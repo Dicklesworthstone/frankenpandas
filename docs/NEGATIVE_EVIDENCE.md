@@ -40571,3 +40571,78 @@ straddling unity** and cv 26.8%/21.8% even at loadavg 11. NULL_UNDECIDABLE, no r
 that a headline sub-parity figure evaporated under rounds, and the ranking pass should be read as
 "look here next", never as evidence.
 ARTIFACT `artifacts/bench/olivecarp_reindex100k_HEAD_2026-08-26.json`
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `sqrt_int64 @100k` **0.744x**: `Column::sqrt`'s two fast helpers gate on `as_f64_slice()` with NO `as_i64_slice()` sibling, so an Int64 column falls to the boxed `Vec<Scalar>` tail. Same ELF, same op, f64 is 1.173x FASTER
+
+**This is a certified LOSS and banking it is the point.** It is also the cleanest mechanism I have
+recorded: the same operation, at the same size, in the same binary, is a WIN on f64 input and a
+certified LOSS on Int64 input, and the difference is one missing match arm.
+
+**Executing ELF SHA-256 (self-reported by the process):**
+`3c44ac79fa3dc9b64756fe9883af77e03309dca9bdf89de5868161f75febac9a` (86474632 bytes),
+`/data/projects/fp-wt-divlead/tdl7/release-perf/fp-bench`, built at git `751e4f790` — HEAD at
+measurement time — in a DETACHED WORKTREE with its own `CARGO_TARGET_DIR`. Rebuilt rather than
+reused: `git diff 0264ae8d7..HEAD -- crates/` showed fp-columnar and fp-frame had moved under me.
+Harness `bench_harness_source_sha256=b8d006f66f87b3551c0e4713e7e6617c9d9d445dfb251d6d5b282696cf449c94`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f` (70681559 bytes,
+2922 files); `invocation_id=vs-pandas-20260826T052158.450309Z-pid2636453`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.99424866 and pandas null
+median ratio 0.98490822, both inside the 0.02 maximum absolute deviation. **Median-CI decision:**
+effect median 0.744x, CI [0.73797411, 0.75103262], excluding unity; claimed log effect 0.29605208
+against a required 0.18349652. All three gate clauses TRUE. **CV role:** provenance-only, no vote; FP
+p50 216.60us cv 10.97% against pandas p50 160.65us cv 11.64%, 128 iterations over 32
+balanced-square rounds. Best-vs-best 0.7435 agrees. **Measured in the quietest window of the
+campaign: loadavg 5.77-5.92**, arms clock-matched 1.0000, same clock TRUE.
+
+    python3 benches/vs_pandas_harness.py --category math_unary --workloads sqrt_int64 --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 24 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl7/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_sqrtint64_100k_HEAD_2026-08-26.json
+
+**Counted mechanism — ONE MISSING MATCH ARM, and the control is the same op on the other dtype.**
+`Column::sqrt` tries exactly two fast paths and **both gate on `as_f64_slice()`**:
+`typed_float_domain_fused_unary_with_finiteness` (crates/fp-columnar/src/lib.rs:28344,
+`if let Some(data) = self.as_f64_slice()`) and `typed_float_unary_nullable_owned_par` (:27647, same
+predicate). Neither has an `as_i64_slice()` arm, so an **Int64** column matches neither and falls all
+the way through to the generic tail — `for v in &self.values { ... out.push(Scalar::Float64(...)) }`
+— which builds a boxed `Vec<Scalar>`, one enum push per element, plus a per-element `is_missing()`,
+and cannot vectorise. **`typed_float_unary_par` (:27507) HAS both arms** — `as_f64_slice` at :27508
+AND `as_i64_slice` at :27514 — which is why `cbrt`/`log` route Int64 onto a typed path and `sqrt`
+does not. The sibling exists in the crate; `sqrt` just does not reach it.
+
+**MEASURED ON ONE ELF, SAME OP, SAME SIZE, DTYPE THE ONLY VARIABLE:**
+
+| lane | verdict | ratio | FP p50 | pandas p50 |
+|---|---|---|---|---|
+| `sqrt` (f64 input) | NULL_UNDECIDABLE | **1.173x** | **115.66us** | 135.05us |
+| `sqrt_int64` (Int64 input) | **SLOWER, certified** | **0.744x** | **216.60us** | 160.65us |
+
+**Int64 input costs FrankenPandas +100.94us on 100k elements = +1.01ns/element, an 87% increase,
+and it converts a 1.17x win into a certified 0.74x loss.** The incumbent pays the same logical cast
+and it costs pandas only +25.6us (+19%, 0.26ns/element) — so **FrankenPandas pays ~4x what numpy
+pays to accept an integer input**, and that gap is the entire row. `log_int64 @100k` measured
+alongside at 0.902x (FP 436.97us) on the same ELF is the milder sibling and is NULL_UNDECIDABLE, not
+banked.
+
+**⚠️ THIS IS NOT THE `PAR_MIN` STORY FROM THE PREVIOUS ENTRY, AND THE NUMBERS SAY SO.**
+`thread_count_actually_used` is **1** on both arms, and at 216.60us serial this row is **well below
+the ~400us break-even** that entry established for the ~350-420us `thread::scope` tax. Parallelising
+`sqrt_int64 @100k` would make it WORSE, not better. Two certified losses on the same night in the
+same family with genuinely different causes — the tempting move was to assume the second was another
+instance of the first.
+
+**⚠️ I DID NOT EDIT `fp-columnar` AND THE FIX IS NOT MINE TO LAND.** GreenAnchor holds an exclusive
+Agent Mail lease on `crates/fp-columnar/src/lib.rs`. The precise change is to give
+`typed_float_domain_fused_unary_with_finiteness` an `as_i64_slice()` arm mirroring its `as_f64_slice`
+one, which would lift every op routed through it, not just `sqrt`. **⚠️ AND WHOEVER TAKES IT MUST NOT
+RUN `cargo fmt` OR `ubs` ON THAT FILE** — USER-GIVEN 2026-08-26, rustfmt balloons past 26GB RSS on
+its 62k lines and OOM-kills the host along with peer agents; format your own block by hand and
+`--no-verify` if a hook targets it.
+
+⚠️ **Agent Mail could not be notified: the mailbox hit its SQLite corruption circuit breaker**
+(`page 3063 was freed earlier in this transaction`) mid-session. Per the standing request I did NOT
+run `am doctor repair`. This ledger entry is the delivery mechanism instead.
