@@ -40796,3 +40796,72 @@ tag**, so the cost of NOT doing the storage work is now a number.
 `br-frankenpandas-3ya6b` measuring `df_transpose_full_materialize` at **1M** during this session
 (`artifacts/bench/3ya6b_df_transpose_full_materialize_1m.json`, not yet landed). This row is at 100k
 and is offered as the complementary size, not as a duplicate. I did not touch fp-frame.
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `str_len @100k` **0.853x**, refuting the standing "all string ops beat pandas 4.8-14.6x" generalisation. `StrAccessor::len` is `s.chars().count()` — a full UTF-8 decode per element for an answer the offsets already hold
+
+**This is a certified LOSS and banking it is the point.** It also overturns a recorded generalisation,
+which is the more useful half.
+
+**Executing ELF SHA-256 (self-reported by the process):**
+`4ee8b92f9642fcd3d7588bc59f269a8751e541f61057f8fb8fbc5eb89132e157` (86215160 bytes),
+`/data/projects/fp-wt-divlead/tdl8/release-perf/fp-bench`, built at git `2be247d39` in a DETACHED
+WORKTREE with its own `CARGO_TARGET_DIR`; `git log 2be247d39..HEAD -- crates/` empty at measurement
+time. Harness
+`bench_harness_source_sha256=2374ce5d1da3bff41625753701040fc92a8b164b30a07f8e8d867065cbd7e8a9`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`;
+`invocation_id=vs-pandas-20260826T074251.846013Z-pid2466820`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.9995658 and pandas null
+median ratio 1.0004774 — the tightest pair on this campaign — both inside the 0.02 maximum absolute
+deviation. **Median-CI decision:** effect median 0.853x, CI [0.84417438, 0.85842877], excluding
+unity; claimed log effect 0.15932232 against a required 0.01281353 — **12x the margin**. All three
+gate clauses TRUE. **CV role:** provenance-only; FP p50 1150.10us cv 9.67% against pandas p50
+979.66us cv 6.39%, 96 iterations over 24 balanced-square rounds. Best-vs-best 0.8447 agrees.
+Loadavg 6.28-8.84, arms clock-matched 1.0000.
+
+    python3 benches/vs_pandas_harness.py --category strings --workloads str_len --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 24 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl8/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_strlen100k_2026-08-26.json
+
+**⚠️ THIS REFUTES A STANDING GENERALISATION.** The record says "**STRING ops ALL WIN 4.8-14.6x**
+(str.len/upper/contains/startswith — pandas Python-level vs FP contiguous-Utf8)". Two things in that
+sentence are now false for this lane. **`str.len` does not win, it loses at 0.853x certified.** And
+the incumbent is **not** "Python-level": the harness maps the unsuffixed `"str_len"` workload to
+`bench_str_len_arrow_pandas`, so pandas runs **Arrow-backed** `string[pyarrow]` with a C kernel. The
+old claim was measured against object-dtype pandas. **An "ALL ops WIN" generalisation held up only
+until the incumbent's backend changed underneath it.**
+
+**Counted mechanism.** `StrAccessor::len` (crates/fp-frame/src/lib.rs:46202) is one line:
+
+    self.apply_str_int(|s| s.chars().count() as i64, self.series.name())
+
+`chars().count()` **decodes UTF-8 across every byte of every string**. The fixture is
+`item_{i:010d}` — **15 pure-ASCII bytes** per element (harness:3029) — so the correct answer is
+exactly the byte length, which a contiguous-Utf8 column already holds as `offsets[i+1] - offsets[i]`,
+an O(1) subtraction that vectorises. Measured 1150.10us for 100k elements = **11.5ns/element, about
+0.77ns per byte**, which is the signature of a scalar continuation-byte walk and not of an offset
+read. `apply_str_int` is NOT the problem — it already has a contiguous-Utf8 rung that skips
+per-row `Scalar::Int64` boxing (:45589-45596). The decode is the whole cost.
+
+**⚠️ THE FIX ALREADY EXISTS IN THIS FILE, APPLIED TO A NEIGHBOUR.** `StrAccessor::slice`, forty lines
+below `len`, carries an explicit ASCII fast path from br-frankenpandas-1q4q4 whose comment reads
+"when step is 1 (or None) and the string is ASCII, char index == byte index" — added because
+`str.slice` was 0.56x pandas. fp-frame contains **14** `is_ascii()` fast paths. `str.len` is not one
+of them. The change is to test ASCII once (vectorised over the whole contiguous buffer, not per row)
+and then emit offset differences.
+
+**⚠️ THIS IS THE THIRD TIME TONIGHT THE FAST PATH WAS ALREADY IN THE CRATE AND THE OP DID NOT REACH
+IT.** `sqrt` has no `as_i64_slice()` arm while `typed_float_unary_par` has one; `cbrt` does not pass
+the `par_min_override` its own helper accepts; `str.len` does not take the ASCII route its sibling
+`str.slice` takes. **Three certified losses, three unused levers already written and tested in the
+same crate.** That is a distinct failure mode from "we need a new optimisation", and it suggests
+auditing for fast paths that exist but are unreached would pay better than inventing new ones.
+
+**No source touched** (Agent Mail remains down on its SQLite corruption breaker, so no reservation
+could be taken and I did not edit fp-frame). **No `cargo fmt` or `ubs` was run on
+`crates/fp-columnar/src/lib.rs`** — USER-GIVEN 2026-08-26, rustfmt exceeds 26GB RSS on that file and
+OOM-kills the host and peer agents.
