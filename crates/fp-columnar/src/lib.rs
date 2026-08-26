@@ -26952,7 +26952,23 @@ impl Column {
         // so the loop does not vectorize) and then re-reads the whole output asking
         // `is_nan()` — a pass measured at 505.1us per 1M elsewhere in this file.
         // br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 0.0, f64::log10) {
+        // PAR_MIN OVERRIDE, MEASURED not guessed — same lever as `cbrt`, different
+        // constant, and the difference is the point. `log10 @100k` was CERTIFIED
+        // SLOWER at 0.915x (three gate clauses, A/A nulls 0.99986235 / 1.00203747,
+        // 7.36x the required margin) purely because 200_000 kept it serial; an
+        // env-only probe on the same ELF gave 1.532x on 8 workers, 757.86us ->
+        // 458.14us. log10 costs 7.58ns/element against cbrt's 14.8ns, so it needs
+        // ~53_000 rows to clear the ~400us break-even where cbrt needs ~27_000 —
+        // TWICE the row count for the same wall-clock. 65_536 is the next power of
+        // two above it. A single shared constant cannot express both, which is why
+        // this is an override and not an edit to the default.
+        const LOG10_PAR_MIN: usize = 65_536;
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x >= 0.0,
+            f64::log10,
+            false,
+            Some(LOG10_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::log10) {
@@ -28899,7 +28915,28 @@ impl Column {
         // TOTAL: the real cube root is defined on negatives, and `cbrt(±inf)` is
         // `±inf`. This is the one root-like op with no domain restriction at all —
         // contrast `sqrt`, which needs `x >= 0.0`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::cbrt) {
+        // PAR_MIN OVERRIDE, MEASURED not guessed. The shared
+        // `ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN` is 200_000, which left `cbrt @100k`
+        // SERIAL and CERTIFIED SLOWER at 0.759x against pandas 2.2.3 (three gate
+        // clauses, A/A nulls 0.9996064 / 0.99803391). An env-only probe on the same
+        // ELF took it to 1.91x on 8 workers, 1479.69us -> 606.45us.
+        //
+        // The threshold is per-op ON PURPOSE and must NOT be folded back into the
+        // global constant: the same probe REGRESSED `expm1 @100k` 0.872x -> 0.709x,
+        // because the per-call `thread::scope` tax is ~350-420us (re-measured four
+        // ways: 421/335/351/363us) and expm1's 303us of serial work cannot repay it.
+        // Break-even is `serial > 8/7 * ~350us ~= 400us`; cbrt costs 14.8ns/element,
+        // so it clears that at ~27_000 rows. 32_768 is the next power of two ABOVE
+        // that, so the parallel arm engages only where it has already paid for
+        // itself. Bit-identical either way: `par_map_slice_f64_domain_fused_to_owned_chunks`
+        // writes contiguous global ranges, so chunking cannot reorder the output.
+        const CBRT_PAR_MIN: usize = 32_768;
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |_| true,
+            f64::cbrt,
+            false,
+            Some(CBRT_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::cbrt) {
@@ -40410,6 +40447,81 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// `cbrt` and `log10` now pin their OWN parallel thresholds (32_768 and
+        /// 65_536) below the shared 200_000 default, so lengths in between changed
+        /// routing from serial to parallel. That is the mirror image of the `sqrt`
+        /// case below and carries the same risk: the two arms must be
+        /// interchangeable. Each op is exercised at a length that is parallel under
+        /// its new threshold and was serial before, and asserted bit-identical
+        /// against the scalar oracle — plus the domain behaviour the fused arm owns,
+        /// which for `log10` is the one that a routing slip would silently drop.
+        ///
+        /// Both sides of each threshold are covered, because a change that
+        /// accidentally parallelised EVERYTHING would pass a parallel-only check.
+        #[test]
+        fn cbrt_and_log10_are_bit_identical_across_their_new_par_min() {
+            fn build(len: usize) -> Vec<f64> {
+                let mut values: Vec<f64> = Vec::with_capacity(len);
+                let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+                for i in 0..len {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let unit = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                    values.push(match i % 997 {
+                        0 => 0.0,
+                        1 => 1.0,
+                        2 => f64::INFINITY,
+                        3 => 8.0,
+                        _ => unit * 1e6,
+                    });
+                }
+                values
+            }
+
+            // Straddle each threshold: below it the op is serial, above it parallel.
+            for &len in &[1_000_usize, 40_000, 70_000] {
+                let values = build(len);
+
+                let out = Column::from_f64_values(values.clone()).cbrt().expect("cbrt");
+                assert_eq!(out.len(), len, "cbrt length drift at {len}");
+                assert!(out.validity().all(), "cbrt is total: no slot may be missing");
+                let got = out.as_f64_slice().expect("all-valid typed slice");
+                for (i, (&g, &x)) in got.iter().zip(values.iter()).enumerate() {
+                    assert_eq!(g.to_bits(), x.cbrt().to_bits(), "cbrt len {len} at {i}");
+                }
+
+                let out = Column::from_f64_values(values.clone())
+                    .log10()
+                    .expect("log10");
+                assert_eq!(out.len(), len, "log10 length drift at {len}");
+                let got = out.as_f64_slice().expect("all-valid typed slice");
+                for (i, (&g, &x)) in got.iter().zip(values.iter()).enumerate() {
+                    assert_eq!(g.to_bits(), x.log10().to_bits(), "log10 len {len} at {i}");
+                }
+            }
+
+            // The domain must still bite ABOVE the new threshold. One negative in a
+            // now-parallel column has to come back MISSING at exactly its index; a
+            // routing change that bypassed the domain check would pass everything
+            // above and fail only here.
+            const LEN: usize = 70_000;
+            let mut with_negative = build(LEN);
+            with_negative[LEN / 2] = -1.0;
+            let out = Column::from_f64_values(with_negative)
+                .log10()
+                .expect("log10");
+            assert!(
+                !out.validity().get(LEN / 2),
+                "log10(-1.0) is NaN and must be MISSING even on the parallel arm"
+            );
+            assert_eq!(
+                out.validity().count_valid(),
+                LEN - 1,
+                "exactly one slot may be missing"
+            );
         }
 
         /// br-frankenpandas-4kig1. `sqrt` now pins its own parallel threshold to

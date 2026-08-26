@@ -41012,3 +41012,92 @@ because csv rows are ~100ms.
 could be taken; GreenAnchor's fp-columnar lease has since expired but I am not editing a file I
 cannot announce). **No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`** —
 USER-GIVEN, rustfmt exceeds 26GB RSS on that file and OOM-kills the host and peer agents.
+
+---
+
+### 2026-08-26 OliveCarp — SHIPPED: per-op `par_min_override` converts BOTH certified losses into certified WINS — `cbrt @100k` 0.759x -> **1.98x**, `log10 @100k` 0.915x -> **1.514x**, with the two ops the model said must NOT move measured and unmoved
+
+**Campaign result class:** incumbent-win
+
+Two workloads, both gated FASTER on three clauses against live pandas 2.2.3 in the same invocation.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=b75722266afcd63b6458d38f18354eb1171c70c03a6a9927cd14eafdf76db784 (86213400 bytes)
+/data/projects/fp-wt-divlead/tdl10/release-perf/fp-bench`, built at `a3569ba85` plus this change in a
+DETACHED WORKTREE with its own `CARGO_TARGET_DIR`. Harness
+`bench_harness_source_sha256=b37e364f8e8deb8f3f8f17e7f7d6cbf3904b8f7f89a3cc3212a94f564226538d`.
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f
+invocation_id=vs-pandas-20260826T091004.710863Z-pid2092136 measured_ratio=1.98x — pinned artifact is
+/home/ubuntu/.local/lib/python3.13/site-packages/pandas/__init__.py (70681559 bytes, 2922 files);
+pandas p50 1130.01us against FrankenPandas p50 575.36us in the same invocation. The `log10` row is
+the same pinned artifact under invocation_id=vs-pandas-20260826T091022.785740Z-pid2135678 at
+measured_ratio=1.514x, pandas p50 701.28us against FrankenPandas p50 465.29us.
+
+**A/A null control (same invocation):** `cbrt` FrankenPandas null median ratio 0.99994342 and pandas
+1.00642556; `log10` FrankenPandas 1.0155698 and pandas 0.9988456 — all four inside the 0.02 maximum
+absolute deviation.
+
+**Median-CI decision:** `cbrt` effect median 1.98x, CI [1.9584493, 2.0353251], claimed log effect
+0.68321165 against a required 0.04406292; `log10` effect median 1.514x, CI [1.48901376, 1.54475839],
+claimed 0.41506202 against a required 0.06188601. Both exclude unity, both clear twice the null
+margin, all three clauses TRUE on both.
+
+**CV role:** provenance-only, no vote. `cbrt` FP p50 575.36us cv 5.30% against pandas 1130.01us cv
+7.41%, `log10` FP p50 465.29us cv 5.57% against pandas 701.28us cv 8.33%, 96 iterations over 24
+balanced-square rounds each. Best-vs-best 2.2245 and 1.7177 agree in direction. Loadavg 15.98-21.28,
+arms clock-matched 1.0000.
+
+    python3 benches/vs_pandas_harness.py --category math_unary --workloads <cbrt|log10> --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 24 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl10/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_<op>_100k_PARMINFIX_2026-08-26.json
+
+**THE CHANGE IS TWO CONSTANTS AND NO NEW MACHINERY.** `Column::cbrt` and `Column::log10` called
+`typed_float_domain_fused_unary`, the two-argument wrapper that passes `par_min_override: None` and so
+inherits `ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN = 200_000`. They now call
+`typed_float_domain_fused_unary_with_finiteness` directly with `Some(32_768)` and `Some(65_536)`. The
+override parameter already existed, documented as "lets ONE op decide the length at which the parallel
+[path engages]", and was unused. **`preserves_finiteness` is passed `false` on both, exactly as the
+wrapper did**, so the witness derivation is untouched — the only thing that changed is routing.
+
+**THE TWO CONSTANTS DIFFER BY DESIGN AND THAT IS THE WHOLE ARGUMENT AGAINST TOUCHING THE DEFAULT.**
+Break-even is `serial > 8/7 x ~350us ~ 400us` from the `thread::scope` tax re-measured four ways
+tonight (421 / 335 / 351 / 363us). cbrt costs 14.8ns/element so it clears 400us at ~27_000 rows;
+log10 costs 7.58ns/element so it needs ~53_000 — **twice the row count for the same wall clock.**
+32_768 and 65_536 are the next powers of two above each. A single global constant cannot express two
+different per-element costs, which is why this is an override rather than an edit to the default.
+
+**THE CONTROLS HELD, AND THEY ARE THE REASON TO BELIEVE THE REST.** The model predicted `expm1`
+(303us serial) and `log` (390us serial) are BELOW break-even and must stay serial. Measured on the
+SAME fixed ELF: `expm1` 0.855x with **`thread_count_actually_used` = 1** and `log` 0.93x, both
+unchanged and both still serial. **Had I lowered the global constant instead, the earlier env probe
+says expm1 would have gone 0.872x -> 0.709x.** The override is what avoids that, and the control
+measurement is what proves it avoided it rather than merely intending to.
+
+    op       serial    predicted     BEFORE            AFTER (this change)      threads
+    cbrt     1479us    profitable    0.759x SLOWER     1.98x  FASTER            1 -> 8
+    log10     758us    profitable    0.915x SLOWER     1.514x FASTER            1 -> 8
+    log       390us    flat          0.93x             0.93x   unchanged        1 -> 1
+    expm1     303us    regresses     0.872x            0.855x  unchanged        1 -> 1
+
+**BIT-IDENTICAL, ASSERTED NOT ASSUMED.** New test
+`cbrt_and_log10_are_bit_identical_across_their_new_par_min` straddles BOTH thresholds — 1_000, 40_000
+and 70_000 rows, so each op is exercised on the serial side and the parallel side of its own constant
+— and compares `to_bits()` against the scalar `f64::cbrt` / `f64::log10` oracle at every index, on a
+fixture seeded with 0.0, 1.0, 8.0 and `+inf` alongside pseudorandom values. It also asserts the DOMAIN
+still bites above the threshold: one negative in a 70_000-row column must come back MISSING at exactly
+its index with `count_valid() == LEN - 1`, which is the assertion a routing change that bypassed the
+domain check would fail after passing everything else. **fp-columnar lib suite: 672 passed, 0 failed,
+58 ignored.**
+
+⚠️ **`expm1 @100k` IS NOW ITSELF A CERTIFIED LOSS at 0.855x** (three clauses, nulls 1.00083 /
+1.00000) and it is NOT caused by this change — `thread_count_actually_used` = 1 before and after, so
+this code never touched its path. It is the next target, and by the model it is the HARD kind: at
+303us of serial work it is below break-even, so no threshold can rescue it and only the thread pool
+or a cheaper per-element `expm1` will.
+
+⚠️ **NO `cargo fmt`, `rustfmt` OR `ubs` WAS RUN ON `crates/fp-columnar/src/lib.rs`** — USER-GIVEN
+2026-08-26, rustfmt exceeds 26GB RSS on that 62k-line file and OOM-kills the host along with peer
+agents. Both edited blocks were formatted by hand to match the surrounding style and the crate
+compiles clean; the commit used `--no-verify` so no hook could reach that file.
