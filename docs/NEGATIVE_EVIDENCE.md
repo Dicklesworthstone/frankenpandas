@@ -40721,3 +40721,78 @@ the match is the script argument of a python invocation (e.g. `argv[0]` is an in
 match is `argv[1]`), not merely present somewhere in the argument vector. **NOT fixed here** —
 editing the harness changes `harness_sha256` and orphans every standing row, which is not a call to
 make while other agents are mid-measurement.
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `df_transpose_full_materialize @100k` **0.002x — pandas is 515x faster**. The BTreeMap-of-columns wall (l4vzc) now has a certified number and a per-column price: 232ns x 100_000 output columns
+
+**This is a certified LOSS and banking it is the point.** It is the worst measured vs-pandas result on
+this campaign by two orders of magnitude, and unlike the rest of tonight's set it is a KNOWN
+structural wall — what is new is that it is now certified on a current binary, in a quiet window,
+with the per-output-column cost counted.
+
+**Executing ELF SHA-256 (self-reported by the process):**
+`4ee8b92f9642fcd3d7588bc59f269a8751e541f61057f8fb8fbc5eb89132e157` (86215160 bytes),
+`/data/projects/fp-wt-divlead/tdl8/release-perf/fp-bench`, built at git `2be247d39` in a DETACHED
+WORKTREE with its own `CARGO_TARGET_DIR`. Harness
+`bench_harness_source_sha256=2374ce5d1da3bff41625753701040fc92a8b164b30a07f8e8d867065cbd7e8a9`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f` (70681559 bytes,
+2922 files); `invocation_id=vs-pandas-20260826T064947.991478Z-pid3649813`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 1.00399 and pandas null median
+ratio 1.00941, both inside the 0.02 maximum absolute deviation. **Median-CI decision:** effect median
+0.002x, CI [0.00192301, 0.00204294], excluding unity; claimed log effect 6.2394 against a required
+0.0513 — **122x the margin**. All three gate clauses TRUE. **CV role:** provenance-only; FP p50
+23192.19us cv **3.92%** against pandas p50 45.05us cv 10.83%, 128 iterations over 32 balanced-square
+rounds. Best-vs-best 0.002 agrees. Loadavg 7.93-11.96, arms clock-matched 1.0016.
+
+    python3 benches/vs_pandas_harness.py --category dataframe_ops \
+      --workloads df_transpose_full_materialize --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 20 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl8/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_dftransposefull100k_POSTFIX_2026-08-26.json
+
+**⚠️ I ALMOST BANKED A STALE ROW AND CAUGHT IT ONLY BY CHECKING ANCESTRY.** My first certification of
+this workload ran on ELF `3c44ac79fa3d…` at `751e4f790`. While I was measuring, a peer landed
+**`f9b0d9240 perf(frame): share materialized transpose column maps` (br-frankenpandas-4kszu)** — a
+transpose optimisation my binary predated. `git merge-base --is-ancestor f9b0d9240 751e4f790`
+returned false, so I rebuilt at `2be247d39` and re-measured. **Both rows certify at 0.002x with clean
+nulls, so the conclusion is unchanged, but the row I would have published was measured against a
+superseded implementation.** Check ancestry of every peer commit that touches your op between build
+and publish, not just `git diff --stat`.
+
+    row            ELF            FP p50      pandas p50   cv(FP)    load        verdict
+    PRE  751e4f790 3c44ac79fa3d   26013.07us  53.86us      137.89%   22.8-128.2  SLOWER 0.002x
+    POST 2be247d39 4ee8b92f9642   23192.19us  45.05us        3.92%    7.9- 12.0  SLOWER 0.002x
+
+**⚠️ AND I AM NOT ATTRIBUTING THE 26013 -> 23192us DIFFERENCE TO THE PEER'S FIX.** The two rows ran at
+loadavg 22.8-128.2 and 7.9-12.0 respectively. An 11% move across a 10x load difference is not
+evidence about a code change, and the honest statement is only that **the fix did not change the
+order of magnitude.** Attributing it would need both ELFs measured in one window.
+
+**Counted mechanism.** The `100k` fixture is 100_000 rows x 10 cols, so the transpose output is 10
+rows x **100_000 COLUMNS**. FrankenPandas represents a frame as `BTreeMap<String, Column>`, so this
+output costs 100_000 `String` key allocations, 100_000 `Column` constructions, and O(n log n) string
+comparisons to insert them — against pandas' single 2D BlockManager operation. At 23192.19us for
+100_000 output columns that is **231.9ns per output column**, which is the right order for a String
+allocation plus a BTreeMap insert and is nowhere near the ~45us the whole operation costs pandas.
+`thread_count_actually_used` = 1; this is not a parallelism gap and cannot be threaded away.
+
+**⚠️ THE WORKLOAD IS DELIBERATELY LIKE-FOR-LIKE AND I CHECKED BEFORE REPORTING A 515x.** After being
+burned twice tonight by unfair lanes (`range_index_values`, where pandas materialised and FP folded a
+lazy view), I read the definition. `bench_df_transpose_full_materialize_pandas` uses `.T.to_numpy()`
+and its own docstring says a per-column Python sweep "would time the loop rather than the engine, and
+pushing pandas onto a slower route to flatter FrankenPandas would be choosing a bad opponent."
+**The harness author already refused the handicap.** This 515x is real.
+
+**This is bead l4vzc, previously recorded as a STRUCTURAL WALL and still open.** Any FrankenPandas op
+whose OUTPUT has ~n columns inherits the BTreeMap-of-columns tax — transpose, pivot, unstack,
+get_dummies. It is not fixable by tuning; it needs 2D-block or lazy-transpose storage. **What this
+entry adds is that the wall is certified at 0.002x on a current binary with a 232ns/column price
+tag**, so the cost of NOT doing the storage work is now a number.
+
+**⚠️ ANOTHER AGENT IS ACTIVE ON THIS EXACT WORKLOAD.** I observed
+`br-frankenpandas-3ya6b` measuring `df_transpose_full_materialize` at **1M** during this session
+(`artifacts/bench/3ya6b_df_transpose_full_materialize_1m.json`, not yet landed). This row is at 100k
+and is offered as the complementary size, not as a duplicate. I did not touch fp-frame.
