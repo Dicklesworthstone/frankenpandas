@@ -40474,3 +40474,100 @@ is silent: a sweep that errors on 43% of its rows still prints a tidy sorted tab
 the third. `comparability_identity` includes `harness_sha256`; at the current rate of harness churn
 **no row on this campaign stays comparable for more than a few hours**, and that is now a structural
 fact about the instrument rather than an accident.
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `cbrt @100k` **0.759x**, and the mechanism is ONE CONSTANT: `PAR_MIN = 200_000` puts four transcendentals on a single thread at 100k that get eight at 1M
+
+**This is a certified LOSS and banking it is the point.** It is also not one row: the same constant
+explains every sub-parity transcendental at 100k, and all four are 1.7-3.2x WINS at 1M.
+
+**Executing ELF SHA-256 (self-reported by the process):**
+`2498da30d7b34d48b794d24e36436474bd75bdd0450f6b5af477b72fa914adaf` (86473288 bytes),
+`/data/projects/fp-wt-divlead/tdl5/release-perf/fp-bench`, built at git `0264ae8d7` — current HEAD at
+measurement time — in a DETACHED WORKTREE with its own `CARGO_TARGET_DIR`. Rebuilt rather than reused
+because `git diff 9d96fd908..HEAD -- crates/` was NON-empty (fp-bench arms, fp-index, fp-conformance).
+Harness `bench_harness_source_sha256=b8d006f66f87b3551c0e4713e7e6617c9d9d445dfb251d6d5b282696cf449c94`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f` (70681559 bytes,
+2922 files); `invocation_id=vs-pandas-20260826T050417.661736Z-pid2190480`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.9996064 and pandas null
+median ratio 0.99803391, both inside the 0.02 maximum absolute deviation. **Median-CI decision:**
+effect median 0.759x, CI [0.75764232, 0.75936019], excluding unity; claimed log effect 0.27588723
+against a required 0.0072153 — **38x the margin**. All three gate clauses TRUE. **CV role:**
+provenance-only, no vote; FP p50 1479.69us cv 1.34% against pandas p50 1122.84us cv 3.17%, 96
+iterations over 24 balanced-square rounds. Best-vs-best 0.7591 agrees with the gated median. Arms
+clock-matched 1.0000, same clock TRUE, loadavg 10.66-12.26.
+
+    python3 benches/vs_pandas_harness.py --category math_unary --workloads cbrt --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 24 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl5/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_cbrt100k_HEAD_2026-08-26.json
+
+**Counted mechanism — AND MY FIRST NAMING OF IT WAS WRONG, REFUTED BY MY OWN EXPERIMENT.** I first
+recorded the gate as `const PAR_MIN: usize = 200_000` in `par_map_vec_f64` /
+`par_map_vec_f64_with_witness` (crates/fp-columnar/src/lib.rs:8987, :9034). **I rebuilt with those two
+set to 50_000 and cbrt did not move**: ratio 0.759 -> 0.759, FP p50 1479.69us -> 1485.19us,
+`thread_count_actually_used` still **1**. `Column::cbrt` returns from
+`typed_float_domain_fused_unary` before ever reaching `typed_float_unary_par`, so that constant is
+not on its path. **Naming a constant is not tracing a caller** — the same error as
+`profile-symbol-names-a-function-not-a-caller`, caught here only because the lever was cheap to test.
+
+**The gate that actually binds is `ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN = 200_000`**
+(crates/fp-columnar/src/lib.rs:9153), read through `elementwise_witness_policy()`. It is
+**environment-overridable** via `FP_ELEMENTWISE_PAR_MIN`, which makes the whole lever testable with
+NO REBUILD — so the A/B below is **one ELF**, `2498da30d7b34d48…`, differing only by an env var.
+Below the threshold the op runs serial; above it `ELEMENTWISE_WITNESS_DEFAULT_WORKERS` = 8:
+
+    op       @1M ratio  threads      @100k ratio  threads
+    cbrt      3.181x       8            0.762x       1
+    log10     2.974x       8            0.928x       1
+    log       2.246x       8            0.938x       1
+    expm1     1.738x       8            0.867x       1
+
+**THE LEVER WORKS ON cbrt AND REGRESSES ITS NEIGHBOURS — measured, one ELF, env-only difference:**
+
+| op | PAR_MIN 200_000 (default) | `FP_ELEMENTWISE_PAR_MIN=50000` | verdict |
+|---|---|---|---|
+| `cbrt` | 0.759x SLOWER, 1479.69us, **1** thread | **1.91x FASTER**, 606.45us, **8** threads | sign flip, all 3 clauses TRUE, bvb 2.2065 |
+| `expm1` | 0.872x, 303.06us, 1 thread | **0.709x SLOWER**, 373.35us, 8 threads | **REGRESSED** |
+| `log` | 0.948x, 390.43us, 1 thread | 0.946x, 400.45us, 8 threads | flat |
+
+**AND THAT TABLE RE-MEASURES THE SPAWN TAX THE CAMPAIGN HAS BEEN CITING FROM MEMORY.** Solving each
+row for fixed overhead — `parallel_us - serial_us/8` — gives **421us (cbrt), 335us (expm1), 351us
+(log)**: three independent estimates that corroborate the 2026-08-01 figure of 396.9us for 8 threads,
+which I had flagged as inherited and unverified. **It is now observed, on today's binary.**
+
+**PREDICTIONS RECORDED BEFORE THE RUN, ALL THREE CORRECT.** From break-even
+`serial > 8/7 x 350us ~ 400us`: cbrt (14.8ns/elem, 1479us serial) PROFITABLE; log (3.9ns/elem, 390us)
+MARGINAL; expm1 (3.1ns/elem, 303us) BELOW BREAK-EVEN, WOULD REGRESS. Measured: sign flip, flat,
+regression. The model predicts the sign of the effect from per-element cost alone.
+
+**⚠️ SO DO NOT LOWER THE CONSTANT. THE FIX IS PER-OP AND THE API FOR IT ALREADY EXISTS.**
+A flat drop buys cbrt 1.91x and costs expm1 0.872x -> 0.709x, measured above. The threshold must be
+cost-aware, and a single constant cannot express that because the helper does not know the cost of
+the closure it is handed. **`typed_float_domain_fused_unary_with_finiteness` already takes
+`par_min_override: Option<usize>`**, commented "lets ONE op decide the length at which the parallel
+[path engages]" — the mechanism is in the tree and cbrt simply does not use it. The surgical change is
+to pass `Some(~30_000)` for cbrt alone (break-even 400us / 14.8ns per element ~ 27k rows) and leave
+every other op at 200_000.
+
+The structural version is larger and is not mine to land tonight: the ledger counts **89
+`thread::scope` sites and no thread pool anywhere** (fp-columnar 13). At ~350-420us per call, a pool
+takes that tax to microseconds and makes all four of these profitable at 100k at once — that is worth
+more than any per-op threshold.
+
+**⚠️ I DID NOT EDIT `fp-columnar`.** GreenAnchor holds an exclusive Agent Mail lease on
+`crates/fp-columnar/src/lib.rs` until 05:54Z. The finding, the arithmetic above and the experiment
+were mailed to them instead; any threshold change is theirs to land. The `PAR_MIN = 50_000` probe
+referenced below was run ONLY in `/data/projects/fp-wt-divlead` (detached at `0264ae8d7`, own target
+dir) and is NOT committed to the shared checkout, which still reads 200_000 at all three sites.
+
+**⚠️ `reindex @100k` WAS THE SURVEY'S #2 AND IT IS A FALSE ALARM.** The 5-round ranking pass put it at
+0.747x; measured properly at 24 adaptive rounds it is **0.94x with CI [0.89057566, 1.018633]
+straddling unity** and cv 26.8%/21.8% even at loadavg 11. NULL_UNDECIDABLE, no ratio banked.
+**A 5-round survey position is a hypothesis, not a loss** — this is the second time in two sessions
+that a headline sub-parity figure evaporated under rounds, and the ranking pass should be read as
+"look here next", never as evidence.
+ARTIFACT `artifacts/bench/olivecarp_reindex100k_HEAD_2026-08-26.json`
