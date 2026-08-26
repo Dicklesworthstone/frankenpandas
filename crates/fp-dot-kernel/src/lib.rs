@@ -1,3 +1,4 @@
+#![feature(portable_simd)]
 //! ISA-isolated `f64` dot-product materialization.
 //!
 //! br-frankenpandas-oxv4u. This crate exists for ONE reason: it is the only
@@ -27,7 +28,11 @@
 //! `is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")` at the
 //! call site, in a BASELINE crate, with the original kernel as the else arm.
 //! That is discipline, not types — this crate cannot enforce it.
+
 #![forbid(unsafe_code)]
+
+use std::simd::cmp::SimdPartialEq;
+use std::simd::{Mask, Simd};
 
 /// Materialize `out[row] = Σ_j a_slices[j][row] * b_col[j]` for `len` rows.
 ///
@@ -284,11 +289,53 @@ pub fn materialize_float64_dot_block_prepacked(
 pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     assert_eq!(a.len(), b.len(), "div_f64_into: a/b length mismatch");
     assert_eq!(a.len(), out.len(), "div_f64_into: out length mismatch");
-    let mut output_nan = false;
-    for ((x, y), d) in a.iter().zip(b.iter()).zip(out.iter_mut()) {
-        let r = x / y;
+
+    // THE WITNESS FOLD, NOT THE DIVIDE, IS WHAT THIS KERNEL LOSES ON.
+    //
+    // `div @1M` is CERTIFIED SLOWER at 0.885x, and the divide is not the reason:
+    // measured on one ELF, FP `add @1M` (same machinery, same 24MB of traffic,
+    // same witness fold, no divider) is 301.8us against `div @1M` 398.6us, so the
+    // divider is only 96.8us — 24%. pandas answers the whole divide in 334.84us,
+    // barely more than FrankenPandas' shared overhead alone.
+    //
+    // Disassembling the previous scalar-source loop showed why the divider stays
+    // EXPOSED here while it hides under memory latency for numpy. LLVM vectorised
+    // it four lanes wide with four independent accumulators — no dependency chain,
+    // that hypothesis was checked and refuted — but the `bool` fold made it narrow
+    // every 256-bit compare back to 128 bits per lane:
+    //
+    //     vcmpunordpd %ymm1,%ymm5,%ymm9      <- the compare we actually want
+    //     vextractf128 $0x1,%ymm9,%xmm10     <- pure narrowing overhead
+    //     vpackssdw   %xmm10,%xmm9,%xmm9     <- pure narrowing overhead
+    //     vpor        %xmm0,%xmm9,%xmm0
+    //
+    // Four instructions per four doubles for a witness, against one `vdivpd`.
+    // Written as an explicit mask OR the fold is `vcmpXpd` + `vorpd`, both 256-bit,
+    // so two of the four go away and the issue slots they occupied are free to
+    // cover divide latency.
+    //
+    // `x != x` is NaN by IEEE, so `simd_ne(r, r)` is exactly `is_nan` lane-wise,
+    // and lane-wise `av / bv` is the identical IEEE quotient the scalar loop
+    // produced — the output is bit-identical and the witness is the same boolean.
+    const LANES: usize = 4;
+    let n = a.len();
+    let chunk_end = n - n % LANES;
+    let mut nan_acc = Mask::<i64, LANES>::splat(false);
+    let mut index = 0usize;
+    while index < chunk_end {
+        let av = Simd::<f64, LANES>::from_slice(&a[index..index + LANES]);
+        let bv = Simd::<f64, LANES>::from_slice(&b[index..index + LANES]);
+        let r = av / bv;
+        nan_acc |= r.simd_ne(r);
+        r.copy_to_slice(&mut out[index..index + LANES]);
+        index += LANES;
+    }
+    let mut output_nan = nan_acc.any();
+    // Scalar remainder, identical to the original body.
+    for offset in chunk_end..n {
+        let r = a[offset] / b[offset];
         output_nan |= r.is_nan();
-        *d = r;
+        out[offset] = r;
     }
     output_nan
 }
@@ -296,6 +343,83 @@ pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The SIMD witness fold must agree with the scalar `is_nan` fold on every
+    /// element AND on the returned boolean — including the cases a cheaper fold
+    /// would get wrong. `inf` outputs are PRESENT values under pandas semantics,
+    /// so a witness built from e.g. `r - r` (NaN for both NaN and inf) would
+    /// wrongly mark valid data missing; this pins that.
+    #[test]
+    fn div_simd_witness_matches_the_scalar_fold_including_inf_and_remainder() {
+        fn scalar(a: &[f64], b: &[f64]) -> (Vec<f64>, bool) {
+            let mut out = vec![0.0; a.len()];
+            let mut nan = false;
+            for i in 0..a.len() {
+                let r = a[i] / b[i];
+                nan |= r.is_nan();
+                out[i] = r;
+            }
+            (out, nan)
+        }
+
+        // Lengths straddling the 4-lane chunk so the scalar remainder runs too.
+        for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 1000, 1001] {
+            let mut a = Vec::with_capacity(len);
+            let mut b = Vec::with_capacity(len);
+            let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+            for i in 0..len {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                // Seed the interesting shapes: x/0 -> +-inf (PRESENT), 0/0 -> NaN,
+                // inf/inf -> NaN, plus ordinary values.
+                match i % 11 {
+                    0 => {
+                        a.push(1.0);
+                        b.push(0.0);
+                    }
+                    1 => {
+                        a.push(-1.0);
+                        b.push(0.0);
+                    }
+                    2 => {
+                        a.push(f64::INFINITY);
+                        b.push(f64::INFINITY);
+                    }
+                    3 => {
+                        a.push(0.0);
+                        b.push(0.0);
+                    }
+                    _ => {
+                        a.push(unit * 1e6 - 5e5);
+                        b.push(unit * 7.0 + 0.5);
+                    }
+                }
+            }
+            let (want, want_nan) = scalar(&a, &b);
+            let mut got = vec![0.0; len];
+            let got_nan = div_f64_into(&a, &b, &mut got);
+            assert_eq!(got_nan, want_nan, "witness disagrees at len {len}");
+            for i in 0..len {
+                assert_eq!(
+                    got[i].to_bits(),
+                    want[i].to_bits(),
+                    "value disagrees at len {len} index {i}"
+                );
+            }
+        }
+
+        // An all-inf, no-NaN case must report NO nan: inf is present, not missing.
+        let a = vec![1.0f64; 8];
+        let b = vec![0.0f64; 8];
+        let mut out = vec![0.0; 8];
+        assert!(
+            !div_f64_into(&a, &b, &mut out),
+            "x/0 is +inf, a PRESENT value; the witness must not claim NaN"
+        );
+        assert!(out.iter().all(|v| *v == f64::INFINITY));
+    }
 
     #[test]
     fn matches_a_scalar_reference_sum() {
