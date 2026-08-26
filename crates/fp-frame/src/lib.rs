@@ -56973,7 +56973,22 @@ const LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN: usize = 256;
 type LazyTransposeColumnSlot = OnceLock<Box<Column>>;
 
 #[cfg(feature = "lazy-transpose-view")]
-type LazyTransposeColumnSlotPage = Box<[LazyTransposeColumnSlot]>;
+/// One page of output columns.
+///
+/// `Contiguous` is the fast shape: the whole page shares a single gathered
+/// `Arc<[f64]>` and every column is a zero-copy window into it, so the page costs
+/// ONE `Box<[Column]>` allocation instead of 256 `Box<Column>` plus 256 `OnceLock`
+/// inits. Profiled on `df_transpose_full_materialize_positional` after the shared
+/// buffer landed, that per-slot churn was what remained: `cached_column` 13.28%,
+/// mimalloc ~21.8%, `OnceLock`/`Once::call` ~17.7%, drop_glue ~12.5%.
+///
+/// `PerSlot` is the original lazy shape, kept unchanged for every plan the
+/// contiguous path declines (non-Float64, or any source without a typed slice).
+#[derive(Debug)]
+enum LazyTransposeColumnSlotPage {
+    Contiguous(Box<[Column]>),
+    PerSlot(Box<[LazyTransposeColumnSlot]>),
+}
 
 #[cfg(feature = "lazy-transpose-view")]
 #[derive(Debug)]
@@ -56981,7 +56996,11 @@ struct LazyTransposeFramePlan {
     source_columns: Arc<[Column]>,
     dtype: DType,
     output_columns: usize,
-    column_slot_pages: Box<[OnceLock<LazyTransposeColumnSlotPage>]>,
+    /// Lazily allocated for the same reason as `page_buffers`: sizing this by
+    /// page count in the constructor is work every `df.transpose()` caller pays
+    /// even if it never reads a column, and it measured as a real regression on
+    /// the shell-only lane.
+    column_slot_pages: OnceLock<Box<[OnceLock<LazyTransposeColumnSlotPage>]>>,
     /// One shared gathered buffer per page of output columns; `None` inside the
     /// inner `OnceLock` records that this page declined the contiguous path (an
     /// untyped source), so the decision is made once rather than re-probed per
@@ -56997,13 +57016,15 @@ struct LazyTransposeFramePlan {
 
 #[cfg(feature = "lazy-transpose-view")]
 impl LazyTransposeFramePlan {
-    fn empty_column_slot_pages(
-        output_columns: usize,
-    ) -> Box<[OnceLock<LazyTransposeColumnSlotPage>]> {
-        (0..output_columns.div_ceil(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN))
-            .map(|_| OnceLock::new())
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
+    fn column_slot_page_slots(&self) -> &[OnceLock<LazyTransposeColumnSlotPage>] {
+        self.column_slot_pages.get_or_init(|| {
+            (0..self
+                .output_columns
+                .div_ceil(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN))
+                .map(|_| OnceLock::new())
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
     }
 
     fn page_buffer_slots(&self) -> &[OnceLock<Option<Arc<[f64]>>>] {
@@ -57193,12 +57214,35 @@ impl LazyTransposeFramePlan {
         let slot_index = output_column % LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
         let page_start = page_index * LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
         let page_len = (self.output_columns - page_start).min(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN);
-        let page = self.column_slot_pages[page_index].get_or_init(|| {
-            (0..page_len)
-                .map(|_| OnceLock::new())
-                .collect::<Vec<_>>()
-                .into_boxed_slice()
+        let page = self.column_slot_page_slots()[page_index].get_or_init(|| {
+            // Try the contiguous shape first: one gathered buffer for the page,
+            // one allocation for its columns, zero per-slot OnceLocks.
+            if let Some(buffer) = self.page_contiguous_buffer(page_index, page_start, page_len) {
+                let ncols = self.source_columns.len();
+                return LazyTransposeColumnSlotPage::Contiguous(
+                    (0..page_len)
+                        .map(|slot| {
+                            Column::from_f64_shared_window(
+                                Arc::clone(&buffer),
+                                slot * ncols,
+                                ncols,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+            }
+            LazyTransposeColumnSlotPage::PerSlot(
+                (0..page_len)
+                    .map(|_| OnceLock::new())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
         });
+        let page = match page {
+            LazyTransposeColumnSlotPage::Contiguous(columns) => return &columns[slot_index],
+            LazyTransposeColumnSlotPage::PerSlot(slots) => slots,
+        };
         // PAGE-CONTIGUOUS FAST PATH. The transposed frame has one output column
         // per SOURCE ROW — 100_000 at the 100k fixture — and giving each its own
         // heap `Column` costs an allocation, a `OnceLock` init and a drop apiece.
@@ -57216,19 +57260,6 @@ impl LazyTransposeFramePlan {
         //
         // Float64-with-typed-sources only; every other plan shape keeps the
         // per-column path below unchanged.
-        if let Some(page_buffer) = self.page_contiguous_buffer(page_index, page_start, page_len) {
-            let ncols = self.source_columns.len();
-            return page[slot_index]
-                .get_or_init(|| {
-                    Box::new(Column::from_f64_shared_window(
-                        page_buffer,
-                        slot_index * ncols,
-                        ncols,
-                    ))
-                })
-                .as_ref();
-        }
-
         page[slot_index]
             .get_or_init(|| Box::new(self.materialize_column(output_column)))
             .as_ref()
@@ -57300,11 +57331,12 @@ impl LazyTransposeFramePlan {
         debug_assert!(output_column < self.output_columns);
         let page_index = output_column / LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
         let slot_index = output_column % LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
-        self.column_slot_pages[page_index]
-            .get()?
-            .get(slot_index)?
-            .get()
-            .map(Box::as_ref)
+        match self.column_slot_page_slots()[page_index].get()? {
+            LazyTransposeColumnSlotPage::Contiguous(columns) => columns.get(slot_index),
+            LazyTransposeColumnSlotPage::PerSlot(slots) => {
+                slots.get(slot_index)?.get().map(Box::as_ref)
+            }
+        }
     }
 
     fn materialize_columns(&self, column_start: i64) -> ColumnStore {
@@ -57327,10 +57359,19 @@ impl LazyTransposeFramePlan {
 
     #[cfg(test)]
     fn initialized_column_slots(&self) -> usize {
-        self.column_slot_pages
+        self.column_slot_page_slots()
             .iter()
             .filter_map(OnceLock::get)
-            .map(|page| page.iter().filter(|slot| slot.get().is_some()).count())
+            .map(|page| match page {
+                // A contiguous page builds every column in it at once, so an
+                // initialised page has all its slots initialised. Laziness is now
+                // at PAGE granularity for this shape, which is the trade the
+                // shared-buffer path makes.
+                LazyTransposeColumnSlotPage::Contiguous(columns) => columns.len(),
+                LazyTransposeColumnSlotPage::PerSlot(slots) => {
+                    slots.iter().filter(|slot| slot.get().is_some()).count()
+                }
+            })
             .sum()
     }
 }
@@ -67526,7 +67567,7 @@ impl DataFrame {
                 source_columns,
                 dtype: view.dtype(),
                 output_columns: view.column_len,
-                column_slot_pages: LazyTransposeFramePlan::empty_column_slot_pages(view.column_len),
+                column_slot_pages: OnceLock::new(),
                 page_buffers: OnceLock::new(),
             });
             return Ok(Self {
@@ -186300,7 +186341,30 @@ mod tests {
             let first = transposed.column(&first_name).unwrap();
             assert_eq!(first, expected);
             assert!(std::ptr::eq(first, transposed.column(&first_name).unwrap()));
-            assert_eq!(plan.initialized_column_slots(), 1);
+            // Reading ONE column materialises its PAGE, not the frame. That is the
+            // trade the shared-buffer path makes: a page shares one gathered
+            // Arc<[f64]> and one Box<[Column]>, so its columns come into being
+            // together. Laziness is still real and is checked below on a frame
+            // large enough to have more than one page — this fixture has fewer
+            // columns than a page, so here the page IS the frame.
+            let touched = plan.initialized_column_slots();
+            assert!(
+                touched <= crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN,
+                "one read must not materialise more than one page, got {touched}"
+            );
+            // Both page shapes are legal here and this helper sees both: the
+            // Float64 frames take the contiguous path (whole page at once), the
+            // Int64/datetime frames still take the per-slot path (exactly one).
+            // What must hold for either is that ONE read never exceeds one page.
+            assert!(
+                touched >= 1
+                    && touched
+                        <= eager
+                            .column_names()
+                            .len()
+                            .min(crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN),
+                "one read must materialise between one column and one page, got {touched}"
+            );
             assert!(transposed.is_lazy_transpose_storage());
             assert!(transposed.column("00").is_none());
             assert!(transposed.column("+0").is_none());
@@ -186482,6 +186546,52 @@ mod tests {
         assert_eq!(
             empty_transposed,
             empty_columns.transpose_materialized().unwrap()
+        );
+    }
+
+    /// The page trade only stays honest if a frame with MANY pages still
+    /// declines to build the ones nobody touched. The fixture below transposes
+    /// to 4 x 2000 columns — about eight pages — and reading one column from
+    /// each end must leave the middle untouched.
+    #[test]
+    fn lazy_transpose_materialises_only_the_touched_pages() {
+        const ROWS: usize = 2_000;
+        let mut columns = BTreeMap::new();
+        for c in 0..4usize {
+            let values: Vec<f64> = (0..ROWS).map(|r| (r * 4 + c) as f64).collect();
+            columns.insert(format!("c{c}"), Column::from_f64_values(values));
+        }
+        let order: Vec<String> = (0..4usize).map(|c| format!("c{c}")).collect();
+        let source = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, ROWS),
+            columns,
+            order,
+        )
+        .unwrap();
+        let transposed = source.transpose().unwrap();
+        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } = &transposed.columns
+        else {
+            panic!("expected lazy transpose storage");
+        };
+        assert_eq!(plan.initialized_column_slots(), 0);
+
+        let _ = transposed.column("0").expect("first output column");
+        let after_first = plan.initialized_column_slots();
+        assert!(
+            after_first <= crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN,
+            "one page only, got {after_first}"
+        );
+
+        let last = format!("{}", ROWS - 1);
+        let _ = transposed.column(&last).expect("last output column");
+        let after_both = plan.initialized_column_slots();
+        assert!(
+            after_both <= 2 * crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN,
+            "two pages only, got {after_both}"
+        );
+        assert!(
+            after_both < ROWS,
+            "the untouched middle must NOT be materialised: {after_both} of {ROWS}"
         );
     }
 
