@@ -1699,18 +1699,11 @@ fn run(
             // regressions live at small n by construction, so the gate is blindest
             // exactly where that class of defect appears.
             //
-            // This lane tests ONE half of the proposed remedy: does amortising the fixed
-            // per-measurement cost over 1000 calls lengthen the arm enough for the A/A
-            // control to hold unity? That question is answerable FP-SIDE ALONE, because
-            // `null_control` is computed inside fp-bench — so it costs no harness edit
-            // and orphans no standing lock.
-            //
-            // ⚠️ IT DOES NOT MAKE A vs-PANDAS ROW. The incumbent arm is still timed
-            // single-shot by the harness, so any ratio against `cumsum_batched` compares
-            // a batched arm to an unbatched one and IS MEANINGLESS WHILE LOOKING VALID.
-            // A real vs-pandas row needs `time_operation_repeated` on the pandas side
-            // with a MATCHED repeat count, which moves the harness sha and orphans all
-            // standing locks — deliberately out of scope here.
+            // This lane tests whether amortising fixed per-measurement cost over 1000
+            // calls lengthens both matched arms enough for their A/A controls to hold
+            // unity. The paired pandas workload repeats the same `df.cumsum()` call
+            // count, so the harness compares batch totals rather than a batched arm to a
+            // single-shot incumbent.
             //
             // ⚠️ USES `time_us_repeated_total`, WHICH REPORTS THE BATCH TOTAL, NOT a
             // per-call figure — so its p50 is ~1000x `cumsum`'s and the two are NOT
