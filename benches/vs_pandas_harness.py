@@ -3227,6 +3227,7 @@ PANDAS_WORKLOADS = {
         "df_transpose": bench_df_transpose_pandas,
         "df_transpose_materialize": bench_df_transpose_materialize_pandas,
         "df_transpose_full_materialize": bench_df_transpose_full_materialize_pandas,
+        "df_transpose_full_materialize_positional": bench_df_transpose_full_materialize_pandas,
         "df_transpose_materialized_clone": bench_df_transpose_materialized_clone_pandas,
         "series_skew": bench_series_skew_pandas,
         "series_kurtosis": bench_series_kurtosis_pandas,
