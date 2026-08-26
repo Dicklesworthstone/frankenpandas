@@ -40865,3 +40865,77 @@ auditing for fast paths that exist but are unreached would pay better than inven
 could be taken and I did not edit fp-frame). **No `cargo fmt` or `ubs` was run on
 `crates/fp-columnar/src/lib.rs`** — USER-GIVEN 2026-08-26, rustfmt exceeds 26GB RSS on that file and
 OOM-kills the host and peer agents.
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `log_int64 @100k` **0.915x** by the thinnest margin of the campaign (1.02x the requirement), and it CORRECTS a claim I made two entries ago: `log` shares `sqrt`'s f64-only helpers, so it does NOT route Int64 onto a typed path
+
+**This is a certified LOSS and banking it is the point.** The correction is the more useful half, and
+it is a correction to my own entry from earlier tonight.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=4ee8b92f9642fcd3d7588bc59f269a8751e541f61057f8fb8fbc5eb89132e157 (86215160 bytes)
+/data/projects/fp-wt-divlead/tdl8/release-perf/fp-bench`, built at git `2be247d39` in a DETACHED
+WORKTREE with its own `CARGO_TARGET_DIR`; `git log 2be247d39..HEAD -- crates/` empty at measurement
+time. Harness
+`bench_harness_source_sha256=2374ce5d1da3bff41625753701040fc92a8b164b30a07f8e8d867065cbd7e8a9`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.99364877 and pandas null
+median ratio 1.00212945, both inside the 0.02 maximum absolute deviation. **Median-CI decision:**
+effect median 0.915x, CI [0.90733822, 0.92038045], excluding unity; claimed log effect 0.08902594
+against a required 0.08707459. All three gate clauses TRUE. **CV role:** provenance-only, no vote; FP
+p50 434.99us cv 10.77% against pandas p50 395.90us cv 14.66%, 64 balanced-square rounds. Best-vs-best
+0.9068 agrees. Loadavg 7.89-8.95.
+
+    python3 benches/vs_pandas_harness.py --category math_unary --workloads log_int64 --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 64 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl8/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_logint64_100k_r64_2026-08-26.json
+
+**⚠️ THIS IS THE THINNEST CERTIFICATION ON THE CAMPAIGN AND THE NUMBER SHOULD CARRY THAT LABEL.**
+Claim 0.08902594 against requirement 0.08707459 is **1.022x the margin**. Tonight's other rows cleared
+theirs by 12x (`str_len`), 38x (`cbrt`), 122x (`df_transpose_full_materialize`) and 132x
+(`range_index_values`). **It also required 64 rounds to get there**: at 32 rounds the same workload
+returned NULL_UNDECIDABLE with BOTH nulls clean (FP 1.00107332, pandas 1.00048229) and the CI already
+excluding unity — failing only `effect_exceeds_two_x_null_margin` at 0.10075863 against 0.13687441.
+Doubling the rounds tightened the null and dropped the requirement below the claim while the effect
+itself barely moved (0.904 -> 0.915). **A row that certifies only by shrinking its own threshold is
+weaker evidence than one whose effect dwarfs it, and re-running this on a different day could
+plausibly land either side of the line.**
+
+**⚠️ CORRECTION TO MY `sqrt_int64` ENTRY EARLIER TONIGHT.** I wrote there that
+"`typed_float_unary_par` (:27507) HAS both arms, which is why `cbrt`/`log` route Int64 onto a typed
+path and `sqrt` does not." **That is wrong for `log`.** Reading the three call sites:
+
+    sqrt   -> typed_float_domain_fused_unary_with_finiteness  +  typed_float_unary_nullable_owned_par
+    log    -> typed_float_domain_fused_unary                  +  typed_float_unary_nullable_owned_par
+    cbrt   -> typed_float_domain_fused_unary                  +  typed_float_unary_par     <- the i64 arm
+
+`typed_float_unary_nullable_owned_par` gates on `as_f64_slice()` (:27647), exactly like the fused
+helper. **So `log` has the same missing `as_i64_slice()` sibling as `sqrt`, and only `cbrt` actually
+routes Int64 onto a typed path.** I generalised from cbrt to "cbrt/log" without reading log's call
+site. The certified numbers agree with the corrected reading and not with my original one: measured
+on this same ELF, Int64 input costs **sqrt +1.01ns/element (+87%, 115.66 -> 216.60us)** and **log
++0.45ns/element (+11.4%, 390.43 -> 434.99us)** — both penalties present, log's proportionally smaller
+only because its per-element libm `ln` (~3.9ns) dwarfs the fixed `Vec<Scalar>` tail cost that sqrt's
+cheap `vsqrtpd` (~1.2ns) cannot hide.
+
+**Counted mechanism.** `Column::log` (crates/fp-columnar/src/lib.rs:26917) tries
+`typed_float_domain_fused_unary(|x| x >= 0.0, f64::ln)` then
+`typed_float_unary_nullable_owned_par(f64::ln)`; both require `as_f64_slice()`, so an **Int64** column
+matches neither and falls to the generic tail that builds a boxed `Vec<Scalar>` one enum push per
+element. `thread_count_actually_used` = 1 — at 434.99us this sits essentially ON the ~400us
+parallel break-even established in tonight's `cbrt` entry, so threading it is not the answer either;
+the measured `FP_ELEMENTWISE_PAR_MIN=50000` probe moved `log @100k` 0.948 -> 0.946, i.e. flat.
+
+**GROUPBY IS CLEAN AT 100k AND THAT IS ALSO A RESULT.** All **32** groupby workloads measured at 100k
+on this ELF (5-round ranking pass): **zero sub-parity**, worst row `df_groupby_widekey_sum` at
+**1.609x**. The family that produced two certified regressions on 2026-08-18 now has no sub-parity
+member at this size. Combined with the dataframe_ops pass, 100k coverage is now ~120 of 136
+workloads.
+
+**No source touched** (Agent Mail remains down on its SQLite corruption breaker). **No `cargo fmt`,
+`rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`** — USER-GIVEN, rustfmt exceeds 26GB RSS
+on that file and OOM-kills the host and peer agents.
