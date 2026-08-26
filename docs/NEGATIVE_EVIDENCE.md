@@ -40261,3 +40261,116 @@ Build: `CARGO_TARGET_DIR=<per-repo> rch exec -- cargo build -p fp-frame --releas
 **NEW RETRY PREDICATE for eager consolidation specifically:** do not re-propose it unless the copy itself becomes free — i.e. the construction site is ALREADY writing a column-major buffer, which is exactly what makes alternative (2) sound — or a measured redesign brings the added cost under the A/A null floor on `bench_fresh_frame_consolidation_tax` at **100k x 10** (not 10k, per the warning above). Re-running that bench is a two-command check; there is no excuse for re-deriving this by argument.
 
 **Host state:** thinkstation1, AMD Ryzen Threadripper PRO 5975WX, 64 logical / 32 physical, governor powersave, loadavg_1min 19.51-28.19 across the nine runs. Both arms of every ratio ran in the SAME invocation, interleaved. These are FrankenPandas-against-FrankenPandas figures; the legacy incumbent never ran in this lane and this row claims nothing about it.
+
+---
+
+### 2026-08-25 OliveCarp — THE WORST-LOSS PREMISE IS REFUTED: both certified regressions SIGN-FLIPPED to certified WINS (`ewm_mean @100k` 0.780x -> **1.161x**, `df_groupby_2strkey_sum @10k` 0.853x -> **1.612x**), and `div @1M` is at PARITY, not 0.903x and not 0.496x
+
+**I was asked to confirm the worst measured vs-pandas loss and attack it. I could not confirm one, because the two rows that held the title no longer exist and the named candidate is at parity.** That is the finding.
+
+**Subject ELF (identical across all four rows, self-reported by the process):**
+`791a49d740999afa03e496a0540f41e4691f298d28a5fa585f8cb20836eb62f5` (86476472 bytes),
+`/data/projects/fp-wt-divlead/tdl3/release-perf/fp-bench`, built at git
+`9d96fd9083d574b79f7a7b84695485696ec4b011` in a DETACHED WORKTREE with its own
+`CARGO_TARGET_DIR` — never the shared `target/`, so no peer build can be mistaken for mine.
+Harness `bench_harness_source_sha256=2c72e4d8e321b777d45b63ca1cdbbd33a0c2e16f9e14e1ee28b62bb0509347ef`
+(253224 bytes), reproducible as `git show 33fcdd6f3:benches/vs_pandas_harness.py`.
+**Legacy incumbent arm, same invocation, every row:** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f`
+(70681559 bytes, 2922 files), python3.13 `efb29ce53d36ebae…`.
+
+**A/A null control (same invocation):** every row below carries its own within-invocation A/A control. `ewm_mean @100k` FrankenPandas null median ratio 0.99749 and pandas 1.00235; `df_groupby_2strkey_sum @10k` FrankenPandas 1.01160 and pandas 0.99925 — all four inside the 0.02 maximum absolute deviation, which is why those two rows are CERTIFIED. `div @1M` FrankenPandas 0.97879 and pandas 1.02040 at 24 rounds, then FrankenPandas 0.99177 and pandas 0.96664 at 48 rounds — the pandas arm is outside the band in BOTH, high once and low once, so `div @1M` is reported as NULL_UNDECIDABLE with no ratio banked.
+
+**THE COMMAND** (one workload per invocation; balanced-square requires exactly one):
+
+    python3 benches/vs_pandas_harness.py --category <cat> --workloads <w> --sizes <n> \
+      --measurement-mode balanced-square --balanced-square-rounds 24 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl3/release-perf/fp-bench \
+      --output artifacts/bench/<row>.json
+
+**THE TWO SIGN FLIPS — both CERTIFIED, all three clauses TRUE, both A/A nulls inside the 2% band:**
+
+| row | 2026-08-18 certified | NOW | CI | nulls FP / pandas | FP p50 | pandas p50 | bvb |
+|---|---|---|---|---|---|---|---|
+| `ewm_mean @100k` | **0.7800x LOSS** | **1.161x WIN** | [1.15773047, 1.17160232] | 0.99749 / 1.00235 | 489.83us cv 8.21% | 571.63us cv 16.35% | 1.1544 |
+| `df_groupby_2strkey_sum @10k` | **0.8530x LOSS** | **1.612x WIN** | [1.59043077, 1.65393633] | 1.01160 / 0.99925 | 872.13us cv 10.21% | 1430.23us cv 8.88% | 1.5602 |
+
+`ewm_mean`: claim log effect 0.14955081 against required 0.07464751; loadavg 14.62-15.76; arm clock
+ratio 1.0000. `df_groupby_2strkey_sum`: loadavg 15.83-19.33; clock ratio 1.0002. Best-vs-best agrees
+in direction and magnitude on both, which is the check that has caught false WINs on this campaign
+before. **The pandas arm did NOT move** (`ewm_mean` 571.63us now against 567us then) — **FrankenPandas
+did**: 727us -> 489.83us, a 33% improvement. These are not instrument artifacts; they are the campaign
+catching up with itself.
+ARTIFACTS `artifacts/bench/olivecarp_ewmmean100k_HEAD_2026-08-25.json`,
+`artifacts/bench/olivecarp_gb2strkey10k_HEAD_2026-08-25.json`
+
+**`div @1M` IS AT PARITY AND I COULD NOT CERTIFY IT EITHER WAY. Three runs, one ELF:**
+
+    24 rounds, load 12.61-13.78    0.958x   CI [0.86833389, 1.00292846]   nulls 0.97879 / 1.02040
+    48 rounds, load 24.44-29.67    1.000x   CI [0.94568681, 1.04151880]   nulls 0.99177 / 0.96664
+     5 rounds (survey)             0.860x   —                             —
+
+**Every CI contains unity.** FP p50 461.46us / 443.18us against pandas 437.06us / 445.08us — the two
+arms trade places between runs. **All three verdicts are NULL_UNDECIDABLE and I am not banking a
+ratio.** The blocker is the A/A null, and it failed on a DIFFERENT arm each time (pandas 2.04% high
+at 24 rounds, pandas 3.34% low at 48) — dispersion, not bias. Both arms ran cv 18.7-23.5%: `div @1M`
+streams 16MB in and 8MB out single-threaded, so it is the most co-tenant-sensitive row I measured,
+and doubling rounds did not rescue it. The remedy that worked for floor/ceil/trunc — more rounds —
+does not work here.
+ARTIFACTS `artifacts/bench/divlead_div1M_HEAD_2026-08-25.json`,
+`artifacts/bench/divlead_div1M_HEAD_r48_2026-08-25.json`
+
+**⚠️ THE `div` ARCHAEOLOGY IS DEAD AND SO IS THE LEVER PROPOSAL THAT GOES WITH IT.** The standing
+figures — 0.496x, 0.878x, and the 0.903x "AVX2 floor" I was handed — all predate
+br-frankenpandas-uza04, which wired `ArithmeticOp::Div` to `fp_dot_kernel::div_f64_into` behind a
+runtime `is_x86_feature_detected!("avx2")` guard. **I verified the lever is live in the ELF rather
+than trusting the source:** `fp_dot_kernel::div_f64_into` at `0x7f94d0` contains a 4x-unrolled AVX2
+body — `vdivpd (%rdx,%r10,1),%ymm5,%ymm5` and three siblings at +0x20/+0x40/+0x60, 16 f64 per
+iteration — and **those four are the ONLY ymm-width `vdivpd` in the entire 82MB binary**, with an
+`xmm` remainder arm and a `vdivsd` scalar tail beside them. The row's own
+`runtime_detected_isa_features` for the FP arm reads `["scalar","sse2","avx2","fma","bmi2","vaes"]`,
+so the guard admitted and the AVX2 arm is what ran. **The 2-lane-versus-4-lane account of the div
+gap was correct and has already been paid.** Anyone re-proposing `+avx2` for fp-columnar on the
+strength of a sub-parity div row is proposing a lever that shipped.
+
+**THE WHOLE `math_unary @1M` FAMILY, 22 workloads, same ELF, 5-round ranking pass** (undecidable by
+construction at 5 rounds — this ranks, it does not certify):
+
+    floor 1.38  ceil 1.55  trunc 1.54  round2 1.17  sqrt 0.93  log 2.25  log10 2.97  log2 2.26
+    log1p 3.42  pow 3.58  atan2 5.39  hypot 5.76  mod 7.92  floordiv 10.35  add 1.05  div 0.86
+    sqrt_int64 1.07  log_int64 2.39  expm1 1.74  cbrt 3.18  sin 4.24  atan 3.10
+
+**Two of twenty-two are sub-parity and they are `div` (0.86) and `sqrt` (0.93).** floor/ceil/trunc
+are confirmed wins on a current instrument, which independently re-stands the `+sse4.1` pair.
+**`sqrt @1M` is now the better-evidenced remaining loss than `div`** — not because it is worse, but
+because it is STABLE: 0.930x (2026-08-23), 0.937x (2026-08-19), 0.93x here, against div's
+0.86/0.958/1.000 scatter. A reproducible 7% gap is a target; an irreproducible one is a measurement
+problem. **That is the next lever and it is NOT done here.**
+
+**`joins @1M`, 3 of 5 before I stopped:** `join_inner` 1.33, `join_left` 3.29, `join_outer` 2.27. No
+loss found. `join_inner_validate_one_to_many` and `join_inner_str` are UNMEASURED — see below.
+
+**⚠️ I STOPPED THE SURVEY MID-FAMILY AND THE REASON MATTERS MORE THAN THE TWO MISSING ROWS.**
+Loadavg went 15 -> 21 -> **181.34** during the join sweep as the peer swarm spun up (one `git` at
+3200% CPU, concurrent `rustc`). At load 181 the balanced-square nulls cannot come back inside 2% and
+every row would have been noise wearing a ratio. **I killed my own sweep rather than bank rows the
+instrument could not support.** The two joins rows are absent from this entry because they were not
+measured, not because they were measured and hidden.
+
+**⚠️ AND MY OWN HARNESS SHA IS ALREADY ORPHANED — BY A COMMIT THAT LANDED WHILE I WAS MEASURING.**
+I broadcast to the swarm that the 2026-08-18/19 rows were orphaned at `50d3c3ffad4d…` -> `2c72e4d8e321…`.
+Thirty minutes later `f20a3183f` ("refuse concurrent harness measurements", br-frankenpandas-qhs8g)
+took the harness to `5ede43dd1422…`. **`comparability_identity` includes `harness_sha256`, so the four
+rows in THIS entry are keyed to a blob that is no longer HEAD** — reachable only as
+`git show 33fcdd6f3:benches/vs_pandas_harness.py`, which is why the sha and the commit are both
+recorded above. The orphaning rule I invoked against other people's rows applies to mine, on the
+same day, and the campaign should expect this every time the harness is touched.
+
+**WHAT THIS SETTLES AND WHAT IT DOES NOT.** It settles that the sub-parity set named on 2026-08-23
+(`ceil`/`trunc`/`floor`/`div`/`sqrt` @1M) is down to `sqrt` and a `div` that will not resolve, and
+that the two certified regressions of 2026-08-18 are gone. **It does not establish a current worst
+loss**, because I measured 22+3 workload@size in one family-and-a-bit; the campaign's own warning
+from 2026-08-23 — "five-of-twenty-one is a statement about the measured set" — is still the binding
+constraint, and this entry moves the measured set to roughly thirty. **Three of the four rows I
+banked contradicted the record I started from.** The re-measure sweep remains the highest-value work
+here, above any kernel.
