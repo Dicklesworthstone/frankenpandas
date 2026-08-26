@@ -41,7 +41,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 const WARMUP: usize = 3;
 const ITERS: usize = 25;
 const TAKE_BATCH: usize = 256;
-const MATERIALIZED_CLONE_BATCH: usize = 1_024;
+const MATERIALIZED_CLONE_BATCH: usize = 8_192;
 const TELEMETRY_STRING_BATCH_ROWS: usize = 250_000;
 
 #[derive(Debug)]
