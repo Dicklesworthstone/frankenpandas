@@ -40646,3 +40646,78 @@ its 62k lines and OOM-kills the host along with peer agents; format your own blo
 ⚠️ **Agent Mail could not be notified: the mailbox hit its SQLite corruption circuit breaker**
 (`page 3063 was freed earlier in this transaction`) mid-session. Per the standing request I did NOT
 run `am doctor repair`. This ledger entry is the delivery mechanism instead.
+
+---
+
+### 2026-08-26 OliveCarp — CERTIFIED SLOWER `df_abs @100k` **0.523x**: FrankenPandas spends TEN THREADS and still loses to pandas' one, because its per-call `thread::scope` tax (~350-420us) is larger than the entire operation pandas performs (199us)
+
+**This is a certified LOSS and banking it is the point.** It is the worst *open* loss on the board —
+worse than tonight's `cbrt @100k` 0.759x and `sqrt_int64 @100k` 0.744x — and it shares a root cause
+with the first of those, which is the reason to record them together.
+
+**Executing ELF SHA-256 (self-reported by the process):**
+`3c44ac79fa3dc9b64756fe9883af77e03309dca9bdf89de5868161f75febac9a` (86474632 bytes),
+`/data/projects/fp-wt-divlead/tdl7/release-perf/fp-bench`, built at git `751e4f790` in a DETACHED
+WORKTREE with its own `CARGO_TARGET_DIR`. Confirmed current: `git diff 751e4f790..HEAD` touched only
+fp-conformance and fp-frankentui, no perf crate. Harness
+`bench_harness_source_sha256=2374ce5d1da3bff41625753701040fc92a8b164b30a07f8e8d867065cbd7e8a9`.
+**Legacy incumbent arm (same invocation):** pandas 2.2.3,
+`artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f` (70681559 bytes,
+2922 files); `invocation_id=vs-pandas-20260826T055804.647841Z-pid1382253`.
+
+**A/A null control (same invocation):** FrankenPandas null median ratio 0.98685 and pandas null
+median ratio 1.00075, both inside the 0.02 maximum absolute deviation. **Median-CI decision:** effect
+median 0.523x, CI [0.49826378, 0.556188], excluding unity; claimed log effect 0.64759537 against a
+required 0.12527146 — **5.2x the margin**. All three gate clauses TRUE. **CV role:** provenance-only;
+FP p50 378.06us cv 7.47% against pandas p50 199.11us cv 21.19%, 192 iterations over 48
+balanced-square rounds. Best-vs-best 0.4807 agrees. Loadavg 13.27-14.72, arms clock-matched 1.0000.
+
+    python3 benches/vs_pandas_harness.py --category dataframe_ops --workloads df_abs --sizes 100k \
+      --measurement-mode balanced-square --balanced-square-rounds 48 --adaptive-rounds \
+      --frankenpandas-binary /data/projects/fp-wt-divlead/tdl7/release-perf/fp-bench \
+      --output artifacts/bench/olivecarp_dfabs100k_r48_2026-08-26.json
+
+**Counted mechanism.** The `100k` fixture is **100_000 rows x 10 cols = 1_000_000 cells** (harness
+`SIZES["100k"] = {"rows": 100_000, "cols": 10}`). `DataFrame::abs` is
+`apply_per_column_min(131_072, |s| s.abs())` (crates/fp-frame/src/lib.rs:80890), so 1M cells clears
+the floor and the frame is threaded: `thread_count_actually_used` = **10**, peak 12. But
+`par_map_columns_min` opens a fresh `thread::scope` **per call**, and the spawn+join tax was
+RE-MEASURED tonight at **~350-420us** (three independent estimates in the `cbrt @100k` entry above,
+confirming the 2026-08-01 figure of 396.9us). **FrankenPandas' entire p50 is 378.06us.** Within the
+resolution of these numbers, essentially the whole call is thread creation and the abs work itself is
+nearly free — 16MB of traffic (8MB in, 8MB out) at this host's bandwidth is ~200us serial, ~20-25us
+per worker across ten. pandas does the whole thing in **199.11us on ONE thread**, which is the
+bandwidth floor for 16MB and is therefore already optimal.
+
+**So FrankenPandas is paying more to CREATE its threads than pandas pays to DO THE ENTIRE OPERATION.**
+Threading harder cannot fix this and neither can the kernel: `Column::abs` is already a single
+vectorised pass with a propagated finiteness witness (`.iter().map(..).collect()` into a
+`with_capacity` buffer — I checked, it does NOT zero-fill, so the `vec![0.0; n]` 206us tax from the
+2026-08-01 ledger is NOT in this path and I am not claiming it).
+
+**⚠️ THIS UNIFIES WITH TONIGHT'S `cbrt` ENTRY AND POINTS AT ONE FIX.** Those two certified losses look
+opposite — cbrt is too SERIAL at 100k, df_abs is threaded and still loses — but both are the same
+per-call `thread::scope` tax seen from different sides. cbrt cannot afford to pay it, df_abs pays it
+and gets nothing. **The ledger counts 89 `thread::scope` sites and NO thread pool anywhere** (fp-frame
+59, fp-columnar 13, fp-join 9, fp-io 5, fp-index 2). A pool takes ~350-420us per call to
+microseconds, which would put df_abs at its ~200us bandwidth floor (parity or better) and make cbrt's
+threshold question disappear. **On tonight's evidence the pool is worth more than every per-op lever
+in this ledger combined**, and it is the thing I would do next.
+
+**⚠️ THE SURVEY ROW THAT SENT ME HERE SAID 0.053x AND WAS CONTAMINATED BY A FACTOR OF TEN.** The
+5-round ranking pass reported `df_abs @100k` at 0.053x with FP p50 4998.28us; measured properly the
+FP arm is 378.06us. The survey row was taken while my own sweep and peer builds contended for the
+host. **The direction was right and the magnitude was fiction** — third time this session a ranking
+figure has not survived rounds (after `reindex` 0.747x -> 0.94x parity and `div @1M`). A 5-round row
+is a pointer, never a number.
+
+**⚠️ THE CONCURRENCY GUARD FROM `f20a3183f` HAS A FALSE-POSITIVE THAT BLOCKS ALL MEASUREMENT.**
+`_competing_benchmark_harness_processes` `shlex.split`s every visible process and treats it as a
+competitor if ANY argument's `Path(arg).name == "vs_pandas_harness.py"`. A peer's watcher shell —
+`zsh -lc 'sleep 55; pgrep -af "python3 benches/vs_pandas_harness.py"'` — matches on its own pgrep
+PATTERN while timing nothing. It cost me **11 consecutive refusals** before a gap opened, and while
+such a watcher runs the harness is unusable for every agent on the host. The check needs to confirm
+the match is the script argument of a python invocation (e.g. `argv[0]` is an interpreter and the
+match is `argv[1]`), not merely present somewhere in the argument vector. **NOT fixed here** —
+editing the harness changes `harness_sha256` and orphans every standing row, which is not a call to
+make while other agents are mid-measurement.
