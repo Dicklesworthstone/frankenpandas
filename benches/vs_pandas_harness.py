@@ -32,6 +32,7 @@ import os
 import platform
 import shutil
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -247,6 +248,22 @@ TAKE_BATCH = 256
 TRANSPOSE_BATCH = 8192
 TELEMETRY_STRING_BATCH_ROWS = 250_000
 TELEMETRY_MIMALLOC_PURGE_DELAY_MS = "0"
+
+_HARNESS_SCRIPT_NAME = "vs_pandas_harness.py"
+_NON_MEASUREMENT_HARNESS_FLAGS = frozenset(
+    {
+        "--dependency-probe",
+        "--balanced-square-self-test",
+        "--best-vs-best-self-test",
+        "--corrected-null-gate-self-test",
+        "--host-exclusivity-self-test",
+        "--host-readiness-probe",
+        "--host-state-self-test",
+        "--like-for-like-self-test",
+        "--row-persistence-self-test",
+        "--slot-sampler-self-test",
+    }
+)
 
 
 @dataclass
@@ -550,6 +567,85 @@ def _busiest_host_processes(limit: int = 6) -> list[str]:
         return []
     rows = completed.stdout.strip().splitlines()[1 : limit + 1]
     return [" ".join(row.split()) for row in rows]
+
+
+def _visible_process_commands() -> list[tuple[int, str]]:
+    """Return readable process command lines without launching a helper process."""
+    commands = []
+    try:
+        proc_entries = list(Path("/proc").iterdir())
+    except OSError as error:
+        raise RuntimeError(f"unable to enumerate /proc: {error}") from error
+    for proc_entry in proc_entries:
+        try:
+            pid = int(proc_entry.name)
+        except ValueError:
+            continue
+        try:
+            raw_command = (proc_entry / "cmdline").read_bytes()
+        except OSError:
+            # A process may exit between directory enumeration and this read.
+            continue
+        if not raw_command:
+            continue
+        command = (
+            raw_command.replace(b"\0", b" ")
+            .decode("utf-8", errors="replace")
+            .strip()
+        )
+        if command:
+            commands.append((pid, command))
+    return commands
+
+
+def _competing_benchmark_harness_processes() -> list[str]:
+    """Return other measuring harness invocations visible to ``ps``.
+
+    Balanced-square rows do not use the host-wide-exclusive mode, so its CPU
+    quiescence guard cannot stop a second harness from starting between samples.
+    This is a separate admission check: an already-running benchmark is an
+    immediate, attributable reason to refuse before either arm starts.
+
+    Read-only probes and the harness self-tests are deliberately excluded. They
+    do not time an FP/pandas arm and must remain usable while a measurement is
+    in progress, otherwise the operator could not inspect a contested host.
+    """
+    own_pid = os.getpid()
+    competitors = []
+    for pid, command in _visible_process_commands():
+        if pid == own_pid:
+            continue
+        try:
+            arguments = shlex.split(command)
+        except ValueError:
+            # Preserve fail-closed admission even for a malformed process title:
+            # an unreadable argument vector cannot establish that it is harmless.
+            arguments = command.split()
+        if not any(
+            Path(argument).name == _HARNESS_SCRIPT_NAME for argument in arguments
+        ):
+            continue
+        if any(flag in arguments for flag in _NON_MEASUREMENT_HARNESS_FLAGS):
+            continue
+        competitors.append(f"pid={pid} command={command}")
+    return competitors
+
+
+def _require_no_competing_benchmark_harnesses() -> None:
+    """Fail closed when another measuring harness is already running."""
+    try:
+        competitors = _competing_benchmark_harness_processes()
+    except RuntimeError as error:
+        print(f"ERROR: benchmark-process admission: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+    if competitors:
+        print(
+            "ERROR: benchmark-process admission refused because another "
+            "vs_pandas_harness measurement is running: "
+            + "; ".join(competitors),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
 
 def _host_readiness_probe(wait_seconds: float) -> int:
@@ -5645,6 +5741,8 @@ def main():
 
     if not args.category and not args.all:
         parser.error("Specify --category or --all")
+
+    _require_no_competing_benchmark_harnesses()
 
     if args.balanced_square_rounds < 3:
         parser.error("--balanced-square-rounds must be at least 3")

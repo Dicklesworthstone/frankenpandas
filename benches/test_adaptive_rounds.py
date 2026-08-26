@@ -30,6 +30,42 @@ def _load():
     return module
 
 
+def test_peer_benchmark_process_refuses_before_measurement(monkeypatch):
+    """A second measuring harness is a hard refusal; probes and self stay usable.
+
+    The negative control is the peer's normal ``--category`` invocation. A
+    naive scan that only checks load, ignores an already-running process, or
+    rejects every harness command would respectively miss pid 303, miss pid
+    303, or incorrectly reject pid 202.
+    """
+    m = _load()
+    monkeypatch.setattr(m.os, "getpid", lambda: 101)
+    monkeypatch.setattr(
+        m,
+        "_visible_process_commands",
+        lambda: [
+            (101, "python benches/vs_pandas_harness.py --category strings"),
+            (202, "python benches/vs_pandas_harness.py --host-readiness-probe"),
+            (
+                303,
+                "python benches/vs_pandas_harness.py --category linalg "
+                "--workloads df_dot --sizes 1M",
+            ),
+        ],
+    )
+
+    assert m._competing_benchmark_harness_processes() == [
+        "pid=303 command=python benches/vs_pandas_harness.py --category linalg "
+        "--workloads df_dot --sizes 1M"
+    ]
+    try:
+        m._require_no_competing_benchmark_harnesses()
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("a peer benchmark must refuse admission")
+
+
 def test_it_can_only_ever_ADD_rounds_never_remove_them():
     """THE ANTI-GATE-WEAKENING INVARIANT, swept over the whole input domain.
 
