@@ -57307,12 +57307,17 @@ impl LazyTransposeFramePlan {
             F64(&'a [f64]),
             I64(&'a [i64]),
         }
+        // Narrow every source to EXACTLY this page's window while resolving it.
+        // The fill below then walks slices whose length it already knows, so the
+        // per-element `get(row)?` disappears: at 1M source rows that bounds check
+        // ran 10M times to re-answer what one check per source per page settles.
+        let page_end = page_start.checked_add(page_len)?;
         let mut sources: Vec<Src<'_>> = Vec::with_capacity(self.source_columns.len());
         for source in self.source_columns.iter() {
             if let Some(values) = source.as_f64_slice() {
-                sources.push(Src::F64(values));
+                sources.push(Src::F64(values.get(page_start..page_end)?));
             } else if let Some(values) = source.as_i64_slice() {
-                sources.push(Src::I64(values));
+                sources.push(Src::I64(values.get(page_start..page_end)?));
             } else {
                 // Canonical-nullable or otherwise untyped source: the per-column
                 // path reconstructs emission-rule Scalars and must keep it.
@@ -57320,17 +57325,39 @@ impl LazyTransposeFramePlan {
             }
         }
         let ncols = sources.len();
-        let mut buffer: Vec<f64> = Vec::with_capacity(page_len.checked_mul(ncols)?);
-        for offset in 0..page_len {
-            let row = page_start + offset;
-            for source in &sources {
-                match source {
-                    Src::F64(values) => buffer.push(*values.get(row)?),
-                    Src::I64(values) => buffer.push(*values.get(row)? as f64),
+        // Build the page buffer DIRECTLY inside its `Arc`. `Arc::from(vec)` cannot
+        // adopt a `Vec`'s allocation — the refcount header has to sit in front of
+        // the data — so the old path wrote the page once into the `Vec` and then
+        // copied the whole thing again: 160 MB written and 80 MB read across the
+        // frame at 1M rows, of which the copy alone profiled at 2.80% of
+        // `df_transpose_full_materialize_positional`. `repeat_with(..).take(n)` is
+        // `TrustedLen`, so this allocates once, exactly, and writes each cell a
+        // single time — 80 MB written and nothing read back.
+        //
+        // The cursor walks sources by ITERATOR rather than by index on purpose: a
+        // `sources[cursor]` would reintroduce a bounds check per element, which is
+        // the cost this rewrite exists to remove.
+        let total = page_len.checked_mul(ncols)?;
+        let mut cursor = sources.iter();
+        let mut offset = 0usize;
+        let buffer: std::sync::Arc<[f64]> = std::iter::repeat_with(|| {
+            let source = match cursor.next() {
+                Some(source) => source,
+                None => {
+                    // Row finished: step down the window and restart the cycle.
+                    offset += 1;
+                    cursor = sources.iter();
+                    cursor.next().expect("a page with cells has >= 1 source")
                 }
+            };
+            match source {
+                Src::F64(values) => values[offset],
+                Src::I64(values) => values[offset] as f64,
             }
-        }
-        Some(std::sync::Arc::from(buffer))
+        })
+        .take(total)
+        .collect();
+        Some(buffer)
     }
 
     fn cached_column_if_present(&self, output_column: usize) -> Option<&Column> {
@@ -186599,6 +186626,110 @@ mod tests {
             after_both < ROWS,
             "the untouched middle must NOT be materialised: {after_both} of {ROWS}"
         );
+    }
+
+    /// The page gather fills its buffer directly inside the `Arc` and cycles
+    /// sources by ITERATOR rather than by index, so a cursor bug would land
+    /// values in the wrong row or the wrong column instead of failing loudly.
+    /// Compare against the eager reference across page boundaries and across
+    /// BOTH match arms — the i64 sources reach the buffer through a widening
+    /// arm the f64 ones never touch, and a mixed frame takes both inside a
+    /// single page.
+    #[test]
+    fn lazy_transpose_page_gather_matches_the_eager_reference() {
+        for rows in [
+            0usize,
+            1,
+            7,
+            crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN - 1,
+            crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN,
+            crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN + 1,
+            2 * crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN + 3,
+        ] {
+            for ncols in [1usize, 2, 5] {
+                let mut f64_columns = BTreeMap::new();
+                let mut i64_columns = BTreeMap::new();
+                let mut mixed_columns = BTreeMap::new();
+                let mut order = Vec::with_capacity(ncols);
+                for c in 0..ncols {
+                    let name = format!("c{c}");
+                    let f64_values: Vec<f64> =
+                        (0..rows).map(|r| (r * ncols + c) as f64 - 3.5).collect();
+                    let i64_values: Vec<i64> =
+                        (0..rows).map(|r| (r * ncols + c) as i64 - 3).collect();
+                    f64_columns.insert(name.clone(), Column::from_f64_values(f64_values.clone()));
+                    i64_columns.insert(name.clone(), Column::from_i64_values(i64_values.clone()));
+                    mixed_columns.insert(
+                        name.clone(),
+                        if c % 2 == 0 {
+                            Column::from_f64_values(f64_values)
+                        } else {
+                            Column::from_i64_values(i64_values)
+                        },
+                    );
+                    order.push(name);
+                }
+                // An all-Int64 frame transposes to an Int64 frame, and
+                // `page_contiguous_buffer` serves Float64 output only — so that
+                // case runs the per-slot builder by design and must NOT assert the
+                // contiguous witness. The MIXED frame is what covers the gather's
+                // i64-widening arm: f64 + i64 sources promote to Float64 output,
+                // so both match arms run inside one page.
+                for (label, columns, contiguous) in [
+                    ("f64", f64_columns, true),
+                    ("i64", i64_columns, false),
+                    ("mixed", mixed_columns, true),
+                ] {
+                    let source = DataFrame::new_with_column_order(
+                        Index::new_known_unique_int64_unit_range(0, rows),
+                        columns,
+                        order.clone(),
+                    )
+                    .unwrap();
+                    let lazy = source.transpose().unwrap();
+                    let eager = source.transpose_materialized().unwrap();
+                    assert_eq!(
+                        lazy.num_columns(),
+                        eager.num_columns(),
+                        "{label} rows={rows} ncols={ncols}"
+                    );
+                    for position in 0..lazy.num_columns() {
+                        let got = lazy.column_at(position).expect("lazy output column");
+                        let want = eager.column_at(position).expect("eager output column");
+                        assert_eq!(
+                            got.values(),
+                            want.values(),
+                            "{label} rows={rows} ncols={ncols} position={position}"
+                        );
+                    }
+
+                    // NON-VACUITY. Comparing two frames proves nothing if
+                    // `transpose()` quietly handed back eager storage, or if the
+                    // plan fell back to the per-slot builder — either way the
+                    // rewritten gather would never run and this test would still
+                    // be green. Witness that the CONTIGUOUS page path is the one
+                    // that produced the values compared above.
+                    if rows > 0 && contiguous {
+                        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } =
+                            &lazy.columns
+                        else {
+                            panic!(
+                                "{label} rows={rows} ncols={ncols}: expected lazy transpose \
+                                 storage"
+                            );
+                        };
+                        assert!(
+                            matches!(
+                                plan.column_slot_page_slots()[0].get(),
+                                Some(crate::LazyTransposeColumnSlotPage::Contiguous(_))
+                            ),
+                            "{label} rows={rows} ncols={ncols}: the contiguous page gather \
+                             must be the path under test"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(feature = "lazy-transpose-view")]
