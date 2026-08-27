@@ -73369,6 +73369,52 @@ impl DataFrame {
                     out,
                     fp_columnar::ValidityMask::from_words(words, new_len),
                 ))
+            } else if let Some((data, source_validity)) = col.as_f64_slice_with_validity() {
+                // TYPED NULLABLE GATHER. The all-valid arm above declines a
+                // Float64 column that carries ANY missing value, and everything
+                // then fell through to the Scalar path — which is why the same
+                // reindex costs 866us on clean f64 and 8137us at 10% NaN, while
+                // pandas is unmoved (958us vs 844us) because a numpy float64
+                // array represents missing AS NaN and needs no second structure.
+                // Profiled: reindex_by_positions 48.72%, memmove 18.31%,
+                // drop_slow 8.75% — all of it Scalar traffic.
+                //
+                // Bit-identical to the fallback: a target resolving to a source
+                // row copies that row's value AND its validity, so a source that
+                // was missing stays missing; an unresolved target stores 0.0 with
+                // the bit CLEARED, which is the same invented `Null(NullKind::NaN)`
+                // gap the all-valid arm and `reindex_column_with_invented_gaps`
+                // produce. dtype stays Float64.
+                let mut out = Vec::with_capacity(new_len);
+                let mut words = vec![0_u64; new_len.div_ceil(64)];
+                if let Some(compact) = compact_ref {
+                    for (word_index, chunk) in compact.chunks(64).enumerate() {
+                        let mut word = 0_u64;
+                        for (bit, &row) in chunk.iter().enumerate() {
+                            if row != REINDEX_ABSENT && source_validity.get(row as usize) {
+                                word |= 1_u64 << bit;
+                                out.push(data[row as usize]);
+                            } else {
+                                out.push(0.0);
+                            }
+                        }
+                        words[word_index] = word;
+                    }
+                } else {
+                    for (oi, slot) in positions_ref.iter().enumerate() {
+                        match slot {
+                            Some(idx) if source_validity.get(*idx) => {
+                                words[oi / 64] |= 1_u64 << (oi % 64);
+                                out.push(data[*idx]);
+                            }
+                            _ => out.push(0.0),
+                        }
+                    }
+                }
+                Ok(Column::from_f64_values_with_validity(
+                    out,
+                    fp_columnar::ValidityMask::from_words(words, new_len),
+                ))
             } else {
                 // A row reindex INVENTS is NaN (already the case here), and an
                 // all-valid int64 column widens to float64 to hold it — numpy
@@ -116192,6 +116238,56 @@ mod tests {
     // ── reindex test ──
 
     #[test]
+    /// A Float64 column carrying MISSING values must reindex to exactly what
+    /// the Scalar fallback produced: a resolved target keeps the source row's
+    /// value AND its nullity, an unresolved target becomes an invented gap.
+    /// The typed nullable arm is the one under test — the all-valid arm declines
+    /// these columns, so before it existed every one of them went to Scalars.
+    #[test]
+    fn dataframe_reindex_nullable_float64_matches_the_scalar_semantics() {
+        let mut columns = BTreeMap::new();
+        // rows 1 and 3 are MISSING in the source.
+        columns.insert(
+            "a".to_owned(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(30.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(50.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 5),
+            columns,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        // Targets: present-valid, present-MISSING, present-valid, ABSENT.
+        let targets: Vec<IndexLabel> = [0_i64, 1, 4, 99].into_iter().map(IndexLabel::Int64).collect();
+        let got = frame.reindex(targets).unwrap();
+        let column = got.column("a").expect("reindexed column");
+        assert_eq!(column.dtype(), DType::Float64, "dtype must not change");
+        let values = column.values();
+        assert_eq!(values.len(), 4);
+        assert_eq!(values[0], Scalar::Float64(10.0), "resolved valid row");
+        assert!(
+            matches!(values[1], Scalar::Null(_)),
+            "a source row that was MISSING must stay missing, got {:?}",
+            values[1]
+        );
+        assert_eq!(values[2], Scalar::Float64(50.0), "resolved valid row");
+        assert!(
+            matches!(values[3], Scalar::Null(_)),
+            "an unresolved target is an invented gap, got {:?}",
+            values[3]
+        );
+    }
+
     fn dataframe_reindex_basic() {
         let df = DataFrame::from_series(vec![
             Series::from_values(
