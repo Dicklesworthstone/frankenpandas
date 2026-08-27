@@ -41723,3 +41723,83 @@ contract finding: its subject is the A/A null control, which is by construction 
 FrankenPandas-vs-FrankenPandas self-comparison and can never be evidence of a
 vs-incumbent result.
 
+
+### 2026-08-27 cod-pandas — REJECTED AS A FIXTURE ARTIFACT: the "4.9x dtype degradation" in `drop_duplicates` is the clean lane doing NO WORK, not the NaN lane doing it badly. The bitmap lever that came out of it is real but small, and the row is now UNDECIDABLE rather than a certified loss [br-frankenpandas-uza04]
+
+`drop_duplicates @100k` costs 533.7us on clean float64 and 2623.2us at 10%
+NaN. That 4.9x is what pointed me at the lane. It is not a code gap.
+
+`gen_f64_column` (crates/fp-bench/src/main.rs) draws `rng.unit() * 1_000_000.0`.
+100k continuous doubles are all distinct, so the CLEAN column contains ZERO
+duplicates: `drop_duplicates` drops nothing, and the surviving positions are
+exactly the identity range `0..100k`. `Column::take_positions` has a zero-copy
+contiguous-range view gated on `float64_arc_view_source()` (all-valid) AND
+`contiguous_ascending_start(positions)`. The clean lane satisfies both and never
+gathers at all. The nan10 lane drops ~10k duplicate-NaN rows, so its positions
+have gaps, the certificate fails, and it performs a real gather.
+
+Confirmed in the profiles rather than argued. Normalising both against the fixed
+`sha2` startup anchor (identical absolute work in both runs):
+
+    symbol                    clean      nan10     ratio
+    take_positions           <0.041X     1.249X     >30x
+    DataFrame::duplicated_mask <0.041X   0.885X     >20x
+    FxHashMap insert           0.526X    0.805X      1.5x
+
+The hash barely moves — and the NaN column does FEWER inserts, since 10% of its
+rows collapse into one missing class instead of being probed. So "close the dtype
+gap" was never a legitimate target: the clean number is the price of doing no work
+on this particular input. Anyone re-deriving a target from that 533.7us is
+measuring the fixture.
+
+THE LEVER THAT WAS REAL, AND ITS SIZE. `duplicated_single_f64` asked
+`validity.get(i) && !data[i].is_nan()` per row in all three keep-modes;
+`ValidityMask::get` is an out-of-line call that re-decides
+sentinel-vs-ranges-vs-words every time. Resolving presence ONCE into a bitmap —
+borrowed straight from the mask's words when the column carries the
+`nan_missing_exact` witness (9c35e8221), derived `valid & !nan` word-at-a-time
+otherwise — is worth ~6%. Shipped in 7ac58d5ec.
+
+    arm     executing ELF (sha256 prefix)  ratio  verdict           A/A null fp / pandas   limit  load
+    before  360b7981d9fe20355a98e4298e0c5   0.89   SLOWER (certified) 1.007252 / 0.999147   0.02    9-11
+    before  83cd300e1c4173b4070ae58f92da    0.91   SLOWER (certified) 1.009538 / 1.008744   0.02   22-30
+    before  83cd300e1c4173b4070ae58f92da    0.952  NULL_UNDECIDABLE   0.998732 / 1.001907   0.02   48-114
+    after   5e621c8df98129ef41a4184eabea    0.949  NULL_UNDECIDABLE   1.018284 / 1.005921   0.02   21-36
+    after   5e621c8df98129ef41a4184eabea    0.993  NULL_UNDECIDABLE   0.993581 / 1.010876   0.02   22-113
+    after   5e621c8df98129ef41a4184eabea    1.005  NULL_UNDECIDABLE   0.991701 / 0.996740   0.02   27-48
+
+    Full executing ELFs:
+      before 360b7981d9fe20355a98e4298e0c593473988c46bd5c0b6581a30701375c2205
+      before 83cd300e1c4173b4070ae58f92da64ed94bc88c296f697212ddeb141de1288c8
+      after  5e621c8df98129ef41a4184eabeade97fdd70dadd238931c6686359a3b8f38df
+**A/A null control (same invocation):** median null ratios over 64 rounds, maximum absolute deviation limit 0.02 — FrankenPandas 1.007252 / 1.009538 / 0.998732 (before arms) and 1.018284 / 0.993581 / 0.991701 (after arms); pandas 0.999147 / 1.008744 / 1.001907 (before) and 1.005921 / 1.010876 / 0.996740 (after). All twelve inside the limit, so no row here is refused for a failed null.
+
+    Incumbent pinned in every row: pandas 2.2.3, artifact sha256
+      c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f,
+      same-invocation balanced-square ABBAABBA, 64 rounds.
+
+    EXACT COUNTED MECHANISM for the REJECT: 100_000 rows drawn from a continuous
+    generator yield 100_000 distinct doubles, so the clean lane's duplicate count
+    is 0 and its surviving-position vector is the identity range 0..100_000 —
+    which satisfies `contiguous_ascending_start`, so exactly 0 elements are
+    gathered. The nan10 lane drops ~10_000 duplicate-NaN rows, so its position
+    vector has gaps, the certificate fails, and ~90_000 elements are gathered per
+    column. The compared quantity differs by ~90_000 gathered elements, not by
+    any property of the code under test.
+
+Paired same-regime, before/after back to back: 0.91 -> 0.949, 0.952 -> 0.993.
+FP-only interleaved, 3 passes: 2694/2572/2635us -> 2587/2475/2373us.
+
+WHAT IS CLAIMED: the lane no longer certifies as a LOSS. WHAT IS NOT: it does not
+certify as parity or as a win. Every post-change run is UNDECIDABLE on
+`effect_exceeds_two_x_null_margin` (plus `effect_ci_excludes_unity` on the two
+nearest unity) — the effect is now too close to 1.0 to clear the null margin,
+which is the gate working, not a result. UNDECIDABLE IS NOT PARITY, and a
+quiet-host re-measurement is still owed before anyone quotes a number here.
+
+I ALSO GOT THE MECHANISM WRONG FIRST, AND MY OWN PROFILE HAD ALREADY SAID SO. I
+attributed the 4.9x to the per-row `validity.get`; the profile I had already taken
+put `ValidityMask::get` at 3.97% of the process. The bitmap bought ~6%, almost
+exactly what that 3.97% predicted. The profile was right and the narrative was
+wrong — the degradation and the lever were two different things that happened to
+live in the same function.
