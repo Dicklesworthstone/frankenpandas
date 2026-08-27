@@ -1,7 +1,6 @@
 // MultiIndex level walks index several parallel arrays by the same counter; rewriting to
 // iterators would obscure the level arithmetic without changing behaviour.
 #![allow(clippy::needless_range_loop)]
-
 #![forbid(unsafe_code)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
@@ -76,7 +75,6 @@
 //! - **fp-frame** stores an `Index` per DataFrame / Series and uses
 //!   the alignment algebra here for binary ops.
 //! - **fp-join** consumes alignment plans for merge-style joins.
-
 
 use std::{
     borrow::Cow,
@@ -3682,7 +3680,10 @@ impl Index {
         if other.is_unique() {
             let mut labels = self_labels.to_vec();
             let mut seen = FxHashSet::<&IndexLabel>::default();
-            seen.reserve(combined_output_capacity(self_labels.len(), other_labels.len()));
+            seen.reserve(combined_output_capacity(
+                self_labels.len(),
+                other_labels.len(),
+            ));
             seen.extend(self_labels.iter());
             for label in other_labels {
                 if seen.insert(label) {
@@ -13031,44 +13032,57 @@ impl RangeIndex {
             return Index::from_i64_values(labels);
         }
 
-        if let Some((min, span)) = Index::i64_dense_span(other) {
-            let mut remaining = vec![0usize; span];
-            for &value in other {
-                let slot = (value as i128 - min as i128) as usize;
-                remaining[slot] += 1;
-            }
+        // A duplicate-bearing right index uses the same first-key grouping as
+        // `Index::union_with`. The range itself is unique, but emitting its
+        // complete physical order and appending surplus right duplicates would
+        // place a second `6` after `3`, unlike the flat-index oracle.
+        if Index::has_duplicates_i64(other) {
+            let mut counts = FxHashMap::<i64, (usize, usize)>::default();
+            counts.reserve(combined_output_capacity(self.len(), other.len()));
+            let mut order = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
             for position in 0..self.len() {
-                let offset = self.value_at(position) as i128 - min as i128;
-                if offset >= 0 && (offset as usize) < span {
-                    let count = &mut remaining[offset as usize];
-                    *count = count.saturating_sub(1);
+                let value = self.value_at(position);
+                let entry = counts.entry(value).or_insert((0, 0));
+                if entry.0 == 0 && entry.1 == 0 {
+                    order.push(value);
                 }
+                entry.0 += 1;
             }
             for &value in other {
+                let entry = counts.entry(value).or_insert((0, 0));
+                if entry.0 == 0 && entry.1 == 0 {
+                    order.push(value);
+                }
+                entry.1 += 1;
+            }
+            let mut grouped = Vec::with_capacity(combined_output_capacity(self.len(), other.len()));
+            for value in order {
+                let (left_count, right_count) = counts[&value];
+                grouped.extend(std::iter::repeat_n(value, left_count.max(right_count)));
+            }
+            return Index::from_i64_values(grouped);
+        }
+
+        if let Some((min, span)) = Index::i64_dense_span(other) {
+            let mut seen = vec![0u64; span.div_ceil(64)];
+            for &value in other {
+                if self.contains_value(value) {
+                    continue;
+                }
                 let slot = (value as i128 - min as i128) as usize;
-                let count = &mut remaining[slot];
-                if *count > 0 {
+                let bit = 1u64 << (slot & 63);
+                let word = slot >> 6;
+                if seen[word] & bit == 0 {
                     labels.push(value);
-                    *count -= 1;
+                    seen[word] |= bit;
                 }
             }
         } else {
-            let mut remaining = FxHashMap::<i64, usize>::default();
-            remaining.reserve(other.len());
+            let mut seen = FxHashSet::<i64>::default();
+            seen.reserve(other.len());
             for &value in other {
-                *remaining.entry(value).or_default() += 1;
-            }
-            for position in 0..self.len() {
-                if let Some(count) = remaining.get_mut(&self.value_at(position)) {
-                    *count = count.saturating_sub(1);
-                }
-            }
-            for &value in other {
-                if let Some(count) = remaining.get_mut(&value)
-                    && *count > 0
-                {
+                if !self.contains_value(value) && seen.insert(value) {
                     labels.push(value);
-                    *count -= 1;
                 }
             }
         }
@@ -33159,7 +33173,7 @@ mod tests {
         assert_eq!(outer.name(), Some("k"));
         assert_eq!(
             outer.labels.int64_view().unwrap().as_slice(),
-            &[9, 6, 3, 6, 12, 0]
+            &[9, 6, 6, 3, 12, 0]
         );
         assert!(
             outer.labels.materialized.get().is_none(),
