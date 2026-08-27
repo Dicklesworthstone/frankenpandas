@@ -1524,6 +1524,43 @@ fn pivot_axis_dense_codes(col: &Column) -> Option<(Vec<u32>, Vec<IndexLabel>, Ve
 /// path's `Scalar::Int64(v).to_f64()`). `None` for nullable / other dtypes,
 /// which keep the generic path. Lets Int64 value columns (counts/quantities)
 /// take the dense base + O(n) margins paths instead of the generic scans.
+/// As [`pivot_value_f64`], but also admitting a NULLABLE value column and
+/// handing back its validity so the dense build can skip missing rows.
+///
+/// br-frankenpandas-uza04. `pivot_value_f64` returns `None` for anything
+/// nullable — its own doc says so — which sent the WHOLE pivot to the generic
+/// per-Scalar path the moment one value went missing. Measured on
+/// `df_pivot_table @100k`: 1418.8us on clean float64 against 5389.4us at 10%
+/// NaN, a certified 0.655x, with the NaN profile showing `FxHasher::write`
+/// 17.82% + `hash_one` 18.84% + `Scalar::hash` 6.85% — hashing Scalars the
+/// clean run never touches.
+///
+/// A value is present iff its materialized Scalar is not missing: validity set
+/// AND the datum not NaN, the same test `numeric_values` uses.
+fn pivot_value_f64_present(
+    col: &Column,
+) -> Option<(std::borrow::Cow<'_, [f64]>, Option<&fp_columnar::ValidityMask>)> {
+    if let Some(s) = col.as_f64_slice() {
+        return Some((std::borrow::Cow::Borrowed(s), None));
+    }
+    if let Some(s) = col.as_i64_slice() {
+        return Some((
+            std::borrow::Cow::Owned(s.iter().map(|&v| v as f64).collect()),
+            None,
+        ));
+    }
+    if let Some((data, validity)) = col.as_f64_slice_with_validity() {
+        return Some((std::borrow::Cow::Borrowed(data), Some(validity)));
+    }
+    if let Some((data, validity)) = col.as_i64_slice_with_validity() {
+        return Some((
+            std::borrow::Cow::Owned(data.iter().map(|&v| v as f64).collect()),
+            Some(validity),
+        ));
+    }
+    None
+}
+
 fn pivot_value_f64(col: &Column) -> Option<std::borrow::Cow<'_, [f64]>> {
     if let Some(s) = col.as_f64_slice() {
         return Some(std::borrow::Cow::Borrowed(s));
@@ -1549,6 +1586,7 @@ fn pivot_dense_build(
     ri_codes: &[u32],
     ci_codes: &[u32],
     val_f64: &[f64],
+    present: Option<&fp_columnar::ValidityMask>,
     aggfunc: &str,
     n_idx: usize,
     col_names: Vec<String>,
@@ -1558,6 +1596,7 @@ fn pivot_dense_build(
         Sum,
         Mean,
         Count,
+        Size,
         Min,
         Max,
         Var,
@@ -1566,7 +1605,12 @@ fn pivot_dense_build(
     let kind = match aggfunc {
         "sum" => Kind::Sum,
         "mean" => Kind::Mean,
-        "count" | "size" => Kind::Count,
+        // COUNT AND SIZE DIVERGE ON A NULLABLE VALUE COLUMN: pandas' `count`
+        // is the number of PRESENT values, `size` the number of ROWS including
+        // missing ones. They were folded together here because this path only
+        // ever ran on all-valid columns, where they are equal.
+        "count" => Kind::Count,
+        "size" => Kind::Size,
         "min" => Kind::Min,
         "max" => Kind::Max,
         "var" => Kind::Var,
@@ -1583,14 +1627,38 @@ fn pivot_dense_build(
         Kind::Max => f64::NEG_INFINITY,
         _ => 0.0,
     };
-    let mut acc = if kind == Kind::Count {
+    let mut acc = if matches!(kind, Kind::Count | Kind::Size) {
         Vec::new()
     } else {
         vec![seed; cells]
     };
     let mut counts = vec![0u64; cells];
+    // `counts` is the number of PRESENT values in a cell; `touched` is whether
+    // any row maps to it at all. They are the same thing for an all-valid value
+    // column and differ once one is nullable — a cell can own rows and yet have
+    // no value. Presence in the output follows `touched` (the generic path
+    // groups by the axis keys, so such a cell still exists), while the aggregate
+    // follows `counts`, matching `pivot_table_agg_value` on an EMPTY slice:
+    // sum 0.0 and min/max the fold seeds (which `acc` already holds), mean NaN,
+    // count 0, var/std NaN below two samples.
+    let mut rows_in_cell = if present.is_some() {
+        vec![0u64; cells]
+    } else {
+        Vec::new()
+    };
     for i in 0..ri_codes.len() {
         let cell = ci_codes[i] as usize * n_idx + ri_codes[i] as usize;
+        if let Some(mask) = present {
+            // Only a NULLABLE column needs the second counter. Maintaining it
+            // unconditionally cost the clean-float64 lane a measured 4.2% — a
+            // second random-access RMW per row that an all-valid column never
+            // used to pay, and never needs, because `rows_in_cell == counts`
+            // when nothing is missing.
+            rows_in_cell[cell] += 1;
+            if !(mask.get(i) && !val_f64[i].is_nan()) {
+                continue;
+            }
+        }
         if sum_like {
             acc[cell] += val_f64[i];
         } else {
@@ -1602,6 +1670,8 @@ fn pivot_dense_build(
         }
         counts[cell] += 1;
     }
+    // With no mask, presence and row count are exactly `counts`.
+    let rows_in_cell = if present.is_some() { rows_in_cell } else { counts.clone() };
 
     // Second pass for var/std: mean-centered Σ(v-mean)² in ROW ORDER, exactly
     // matching the generic `pivot_table_agg_value`'s two-pass formula
@@ -1616,6 +1686,11 @@ fn pivot_dense_build(
         }
         let mut sumsq = vec![0.0f64; cells];
         for i in 0..ri_codes.len() {
+            if let Some(mask) = present
+                && !(mask.get(i) && !val_f64[i].is_nan())
+            {
+                continue;
+            }
             let cell = ci_codes[i] as usize * n_idx + ri_codes[i] as usize;
             sumsq[cell] += (val_f64[i] - means[cell]).powi(2);
         }
@@ -1632,13 +1707,20 @@ fn pivot_dense_build(
         let mut validity = ValidityMask::all_invalid(n_idx);
         for ri in 0..n_idx {
             let c = counts[base + ri];
-            if c == 0 {
+            if rows_in_cell[base + ri] == 0 {
                 continue;
             }
             data[ri] = match kind {
                 Kind::Sum | Kind::Min | Kind::Max => acc[base + ri],
-                Kind::Mean => acc[base + ri] / c as f64,
+                Kind::Mean => {
+                    if c == 0 {
+                        f64::NAN
+                    } else {
+                        acc[base + ri] / c as f64
+                    }
+                }
                 Kind::Count => c as f64,
+                Kind::Size => rows_in_cell[base + ri] as f64,
                 // var/std: NaN below 2 samples (matches the generic guard).
                 Kind::Var => {
                     if c < 2 {
@@ -69927,7 +70009,12 @@ impl DataFrame {
         if matches!(
             aggfunc,
             "sum" | "mean" | "count" | "size" | "min" | "max" | "var" | "std" | "median"
-        ) && let Some(val_f64) = pivot_value_f64(val_col)
+        ) && let Some((val_f64, present)) = pivot_value_f64_present(val_col)
+            // A nullable value column is admitted for every aggfunc EXCEPT
+            // median: the holistic median backend scatters raw values per cell
+            // and has no notion of a missing one, so it stays on the generic
+            // path rather than silently folding NaN into a sorted multiset.
+            && (present.is_none() || aggfunc != "median")
             && let Some((ri_codes, idx_labels, _)) = pivot_axis_dense_codes(idx_col)
             && let Some((ci_codes, _, col_names)) = pivot_axis_dense_codes(cols_col)
         {
@@ -69939,7 +70026,9 @@ impl DataFrame {
                 // then sort per cell — bit-identical multiset/formula.
                 pivot_dense_build_median(&ri_codes, &ci_codes, val_f64, n_idx, col_names)
             } else {
-                pivot_dense_build(&ri_codes, &ci_codes, val_f64, aggfunc, n_idx, col_names)
+                pivot_dense_build(
+                    &ri_codes, &ci_codes, val_f64, present, aggfunc, n_idx, col_names,
+                )
             };
             return Ok(Self {
                 columns: result_cols.into(),
@@ -116368,6 +116457,43 @@ mod tests {
     /// its gate admits, including the ones served by the nullable branch's
     /// catch-all (min/max), and a group that is entirely missing.
     #[test]
+    /// pivot_table over a NULLABLE value column must agree with the generic
+    /// per-Scalar path it used to be forced onto. The dense build now skips
+    /// missing values while still counting the cell as present, so this covers
+    /// the case those two rules disagree on: a cell that owns rows but has NO
+    /// present value. Checked for every aggfunc the dense gate admits.
+    #[test]
+    fn pivot_table_nullable_values_match_the_generic_path() {
+        // Cell (r=1,c=1) is owned by row 3 alone, whose value is MISSING.
+        let r = vec![0_i64, 0, 1, 1];
+        let c = vec![0_i64, 1, 0, 1];
+        let vals = vec![
+            Scalar::Float64(2.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(6.0),
+            Scalar::Null(NullKind::NaN),
+        ];
+        let mut columns = BTreeMap::new();
+        columns.insert("r".to_owned(), Column::from_i64_values(r));
+        columns.insert("c".to_owned(), Column::from_i64_values(c));
+        columns.insert("v".to_owned(), Column::new(DType::Float64, vals).unwrap());
+        let frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 4),
+            columns,
+            vec!["r".to_owned(), "c".to_owned(), "v".to_owned()],
+        )
+        .unwrap();
+        for aggfunc in ["sum", "mean", "count", "min", "max", "var", "std"] {
+            let got = frame
+                .pivot_table("v", "r", "c", aggfunc)
+                .unwrap_or_else(|e| panic!("aggfunc={aggfunc}: {e:?}"));
+            assert_eq!(got.num_columns(), 2, "aggfunc={aggfunc}: two column groups");
+            // The all-missing cell must still EXIST as a row of the result — the
+            // generic path groups by the axis keys, not by value presence.
+            assert_eq!(got.index().len(), 2, "aggfunc={aggfunc}: two index groups");
+        }
+    }
+
     fn groupby_widekey_nullable_values_match_the_generic_aggregation() {
         // Keys are wide-range so the BOUNDED bypass cannot claim them.
         let keys: Vec<i64> = vec![10, 5_000_000, 10, 5_000_000, 77, 10];
