@@ -9039,6 +9039,43 @@ fn f64_radix_key(value: f64) -> u64 {
 /// scoped threads for COMPUTE-bound `g` (libm transcendentals). Serial below
 /// `PAR_MIN` or on single-core hosts. Order-preserving (chunk writes a
 /// contiguous global range) → bit-identical to the serial map.
+/// SLICE-shaped sibling of [`par_map_vec_f64`], for a map whose input is a
+/// contiguous `&[f64]` rather than an index.
+///
+/// br-frankenpandas-uza04. The index form cannot vectorize. `(0..n).map(|i|
+/// data[i].abs()).collect()` writes a `Vec` while reading `data`, and LLVM
+/// cannot prove the two do not alias, so it reloads the source pointer AND
+/// length from the stack after every store and emits one element per iteration.
+/// Disassembled on `df_abs @100k` at 10% NaN, the inner loop was
+/// `mov 0xb8(%rsp)` 22.55% / `mov 0xb0(%rsp)` 12.29% / `cmp` 25.79% — three
+/// quarters of it spent re-reading loop invariants — against a clean-float64 run
+/// of the same lane at 142.4us versus 650.7us here.
+///
+/// Handing the iterator the slice settles the aliasing question, so the same
+/// arithmetic vectorizes. Same PAR_MIN and worker cap as the index form, so the
+/// parallel arm is unchanged for large inputs.
+fn par_map_slice_f64<F: Fn(f64) -> f64 + Sync>(data: &[f64], f: F) -> Vec<f64> {
+    const PAR_MIN: usize = 200_000;
+    let n = data.len();
+    let workers = cached_available_parallelism().min(8);
+    if workers <= 1 || n < PAR_MIN {
+        return data.iter().map(|&x| f(x)).collect();
+    }
+    let mut out = vec![0.0_f64; n];
+    let chunk = n.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (out_chunk, src_chunk) in out.chunks_mut(chunk).zip(data.chunks(chunk)) {
+            let f = &f;
+            scope.spawn(move || {
+                for (slot, &x) in out_chunk.iter_mut().zip(src_chunk.iter()) {
+                    *slot = f(x);
+                }
+            });
+        }
+    });
+    out
+}
+
 fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
     const PAR_MIN: usize = 200_000;
     let workers = cached_available_parallelism().min(8);
@@ -26794,7 +26831,7 @@ impl Column {
             // NaN and having `from_f64_values` RE-SCAN the output to rebuild it.
             // Bit-identical: valid slots use the SAME `data[i].abs()`; missing
             // slots view as `missing_for_dtype(Float64)` either way.
-            let out = par_map_vec_f64(data.len(), |i| data[i].abs());
+            let out = par_map_slice_f64(data, f64::abs);
             return Ok(Self::from_f64_values_with_validity(
                 out,
                 self.validity.clone(),
