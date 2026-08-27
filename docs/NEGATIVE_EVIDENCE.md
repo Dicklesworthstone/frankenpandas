@@ -42009,3 +42009,75 @@ above and takes `--load-max`. It re-measures nothing and edits nothing.
 NO RATIO IS CLAIMED OR RETRACTED HERE. This entry does not move a single banked
 number; it says which ones a load gate would have refused and which direction
 each one's error runs.
+
+### 2026-08-27 cod-pandas — INSTRUCTION-COUNTED, LOAD-INVARIANT: `log @100k`'s deficit is glibc's errno WRAPPER, not vectorisation. FrankenPandas 74.3 instr/element against numpy's 61.8; my earlier "numpy vectorises log" mechanism is REFUTED [br-frankenpandas-uza04]
+
+Wall-time measurement has been unavailable on this box for four turns
+(`--host-readiness-probe` blocked on every attempt, loadavg peaks 86-615).
+Instructions retired are DETERMINISTIC and load-invariant, so the question is
+answerable anyway — and it answers a mechanism I previously got wrong.
+
+**METHOD.** Instructions per element by DIFFERENCING two sizes, so fixed startup
+cancels. FrankenPandas: `fp-bench --workload log` at 10k and 100k, 50 samples
+each, BOTH BELOW the 200_000 `par_min` so both are serial and the same code path
+(differencing 100k against 1M is invalid here — 1M crosses the threshold and
+mixes serial with parallel, which is the first design I tried and discarded).
+numpy: one script run with `reps=0` and `reps=500` at n=1e6, identical otherwise,
+so the subtraction is exact. The naive numpy two-size difference is NOT usable —
+its ~7.1e9 Python/import baseline varies 1-2% run to run and swamps a ~0.2e9
+signal; the same measurement gave 44.2 and 106.1 instr/element on consecutive
+runs before the null-subtraction fixed it.
+
+    op      FrankenPandas   numpy    delta
+    log      74.3 / 74.2    61.8      +12.5 instr/element
+    trunc     3.0            2.0       +1.0
+
+FrankenPandas' repeats agree to 0.1 instruction; numpy's null-subtracted repeats
+agree to 2.3 (62.9 / 60.6).
+
+**IT IS NOT FRANKENPANDAS' LOOP.** `trunc` is the control: same fixture, same
+harness, same validity and buffer machinery, near-zero math. FrankenPandas spends
+3.0 instructions per element there against numpy's 2.0, so the per-element
+framework overhead is ONE instruction and effectively unchanged from the
+incumbent's. Subtracting it, the log CALL costs 71.3 in FrankenPandas and 59.8 in
+numpy.
+
+**Counted mechanism:** 12.5 instructions per element separate the two `log`
+implementations, of which the framework accounts for 1.0 — leaving 11.5 in the
+call itself, an 19% overhead on numpy's 59.8. The framework contribution is
+unchanged between engines and is therefore not the lever.
+
+**THE SYMBOLS SETTLE IT.** `perf record` on the numpy probe:
+
+    10.17%  libm.so.6                 __ieee754_log_fma
+     2.50%  _multiarray_umath...so    DOUBLE_log_X86_V3
+
+numpy reaches `__ieee754_log_fma` DIRECTLY through its own dispatch. The
+FrankenPandas profile of the same op shows `log@@GLIBC_2.29` at 4.79% ON TOP OF
+`__ieee754_log_fma` at 18.11% — Rust's `f64::ln` lowers to `llvm.log.f64`, which
+calls glibc's PUBLIC `log`, which is the errno-setting wrapper around the same
+kernel. Both engines run the same scalar kernel; only one pays the wrapper.
+
+**THIS REFUTES MY OWN PRIOR ENTRY.** On 2026-08-27 I closed this row with "the
+deficit is scalar glibc `log` against numpy's, closing it means vectorising the
+transcendental, which needs portable SIMD or intrinsics". That mechanism is
+wrong. numpy is NOT vectorising — 59.8 instructions per element is a scalar
+kernel; a SIMD log would be nearer 10-15. The gap is a wrapper, and it is 19%,
+not an ISA generation.
+
+**REJECTED ANYWAY, AND FOR A BETTER REASON THAN BEFORE.** Reaching
+`__ieee754_log_fma` from Rust means linking a PRIVATE glibc symbol — unversioned,
+absent from the public headers, and different on musl or another libc. That is a
+fragile ABI dependency on a C symbol, which is exactly what this campaign's
+no-C-dependency rule exists to prevent. The alternative, a polynomial log of our
+own, changes the last ulp and trades semantic parity for speed, which the
+correctness doctrine forbids outright. So the row stays a certified LOSS
+(0.955x), now with the right mechanism attached.
+
+**INCIDENTAL, FOR WHOEVER OWNS THE INCUMBENT'S THREAD PROVENANCE:** the same
+profile shows `blas_thread_server` at 81.31% of the numpy process — OpenBLAS's
+idle thread pool spinning during a pure `np.log` loop that uses no BLAS at all.
+It does not affect the instruction counts above (those are differenced), but it
+is CPU the incumbent burns in every pandas-arm measurement on this host, and it
+bears on br-frankenpandas-633fb's question about what the incumbent's 64-thread
+arm is doing.
