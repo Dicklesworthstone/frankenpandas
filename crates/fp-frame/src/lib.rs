@@ -57756,6 +57756,51 @@ impl LazyDataFrameColumns {
         }
     }
 
+    /// Is `name` EXACTLY what `i64::to_string` would have produced for the
+    /// value it parses to?
+    ///
+    /// The resolver used to answer this by formatting the parsed label back
+    /// into a fresh `String` and comparing. That is a heap allocation and a
+    /// free per lookup, to check a property that is a byte scan — and a
+    /// transposed frame has one output column per SOURCE ROW, so the label
+    /// route pays it 1M times at the 1M fixture.
+    ///
+    /// `i64::from_str` accepts exactly an optional `+`/`-` followed by digits;
+    /// it rejects whitespace, underscores and empty input. So the forms it
+    /// accepts that `to_string` would never emit are precisely: a leading `+`,
+    /// a leading zero on a multi-digit run (`007`), and `-0`.
+    /// ⚠️ DO NOT FUSE THIS INTO THE PARSE — MEASURED 2026-08-27, 2.2% SLOWER.
+    ///
+    /// It looks like `parse::<i64>()` followed by this scan walks the digits
+    /// twice, and `get_one` is 4.86% of `df_transpose_full_materialize @1M`, so
+    /// folding them into one pass looks free. It is not: THIS SCAN IS O(1). It
+    /// reads the first byte, the length, and the first digit — it never walks
+    /// the digits at all, so there is no second walk to remove. Replacing
+    /// `parse` with a hand-rolled digit loop that also checks canonicity swaps
+    /// std's optimised parser for a slower one and pays for it:
+    ///
+    ///   base  ELF 60037a1b...  SLOWER  FP 104129.8us  pd 44.3us  0.9959/1.0038
+    ///   fused ELF dd59bb3d...  SLOWER  FP 106384.0us  pd 43.9us  1.0144/1.0024
+    ///
+    /// Both certified against live pandas in the same invocation with clean A/A
+    /// nulls; raw interleaved medians agreed (103336/104821/104403 against
+    /// 107567/108116/107358), minima too.
+    fn is_canonical_i64_label(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        let negative = bytes.first() == Some(&b'-');
+        let digits = if negative { &bytes[1..] } else { bytes };
+        if digits.is_empty() {
+            return false;
+        }
+        if bytes[0] == b'+' {
+            return false;
+        }
+        if digits.len() > 1 && digits[0] == b'0' {
+            return false;
+        }
+        // `-0` parses to 0, which renders as `0`.
+        !(negative && digits == b"0")
+    }
     fn homogeneous_transpose_column_position(
         column_start: i64,
         output_columns: usize,
