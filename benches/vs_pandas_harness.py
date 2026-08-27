@@ -6229,9 +6229,28 @@ def compute_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     import math
 
     by_category = defaultdict(list)
+    # `ratio` is stored rounded to 3 decimals, so any lane slower than ~2000x
+    # underflows to exactly 0.0. `math.log(0.0)` raises, and because this runs
+    # while the output payload is being ASSEMBLED, the exception destroyed the
+    # whole invocation's results file — every workload in the run, not just the
+    # offending one. The lane was therefore recordable only while it FAILED to
+    # certify: an UNDECIDABLE verdict is not collected here, so it wrote fine,
+    # and the moment it certified SLOWER the evidence was lost.
+    # Observed on df_transpose_full_materialize @1M (FP 125735.8us vs pandas
+    # 46.2us -> 0.000367 -> 0.0).
+    #
+    # A geometric mean is undefined on a set containing zero, so these cannot be
+    # folded in; they are excluded and COUNTED, never silently dropped, so a
+    # reader can tell a category score that saw everything from one that did not.
+    # This touches only the summary. No verdict, clause or decision uses it.
+    underflowed = defaultdict(int)
     for r in results:
         if r.get("verdict") in ("FASTER", "SLOWER"):
-            by_category[r["category"]].append(r["ratio"])
+            ratio = r["ratio"]
+            if isinstance(ratio, (int, float)) and ratio > 0.0:
+                by_category[r["category"]].append(ratio)
+            else:
+                underflowed[r["category"]] += 1
 
     category_scores = {}
     for cat, ratios in by_category.items():
@@ -6262,6 +6281,10 @@ def compute_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         "decidable_workloads": decidable_count,
         "null_undecidable_workloads": null_count,
         "category_scores": category_scores,
+        # Certified lanes whose stored ratio underflowed 3-decimal rounding to
+        # 0.0 and so cannot enter a geometric mean. Non-empty means the category
+        # score above was computed WITHOUT the run's most extreme rows.
+        "ratio_underflow_excluded_from_geomean": dict(underflowed),
         "weighted_score": round(weighted_score, 3),
         "claim_validated": all(
             category_scores.get(cat, 0) > 1.0
