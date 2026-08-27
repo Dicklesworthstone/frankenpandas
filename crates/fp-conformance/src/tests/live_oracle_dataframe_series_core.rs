@@ -19271,7 +19271,7 @@ fn live_oracle_dataframe_apply_nunique_axis0() {
 #[test]
 fn live_oracle_dataframe_apply_prod_axis1() {
     let mut cfg = super::HarnessConfig::default_paths();
-        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DFAPPLYPROD",
@@ -25673,7 +25673,7 @@ fn live_oracle_series_str_rjust_width8() {
 #[test]
 fn live_oracle_dataframe_apply_product_axis1() {
     let mut cfg = super::HarnessConfig::default_paths();
-        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DFAPPLYPRODUCT",

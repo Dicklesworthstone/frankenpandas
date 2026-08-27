@@ -67343,6 +67343,27 @@ impl DataFrame {
         } else if axis == 1 {
             // Row-wise: aggregate each row across columns
             let mut values = Vec::with_capacity(self.len());
+            // pandas KEEPS INTEGER DTYPE for the row-wise reductions that cannot
+            // introduce a fraction. MEASURED, live pandas 2.2.3, on an all-int
+            // frame:
+            //
+            //   sum prod min max count  -> int64
+            //   mean median std var     -> float64
+            //
+            // This branch widened EVERY value through `to_f64()` and emitted
+            // `Scalar::Float64` for all of them, so `df.apply("prod", 1)` on int
+            // columns returned 10.0 where pandas returns 10. It was not just
+            // `prod`: sum/min/max lost the dtype too and simply had no live test
+            // pointing at them (br-frankenpandas-live-oracle-passes-by-skip-l7r1p).
+            //
+            // The integral path is taken only when every column is a fully-valid
+            // Int64: a missing value makes pandas' own column float64, and a
+            // mixed frame has no integer answer to preserve.
+            let integral_rows = self
+                .column_order
+                .iter()
+                .filter_map(|name| self.columns.get(name))
+                .all(|col| col.dtype() == DType::Int64 && col.validity().all());
             for row_idx in 0..self.len() {
                 let row_vals: Vec<f64> = self
                     .column_order
@@ -67357,6 +67378,32 @@ impl DataFrame {
                         }
                     })
                     .collect();
+                // Wrapping arithmetic matches numpy's int64 overflow, which is
+                // what `Series::sum`/`Series::prod` already do on the axis-0 path.
+                let integral_agg: Option<Scalar> = if integral_rows {
+                    let ints: Vec<i64> = self
+                        .column_order
+                        .iter()
+                        .filter_map(|name| self.columns.get(name))
+                        .filter_map(|col| match &col.values()[row_idx] {
+                            Scalar::Int64(v) => Some(*v),
+                            _ => None,
+                        })
+                        .collect();
+                    match func {
+                        "sum" => Some(Scalar::Int64(
+                            ints.iter().copied().fold(0_i64, i64::wrapping_add),
+                        )),
+                        "prod" | "product" => Some(Scalar::Int64(
+                            ints.iter().copied().fold(1_i64, i64::wrapping_mul),
+                        )),
+                        "min" => ints.iter().copied().min().map(Scalar::Int64),
+                        "max" => ints.iter().copied().max().map(Scalar::Int64),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 let sample_median = |vals: &[f64]| -> f64 {
                     if vals.is_empty() {
                         return f64::NAN;
@@ -67372,7 +67419,10 @@ impl DataFrame {
                         sorted[mid]
                     }
                 };
-                let result = match func {
+                let result = if let Some(integral) = integral_agg {
+                    integral
+                } else {
+                    match func {
                     "sum" => Scalar::Float64(row_vals.iter().sum::<f64>()),
                     "mean" => Scalar::Float64(if row_vals.is_empty() {
                         f64::NAN
@@ -67522,6 +67572,7 @@ impl DataFrame {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported apply function: '{other}'"
                         )));
+                    }
                     }
                 };
                 values.push(result);
