@@ -42081,3 +42081,64 @@ It does not affect the instruction counts above (those are differenced), but it
 is CPU the incumbent burns in every pandas-arm measurement on this host, and it
 bears on br-frankenpandas-633fb's question about what the incumbent's 64-thread
 arm is doing.
+
+### 2026-08-27 cod-pandas — INSTRUCTION-COUNTED: FrankenPandas' dot kernel runs 2.83 instructions per FMA, ~5.1x an optimised reference. And OpenBLAS's spin pool makes the incumbent's INSTRUCTION count as unusable as its A/A null [br-frankenpandas-633fb]
+
+`df_dot @10k` is the worst certified loss with clean load provenance (0.673x,
+2026-08-16, loadavg 6.09-11.92). Wall time has been unavailable on this host for
+five turns, so this asks the question with instructions retired, which are
+deterministic and load-invariant.
+
+**FRANKENPANDAS' KERNEL, AND IT IS SOLID.** `fp-bench --workload df_dot` at 1k
+and 10k (dim 31 -> 100), 50 samples each, differenced so fixed startup cancels:
+
+    trial 1   delta 137,368,068 instructions / 48,510,450 FMAs   2.832 instr/FMA
+    trial 2   delta 137,844,914 instructions / 48,510,450 FMAs   2.842 instr/FMA
+
+**Counted mechanism:** 2.832 and 2.842 instructions per FMA on two independent
+trials — unchanged to 0.4%, against 0.553-0.555 for the reference kernel below.
+
+**THE INCUMBENT CANNOT BE COUNTED EITHER, AND IT IS THE SAME ROOT CAUSE AS THE
+NULL FAILURES.** numpy `m.dot(m)` at dim=100, null-subtracted (reps=0 against
+reps=N, identical script), gave 0.208, 2.237 and 1.611 instr/FMA on three runs —
+an order of magnitude apart. At dim=316 it gave 105.154, which is 995 BILLION
+instructions for a 9.5e9-FMA job.
+
+The cause is `blas_thread_server`: OpenBLAS keeps a 64-thread pool SPINNING, and
+those spin instructions accrue with WALL TIME, not with work. So the
+null-subtraction's premise — that the baseline is constant between reps=0 and
+reps=N — is false: the longer run simply spins longer. This is the same pool that
+made pandas' A/A null swing 0.85980-1.19331 in today's earlier `df_dot` void.
+BOTH metrics are blocked by one mechanism, which is worth stating plainly: for
+this lane the incumbent is not measurable by wall time OR by instruction count on
+a shared host.
+
+**THE REFERENCE FLOOR, AND WHY IT IS NOT A RATIO.** With `OPENBLAS_NUM_THREADS=1`
+the spin disappears and the count is stable:
+
+    dim=100 reps=300   0.555 instr/FMA
+    dim=100 reps=600   0.553 instr/FMA
+
+⚠️ THAT IS A DIAGNOSTIC, NOT A vs-INCUMBENT MEASUREMENT, AND MUST NEVER BE QUOTED
+AS ONE. Pinning the incumbent's thread count cripples it — it is not the pandas a
+user runs, which is exactly why br-frankenpandas-633fb's option 2 is refused. It
+is used here only to read what an optimised f64 GEMM kernel costs in
+instructions, a property of that kernel and not of any comparison.
+
+**WHAT IT SAYS ABOUT OUR KERNEL, WITHOUT NEEDING THE INCUMBENT AT ALL.** 2.83
+instructions per FMA is a scalar-shaped kernel: a 4-wide AVX2 `vfmadd` retires
+four FMAs in one instruction, so a blocked vector kernel lands near 0.3-0.6 —
+which the 0.554 reading confirms empirically rather than by assertion.
+FrankenPandas is at 5.1x that. This is an ABSOLUTE statement about our own code:
+it needs no pandas arm, no quiet host, and no ratio.
+
+**THE LEVER, AND THE CONSTRAINT IT MUST RESPECT.** Vectorising across the OUTPUT
+column index `j` keeps each output element's `k` accumulation sequential and in
+the same order, so the result is bit-identical — the same argument that let
+br-frankenpandas' register blocking land bit-identically. Vectorising across `k`
+would reassociate the sum and change the last ulp, which the correctness doctrine
+forbids. No C BLAS is involved either way; this is Rust over an f64 slice.
+
+NOT ATTEMPTED HERE. This entry establishes the budget and the bit-identity
+constraint; the kernel change is a separate piece of work and must show its own
+instruction count, not a wall-time ratio, until this host offers a quiet window.
