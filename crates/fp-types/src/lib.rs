@@ -3732,10 +3732,16 @@ impl Timestamp {
         if self.is_nat() {
             return "NaT".to_string();
         }
+        let display_nanos = self
+            .tz
+            .as_deref()
+            .and_then(Self::fixed_utc_offset_seconds)
+            .and_then(|offset| self.nanos.checked_add(offset * Timedelta::NANOS_PER_SEC))
+            .unwrap_or(self.nanos);
         // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
         // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
-        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
-        let nanos_of_day = self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
+        let days_since_epoch = display_nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let nanos_of_day = display_nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
         let secs_of_day = nanos_of_day / Timedelta::NANOS_PER_SEC;
         let sub_nanos = nanos_of_day.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
 
@@ -3781,6 +3787,9 @@ impl Timestamp {
         }
         match &self.tz {
             Some(tz) if tz == "UTC" => result.push_str("+00:00"),
+            Some(tz) if Self::fixed_utc_offset_seconds(tz).is_some() => {
+                result.push_str(tz.strip_prefix("UTC").unwrap_or(tz));
+            }
             Some(tz) => {
                 result.push('[');
                 result.push_str(tz);
@@ -3981,6 +3990,20 @@ impl Timestamp {
         } else {
             Some((s, None))
         }
+    }
+
+    fn fixed_utc_offset_seconds(tz: &str) -> Option<i64> {
+        if tz == "UTC" {
+            return Some(0);
+        }
+        let offset = tz.strip_prefix("UTC").unwrap_or(tz);
+        if !Self::is_timezone_offset(offset) {
+            return None;
+        }
+        let sign = if offset.starts_with('+') { 1 } else { -1 };
+        let hours = offset[1..3].parse::<i64>().ok()?;
+        let minutes = offset[4..6].parse::<i64>().ok()?;
+        Some(sign * (hours * 3_600 + minutes * 60))
     }
 
     fn is_timezone_offset(s: &str) -> bool {
@@ -15211,6 +15234,13 @@ mod tests {
 
         let ts_utc = Timestamp::from_nanos_tz(0, "UTC");
         assert_eq!(ts_utc.isoformat(), "1970-01-01T00:00:00+00:00");
+
+        let ts_fixed_offset = Timestamp::from_nanos_tz(0, "UTC+05:30");
+        assert_eq!(
+            ts_fixed_offset.isoformat(),
+            "1970-01-01T05:30:00+05:30",
+            "a fixed-offset timestamp must render local wall time rather than a UTC instant with an annotation"
+        );
 
         let ts_tz = Timestamp::from_nanos_tz(
             Timedelta::NANOS_PER_DAY
