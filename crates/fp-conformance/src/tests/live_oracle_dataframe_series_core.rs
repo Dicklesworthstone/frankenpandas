@@ -4851,7 +4851,11 @@ fn live_oracle_series_factorize_ints() {
 #[test]
 fn live_oracle_series_astype_int_to_float() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ASTYPE-INT-TO-FLOAT",
@@ -4906,7 +4910,11 @@ fn live_oracle_series_astype_int_to_float() {
 #[test]
 fn live_oracle_series_astype_float_to_int() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ASTYPE-FLOAT-TO-INT",
@@ -4961,7 +4969,11 @@ fn live_oracle_series_astype_float_to_int() {
 #[test]
 fn live_oracle_series_astype_int_to_string() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ASTYPE-INT-TO-STR",
@@ -5014,7 +5026,11 @@ fn live_oracle_series_astype_int_to_string() {
 #[test]
 fn live_oracle_series_astype_bool_to_int() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ASTYPE-BOOL-TO-INT",
@@ -5069,7 +5085,11 @@ fn live_oracle_series_astype_bool_to_int() {
 #[test]
 fn live_oracle_series_astype_int_to_bool() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ASTYPE-INT-TO-BOOL",
@@ -5124,7 +5144,11 @@ fn live_oracle_series_astype_int_to_bool() {
 #[test]
 fn live_oracle_series_astype_float_to_string() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ASTYPE-FLOAT-TO-STR",
@@ -16184,7 +16208,11 @@ fn live_oracle_series_autocorr_lag1() {
 #[test]
 fn live_oracle_series_nlargest_with_ties() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-NLARGEST-TIES",
@@ -16193,6 +16221,14 @@ fn live_oracle_series_nlargest_with_ties() {
         "operation": "series_nlargest",
         "oracle_source": "live_legacy_pandas",
         "nlargest_n": 3,
+        // `series_nlargest` REQUIRES `keep`; without it the harness reports
+        // OracleUnavailable and the test skips green.
+        //
+        // `first`, NOT `all`, because the FrankenPandas side below calls
+        // `series.nlargest(3)` — pandas' DEFAULT keep. With `all` the oracle
+        // preserves ties past n and returns four rows against
+        // FrankenPandas' three, which is a fixture mismatch, not a parity bug.
+        "keep": "first",
         "left": {
             "name": "vals",
             "index": [
@@ -32342,7 +32378,11 @@ fn live_oracle_series_str_split_regex_get_index_2() {
 #[test]
 fn live_oracle_dataframe_drop_duplicates_with_subset() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DF-DROPDUP-SUB",
@@ -40040,7 +40080,11 @@ fn live_oracle_series_between_inclusive_right() {
 #[test]
 fn live_oracle_series_astype_string_to_int() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ASTYPE-STR-TO-INT",
@@ -40087,7 +40131,11 @@ fn live_oracle_series_astype_string_to_int() {
 #[test]
 fn live_oracle_series_astype_bool_to_string() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: without the
+    // fallback this test SKIPS (legacy_pandas_code/pandas is absent) and
+    // still reports ok, so it validated nothing. Same opt-in the 11
+    // already-live tests in this file use.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ASTYPE-BOOL-TO-STR",
