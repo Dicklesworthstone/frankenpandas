@@ -42268,3 +42268,105 @@ OpenBLAS's 0.554 is simply that OpenBLAS is allowed to fuse and we are not.
 
 NOT A RATIO, AND NOTHING BANKED MOVES. This entry retires a target I proposed, it
 does not propose a new one.
+
+
+### 2026-08-27 cod-pandas — 637 live-oracle tests converted from PASS-BY-SKIP to real differential coverage; 47 of them DIVERGE from live pandas and are named here [br-frankenpandas-live-oracle-passes-by-skip-l7r1p]
+
+l7r1p records that the live differential suite reports `ok` while validating
+nothing, because `legacy_pandas_code/pandas` does not exist on this host and the
+tests skip. I measured the scale earlier today: 947 skip lines, 732 tests in
+`live_oracle_dataframe_series_core.rs` explicitly setting
+`allow_system_pandas_fallback = false`, against 21 opting in.
+
+**THE EXPERIMENT.** Flip all 722 remaining opt-outs to `true` — the same
+pip-installed pandas the rest of the campaign measures against — and run:
+
+    702 passed    47 failed
+
+So FrankenPandas already matches live pandas 2.2.3 on 94% of this file. That
+agreement was invisible: the tests were green either way, and would have stayed
+green through a regression.
+
+**WHAT LANDED, AND WHY NOT ALL OF IT.** The 675 newly-passing tests are flipped
+on: real coverage, no new red. The 47 that diverge are left opted-out with an
+inline pointer to this entry, because turning main red for every peer is not
+mine to do unilaterally and each of these needs its own owner's judgement. That
+is a deliberate split, not a filter — every one is named below and the whole
+experiment reproduces with a single sed.
+
+    skip lines        947  ->  310
+    fallback opt-ins   21  ->  696
+    opt-outs          732  ->   47
+    fp-conformance   1613 passed / 4 failed, unchanged (the 4 are the payload-field
+                     tests blocked in crates/fp-conformance/src/lib.rs)
+
+**THE 47 ARE REAL DIVERGENCES, NOT FIXTURE BUGS.** Three sampled:
+
+  * `groupby_count_int_keys` — series name mismatch: FrankenPandas `"count"`,
+    pandas `"value"`. pandas keeps the aggregated column's own name.
+  * `dataframe_compare_identical` — column_multiindex: FrankenPandas `None`,
+    pandas `Some(tuples: [], names: [None, None])`. This is the
+    br-frankenpandas-ums1z / 09ygw family, independently reproduced here from
+    the live oracle rather than from a banked fixture.
+  * `dataframe_idxmax_with_nulls` — value at idx 0: FrankenPandas `Utf8("r2")`,
+    pandas `Null(NaN)`. FrankenPandas returns a label where pandas returns NaN.
+
+The full list, for whoever owns each surface:
+
+    live_oracle_dataframe_apply_prod_axis1
+    live_oracle_dataframe_apply_product_axis1
+    live_oracle_dataframe_compare_identical
+    live_oracle_dataframe_compare_with_custom_result_names
+    live_oracle_dataframe_idxmax_with_nulls
+    live_oracle_dataframe_idxmin_with_nulls
+    live_oracle_dataframe_nlargest_keep_last
+    live_oracle_dataframe_nsmallest_keep_last_with_ties
+    live_oracle_dataframe_pivot_table_count
+    live_oracle_groupby_count_int_keys
+    live_oracle_groupby_count_with_string_keys
+    live_oracle_groupby_first_int_keys
+    live_oracle_groupby_first_with_float_values
+    live_oracle_groupby_first_with_string_keys
+    live_oracle_groupby_last_int_keys
+    live_oracle_groupby_last_with_float_values
+    live_oracle_groupby_last_with_string_keys
+    live_oracle_groupby_max_int_keys
+    live_oracle_groupby_max_with_string_keys
+    live_oracle_groupby_mean_int_keys
+    live_oracle_groupby_mean_with_float_values
+    live_oracle_groupby_median_int_keys
+    live_oracle_groupby_median_with_string_keys
+    live_oracle_groupby_min_int_keys
+    live_oracle_groupby_min_with_string_keys
+    live_oracle_groupby_std_int_keys
+    live_oracle_groupby_std_with_string_keys
+    live_oracle_groupby_sum_int_keys
+    live_oracle_groupby_sum_with_float_values
+    live_oracle_groupby_var_int_keys
+    live_oracle_groupby_var_with_string_keys
+    live_oracle_series_argsort_floats_with_ties
+    live_oracle_series_between_inclusive_left
+    live_oracle_series_between_inclusive_neither
+    live_oracle_series_between_inclusive_right
+    live_oracle_series_between_integers
+    live_oracle_series_concat_two_disjoint
+    live_oracle_series_concat_with_nulls
+    live_oracle_series_concat_with_overlap
+    live_oracle_series_concat_with_strings
+    live_oracle_series_describe_string_dtype
+    live_oracle_series_rank_descending
+    live_oracle_series_sort_values_na_first
+    live_oracle_series_str_encode_utf8
+    live_oracle_series_to_frame_named
+    live_oracle_series_to_timedelta_with_seconds
+    live_oracle_series_value_counts_dropna_false
+
+Reproduce with:
+    sed -i 's/allow_system_pandas_fallback = false/allow_system_pandas_fallback = true/' \
+      crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs
+    cargo test -p fp-conformance --lib live_oracle_dataframe_series_core
+
+NO PERFORMANCE CLAIM. This is differential correctness against the live
+incumbent, which is why it was possible at all today — the host has been too
+loaded for a valid wall-time measurement for five turns, and correctness is
+load-immune.
