@@ -99183,6 +99183,64 @@ mod tests {
         }
     }
 
+    /// br-frankenpandas-mhygz: pandas 2.x infers ONE format from the first
+    /// non-null element and NaTs every element that format cannot parse.
+    /// FrankenPandas used to parse each element on its own terms and so ACCEPTED
+    /// rows pandas refuses — silently more lenient.
+    ///
+    /// MEASURED, live pandas 2.2.3, all four shapes below:
+    ///   ['2024-01-15 10:30:00.123456789','2024-01-16',
+    ///    '2024-01-15 10:30:00.500000000','not a date']
+    ///     -> ['2024-01-15 10:30:00.123456789', NaT,
+    ///         '2024-01-15 10:30:00.500000', NaT]
+    ///   ['2024-01-15','2024-01-16 10:30:00']   -> ['2024-01-15 00:00:00', NaT]
+    ///   ['2024-01-15 10:30:00','2024-01-16']   -> ['2024-01-15 10:30:00', NaT]
+    ///   ['not-a-date','2024-06-15 12:34:56.123456'] -> [NaT, Timestamp(...)]
+    ///     (an unreadable FIRST element takes NO lock — pandas'
+    ///      guess_datetime_format returning None — so later rows parse freely)
+    #[test]
+    fn to_datetime_locks_one_format_from_the_first_element_like_pandas() {
+        let parse = |items: &[&str]| -> Vec<bool> {
+            let values: Vec<Scalar> = items
+                .iter()
+                .map(|s| Scalar::Utf8((*s).to_string()))
+                .collect();
+            let out = super::to_datetime_values_with_options(
+                &values,
+                super::ToDatetimeOptions::default(),
+            )
+            .expect("to_datetime");
+            // true == parsed to a real timestamp, false == NaT/missing
+            out.iter().map(|v| !v.is_missing()).collect()
+        };
+
+        assert_eq!(
+            parse(&[
+                "2024-01-15 10:30:00.123456789",
+                "2024-01-16",
+                "2024-01-15 10:30:00.500000000",
+                "not a date",
+            ]),
+            vec![true, false, true, false],
+            "a DATE-ONLY row under a datetime lock is NaT, and junk is NaT"
+        );
+        assert_eq!(
+            parse(&["2024-01-15", "2024-01-16 10:30:00"]),
+            vec![true, false],
+            "date-only lock rejects a row carrying a time part"
+        );
+        assert_eq!(
+            parse(&["2024-01-15 10:30:00", "2024-01-16"]),
+            vec![true, false],
+            "datetime lock rejects a date-only row"
+        );
+        assert_eq!(
+            parse(&["not-a-date", "2024-06-15 12:34:56.123456"]),
+            vec![false, true],
+            "an unreadable FIRST element takes NO lock; later rows parse freely"
+        );
+    }
+
     #[test]
     fn series_datetime_minus_datetime_yields_exact_timedelta() {
         // Regression (fp-columnar temporal binary_numeric arm): `df["end"] - df["start"]`
