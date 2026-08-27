@@ -26831,6 +26831,28 @@ impl Column {
             // NaN and having `from_f64_values` RE-SCAN the output to rebuild it.
             // Bit-identical: valid slots use the SAME `data[i].abs()`; missing
             // slots view as `missing_for_dtype(Float64)` either way.
+            // ⚠️ THE INGEST IS NOW THE WHOLE REMAINING GAP, AND ONE FIX IS ALREADY
+            // REJECTED. Replacing this ingest with the all-valid one took
+            // `df_abs @100k` at 10% NaN from 307.4us to 149.1us — the arithmetic
+            // above is no longer the cost, the output column construction is.
+            //
+            // The mask is copied TWICE per column: once by the caller here, and
+            // again inside `from_f64_values_with_validity`, which stores it in
+            // both the `LazyNullableFloat64` backing and `Column::validity`.
+            //
+            // Collapsing that to ONE copy via `from_f64_values_owned_with_validity`
+            // (which moves the buffer into a `LazyAllValidFloat64` backing and
+            // stores the mask once) WAS TRIED AND IS WRONG: a nullable column's
+            // data buffer may hold ARBITRARY values at missing slots, not
+            // necessarily NaN, so a backing that emits `Float64(data[i])` there
+            // reports a missing slot as present. `tests::abs_shift_clip_round_isin
+            // ::abs_int_and_float` catches it on `values()[1].is_missing()`.
+            // `LazyNullableFloat64` is required precisely because it emits `Null`
+            // independent of the datum.
+            //
+            // The real fix is to make `ValidityMask` cheap to clone — Arc-backed
+            // words — so storing it in two places costs a refcount, not 12.5 KB
+            // per column per copy. That is a change to the mask itself, not here.
             let out = par_map_slice_f64(data, f64::abs);
             return Ok(Self::from_f64_values_with_validity(
                 out,
