@@ -2673,7 +2673,16 @@ enum ScalarValues {
         values: OnceLock<Vec<Scalar>>,
     },
     LazyNullableFloat64 {
-        data: Vec<f64>,
+        /// SHARED, so cloning a nullable column is a refcount bump — the same
+        /// deal `LazyAllValidFloat64`'s `Arc<[f64]>` already gets.
+        ///
+        /// br-frankenpandas-uza04. A plain `Vec<f64>` here made
+        /// `<ScalarValues as Clone>::clone` DEEP-COPY the whole buffer, so
+        /// cloning a nullable column cost 800 KB per 100k rows while cloning an
+        /// all-valid one cost an atomic increment. Profiled on `df_abs @100k` at
+        /// 10% NaN, that single clone was 12.52% of the process — and the clean
+        /// float64 run of the same lane has NO memmove at all.
+        data: Arc<Vec<f64>>,
         validity: ValidityMask,
         values: OnceLock<Vec<Scalar>>,
     },
@@ -3341,7 +3350,7 @@ impl ScalarValues {
 
     fn lazy_nullable_float64(data: Vec<f64>, validity: ValidityMask) -> Self {
         Self::LazyNullableFloat64 {
-            data,
+            data: Arc::new(data),
             validity,
             values: OnceLock::new(),
         }
@@ -6388,9 +6397,18 @@ impl Clone for ScalarValues {
                 Arc::clone(positions),
                 all_finite.get().copied(),
             ),
-            Self::LazyNullableFloat64 { data, validity, .. } => {
-                Self::lazy_nullable_float64(data.clone(), validity.clone())
-            }
+            // SHARE the buffer instead of copying it. This arm is the clone the
+            // profile caught at 12.52% of `df_abs @100k` on 10%-NaN data: it went
+            // through `lazy_nullable_float64`, which takes an owned `Vec`, so
+            // every clone of a nullable column deep-copied 800 KB per 100k rows.
+            // Its all-valid sibling two arms down has always been an `Arc::clone`.
+            // Same values, same validity, and `values` is re-armed empty exactly
+            // as before, so a clone still re-materializes its own Scalar view.
+            Self::LazyNullableFloat64 { data, validity, .. } => Self::LazyNullableFloat64 {
+                data: Arc::clone(data),
+                validity: validity.clone(),
+                values: OnceLock::new(),
+            },
             Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool_arc(Arc::clone(data)),
             Self::LazyShiftedBool {
                 source,
