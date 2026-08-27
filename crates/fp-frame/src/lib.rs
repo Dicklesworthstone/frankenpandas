@@ -69710,6 +69710,30 @@ impl DataFrame {
         enum NumSlice<'a> {
             F64(&'a [f64]),
             I64(&'a [i64]),
+            /// A Float64 column that carries MISSING values. `as_f64_slice`
+            /// declines these, and because the list below is collected as
+            /// `Option<Vec<_>>`, ONE such column used to turn the whole typed
+            /// path off and send every value var through `Vec<Scalar>` — 32 B a
+            /// cell. Measured: `df_melt @100k` costs 2370.1us on clean float64
+            /// and 28268.9us at 10% NaN, 11.9x worse, while pandas is unmoved
+            /// because a numpy float64 array represents missing AS NaN.
+            F64Nullable(&'a [f64], &'a fp_columnar::ValidityMask),
+        }
+        /// Set output validity bits `[from, from + len)`, whole words at a time.
+        fn set_valid_run(words: &mut [u64], from: usize, len: usize) {
+            let end = from + len;
+            let mut at = from;
+            while at < end {
+                let bit = at % 64;
+                let take = (64 - bit).min(end - at);
+                let mask = if take == 64 {
+                    u64::MAX
+                } else {
+                    ((1_u64 << take) - 1) << bit
+                };
+                words[at / 64] |= mask;
+                at += take;
+            }
         }
         let numeric_slices: Option<Vec<NumSlice>> = actual_value_vars
             .iter()
@@ -69717,18 +69741,66 @@ impl DataFrame {
                 let c = &self.columns[name];
                 if let Some(s) = c.as_f64_slice() {
                     Some(NumSlice::F64(s))
+                } else if let Some(s) = c.as_i64_slice() {
+                    Some(NumSlice::I64(s))
+                } else if c.dtype() == DType::Float64
+                    && let Some((data, validity)) = c.as_f64_slice_with_validity()
+                {
+                    Some(NumSlice::F64Nullable(data, validity))
                 } else {
-                    c.as_i64_slice().map(NumSlice::I64)
+                    None
                 }
             })
             .collect();
         let value_column = if let Some(slices) = numeric_slices {
-            if slices.iter().any(|s| matches!(s, NumSlice::F64(_))) {
+            let any_nullable = slices
+                .iter()
+                .any(|s| matches!(s, NumSlice::F64Nullable(..)));
+            if any_nullable {
+                // Concatenate values AND validity. A missing slot contributes its
+                // datum (hidden by the cleared bit) exactly as the Scalar path
+                // contributed `Null(NullKind::NaN)`; an all-valid or Int64 segment
+                // contributes a solid run of set bits, which is what
+                // `Column::new` derived for it. dtype is Float64 because at least
+                // one value var is.
+                let mut value_vals: Vec<f64> = Vec::with_capacity(total_rows);
+                let mut words = vec![0_u64; total_rows.div_ceil(64)];
+                let mut offset = 0_usize;
+                for s in &slices {
+                    match s {
+                        NumSlice::F64(x) => {
+                            set_valid_run(&mut words, offset, x.len());
+                            value_vals.extend_from_slice(x);
+                            offset += x.len();
+                        }
+                        NumSlice::I64(x) => {
+                            set_valid_run(&mut words, offset, x.len());
+                            value_vals.extend(x.iter().map(|&i| i as f64));
+                            offset += x.len();
+                        }
+                        NumSlice::F64Nullable(x, validity) => {
+                            for (k, _) in x.iter().enumerate() {
+                                if validity.get(k) {
+                                    let at = offset + k;
+                                    words[at / 64] |= 1_u64 << (at % 64);
+                                }
+                            }
+                            value_vals.extend_from_slice(x);
+                            offset += x.len();
+                        }
+                    }
+                }
+                Column::from_f64_values_with_validity(
+                    value_vals,
+                    fp_columnar::ValidityMask::from_words(words, total_rows),
+                )
+            } else if slices.iter().any(|s| matches!(s, NumSlice::F64(_))) {
                 let mut value_vals: Vec<f64> = Vec::with_capacity(total_rows);
                 for s in &slices {
                     match s {
                         NumSlice::F64(x) => value_vals.extend_from_slice(x),
                         NumSlice::I64(x) => value_vals.extend(x.iter().map(|&i| i as f64)),
+                        NumSlice::F64Nullable(..) => unreachable!("guarded by any_nullable"),
                     }
                 }
                 Column::from_f64_values_owned(value_vals)
@@ -116244,6 +116316,68 @@ mod tests {
     /// The typed nullable arm is the one under test — the all-valid arm declines
     /// these columns, so before it existed every one of them went to Scalars.
     #[test]
+    /// melt over value vars that carry MISSING values must produce exactly what
+    /// the Scalar path produced. The typed concat arm is the one under test:
+    /// before it existed, ONE nullable value var turned the whole typed path off.
+    /// Mixes an all-valid f64 var, a nullable one, and an i64 one so the run-fill,
+    /// per-slot and widening branches all execute in a single call.
+    #[test]
+    fn dataframe_melt_nullable_value_vars_match_the_scalar_semantics() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "id".to_owned(),
+            Column::from_i64_values(vec![1, 2, 3]),
+        );
+        columns.insert("clean".to_owned(), Column::from_f64_values(vec![1.0, 2.0, 3.0]));
+        columns.insert(
+            "holey".to_owned(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(30.0),
+                ],
+            )
+            .unwrap(),
+        );
+        columns.insert("ints".to_owned(), Column::from_i64_values(vec![7, 8, 9]));
+        let frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 3),
+            columns,
+            vec![
+                "id".to_owned(),
+                "clean".to_owned(),
+                "holey".to_owned(),
+                "ints".to_owned(),
+            ],
+        )
+        .unwrap();
+        let melted = frame
+            .melt(&["id"], &["clean", "holey", "ints"], None, None)
+            .unwrap();
+        let values = melted.column("value").expect("value column").values();
+        assert_eq!(values.len(), 9, "3 value vars x 3 rows");
+        // clean segment: all valid
+        assert_eq!(values[0], Scalar::Float64(1.0));
+        assert_eq!(values[2], Scalar::Float64(3.0));
+        // holey segment: the MISSING slot must survive as missing
+        assert_eq!(values[3], Scalar::Float64(10.0));
+        assert!(
+            matches!(values[4], Scalar::Null(_)),
+            "a missing value var slot must stay missing, got {:?}",
+            values[4]
+        );
+        assert_eq!(values[5], Scalar::Float64(30.0));
+        // i64 segment: widened to f64, all valid
+        assert_eq!(values[6], Scalar::Float64(7.0));
+        assert_eq!(values[8], Scalar::Float64(9.0));
+        assert_eq!(
+            melted.column("value").expect("value column").dtype(),
+            DType::Float64
+        );
+    }
+
     fn dataframe_reindex_nullable_float64_matches_the_scalar_semantics() {
         let mut columns = BTreeMap::new();
         // rows 1 and 3 are MISSING in the source.
