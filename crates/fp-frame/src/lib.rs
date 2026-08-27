@@ -57454,7 +57454,6 @@ impl LazyTransposeFramePlan {
             F64(&'a [f64]),
             I64(&'a [i64]),
         }
-        let page_end = page_start.checked_add(page_len)?;
         let mut sources: Vec<Src<'_>> = Vec::with_capacity(self.source_columns.len());
         for source in self.source_columns.iter() {
             if let Some(values) = source.as_f64_slice() {
@@ -57470,12 +57469,11 @@ impl LazyTransposeFramePlan {
         let ncols = sources.len();
         let mut buffer: Vec<f64> = Vec::with_capacity(page_len.checked_mul(ncols)?);
         for offset in 0..page_len {
-            // `sources` already hold the page subslices, so index by the
-            // page-local offset (each subslice has exactly `page_len` rows).
+            let row = page_start + offset;
             for source in &sources {
                 match source {
-                    Src::F64(values) => buffer.push(*values.get(offset)?),
-                    Src::I64(values) => buffer.push(*values.get(offset)? as f64),
+                    Src::F64(values) => buffer.push(*values.get(row)?),
+                    Src::I64(values) => buffer.push(*values.get(row)? as f64),
                 }
             }
         }
