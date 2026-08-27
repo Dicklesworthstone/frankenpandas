@@ -703,7 +703,22 @@ def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[
     # sum/count/mean/etc. reached pandas, so the oracle reported a different
     # operation than the fixture requested.
     value_dtype = series_dtype_for_payload_values(right["values"])
-    value_series = pd.Series(values, index=value_index, dtype=value_dtype)
+    # CARRY THE FIXTURE'S SERIES NAME. Without `name=` the oracle's series is
+    # unnamed, so pandas' groupby result is unnamed too and the oracle could not
+    # report the column name back -- while pandas itself names a SeriesGroupBy
+    # aggregation after the SOURCE COLUMN.
+    #
+    # MEASURED, live pandas 2.2.3:
+    #   pd.Series([...], name="val").groupby(k).count().name -> "val"
+    #   the same series WITHOUT a name                        -> None
+    #
+    # br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this was the residue
+    # after 76efdb477 taught FrankenPandas the same rule -- the mismatch moved
+    # from actual="count" to actual="val" against an oracle that had thrown the
+    # name away.
+    value_series = pd.Series(
+        values, index=value_index, dtype=value_dtype, name=right.get("name")
+    )
     groupby_keys = payload.get("groupby_keys")
 
     if isinstance(groupby_keys, list) and groupby_keys:
@@ -734,9 +749,23 @@ def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[
     # and the fixtures follow that default, so the oracle must too. The prior
     # sort=False emitted group keys in first-seen order, a false live-gate red
     # for every groupby case whose key order differed from sorted order.
-    grouped = pd.DataFrame({"key": aligned_keys, "value": aligned_values}).groupby(
-        "key", sort=True, dropna=True
-    )["value"]
+    # NAME THE VALUE COLUMN AFTER THE FIXTURE'S SERIES, not the literal "value".
+    #
+    # This built `DataFrame({"key": ..., "value": ...})` with a HARDCODED column
+    # name, so every aggregation came back named "value" no matter what the
+    # fixture called its values series. Against a fixture whose right series is
+    # "val" the oracle reported "value", which is not what pandas would say
+    # about that input -- pandas names a SeriesGroupBy result after the SOURCE
+    # COLUMN (measured: pd.Series([...], name="val").groupby(k).count().name ==
+    # "val"). br-frankenpandas-live-oracle-passes-by-skip-l7r1p.
+    #
+    # The key column is renamed out of the way when the values series is itself
+    # called "key", which would otherwise collide inside the DataFrame.
+    value_name = right.get("name") or "value"
+    key_name = "key" if value_name != "key" else "__fp_key__"
+    grouped = pd.DataFrame({key_name: aligned_keys, value_name: aligned_values}).groupby(
+        key_name, sort=True, dropna=True
+    )[value_name]
     if agg == "sum":
         out = grouped.sum()
     elif agg == "mean":
