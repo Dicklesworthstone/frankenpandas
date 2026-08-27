@@ -14735,21 +14735,55 @@ impl Column {
         {
             let window = &data[start..end];
             let mut words = vec![0_u64; len.div_ceil(64)];
-            let packed = validity.packed_words();
-            for (word_index, chunk) in window.chunks(64).enumerate() {
-                let base = start + word_index * 64;
-                let mut word = 0_u64;
-                for (bit, &x) in chunk.iter().enumerate() {
-                    let at = base + bit;
-                    let valid = match packed {
-                        Some(source_words) => (source_words[at / 64] >> (at % 64)) & 1 == 1,
-                        None => validity.get(at),
-                    };
-                    if valid && !x.is_nan() {
-                        word |= 1_u64 << bit;
+            match validity.packed_words() {
+                // WORD-ORIENTED DERIVE. Every source validity bit for output
+                // word `w` lives in source words `word_off + w` and its
+                // successor, so ONE double-shift replaces the 64 bounds-checked
+                // loads and 64 branches the per-bit form paid — and the
+                // `word |= 1 << bit` serial dependency chain goes with them.
+                //
+                // The NaN test is spelled `x == x` (false for NaN alone) rather
+                // than `!x.is_nan()` so it lowers to a plain vector compare and
+                // LLVM can fold 64 lanes into a mask without a branch per lane.
+                //
+                // Bit-identical to the per-bit form: bit `i` is set iff the
+                // source bit at `start + w * 64 + i` is set AND that element is
+                // not NaN, which is exactly what `take_positions` marks valid.
+                Some(source) => {
+                    let bit_off = start % 64;
+                    let word_off = start / 64;
+                    for (w, chunk) in window.chunks(64).enumerate() {
+                        let lo = source[word_off + w];
+                        let valid = if bit_off == 0 {
+                            lo
+                        } else {
+                            // `hi` is absent exactly when the window's last bit
+                            // lands in the final source word; those high bits are
+                            // then beyond the window and `finite` masks them off.
+                            let hi = source.get(word_off + w + 1).copied().unwrap_or(0);
+                            (lo >> bit_off) | (hi << (64 - bit_off))
+                        };
+                        let mut finite = 0_u64;
+                        for (bit, &x) in chunk.iter().enumerate() {
+                            finite |= u64::from(x == x) << bit;
+                        }
+                        words[w] = valid & finite;
                     }
                 }
-                words[word_index] = word;
+                // Range-encoded or sentinel masks have no packed words to shift;
+                // ask the mask per element.
+                None => {
+                    for (w, chunk) in window.chunks(64).enumerate() {
+                        let base = start + w * 64;
+                        let mut word = 0_u64;
+                        for (bit, &x) in chunk.iter().enumerate() {
+                            if validity.get(base + bit) && x == x {
+                                word |= 1_u64 << bit;
+                            }
+                        }
+                        words[w] = word;
+                    }
+                }
             }
             return Self::from_f64_values_with_validity(
                 window.to_vec(),
@@ -33012,6 +33046,65 @@ mod tests {
     /// outside it, and windows that straddle a 64-bit word boundary — the mask
     /// is derived per output word, so an off-by-one there would silently shift
     /// every missingness bit in the result.
+    /// The word-oriented derive computes `source_validity & not_nan`. A fixture
+    /// built by `from_f64_values` can never separate those two terms, because it
+    /// DERIVES validity from NaN — every NaN already sits at an invalid slot, so
+    /// dropping the NaN test entirely would still pass.
+    ///
+    /// `from_f64_values_with_validity` does not re-derive, so it can place a NaN
+    /// at a VALID slot and finite data at an INVALID one. Those are the only two
+    /// shapes where the two terms disagree, and this is the only test that has
+    /// them.
+    #[test]
+    fn take_contiguous_range_derive_separates_validity_from_nan() {
+        for len in [70usize, 128, 130, 200] {
+            let data: Vec<f64> = (0..len)
+                .map(|i| match i % 5 {
+                    0 => f64::NAN,        // NaN at a slot the mask calls VALID
+                    1 => 7.5,             // finite at a slot the mask calls INVALID
+                    _ => i as f64 * 0.25,
+                })
+                .collect();
+            let mut words = vec![0_u64; len.div_ceil(64)];
+            for i in 0..len {
+                // Deliberately NOT NaN-consistent: every slot is valid except
+                // `i % 5 == 1`, so the `i % 5 == 0` NaNs are valid-and-NaN.
+                if i % 5 != 1 {
+                    words[i / 64] |= 1_u64 << (i % 64);
+                }
+            }
+            let column = Column::from_f64_values_with_validity(
+                data,
+                ValidityMask::from_words(words, len),
+            );
+            assert!(
+                column.validity.get(0) && column.values()[0].is_missing(),
+                "len={len}: fixture must carry a NaN at a slot the MASK calls valid"
+            );
+
+            for start in [0usize, 1, 5, 63, 64, 65, 70] {
+                if start >= len {
+                    continue;
+                }
+                for take in [1usize, 63, 64, 65, 129] {
+                    if start + take > len {
+                        continue;
+                    }
+                    let ranged = column.take_contiguous_range(start, take);
+                    let positions: Vec<usize> = (start..start + take).collect();
+                    let gathered = column.take_positions(&positions);
+                    for i in 0..take {
+                        assert_eq!(
+                            ranged.validity.get(i),
+                            gathered.validity.get(i),
+                            "len={len} start={start} take={take} bit={i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn take_contiguous_range_on_a_nullable_column_matches_take_positions() {
         // len >= 4 so `i % 7 == 3` actually places a NaN; at len 1 the pattern
