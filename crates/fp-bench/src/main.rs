@@ -3918,9 +3918,25 @@ fn run(
             // than the lazy-plan shell the drop-only form measured.
             time_us(|| {
                 let result = frame.dot(&frame).expect("dot");
+                // MATERIALIZE TYPED, NOT AS SCALARS. `values()` forces the dot
+                // plan AND boxes every output element into a `Scalar`
+                // (`LazyAllValidFloat64Dot` fills `data` then maps it into a
+                // `Vec<Scalar>`). The incumbent arm is `m.dot(m)`, which yields a
+                // dense float64 block and allocates nothing per element — so the
+                // Scalar pass is work only FrankenPandas is charged for, dim*dim
+                // of it (10_000 at the 10k lane, 1_000_000 at 1M).
+                //
+                // `as_f64_slice()` reaches the same `dot_float64_data()` and so
+                // still forces the FULL GEMM — the lazy plan is computed, which is
+                // what the drop-only form failed to do — while stopping at the
+                // same dense-f64 boundary pandas stops at.
                 let mut acc = 0usize;
                 for name in result.column_names() {
-                    acc += result.column(name.as_str()).expect("col").values().len();
+                    let col = result.column(name.as_str()).expect("col");
+                    acc += col
+                        .as_f64_slice()
+                        .expect("dot output column is typed f64")
+                        .len();
                 }
                 black_box((&result, acc));
             })
