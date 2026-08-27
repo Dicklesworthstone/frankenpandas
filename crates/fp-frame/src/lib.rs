@@ -1745,6 +1745,36 @@ fn pivot_dense_build(
         );
         result_col_order.push(name);
     }
+
+    // INTEGER DTYPE FOR A COMPLETE count/size PIVOT, the dense sibling of the
+    // same rule in the generic builder. The generic path alone was NOT enough:
+    // this dense backend is what the live `pivot_table_count` case actually
+    // takes, so fixing only the generic one left the row still reporting
+    // Float64(2.0) against pandas' Int64(2) — the same shape as the groupby
+    // `sum` fast paths that bypassed the `agg_name` fix.
+    //
+    // The test spans EVERY column, because pandas decides this for the whole
+    // table: with one empty cell anywhere, every column comes back float64,
+    // including columns that are themselves complete.
+    if matches!(kind, Kind::Count | Kind::Size)
+        && result_cols.values().all(|column| column.validity().all())
+    {
+        let promoted: Vec<(String, Column)> = result_col_order
+            .iter()
+            .filter_map(|name| {
+                let counts = result_cols.get(name)?.as_f64_slice()?;
+                // Exact: every value is a count, a small non-negative integer
+                // already held exactly in f64.
+                let ints: Vec<Scalar> =
+                    counts.iter().map(|&c| Scalar::Int64(c as i64)).collect();
+                Some((name.clone(), Column::new(DType::Int64, ints).ok()?))
+            })
+            .collect();
+        for (name, column) in promoted {
+            result_cols.insert(name, column);
+        }
+    }
+
     (result_cols, result_col_order)
 }
 
@@ -70470,10 +70500,46 @@ impl DataFrame {
             mat[ci][ri] = Scalar::Float64(pivot_table_agg_value(aggfunc, vals)?);
         }
 
+        // pandas GIVES A COMPLETE count/size PIVOT AN INTEGER DTYPE. The cell
+        // values are counts, so the only reason the result is ever float is that
+        // an EMPTY cell has to hold NaN, and NaN cannot live in an int column.
+        // MEASURED, live pandas 2.2.3:
+        //
+        //   complete pivot, aggfunc="count"   -> dtype int64
+        //   the same pivot with one cell gone -> dtype float64
+        //
+        // and in the gapped case EVERY column is float64, including ones with no
+        // empty cell of their own — so the decision is made for the whole table,
+        // not per column. This built every pivot as Float64 unconditionally, so
+        // a complete count came back 2.0 where pandas gives 2
+        // (br-frankenpandas-live-oracle-passes-by-skip-l7r1p).
+        //
+        // Only `count` and `size` qualify: mean/median/std and the rest are
+        // genuinely fractional, and sum/min/max would need the SOURCE column's
+        // dtype rather than the aggregation's, which is a separate question.
+        let integral_counts = matches!(aggfunc, "count" | "size")
+            && mat
+                .iter()
+                .all(|column| column.iter().all(|cell| !cell.is_missing()));
+
         for (idx, _ck) in col_order_keys.iter().enumerate() {
             let col_name = col_names[idx].clone();
             let col_vals = std::mem::take(&mut mat[idx]);
-            result_cols.insert(col_name.clone(), Column::new(DType::Float64, col_vals)?);
+            let column = if integral_counts {
+                let ints: Vec<Scalar> = col_vals
+                    .into_iter()
+                    .map(|cell| match cell {
+                        // Exact: every value here came from a count, so it is a
+                        // small non-negative integer already held exactly in f64.
+                        Scalar::Float64(count) => Scalar::Int64(count as i64),
+                        other => other,
+                    })
+                    .collect();
+                Column::new(DType::Int64, ints)?
+            } else {
+                Column::new(DType::Float64, col_vals)?
+            };
+            result_cols.insert(col_name.clone(), column);
             result_col_order.push(col_name);
         }
 
