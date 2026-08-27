@@ -73266,17 +73266,58 @@ impl DataFrame {
         // missing slot stores 0.0 (NOT NaN) with the bit CLEARED (⇒
         // `Null(NullKind::NaN)` == the old fill); dtype stays Float64.
         let positions_ref: &[Option<usize>] = &positions;
+        // COMPACT THE POSITIONS BEFORE THE PER-COLUMN GATHER. `Option<usize>`
+        // carries no niche, so a resolved slot costs SIXTEEN bytes to hold a row
+        // number that fits in four: at 100k targets the typed gather re-reads
+        // 1.6 MB per column, 16 MB across ten. Paying ONE extra pass here to
+        // fold it to a `u32` sentinel removes three quarters of the bytes from
+        // every column after the first.
+        //
+        // Bit-identical: each slot still resolves to the same source row, and
+        // the sentinel is only used when the source is strictly shorter than it,
+        // so no real row can collide with it.
+        const REINDEX_ABSENT: u32 = u32::MAX;
+        let compact_positions: Option<Vec<u32>> = if self.index.len() < REINDEX_ABSENT as usize {
+            Some(
+                positions
+                    .iter()
+                    .map(|slot| slot.map_or(REINDEX_ABSENT, |row| row as u32))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let compact_ref: Option<&[u32]> = compact_positions.as_deref();
         let build_col = |col: &Column| -> Result<Column, FrameError> {
             if let Some(data) = col.as_f64_slice() {
                 let mut out = Vec::with_capacity(new_len);
                 let mut words = vec![0_u64; new_len.div_ceil(64)];
-                for (oi, p) in positions_ref.iter().enumerate() {
-                    match p {
-                        Some(idx) => {
-                            words[oi / 64] |= 1_u64 << (oi % 64);
-                            out.push(data[*idx]);
+                if let Some(compact) = compact_ref {
+                    // The validity word is built in a REGISTER and stored once
+                    // per 64 slots. The slot-at-a-time form read-modify-wrote
+                    // `words[oi / 64]` on every present row — 100k dependent RMWs
+                    // against 1_562 stores for the same bits.
+                    for (word_index, chunk) in compact.chunks(64).enumerate() {
+                        let mut word = 0_u64;
+                        for (bit, &row) in chunk.iter().enumerate() {
+                            if row == REINDEX_ABSENT {
+                                out.push(0.0);
+                            } else {
+                                word |= 1_u64 << bit;
+                                out.push(data[row as usize]);
+                            }
                         }
-                        None => out.push(0.0),
+                        words[word_index] = word;
+                    }
+                } else {
+                    for (oi, p) in positions_ref.iter().enumerate() {
+                        match p {
+                            Some(idx) => {
+                                words[oi / 64] |= 1_u64 << (oi % 64);
+                                out.push(data[*idx]);
+                            }
+                            None => out.push(0.0),
+                        }
                     }
                 }
                 Ok(Column::from_f64_values_with_validity(
