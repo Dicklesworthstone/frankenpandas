@@ -70594,8 +70594,19 @@ impl DataFrame {
                 continue;
             }
 
+            // TYPED, not stringified. `expected_row` comes from the pivot's own
+            // index, which br-frankenpandas-9m9zf retyped onto
+            // `scalar_to_typed_index_label`; asking the STRINGIFYING mapper here
+            // compared `Float64(1.5)` against `Utf8("1.5")`, which is never equal,
+            // so every per-row margin over a FLOAT or BOOL index selected zero
+            // source values and came out `Null(NaN)`. Int64/Utf8 indexes matched
+            // either way, which is why the residue survived the retyping.
+            //
+            // The COLUMN comparison below deliberately keeps the stringifying
+            // mapper: pivot column names are `String` in FP and cannot hold a
+            // typed label.
             if let Some(expected_row) = row_label
-                && scalar_to_value_counts_index_label(idx_value) != *expected_row
+                && scalar_to_typed_index_label(idx_value) != *expected_row
             {
                 continue;
             }
@@ -167355,6 +167366,121 @@ mod tests {
 
         let err = df.to_multi_index(&["a", "nonexistent"]);
         assert!(err.is_err());
+    }
+
+    /// RESIDUE OF br-frankenpandas-9m9zf. That bead retyped the index-label
+    /// BUILDERS onto `scalar_to_typed_index_label`, but
+    /// `pivot_table_margin_source_values` still asked the STRINGIFYING
+    /// `scalar_to_value_counts_index_label` when matching a row against
+    /// `expected_row`. The row labels it is matched against are typed, so for a
+    /// FLOAT or BOOL pivot index the comparison is `Float64(1.5) != Utf8("1.5")`
+    /// — never equal — and every per-row margin silently selects zero source
+    /// values. Int64/Utf8 indexes were unaffected, which is why it survived.
+    ///
+    /// MEASURED, live pandas 2.2.3:
+    ///   df = DataFrame({"k":[1.5,1.5,2.5,2.5],"c":["x","y","x","y"],"v":[1,2,3,4]})
+    ///   df.pivot_table(index="k", columns="c", values="v", aggfunc="sum", margins=True)
+    ///        c      x    y   All
+    ///     1.5     1.0  2.0   3.0
+    ///     2.5     3.0  4.0   7.0
+    ///     All     4.0  6.0  10.0
+    /// and for a bool index, rows False -> 7.0 and True -> 3.0.
+    #[test]
+    fn pivot_table_margins_match_pandas_for_float_and_bool_row_labels() {
+        let float_df = DataFrame::from_dict(
+            &["k", "c", "v"],
+            vec![
+                (
+                    "k",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(2.5),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let pivoted = float_df
+            .pivot_table_with_margins("v", "k", "c", "sum", true)
+            .expect("float pivot_table with margins");
+        // The "All" COLUMN is the per-row margin — the value the stringified
+        // comparison zeroed out.
+        let all_col = &pivoted.columns["All"];
+        assert_eq!(
+            all_col.values(),
+            &[
+                Scalar::Float64(3.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(10.0)
+            ],
+            "float row labels: per-row margins must be 3.0/7.0 with overall 10.0"
+        );
+
+        let bool_df = DataFrame::from_dict(
+            &["k", "c", "v"],
+            vec![
+                (
+                    "k",
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                        Scalar::Bool(false),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let bool_pivoted = bool_df
+            .pivot_table_with_margins("v", "k", "c", "sum", true)
+            .expect("bool pivot_table with margins");
+        assert_eq!(
+            bool_pivoted.columns["All"].values(),
+            &[
+                Scalar::Float64(7.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0)
+            ],
+            "bool row labels: False row margin 7.0, True row margin 3.0, overall 10.0"
+        );
     }
 
     #[test]
