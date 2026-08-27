@@ -2538,6 +2538,23 @@ enum ScalarValues {
     LazyAllValidFloat64 {
         data: Arc<[f64]>,
         all_finite: OnceLock<bool>,
+        /// WITNESS: the owning column's validity is EXACTLY `!data[i].is_nan()`.
+        ///
+        /// Despite the variant's name this backing is also how a NaN-bearing
+        /// Float64 column is stored — `from_f64_values` keeps the raw buffer here
+        /// and derives a holey mask with `ValidityMask::from_f64`, so missing
+        /// slots hold NaN. When that is how the pair was built, missingness is
+        /// recoverable from the mask ALONE and no consumer needs to re-read the
+        /// data to rediscover it.
+        ///
+        /// br-frankenpandas-uza04. `iloc_slice @100k/float64_nan10` re-derived
+        /// the window's mask by scanning all 400 KB of it for NaN, while pandas
+        /// answers the same call with a view and reads nothing — numpy float64
+        /// represents missing AS NaN, so its mask needs no derivation at all.
+        ///
+        /// Conservative: `false` means UNKNOWN, never "not NaN-exact". Only
+        /// constructors that derive the mask from their own buffer set it.
+        nan_missing_exact: bool,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Move-not-copy sibling of `LazyAllValidFloat64`: stores the owned `Vec<f64>`
@@ -3226,7 +3243,32 @@ impl ScalarValues {
         Self::LazyAllValidFloat64 {
             data,
             all_finite: Self::bool_once_lock(all_finite),
+            nan_missing_exact: false,
             values: OnceLock::new(),
+        }
+    }
+
+    /// [`Self::lazy_all_valid_float64_arc_with_finite`] for a caller that just
+    /// derived the owning column's validity from THIS buffer's NaNs.
+    ///
+    /// The caller is asserting the pair invariant; see `nan_missing_exact`.
+    fn lazy_all_valid_float64_arc_nan_exact(data: Arc<[f64]>, all_finite: Option<bool>) -> Self {
+        Self::LazyAllValidFloat64 {
+            data,
+            all_finite: Self::bool_once_lock(all_finite),
+            nan_missing_exact: true,
+            values: OnceLock::new(),
+        }
+    }
+
+    /// Read the NaN-exactness witness. `false` for every other backing, which is
+    /// the safe answer: a caller that cannot prove the invariant must scan.
+    fn nan_missing_exact(&self) -> bool {
+        match self {
+            Self::LazyAllValidFloat64 {
+                nan_missing_exact, ..
+            } => *nan_missing_exact,
+            _ => false,
         }
     }
 
@@ -6401,11 +6443,20 @@ impl Clone for ScalarValues {
                 ..
             } => Self::lazy_nullable_period(data.clone(), *freq, *missing_freq, validity.clone()),
             Self::LazyAllValidFloat64 {
-                data, all_finite, ..
-            } => Self::lazy_all_valid_float64_arc_with_finite(
-                Arc::clone(data),
-                all_finite.get().copied(),
-            ),
+                data,
+                all_finite,
+                nan_missing_exact,
+                ..
+            } => {
+                // Carry the witness: a clone copies the buffer and the mask
+                // TOGETHER, so whatever held of the pair still holds.
+                let finite = all_finite.get().copied();
+                if *nan_missing_exact {
+                    Self::lazy_all_valid_float64_arc_nan_exact(Arc::clone(data), finite)
+                } else {
+                    Self::lazy_all_valid_float64_arc_with_finite(Arc::clone(data), finite)
+                }
+            }
             Self::LazyAllValidFloat64Vec {
                 data, all_finite, ..
             } => Self::LazyAllValidFloat64Vec {
@@ -12203,9 +12254,16 @@ impl Column {
         } else {
             ValidityMask::all_valid(len)
         };
+        // NaN-EXACT BY CONSTRUCTION, in both branches: `from_f64` sets bit i iff
+        // `!data[i].is_nan()`, and the all-valid branch is only taken when the
+        // buffer has no NaN at all. Consumers can therefore recover missingness
+        // from the mask alone and never re-read the buffer to find it.
         Self {
             dtype: DType::Float64,
-            values: ScalarValues::lazy_all_valid_float64_with_finite(data, Some(all_finite)),
+            values: ScalarValues::lazy_all_valid_float64_arc_nan_exact(
+                Arc::from(data),
+                Some(all_finite),
+            ),
             validity,
             data: None,
         }
@@ -14839,6 +14897,51 @@ impl Column {
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
             && data.len() == validity.len()
         {
+            // SCAN-FREE WINDOW. When the source is NaN-exact, `valid & finite`
+            // is just `valid` — the mask ALREADY encodes every NaN — so the
+            // window's mask is a pure bit-slice of the source's and the 400 KB
+            // data read disappears entirely. This is the whole gap against
+            // pandas on this lane: numpy represents missing AS NaN, so its slice
+            // derives nothing.
+            //
+            // `escaped` is 0 under the witness by definition (no non-NaN datum
+            // sits at an invalid slot), so the all-valid-shaped window below is
+            // as bit-identical here as it is on the scanned path.
+            if self.values.nan_missing_exact()
+                && let Some(source) = validity.packed_words()
+                && let Some((buffer, src_start)) = self.float64_arc_backing()
+                && let Some(view_start) = src_start.checked_add(start)
+                && view_start
+                    .checked_add(len)
+                    .is_some_and(|view_end| view_end <= buffer.len())
+            {
+                let mut words = vec![0_u64; len.div_ceil(64)];
+                let bit_off = start % 64;
+                let word_off = start / 64;
+                for (w, out) in words.iter_mut().enumerate() {
+                    let lo = source[word_off + w];
+                    *out = if bit_off == 0 {
+                        lo
+                    } else {
+                        let hi = source.get(word_off + w + 1).copied().unwrap_or(0);
+                        (lo >> bit_off) | (hi << (64 - bit_off))
+                    };
+                }
+                // The scanned path never set bits past the window because
+                // `finite` only covered real elements; a raw bit-slice has to
+                // clear the last word's tail itself.
+                let tail = len % 64;
+                if tail != 0 && let Some(last) = words.last_mut() {
+                    *last &= (1_u64 << tail) - 1;
+                }
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_float64_slice(buffer, view_start, len),
+                    validity: ValidityMask::from_words(words, len),
+                    data: None,
+                };
+            }
+
             let window = &data[start..end];
             let mut words = vec![0_u64; len.div_ceil(64)];
             // Non-zero iff some window slot holds a non-NaN datum while the mask
@@ -33377,6 +33480,73 @@ mod tests {
     /// must NOT be taken for a Datetime64/Timedelta64 column that happens to be
     /// ns-backed by the same i64 buffer — that would emit Scalar::Int64 where the
     /// column promises Scalar::Datetime64.
+    /// The `nan_missing_exact` witness lets `take_contiguous_range` skip reading
+    /// the data entirely, so a WRONG witness is a silent wrong answer, not a slow
+    /// one. Check the invariant it asserts directly against the constructors, and
+    /// check it is WITHHELD from the one shape that violates it.
+    #[test]
+    fn nan_missing_exact_witness_matches_the_invariant_it_claims() {
+        for len in [1usize, 63, 64, 130] {
+            let data: Vec<f64> = (0..len)
+                .map(|i| if i % 7 == 3 { f64::NAN } else { i as f64 })
+                .collect();
+            let column = Column::from_f64_values(data.clone());
+            assert!(
+                column.values.nan_missing_exact(),
+                "len={len}: from_f64_values derives its mask from this buffer"
+            );
+            // THE INVARIANT: the mask alone determines missingness, so no
+            // consumer has to re-read the buffer to find a NaN.
+            for i in 0..len {
+                assert_eq!(
+                    column.validity.get(i),
+                    !data[i].is_nan(),
+                    "len={len} slot={i}: witness claims validity == !is_nan"
+                );
+            }
+            assert!(
+                column.clone().values.nan_missing_exact(),
+                "len={len}: a clone copies buffer and mask together"
+            );
+        }
+
+        // WITHHELD: a mask that was NOT derived from this buffer can call a
+        // finite slot invalid, which the witness would wrongly license skipping.
+        let mut words = vec![0_u64; 1];
+        for i in 0..8 {
+            if i != 3 {
+                words[0] |= 1_u64 << i;
+            }
+        }
+        let hand_built = Column::from_f64_values_with_validity(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            ValidityMask::from_words(words, 8),
+        );
+        assert!(
+            !hand_built.values.nan_missing_exact(),
+            "a hand-supplied mask with a finite datum at an invalid slot must NOT be NaN-exact"
+        );
+        // And the range must still agree with the gather on it.
+        for start in [0usize, 1, 3] {
+            for take in [1usize, 4, 5] {
+                if start + take > 8 {
+                    continue;
+                }
+                let ranged = hand_built.take_contiguous_range(start, take);
+                let positions: Vec<usize> = (start..start + take).collect();
+                let gathered = hand_built.take_positions(&positions);
+                assert_eq!(ranged.values(), gathered.values(), "start={start} take={take}");
+                for i in 0..take {
+                    assert_eq!(
+                        ranged.validity.get(i),
+                        gathered.validity.get(i),
+                        "start={start} take={take} bit={i}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn take_contiguous_range_int64_window_matches_the_copy_and_spares_temporal() {
         // NON-VACUITY: `from_i64_values_owned` is the constructor that yields the
