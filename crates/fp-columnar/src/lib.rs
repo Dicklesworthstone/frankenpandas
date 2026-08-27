@@ -9433,6 +9433,37 @@ fn map_block_with_witness<T: Copy, F: Fn(T) -> f64>(
 const ELEMENTWISE_WITNESS_DEFAULT_WORKERS: usize = 8;
 const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 
+/// `par_min` for the few unary ops whose PER-ELEMENT cost is high enough that
+/// 100k elements already pays for a `thread::scope`.
+///
+/// br-frankenpandas-uza04. The shared default is an ELEMENT-COUNT threshold, but
+/// what has to clear the spawn cost is WORK, and per-element cost spans ~80x
+/// across the unary maps — measured at 100k on one ELF, serial against
+/// `FP_ELEMENTWISE_PAR_MIN=50000`, interleaved:
+///
+///     sin     15.1 ns/elem   1513.1us -> 541.4us   2.79x
+///     log1p    9.3           934.1   -> 455.2     2.05x
+///     atan     7.5           754.2   -> 406.3     1.86x
+///     ---- crossover sits in here ----
+///     cbrt     6.0           601.3   -> 573.8     1.05x
+///     log      3.8           382.2   -> 365.5     1.05x
+///     expm1    2.9           288.0   -> 349.9     0.82x  <- parallel LOSES
+///     sqrt     1.1           113.7   -> 115.2     0.99x
+///     floor    0.18           18.0   ->  28.1     0.64x
+///
+/// ⚠ THE VALUE IS INTERPOLATED, NOT MEASURED. At 10k all three lose badly
+/// (sin 0.50x, atan 0.30x, log1p 0.30x), so the crossover is between 10k and
+/// 100k — but the bench only offers those two sizes, so nothing in between was
+/// run. Fitting spawn overhead to both points puts the crossovers near 26k
+/// (sin), 42k (log1p) and 52k (atan); 65_536 clears all three with margin and
+/// still takes the measured win at 100k. If a fixture between 10k and 100k ever
+/// exists, measure there before trusting this number.
+///
+/// ONLY the three ops above opt in. The other fourteen callers of
+/// `typed_float_domain_fused_unary` keep the shared default — including
+/// `exp_m1`, which was measured and is CORRECTLY left serial at 100k.
+const ELEMENTWISE_EXPENSIVE_PAR_MIN: usize = 65_536;
+
 /// Worker cap and parallel threshold for the UNARY witness map, from
 /// `FP_ELEMENTWISE_MAX_WORKERS` / `FP_ELEMENTWISE_PAR_MIN`.
 ///
@@ -27746,7 +27777,12 @@ impl Column {
         // `sin(±inf)` is NaN (there is no limit to return), so infinities are OUT
         // of the domain even though every FINITE input is in it. Predicate is
         // `is_finite`, not `true`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.is_finite(), f64::sin) {
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x.is_finite(),
+            f64::sin,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::sin) {
@@ -27900,7 +27936,12 @@ impl Column {
     pub fn atan(&self) -> Result<Self, ColumnError> {
         // TOTAL: `atan` saturates rather than failing — `atan(±inf)` is `±π/2`.
         // br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::atan) {
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |_| true,
+            f64::atan,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::atan) {
@@ -29678,7 +29719,12 @@ impl Column {
         // `ln_1p(-1.0)` is `-inf` and PRESENT, `ln_1p(x < -1.0)` is NaN. Getting this
         // bound wrong by one would mark a valid `-inf` slot missing, or worse, mark a
         // NaN slot present. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= -1.0, f64::ln_1p) {
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x >= -1.0,
+            f64::ln_1p,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::ln_1p) {
