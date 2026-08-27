@@ -4872,7 +4872,7 @@ fn live_oracle_series_astype_int_to_float() {
                 { "kind": "int64", "value": 3 }
             ]
         },
-        "dtype": "float64"
+        "constructor_dtype": "float64"
     }))
     .expect("fixture");
 
@@ -4927,7 +4927,7 @@ fn live_oracle_series_astype_float_to_int() {
                 { "kind": "float64", "value": 3.9 }
             ]
         },
-        "dtype": "int64"
+        "constructor_dtype": "int64"
     }))
     .expect("fixture");
 
@@ -4980,7 +4980,7 @@ fn live_oracle_series_astype_int_to_string() {
                 { "kind": "int64", "value": -7 }
             ]
         },
-        "dtype": "str"
+        "constructor_dtype": "str"
     }))
     .expect("fixture");
 
@@ -5035,7 +5035,7 @@ fn live_oracle_series_astype_bool_to_int() {
                 { "kind": "bool", "value": true }
             ]
         },
-        "dtype": "int64"
+        "constructor_dtype": "int64"
     }))
     .expect("fixture");
 
@@ -5090,7 +5090,7 @@ fn live_oracle_series_astype_int_to_bool() {
                 { "kind": "int64", "value": -5 }
             ]
         },
-        "dtype": "bool"
+        "constructor_dtype": "bool"
     }))
     .expect("fixture");
 
@@ -5143,7 +5143,7 @@ fn live_oracle_series_astype_float_to_string() {
                 { "kind": "float64", "value": -4.25 }
             ]
         },
-        "dtype": "str"
+        "constructor_dtype": "str"
     }))
     .expect("fixture");
 
@@ -16192,7 +16192,7 @@ fn live_oracle_series_nlargest_with_ties() {
         "mode": "strict",
         "operation": "series_nlargest",
         "oracle_source": "live_legacy_pandas",
-        "n_keep": 3,
+        "nlargest_n": 3,
         "left": {
             "name": "vals",
             "index": [
@@ -32350,7 +32350,7 @@ fn live_oracle_dataframe_drop_duplicates_with_subset() {
         "mode": "strict",
         "operation": "dataframe_drop_duplicates",
         "oracle_source": "live_legacy_pandas",
-        "duplicate_subset": ["a"],
+        "subset": ["a"],
         "frame": {
             "index": [
                 { "kind": "int64", "value": 0 },
@@ -40061,7 +40061,7 @@ fn live_oracle_series_astype_string_to_int() {
                 { "kind": "utf8", "value": "30" }
             ]
         },
-        "dtype": "int64"
+        "constructor_dtype": "int64"
     }))
     .expect("fixture");
 
@@ -40108,7 +40108,7 @@ fn live_oracle_series_astype_bool_to_string() {
                 { "kind": "bool", "value": true }
             ]
         },
-        "dtype": "string"
+        "constructor_dtype": "string"
     }))
     .expect("fixture");
 
