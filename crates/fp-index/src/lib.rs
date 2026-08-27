@@ -2630,6 +2630,23 @@ impl Index {
     /// labels keep their first-seen order across `a` then `b`, while each label
     /// is emitted the maximum of its multiplicities in either input.
     fn union_i64(a: &[i64], b: &[i64]) -> Vec<i64> {
+        // pandas preserves the left index's physical order when the right
+        // operand is unique. Grouping the left counts by first-seen key would
+        // turn `[3, 1, 3, 2].union([2, 4, 1], sort=False)` into
+        // `[3, 3, 1, 2, 4]` instead of pandas' `[3, 1, 3, 2, 4]`.
+        if !Self::has_duplicates_i64(b) {
+            let mut out = a.to_vec();
+            let mut seen = FxHashSet::<i64>::default();
+            seen.reserve(combined_output_capacity(a.len(), b.len()));
+            seen.extend(a.iter().copied());
+            for &value in b {
+                if seen.insert(value) {
+                    out.push(value);
+                }
+            }
+            return out;
+        }
+
         let mut counts = FxHashMap::<i64, (usize, usize)>::default();
         counts.reserve(combined_output_capacity(a.len(), b.len()));
         let mut order = Vec::with_capacity(combined_output_capacity(a.len(), b.len()));
@@ -3659,6 +3676,20 @@ impl Index {
             temporal_ns(other_labels, false),
         ) {
             let mut result = Self::from_timedelta64(Self::union_i64(&a_ns, &b_ns));
+            result.name = self.shared_name(other);
+            return result;
+        }
+        if other.is_unique() {
+            let mut labels = self_labels.to_vec();
+            let mut seen = FxHashSet::<&IndexLabel>::default();
+            seen.reserve(combined_output_capacity(self_labels.len(), other_labels.len()));
+            seen.extend(self_labels.iter());
+            for label in other_labels {
+                if seen.insert(label) {
+                    labels.push(label.clone());
+                }
+            }
+            let mut result = Self::new(labels);
             result.name = self.shared_name(other);
             return result;
         }
@@ -13001,25 +13032,43 @@ impl RangeIndex {
         }
 
         if let Some((min, span)) = Index::i64_dense_span(other) {
-            let mut seen = vec![0u64; span.div_ceil(64)];
+            let mut remaining = vec![0usize; span];
             for &value in other {
-                if self.contains_value(value) {
-                    continue;
-                }
                 let slot = (value as i128 - min as i128) as usize;
-                let bit = 1u64 << (slot & 63);
-                let word = slot >> 6;
-                if seen[word] & bit == 0 {
-                    seen[word] |= bit;
+                remaining[slot] += 1;
+            }
+            for position in 0..self.len() {
+                let offset = self.value_at(position) as i128 - min as i128;
+                if offset >= 0 && (offset as usize) < span {
+                    let count = &mut remaining[offset as usize];
+                    *count = count.saturating_sub(1);
+                }
+            }
+            for &value in other {
+                let slot = (value as i128 - min as i128) as usize;
+                let count = &mut remaining[slot];
+                if *count > 0 {
                     labels.push(value);
+                    *count -= 1;
                 }
             }
         } else {
-            let mut seen = FxHashSet::<i64>::default();
-            seen.reserve(other.len());
+            let mut remaining = FxHashMap::<i64, usize>::default();
+            remaining.reserve(other.len());
             for &value in other {
-                if !self.contains_value(value) && seen.insert(value) {
+                *remaining.entry(value).or_default() += 1;
+            }
+            for position in 0..self.len() {
+                if let Some(count) = remaining.get_mut(&self.value_at(position)) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+            for &value in other {
+                if let Some(count) = remaining.get_mut(&value)
+                    && *count > 0
+                {
                     labels.push(value);
+                    *count -= 1;
                 }
             }
         }
@@ -22226,6 +22275,22 @@ mod tests {
         }
 
         fn union_ref(a: &[i64], b: &[i64]) -> Vec<i64> {
+            let b_unique = b
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == b.len();
+            if b_unique {
+                let mut out = a.to_vec();
+                let mut seen = a.iter().copied().collect::<std::collections::BTreeSet<_>>();
+                for &value in b {
+                    if seen.insert(value) {
+                        out.push(value);
+                    }
+                }
+                return out;
+            }
             let mut counts = std::collections::BTreeMap::<i64, (usize, usize)>::new();
             let mut order = Vec::new();
             for &value in a {
@@ -22350,7 +22415,16 @@ mod tests {
             intersection.labels.int64_view().unwrap().as_slice(),
             &[1, 2]
         );
-        assert_eq!(union.labels.int64_view().unwrap().as_slice(), &[3, 1, 2, 4]);
+        assert_eq!(
+            union.labels.int64_view().unwrap().as_slice(),
+            &[3, 1, 3, 2, 4],
+            "pandas preserves the duplicate left occurrence when the right index is unique"
+        );
+        assert_ne!(
+            union.labels.int64_view().unwrap().as_slice(),
+            &[3, 3, 1, 2, 4],
+            "negative: grouping left duplicates by label is not pandas union ordering"
+        );
         assert_eq!(difference.labels.int64_view().unwrap().as_slice(), &[3]);
         assert_eq!(symmetric.labels.int64_view().unwrap().as_slice(), &[3, 4]);
         assert!(
@@ -33085,7 +33159,7 @@ mod tests {
         assert_eq!(outer.name(), Some("k"));
         assert_eq!(
             outer.labels.int64_view().unwrap().as_slice(),
-            &[9, 6, 3, 12, 0]
+            &[9, 6, 3, 6, 12, 0]
         );
         assert!(
             outer.labels.materialized.get().is_none(),
