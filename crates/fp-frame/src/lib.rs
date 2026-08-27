@@ -57457,13 +57457,13 @@ impl LazyTransposeFramePlan {
         let mut sources: Vec<Src<'_>> = Vec::with_capacity(self.source_columns.len());
         for source in self.source_columns.iter() {
             if let Some(values) = source.as_f64_slice() {
-                sources.push(Src::F64(values.get(page_start..page_end)?));
+                sources.push(Src::F64(values));
+            } else if let Some(values) = source.as_i64_slice() {
+                sources.push(Src::I64(values));
             } else {
                 // Canonical-nullable or otherwise untyped source: the per-column
-                // path reconstructs emission-rule Scalars and must keep it, so a
-                // non-i64 source short-circuits the whole page build.
-                let values = source.as_i64_slice()?;
-                sources.push(Src::I64(values.get(page_start..page_end)?));
+                // path reconstructs emission-rule Scalars and must keep it.
+                return None;
             }
         }
         let ncols = sources.len();
