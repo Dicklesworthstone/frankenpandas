@@ -3367,6 +3367,9 @@ impl ScalarValues {
             len,
             all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
+            // A STANDALONE window has no page-shared Scalar view; that field is
+            // for sibling windows over one buffer (the transposed-frame plan).
+            shared_values: None,
         }
     }
 
