@@ -226,7 +226,21 @@ fn build_utf8_factorize_default_witness(
 
 #[derive(Debug, Clone, Eq)]
 pub struct ValidityMask {
-    words: Vec<u64>,
+    /// SHARED, so cloning a mask is a refcount bump rather than a 12.5 KB copy
+    /// per 100k rows.
+    ///
+    /// br-frankenpandas-uza04. A nullable column stores its mask TWICE — once in
+    /// the `LazyNullableFloat64`/`LazyNullableInt64` backing and once in
+    /// `Column::validity` — so every nullable output column used to copy the
+    /// words twice on construction, plus once more at any caller that had to
+    /// hand one in. Measured on `df_abs @100k` at 10% NaN: replacing the whole
+    /// nullable ingest with the all-valid one took the lane from 307.4us to
+    /// 149.1us, i.e. the ingest was the ENTIRE gap left after the map was
+    /// vectorized. Copy-on-write keeps the two stores sharing one buffer.
+    ///
+    /// Mutation goes through `Arc::make_mut`, so a mask that is genuinely shared
+    /// still copies exactly once, at the first write.
+    words: Arc<Vec<u64>>,
     invalid_ranges: Option<Arc<[(usize, usize)]>>,
     len: usize,
 }
@@ -283,7 +297,7 @@ impl ValidityMask {
             }
             return words;
         }
-        self.words.clone()
+        (*self.words).clone()
     }
 
     /// Return LSB-first packed validity words for hot typed kernels that scan
@@ -316,7 +330,7 @@ impl ValidityMask {
 
     fn materialize_if_all_valid_sentinel(&mut self) {
         if self.is_all_valid_sentinel() || self.invalid_ranges.is_some() {
-            self.words = self.materialized_words();
+            self.words = Arc::new(self.materialized_words());
             self.invalid_ranges = None;
         }
     }
@@ -338,7 +352,7 @@ impl ValidityMask {
             return Self::all_valid(len);
         }
         Self {
-            words,
+            words: Arc::new(words),
             invalid_ranges: None,
             len,
         }
@@ -366,7 +380,7 @@ impl ValidityMask {
             return Self::all_valid(len);
         }
         Self {
-            words,
+            words: Arc::new(words),
             invalid_ranges: None,
             len,
         }
@@ -375,7 +389,7 @@ impl ValidityMask {
     #[must_use]
     pub fn all_valid(len: usize) -> Self {
         Self {
-            words: Vec::new(),
+            words: Arc::new(Vec::new()),
             invalid_ranges: None,
             len,
         }
@@ -397,7 +411,7 @@ impl ValidityMask {
             return Self::all_valid(len);
         }
         Self {
-            words,
+            words: Arc::new(words),
             invalid_ranges: None,
             len,
         }
@@ -420,7 +434,7 @@ impl ValidityMask {
             return Self::all_valid(len);
         }
         Self {
-            words: Vec::new(),
+            words: Arc::new(Vec::new()),
             invalid_ranges: Some(invalid_ranges),
             len,
         }
@@ -430,7 +444,7 @@ impl ValidityMask {
     pub fn all_invalid(len: usize) -> Self {
         let word_count = len.div_ceil(64);
         Self {
-            words: vec![0_u64; word_count],
+            words: Arc::new(vec![0_u64; word_count]),
             invalid_ranges: None,
             len,
         }
@@ -485,9 +499,9 @@ impl ValidityMask {
             self.materialize_if_all_valid_sentinel();
         }
         if value {
-            self.words[idx / 64] |= 1_u64 << (idx % 64);
+            Arc::make_mut(&mut self.words)[idx / 64] |= 1_u64 << (idx % 64);
         } else {
-            self.words[idx / 64] &= !(1_u64 << (idx % 64));
+            Arc::make_mut(&mut self.words)[idx / 64] &= !(1_u64 << (idx % 64));
         }
     }
 
