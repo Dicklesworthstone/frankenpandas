@@ -42142,3 +42142,64 @@ forbids. No C BLAS is involved either way; this is Rust over an f64 slice.
 NOT ATTEMPTED HERE. This entry establishes the budget and the bit-identity
 constraint; the kernel change is a separate piece of work and must show its own
 instruction count, not a wall-time ratio, until this host offers a quiet window.
+
+### 2026-08-27 cod-pandas — CORRECTION to my own entry hours ago: the dot kernel is 1.866 instr/FMA, not 2.83, and the headroom is 3.4x, not 5.1x. Also REFUTED: the blocked kernel IS reached at this size [br-frankenpandas-633fb]
+
+My previous entry put FrankenPandas' dot kernel at 2.832/2.842 instructions per
+FMA and called the headroom ~5.1x. THE METHOD WAS BAD and the agreement between
+those two trials was luck.
+
+**WHAT WAS WRONG.** I differenced `df_dot` at 1k and 10k. The 1k run is almost
+entirely process startup, and startup is NOT constant — it varies with the thread
+regime the run happens to take. Measured directly:
+
+    1k, default   284,436,579 instructions
+    1k, serial    255,037,810 instructions      <- 11% apart
+
+while the 10k end agreed to 0.1% (392,195,878 against 392,661,859). So the
+subtraction inherited an 11% swing in its baseline, on a signal of ~110M. Both my
+trials happened to run the same mode, which is why they agreed to 0.4% and looked
+solid. They were reproducing the same bias, not converging on a value.
+
+**THE CORRECTED MEASUREMENT.** Difference 10k against 100k, where the GEMM
+dominates startup (signal 2.85e9 instructions against a ~30M baseline swing, so
+~1%), with `FP_DOT_SERIAL=1` pinning FrankenPandas to one thread so the regime is
+constant across both points:
+
+    trial 1   delta 2,849,662,934 instr / 1,527,724,800 FMAs   1.865 instr/FMA
+    trial 2   delta 2,850,687,213 instr / 1,527,724,800 FMAs   1.866 instr/FMA
+
+Agreement 0.05%, and this time the two points share a thread regime rather than
+sharing a bias.
+
+**Counted mechanism:** 1.865 and 1.866 instructions per FMA across two trials —
+unchanged to 0.05% — against 0.553-0.555 for the pinned reference kernel. The
+corrected headroom is 3.37x, and my published 5.1x is withdrawn.
+
+**AND THE HYPOTHESIS I WENT IN WITH IS REFUTED.** I expected to find the blocked
+8x6 AVX2 kernel unreached — the "fast path exists but the op never gets there"
+shape that has caught me before. It is NOT that. `DataFrame::dot` calls
+`Column::materialize_dot_columns_parallel` on ALL output columns before it
+returns (fp-frame lib.rs:72715), so the batch run-detection sees the full set,
+`run.len() >= 2` holds, and the blocked kernel runs. The 1.866 figure IS the
+blocked kernel, single-threaded.
+
+That also clears a worry I raised against my own ffc2f36f5: routing the bench
+through `as_f64_slice()` instead of `values()` does NOT downgrade the kernel,
+because the GEMM has already happened inside `dot()` by the time either accessor
+is called. That commit removed Scalar boxing and nothing else.
+
+**SO THE REMAINING 3.4x IS INSIDE A KERNEL THAT IS ALREADY BLOCKED AND ALREADY
+AVX2.** By construction an 8x6 tile should retire ~0.42 instructions per FMA (2
+ymm loads plus 6 broadcasts and 12 FMAs per `p`, for 48 FMAs). The measured 1.866
+is 4.4x that, so the gap is not the tile shape — candidates are the `dim = 316`
+tails (316 is neither a multiple of MR=8 nor of NR=6), the per-call packing, the
+`copy_from_slice` of each tile, and one output `Vec` allocation per column per
+call. Which of those dominates is NOT established here and should not be guessed
+at; it needs the same instruction counting applied to a kernel-level fixture
+rather than the whole bench.
+
+NOT A RATIO. The 0.554 reference is a thread-pinned diagnostic and remains
+unquotable as a vs-incumbent number, for the reason br-frankenpandas-633fb gives.
+Nothing banked moves; the previous entry's 2.83/5.1x figures are superseded by
+the two rows above.
