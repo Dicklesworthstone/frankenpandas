@@ -14577,6 +14577,32 @@ impl Series {
                 }
             })
             .transpose()?;
+
+        // pandas materializes missing values in an integer bound Series as
+        // -inf/+inf before applying the elementwise clip. An integer extension
+        // array cannot store either sentinel, so the operation raises even when
+        // the target itself is float64. Treating the missing bound as absent
+        // (the scalar-bound rule) silently accepts a different operation.
+        //
+        // Float-bound Series are intentionally excluded: they can represent the
+        // sentinels and pandas completes the clip. The lower arm wins when both
+        // sides contain a missing value, matching pandas' reported `-inf`.
+        let invalid_integer_bound = |bounds: Option<&Self>| {
+            bounds.is_some_and(|series| {
+                matches!(series.column.dtype(), DType::Int64 | DType::Int64Nullable)
+                    && series.column.has_any_missing()
+            })
+        };
+        if invalid_integer_bound(lower.as_ref()) {
+            return Err(FrameError::CompatibilityRejected(
+                "clip: Invalid value '-inf' for dtype Int64".to_owned(),
+            ));
+        }
+        if invalid_integer_bound(upper.as_ref()) {
+            return Err(FrameError::CompatibilityRejected(
+                "clip: Invalid value 'inf' for dtype Int64".to_owned(),
+            ));
+        }
         let mut out = Vec::with_capacity(self.len());
         for i in 0..self.len() {
             let val = &self.column.values()[i];
@@ -162129,6 +162155,43 @@ mod tests {
         assert_eq!(
             result.index().labels(),
             &[10_i64.into(), 20_i64.into(), 30_i64.into(), 40_i64.into()]
+        );
+    }
+
+    #[test]
+    fn clip_with_series_integer_missing_bounds_raise_but_float_bounds_do_not_n8aqm() {
+        let index = vec![0_i64.into(), 1_i64.into(), 2_i64.into()];
+        let target = Series::from_values(
+            "target",
+            index.clone(),
+            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(10.0)],
+        )
+        .unwrap();
+        let integer_lower = Series::from_values(
+            "lower",
+            index.clone(),
+            vec![Scalar::Int64(2), Scalar::Null(NullKind::Null), Scalar::Int64(8)],
+        )
+        .unwrap();
+        let err = target.clip_with_series(Some(&integer_lower), None).unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(message)
+                if message.contains("Invalid value '-inf' for dtype Int64")
+        ));
+
+        // A naive fix that rejects every missing array bound would break the
+        // float-bound case: pandas can materialize its sentinel in float64.
+        let float_lower = Series::from_values(
+            "lower",
+            index,
+            vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN), Scalar::Float64(8.0)],
+        )
+        .unwrap();
+        let clipped = target.clip_with_series(Some(&float_lower), None).unwrap();
+        assert_eq!(
+            clipped.values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(5.0), Scalar::Float64(10.0)]
         );
     }
 

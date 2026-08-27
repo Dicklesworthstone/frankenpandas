@@ -5,8 +5,9 @@
   "operation": "series_clip",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "5379d0689062e1c438c3dae03fa6073c1ab15a162b8245d820a74c674ea68c3a",
-    "generated_at": "2026-05-19T22:36:03Z"
+    "oracle_script_sha256": "1469855ce1676eeee44afe439719e8057b6f2f064b27edd4fabe976a08db233f",
+    "generated_at": "2026-08-27T20:31:18Z",
+    "oracle_attestation": "error_agreement"
   },
   "left": {
     "name": "nums",
@@ -125,42 +126,5 @@
       }
     ]
   },
-  "expected_series": {
-    "index": [
-      {
-        "kind": "int64",
-        "value": 10
-      },
-      {
-        "kind": "int64",
-        "value": 20
-      },
-      {
-        "kind": "int64",
-        "value": 30
-      },
-      {
-        "kind": "int64",
-        "value": 40
-      }
-    ],
-    "values": [
-      {
-        "kind": "int64",
-        "value": 2
-      },
-      {
-        "kind": "int64",
-        "value": 4
-      },
-      {
-        "kind": "int64",
-        "value": 12
-      },
-      {
-        "kind": "int64",
-        "value": -1
-      }
-    ]
-  }
+  "expected_error_contains": "Invalid value '-inf' for dtype Int64"
 }
