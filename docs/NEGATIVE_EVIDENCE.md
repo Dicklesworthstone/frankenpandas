@@ -42370,3 +42370,72 @@ NO PERFORMANCE CLAIM. This is differential correctness against the live
 incumbent, which is why it was possible at all today — the host has been too
 loaded for a valid wall-time measurement for five turns, and correctness is
 load-immune.
+
+### 2026-08-27 cod-pandas — CLOSING 633fb on the INSTRUCTION basis: 1.866 instr/FMA measured, no clean wall-window obtainable on this fleet, and instruction REDUCTION is the wrong lever — the kernel with 1.73x fewer instructions is 1.45x slower [br-frankenpandas-633fb]
+
+633fb asks whether `df_dot`'s dim>=316 rows can be certified, and what to do
+about the incumbent's 64-thread arm. Answering it on the instruction basis,
+which needs no quiet host.
+
+**1. THE KERNEL, MEASURED.** `fp-bench df_dot` differenced 10k against 100k with
+`FP_DOT_SERIAL=1` holding one thread so the regime is constant:
+
+    trial 1   2,849,662,934 instr / 1,527,724,800 FMAs   1.865 instr/FMA
+    trial 2   2,850,687,213 instr / 1,527,724,800 FMAs   1.866 instr/FMA
+
+0.05% agreement. A pinned single-thread OpenBLAS reference reads 0.553-0.555,
+so the ratio is 3.37x. ⚠️ That reference is a DIAGNOSTIC: pinning the
+incumbent's threads cripples it, so it is not a vs-incumbent number and 633fb's
+option 2 (pin OMP_NUM_THREADS and re-baseline) is REFUSED on exactly that
+ground.
+
+**2. NO CLEAN WALL-TIME WINDOW EXISTS ON THIS FLEET.** `--host-readiness-probe`
+returned `verdict=blocked` on 81 consecutive attempts across 120 seconds, 7-28
+CPUs above the 0.200 busy fraction; peak loadavg observed today ranged 86 to 615.
+Five separate certification attempts were taken and VOIDED, one of which passed
+all three clauses and both A/A nulls while the host sat at loadavg 87.8-102.4.
+Waiting is not a strategy here: the load is other agents' builds, and it does not
+clear.
+
+**3. THE INCUMBENT BLOCKS ITS OWN INSTRUCTION COUNT TOO.** numpy `m.dot(m)`
+null-subtracted at dim=100 gave 0.208, 2.237 and 1.611 instr/FMA on three runs,
+and 105.154 at dim=316 — 995 billion instructions for a 9.5e9-FMA job.
+`blas_thread_server` spins a 64-thread pool whose instructions accrue with WALL
+TIME rather than work, so the subtraction's constant-baseline premise fails. The
+same pool made pandas' A/A null swing 0.85980-1.19331. ONE mechanism denies both
+metrics, so there is no vs-incumbent instruction ratio to be had either.
+
+**4. AND INSTRUCTION REDUCTION IS THE WRONG LEVER, WHICH IS THE PART THAT
+DECIDES THIS.** Measured directly on the kernels:
+
+    mode        instr/FMA   cycles/FMA   IPC
+    prepacked      1.835       0.346     5.31
+    axpy           1.062       0.503     2.11
+
+The AXPY kernel executes 1.73x FEWER instructions and takes 1.45x MORE cycles.
+The blocked kernel spends instructions to keep the output tile in registers and
+avoid re-streaming A per output column; that trade is the whole point of
+blocking. So "reduce instructions per FMA" would move this lane BACKWARDS, and
+the 3.37x figure is a description of the kernel, not a target. Anything landed
+against it would be a regression measured as a win.
+
+**Counted mechanism:** 1.835 against 1.062 instructions per FMA with cycles 0.346
+against 0.503 — the instruction ranking is INVERTED relative to cycles, so the
+candidate with the lower instruction count did not clear the required cycle
+threshold and the metric fails to order the candidates.
+
+**5. WHAT REMAINS, AND IT IS SMALL.** Tails cost 3.4% (dim 312 -> 316; 316
+divides neither MR=8 nor NR=6) and packing 2.2%. Neither is worth a lever.
+`objdump` shows 1562 ymm and ZERO vfmadd: the kernel uses separate mul and add
+ON PURPOSE, because that is what makes it bit-identical to the per-column path.
+Part of the distance to OpenBLAS is simply that OpenBLAS may fuse and the
+correctness doctrine says we may not.
+
+**CLOSING POSITION.** No source-addressable lever is identified on the
+instruction basis. The kernel is issue-bound at IPC 5.31, already blocked,
+already AVX2, and near its structural ceiling given the FMA prohibition. 633fb's
+measurement question is answered as far as this fleet permits; its decision
+question is answered NO — pinning the incumbent is refused because it cripples
+it. Re-open only with a genuinely quiet host or a dedicated box, and note that a
+wall-time row taken here needs a load bound as a GATE, not a recorded field
+(scripts/audit_banked_row_load.py).
