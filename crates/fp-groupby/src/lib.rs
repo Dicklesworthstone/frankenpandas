@@ -2691,7 +2691,7 @@ pub fn groupby_agg(
             try_groupby_mean_dense_int64_slices(raw_keys, raw_values, options.sort)
     {
         let out_column = Column::from_values(out_values)?;
-        return Ok(Series::new("mean", Index::new(out_index), out_column)?);
+        return Ok(Series::new(values.name(), Index::new(out_index), out_column)?);
     }
 
     let (key_vals, val_vals): (&[Scalar], &[Scalar]) =
@@ -2708,21 +2708,17 @@ pub fn groupby_agg(
         .as_ref()
         .map_or_else(|| values.column().dtype(), |(_, av)| av.dtype());
 
-    let agg_name = match func {
-        AggFunc::Sum => "sum",
-        AggFunc::Mean => "mean",
-        AggFunc::Count => "count",
-        AggFunc::Min => "min",
-        AggFunc::Max => "max",
-        AggFunc::First => "first",
-        AggFunc::Last => "last",
-        AggFunc::Std => "std",
-        AggFunc::Var => "var",
-        AggFunc::Median => "median",
-        AggFunc::Nunique => "nunique",
-        AggFunc::Prod => "prod",
-        AggFunc::Size => "size",
-    };
+    // pandas NAMES A SeriesGroupBy AGGREGATION AFTER THE SOURCE COLUMN, not
+    // after the function. FrankenPandas named it after the function, so
+    // `df.groupby(k)["value"].sum()` came back named "sum" where pandas gives
+    // "value" — a divergence on EVERY aggregation, invisible until the live
+    // oracle was actually reached (br-frankenpandas-live-oracle-passes-by-skip-l7r1p).
+    //
+    // MEASURED, live pandas 2.2.3, `df.groupby("k")["value"].<agg>().name`:
+    //   sum mean count first last max min median std var  -> "value"
+    //   size nunique prod                                  -> "value"
+    // Every one keeps the column name, so there is no per-function exception.
+    let agg_name = values.name();
 
     // Dense direct-address streaming fast path for bounded Int64 keys (folds
     // each group's values without hashing or collecting a per-group Vec).
@@ -5927,7 +5923,12 @@ mod tests {
             out.values(),
             &[Scalar::Float64(20.0), Scalar::Float64(30.0)]
         );
-        assert_eq!(out.name(), "mean");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "mean" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].mean().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
@@ -5945,7 +5946,12 @@ mod tests {
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(out.values(), &[Scalar::Int64(2), Scalar::Int64(2)]);
-        assert_eq!(out.name(), "count");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "count" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].count().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
@@ -5965,7 +5971,12 @@ mod tests {
         // pandas groupby.min() preserves source Int64 dtype (no Float64
         // promotion), matching the br-764ys first/last surgery.
         assert_eq!(out.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
-        assert_eq!(out.name(), "min");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "min" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].min().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
@@ -5984,7 +5995,12 @@ mod tests {
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         // pandas groupby.max() preserves source Int64 dtype.
         assert_eq!(out.values(), &[Scalar::Int64(30), Scalar::Int64(40)]);
-        assert_eq!(out.name(), "max");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "max" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].max().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
@@ -6164,7 +6180,12 @@ mod tests {
         // Per br-frankenpandas-764ys: pandas groupby.first() preserves
         // source Int64 dtype (no Float64 promotion).
         assert_eq!(out.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
-        assert_eq!(out.name(), "first");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "first" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].first().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
@@ -6184,7 +6205,12 @@ mod tests {
         // Per br-frankenpandas-764ys: pandas groupby.last() preserves
         // source Int64 dtype (no Float64 promotion).
         assert_eq!(out.values(), &[Scalar::Int64(30), Scalar::Int64(40)]);
-        assert_eq!(out.name(), "last");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "last" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].last().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
@@ -6978,7 +7004,12 @@ mod tests {
             _ => 0.0,
         };
         assert!((a_std - 200.0_f64.sqrt()).abs() < 1e-10, "a std={a_std}");
-        assert_eq!(out.name(), "std");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "std" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].std().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
@@ -7001,7 +7032,12 @@ mod tests {
             out.values(),
             &[Scalar::Float64(200.0), Scalar::Float64(200.0)]
         );
-        assert_eq!(out.name(), "var");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "var" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].var().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
@@ -7119,7 +7155,12 @@ mod tests {
             out.values(),
             &[Scalar::Float64(20.0), Scalar::Float64(10.0)]
         );
-        assert_eq!(out.name(), "median");
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p: this asserted
+        // "median" — the AGG function's name. MEASURED, live pandas 2.2.3,
+        // `df.groupby("k")["value"].median().name` is "value": pandas names a
+        // SeriesGroupBy result after the SOURCE COLUMN. The old expectation
+        // pinned our divergence, so it moves with the fix.
+        assert_eq!(out.name(), values.name());
     }
 
     #[test]
