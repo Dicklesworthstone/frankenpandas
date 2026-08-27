@@ -231,7 +231,20 @@ pub fn groupby_sum_with_options(
 ) -> Result<Series, GroupByError> {
     let (result, _trace) =
         groupby_sum_with_trace(keys, values, options, policy, ledger, exec_options)?;
-    Ok(result)
+    // NAME THE RESULT AFTER THE SOURCE COLUMN, as pandas does. The sum path has
+    // EIGHT separate `Series::new("sum", ...)` sites — dense-Int64, arena,
+    // global-allocator, Timedelta64, Utf8 and the generic emit — and most of
+    // them take `&[Scalar]` with no series to read a name from, so the fix that
+    // corrected `groupby_agg` (76efdb477) never reached any of them.
+    //
+    // Renaming once here is the single choke point every one of those arms
+    // returns through, and it is O(1): `Series::rename` rebuilds from a cloned
+    // Index and Column, both of which are Arc-backed refcount bumps, and it runs
+    // once per groupby call rather than per element.
+    //
+    // MEASURED, live pandas 2.2.3: `df.groupby("k")["value"].sum().name` is
+    // "value". br-frankenpandas-live-oracle-passes-by-skip-l7r1p.
+    Ok(result.rename(values.name())?)
 }
 
 fn groupby_sum_with_trace(

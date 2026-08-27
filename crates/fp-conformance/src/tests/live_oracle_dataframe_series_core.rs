@@ -2997,7 +2997,7 @@ fn live_oracle_series_between_basic() {
 #[test]
 fn live_oracle_series_between_inclusive_neither() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-BETWEEN-NEITHER",
@@ -3114,7 +3114,7 @@ fn live_oracle_series_between_with_nulls() {
 #[test]
 fn live_oracle_series_between_integers() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-BETWEEN-INTS",
@@ -19271,7 +19271,7 @@ fn live_oracle_dataframe_apply_nunique_axis0() {
 #[test]
 fn live_oracle_dataframe_apply_prod_axis1() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DFAPPLYPROD",
@@ -20080,7 +20080,7 @@ fn live_oracle_series_str_count_literal_basic() {
 #[test]
 fn live_oracle_series_str_encode_utf8() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-STRENCODE",
@@ -22523,7 +22523,7 @@ fn live_oracle_series_argmax_skipna_false_with_null() {
 #[test]
 fn live_oracle_dataframe_nlargest_keep_last() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DFNLARGEST-LAST",
@@ -22587,7 +22587,7 @@ fn live_oracle_dataframe_nlargest_keep_last() {
 #[test]
 fn live_oracle_dataframe_nsmallest_keep_last_with_ties() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DFNSMALLEST-LAST",
@@ -22651,7 +22651,7 @@ fn live_oracle_dataframe_nsmallest_keep_last_with_ties() {
 #[test]
 fn live_oracle_series_describe_string_dtype() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-SDESCRIBE-STR",
@@ -24706,7 +24706,7 @@ fn live_oracle_series_unique_strings() {
 #[test]
 fn live_oracle_dataframe_compare_identical() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DFCOMPARE-EQUAL",
@@ -25673,7 +25673,7 @@ fn live_oracle_series_str_rjust_width8() {
 #[test]
 fn live_oracle_dataframe_apply_product_axis1() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DFAPPLYPRODUCT",
@@ -28082,7 +28082,7 @@ fn live_oracle_series_rolling_sum_min_periods_2() {
 #[test]
 fn live_oracle_groupby_sum_int_keys() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-GBSUM-INT",
@@ -30348,7 +30348,7 @@ fn live_oracle_dataframe_explode_colon_ignore_index() {
 #[test]
 fn live_oracle_dataframe_compare_with_custom_result_names() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DFCOMPARE-NAMES",
@@ -31098,7 +31098,7 @@ fn live_oracle_dataframe_prod_with_nulls() {
 #[test]
 fn live_oracle_dataframe_idxmin_with_nulls() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DF-IDXMIN-NULLS",
@@ -31151,7 +31151,7 @@ fn live_oracle_dataframe_idxmin_with_nulls() {
 #[test]
 fn live_oracle_dataframe_idxmax_with_nulls() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DF-IDXMAX-NULLS",
@@ -32102,7 +32102,7 @@ fn live_oracle_dataframe_notnull_with_three_nulls() {
 #[test]
 fn live_oracle_series_value_counts_dropna_false() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-VC-DROPNA-F",
@@ -33180,7 +33180,7 @@ fn live_oracle_series_drop_duplicates_with_floats() {
 #[test]
 fn live_oracle_dataframe_pivot_table_count() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-DF-PVTBL-CNT",
@@ -33695,7 +33695,7 @@ fn live_oracle_series_str_lstrip_with_tabs() {
 #[test]
 fn live_oracle_series_to_frame_named() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-STOFRAME-NAMED",
@@ -33870,7 +33870,7 @@ fn live_oracle_series_to_timedelta_with_negatives() {
 #[test]
 fn live_oracle_series_to_timedelta_with_seconds() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-STOTD-SEC",
@@ -35550,7 +35550,7 @@ fn live_oracle_series_take_with_floats() {
 #[test]
 fn live_oracle_series_argsort_floats_with_ties() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-ARGSORT-TIES",
@@ -38483,7 +38483,7 @@ fn live_oracle_groupby_last_with_string_keys() {
 #[test]
 fn live_oracle_groupby_sum_with_float_values() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-GBSUM-FL",
@@ -39483,7 +39483,7 @@ fn live_oracle_series_rank_dense_method() {
 #[test]
 fn live_oracle_series_rank_descending() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-RANK-DESC",
@@ -39633,7 +39633,7 @@ fn live_oracle_series_rank_na_bottom() {
 #[test]
 fn live_oracle_series_sort_values_na_first() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-SORTVALS-NA-FIRST",
@@ -39968,7 +39968,7 @@ fn live_oracle_series_autocorr_lag3() {
 #[test]
 fn live_oracle_series_between_inclusive_left() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-BETWEEN-LEFT",
@@ -40024,7 +40024,7 @@ fn live_oracle_series_between_inclusive_left() {
 #[test]
 fn live_oracle_series_between_inclusive_right() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-BETWEEN-RIGHT",
