@@ -57779,13 +57779,43 @@ impl LazyDataFrameColumns {
         }
     }
 
+    /// Is `name` EXACTLY what `i64::to_string` would have produced for the
+    /// value it parses to?
+    ///
+    /// The resolver used to answer this by formatting the parsed label back
+    /// into a fresh `String` and comparing. That is a heap allocation and a
+    /// free per lookup, to check a property that is a byte scan — and a
+    /// transposed frame has one output column per SOURCE ROW, so the label
+    /// route pays it 1M times at the 1M fixture.
+    ///
+    /// `i64::from_str` accepts exactly an optional `+`/`-` followed by digits;
+    /// it rejects whitespace, underscores and empty input. So the forms it
+    /// accepts that `to_string` would never emit are precisely: a leading `+`,
+    /// a leading zero on a multi-digit run (`007`), and `-0`.
+    fn is_canonical_i64_label(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        let negative = bytes.first() == Some(&b'-');
+        let digits = if negative { &bytes[1..] } else { bytes };
+        if digits.is_empty() {
+            return false;
+        }
+        if bytes[0] == b'+' {
+            return false;
+        }
+        if digits.len() > 1 && digits[0] == b'0' {
+            return false;
+        }
+        // `-0` parses to 0, which renders as `0`.
+        !(negative && digits == b"0")
+    }
+
     fn homogeneous_transpose_column_position(
         column_start: i64,
         output_columns: usize,
         name: &str,
     ) -> Option<usize> {
         let label = name.parse::<i64>().ok()?;
-        if label.to_string() != name {
+        if !Self::is_canonical_i64_label(name) {
             return None;
         }
         let offset = i128::from(label) - i128::from(column_start);
@@ -186626,6 +186656,68 @@ mod tests {
             after_both < ROWS,
             "the untouched middle must NOT be materialised: {after_both} of {ROWS}"
         );
+    }
+
+    /// The label resolver replaced a `to_string()` round trip with a byte scan.
+    /// The two must agree on EVERY input, especially the forms `i64::from_str`
+    /// tolerates but `to_string` never emits — a disagreement there would make
+    /// a transposed frame answer to a label that is not its own.
+    #[test]
+    fn canonical_i64_label_matches_the_to_string_round_trip() {
+        let mut cases: Vec<String> = Vec::new();
+        for v in [
+            i64::MIN,
+            i64::MIN + 1,
+            -1_000_000,
+            -1000,
+            -100,
+            -10,
+            -9,
+            -1,
+            0,
+            1,
+            9,
+            10,
+            100,
+            1000,
+            1_000_000,
+            i64::MAX - 1,
+            i64::MAX,
+        ] {
+            cases.push(v.to_string());
+        }
+        // Accepted by the parser, never emitted by `to_string`.
+        for s in [
+            "+0",
+            "+1",
+            "+007",
+            "007",
+            "-007",
+            "-0",
+            "-00",
+            "00",
+            "0000",
+            "+9223372036854775807",
+        ] {
+            cases.push((*s).to_owned());
+        }
+        // Rejected by the parser. The resolver never reaches the scan for these,
+        // but the combined predicate must still refuse them.
+        for s in ["", "-", "+", " 1", "1 ", "1_0", "abc", "1.0", "\u{0663}"] {
+            cases.push((*s).to_owned());
+        }
+        for v in -2000i64..2000 {
+            cases.push(v.to_string());
+        }
+        for case in cases {
+            let expected = case
+                .parse::<i64>()
+                .map(|label| label.to_string() == case)
+                .unwrap_or(false);
+            let got = case.parse::<i64>().is_ok()
+                && LazyDataFrameColumns::is_canonical_i64_label(&case);
+            assert_eq!(got, expected, "case {case:?}");
+        }
     }
 
     /// The page gather fills its buffer directly inside the `Arc` and cycles
