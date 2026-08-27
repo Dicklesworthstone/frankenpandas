@@ -1,3 +1,6 @@
+// Helpers kept alongside this benchmark for the variants it can be switched to.
+#![allow(dead_code)]
+
 //! Fresh-frame-per-iteration bench: what would eager block consolidation cost
 //! the ORDINARY op surface? (br-frankenpandas-uza04)
 //!

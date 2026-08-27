@@ -1,3 +1,9 @@
+// Index-arithmetic loops walk several parallel slices by one counter here; an
+// iterator rewrite would obscure the arithmetic without changing behaviour.
+#![allow(clippy::needless_range_loop)]
+// A few wide tuple types in the frame internals; naming them would not aid clarity.
+#![allow(clippy::type_complexity)]
+
 #![feature(portable_simd)]
 #![forbid(unsafe_code)]
 #![warn(rustdoc::broken_intra_doc_links)]
@@ -6014,6 +6020,8 @@ fn range_index(len: usize) -> Result<Index, FrameError> {
     Ok(Index::new_known_unique_int64_unit_range(0, len))
 }
 
+// Exercised only by the inline test module below.
+#[cfg(test)]
 #[inline]
 fn boolean_mask_positions(mask: &[bool]) -> (Vec<usize>, Option<AffineSelectionCertificate>) {
     match boolean_mask_selection(mask) {
@@ -6315,6 +6323,8 @@ fn boolean_mask_every_other_affine_certificate(
     None
 }
 
+// Exercised only by the inline test module below.
+#[cfg(test)]
 #[inline]
 fn boolean_mask_matches_repeated_octet(mask: &[bool], pattern: &[bool; 8]) -> bool {
     let (chunks, remainder) = mask.as_chunks::<8>();

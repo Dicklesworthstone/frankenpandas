@@ -1,3 +1,7 @@
+// MultiIndex level walks index several parallel arrays by the same counter; rewriting to
+// iterators would obscure the level arithmetic without changing behaviour.
+#![allow(clippy::needless_range_loop)]
+
 #![forbid(unsafe_code)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
@@ -72,6 +76,7 @@
 //! - **fp-frame** stores an `Index` per DataFrame / Series and uses
 //!   the alignment algebra here for binary ops.
 //! - **fp-join** consumes alignment plans for merge-style joins.
+
 
 use std::{
     borrow::Cow,
