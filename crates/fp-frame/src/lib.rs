@@ -2172,7 +2172,10 @@ impl<'a> IsinIndex<'a> {
                     return true;
                 }
                 let as_float = as_int as f64;
-                self.float_bits.contains(&as_float.to_bits())
+                if self.float_bits.contains(&as_float.to_bits()) {
+                    return true;
+                }
+                false
             }
             Scalar::Utf8(s) => self.utf8s.contains(s.as_str()),
             Scalar::Timedelta64(t) => self.timedeltas.contains(t),
@@ -30510,7 +30513,8 @@ impl Ewm<'_> {
                     } else {
                         old_wt *= old_wt_factor;
                         if weighted_avg != x {
-                            weighted_avg = (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
+                            weighted_avg =
+                                (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
                         }
                         if adjust {
                             old_wt += new_wt;
@@ -30565,7 +30569,8 @@ impl Ewm<'_> {
                     } else {
                         old_wt *= old_wt_factor;
                         if weighted_avg != x {
-                            weighted_avg = (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
+                            weighted_avg =
+                                (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
                         }
                         if adjust {
                             old_wt += new_wt;
@@ -46233,7 +46238,10 @@ impl StringAccessor<'_> {
         if let Some((bytes, offsets)) = column.as_utf8_contiguous()
             && bytes.is_ascii()
         {
-            let out: Vec<i64> = offsets.windows(2).map(|w| (w[1] - w[0]) as i64).collect();
+            let out: Vec<i64> = offsets
+                .windows(2)
+                .map(|w| (w[1] - w[0]) as i64)
+                .collect();
             let index = self.series.index().clone();
             return Series::new(
                 self.series.name(),
@@ -57221,19 +57229,13 @@ impl LazyTransposeFramePlan {
             // one allocation for its columns, zero per-slot OnceLocks.
             if let Some(buffer) = self.page_contiguous_buffer(page_index, page_start, page_len) {
                 let ncols = self.source_columns.len();
-                // One lazily-built Scalar view for the WHOLE page, shared by all
-                // its columns. A caller walking every column reaches `values()`
-                // once per column; with a private view that is an allocation, an
-                // OnceLock init and a free apiece.
-                let shared_values = Arc::new(OnceLock::new());
                 return LazyTransposeColumnSlotPage::Contiguous(
                     (0..page_len)
                         .map(|slot| {
-                            Column::from_f64_shared_window_with_shared_values(
+                            Column::from_f64_shared_window(
                                 Arc::clone(&buffer),
                                 slot * ncols,
                                 ncols,
-                                Arc::clone(&shared_values),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -57295,7 +57297,7 @@ impl LazyTransposeFramePlan {
             return cached.clone();
         }
         let built = self.build_page_contiguous_buffer(page_start, page_len);
-        slots[page_index].get_or_init(|| built).clone()
+        Some(slots[page_index].get_or_init(|| built).clone()?)
     }
 
     fn build_page_contiguous_buffer(
@@ -57309,11 +57311,6 @@ impl LazyTransposeFramePlan {
             F64(&'a [f64]),
             I64(&'a [i64]),
         }
-        // Narrow every source to EXACTLY this page's window while resolving it.
-        // The fill below then walks slices whose length it already knows, so the
-        // per-element `get(row)?` disappears: at 1M source rows that bounds check
-        // ran 10M times to re-answer what one check per source per page settles.
-        let page_end = page_start.checked_add(page_len)?;
         let mut sources: Vec<Src<'_>> = Vec::with_capacity(self.source_columns.len());
         for source in self.source_columns.iter() {
             if let Some(values) = source.as_f64_slice() {
@@ -57327,39 +57324,17 @@ impl LazyTransposeFramePlan {
             }
         }
         let ncols = sources.len();
-        // Build the page buffer DIRECTLY inside its `Arc`. `Arc::from(vec)` cannot
-        // adopt a `Vec`'s allocation — the refcount header has to sit in front of
-        // the data — so the old path wrote the page once into the `Vec` and then
-        // copied the whole thing again: 160 MB written and 80 MB read across the
-        // frame at 1M rows, of which the copy alone profiled at 2.80% of
-        // `df_transpose_full_materialize_positional`. `repeat_with(..).take(n)` is
-        // `TrustedLen`, so this allocates once, exactly, and writes each cell a
-        // single time — 80 MB written and nothing read back.
-        //
-        // The cursor walks sources by ITERATOR rather than by index on purpose: a
-        // `sources[cursor]` would reintroduce a bounds check per element, which is
-        // the cost this rewrite exists to remove.
-        let total = page_len.checked_mul(ncols)?;
-        let mut cursor = sources.iter();
-        let mut offset = 0usize;
-        let buffer: std::sync::Arc<[f64]> = std::iter::repeat_with(|| {
-            let source = match cursor.next() {
-                Some(source) => source,
-                None => {
-                    // Row finished: step down the window and restart the cycle.
-                    offset += 1;
-                    cursor = sources.iter();
-                    cursor.next().expect("a page with cells has >= 1 source")
+        let mut buffer: Vec<f64> = Vec::with_capacity(page_len.checked_mul(ncols)?);
+        for offset in 0..page_len {
+            let row = page_start + offset;
+            for source in &sources {
+                match source {
+                    Src::F64(values) => buffer.push(*values.get(row)?),
+                    Src::I64(values) => buffer.push(*values.get(row)? as f64),
                 }
-            };
-            match source {
-                Src::F64(values) => values[offset],
-                Src::I64(values) => values[offset] as f64,
             }
-        })
-        .take(total)
-        .collect();
-        Some(buffer)
+        }
+        Some(std::sync::Arc::from(buffer))
     }
 
     fn cached_column_if_present(&self, output_column: usize) -> Option<&Column> {
@@ -57781,43 +57756,13 @@ impl LazyDataFrameColumns {
         }
     }
 
-    /// Is `name` EXACTLY what `i64::to_string` would have produced for the
-    /// value it parses to?
-    ///
-    /// The resolver used to answer this by formatting the parsed label back
-    /// into a fresh `String` and comparing. That is a heap allocation and a
-    /// free per lookup, to check a property that is a byte scan — and a
-    /// transposed frame has one output column per SOURCE ROW, so the label
-    /// route pays it 1M times at the 1M fixture.
-    ///
-    /// `i64::from_str` accepts exactly an optional `+`/`-` followed by digits;
-    /// it rejects whitespace, underscores and empty input. So the forms it
-    /// accepts that `to_string` would never emit are precisely: a leading `+`,
-    /// a leading zero on a multi-digit run (`007`), and `-0`.
-    fn is_canonical_i64_label(name: &str) -> bool {
-        let bytes = name.as_bytes();
-        let negative = bytes.first() == Some(&b'-');
-        let digits = if negative { &bytes[1..] } else { bytes };
-        if digits.is_empty() {
-            return false;
-        }
-        if bytes[0] == b'+' {
-            return false;
-        }
-        if digits.len() > 1 && digits[0] == b'0' {
-            return false;
-        }
-        // `-0` parses to 0, which renders as `0`.
-        !(negative && digits == b"0")
-    }
-
     fn homogeneous_transpose_column_position(
         column_start: i64,
         output_columns: usize,
         name: &str,
     ) -> Option<usize> {
         let label = name.parse::<i64>().ok()?;
-        if !Self::is_canonical_i64_label(name) {
+        if label.to_string() != name {
             return None;
         }
         let offset = i128::from(label) - i128::from(column_start);
@@ -57965,9 +57910,10 @@ impl LazyDataFrameColumns {
             else {
                 unreachable!();
             };
-            let columns = materialized
-                .into_inner()
-                .map_or_else(|| store.materialize_columns(), Arc::unwrap_or_clone);
+            let columns = materialized.into_inner().map_or_else(
+                || store.materialize_columns(),
+                Arc::unwrap_or_clone,
+            );
             *self = Self::Eager(columns);
         }
         let Self::Eager(columns) = self else {
@@ -57991,9 +57937,10 @@ impl LazyDataFrameColumns {
             Self::Float64Block {
                 store,
                 materialized,
-            } => materialized
-                .into_inner()
-                .map_or_else(|| store.materialize_columns(), Arc::unwrap_or_clone),
+            } => materialized.into_inner().map_or_else(
+                || store.materialize_columns(),
+                Arc::unwrap_or_clone,
+            ),
         }
     }
 }
@@ -117456,7 +117403,10 @@ mod tests {
         fn check(label: &str, strings: Vec<String>) {
             let n = strings.len();
             let index: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::from).collect();
-            let values: Vec<Scalar> = strings.iter().map(|s| Scalar::Utf8(s.clone())).collect();
+            let values: Vec<Scalar> = strings
+                .iter()
+                .map(|s| Scalar::Utf8(s.clone().into()))
+                .collect();
             let series = Series::from_values("x", index, values).unwrap();
             let got = series.str().len().unwrap();
             for (i, s) in strings.iter().enumerate() {
@@ -117491,7 +117441,9 @@ mod tests {
             "fixture must actually contain non-ASCII or this arm is vacuous"
         );
         assert!(
-            multibyte.iter().any(|s| s.chars().count() != s.len()),
+            multibyte
+                .iter()
+                .any(|s| s.chars().count() != s.len()),
             "fixture must contain a string whose char count differs from its byte count"
         );
         check("multibyte", multibyte);
@@ -186627,7 +186579,8 @@ mod tests {
         )
         .unwrap();
         let transposed = source.transpose().unwrap();
-        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } = &transposed.columns else {
+        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } = &transposed.columns
+        else {
             panic!("expected lazy transpose storage");
         };
         assert_eq!(plan.initialized_column_slots(), 0);
@@ -186650,172 +186603,6 @@ mod tests {
             after_both < ROWS,
             "the untouched middle must NOT be materialised: {after_both} of {ROWS}"
         );
-    }
-
-    /// The label resolver replaced a `to_string()` round trip with a byte scan.
-    /// The two must agree on EVERY input, especially the forms `i64::from_str`
-    /// tolerates but `to_string` never emits — a disagreement there would make
-    /// a transposed frame answer to a label that is not its own.
-    #[test]
-    fn canonical_i64_label_matches_the_to_string_round_trip() {
-        let mut cases: Vec<String> = Vec::new();
-        for v in [
-            i64::MIN,
-            i64::MIN + 1,
-            -1_000_000,
-            -1000,
-            -100,
-            -10,
-            -9,
-            -1,
-            0,
-            1,
-            9,
-            10,
-            100,
-            1000,
-            1_000_000,
-            i64::MAX - 1,
-            i64::MAX,
-        ] {
-            cases.push(v.to_string());
-        }
-        // Accepted by the parser, never emitted by `to_string`.
-        for s in [
-            "+0",
-            "+1",
-            "+007",
-            "007",
-            "-007",
-            "-0",
-            "-00",
-            "00",
-            "0000",
-            "+9223372036854775807",
-        ] {
-            cases.push((*s).to_owned());
-        }
-        // Rejected by the parser. The resolver never reaches the scan for these,
-        // but the combined predicate must still refuse them.
-        for s in ["", "-", "+", " 1", "1 ", "1_0", "abc", "1.0", "\u{0663}"] {
-            cases.push((*s).to_owned());
-        }
-        for v in -2000i64..2000 {
-            cases.push(v.to_string());
-        }
-        for case in cases {
-            let expected = case
-                .parse::<i64>()
-                .map(|label| label.to_string() == case)
-                .unwrap_or(false);
-            let got = case.parse::<i64>().is_ok()
-                && LazyDataFrameColumns::is_canonical_i64_label(&case);
-            assert_eq!(got, expected, "case {case:?}");
-        }
-    }
-
-    /// The page gather fills its buffer directly inside the `Arc` and cycles
-    /// sources by ITERATOR rather than by index, so a cursor bug would land
-    /// values in the wrong row or the wrong column instead of failing loudly.
-    /// Compare against the eager reference across page boundaries and across
-    /// BOTH match arms — the i64 sources reach the buffer through a widening
-    /// arm the f64 ones never touch, and a mixed frame takes both inside a
-    /// single page.
-    #[test]
-    fn lazy_transpose_page_gather_matches_the_eager_reference() {
-        for rows in [
-            0usize,
-            1,
-            7,
-            crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN - 1,
-            crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN,
-            crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN + 1,
-            2 * crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN + 3,
-        ] {
-            for ncols in [1usize, 2, 5] {
-                let mut f64_columns = BTreeMap::new();
-                let mut i64_columns = BTreeMap::new();
-                let mut mixed_columns = BTreeMap::new();
-                let mut order = Vec::with_capacity(ncols);
-                for c in 0..ncols {
-                    let name = format!("c{c}");
-                    let f64_values: Vec<f64> =
-                        (0..rows).map(|r| (r * ncols + c) as f64 - 3.5).collect();
-                    let i64_values: Vec<i64> =
-                        (0..rows).map(|r| (r * ncols + c) as i64 - 3).collect();
-                    f64_columns.insert(name.clone(), Column::from_f64_values(f64_values.clone()));
-                    i64_columns.insert(name.clone(), Column::from_i64_values(i64_values.clone()));
-                    mixed_columns.insert(
-                        name.clone(),
-                        if c % 2 == 0 {
-                            Column::from_f64_values(f64_values)
-                        } else {
-                            Column::from_i64_values(i64_values)
-                        },
-                    );
-                    order.push(name);
-                }
-                // An all-Int64 frame transposes to an Int64 frame, and
-                // `page_contiguous_buffer` serves Float64 output only — so that
-                // case runs the per-slot builder by design and must NOT assert the
-                // contiguous witness. The MIXED frame is what covers the gather's
-                // i64-widening arm: f64 + i64 sources promote to Float64 output,
-                // so both match arms run inside one page.
-                for (label, columns, contiguous) in [
-                    ("f64", f64_columns, true),
-                    ("i64", i64_columns, false),
-                    ("mixed", mixed_columns, true),
-                ] {
-                    let source = DataFrame::new_with_column_order(
-                        Index::new_known_unique_int64_unit_range(0, rows),
-                        columns,
-                        order.clone(),
-                    )
-                    .unwrap();
-                    let lazy = source.transpose().unwrap();
-                    let eager = source.transpose_materialized().unwrap();
-                    assert_eq!(
-                        lazy.num_columns(),
-                        eager.num_columns(),
-                        "{label} rows={rows} ncols={ncols}"
-                    );
-                    for position in 0..lazy.num_columns() {
-                        let got = lazy.column_at(position).expect("lazy output column");
-                        let want = eager.column_at(position).expect("eager output column");
-                        assert_eq!(
-                            got.values(),
-                            want.values(),
-                            "{label} rows={rows} ncols={ncols} position={position}"
-                        );
-                    }
-
-                    // NON-VACUITY. Comparing two frames proves nothing if
-                    // `transpose()` quietly handed back eager storage, or if the
-                    // plan fell back to the per-slot builder — either way the
-                    // rewritten gather would never run and this test would still
-                    // be green. Witness that the CONTIGUOUS page path is the one
-                    // that produced the values compared above.
-                    if rows > 0 && contiguous {
-                        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } =
-                            &lazy.columns
-                        else {
-                            panic!(
-                                "{label} rows={rows} ncols={ncols}: expected lazy transpose \
-                                 storage"
-                            );
-                        };
-                        assert!(
-                            matches!(
-                                plan.column_slot_page_slots()[0].get(),
-                                Some(crate::LazyTransposeColumnSlotPage::Contiguous(_))
-                            ),
-                            "{label} rows={rows} ncols={ncols}: the contiguous page gather \
-                             must be the path under test"
-                        );
-                    }
-                }
-            }
-        }
     }
 
     #[cfg(feature = "lazy-transpose-view")]
@@ -205807,7 +205594,11 @@ mod transpose_row_prealloc_uza04 {
             &[Scalar::Float64(7.0), Scalar::Float64(1.0)]
         );
         assert!(
-            transposed.column_at(1).expect("second row").values()[1].is_missing(),
+            transposed
+                .column_at(1)
+                .expect("second row")
+                .values()[1]
+                .is_missing(),
             "a NaN source cell must bypass the unchecked typed-row constructor"
         );
     }
@@ -205993,11 +205784,7 @@ mod ewm_mean_loop_shape_uza04 {
                     .mean()
                     .expect("mean");
                 let expected = reference_ewm_mean(&data, alpha, adjust, 0);
-                assert_bits_match(
-                    &actual,
-                    &expected,
-                    &format!("f64 adjust={adjust} alpha={alpha}"),
-                );
+                assert_bits_match(&actual, &expected, &format!("f64 adjust={adjust} alpha={alpha}"));
             }
         }
     }
@@ -206013,11 +205800,7 @@ mod ewm_mean_loop_shape_uza04 {
             .ewm_with_options(None, Some(0.3), true, 0)
             .mean()
             .expect("mean");
-        assert_bits_match(
-            &actual,
-            &reference_ewm_mean(&data, 0.3, true, 0),
-            "equal-run",
-        );
+        assert_bits_match(&actual, &reference_ewm_mean(&data, 0.3, true, 0), "equal-run");
     }
 
     /// min_periods drives the NaN prefix, which the collect writes per element
@@ -206298,11 +206081,7 @@ mod mixed_dense_group_order_uza04 {
             .expect("sum");
 
         let (want_sparse_labels, want_sparse_sums) = reference(&sk1, &sk2, &sv);
-        assert_eq!(
-            want_sparse_labels.len(),
-            20,
-            "sparse: 20 occupied of 400 slots"
-        );
+        assert_eq!(want_sparse_labels.len(), 20, "sparse: 20 occupied of 400 slots");
         assert_eq!(flat_labels(&sparse), want_sparse_labels);
         assert_eq!(values(&sparse, "v"), want_sparse_sums);
 
