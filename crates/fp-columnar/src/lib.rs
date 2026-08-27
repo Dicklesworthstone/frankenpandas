@@ -450,6 +450,28 @@ impl ValidityMask {
         (self.words[idx / 64] >> (idx % 64)) & 1 == 1
     }
 
+    /// The packed words, when this mask is PLAIN word-backed — neither the
+    /// all-valid sentinel nor range-encoded.
+    ///
+    /// [`Self::get`] re-decides the mask's SHAPE on every call: a bounds check,
+    /// an all-valid-sentinel test (three loads), a range-encoding test that can
+    /// binary-search, and only then the word lookup. All of that is
+    /// loop-invariant, so a gather calling `get` per row pays it per row —
+    /// ~1M times for a 100k x 10 frame. A caller that hoists this out of its
+    /// element loop can do the bit test inline as
+    /// `(words[i / 64] >> (i % 64)) & 1`, which is exactly the branch `get`
+    /// would have reached.
+    ///
+    /// Callers must still satisfy `get`'s bounds rule themselves: this is only
+    /// equivalent for indices below [`Self::len`].
+    #[must_use]
+    pub fn packed_words(&self) -> Option<&[u64]> {
+        if self.is_all_valid_sentinel() || self.invalid_ranges.is_some() {
+            return None;
+        }
+        Some(&self.words)
+    }
+
     pub fn set(&mut self, idx: usize, value: bool) {
         if idx >= self.len {
             return;
@@ -14011,11 +14033,42 @@ impl Column {
         if let Some(src) = typed_f64 {
             let mut data = Vec::with_capacity(n);
             let mut words = vec![0_u64; n.div_ceil(64)];
-            for (out_idx, &pos) in positions.iter().enumerate() {
-                let x = src[pos];
-                data.push(x);
-                if self.validity.get(pos) && !x.is_nan() {
-                    words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+            // HOIST THE MASK SHAPE, BATCH THE OUTPUT WORD. `validity.get(pos)`
+            // re-decides sentinel-vs-ranges-vs-words on every row (see
+            // `ValidityMask::packed_words`), and the output word was
+            // read-modify-written per present row. Both are loop-invariant work
+            // paid per element: profiled as `take_positions` 35.21% of
+            // `drop_duplicates @100k` at 10% NaN, a lane that costs 519.4us on
+            // clean float64 and 2812.8us here.
+            //
+            // Bit-identical: `packed_words` returns `Some` only when `get` would
+            // have reached its final word lookup, and the equal-length guard
+            // means `get`'s `idx >= len` arm is unreachable for these positions —
+            // `src[pos]` on the line above already indexes the same length, so an
+            // out-of-range position panics identically either way.
+            match self.validity.packed_words() {
+                Some(source_words) if src.len() == self.validity.len() => {
+                    for (word_index, chunk) in positions.chunks(64).enumerate() {
+                        let mut word = 0_u64;
+                        for (bit, &pos) in chunk.iter().enumerate() {
+                            let x = src[pos];
+                            data.push(x);
+                            let valid = (source_words[pos / 64] >> (pos % 64)) & 1 == 1;
+                            if valid && !x.is_nan() {
+                                word |= 1_u64 << bit;
+                            }
+                        }
+                        words[word_index] = word;
+                    }
+                }
+                _ => {
+                    for (out_idx, &pos) in positions.iter().enumerate() {
+                        let x = src[pos];
+                        data.push(x);
+                        if self.validity.get(pos) && !x.is_nan() {
+                            words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                        }
+                    }
                 }
             }
             return Self::from_f64_values_with_validity(data, ValidityMask::from_words(words, n));
@@ -31448,6 +31501,52 @@ mod cached_parallelism_tests {
         let first = cached_available_parallelism();
         for _ in 0..64 {
             assert_eq!(cached_available_parallelism(), first);
+        }
+    }
+}
+
+#[cfg(test)]
+mod validity_packed_words_uza04 {
+    use super::*;
+
+    /// `packed_words` must return `Some` EXACTLY when `get` would reach its word
+    /// lookup, and the inline bit test must then agree with `get` on every index.
+    /// A disagreement would silently flip a row's missingness in every gather
+    /// that hoists it.
+    #[test]
+    fn packed_words_agrees_with_get_on_every_index() {
+        // all-valid sentinel: no words to hand out
+        let sentinel = ValidityMask::all_valid(200);
+        assert!(sentinel.packed_words().is_none(), "sentinel must decline");
+        for i in 0..200 {
+            assert!(sentinel.get(i));
+        }
+
+        // A fully-set word pattern NORMALISES to the sentinel in `from_words`,
+        // so it too must decline — that is the contract, not a gap.
+        let mut full = vec![0_u64; 2];
+        for i in 0..128usize {
+            full[i / 64] |= 1_u64 << (i % 64);
+        }
+        assert!(
+            ValidityMask::from_words(full, 128).packed_words().is_none(),
+            "an all-valid word pattern normalises to the sentinel"
+        );
+
+        // plain word-backed, spanning a word boundary and a partial tail.
+        // len >= 2 so index 1 is always UNSET and the mask cannot normalise.
+        for len in [2usize, 63, 64, 65, 200] {
+            let mut words = vec![0_u64; len.div_ceil(64)];
+            for i in (0..len).step_by(3) {
+                words[i / 64] |= 1_u64 << (i % 64);
+            }
+            let mask = ValidityMask::from_words(words, len);
+            let packed = mask.packed_words().expect("word-backed mask must expose words");
+            for i in 0..len {
+                let inline = (packed[i / 64] >> (i % 64)) & 1 == 1;
+                assert_eq!(inline, mask.get(i), "len={len} idx={i}");
+                assert_eq!(inline, i % 3 == 0, "len={len} idx={i}");
+            }
         }
     }
 }
