@@ -64010,7 +64010,12 @@ impl DataFrame {
         if selected_column_refs.len() == 1
             && let Some((data, validity)) = selected_column_refs[0].as_f64_slice_with_validity()
         {
-            return Ok(Self::duplicated_single_f64(data, validity, keep));
+            return Ok(Self::duplicated_single_f64(
+                data,
+                validity,
+                selected_column_refs[0].nan_missing_exact(),
+                keep,
+            ));
         }
 
         // Single all-valid Int64 column fast path (BlackThrush): same as the
@@ -64414,17 +64419,77 @@ impl DataFrame {
     fn duplicated_single_f64(
         data: &[f64],
         validity: &fp_columnar::ValidityMask,
+        nan_missing_exact: bool,
         keep: DuplicateKeep,
     ) -> Vec<bool> {
         let n = data.len();
         let mut duplicated = vec![false; n];
+
+        // PRESENCE AS A BITMAP, RESOLVED ONCE.
+        //
+        // Every arm below asked `validity.get(i) && !data[i].is_nan()` PER ROW.
+        // `ValidityMask::get` is an out-of-line call that re-decides
+        // sentinel-vs-ranges-vs-words on every call, so the cost of that question
+        // depends on the mask's SHAPE rather than on the work: a clean column hits
+        // the all-valid sentinel branch, a column with any missing value takes the
+        // word path. Measured on `drop_duplicates @100k`: 533.7us on clean float64
+        // against 2623.2us at 10% NaN — 4.9x — even though the NaN column does
+        // FEWER hash inserts, because 10% of its rows collapse into the missing
+        // class instead of being probed. The hash was never the difference.
+        //
+        // Under `nan_missing_exact` the column's validity IS `!is_nan`, so the
+        // presence bitmap is the mask's own words and there is nothing to derive.
+        // That covers the clean case too (all-valid sentinel => all ones).
+        let words = n.div_ceil(64);
+        let present: Vec<u64> = if nan_missing_exact {
+            match validity.packed_words() {
+                Some(source) => source.to_vec(),
+                // Sentinel all-valid, or range-encoded with nothing to borrow.
+                None if validity.all() => vec![u64::MAX; words],
+                None => (0..words)
+                    .map(|w| {
+                        let base = w * 64;
+                        let mut word = 0_u64;
+                        for bit in 0..64.min(n - base) {
+                            if validity.get(base + bit) {
+                                word |= 1_u64 << bit;
+                            }
+                        }
+                        word
+                    })
+                    .collect(),
+            }
+        } else {
+            // No witness: derive `valid & !nan` word-at-a-time rather than asking
+            // per row. `x == x` is false for NaN alone and lowers to a compare.
+            let packed = validity.packed_words();
+            (0..words)
+                .map(|w| {
+                    let base = w * 64;
+                    let hi = 64.min(n - base);
+                    let mut word = 0_u64;
+                    for bit in 0..hi {
+                        let i = base + bit;
+                        let valid = match packed {
+                            Some(source) => (source[i / 64] >> (i % 64)) & 1 == 1,
+                            None => validity.get(i),
+                        };
+                        if valid && data[i] == data[i] {
+                            word |= 1_u64 << bit;
+                        }
+                    }
+                    word
+                })
+                .collect()
+        };
+        let is_present = |i: usize| (present[i / 64] >> (i % 64)) & 1 == 1;
         match keep {
             DuplicateKeep::First | DuplicateKeep::Last => {
                 let mut seen: FxHashMap<u64, ()> =
                     FxHashMap::with_capacity_and_hasher(n, Default::default());
                 let mut seen_missing = false;
                 let mark = |i: usize, seen: &mut FxHashMap<u64, ()>, seen_missing: &mut bool| {
-                    if validity.get(i) && !data[i].is_nan() {
+                    if is_present(i) {
                         seen.insert(data[i].to_bits(), ()).is_some()
                     } else {
                         let was = *seen_missing;
@@ -64449,14 +64514,14 @@ impl DataFrame {
                     FxHashMap::with_capacity_and_hasher(n, Default::default());
                 let mut missing_count: u32 = 0;
                 for (i, value) in data.iter().enumerate().take(n) {
-                    if validity.get(i) && !value.is_nan() {
+                    if is_present(i) {
                         *counts.entry(value.to_bits()).or_insert(0) += 1;
                     } else {
                         missing_count += 1;
                     }
                 }
                 for (i, dup) in duplicated.iter_mut().enumerate() {
-                    *dup = if validity.get(i) && !data[i].is_nan() {
+                    *dup = if is_present(i) {
                         counts.get(&data[i].to_bits()).copied().unwrap_or(0) > 1
                     } else {
                         missing_count > 1
@@ -99015,6 +99080,95 @@ mod tests {
                 want_kurt.to_bits(),
                 "len={len}: fused m2/m4 must be BITWISE equal to the powi form"
             );
+        }
+    }
+
+    /// `duplicated_single_f64` now resolves presence ONCE into a bitmap, by two
+    /// different routes: borrow the mask's words when the column carries the
+    /// `nan_missing_exact` witness, otherwise derive `valid & !nan`.
+    ///
+    /// Every existing fixture is built by `from_f64_values`, which SETS that
+    /// witness — so they all take the borrow route and the derive route has no
+    /// coverage at all. `from_f64_values_with_validity` withholds the witness and
+    /// can put finite data at an invalid slot and NaN at a valid one, which are
+    /// exactly the two shapes where the routes could disagree.
+    #[test]
+    fn duplicated_single_f64_agrees_on_both_presence_routes() {
+        for len in [5usize, 64, 70, 130] {
+            let data: Vec<f64> = (0..len)
+                .map(|i| match i % 5 {
+                    0 => f64::NAN, // NaN at a slot the mask calls VALID
+                    1 => 7.0,      // finite at a slot the mask calls INVALID
+                    _ => ((i % 3) as f64) * 1.5,
+                })
+                .collect();
+            let mut words = vec![0_u64; len.div_ceil(64)];
+            for i in 0..len {
+                if i % 5 != 1 {
+                    words[i / 64] |= 1_u64 << (i % 64);
+                }
+            }
+            let hand = Column::from_f64_values_with_validity(
+                data.clone(),
+                fp_columnar::ValidityMask::from_words(words, len),
+            );
+            assert!(
+                !hand.nan_missing_exact(),
+                "len={len}: hand-built mask must NOT carry the witness, or this                  test silently re-checks the borrow route"
+            );
+
+            for keep in [
+                DuplicateKeep::First,
+                DuplicateKeep::Last,
+                DuplicateKeep::None,
+            ] {
+                let (values, validity) = hand
+                    .as_f64_slice_with_validity()
+                    .expect("typed nullable float64");
+                let got = DataFrame::duplicated_single_f64(values, validity, false, keep);
+
+                // Independent oracle over the SAME rule the pre-bitmap code used:
+                // present iff the mask says valid AND the datum is not NaN; all
+                // missing rows form one equivalence class.
+                let present: Vec<bool> = (0..len)
+                    .map(|i| validity.get(i) && !values[i].is_nan())
+                    .collect();
+                let mut want = vec![false; len];
+                match keep {
+                    DuplicateKeep::First | DuplicateKeep::Last => {
+                        let mut seen: std::collections::HashSet<u64> = Default::default();
+                        let mut seen_missing = false;
+                        let order: Vec<usize> = if matches!(keep, DuplicateKeep::First) {
+                            (0..len).collect()
+                        } else {
+                            (0..len).rev().collect()
+                        };
+                        for i in order {
+                            want[i] = if present[i] {
+                                !seen.insert(values[i].to_bits())
+                            } else {
+                                let was = seen_missing;
+                                seen_missing = true;
+                                was
+                            };
+                        }
+                    }
+                    DuplicateKeep::None => {
+                        let missing = present.iter().filter(|p| !**p).count();
+                        for i in 0..len {
+                            want[i] = if present[i] {
+                                (0..len)
+                                    .filter(|&j| present[j] && values[j].to_bits() == values[i].to_bits())
+                                    .count()
+                                    > 1
+                            } else {
+                                missing > 1
+                            };
+                        }
+                    }
+                }
+                assert_eq!(got, want, "len={len} keep={keep:?}");
+            }
         }
     }
 
