@@ -14621,6 +14621,47 @@ impl Column {
             }
         }
 
+        // CONTIGUOUS RANGE ON A NULLABLE COLUMN. The block above is gated on
+        // `validity.all()`, so a column carrying ANY missing value fell straight
+        // through to the line below — which materializes a `Vec<usize>` of the
+        // whole range and then RANDOM-ACCESS gathers it, for a range that is
+        // contiguous by construction. Measured on `iloc_slice @100k`: 2.0us on
+        // clean float64 (a zero-copy window) against 1452.8us at 10% NaN, a
+        // certified 0.009x against pandas' 12.8us — the worst non-transpose loss
+        // in the suite, and entirely this fall-through.
+        //
+        // Slice the buffer and derive the window's mask in two SEQUENTIAL passes.
+        // Bit-identical to the `take_positions` path it replaces: that path marks
+        // a slot valid iff `validity.get(pos) && !data[pos].is_nan()`, and so does
+        // this — the NaN test is why the mask cannot simply be `validity.slice`.
+        if self.dtype == DType::Float64
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+            && data.len() == validity.len()
+        {
+            let window = &data[start..end];
+            let mut words = vec![0_u64; len.div_ceil(64)];
+            let packed = validity.packed_words();
+            for (word_index, chunk) in window.chunks(64).enumerate() {
+                let base = start + word_index * 64;
+                let mut word = 0_u64;
+                for (bit, &x) in chunk.iter().enumerate() {
+                    let at = base + bit;
+                    let valid = match packed {
+                        Some(source_words) => (source_words[at / 64] >> (at % 64)) & 1 == 1,
+                        None => validity.get(at),
+                    };
+                    if valid && !x.is_nan() {
+                        word |= 1_u64 << bit;
+                    }
+                }
+                words[word_index] = word;
+            }
+            return Self::from_f64_values_with_validity(
+                window.to_vec(),
+                ValidityMask::from_words(words, len),
+            );
+        }
+
         let positions: Vec<usize> = (start..end).collect();
         self.take_positions(&positions)
     }
@@ -32871,6 +32912,71 @@ mod tests {
     }
 
     #[test]
+    /// A nullable column sliced by a contiguous range must produce EXACTLY what
+    /// the positions path produced. Covers a missing slot inside the window, one
+    /// outside it, and windows that straddle a 64-bit word boundary — the mask
+    /// is derived per output word, so an off-by-one there would silently shift
+    /// every missingness bit in the result.
+    #[test]
+    fn take_contiguous_range_on_a_nullable_column_matches_take_positions() {
+        // len >= 4 so `i % 7 == 3` actually places a NaN; at len 1 the pattern
+        // never fires and the fixture would silently be all-valid, testing the
+        // block above instead of the arm under test.
+        for len in [4usize, 63, 64, 65, 200] {
+            let data: Vec<f64> = (0..len)
+                .map(|i| if i % 7 == 3 { f64::NAN } else { i as f64 * 1.5 })
+                .collect();
+            let column = Column::from_f64_values(data);
+            assert!(
+                !column.validity.all(),
+                "len={len}: fixture must actually be nullable"
+            );
+            for start in [0usize, 1, 63, 64] {
+                if start >= len {
+                    continue;
+                }
+                for take in [1usize, 2, 63, 64, 65] {
+                    if start + take > len {
+                        continue;
+                    }
+                    let ranged = column.take_contiguous_range(start, take);
+                    let positions: Vec<usize> = (start..start + take).collect();
+                    let gathered = column.take_positions(&positions);
+                    // Compare BITWISE: `Float64(NaN) != Float64(NaN)` under
+                    // PartialEq, so a plain assert_eq can never pass on a
+                    // NaN-bearing fixture even when the two are identical.
+                    let bits = |s: &Scalar| match s {
+                        Scalar::Float64(v) => Some(v.to_bits()),
+                        _ => None,
+                    };
+                    let left = ranged.values();
+                    let right = gathered.values();
+                    assert_eq!(left.len(), right.len(), "len={len} start={start} take={take}");
+                    for (i, (a, b)) in left.iter().zip(right.iter()).enumerate() {
+                        match (bits(a), bits(b)) {
+                            (Some(x), Some(y)) => assert_eq!(
+                                x, y,
+                                "len={len} start={start} take={take} slot={i}"
+                            ),
+                            _ => assert_eq!(
+                                a, b,
+                                "len={len} start={start} take={take} slot={i}"
+                            ),
+                        }
+                    }
+                    assert_eq!(ranged.dtype(), gathered.dtype());
+                    for i in 0..take {
+                        assert_eq!(
+                            ranged.validity.get(i),
+                            gathered.validity.get(i),
+                            "len={len} start={start} take={take} bit={i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn take_contiguous_range_uses_typed_views_without_positions() {
         let f64_data: Vec<f64> = (0..160)
             .map(|i| if i == 72 { -0.0 } else { i as f64 * 0.5 })
