@@ -41887,3 +41887,59 @@ NOT a loop-shape problem that a source rewrite reaches: it is scalar glibc `log`
 called once per element, with a fifth of its cost in the errno wrapper. Closing it
 means vectorising the transcendental, which needs portable SIMD or intrinsics —
 not a reshaping of the surrounding Rust, and explicitly not a C dependency.
+
+### 2026-08-27 cod-pandas — VOID: every `df_dot @100k` row I took today is discarded. The ratio spans 3.73x-16.63x on IDENTICAL code purely with host load, and the ONE row that passed all three clauses is the most contaminated of the five [br-frankenpandas-633fb]
+
+Five `df_dot @100k/float64` rows, balanced-square against LIVE pandas 2.2.3.
+None is bankable. Recorded because the failure mode is not noise — it is
+DIRECTIONAL, it favours FrankenPandas, and the gate does not reliably catch it.
+
+    load(1m)      executing ELF   rounds  verdict            ratio   A/A fp   A/A pandas
+     8.2- 21.9    838d27886af9       12   NULL_UNDECIDABLE   3.729   1.00380   1.19331
+    10.1-112.4    307e0dc27c54       64   NULL_UNDECIDABLE  10.129   1.01283   1.05925
+    11.4- 91.3    307e0dc27c54       64   NULL_UNDECIDABLE   8.963   1.00368   0.94384
+    45.3- 92.1    773bad4fca51       64   NULL_UNDECIDABLE   6.323   0.99107   0.85980
+    87.8-102.4    773bad4fca51       64   FASTER            16.630   1.01493   1.00298
+
+`307e0dc27c54` and `773bad4fca51` differ ONLY in `df_dot`'s materialization
+boundary (ffc2f36f5), and `838d27886af9` predates both. Within ONE ELF
+`773bad4fca51` the ratio is 6.323x and 16.630x — a 2.6x spread on byte-identical
+code. No source change explains that; the load does.
+
+**THE INCUMBENT IS THE ARM THAT DEGRADES, AND THAT IS WHY THE BIAS HAS A SIGN.**
+FrankenPandas' A/A null holds across all five (0.99107-1.01493, every one inside
+the 2% limit). pandas' A/A null swings 0.85980-1.19331 and fails it in four.
+pandas here is numpy backed by scipy-openblas 0.3.31 running a 64-thread GEMM on
+a 32-core box; FrankenPandas has no BLAS and far fewer threads. Competing load
+starves a 64-thread arm disproportionately, so the incumbent slows more than the
+subject and the RATIO INFLATES IN FRANKENPANDAS' FAVOUR. The lowest-load row is
+also the lowest ratio (3.729x at load 8.2-21.9) and the highest-load row the
+highest (16.630x at 87.8-102.4). This is br-frankenpandas-633fb's own observation
+reproduced from the other end: it is not that busy hosts add symmetric noise, it
+is that they cripple the incumbent.
+
+**A/A null control (same invocation):** median null ratios, maximum absolute
+deviation limit 0.02 — FrankenPandas 1.00380 / 1.01283 / 1.00368 / 0.99107 /
+1.01493 across the five rows, and pandas 1.19331 / 1.05925 / 0.94384 / 0.85980 /
+1.00298. Four of five pandas nulls are outside the limit; the fifth is inside.
+
+**THE CLAUSE SET IS NOT A SUFFICIENT LOAD GUARD.** Row five passed
+`effect_ci_excludes_unity`, `effect_exceeds_two_x_null_margin` AND
+`null_medians_within_2pct_unity` while the host sat at loadavg 87.8-102.4 for the
+whole run. The A/A null cannot see this contamination in general: both arms of
+the null are starved EQUALLY, so their ratio stays near unity while the
+subject-versus-incumbent ratio is skewed. It caught four rows by luck of timing,
+not by construction. Loadavg is recorded on every row
+(`balanced_square.host_state.loadavg_1min`) but is not gated on.
+
+**CONSEQUENCE.** `--host-readiness-probe` is the pre-gate that would have refused
+all five: it returned `verdict=blocked` on 81 consecutive attempts over 120s this
+afternoon, 7-28 CPUs above the 0.200 busy fraction. It is opt-in and a plain
+`--measurement-mode balanced-square` run does not consult it. Until a row carries
+a load bound as a GATE rather than a field, "all three clauses TRUE" is not
+sufficient provenance for a threaded-incumbent lane.
+
+NO RATIO IS CLAIMED HERE, in either direction. `df_dot @100k` remains unmeasured
+by me. The ledger's standing `df_dot @10k` LOSS rows (0.573x/0.673x, 2026-08-16)
+are NOT touched by this entry — they were taken at loadavg 6.09-11.92 with both
+nulls inside the limit, which is the shape this entry says is required.
