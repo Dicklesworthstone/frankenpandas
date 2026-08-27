@@ -42203,3 +42203,68 @@ NOT A RATIO. The 0.554 reference is a thread-pinned diagnostic and remains
 unquotable as a vs-incumbent number, for the reason br-frankenpandas-633fb gives.
 Nothing banked moves; the previous entry's 2.83/5.1x figures are superseded by
 the two rows above.
+
+### 2026-08-27 cod-pandas — REJECTED AS A TARGET: instructions/op is the WRONG figure of merit for the dot kernel. The kernel with 1.73x FEWER instructions is the SLOWER one, and my "3.4x instruction headroom" is withdrawn [br-frankenpandas-633fb]
+
+Two entries today measured the dot kernel at 1.866 instructions per FMA against a
+0.554 reference and called the difference headroom. The measurement was right.
+THE INTERPRETATION WAS WRONG, and this refutes it with the kernel's own numbers.
+
+New probe `crates/fp-dot-kernel/examples/kernel_instr_probe.rs` runs the kernels
+directly with a null subtraction (`reps = 0` against `reps = 40`), so process
+start, fixture build and input allocation cancel exactly and the difference is N
+kernel invocations. dim 312 divides both MR=8 and NR=6; dim 316 divides neither,
+which isolates the tails.
+
+    dim  mode         instr/FMA
+    312  prepacked      1.836
+    312  block          1.877
+    312  axpy           1.063
+    316  prepacked      1.898
+    316  block          1.939
+    316  axpy           1.068
+
+**THE AXPY KERNEL EXECUTES 1.73x FEWER INSTRUCTIONS THAN THE BLOCKED ONE, AND IT
+IS THE KERNEL THE BLOCKED ONE REPLACED FOR BEING SLOWER.** Cycles say why:
+
+    mode        instr/FMA   cycles/FMA   IPC
+    prepacked      1.835       0.346     5.31
+    axpy           1.062       0.503     2.11
+
+The blocked kernel retires 1.73x more instructions in 1.45x fewer cycles because
+its IPC is 2.5x higher: the output tile lives in registers across the whole `k`
+loop, so it is issue-bound, while AXPY re-streams the A panel once per output
+column and is memory-bound. Trading instructions for memory traffic is the whole
+point of blocking.
+
+So a lower instruction count is not better here, and "close the instruction gap"
+is not a valid objective for this lane.
+
+**Counted mechanism:** 1.835 against 1.062 instructions per FMA, with cycles 0.346 against 0.503 — the instruction ranking is INVERTED relative to the cycle ranking: the candidate with the LOWER instruction count did not clear the required cycle threshold, so the metric fails to order the candidates and is rejected as a selection criterion for this kernel. My 3.37x "headroom" figure is withdrawn AS A TARGET; the number
+itself stands as a description.
+
+WHERE THIS LEAVES THE METRIC. Instructions/op remains the right tool where it was
+used successfully today — `log`, an elementwise scalar op whose cost IS its
+instruction stream, and where it produced a mechanism (glibc's errno wrapper) that
+wall-time shares had got wrong. It is the wrong tool for a blocked GEMM, whose
+whole design is to spend instructions to avoid cache misses. The lesson is not
+"prefer wall time" but "instructions order the candidates only when the op is
+issue-bound, and that has to be checked, not assumed".
+
+WHAT THE DECOMPOSITION DOES SAY, all small:
+  * TAILS cost 3.4% (312 -> 316, 1.836 -> 1.898). `dim = 316` divides neither
+    MR nor NR; the penalty is real and minor.
+  * PACKING costs 2.2% (prepacked -> block, 1.836 -> 1.877).
+  Neither is worth a lever, and both are far below the 3.4x the earlier framing
+  implied was available.
+
+AND A STRUCTURAL COST I HAD MISSED. `objdump` on the probe: 1562 `ymm` registers
+and ZERO `vfmadd`. The kernel uses a separate `mul` and `add` ON PURPOSE — that
+is what makes it bit-identical to the per-column path, as its own doc states. So
+an 8x6 tile cannot reach the ~0.42 instructions/FMA I quoted this morning; that
+figure assumed a fused multiply-add the correctness contract forbids. With
+separate mul and add the tile floors nearer 0.67. Part of the distance to
+OpenBLAS's 0.554 is simply that OpenBLAS is allowed to fuse and we are not.
+
+NOT A RATIO, AND NOTHING BANKED MOVES. This entry retires a target I proposed, it
+does not propose a new one.
