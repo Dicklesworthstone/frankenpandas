@@ -41636,3 +41636,90 @@ what was left after those were eliminated, not the first thing tried.**
 fp-columnar lib suite: **672 passed, 0 failed, 58 ignored.**
 
 **No `cargo fmt`, `rustfmt` or `ubs` was run on `crates/fp-columnar/src/lib.rs`.**
+
+### 2026-08-27 cod-pandas — CONTROLLED: per-call thread spawn is a KERNEL cost, not an instrument artifact. making ONE op parallel widens ITS OWN A/A null margin 14-16x while the incumbent's null in the SAME invocation is unchanged [br-frankenpandas-g0apw]
+
+g0apw scope item 1 asks whether the "per-call fixed overhead comparable to the work"
+signature is a KERNEL problem or a MEASUREMENT problem. Every instance in the bead
+compares DIFFERENT operations — `series_skew` (1 thread, ~490us, 3/3 certified) against
+`df_skew` (10 threads, ~3ms, 1/3) — so thread count is confounded with the op, its size,
+its input and its code path. This is the controlled version.
+
+DESIGN. The same op, the same size, the same input, the same instrument, two ELFs whose
+ONLY difference is whether that op takes the parallel arm at 100k. `3cb0e1704` gave
+`sin`/`atan`/`ln_1p` a `par_min_override` of 65_536; below it they are serial, above it
+they spawn. At 100k that flips the thread regime and changes nothing else — the commit is
+one constant plus three call sites. Both ELFs are on disk and self-report their sha.
+
+    serial arm    ELF 360b7981d9fe20355a98e4298e0c593473988c46bd5c0b6581a30701375c2205
+    parallel arm  ELF 83cd300e1c4173b4070ae58f92da64ed94bc88c296f697212ddeb141de1288c8
+
+Each row below is a separate 64-round balanced-square invocation against LIVE pandas
+2.2.3. `fp_cv` is the FrankenPandas A/A arm's coefficient of variation across its 64
+rounds; `pd_cv` is the incumbent's, measured in the SAME invocation. `a<b` counts rounds
+where the null's first arm beat its second — the bead's own discriminator, since warm-up
+or drift would be directional.
+
+    op     arm       verdict  ratio   fp_null   fp_cv%    a<b    pd_null   pd_cv%
+    atan   parallel  FASTER    1.68   0.99741    5.88  35/64    0.99988    3.09
+    atan   parallel  FASTER   1.695   1.00293   28.56  31/64    1.00024    3.79
+    atan   parallel  FASTER   1.779   0.99183   97.27  37/64    1.00131   12.78
+    atan   parallel  FASTER   1.744   1.01172    4.18  27/64    1.00059    0.53
+    atan   serial    SLOWER   0.982   0.99947    0.49  38/64    0.99954    0.54
+    atan   serial    SLOWER   0.983   1.00072    3.52  28/64    0.99905    2.90
+    atan   serial    SLOWER   0.985   1.00051    1.91  27/64    0.99899    1.22
+    atan   serial    SLOWER   0.983   0.99994   14.18  33/64    1.00047   12.94
+    sin    parallel  FASTER   2.653   0.98704    4.17  39/64    1.00022    1.86
+    sin    parallel  FASTER   2.676   1.00355    3.65  30/64    0.99797    2.05
+    sin    parallel  FASTER   2.645   0.99884    3.12  34/64    1.00055    0.89
+    sin    parallel  FASTER   2.641   0.99597    3.77  33/64    1.00019    1.39
+    sin    serial    SLOWER    0.99   1.00030    0.80  29/64    1.00070    1.04
+    sin    serial    SLOWER   0.992   0.99944    1.71  34/64    0.99893    1.46
+    sin    serial    SLOWER   0.992   0.99981    1.69  34/64    0.99989    0.44
+    sin    serial    FASTER   1.014   1.00028    0.73  32/64    1.00046    1.51
+
+    op     arm        n   mean|null-1|   max|null-1|   mean fp_cv%   max fp_cv%   mean pd_cv%
+    atan   parallel   4        0.00635       0.01172         33.97        97.27          5.05
+    atan   serial     4        0.00045       0.00072          5.02        14.18          4.40
+    sin    parallel   4        0.00543       0.01296          3.68         4.17          1.55
+    sin    serial     4        0.00033       0.00056          1.23         1.71          1.11
+
+FINDING. Flipping one op from serial to parallel, with everything else held constant,
+widens that op's own A/A null by more than an order of magnitude, and the incumbent's
+null in the same invocation does not move with it. The dispersion is non-directional in
+every run (`a<b` sits near 32/64 throughout), which is the bead's stated signature and
+rules out warm-up and drift.
+
+STATED PRECISELY, BECAUSE THE DIFFERENCE MATTERS: NO NULL FAILED. All 16 runs certified,
+0/16 outside the 2% limit. What is shown is that the MARGIN collapses — mean |null-1|
+goes from 0.0003-0.0005 to 0.005-0.006, i.e. from ~2% of the budget to ~30% of it, with
+one `atan` arm reaching 97.27% dispersion. That is a mechanism for the bead's signature
+and a direction, not a demonstration that this size refuses. An op with the same spawn
+cost over LESS work (the bead's `df_skew` at ~3ms with 10 threads) is where the same
+mechanism runs out of budget, and that remains the bead's own evidence, not mine.
+
+ANSWER TO SCOPE ITEM 1, for the thread-spawn mechanism: it is a KERNEL cost that the
+instrument reports faithfully. The harness is not failing to hold a null on a stable
+operation; the operation genuinely is less repeatable per call once it spawns. A user
+calling `atan` once on 100k rows pays that variance too. This does NOT settle the
+allocator-bound instance (`df_transpose_full_materialize`), which the bead is right to
+keep separate — nothing here touches it, and the naming argument in the bead stands.
+
+THE COST IS REAL AND I PAID IT DELIBERATELY. `3cb0e1704` is a 1.70-2.69x certified win on
+three lanes, bought partly WITH null stability: those ops moved from a mean |null-1| of
+0.0003-0.0005 to 0.005-0.006, and one `atan` run reached 97.27% fp_cv. Every run still
+certified, so the trade was worth taking, but it is a trade and the ledger should say so.
+Anyone raising parallelism to win a ratio should expect the same bill.
+
+CONSEQUENCE FOR THE CONTRACT. "Op is unstable under its own null" is now a predictable
+property of a code path rather than a mystery of a lane: an op that spawns per call at a
+size where spawn is a large fraction of the work will disperse. That is checkable BEFORE
+a measurement campaign — from the op's par_min and the fixture size — instead of after
+five refused rows.
+
+NO RATIO IS CLAIMED HERE. The ratios above are the already-banked `3cb0e1704` numbers,
+reproduced only as the context the nulls were measured in. This entry is a measurement-
+contract finding: its subject is the A/A null control, which is by construction a
+FrankenPandas-vs-FrankenPandas self-comparison and can never be evidence of a
+vs-incumbent result.
+
