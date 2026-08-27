@@ -41803,3 +41803,87 @@ put `ValidityMask::get` at 3.97% of the process. The bitmap bought ~6%, almost
 exactly what that 3.97% predicted. The profile was right and the narrative was
 wrong — the degradation and the lever were two different things that happened to
 live in the same function.
+
+### 2026-08-27 cod-pandas — REJECTED: the off-by-default write-once elementwise path does NOT help `log`/`log_int64`, the two worst certified losses left. Measured across eight ops instead of flipped on faith; it helps three and hurts two, so the default stays OFF [br-frankenpandas-uza04]
+
+`elementwise_write_once_enabled()` (`FP_ELEMENTWISE_WRITE_ONCE`, DEFAULT OFF)
+carries a doc comment stating its saving is "a HYPOTHESIS with a mechanism, not a
+measurement", and that defaulting it ON before measuring "would repeat the exact
+mistake that put three mutually inconsistent `df_dot` ratios in the ledger". This
+measures it.
+
+MOTIVE. `log @100k/float64` and `log_int64 @100k/float64` are the worst certified
+vs-incumbent ratios I can still find, and `clear_page_erms` — the kernel zeroing
+the output buffer that `vec![0.0_f64; n]` requests before the kernel overwrites
+it — is 8.06% of the `log` process, the exact cost the flag exists to remove.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=5e621c8df98129ef41a4184eabeade97fdd70dadd238931c6686359a3b8f38df (86606224 bytes) /data/tmp/claude-1000/-data-projects-frankenpandas/0ea89b14-edbd-4725-9ea5-65536114e480/scratchpad/fp-bench-dd`,
+built in a DETACHED WORKTREE (/data/projects/fp-wt-divlead) with its own
+`CARGO_TARGET_DIR`. Harness
+`bench_harness_source_sha256=0191c863f4d29688441c60c58af4b47ba525d2e9b3114a0fb36b51cac52bc122`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=c10b13e6b6bec9a38bef8a24062c35f84c343a67973eec708b0c523302a5845f,
+balanced-square ABBAABBA, 64 rounds, same invocation.
+
+**A/A null control (same invocation):** median null ratios, 64 rounds, maximum
+absolute deviation limit 0.02 — `log`: FrankenPandas 0.998366 and pandas 1.005170;
+`log_int64`: FrankenPandas 1.001023 and pandas 1.000793. Both rows inside the
+limit, so neither baseline is refused for a failed null.
+
+**Median-CI decision:** `log` effect median 0.955x, CI [0.94910000, 0.97810000],
+excluding unity; claimed log effect 0.04629457 against the required threshold
+0.02576353 at margin multiplier 2.0. All three clauses TRUE — CERTIFIED SLOWER.
+`log_int64` effect median 0.951x, CI [0.94780000, 0.95640000]; claimed log effect
+0.05013438 against the required threshold 0.01969837 at margin multiplier 2.0. All
+three clauses TRUE — CERTIFIED SLOWER. FP 421.1us against pandas 396.5us, and FP
+434.9us against pandas 414.7us, in the same invocations.
+
+**CV role:** provenance-only, no vote.
+
+THE A/B, FrankenPandas-only, two interleaved passes, one ELF, the flag toggled by
+environment so no rebuild separates the arms:
+
+    op          default   write-once    gain
+    log10        459.0      384.2      1.195x   helps
+    log10        462.8      382.0      1.212x   helps
+    sin          566.1      520.6      1.087x   helps
+    sin          576.9      493.2      1.170x   helps
+    log2         366.9      349.2      1.051x   helps
+    log2         370.6      347.6      1.066x   helps
+    sqrt_int64   139.0      136.7      1.017x   flat
+    expm1        263.0      263.4      0.998x   flat
+    expm1        263.8      263.9      1.000x   flat
+    log_int64    414.0      415.1      0.997x   flat
+    log          389.0      397.0      0.980x   HURTS
+    log          383.1      388.1      0.987x   HURTS
+    sqrt         113.3      117.4      0.965x   HURTS
+    sqrt         116.1      116.3      0.998x
+
+REJECTED FOR THE TARGET, AND FOR A BLANKET DEFAULT. It does not help either op it
+was reached for: `log` is 0.980x/0.987x — WORSE — and `log_int64` is flat at
+0.997x. And it cannot simply be switched on globally, because the same toggle that
+buys `log10` 20% costs `log` 2% and `sqrt` 3.5%. This is the same per-op shape as
+the elementwise `par_min` finding earlier today: one constant serving ops whose
+per-element cost differs by ~80x.
+
+NOT WIDENED ON PURPOSE. `log10` is the biggest beneficiary, but it already
+certifies FASTER 1.58x at this size, so turning the flag on for it would be
+widening a win rather than attacking a loss, and no code change is landed for it
+here. `log2` measures NULL_UNDECIDABLE 0.99x — not a certified loss either.
+
+WHERE `log`'S 5.8% DEFICIT ACTUALLY LIVES, from the profile (`sha2` 50.42% is the
+bench's own startup, not the loop):
+
+    __ieee754_log_fma                 18.11%   glibc's scalar log kernel
+    clear_page_erms                    8.06%   output-buffer zeroing
+    par_map_slice_f64_domain_fused     4.96%   OUR loop: domain test + finiteness fold
+    log@@GLIBC_2.29                    4.79%   glibc's errno/special-case wrapper
+
+Normalised against non-startup time, libm is ~46% of the op and FrankenPandas' own
+loop shape is ~10%. The deficit against pandas is 24.6us on 421.1us. So this row is
+NOT a loop-shape problem that a source rewrite reaches: it is scalar glibc `log`,
+called once per element, with a fifth of its cost in the errno wrapper. Closing it
+means vectorising the transcendental, which needs portable SIMD or intrinsics —
+not a reshaping of the surrounding Rust, and explicitly not a C dependency.
