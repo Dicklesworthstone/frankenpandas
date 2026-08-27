@@ -56969,26 +56969,6 @@ fn concat_dataframes_axis1(
 #[cfg(feature = "lazy-transpose-view")]
 const LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN: usize = 256;
 
-/// Pages that must be built one-at-a-time before the plan believes a caller is
-/// SWEEPING and starts building ahead of it. Eight pages is 2048 output columns
-/// — far past any point-lookup, and still only 0.2% of the 3907-page frame at
-/// 1M rows.
-const LAZY_TRANSPOSE_PREFETCH_TRIGGER_PAGES: usize = 8;
-/// Floor and ceiling on the readahead window. The window itself is the number
-/// of pages already built, so it grows geometrically with demonstrated sweep
-/// and a caller that stops early wastes at most what it already consumed.
-///
-/// The floor exists because a `thread::scope` costs ~148.6us to open plus
-/// ~24.9us per worker; page construction measured ~7.1us, so a window below
-/// ~32 pages cannot repay the spawn and must stay serial.
-const LAZY_TRANSPOSE_PREFETCH_MIN_PAGES: usize = 32;
-const LAZY_TRANSPOSE_PREFETCH_MAX_PAGES: usize = 1024;
-/// Deliberately far below the 64 logical CPUs. A transpose sweep is a memory
-/// WRITE storm — 632 MB of Columns and Scalars at 1M rows — so it saturates
-/// bandwidth long before it saturates cores, and taking every core would only
-/// starve the co-tenant arm this lane is measured against.
-const LAZY_TRANSPOSE_PREFETCH_MAX_WORKERS: usize = 8;
-
 #[cfg(feature = "lazy-transpose-view")]
 type LazyTransposeColumnSlot = OnceLock<Box<Column>>;
 
@@ -57032,22 +57012,6 @@ struct LazyTransposeFramePlan {
     /// transpose caller pays whether or not it ever materialises a column. Built
     /// on first page access instead, so the lazy path is untouched.
     page_buffers: OnceLock<Box<[OnceLock<Option<Arc<[f64]>>>]>>,
-    /// How many pages this plan has actually BUILT, and how far a prefetch has
-    /// already reached. Together they are the readahead's only state.
-    ///
-    /// Building a page is independent of every other page, but a caller walking
-    /// the frame builds them strictly one at a time on one core: profiled on
-    /// `df_transpose_full_materialize_positional` @1M, page construction is
-    /// ~32% of the lane while 63 cores sit idle. These counters let the plan
-    /// notice a SWEEP and build the pages ahead of it in parallel.
-    ///
-    /// `pages_built` is the evidence, not `output_column`: a caller that jumps
-    /// straight to column 500_000 has demonstrated nothing, and must not be
-    /// charged for a readahead it never asked for. The window is sized to the
-    /// pages already built, so a caller that stops early can never waste more
-    /// work than it has already consumed.
-    pages_built: std::sync::atomic::AtomicUsize,
-    prefetched_through: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(feature = "lazy-transpose-view")]
@@ -57244,127 +57208,43 @@ impl LazyTransposeFramePlan {
     }
 
     #[inline(never)]
-    /// Build one page. Independent of every other page — which is the whole
-    /// reason [`Self::prefetch_ahead_of_sweep`] can run these in parallel.
-    fn build_page(
-        &self,
-        page_index: usize,
-        page_start: usize,
-        page_len: usize,
-    ) -> LazyTransposeColumnSlotPage {
-        // Try the contiguous shape first: one gathered buffer for the page,
-        // one allocation for its columns, zero per-slot OnceLocks.
-        if let Some(buffer) = self.page_contiguous_buffer(page_index, page_start, page_len) {
-            let ncols = self.source_columns.len();
-            // One lazily-built Scalar view for the WHOLE page, shared by all
-            // its columns. A caller walking every column reaches `values()`
-            // once per column; with a private view that is an allocation, an
-            // OnceLock init and a free apiece.
-            let shared_values = Arc::new(OnceLock::new());
-            return LazyTransposeColumnSlotPage::Contiguous(
-                (0..page_len)
-                    .map(|slot| {
-                        Column::from_f64_shared_window_with_shared_values(
-                            Arc::clone(&buffer),
-                            slot * ncols,
-                            ncols,
-                            Arc::clone(&shared_values),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-        }
-        LazyTransposeColumnSlotPage::PerSlot(
-            (0..page_len)
-                .map(|_| OnceLock::new())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        )
-    }
-
-    /// Build `page_index` if nobody has yet, counting only the builds THIS call
-    /// performed. The count is the readahead's evidence of a sweep, so a page
-    /// another thread had already finished must not inflate it.
-    fn ensure_page(
-        &self,
-        page_index: usize,
-        page_start: usize,
-        page_len: usize,
-    ) -> &LazyTransposeColumnSlotPage {
-        let slots = self.column_slot_page_slots();
-        if let Some(page) = slots[page_index].get() {
-            return page;
-        }
-        let mut built_here = false;
-        let page = slots[page_index].get_or_init(|| {
-            built_here = true;
-            self.build_page(page_index, page_start, page_len)
-        });
-        if built_here {
-            self.pages_built
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        page
-    }
-
-    /// Build the pages a sweeping caller is about to ask for, in parallel,
-    /// while it is still working through this one.
-    ///
-    /// Does nothing until the caller has built
-    /// [`LAZY_TRANSPOSE_PREFETCH_TRIGGER_PAGES`] pages one at a time, so a point
-    /// lookup pays exactly what it did before. The window is then the number of
-    /// pages already built, clamped: readahead grows with the sweep instead of
-    /// being guessed up front, and the work thrown away if the caller stops is
-    /// bounded by the work it already asked for.
-    fn prefetch_ahead_of_sweep(&self, page_index: usize) {
-        use std::sync::atomic::Ordering;
-        let built = self.pages_built.load(Ordering::Relaxed);
-        if built < LAZY_TRANSPOSE_PREFETCH_TRIGGER_PAGES {
-            return;
-        }
-        let slots = self.column_slot_page_slots();
-        let from = page_index + 1;
-        // One spawn per window, not one per page: the walk re-enters this
-        // function for every page it touches, and re-opening a `thread::scope`
-        // each time would cost more than the readahead saves.
-        if from < self.prefetched_through.load(Ordering::Relaxed) || from >= slots.len() {
-            return;
-        }
-        let window = built.clamp(
-            LAZY_TRANSPOSE_PREFETCH_MIN_PAGES,
-            LAZY_TRANSPOSE_PREFETCH_MAX_PAGES,
-        );
-        let end = from.saturating_add(window).min(slots.len());
-        let pending: Vec<usize> = (from..end).filter(|i| slots[*i].get().is_none()).collect();
-        self.prefetched_through.store(end, Ordering::Relaxed);
-        if pending.len() < LAZY_TRANSPOSE_PREFETCH_MIN_PAGES {
-            return;
-        }
-        let workers = pending.len().min(LAZY_TRANSPOSE_PREFETCH_MAX_WORKERS);
-        let chunk = pending.len().div_ceil(workers);
-        std::thread::scope(|scope| {
-            for slice in pending.chunks(chunk) {
-                scope.spawn(move || {
-                    for &page in slice {
-                        let start = page * LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
-                        let len = (self.output_columns - start)
-                            .min(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN);
-                        let _ = self.ensure_page(page, start, len);
-                    }
-                });
-            }
-        });
-    }
-
     fn cached_column(&self, output_column: usize) -> &Column {
         debug_assert!(output_column < self.output_columns);
         let page_index = output_column / LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
         let slot_index = output_column % LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
         let page_start = page_index * LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
         let page_len = (self.output_columns - page_start).min(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN);
-        let page = self.ensure_page(page_index, page_start, page_len);
-        self.prefetch_ahead_of_sweep(page_index);
+        let page = self.column_slot_page_slots()[page_index].get_or_init(|| {
+            // Try the contiguous shape first: one gathered buffer for the page,
+            // one allocation for its columns, zero per-slot OnceLocks.
+            if let Some(buffer) = self.page_contiguous_buffer(page_index, page_start, page_len) {
+                let ncols = self.source_columns.len();
+                // One lazily-built Scalar view for the WHOLE page, shared by all
+                // its columns. A caller walking every column reaches `values()`
+                // once per column; with a private view that is an allocation, an
+                // OnceLock init and a free apiece.
+                let shared_values = Arc::new(OnceLock::new());
+                return LazyTransposeColumnSlotPage::Contiguous(
+                    (0..page_len)
+                        .map(|slot| {
+                            Column::from_f64_shared_window_with_shared_values(
+                                Arc::clone(&buffer),
+                                slot * ncols,
+                                ncols,
+                                Arc::clone(&shared_values),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+            }
+            LazyTransposeColumnSlotPage::PerSlot(
+                (0..page_len)
+                    .map(|_| OnceLock::new())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
+        });
         let page = match page {
             LazyTransposeColumnSlotPage::Contiguous(columns) => return &columns[slot_index],
             LazyTransposeColumnSlotPage::PerSlot(slots) => slots,
@@ -67722,8 +67602,6 @@ impl DataFrame {
                 output_columns: view.column_len,
                 column_slot_pages: OnceLock::new(),
                 page_buffers: OnceLock::new(),
-                pages_built: std::sync::atomic::AtomicUsize::new(0),
-                prefetched_through: std::sync::atomic::AtomicUsize::new(0),
             });
             return Ok(Self {
                 index: view.row_index.clone(),
@@ -186748,72 +186626,6 @@ mod tests {
             after_both < ROWS,
             "the untouched middle must NOT be materialised: {after_both} of {ROWS}"
         );
-    }
-
-    /// The readahead must be invisible to a caller that did not ask for it and
-    /// must actually happen for one that did — and neither may change a value.
-    #[test]
-    fn lazy_transpose_prefetches_ahead_of_a_sweep_but_not_a_point_lookup() {
-        const ROWS: usize = 20_000;
-        let page = crate::LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
-        let mut columns = BTreeMap::new();
-        let mut order = Vec::new();
-        for c in 0..4usize {
-            let name = format!("c{c}");
-            let values: Vec<f64> = (0..ROWS).map(|r| (r * 4 + c) as f64).collect();
-            columns.insert(name.clone(), Column::from_f64_values(values));
-            order.push(name);
-        }
-        let source = DataFrame::new_with_column_order(
-            Index::new_known_unique_int64_unit_range(0, ROWS),
-            columns,
-            order,
-        )
-        .unwrap();
-
-        // A POINT LOOKUP MUST PAY NOTHING EXTRA. This is the whole reason the
-        // trigger counts pages actually built rather than the column index: a
-        // caller that jumps straight into the middle has demonstrated no sweep.
-        let point = source.transpose().unwrap();
-        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } = &point.columns else {
-            panic!("expected lazy transpose storage");
-        };
-        let _ = point.column_at(ROWS / 2).expect("a single column");
-        assert_eq!(
-            plan.initialized_column_slots(),
-            page,
-            "a point lookup must build exactly one page"
-        );
-
-        // A SWEEP MUST BUILD AHEAD. Touch one column past the trigger and the
-        // plan should have run the readahead, leaving more pages built than the
-        // walk has actually reached.
-        let swept = source.transpose().unwrap();
-        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } = &swept.columns else {
-            panic!("expected lazy transpose storage");
-        };
-        let touched = crate::LAZY_TRANSPOSE_PREFETCH_TRIGGER_PAGES * page + 1;
-        for position in 0..touched {
-            let _ = swept.column_at(position).expect("swept column");
-        }
-        let built = plan.initialized_column_slots();
-        assert!(
-            built > touched.div_ceil(page) * page,
-            "readahead must build past the sweep: built {built}, walk reached {touched}"
-        );
-
-        // AND IT MUST NOT HAVE CHANGED A VALUE. Compare the whole frame against
-        // the eager reference — including every page the readahead built rather
-        // than the walk.
-        let eager = source.transpose_materialized().unwrap();
-        assert_eq!(swept.num_columns(), eager.num_columns());
-        for position in 0..swept.num_columns() {
-            assert_eq!(
-                swept.column_at(position).expect("lazy").values(),
-                eager.column_at(position).expect("eager").values(),
-                "position={position}"
-            );
-        }
     }
 
     /// The page gather fills its buffer directly inside the `Arc` and cycles
