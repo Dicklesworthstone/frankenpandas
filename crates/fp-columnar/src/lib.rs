@@ -2520,6 +2520,40 @@ enum ScalarValues {
         len: usize,
         all_finite: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
+        /// PAGE-SHARED Scalar view, for windows that are siblings over one
+        /// buffer (the transposed-frame plan builds 256 such columns per page).
+        ///
+        /// Without it each window owns a private `values` OnceLock, so a caller
+        /// walking every column pays one `Vec<Scalar>` allocation, one OnceLock
+        /// init and one free PER COLUMN — profiled on
+        /// `df_transpose_full_materialize_positional` as drop_glue 17.24%,
+        /// OnceLock-init 9.21% and `Once::call` 5.43%. Sharing one lazily-built
+        /// buffer across the page turns 100_000 of each into 391.
+        ///
+        /// It covers the WHOLE of `data`, so slot `start..start + len` indexes it
+        /// directly. Lazy: nothing is built unless a caller actually asks for the
+        /// Scalar view, so typed consumers (`as_f64_slice`) pay nothing.
+        ///
+        /// ⚠️ FOLDING THIS INTO `data` (one backing, one `Arc`) IS PRICED AND
+        /// DECLINED — 2026-08-27. A page column holds TWO `Arc`s, so it costs two
+        /// refcount increments to build and two decrements to drop: 2M atomic
+        /// pairs at the 1M transpose fixture, where drops are ~25% of the lane.
+        /// An isolated probe of 1M clone+drop pairs put the UPPER bound at
+        /// 7814us (11782.9us for two `Arc`s vs 3968.6us for one) — 9% of
+        /// `df_transpose_full_materialize_positional @1M`.
+        ///
+        /// That number is an over-estimate and the shape of the change is why it
+        /// was declined anyway:
+        ///   * the probe's two-`Arc` struct is 24 bytes against the folded one's
+        ///     8, so it bundles 16 MB of `Vec` traffic in with the atomics;
+        ///   * an earlier build of exactly this fold measured 1.004x at 100k;
+        ///   * folding needs `data` to become a two-variant source enum, which
+        ///     puts a branch on EVERY lazy f64 window access — `as_f64_slice` is
+        ///     the hot path for the elementwise lanes that currently WIN, so the
+        ///     common case pays to help one lane that stays ~2000x slower either
+        ///     way.
+        /// Re-open only with a measurement showing the Plain arm is unharmed.
+        shared_values: Option<Arc<OnceLock<Vec<Scalar>>>>,
     },
     /// Deferred all-valid Float64 output column for finite `DataFrame::dot`.
     ///
