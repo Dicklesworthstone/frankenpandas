@@ -2697,7 +2697,18 @@ enum ScalarValues {
         /// all-valid one cost an atomic increment. Profiled on `df_abs @100k` at
         /// 10% NaN, that single clone was 12.52% of the process — and the clean
         /// float64 run of the same lane has NO memmove at all.
-        data: Arc<Vec<f64>>,
+        buffer: Arc<Vec<f64>>,
+        /// WINDOW into `buffer`, so a contiguous range of a nullable column is
+        /// a refcount bump like its all-valid sibling instead of an 8-byte-per-
+        /// row copy. `buffer[start..start + len]` is this backing's data; NO
+        /// reader may touch `buffer` directly.
+        ///
+        /// br-frankenpandas-uza04. `iloc_slice @100k/float64_nan10` answered a
+        /// slice by copying the window out (`window.to_vec()`), which profiled
+        /// as ~63% of the op — alloc, page-zeroing and memmove — against 2.0us
+        /// for the clean-float64 arm that returns a zero-copy window.
+        start: usize,
+        len: usize,
         validity: ValidityMask,
         values: OnceLock<Vec<Scalar>>,
     },
@@ -3377,8 +3388,35 @@ impl ScalarValues {
     }
 
     fn lazy_nullable_float64(data: Vec<f64>, validity: ValidityMask) -> Self {
+        let len = data.len();
         Self::LazyNullableFloat64 {
-            data: Arc::new(data),
+            buffer: Arc::new(data),
+            start: 0,
+            len,
+            validity,
+            values: OnceLock::new(),
+        }
+    }
+
+    /// Windowed sibling of [`Self::lazy_nullable_float64`]: shares `buffer`
+    /// instead of copying `buffer[start..start + len]` out of it.
+    ///
+    /// `validity` is the WINDOW's mask (`len` bits), not the source's.
+    fn lazy_nullable_float64_window(
+        buffer: Arc<Vec<f64>>,
+        start: usize,
+        len: usize,
+        validity: ValidityMask,
+    ) -> Self {
+        debug_assert!(
+            start.checked_add(len).is_some_and(|end| end <= buffer.len()),
+            "nullable Float64 window must lie within source buffer"
+        );
+        debug_assert_eq!(len, validity.len());
+        Self::LazyNullableFloat64 {
+            buffer,
+            start,
+            len,
             validity,
             values: OnceLock::new(),
         }
@@ -5436,12 +5474,15 @@ impl ScalarValues {
                 })
                 .as_slice(),
             Self::LazyNullableFloat64 {
-                data,
+                buffer,
+                start,
+                len,
                 validity,
                 values,
             } => values
                 .get_or_init(|| {
-                    data.iter()
+                    buffer[*start..*start + *len]
+                        .iter()
                         .enumerate()
                         .map(|(idx, value)| {
                             if validity.get(idx) || value.is_nan() {
@@ -6033,7 +6074,7 @@ impl ScalarValues {
             Self::LazyCombineFirstFloat64 { len, .. } => *len,
             Self::LazyStridedFloat64 { len, .. } => *len,
             Self::LazyGatherFloat64 { positions, .. } => positions.len(),
-            Self::LazyNullableFloat64 { data, .. } => data.len(),
+            Self::LazyNullableFloat64 { len, .. } => *len,
             Self::LazyAllValidBool { data, .. } => data.len(),
             Self::LazyShiftedBool { len, .. } => *len,
             Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
@@ -6451,8 +6492,16 @@ impl Clone for ScalarValues {
             // Its all-valid sibling two arms down has always been an `Arc::clone`.
             // Same values, same validity, and `values` is re-armed empty exactly
             // as before, so a clone still re-materializes its own Scalar view.
-            Self::LazyNullableFloat64 { data, validity, .. } => Self::LazyNullableFloat64 {
-                data: Arc::clone(data),
+            Self::LazyNullableFloat64 {
+                buffer,
+                start,
+                len,
+                validity,
+                ..
+            } => Self::LazyNullableFloat64 {
+                buffer: Arc::clone(buffer),
+                start: *start,
+                len: *len,
                 validity: validity.clone(),
                 values: OnceLock::new(),
             },
@@ -12864,7 +12913,9 @@ impl Column {
             return None;
         }
         let data: &[f64] = match &self.values {
-            ScalarValues::LazyNullableFloat64 { data, .. } => data.as_slice(),
+            ScalarValues::LazyNullableFloat64 {
+                buffer, start, len, ..
+            } => &buffer[*start..*start + *len],
             ScalarValues::LazyAllValidFloat64 { data, .. } => data.as_ref(),
             ScalarValues::LazyAllValidFloat64Vec { data, .. } => &data[..],
             ScalarValues::LazyAllValidFloat64Slice {
@@ -12884,7 +12935,19 @@ impl Column {
         }
         let data: &[f64] = match &self.values {
             ScalarValues::LazyAllValidFloat64 { data, .. } => data.as_ref(),
-            ScalarValues::LazyNullableFloat64 { data, .. } => data.as_slice(),
+            ScalarValues::LazyNullableFloat64 {
+                buffer, start, len, ..
+            } => &buffer[*start..*start + *len],
+            // The WINDOWED all-valid backings are just as contiguous as the
+            // whole-buffer ones, and `take_contiguous_range` now answers a
+            // nullable range with one. Omitting them here would make a windowed
+            // column decline every typed consumer that asks this question — this
+            // arm's own gate included, so re-slicing a window fell back to the
+            // `Vec<usize>` gather it exists to avoid.
+            ScalarValues::LazyAllValidFloat64Vec { data, .. } => &data[..],
+            ScalarValues::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } => &data[*start..*start + *len],
             _ => match &self.data {
                 Some(ColumnData::Float64(data)) => data.as_ref(),
                 _ => return None,
@@ -13479,6 +13542,21 @@ impl Column {
         }
     }
 
+    /// Nullable-Float64 sibling of [`Self::float64_arc_view_source`].
+    ///
+    /// Returns the SHARED backing plus this column's offset into it, so a
+    /// contiguous range can re-window the same buffer. The window's validity is
+    /// the caller's problem: unlike the all-valid sources, a nullable range
+    /// still has to derive its own mask.
+    fn nullable_float64_arc_view_source(&self) -> Option<(Arc<Vec<f64>>, usize)> {
+        match &self.values {
+            ScalarValues::LazyNullableFloat64 { buffer, start, .. } => {
+                Some((Arc::clone(buffer), *start))
+            }
+            _ => None,
+        }
+    }
+
     /// Int64 sibling of [`Self::float64_arc_view_source`].
     ///
     /// Gated on `DType::Int64` specifically, NOT merely on an i64-shaped backing:
@@ -13498,6 +13576,30 @@ impl Column {
             // cannot be re-shared as `Arc<Vec<i64>>` without the copy this window
             // exists to avoid; those keep the copying arm.
             _ => None,
+        }
+    }
+
+    /// The shared `Arc<[f64]>` behind a Float64 column and this column's offset
+    /// into it, WITHOUT requiring the column to be all-valid.
+    ///
+    /// Separate from [`Self::float64_arc_view_source`] because a NaN-as-missing
+    /// column (`LazyAllValidFloat64` carrying NaN at the slots its mask calls
+    /// invalid) has a perfectly good shared backing even though `validity.all()`
+    /// is false. Callers that hand the result to an all-valid-shaped backing
+    /// must prove the missing slots really do hold NaN.
+    fn float64_arc_backing(&self) -> Option<(Arc<[f64]>, usize)> {
+        if self.dtype != DType::Float64 {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } => Some((Arc::clone(data), 0)),
+            ScalarValues::LazyAllValidFloat64Slice { data, start, .. } => {
+                Some((Arc::clone(data), *start))
+            }
+            _ => match &self.data {
+                Some(ColumnData::Float64(data)) => Some((Arc::clone(data), 0)),
+                _ => None,
+            },
         }
     }
 
@@ -14170,7 +14272,9 @@ impl Column {
         // `Null(NaT)`/`Null(Null)` keeps Eager values and must use the generic
         // NullKind-faithful gather below.
         let typed_f64: Option<&[f64]> = match &self.values {
-            ScalarValues::LazyNullableFloat64 { data, .. } => Some(data.as_slice()),
+            ScalarValues::LazyNullableFloat64 {
+                buffer, start, len, ..
+            } => Some(&buffer[*start..*start + *len]),
             ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
             _ => None,
         };
@@ -14540,7 +14644,9 @@ impl Column {
         }
 
         let typed_f64: Option<&[f64]> = match &self.values {
-            ScalarValues::LazyNullableFloat64 { data, .. } => Some(data.as_slice()),
+            ScalarValues::LazyNullableFloat64 {
+                buffer, start, len, ..
+            } => Some(&buffer[*start..*start + *len]),
             ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
             _ => None,
         };
@@ -14735,6 +14841,9 @@ impl Column {
         {
             let window = &data[start..end];
             let mut words = vec![0_u64; len.div_ceil(64)];
+            // Non-zero iff some window slot holds a non-NaN datum while the mask
+            // calls it invalid.
+            let mut escaped = 0_u64;
             match validity.packed_words() {
                 // WORD-ORIENTED DERIVE. Every source validity bit for output
                 // word `w` lives in source words `word_off + w` and its
@@ -14768,6 +14877,10 @@ impl Column {
                             finite |= u64::from(x == x) << bit;
                         }
                         words[w] = valid & finite;
+                        // A non-NaN datum at a slot the mask calls INVALID. See
+                        // the window gate below: such a slot is the one shape an
+                        // all-valid-backed window cannot represent.
+                        escaped |= finite & !valid;
                     }
                 }
                 // Range-encoded or sentinel masks have no packed words to shift;
@@ -14777,18 +14890,77 @@ impl Column {
                         let base = start + w * 64;
                         let mut word = 0_u64;
                         for (bit, &x) in chunk.iter().enumerate() {
-                            if validity.get(base + bit) && x == x {
+                            let valid = validity.get(base + bit);
+                            if valid && x == x {
                                 word |= 1_u64 << bit;
+                            }
+                            if !valid && x == x {
+                                escaped |= 1;
                             }
                         }
                         words[w] = word;
                     }
                 }
             }
-            return Self::from_f64_values_with_validity(
-                window.to_vec(),
-                ValidityMask::from_words(words, len),
-            );
+            let mask = ValidityMask::from_words(words, len);
+            // ZERO-COPY NULLABLE WINDOW. `from_f64_values_with_validity` would
+            // take `window.to_vec()` — an alloc, a page-fault storm and an
+            // 8-byte-per-row memmove that profiled as ~63% of this op, against
+            // 2.0us for the all-valid arm that returns a window. Share the
+            // backing instead; only the derived mask is new.
+            //
+            // `from_words` normalises an all-valid pattern to the sentinel, so
+            // ask the MASK whether the window turned out all-valid rather than
+            // assuming a nullable source yields a nullable window.
+            if !mask.all()
+                && let Some((buffer, src_start)) = self.nullable_float64_arc_view_source()
+                && let Some(view_start) = src_start.checked_add(start)
+                && view_start
+                    .checked_add(len)
+                    .is_some_and(|view_end| view_end <= buffer.len())
+            {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_nullable_float64_window(
+                        buffer,
+                        view_start,
+                        len,
+                        mask.clone(),
+                    ),
+                    validity: mask,
+                    data: None,
+                };
+            }
+            // ZERO-COPY WINDOW FOR NaN-AS-MISSING SOURCES. `from_f64_values`
+            // does NOT build a `LazyNullableFloat64` for NaN-bearing input — it
+            // keeps the raw buffer in `LazyAllValidFloat64` and derives a holey
+            // mask, so missing slots hold NaN rather than the 0.0 sentinel. That
+            // is the representation `iloc_slice @float64_nan10` actually has, and
+            // the window above declines it.
+            //
+            // An all-valid-shaped backing materializes `Float64(x)` at EVERY
+            // slot, so it can only stand in for the gather when each slot is
+            // valid-or-NaN — a missing slot holding finite data would come back
+            // as a value where `take_positions` yields `Null(NaN)`. `escaped` is
+            // exactly that set, accumulated in the derive pass above, so this is
+            // a proof about the window's own rows and not an assumption about
+            // how the column was built.
+            if escaped == 0
+                && let Some((buffer, src_start)) = self.float64_arc_backing()
+                && let Some(view_start) = src_start.checked_add(start)
+                && view_start
+                    .checked_add(len)
+                    .is_some_and(|view_end| view_end <= buffer.len())
+            {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_float64_slice(buffer, view_start, len),
+                    validity: mask,
+                    data: None,
+                };
+            }
+
+            return Self::from_f64_values_with_validity(window.to_vec(), mask);
         }
 
         let positions: Vec<usize> = (start..end).collect();
@@ -16685,9 +16857,12 @@ impl Column {
             {
                 self.values.gather_float64_data()
             }
-            ScalarValues::LazyNullableFloat64 { data, .. } if data.len() == self.validity.len() => {
-                Some(data.as_slice())
-            }
+            ScalarValues::LazyNullableFloat64 {
+                buffer,
+                start,
+                len,
+                ..
+            } if *len == self.validity.len() => Some(&buffer[*start..*start + *len]),
             ScalarValues::LazyCombineFirstFloat64 { len, .. } if *len == self.validity.len() => {
                 self.values.combine_first_float64_data()
             }
@@ -18754,7 +18929,9 @@ impl Column {
             // (present ⇒ same datum Scalar; missing ⇒ Null(NaN)/Null(Null) ==
             // missing_for_dtype; Column::eq compares materialized values).
             let typed_f64: Option<&[f64]> = match &self.values {
-                ScalarValues::LazyNullableFloat64 { data, .. } => Some(data.as_slice()),
+                ScalarValues::LazyNullableFloat64 {
+                    buffer, start, len, ..
+                } => Some(&buffer[*start..*start + *len]),
                 ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
                 _ => None,
             };
@@ -24906,13 +25083,15 @@ impl Column {
             // different backing retains the generic path, avoiding a regression
             // when its Scalar cache has already been paid for.
             if let ScalarValues::LazyNullableFloat64 {
-                data,
+                buffer,
+                start,
+                len,
                 validity,
                 values,
             } = &self.values
                 && values.get().is_none()
             {
-                for (idx, &x) in data.iter().enumerate() {
+                for (idx, &x) in buffer[*start..*start + *len].iter().enumerate() {
                     if validity.get(idx) && x.is_finite() {
                         tally(x);
                     }
@@ -25994,11 +26173,18 @@ impl Column {
                     }
                     return Ok(Self::from_i64_values_with_validity(out, out_valid));
                 }
-                ScalarValues::LazyNullableFloat64 { data, validity, .. } => {
+                ScalarValues::LazyNullableFloat64 {
+                    buffer,
+                    start,
+                    len,
+                    validity,
+                    ..
+                } => {
+                    let window = &buffer[*start..*start + *len];
                     let mut out = Vec::with_capacity(perm.len());
                     let mut out_valid = ValidityMask::all_valid(perm.len());
                     for (j, &i) in perm.iter().enumerate() {
-                        out.push(data[i]);
+                        out.push(window[i]);
                         if !validity.get(i) {
                             out_valid.set(j, false);
                         }
@@ -33107,6 +33293,28 @@ mod tests {
 
     #[test]
     fn take_contiguous_range_on_a_nullable_column_matches_take_positions() {
+        // NON-VACUITY: the nullable range must SHARE the source backing, not
+        // copy the window out of it. Without this the test passes just as well
+        // against the `window.to_vec()` arm.
+        let shared = {
+            let data: Vec<f64> = (0..300)
+                .map(|i| if i % 7 == 3 { f64::NAN } else { i as f64 })
+                .collect();
+            Column::from_f64_values(data)
+        };
+        let window = shared.take_contiguous_range(64, 128);
+        let (src, _) = shared
+            .as_f64_slice_with_validity()
+            .expect("source is a typed nullable float64 column");
+        let (win, _) = window
+            .as_f64_slice_with_validity()
+            .expect("window stays typed nullable");
+        assert_eq!(
+            win.as_ptr(),
+            src[64..].as_ptr(),
+            "the nullable window must SHARE the source buffer, not copy it"
+        );
+
         // len >= 4 so `i % 7 == 3` actually places a NaN; at len 1 the pattern
         // never fires and the fixture would silently be all-valid, testing the
         // block above instead of the arm under test.
