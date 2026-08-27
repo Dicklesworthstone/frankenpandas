@@ -22707,6 +22707,68 @@ impl Series {
     ///
     /// Matches `pd.Series.describe(percentiles=[...])`.
     pub fn describe_with_percentiles(&self, percentiles: &[f64]) -> Result<Self, FrameError> {
+        // pandas DESCRIBES A NON-NUMERIC SERIES WITH A DIFFERENT SET OF
+        // STATISTICS. FrankenPandas ran the numeric summary over every dtype, so
+        // `Series(["apple","banana",...]).describe()` returned
+        // count/mean/std/min/25%/50%/75%/max where pandas returns four entries.
+        //
+        // MEASURED, live pandas 2.2.3, on ["apple","banana","apple","cherry","banana"]:
+        //   index  ['count', 'unique', 'top', 'freq']
+        //   values [5, 3, 'apple', 2]          dtype object
+        //
+        // `top` is the MOST FREQUENT value and a tie goes to whichever appears
+        // FIRST — 'apple' and 'banana' both occur twice and pandas picks
+        // 'apple'. Confirmed on three further inputs so the rule is not read off
+        // one case: ['b','a','b','a'] -> 'b', ['z','y','z','y','x'] -> 'z',
+        // ['q','q','r','r'] -> 'q'.
+        //
+        // The result mixes Int64 and Utf8; `Column::from_values` holds that by
+        // falling back to its object representation.
+        // br-frankenpandas-live-oracle-passes-by-skip-l7r1p.
+        if self.column.dtype() == DType::Utf8 {
+            let values = self.column.values();
+            let mut order: Vec<String> = Vec::new();
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for value in values {
+                if let Scalar::Utf8(text) = value {
+                    let entry = counts.entry(text.clone()).or_insert(0);
+                    if *entry == 0 {
+                        order.push(text.clone());
+                    }
+                    *entry += 1;
+                }
+            }
+            let count: usize = counts.values().sum();
+            let unique = order.len();
+            // First-appearance order with a strict `>` keeps the earliest of a tie.
+            let mut top: Option<(String, usize)> = None;
+            for candidate in &order {
+                let freq = counts[candidate];
+                if top.as_ref().is_none_or(|(_, best)| freq > *best) {
+                    top = Some((candidate.clone(), freq));
+                }
+            }
+            let labels: Vec<IndexLabel> = ["count", "unique", "top", "freq"]
+                .iter()
+                .map(|name| IndexLabel::Utf8((*name).to_string()))
+                .collect();
+            let stats = match top {
+                Some((text, freq)) => vec![
+                    Scalar::Int64(count as i64),
+                    Scalar::Int64(unique as i64),
+                    Scalar::Utf8(text),
+                    Scalar::Int64(freq as i64),
+                ],
+                None => vec![
+                    Scalar::Int64(0),
+                    Scalar::Int64(0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Int64(0),
+                ],
+            };
+            return Self::from_values(self.name.clone(), labels, stats);
+        }
         let percentiles = normalize_describe_percentiles(percentiles)?;
         // perf (br-frankenpandas-igqxd): typed collection for all-valid Float64/Int64,
         // skipping the per-element Scalar to_f64. as_f64_slice is all-valid no-NaN (so
