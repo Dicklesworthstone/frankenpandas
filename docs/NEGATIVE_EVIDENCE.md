@@ -42439,3 +42439,56 @@ question is answered NO — pinning the incumbent is refused because it cripples
 it. Re-open only with a genuinely quiet host or a dedicated box, and note that a
 wall-time row taken here needs a load bound as a GATE, not a recorded field
 (scripts/audit_banked_row_load.py).
+
+### 2026-08-27 cod-pandas — the two naming fixes cleared 20 of the 47 live-oracle divergences; and 3 of the remaining 27 are NOT FrankenPandas bugs, though I could not pin where the payload is lost [br-frankenpandas-live-oracle-passes-by-skip-l7r1p]
+
+**PART ONE, SETTLED.** 76efdb477 (name a SeriesGroupBy result after the source
+column) and 65ed398ed (stop the oracle hardcoding that column as "value")
+together move `live_oracle_dataframe_series_core` from 47 failing / 702 passing
+to 27 failing / 722 passing, and whole-suite skips from 310 to 290. The 20 are
+the full groupby aggregation set over int keys, string keys and float values.
+Landed in c45816a19; `fp-conformance` stays at 1613 passed / 4 failed.
+
+**PART TWO, AND THE HONEST PART IS THE LIMIT ON IT.** Three of the remaining 27
+are `series_between` cases, and FrankenPandas is RIGHT in all three. Measured,
+live pandas 2.2.3, on the fixtures' own data (`[1,2,3,4,5]`, bounds 2.0/4.0):
+
+    pandas inclusive='left'   [False, True, True, False, False]
+    pandas inclusive='both'   [False, True, True, True,  False]
+
+The test calls FrankenPandas with `"left"` and FrankenPandas answers `false` at
+idx 3 — pandas' `left` answer. The oracle-side expectation is `true` at idx 3,
+which is pandas' `both` answer. So the failing comparison is FrankenPandas'
+correct result against a `both` expectation for a `left` request.
+
+**WHAT I ESTABLISHED, AND WHAT I DID NOT.** Established, each measured rather
+than argued:
+
+  * FrankenPandas' `between` matches live pandas for the requested mode.
+  * `op_series_between` in the oracle DOES read `between_inclusive` and DOES
+    pass `inclusive=` to pandas — invoked directly on a hand-built payload
+    carrying `"between_inclusive": "left"` it returns
+    `[False, True, True, False, False]`, the correct answer.
+  * `PacketFixture.between_inclusive` carries only `#[serde(default)]`, with NO
+    `skip_serializing_if`, and the whole fixture is sent with
+    `serde_json::to_vec(fixture)`. So on inspection the field should survive.
+
+NOT established: where, between those three correct components, the `left`
+becomes a `both`. I have no mechanism for it and I am not publishing a guess —
+I have had to retract two mechanisms today that were inferred from profile
+shares rather than measured, and this would be a third.
+
+**WHAT THIS CHANGES FOR THE COUNT.** These three should NOT be carried as
+FrankenPandas divergences. The remaining 27 are at most 24 product-side, and
+`series_between_{inclusive_left,inclusive_right,integers}` are a harness-path
+defect of unknown location. Whoever owns `crates/fp-conformance/src/lib.rs` —
+which I have been asked to leave alone, and which is the only component in the
+chain I did not read end to end — is best placed to find it in minutes.
+
+**Counted mechanism:** 3 tests, 0 FrankenPandas defects, 3 correct results
+compared against an expectation for a different `inclusive` mode; the product
+answer and the oracle answer are identical (`[False, True, True, False, False]`)
+when each is invoked directly.
+
+NO PERFORMANCE CLAIM. Correctness only, which is what has been possible while
+the host stays too loaded to certify wall time.
