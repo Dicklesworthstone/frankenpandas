@@ -41943,3 +41943,69 @@ NO RATIO IS CLAIMED HERE, in either direction. `df_dot @100k` remains unmeasured
 by me. The ledger's standing `df_dot @10k` LOSS rows (0.573x/0.673x, 2026-08-16)
 are NOT touched by this entry — they were taken at loadavg 6.09-11.92 with both
 nulls inside the limit, which is the shape this entry says is required.
+
+### 2026-08-27 cod-pandas — CORPUS AUDIT: 28 of 285 certified rows were taken above loadavg 40, and the contamination has a SIGN that `thread_provenance` already records. Seven certified wins are biased in our favour [br-frankenpandas-633fb]
+
+Follow-on from today's `df_dot` void. That entry showed one row certifying at
+loadavg 87.8-102.4. This asks how many others did, across everything banked.
+
+    certified rows (decidable, all clauses TRUE)   356
+      loadavg recorded                             285
+      loadavg NOT recorded                          71
+    peak loadavg   min 3.3   p50 14.9   p90 36.8   max 615.4
+    rows a load-max-40 gate would refuse            28
+
+**THE BIAS HAS A SIGN, AND THE FIELD THAT DETERMINES IT IS ALREADY ON EVERY
+ROW.** Competing load starves whichever arm asks for more threads, and
+`thread_provenance.thread_count_actually_used` records both. So:
+
+    pandas threads > FrankenPandas threads   our ratio INFLATES   a WIN is suspect
+    FrankenPandas threads > pandas threads   our ratio DEFLATES   a WIN is conservative,
+                                                                  a LOSS is suspect
+    equal                                    unsigned, still noisy
+
+SEVEN CERTIFIED WINS SIT ON THE SUSPECT SIDE and should be re-measured before
+anyone quotes them:
+
+    df_dot @100k                  16.630x  load  87.8-102.4  fp=63 pandas=64
+    df_dot @1M                     1.680x  load  65.9- 83.3  fp=58 pandas=64
+    df_dot @1M                     1.551x  load  56.9- 82.2  fp=62 pandas=64
+    df_dot @1M                     1.299x  load  59.8- 78.8  fp=62 pandas=64
+    df_dot @100k                   4.758x  load  14.1- 56.6  fp=63 pandas=64
+    groupby_sem_str @1M            7.206x  load  22.0- 70.4  fp=1  pandas=2
+    affine_index_take_arithmetic @1M 1.389x load   9.4- 61.8  fp=1  pandas=2
+
+**A/A null control (same invocation):** the five `df_dot @100k` rows this audit
+is anchored on carry FrankenPandas median null ratios 1.00380 / 1.01283 /
+1.00368 / 0.99107 / 1.01493 against pandas 1.19331 / 1.05925 / 0.94384 / 0.85980
+/ 1.00298, limit 0.02. FrankenPandas holds on all five; pandas fails on four.
+The arm that degrades is the threaded one, which is the mechanism this audit
+generalises.
+
+**MY OWN ROWS ARE IN THIS LIST AND TWO NEED QUALIFYING.**
+
+  * `sin @100k` 2.689x at loadavg 64.7-121.5 and `log1p @100k` 1.957x at
+    17.1-129.5 are on the CONSERVATIVE side — FrankenPandas ran 8 threads
+    against numpy's 1, so load penalised US. The true ratios are at least what
+    was banked. They stand, and they were reported at loads I did not state.
+  * `series_kurtosis @100k` is worse: the BEFORE row (SLOWER 0.929x) was taken
+    at loadavg 61.4-86.6 and the AFTER row (FASTER 1.162x) at 37.1-57.1. Both
+    are 1-thread-versus-1-thread so neither is thread-biased, but a
+    loss-to-win conversion measured across two different load regimes is not a
+    load-matched pair. The FP-only interleaved screen (355us -> 285us, both
+    arms in one window) supports the direction independently, which is why the
+    finding is qualified here rather than withdrawn.
+  * `log @100k` 0.955x and `log_int64 @100k` 0.951x sat at loadavg 47.0-64.8
+    and 46.7-64.3 with equal threads. Losses, so the suspect direction would
+    make them MORE of a loss, not less.
+
+**THE OUTLIER IS WORTH A LOOK BY ITS OWNER:** `df_apply_row @10k` certified
+FASTER 220.116x with a peak loadavg of 615.4. Equal threads, so unsigned, but
+615 is two orders of magnitude above the corpus median of 14.9.
+
+Tooling, not prose: `scripts/audit_banked_row_load.py` reproduces every number
+above and takes `--load-max`. It re-measures nothing and edits nothing.
+
+NO RATIO IS CLAIMED OR RETRACTED HERE. This entry does not move a single banked
+number; it says which ones a load gate would have refused and which direction
+each one's error runs.
