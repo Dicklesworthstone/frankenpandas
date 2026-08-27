@@ -14116,6 +14116,23 @@ impl Column {
             // `src[pos]` on the line above already indexes the same length, so an
             // out-of-range position panics identically either way.
             match self.validity.packed_words() {
+                // ⚠️ SPLITTING THIS INTO A GATHER PASS AND A PACK PASS GAINS
+                // NOTHING — measured 2026-08-27. The loop disassembles to scalar
+                // code reloading `0x80(%rsp)` / `0x88(%rsp)` / `0x90(%rsp)` every
+                // iteration, exactly the spill signature that made
+                // `par_map_slice_f64` worth 2.17x on `df_abs`. It does not
+                // transfer: `data.extend(positions.iter().map(|&pos| src[pos]))`
+                // followed by a separate packing pass measured 2666.1us against
+                // 2663.5us on `drop_duplicates @100k` at 10% NaN, three
+                // interleaved passes, and ~1% WORSE on clean float64.
+                //
+                // The difference is what the loop waits on. `abs` is a SEQUENTIAL
+                // streaming map, so spilled loop invariants cost real issue slots.
+                // This is a RANDOM-ACCESS gather into an 800 KB buffer: every
+                // iteration is already waiting on a cache miss, and the spills
+                // hide under that latency. Do not re-try the shape here without
+                // first showing the gather is issue-bound rather than
+                // latency-bound.
                 Some(source_words) if src.len() == self.validity.len() => {
                     for (word_index, chunk) in positions.chunks(64).enumerate() {
                         let mut word = 0_u64;
