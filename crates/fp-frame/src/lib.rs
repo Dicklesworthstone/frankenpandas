@@ -73451,53 +73451,52 @@ impl DataFrame {
     /// - "first": keep first occurrence (default)
     /// - "last": keep last occurrence
     /// - "all": keep all tied values (may return more than n rows)
+    /// `nlargest`/`nsmallest` with `keep="last"`.
+    ///
+    /// ⚠️ THE OLD IMPLEMENTATION MIXED TWO FRAMES. It sorted into `sorted`,
+    /// computed tie positions AGAINST `sorted`, and then called
+    /// `self.take_rows(...)` — indexing the UNSORTED frame with sorted
+    /// positions. On `a = [5,5,3,7,7]`, `n = 3` it returned index [0,1,3]
+    /// (values 5,5,7), which is not even the three largest.
+    ///
+    /// MEASURED, live pandas 2.2.3, same frame:
+    ///
+    ///   nlargest(3,"a",keep="first") -> [3,4,0]   nsmallest(...,"first") -> [2,0,1]
+    ///   nlargest(3,"a",keep="last")  -> [4,3,1]   nsmallest(...,"last")  -> [2,1,0]
+    ///
+    /// so `keep` only decides how TIES are broken: `first` prefers the earlier
+    /// row, `last` the later one, and the ordering is otherwise by value. That
+    /// is one comparator, not a cutoff-and-splice, which is why this replaces
+    /// both arms rather than patching each.
+    ///
+    /// Missing values are dropped, as pandas drops NaN from both selections.
+    fn n_extreme_keep_last(&self, n: usize, column: &str, largest: bool) -> Result<Self, FrameError> {
+        let col = self.columns.get(column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("nlargest/nsmallest: column '{column}' not found"))
+        })?;
+        let values = col.values();
+        let mut order: Vec<usize> = (0..self.len())
+            .filter(|&i| !values[i].is_missing() && values[i].to_f64().is_ok())
+            .collect();
+        order.sort_by(|&a, &b| {
+            let fa = values[a].to_f64().unwrap_or(f64::NAN);
+            let fb = values[b].to_f64().unwrap_or(f64::NAN);
+            let by_value = if largest {
+                fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+            };
+            // keep="last": the LATER row wins a tie, so later positions sort first.
+            by_value.then(b.cmp(&a))
+        });
+        order.truncate(n);
+        self.take_rows(&order)
+    }
+
     pub fn nlargest_keep(&self, n: usize, column: &str, keep: &str) -> Result<Self, FrameError> {
         match keep {
             "first" => self.nlargest(n, column),
-            "last" => {
-                // Reverse, take first n, reverse back
-                let sorted = self.sort_values(column, false)?;
-                // For "last", we need to reverse ties. Use stable sort and reverse.
-                let len = sorted.len();
-                if len <= n {
-                    return Ok(sorted);
-                }
-                // Get the nth value as the cutoff
-                let col = sorted.columns.get(column).ok_or_else(|| {
-                    FrameError::CompatibilityRejected(format!(
-                        "nlargest_keep: column '{column}' not found"
-                    ))
-                })?;
-                let cutoff = col.values()[n - 1].to_f64().unwrap_or(f64::NEG_INFINITY);
-                // Count how many values are tied at the cutoff
-                let tied: usize = col
-                    .values()
-                    .iter()
-                    .filter(|v| v.to_f64().ok() == Some(cutoff))
-                    .count();
-                let above: usize = col
-                    .values()
-                    .iter()
-                    .filter(|v| v.to_f64().ok().is_some_and(|f| f > cutoff))
-                    .count();
-                let need_tied = n - above;
-                // Take the last `need_tied` of the tied values
-                let mut indices = Vec::new();
-                let mut tied_indices = Vec::new();
-                for (i, v) in col.values().iter().enumerate() {
-                    if let Ok(f) = v.to_f64() {
-                        if f > cutoff {
-                            indices.push(i);
-                        } else if f == cutoff {
-                            tied_indices.push(i);
-                        }
-                    }
-                }
-                // Take last `need_tied` ties
-                let skip = tied.saturating_sub(need_tied);
-                indices.extend_from_slice(&tied_indices[skip..]);
-                self.take_rows(&indices)
-            }
+            "last" => self.n_extreme_keep_last(n, column, true),
             "all" => {
                 let sorted = self.sort_values(column, false)?;
                 if sorted.len() <= n {
@@ -73531,44 +73530,7 @@ impl DataFrame {
     pub fn nsmallest_keep(&self, n: usize, column: &str, keep: &str) -> Result<Self, FrameError> {
         match keep {
             "first" => self.nsmallest(n, column),
-            "last" => {
-                let sorted = self.sort_values(column, true)?;
-                let len = sorted.len();
-                if len <= n {
-                    return Ok(sorted);
-                }
-                let col = sorted.columns.get(column).ok_or_else(|| {
-                    FrameError::CompatibilityRejected(format!(
-                        "nsmallest_keep: column '{column}' not found"
-                    ))
-                })?;
-                let cutoff = col.values()[n - 1].to_f64().unwrap_or(f64::INFINITY);
-                let tied: usize = col
-                    .values()
-                    .iter()
-                    .filter(|v| v.to_f64().ok() == Some(cutoff))
-                    .count();
-                let below: usize = col
-                    .values()
-                    .iter()
-                    .filter(|v| v.to_f64().ok().is_some_and(|f| f < cutoff))
-                    .count();
-                let need_tied = n - below;
-                let mut indices = Vec::new();
-                let mut tied_indices = Vec::new();
-                for (i, v) in col.values().iter().enumerate() {
-                    if let Ok(f) = v.to_f64() {
-                        if f < cutoff {
-                            indices.push(i);
-                        } else if f == cutoff {
-                            tied_indices.push(i);
-                        }
-                    }
-                }
-                let skip = tied.saturating_sub(need_tied);
-                indices.extend_from_slice(&tied_indices[skip..]);
-                self.take_rows(&indices)
-            }
+            "last" => self.n_extreme_keep_last(n, column, false),
             "all" => {
                 let sorted = self.sort_values(column, true)?;
                 if sorted.len() <= n {
