@@ -2441,6 +2441,21 @@ enum ScalarValues {
         dense_cycle: OnceLock<Option<Int64DenseCycleWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// ZERO-COPY WINDOW over a shared all-valid Int64 buffer — the Int64 sibling
+    /// of `LazyAllValidFloat64Slice`.
+    ///
+    /// br-frankenpandas-uza04. Float64 has had a windowed variant for a while, so
+    /// `take_contiguous_range` could answer an all-valid Float64 slice by sharing
+    /// the buffer. Int64 had none, so the same call COPIED
+    /// (`from_i64_values_owned(values[start..end].to_vec())`). Measured on
+    /// `iloc_slice @100k`: 2.0us on float64 against 88.4us on int64 — 44x — and a
+    /// certified 0.172x against pandas, which returns a view.
+    LazyAllValidInt64Slice {
+        data: Arc<Vec<i64>>,
+        start: usize,
+        len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidInt64Chunks {
         chunks: Arc<[Int64Chunk]>,
         len: usize,
@@ -3262,6 +3277,19 @@ impl ScalarValues {
             positions,
             gathered: OnceLock::new(),
             all_finite: Self::bool_once_lock(all_finite),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_all_valid_int64_slice(data: Arc<Vec<i64>>, start: usize, len: usize) -> Self {
+        debug_assert!(
+            start.checked_add(len).is_some_and(|end| end <= data.len()),
+            "Int64 view window must lie within source data"
+        );
+        Self::LazyAllValidInt64Slice {
+            data,
+            start,
+            len,
             values: OnceLock::new(),
         }
     }
@@ -5273,6 +5301,20 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyAllValidInt64Slice {
+                data,
+                start,
+                len,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data[*start..*start + *len]
+                        .iter()
+                        .copied()
+                        .map(Scalar::Int64)
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyAllValidFloat64Slice {
                 data,
                 start,
@@ -5984,6 +6026,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
+            Self::LazyAllValidInt64Slice { len, .. } => *len,
             Self::LazyAllValidFloat64Dot { len, .. } => *len,
             Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, .. } => plan.column_len(),
             Self::LazyAllValidFloat64TransposeRow { plan, .. } => plan.column_len(),
@@ -6047,6 +6090,7 @@ impl ScalarValues {
             | Self::LazyAllValidFloat64Vec { values, .. }
             | Self::LazyAllValidFloat64Chunks { values, .. }
             | Self::LazyAllValidFloat64Slice { values, .. }
+            | Self::LazyAllValidInt64Slice { values, .. }
             | Self::LazyAllValidFloat64Dot { values, .. }
             | Self::LazyAllValidFloat64PairwiseStatMatrixColumn { values, .. }
             | Self::LazyAllValidFloat64TransposeRow { values, .. }
@@ -6345,6 +6389,9 @@ impl Clone for ScalarValues {
                 }
                 cloned
             }
+            Self::LazyAllValidInt64Slice {
+                data, start, len, ..
+            } => Self::lazy_all_valid_int64_slice(Arc::clone(data), *start, *len),
             Self::LazyAllValidFloat64Slice {
                 data,
                 start,
@@ -13046,6 +13093,12 @@ impl Column {
             if let ScalarValues::LazyAllValidInt64Vec { data, .. } = &self.values {
                 return Some(data.as_slice());
             }
+            if let ScalarValues::LazyAllValidInt64Slice {
+                data, start, len, ..
+            } = &self.values
+            {
+                return Some(&data[*start..*start + *len]);
+            }
             if let Some(data) = self.values.chunks_i64_data() {
                 return Some(data);
             }
@@ -13422,6 +13475,28 @@ impl Column {
                 start,
                 ..
             } => Some((Arc::clone(bytes), Arc::clone(offsets), *start)),
+            _ => None,
+        }
+    }
+
+    /// Int64 sibling of [`Self::float64_arc_view_source`].
+    ///
+    /// Gated on `DType::Int64` specifically, NOT merely on an i64-shaped backing:
+    /// Datetime64 and Timedelta64 are ns-backed by the same buffers, and handing
+    /// one of those to an Int64 window would emit `Scalar::Int64` where the
+    /// column promises `Scalar::Datetime64`.
+    fn int64_arc_view_source(&self) -> Option<(Arc<Vec<i64>>, usize)> {
+        if self.dtype != DType::Int64 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyAllValidInt64Vec { data, .. } => Some((Arc::clone(data), 0)),
+            ScalarValues::LazyAllValidInt64Slice { data, start, .. } => {
+                Some((Arc::clone(data), *start))
+            }
+            // `LazyAllValidInt64` and `ColumnData::Int64` are `Arc<[i64]>`, which
+            // cannot be re-shared as `Arc<Vec<i64>>` without the copy this window
+            // exists to avoid; those keep the copying arm.
             _ => None,
         }
     }
@@ -14582,6 +14657,26 @@ impl Column {
 
             if let Some(values) = self.as_f64_slice() {
                 return Self::from_f64_values(values[start..end].to_vec());
+            }
+
+            // ZERO-COPY INT64 WINDOW, the sibling of the Float64 one above.
+            // Without it this arm copied `len` i64 per column, which is why
+            // `iloc_slice @100k` cost 2.0us on float64 and 88.4us on int64.
+            // Bit-identical: the window materializes `Scalar::Int64(data[start + i])`
+            // for the same rows in the same order, and the mask is all-valid either
+            // way.
+            if let Some((src_data, src_start)) = self.int64_arc_view_source()
+                && let Some(view_start) = src_start.checked_add(start)
+                && view_start
+                    .checked_add(len)
+                    .is_some_and(|view_end| view_end <= src_data.len())
+            {
+                return Self {
+                    dtype: self.dtype,
+                    values: ScalarValues::lazy_all_valid_int64_slice(src_data, view_start, len),
+                    validity: ValidityMask::all_valid(len),
+                    data: None,
+                };
             }
 
             if let Some(values) = self.as_i64_slice() {
@@ -32975,6 +33070,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The Int64 window must produce exactly what the copying arm produced, and
+    /// must NOT be taken for a Datetime64/Timedelta64 column that happens to be
+    /// ns-backed by the same i64 buffer — that would emit Scalar::Int64 where the
+    /// column promises Scalar::Datetime64.
+    #[test]
+    fn take_contiguous_range_int64_window_matches_the_copy_and_spares_temporal() {
+        // NON-VACUITY: `from_i64_values_owned` is the constructor that yields the
+        // `Arc<Vec<i64>>` shape the window can share (it is also what every bench
+        // fixture and every i64 ingest path uses). Without this witness the test
+        // would pass just as well against the copying arm.
+        let shared = Column::from_i64_values_owned((0..200i64).collect());
+        let window = shared.take_contiguous_range(64, 100);
+        assert_eq!(
+            window.as_i64_slice().expect("window stays typed").as_ptr(),
+            shared.as_i64_slice().expect("source is typed")[64..].as_ptr(),
+            "the Int64 window must SHARE the source buffer, not copy it"
+        );
+
+        for len in [1usize, 63, 64, 65, 200] {
+            let column = Column::from_i64_values_owned((0..len as i64).map(|i| i * 7 - 11).collect());
+            for start in [0usize, 1, 63] {
+                if start >= len {
+                    continue;
+                }
+                for take in [1usize, 2, 64, 65] {
+                    if start + take > len {
+                        continue;
+                    }
+                    let windowed = column.take_contiguous_range(start, take);
+                    assert_eq!(windowed.dtype(), DType::Int64);
+                    assert_eq!(windowed.len(), take, "len={len} start={start} take={take}");
+                    let want: Vec<Scalar> = (start..start + take)
+                        .map(|i| Scalar::Int64(i as i64 * 7 - 11))
+                        .collect();
+                    assert_eq!(
+                        windowed.values(),
+                        want.as_slice(),
+                        "len={len} start={start} take={take}"
+                    );
+                    // The window must remain borrowable as a typed slice, or every
+                    // typed consumer would decline it and fall back to Scalars.
+                    assert_eq!(
+                        windowed.as_i64_slice().expect("window stays typed").len(),
+                        take
+                    );
+                }
+            }
+        }
+
+        // Datetime64 is ns-backed by an i64 buffer; the window must not claim it.
+        let stamps = Column::new(
+            DType::Datetime64,
+            (0..8i64).map(|i| Scalar::Datetime64(i * 1_000)).collect(),
+        )
+        .unwrap();
+        let sliced = stamps.take_contiguous_range(2, 4);
+        assert_eq!(sliced.dtype(), DType::Datetime64);
+        assert_eq!(
+            sliced.values(),
+            (2..6i64)
+                .map(|i| Scalar::Datetime64(i * 1_000))
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
     }
 
     fn take_contiguous_range_uses_typed_views_without_positions() {
