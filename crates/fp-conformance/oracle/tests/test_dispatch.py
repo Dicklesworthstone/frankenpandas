@@ -606,6 +606,35 @@ def test_series_dt_month_name_returns_strings(oracle, pd):
     assert values == ["January", "June"]
 
 
+def test_series_dt_to_timestamp_uses_a_real_uniform_period_series(oracle, pd):
+    payload = {
+        "operation": "series_dt_to_timestamp",
+        "period_freq": "M",
+        "dt_how": "end",
+        "left": _utf8_series_payload(["2024-01", "2024-02"]),
+    }
+
+    response = oracle.dispatch(pd, payload)
+
+    assert _expected_values(response) == [
+        "2024-01-31 23:59:59.999999999",
+        "2024-02-29 23:59:59.999999999",
+    ]
+
+
+def test_series_dt_to_timestamp_rejects_utf8_pseudo_periods(oracle, pd):
+    # A naive adapter can call pd.Period per element and manufacture outputs
+    # for these mixed precision strings. pandas has no corresponding Period
+    # Series, so accepting this payload would self-compare FP semantics.
+    payload = {
+        "operation": "series_dt_to_timestamp",
+        "left": _utf8_series_payload(["2024", "2024-06", "2024-06-15T12:30:00"]),
+    }
+
+    with pytest.raises(oracle.OracleError, match="period_freq.*not differential coverage"):
+        oracle.dispatch(pd, payload)
+
+
 def test_series_concat_combines_series(oracle, pd):
     payload = {
         "operation": "series_concat",

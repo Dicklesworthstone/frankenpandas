@@ -2152,25 +2152,20 @@ def op_series_dt_to_timestamp(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
         raise OracleError("series_dt_to_timestamp requires left payload")
-    series = fixture_series_from_payload(pd, left, "series_dt_to_timestamp")
+    period_freq = payload.get("period_freq")
+    if not isinstance(period_freq, str) or not period_freq:
+        raise OracleError(
+            "series_dt_to_timestamp requires period_freq: pandas only exposes "
+            ".dt.to_timestamp() on a period-dtype series; a UTF-8 pseudo-period "
+            "payload is not differential coverage"
+        )
     how = "end" if str(payload.get("dt_how", "start")).lower() == "end" else "start"
-
-    def to_ts(s: Any) -> Any:
-        # FP treats a value as a Period and converts to a timestamp at the
-        # period boundary (start/end), formatted with a space separator.
-        # A value that already carries a clock time ("...T..") is a datetime,
-        # not a period: it is echoed verbatim when valid, NaT when malformed.
-        if not isinstance(s, str):
-            return float("nan")
-        if "T" in s:
-            return s if not pd.isna(pd.to_datetime(s, errors="coerce")) else float("nan")
-        try:
-            return str(pd.Period(s).to_timestamp(how=how))
-        except Exception:
-            return float("nan")
-
     try:
-        out = series.apply(to_ts)
+        index = [label_from_json(item) for item in left["index"]]
+        values = [scalar_from_json(item) for item in left["values"]]
+        periods = pd.PeriodIndex(values, freq=period_freq)
+        series = pd.Series(periods, index=index, name=left.get("name", "series"))
+        out = series.dt.to_timestamp(how=how)
     except Exception as exc:
         raise OracleError(f"series_dt_to_timestamp failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
