@@ -12595,6 +12595,25 @@ impl Column {
     /// reason about missingness.
     #[must_use]
     #[doc(hidden)]
+    /// ⚠️ TWO LEVERS FROM THE `DataFrame::reindex` WIN WERE TRIED HERE AND GAIN
+    /// NOTHING — 2026-08-27. This symbol is 12.88% of `join_outer @100k`, so it
+    /// looks like the same shape as the reindex gather, and it is not.
+    ///
+    /// Tried: hoisting the `TypedSource` discriminant out of the element loop
+    /// (it is loop-invariant) and accumulating the validity word in a register
+    /// to replace `n` dependent `words[out_idx / 64] |= ...` RMWs with `n / 64`
+    /// stores. Both are real reductions on paper. Measured vs live pandas,
+    /// `join_outer @100k`, interleaved: FP p50 2880.4/2921.7us before,
+    /// 2889.1/2917.2us after. Identical. LLVM was already hoisting the match,
+    /// and the validity word is L1-resident with a predictable address.
+    ///
+    /// WHAT ACTUALLY WON IN `reindex` WAS THE POSITION COMPACTION, not either of
+    /// these: `Option<usize>` has no niche, so it costs 16 bytes per slot, and
+    /// folding it to a `u32` sentinel removed three quarters of the bytes from
+    /// every column AFTER THE FIRST. That only pays when one position vector is
+    /// consumed by MANY columns, which is the reindex shape. If this is ever
+    /// re-opened, compact once in the CALLER and amortise it across the join's
+    /// columns — do not re-try the two levers above.
     pub fn reindex_promote_float64_by_optional_positions(
         &self,
         positions: &[Option<usize>],
