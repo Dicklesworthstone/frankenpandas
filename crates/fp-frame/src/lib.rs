@@ -2166,10 +2166,7 @@ impl<'a> IsinIndex<'a> {
                     return true;
                 }
                 let as_float = as_int as f64;
-                if self.float_bits.contains(&as_float.to_bits()) {
-                    return true;
-                }
-                false
+                self.float_bits.contains(&as_float.to_bits())
             }
             Scalar::Utf8(s) => self.utf8s.contains(s.as_str()),
             Scalar::Timedelta64(t) => self.timedeltas.contains(t),
@@ -30503,8 +30500,7 @@ impl Ewm<'_> {
                     } else {
                         old_wt *= old_wt_factor;
                         if weighted_avg != x {
-                            weighted_avg =
-                                (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
+                            weighted_avg = (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
                         }
                         if adjust {
                             old_wt += new_wt;
@@ -30559,8 +30555,7 @@ impl Ewm<'_> {
                     } else {
                         old_wt *= old_wt_factor;
                         if weighted_avg != x {
-                            weighted_avg =
-                                (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
+                            weighted_avg = (old_wt * weighted_avg + new_wt * x) / (old_wt + new_wt);
                         }
                         if adjust {
                             old_wt += new_wt;
@@ -46228,10 +46223,7 @@ impl StringAccessor<'_> {
         if let Some((bytes, offsets)) = column.as_utf8_contiguous()
             && bytes.is_ascii()
         {
-            let out: Vec<i64> = offsets
-                .windows(2)
-                .map(|w| (w[1] - w[0]) as i64)
-                .collect();
+            let out: Vec<i64> = offsets.windows(2).map(|w| (w[1] - w[0]) as i64).collect();
             let index = self.series.index().clone();
             return Series::new(
                 self.series.name(),
@@ -57222,11 +57214,7 @@ impl LazyTransposeFramePlan {
                 return LazyTransposeColumnSlotPage::Contiguous(
                     (0..page_len)
                         .map(|slot| {
-                            Column::from_f64_shared_window(
-                                Arc::clone(&buffer),
-                                slot * ncols,
-                                ncols,
-                            )
+                            Column::from_f64_shared_window(Arc::clone(&buffer), slot * ncols, ncols)
                         })
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
@@ -57287,7 +57275,7 @@ impl LazyTransposeFramePlan {
             return cached.clone();
         }
         let built = self.build_page_contiguous_buffer(page_start, page_len);
-        Some(slots[page_index].get_or_init(|| built).clone()?)
+        slots[page_index].get_or_init(|| built).clone()
     }
 
     fn build_page_contiguous_buffer(
@@ -57305,12 +57293,9 @@ impl LazyTransposeFramePlan {
         for source in self.source_columns.iter() {
             if let Some(values) = source.as_f64_slice() {
                 sources.push(Src::F64(values));
-            } else if let Some(values) = source.as_i64_slice() {
-                sources.push(Src::I64(values));
             } else {
-                // Canonical-nullable or otherwise untyped source: the per-column
-                // path reconstructs emission-rule Scalars and must keep it.
-                return None;
+                let values = source.as_i64_slice()?;
+                sources.push(Src::I64(values));
             }
         }
         let ncols = sources.len();
@@ -57900,10 +57885,9 @@ impl LazyDataFrameColumns {
             else {
                 unreachable!();
             };
-            let columns = materialized.into_inner().map_or_else(
-                || store.materialize_columns(),
-                Arc::unwrap_or_clone,
-            );
+            let columns = materialized
+                .into_inner()
+                .map_or_else(|| store.materialize_columns(), Arc::unwrap_or_clone);
             *self = Self::Eager(columns);
         }
         let Self::Eager(columns) = self else {
@@ -57927,10 +57911,9 @@ impl LazyDataFrameColumns {
             Self::Float64Block {
                 store,
                 materialized,
-            } => materialized.into_inner().map_or_else(
-                || store.materialize_columns(),
-                Arc::unwrap_or_clone,
-            ),
+            } => materialized
+                .into_inner()
+                .map_or_else(|| store.materialize_columns(), Arc::unwrap_or_clone),
         }
     }
 }
@@ -117393,10 +117376,7 @@ mod tests {
         fn check(label: &str, strings: Vec<String>) {
             let n = strings.len();
             let index: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::from).collect();
-            let values: Vec<Scalar> = strings
-                .iter()
-                .map(|s| Scalar::Utf8(s.clone().into()))
-                .collect();
+            let values: Vec<Scalar> = strings.iter().map(|s| Scalar::Utf8(s.clone())).collect();
             let series = Series::from_values("x", index, values).unwrap();
             let got = series.str().len().unwrap();
             for (i, s) in strings.iter().enumerate() {
@@ -117431,9 +117411,7 @@ mod tests {
             "fixture must actually contain non-ASCII or this arm is vacuous"
         );
         assert!(
-            multibyte
-                .iter()
-                .any(|s| s.chars().count() != s.len()),
+            multibyte.iter().any(|s| s.chars().count() != s.len()),
             "fixture must contain a string whose char count differs from its byte count"
         );
         check("multibyte", multibyte);
@@ -186569,8 +186547,7 @@ mod tests {
         )
         .unwrap();
         let transposed = source.transpose().unwrap();
-        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } = &transposed.columns
-        else {
+        let LazyDataFrameColumns::HomogeneousTranspose { plan, .. } = &transposed.columns else {
             panic!("expected lazy transpose storage");
         };
         assert_eq!(plan.initialized_column_slots(), 0);
@@ -205584,11 +205561,7 @@ mod transpose_row_prealloc_uza04 {
             &[Scalar::Float64(7.0), Scalar::Float64(1.0)]
         );
         assert!(
-            transposed
-                .column_at(1)
-                .expect("second row")
-                .values()[1]
-                .is_missing(),
+            transposed.column_at(1).expect("second row").values()[1].is_missing(),
             "a NaN source cell must bypass the unchecked typed-row constructor"
         );
     }
@@ -205774,7 +205747,11 @@ mod ewm_mean_loop_shape_uza04 {
                     .mean()
                     .expect("mean");
                 let expected = reference_ewm_mean(&data, alpha, adjust, 0);
-                assert_bits_match(&actual, &expected, &format!("f64 adjust={adjust} alpha={alpha}"));
+                assert_bits_match(
+                    &actual,
+                    &expected,
+                    &format!("f64 adjust={adjust} alpha={alpha}"),
+                );
             }
         }
     }
@@ -205790,7 +205767,11 @@ mod ewm_mean_loop_shape_uza04 {
             .ewm_with_options(None, Some(0.3), true, 0)
             .mean()
             .expect("mean");
-        assert_bits_match(&actual, &reference_ewm_mean(&data, 0.3, true, 0), "equal-run");
+        assert_bits_match(
+            &actual,
+            &reference_ewm_mean(&data, 0.3, true, 0),
+            "equal-run",
+        );
     }
 
     /// min_periods drives the NaN prefix, which the collect writes per element
@@ -206071,7 +206052,11 @@ mod mixed_dense_group_order_uza04 {
             .expect("sum");
 
         let (want_sparse_labels, want_sparse_sums) = reference(&sk1, &sk2, &sv);
-        assert_eq!(want_sparse_labels.len(), 20, "sparse: 20 occupied of 400 slots");
+        assert_eq!(
+            want_sparse_labels.len(),
+            20,
+            "sparse: 20 occupied of 400 slots"
+        );
         assert_eq!(flat_labels(&sparse), want_sparse_labels);
         assert_eq!(values(&sparse, "v"), want_sparse_sums);
 
