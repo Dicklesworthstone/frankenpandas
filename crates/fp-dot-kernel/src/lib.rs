@@ -141,6 +141,29 @@ fn micro_kernel_packed(
 /// AVX2-without-FMA ceiling (4 lanes x (1 mul + 1 add) per cycle) — the
 /// remaining headroom needs `mul_add`, and that WOULD change the bits.
 ///
+/// ⚠️ 2D CACHE BLOCKING (MC x KC) WAS BUILT AND REJECTED — 2026-08-27. The
+/// obvious next move is BLIS-style blocking: sweep a `KC`-deep block of `k`
+/// across a group of `MC` rows so the A working set is bounded by `KC` instead
+/// of by `k`. It was implemented (KC=256, MC=8 row blocks, a `_accum`
+/// microkernel that loads the tile's running sum, continues it, and stores back
+/// — bit-identical, because the `k` blocks are visited in ASCENDING order and no
+/// partial sum is ever rounded separately and recombined) and it LOSES:
+///
+///   * serial, `dim = 1000`, W=1: 75132/76418us -> 81663/80721us, ~8% SLOWER,
+///     consistent across passes.
+///   * certified vs live pandas @100k, pinned incumbent, clean A/A nulls:
+///     FP p50 1141.8us -> 1175.8us, ratio 0.519 -> 0.521, i.e. unchanged.
+///
+/// The reason it cannot help was visible BEFORE the build and is worth keeping:
+/// `perf stat` on this kernel gives IPC 5.32 serial at a 5.38% cache-miss rate,
+/// and 2.91 at 63 threads at 2.86%. It is ISSUE-bound, not memory-bound, so
+/// blocking has nothing to recover and the extra per-`k`-block load/store of the
+/// output tile is pure cost. A COLUMN-panel reorder (B panel hoisted out of the
+/// row loop) was rejected the same day for the same reason: 11-18% slower at 1M.
+///
+/// Do not re-open either without first showing a cache-miss rate that makes the
+/// kernel memory-bound.
+///
 /// br-frankenpandas-mti15. The 2026-07-23 ledger closed this vein with an
 /// explicit retry predicate — "re-open df_dot only for a hand-written GEMM
 /// microkernel (register-blocked, packed panels)" — and recorded the blocker as
