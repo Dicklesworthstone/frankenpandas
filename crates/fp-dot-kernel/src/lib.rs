@@ -31,8 +31,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::simd::cmp::SimdPartialEq;
-use std::simd::{Mask, Simd};
+use std::simd::{Mask, Simd, cmp::SimdPartialEq};
 
 /// Materialize `out[row] = Σ_j a_slices[j][row] * b_col[j]` for `len` rows.
 ///

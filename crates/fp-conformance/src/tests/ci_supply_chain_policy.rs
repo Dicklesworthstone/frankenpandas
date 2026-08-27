@@ -193,7 +193,7 @@ fn rust_toolchain_is_date_pinned_with_required_components() {
     // Deliberately asserts the exact pinned date: bumping the toolchain must be
     // a conscious edit here too, so the pin cannot drift silently.
     assert!(
-        toolchain.contains("channel = \"nightly-2026-07-05\""),
+        toolchain.contains("channel = \"nightly-2026-08-25\""),
         "expected rust-toolchain.toml to pin an exact nightly date"
     );
     assert!(

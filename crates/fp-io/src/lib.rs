@@ -6848,10 +6848,8 @@ fn parse_json_record_number(token: &[u8]) -> Option<JsonRecordNumber> {
         return None;
     }
     let token = std::str::from_utf8(token).ok()?;
-    if !is_float {
-        if let Ok(value) = token.parse::<i64>() {
-            return Some(JsonRecordNumber::Int(value));
-        }
+    if !is_float && let Ok(value) = token.parse::<i64>() {
+        return Some(JsonRecordNumber::Int(value));
     }
     token
         .parse::<f64>()

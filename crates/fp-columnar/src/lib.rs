@@ -40664,9 +40664,14 @@ mod tests {
             for &len in &[1_000_usize, 40_000, 70_000] {
                 let values = build(len);
 
-                let out = Column::from_f64_values(values.clone()).cbrt().expect("cbrt");
+                let out = Column::from_f64_values(values.clone())
+                    .cbrt()
+                    .expect("cbrt");
                 assert_eq!(out.len(), len, "cbrt length drift at {len}");
-                assert!(out.validity().all(), "cbrt is total: no slot may be missing");
+                assert!(
+                    out.validity().all(),
+                    "cbrt is total: no slot may be missing"
+                );
                 let got = out.as_f64_slice().expect("all-valid typed slice");
                 for (i, (&g, &x)) in got.iter().zip(values.iter()).enumerate() {
                     assert_eq!(g.to_bits(), x.cbrt().to_bits(), "cbrt len {len} at {i}");

@@ -2124,7 +2124,10 @@ fn run(
             let transposed = df.transpose().expect("transpose");
             let materialized_columns = transposed.columns();
             black_box(materialized_columns.len());
-            assert!(transposed.num_columns() >= 1_000, "wide clone lane needs 1k columns");
+            assert!(
+                transposed.num_columns() >= 1_000,
+                "wide clone lane needs 1k columns"
+            );
             time_us_repeated_total(MATERIALIZED_CLONE_BATCH, || black_box(transposed.clone()))
         }
         ("dataframe_ops", "df_skew") => time_us(|| {
