@@ -9019,14 +9019,20 @@ fn f64_radix_key(value: f64) -> u64 {
 /// contiguous global range) → bit-identical to the serial map.
 fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
     const PAR_MIN: usize = 200_000;
-    let mut out = vec![0.0_f64; n];
     let workers = cached_available_parallelism().min(8);
     if workers <= 1 || n < PAR_MIN {
-        for (i, o) in out.iter_mut().enumerate() {
-            *o = g(i);
-        }
-        return out;
+        // SERIAL ARM WRITES ONCE. The shared `vec![0.0; n]` below exists so the
+        // parallel arm can hand each worker a disjoint `chunks_mut`; the serial
+        // arm never needed it, and paid a full zero-fill of the output before
+        // overwriting every slot of it. Profiled on `df_abs @100k` at 10% NaN —
+        // which is BELOW `PAR_MIN`, so it is the serial arm — as memset 4.76%
+        // plus clear_page_erms 6.03%.
+        //
+        // Bit-identical: same `g(i)` for the same `i`, in the same ascending
+        // order, into a `Vec` of the same length.
+        return (0..n).map(&g).collect();
     }
+    let mut out = vec![0.0_f64; n];
     let chunk = n.div_ceil(workers);
     std::thread::scope(|scope| {
         for (ci, out_c) in out.chunks_mut(chunk).enumerate() {
