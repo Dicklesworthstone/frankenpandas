@@ -21724,9 +21724,32 @@ impl Series {
         // (and any other numeric_values caller) inherit the speedup.
         let mut vals = Vec::new();
         if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) && !v.is_nan() {
-                    vals.push(v);
+            // RESERVE ONCE, AND HOIST THE MASK SHAPE. This grew a `Vec::new()` to
+            // ~90k elements by repeated reallocation, and asked `validity.get(i)`
+            // per element — which re-decides sentinel-vs-ranges-vs-words on every
+            // call (see `ValidityMask::packed_words`). Profiled on `series_skew
+            // @100k` at 10% NaN: `numeric_values` 13.92% and `ValidityMask::get`
+            // 6.02%, NEITHER of which appears in the clean-float64 run of the same
+            // lane (48.6us clean against 550.6us here).
+            //
+            // Reserving the source length over-reserves when most values are
+            // missing; that is one allocation against log(n) reallocating copies.
+            // Bit-identical: same values, same order, same present-iff test.
+            vals.reserve(data.len());
+            match validity.packed_words() {
+                Some(words) => {
+                    for (i, &v) in data.iter().enumerate() {
+                        if (words[i / 64] >> (i % 64)) & 1 == 1 && !v.is_nan() {
+                            vals.push(v);
+                        }
+                    }
+                }
+                None => {
+                    for (i, &v) in data.iter().enumerate() {
+                        if validity.get(i) && !v.is_nan() {
+                            vals.push(v);
+                        }
+                    }
                 }
             }
         } else if let Some(data) = self.column.as_i64_slice() {
