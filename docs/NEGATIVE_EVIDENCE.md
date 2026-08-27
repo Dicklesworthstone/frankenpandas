@@ -42492,3 +42492,61 @@ when each is invoked directly.
 
 NO PERFORMANCE CLAIM. Correctness only, which is what has been possible while
 the host stays too loaded to certify wall time.
+
+### 2026-08-27 cod-pandas — SIX of the 21 remaining live-oracle divergences are NOT ours, and they share one signature: the expectation is computed with a DIFFERENT OPTION VALUE than the fixture asks for [br-frankenpandas-live-oracle-passes-by-skip-l7r1p]
+
+Two independent families, six tests, one shape. In every case FrankenPandas
+produces the answer live pandas gives for the option the fixture specifies, and
+the expectation it is compared against is the answer for a DIFFERENT option.
+
+**FAMILY 1 — `series_between`, 4 tests.** Fixture data `[1,2,3,4,5]`, bounds
+2.0/4.0. MEASURED, live pandas 2.2.3:
+
+    inclusive='left'   [False, True, True, False, False]
+    inclusive='both'   [False, True, True, True,  False]
+
+The test calls FrankenPandas with `"left"`; it answers `false` at idx 3, which is
+pandas' `left` answer. The expectation is `true` at idx 3 — pandas' `both`
+answer. Same for `inclusive_right`, `inclusive_neither` and `between_integers`.
+
+**FAMILY 2 — `dataframe_idxmax` / `dataframe_idxmin`, 2 tests.** Different data
+in each fixture, checked separately rather than assumed:
+
+    idxmax fixture  a=[5, NaN, 10, 3]  b=[NaN, 9, 2, 50]
+      pandas skipna=True (the DEFAULT)  -> {'a': 'r2', 'b': 'r3'}
+      pandas skipna=False               -> {'a': nan, 'b': nan}
+      FrankenPandas                     -> 'r2'   MATCHES the default
+    idxmin fixture  a=[5, NaN, 1, 3]   b=[NaN, 9, 2, 0.5]
+      pandas skipna=True                -> {'a': 'r2', 'b': 'r3'}
+      FrankenPandas                     -> 'r2'   MATCHES the default
+
+Neither fixture sets `idxmax_skipna`, and BOTH oracle handlers default it to
+True — `op_series_idxmax` does `if skipna is None: skipna = True` and
+`op_dataframe_idxmax` does `payload.get("idxmax_skipna", True)`. Yet the
+expectation is the `skipna=False` answer.
+
+**WHAT IS ESTABLISHED.** For all six: FrankenPandas' answer equals live pandas'
+answer for the requested/default option, measured directly. For `between` the
+oracle handler also passes `inclusive=` through and, invoked by hand on a
+payload carrying `"between_inclusive": "left"`, returns the correct
+`[False, True, True, False, False]`. For idxmax/idxmin both handlers default
+correctly on inspection.
+
+**WHAT IS NOT.** Where the option value changes between fixture and expectation.
+I could not reproduce it by invoking the oracle directly on a hand-built
+DataFrame payload — my payload shape was wrong and the oracle returned nulls, so
+that attempt is inconclusive and is reported as such rather than dressed up. The
+one component in the chain I have not read end to end is
+`crates/fp-conformance/src/lib.rs`, which I have been asked to leave to its
+owner and which is where the fixture is turned into the oracle payload.
+
+**Counted mechanism:** 6 tests, 0 FrankenPandas defects. In each the product
+answer equals live pandas for the specified option and the expectation equals
+live pandas for a different one — `left` against `both` in four cases,
+`skipna=True` against `skipna=False` in two.
+
+**CONSEQUENCE FOR THE COUNT.** 21 remaining opt-outs, of which at most 15 are
+product-side. The six above should not be carried as FrankenPandas divergences
+and should not be "fixed" in the product — changing FrankenPandas to match those
+expectations would make it disagree with live pandas, which is the exact
+inversion this campaign exists to prevent.
