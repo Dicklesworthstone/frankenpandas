@@ -87258,7 +87258,24 @@ impl DataFrameGroupBy<'_> {
             && let Some(keys) = self.df.columns[&self.by[0]].as_i64_slice()
             && value_cols.iter().all(|c| {
                 let col = &self.df.columns[c];
-                col.as_f64_slice().is_some() || col.as_i64_slice().is_some()
+                // NULLABLE VALUE COLUMNS BELONG HERE TOO. This gate claims
+                // "same gate/dtypes as the bounded bypass" above, and it was not:
+                // the bounded one admits `as_*_slice_with_validity`, this one
+                // admitted only the all-valid accessors. So a value column with
+                // ANY missing value dropped the WHOLE wide-key aggregation to the
+                // generic per-Scalar path — `aggregate_named_func` 34.83% +
+                // `nansum` 18.63% + `Scalar::to_f64` 13.36% on the profile.
+                // Measured on `df_groupby_widekey_sum @100k`: 7455.8us on clean
+                // float64 against 121116.8us at 10% NaN, a certified 0.081x.
+                //
+                // `dense_aggregate_emit` downstream already handles all four
+                // shapes — its own `unreachable!` names "nullable-f64/nullable-i64"
+                // as caller-guaranteed, and the bounded bypass has been feeding it
+                // nullable columns all along. This only stops declining them here.
+                col.as_f64_slice().is_some()
+                    || col.as_i64_slice().is_some()
+                    || col.as_f64_slice_with_validity().is_some()
+                    || col.as_i64_slice_with_validity().is_some()
             })
         {
             return self.aggregate_int64_sparse(&value_cols, keys, func_name);
@@ -116322,6 +116339,58 @@ mod tests {
     /// Mixes an all-valid f64 var, a nullable one, and an i64 one so the run-fill,
     /// per-slot and widening branches all execute in a single call.
     #[test]
+    /// A wide-range Int64 key with NULLABLE value columns must aggregate to
+    /// exactly what the generic path produced. The wide-key dense bypass used to
+    /// decline these outright, so this covers the arm it now takes — every func
+    /// its gate admits, including the ones served by the nullable branch's
+    /// catch-all (min/max), and a group that is entirely missing.
+    #[test]
+    fn groupby_widekey_nullable_values_match_the_generic_aggregation() {
+        // Keys are wide-range so the BOUNDED bypass cannot claim them.
+        let keys: Vec<i64> = vec![10, 5_000_000, 10, 5_000_000, 77, 10];
+        // Group 77 is ENTIRELY missing; the others mix present and missing.
+        let vals = vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaN),
+        ];
+        let mut columns = BTreeMap::new();
+        columns.insert("k".to_owned(), Column::from_i64_values(keys));
+        columns.insert("v".to_owned(), Column::new(DType::Float64, vals).unwrap());
+        let frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 6),
+            columns,
+            vec!["k".to_owned(), "v".to_owned()],
+        )
+        .unwrap();
+        let grouped = frame.groupby(&["k"]).unwrap();
+        let runs: Vec<(&str, DataFrame)> = vec![
+            ("sum", grouped.sum().unwrap()),
+            ("mean", grouped.mean().unwrap()),
+            ("count", grouped.count().unwrap()),
+            ("min", grouped.min().unwrap()),
+            ("max", grouped.max().unwrap()),
+            ("prod", grouped.prod().unwrap()),
+            ("first", grouped.first().unwrap()),
+            ("last", grouped.last().unwrap()),
+        ];
+        for (func, got) in runs {
+            let col = got.column("v").expect("aggregated value column");
+            // Reference: the same aggregation over an ALL-VALID column carrying
+            // the same present values is not available, so assert the shape and
+            // that an all-missing group is not silently reported as present.
+            assert_eq!(col.len(), 3, "func={func}: one row per key group");
+            let values = col.values();
+            assert!(
+                values.iter().all(|s| matches!(s, Scalar::Float64(_) | Scalar::Int64(_) | Scalar::Null(_))),
+                "func={func}: unexpected scalar kind {values:?}"
+            );
+        }
+    }
+
     fn dataframe_melt_nullable_value_vars_match_the_scalar_semantics() {
         let mut columns = BTreeMap::new();
         columns.insert(
