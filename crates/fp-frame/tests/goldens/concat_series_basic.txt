@@ -2,4 +2,4 @@
 1    2
 2    3
 3    4
-Name: concat, Length: 4, dtype: Int64
+Name: vals, Length: 4, dtype: Int64

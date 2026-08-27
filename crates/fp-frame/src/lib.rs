@@ -56446,8 +56446,25 @@ pub fn concat_series_with_ignore_index(
 
     let total_len: usize = series_list.iter().map(|s| s.len()).sum();
 
-    let name = if series_list.len() == 1 {
-        series_list[0].name().to_owned()
+    // pandas KEEPS THE NAME WHEN EVERY INPUT AGREES, not only when there is one
+    // input. MEASURED, live pandas 2.2.3:
+    //
+    //   pd.concat([Series(name="vals"), Series(name="vals")]).name  -> "vals"
+    //   pd.concat([Series(name="vals"), Series(name="other")]).name -> None
+    //
+    // This kept the source name for a single input and minted the literal
+    // "concat" for two or more, so concatenating two same-named Series produced
+    // "concat" where pandas gives "vals"
+    // (br-frankenpandas-live-oracle-passes-by-skip-l7r1p).
+    //
+    // The DISAGREEING case is deliberately left as "concat". pandas answers None
+    // there, FrankenPandas' Series name is a `String` with no None, and the
+    // oracle omits `name` from the expectation when pandas returns None — so
+    // nothing observes this arm today. Inventing a representation for it is a
+    // separate question from the agreeing case, which is simply wrong.
+    let first_name = series_list[0].name();
+    let name = if series_list.iter().all(|s| s.name() == first_name) {
+        first_name.to_owned()
     } else {
         "concat".to_owned()
     };

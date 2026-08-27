@@ -20467,7 +20467,7 @@ fn live_oracle_index_is_monotonic_increasing_yes() {
 #[test]
 fn live_oracle_series_concat_two_disjoint() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-SCONCAT",
@@ -29041,7 +29041,7 @@ fn live_oracle_dataframe_rank_axis0_dense() {
 #[test]
 fn live_oracle_series_concat_with_overlap() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-SCONCAT-OVL",
@@ -29098,7 +29098,7 @@ fn live_oracle_series_concat_with_overlap() {
 #[test]
 fn live_oracle_series_concat_with_nulls() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-SCONCAT-NULLS",
@@ -37891,7 +37891,7 @@ fn live_oracle_series_str_decode_basic() {
 #[test]
 fn live_oracle_series_concat_with_strings() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false; // br-...-l7r1p: DIVERGES from live pandas; see ledger
+        cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-SCONCAT-STR",
