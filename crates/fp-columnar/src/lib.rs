@@ -13645,6 +13645,17 @@ impl Column {
     /// invalid) has a perfectly good shared backing even though `validity.all()`
     /// is false. Callers that hand the result to an all-valid-shaped backing
     /// must prove the missing slots really do hold NaN.
+    /// Whether this column's validity is EXACTLY `!data[i].is_nan()`.
+    ///
+    /// When true a consumer that must skip missing values can test the DATUM
+    /// (`v == v`) and never read the mask at all. See the backing's
+    /// `nan_missing_exact` field. Conservative: `false` means unknown.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn nan_missing_exact(&self) -> bool {
+        self.values.nan_missing_exact()
+    }
+
     fn float64_arc_backing(&self) -> Option<(Arc<[f64]>, usize)> {
         if self.dtype != DType::Float64 {
             return None;

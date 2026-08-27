@@ -21712,8 +21712,18 @@ impl Series {
             return Ok(f64::NAN);
         }
         let n = count as f64;
-        let m2: f64 = vals.iter().map(|v| (v - mean).powi(2)).sum();
-        let m3: f64 = vals.iter().map(|v| (v - mean).powi(3)).sum();
+        // FUSED m2/m3, sibling of the kurtosis fusion; bit-identical.
+        let (m2, m3) = {
+            let mut m2 = 0.0_f64;
+            let mut m3 = 0.0_f64;
+            for v in &vals {
+                let d = v - mean;
+                let d2 = d * d;
+                m2 += d2;
+                m3 += d2 * d;
+            }
+            (m2, m3)
+        };
         let s2 = m2 / (n - 1.0);
         if s2 == 0.0 {
             return Ok(0.0);
@@ -21779,8 +21789,21 @@ impl Series {
             return Ok(f64::NAN);
         }
         let n = count as f64;
-        let m2: f64 = vals.iter().map(|v| (v - mean).powi(2)).sum();
-        let m4: f64 = vals.iter().map(|v| (v - mean).powi(4)).sum();
+        // FUSED m2/m4, matching what the all-valid arm above already does: two
+        // independent sums over the same buffer become one pass, halving the
+        // read of `vals` and computing `(v - mean)` once instead of twice.
+        // Bit-identical — fusing changes no term and no summation order.
+        let (m2, m4) = {
+            let mut m2 = 0.0_f64;
+            let mut m4 = 0.0_f64;
+            for v in &vals {
+                let d = v - mean;
+                let d2 = d * d;
+                m2 += d2;
+                m4 += d2 * d2;
+            }
+            (m2, m4)
+        };
         let s2 = m2 / (n - 1.0);
         if s2 == 0.0 {
             return Ok(0.0);
@@ -21818,6 +21841,20 @@ impl Series {
             // missing; that is one allocation against log(n) reallocating copies.
             // Bit-identical: same values, same order, same present-iff test.
             vals.reserve(data.len());
+            // WITNESS: when the column's validity IS `!is_nan` (every NaN-bearing
+            // Float64 column built by `from_f64_values`), the present-iff test
+            // `validity.get(i) && !v.is_nan()` reduces to `v == v` alone — the
+            // mask cannot disagree with the datum. That drops a bounds-checked
+            // word load, a shift and a mask from every one of the 100k
+            // iterations, and leaves a loop over one contiguous buffer.
+            // Bit-identical: same predicate, same values, same order.
+            if self.column.nan_missing_exact() {
+                for &v in data {
+                    if v == v {
+                        vals.push(v);
+                    }
+                }
+            } else {
             match validity.packed_words() {
                 Some(words) => {
                     for (i, &v) in data.iter().enumerate() {
@@ -21833,6 +21870,7 @@ impl Series {
                         }
                     }
                 }
+            }
             }
         } else if let Some(data) = self.column.as_i64_slice() {
             // perf (br-frankenpandas-0xdfx): all-valid Int64 — every value is present,
@@ -98924,6 +98962,60 @@ mod tests {
             ]
         );
         assert_eq!(out.name(), "x-y");
+    }
+
+    /// The fused m2/m3 and m2/m4 passes replace `(v - mean).powi(k)` sums. That
+    /// is only bit-identical if `powi(4)` associates as `(d*d)*(d*d)` and
+    /// `powi(3)` as `(d*d)*d` — if either associates differently the last ulp
+    /// moves, which is a semantics change, not a perf change.
+    ///
+    /// Compare against the EXACT expressions the fallback used before fusing.
+    #[test]
+    fn fused_skew_kurtosis_moments_are_bit_identical_to_the_powi_form() {
+        for len in [7usize, 64, 257, 1000] {
+            // Nullable so the typed all-valid arms decline and the FUSED
+            // fallback is what actually runs.
+            let data: Vec<f64> = (0..len)
+                .map(|i| {
+                    if i % 11 == 4 {
+                        f64::NAN
+                    } else {
+                        ((i as f64) * 0.7).sin() * 1_000.0 + (i as f64)
+                    }
+                })
+                .collect();
+            let column = Column::from_f64_values(data.clone());
+            let index = Index::new((0..len as i64).map(IndexLabel::Int64).collect());
+            let series = Series::new("s".to_string(), index, column).expect("series");
+
+            let vals: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
+            let count = vals.len();
+            let n = count as f64;
+            let mean = vals.iter().sum::<f64>() / n;
+            let m2: f64 = vals.iter().map(|v| (v - mean).powi(2)).sum();
+            let m3: f64 = vals.iter().map(|v| (v - mean).powi(3)).sum();
+            let m4: f64 = vals.iter().map(|v| (v - mean).powi(4)).sum();
+
+            let s2 = m2 / (n - 1.0);
+            // `powf(1.5)`, NOT `sqrt().powi(3)` — they differ by ulps and the
+            // implementation uses powf.
+            let s3 = s2.powf(1.5);
+            let want_skew = (n / ((n - 1.0) * (n - 2.0))) * (m3 / s3);
+            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+            let want_kurt = adj * (m4 / (s2 * s2)) - sub;
+
+            assert_eq!(
+                series.skew().expect("skew").to_bits(),
+                want_skew.to_bits(),
+                "len={len}: fused m2/m3 must be BITWISE equal to the powi form"
+            );
+            assert_eq!(
+                series.kurtosis().expect("kurtosis").to_bits(),
+                want_kurt.to_bits(),
+                "len={len}: fused m2/m4 must be BITWISE equal to the powi form"
+            );
+        }
     }
 
     #[test]
