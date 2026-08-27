@@ -42,6 +42,26 @@ const WARMUP: usize = 3;
 const ITERS: usize = 25;
 const TAKE_BATCH: usize = 256;
 const MATERIALIZED_CLONE_BATCH: usize = 8_192;
+
+/// Timing batch for `dataframe_ops/df_transpose`, which MUST equal the pandas
+/// arm's `TRANSPOSE_BATCH` in `benches/vs_pandas_harness.py`.
+///
+/// ⚠️ BENCHMARK INTEGRITY. Neither side divides by its batch — the Python
+/// `paired_operation` returns the elapsed total for `repeat` calls, and
+/// `time_us_repeated_total` passes `divide_by_repeat = false` — so the harness
+/// compares one arm's batch TOTAL against the other's. This lane used a bare
+/// literal 1024 against the harness's 8192, which made every `df_transpose`
+/// ratio 8x too favourable to FrankenPandas.
+///
+/// MEASURED on this host: FrankenPandas 1058.7us per 1024-call batch
+/// (1.034us/call) against pandas 42.5us/call. The true ratio is ~41x; the
+/// mismatched arithmetic reported ~329x.
+///
+/// The two other batched lanes already name the same constant on both sides —
+/// `cumsum_batched` (1_000 both, its pandas docstring says "Match fp-bench's
+/// 1,000-call cumsum timing batch exactly") and `df_transpose_materialized_clone`
+/// (`MATERIALIZED_CLONE_BATCH` both). This lane was the only one that did not.
+const TRANSPOSE_BATCH: usize = 8_192;
 const TELEMETRY_STRING_BATCH_ROWS: usize = 250_000;
 
 #[derive(Debug)]
@@ -1772,7 +1792,7 @@ fn run(
             let _ = df.abs().expect("abs");
         }),
         #[cfg(feature = "lazy-transpose-view")]
-        ("dataframe_ops", "df_transpose") => time_us_repeated_total(1024, || {
+        ("dataframe_ops", "df_transpose") => time_us_repeated_total(TRANSPOSE_BATCH, || {
             // pandas: df.T. Exercise the actual public DataFrame::transpose
             // call; shape inspection is metadata-only for the feature-gated
             // homogeneous storage and does not cross the materialization
