@@ -73516,6 +73516,24 @@ impl DataFrame {
         } else {
             None
         };
+        // ONLY the Int64 arm needs this, so a frame without an Int64 column does
+        // not pay for it at all — asking unconditionally cost the float64 lane ~3%.
+        // When it IS needed it reads the COMPACT vector, 4 bytes a slot rather than
+        // `Option<usize>`'s 16.
+        //
+        // Folding the test into the compaction by replacing its `map().collect()`
+        // with a hand-rolled push loop was measured and REVERTED: it cost the
+        // float64 lane 50% (769.7us -> 1161.5us), because the TrustedLen collect
+        // writes its output once and the push loop does not.
+        let has_int64_column = self
+            .column_order
+            .iter()
+            .any(|name| self.columns[name].as_i64_slice().is_some());
+        let invented_a_gap = has_int64_column
+            && match compact_positions.as_deref() {
+                Some(compact) => compact.iter().any(|&row| row == REINDEX_ABSENT),
+                None => positions.iter().any(Option::is_none),
+            };
         let compact_ref: Option<&[u32]> = compact_positions.as_deref();
         let build_col = |col: &Column| -> Result<Column, FrameError> {
             if let Some(data) = col.as_f64_slice() {
@@ -73599,6 +73617,65 @@ impl DataFrame {
                     out,
                     fp_columnar::ValidityMask::from_words(words, new_len),
                 ))
+            } else if let Some(data) = col.as_i64_slice() {
+                // TYPED ALL-VALID INT64 GATHER. The two arms above are Float64
+                // only, so an Int64 column fell to the Scalar path — which is why
+                // `reindex @100k` costs 855.7us on float64 and 2375.9us on int64,
+                // a certified 0.453x against pandas' 1082.2us.
+                //
+                // Bit-identical to `reindex_column_with_invented_gaps`: when a gap
+                // is invented the source WIDENS to Float64 (numpy int64 has no
+                // NaN), each resolved slot carrying `data[row] as f64` — exactly
+                // `astype(Float64)` then gather — and each unresolved slot the
+                // same invented `Null(NullKind::NaN)` the Float64 arms emit. With
+                // NO gap the dtype is preserved and every slot resolves, so the
+                // gather is a plain Int64 one.
+                if invented_a_gap {
+                    let mut out = Vec::with_capacity(new_len);
+                    let mut words = vec![0_u64; new_len.div_ceil(64)];
+                    if let Some(compact) = compact_ref {
+                        for (word_index, chunk) in compact.chunks(64).enumerate() {
+                            let mut word = 0_u64;
+                            for (bit, &row) in chunk.iter().enumerate() {
+                                if row == REINDEX_ABSENT {
+                                    out.push(0.0);
+                                } else {
+                                    word |= 1_u64 << bit;
+                                    out.push(data[row as usize] as f64);
+                                }
+                            }
+                            words[word_index] = word;
+                        }
+                    } else {
+                        for (oi, slot) in positions_ref.iter().enumerate() {
+                            match slot {
+                                Some(idx) => {
+                                    words[oi / 64] |= 1_u64 << (oi % 64);
+                                    out.push(data[*idx] as f64);
+                                }
+                                None => out.push(0.0),
+                            }
+                        }
+                    }
+                    Ok(Column::from_f64_values_with_validity(
+                        out,
+                        fp_columnar::ValidityMask::from_words(words, new_len),
+                    ))
+                } else {
+                    let mut out = Vec::with_capacity(new_len);
+                    if let Some(compact) = compact_ref {
+                        out.extend(compact.iter().map(|&row| data[row as usize]));
+                    } else {
+                        for slot in positions_ref {
+                            match slot {
+                                Some(idx) => out.push(data[*idx]),
+                                // Unreachable: `invented_a_gap` is false.
+                                None => out.push(0),
+                            }
+                        }
+                    }
+                    Ok(Column::from_i64_values_owned(out))
+                }
             } else {
                 // A row reindex INVENTS is NaN (already the case here), and an
                 // all-valid int64 column widens to float64 to hold it — numpy
