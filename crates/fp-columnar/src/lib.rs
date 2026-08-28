@@ -27754,6 +27754,39 @@ impl Column {
         // Same as `sqrt`: NaN only from a negative input. `ln(0.0)` is `-inf`,
         // which is PRESENT, so zero stays in the domain and the `all_finite`
         // witness folded alongside is what records it. br-frankenpandas-4kig1.
+        //
+        // NO PAR_MIN OVERRIDE HERE, AND THAT IS A MEASURED REJECT rather than an
+        // omission. `log @100k` is a standing certified loss (0.938x / 0.942x vs
+        // live pandas 2.2.3, two runs, all three clauses, A/A nulls 1.00343 /
+        // 0.99812), so the obvious move is to give it the `cbrt`/`sin`/`atan`/
+        // `log1p` treatment and let it go parallel at 100k. Probed on ONE ELF
+        // (48f20936bf52, `FP_ELEMENTWISE_PAR_MIN=65536`, no rebuild):
+        //
+        //     serial   396.79us / 406.65us   SLOWER 0.942 / 0.938  CERTIFIED
+        //     parallel 381.23us / 369.47us   0.976 / 0.983         UNDECIDABLE
+        //
+        // The parallel arm IS faster FP-side, and both A/A nulls stay inside 2%.
+        // It fails `effect_exceeds_two_x_null_margin`: a ~5% effect is below what
+        // this gate can resolve, so the improvement cannot be certified.
+        //
+        // The reason is `cbrt`'s own break-even rule, applied to log's cost.
+        // The per-call `thread::scope` tax is ~350-420us and the documented
+        // break-even is `serial > 8/7 * ~350us ~= 400us`. log costs ~4.02ns per
+        // element (401.7us mean over 100_000), so it reaches 400us at ~99_600
+        // rows -- the 100k fixture sits ON the knife edge, roughly 0.4% past it,
+        // which is precisely why the measured gain is real but too small to call.
+        //
+        // Following that rule the way `cbrt` does -- "the next power of two ABOVE
+        // break-even, so the parallel arm engages only where it has already paid
+        // for itself" -- gives log a threshold of 131_072, which leaves @100k
+        // SERIAL and changes nothing. Setting 65_536 instead would buy the
+        // uncertifiable ~5% at 100k while making the 65_536..99_600 band parallel
+        // BELOW its break-even, which is exactly how `expm1 @100k` regressed
+        // 0.872x -> 0.709x. The band would pay the tax without earning it.
+        //
+        // So: log stays serial at 100k on purpose. Re-open only with a cheaper
+        // spawn (a pool, not a per-call `thread::scope`), which is the thing that
+        // would move break-even and with it every op in this family.
         if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 0.0, f64::ln) {
             return Ok(out);
         }
