@@ -9496,6 +9496,30 @@ fn map_block_with_witness<T: Copy, F: Fn(T) -> f64>(
 /// Historical defaults for the unary witness map. Unchanged on purpose — see
 /// [`elementwise_witness_policy`].
 const ELEMENTWISE_WITNESS_DEFAULT_WORKERS: usize = 8;
+/// ⚠️ THIS THRESHOLD IS WHERE THE WHOLE ELEMENTWISE FAMILY CROSSES OVER, and the
+/// crossing is now measured on both sides rather than inferred. Worker-side h2h
+/// against LIVE pandas 3.0.5, each row one ELF with both A/A nulls inside 2%:
+///
+///     lane          @100k (SERIAL band)        @1M (THREADED band)
+///     log           0.9107 SLOWER              2.4844 FASTER
+///     log_int64     0.8866 SLOWER              2.5696 FASTER
+///     sqrt_int64    1.1642 FASTER              --
+///     expm1         1.0845 FASTER              --
+///
+/// Above this constant FrankenPandas threads and wins ~2.5x. Below it we run
+/// serial and sit at or just under parity. So the residual sub-parity in this
+/// family is NOT a kernel deficiency — it is the serial band, and it is ~10%.
+///
+/// LOWERING THIS TO CAPTURE THE 100k BAND HAS BEEN TRIED AND MEASURED TWICE, and
+/// it loses. `log @100k` with `FP_ELEMENTWISE_PAR_MIN=65536` went 666us -> 843us
+/// and its own A/A null collapsed to 0.80222 (a1c12fd3e); the spawn tax is not a
+/// constant to compare against serial cost, it scales with contention, and these
+/// workers are shared. The 100k band is serial ON PURPOSE.
+///
+/// What is left at 100k is roughly 10% against numpy's ufunc loops, which is the
+/// libm-per-element call versus their vectorised inner loop. Closing it means
+/// changing the math implementation, which changes output BITS — a parity
+/// decision, not a perf one, and not one to take for 10%.
 const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 
 /// `par_min` for the few unary ops whose PER-ELEMENT cost is high enough that
