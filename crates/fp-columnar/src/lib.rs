@@ -29336,10 +29336,30 @@ impl Column {
             // predicate and kernel see the identical widened value — checksums
             // 8630d5994e01253e (sqrt_int64) and f59f9ee1239f3b8b (log_int64) matched
             // between the two arms.
+            // TWO-PASS IS GATED SEPARATELY FROM THREADING, so the two can be
+            // told apart. br-frankenpandas-4kig1's gate is
+            // `runs_serial = max_workers <= 1 || len < policy_par_min`, which ties
+            // fusion to threading by construction: two-pass only ever ran serial
+            // and fused only ever ran threaded. That made every A/B of the two a
+            // CONFOUND — measured worker-side in 8d7f192c4, `log_int64 @100k` went
+            // 1302.4us -> 613.6us when the gate flipped, and nothing in that number
+            // says whether the widening or the threading was responsible.
+            //
+            // `FP_INT64_WIDEN_TWO_PASS` overrides the choice WITHOUT touching the
+            // threading decision, so "serial two-pass" and "serial fused" can be
+            // compared at equal worker count. Unset it is exactly the shipped
+            // behaviour — this adds a measurement knob, it does not move the gate.
             let runs_serial = max_workers <= 1 || data.len() < policy_par_min;
-            if runs_serial {
+            let two_pass = match std::env::var("FP_INT64_WIDEN_TWO_PASS") {
+                Ok(value) if value == "1" => true,
+                Ok(value) if value == "0" => false,
+                _ => runs_serial,
+            };
+            if two_pass {
                 let widened: Vec<f64> = data.iter().map(|&x| x as f64).collect();
                 let derived = preserves_finiteness.then_some(true);
+                // NOTE: the inner map keeps the ORIGINAL threading inputs, so
+                // forcing two-pass on does not also force the map serial.
                 let (out, domain_held, all_finite) = par_map_slice_f64_domain_fused(
                     &widened,
                     &in_domain,

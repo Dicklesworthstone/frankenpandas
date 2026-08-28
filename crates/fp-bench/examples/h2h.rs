@@ -186,14 +186,20 @@ fn main() {
         && std::env::var("FP_ELEMENTWISE_PAR_MIN").is_err()
     {
         let exe = std::env::current_exe().expect("current exe");
+        // Accept either a bare par_min value (back-compatible) or an explicit
+        // KEY=VALUE, so any env-gated constant can be A/B'd in one invocation.
+        let (key, value) = match par_min.split_once('=') {
+            Some((key, value)) => (key.to_owned(), value.to_owned()),
+            None => ("FP_ELEMENTWISE_PAR_MIN".to_owned(), par_min.clone()),
+        };
         let status = Command::new(exe)
             .args([&workload, &n.to_string(), &rounds.to_string()])
-            .env("FP_ELEMENTWISE_PAR_MIN", &par_min)
+            .env(&key, &value)
             .stderr(Stdio::inherit())
             .stdout(Stdio::inherit())
             .status()
             .expect("respawn self with par_min");
-        eprintln!("(respawn with FP_ELEMENTWISE_PAR_MIN={par_min} exited {status})");
+        eprintln!("(respawn with {key}={value} exited {status})");
     }
 }
 
@@ -256,8 +262,9 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
     };
 
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
-    eprintln!("=== H2H {workload} n={n} rounds={rounds} arm={label} par_min_env={} ===",
-        std::env::var("FP_ELEMENTWISE_PAR_MIN").unwrap_or_else(|_| "<unset>".to_owned()));
+    eprintln!("=== H2H {workload} n={n} rounds={rounds} arm={label} par_min_env={} two_pass_env={} ===",
+        std::env::var("FP_ELEMENTWISE_PAR_MIN").unwrap_or_else(|_| "<unset>".to_owned()),
+        std::env::var("FP_INT64_WIDEN_TWO_PASS").unwrap_or_else(|_| "<unset>".to_owned()));
     eprintln!("fp_elf_sha256   {}", self_sha256());
     eprintln!("host            {}", std::fs::read_to_string("/etc/hostname").unwrap_or_default().trim());
     eprintln!("loadavg         {}", load.trim());
