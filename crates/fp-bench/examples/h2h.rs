@@ -59,18 +59,37 @@ fn fixture(n: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Int64 sibling of [`fixture`]. Values are positive so `log`/`sqrt` stay in
+/// domain, and small enough that `x as f64` is exact (|x| < 2^53), so the
+/// widening cannot itself be the difference between the arms.
+fn fixture_i64(n: usize) -> Vec<i64> {
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    (0..n)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 24) as i64) + 1
+        })
+        .collect()
+}
+
 const DRIVER: &str = r#"
 import sys, time, numpy as np, pandas as pd
 path, workload = sys.argv[1], sys.argv[2]
-values = np.fromfile(path, dtype="<f8")
+# An `_int64` workload feeds BOTH arms an integer column, so the incumbent pays
+# its own widening too and the comparison is not float-vs-int.
+is_int = workload.endswith("_int64")
+values = np.fromfile(path, dtype="<i8" if is_int else "<f8")
 series = pd.Series(values)
+base = workload[:-6] if is_int else workload
 sys.stderr.write("PANDAS_VERSION=%s\nNUMPY_VERSION=%s\n" % (pd.__version__, np.__version__))
 sys.stderr.flush()
 def run():
-    if workload == "log":     return np.log(series)
-    if workload == "sqrt":    return np.sqrt(series)
-    if workload == "floor":   return np.floor(series)
-    if workload == "expm1":   return np.expm1(series)
+    if base == "log":     return np.log(series)
+    if base == "sqrt":    return np.sqrt(series)
+    if base == "floor":   return np.floor(series)
+    if base == "expm1":   return np.expm1(series)
     raise SystemExit("unknown workload " + workload)
 run()  # warm the ufunc dispatch before any timed rep
 print("READY", flush=True)
@@ -120,8 +139,9 @@ impl Incumbent {
 }
 
 fn fp_one_rep_us(workload: &str, column: &fp_columnar::Column) -> f64 {
+    let base = workload.strip_suffix("_int64").unwrap_or(workload);
     let start = Instant::now();
-    let out = match workload {
+    let out = match base {
         "log" => column.log(),
         "sqrt" => column.sqrt(),
         "floor" => column.floor(),
@@ -178,12 +198,18 @@ fn main() {
 }
 
 fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
-    let values = fixture(n);
-    let path = std::env::temp_dir().join(format!("fp_h2h_{workload}_{n}.f64"));
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    std::fs::write(&path, &bytes).expect("write fixture");
-
-    let column = fp_columnar::Column::from_f64_values(values.clone());
+    let path = std::env::temp_dir().join(format!("fp_h2h_{workload}_{n}.bin"));
+    let column = if workload.ends_with("_int64") {
+        let values = fixture_i64(n);
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(&path, &bytes).expect("write fixture");
+        fp_columnar::Column::from_i64_values(values)
+    } else {
+        let values = fixture(n);
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(&path, &bytes).expect("write fixture");
+        fp_columnar::Column::from_f64_values(values)
+    };
     let mut incumbent = Incumbent::spawn(path.to_str().expect("utf8 path"), workload);
 
     // Warm both arms before any timed round.
