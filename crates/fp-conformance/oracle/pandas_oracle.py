@@ -8570,7 +8570,40 @@ def op_jsonl_round_trip(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_bool": bool(df1.equals(df2))}
 
 
+def drop_absent_top_level_options(payload: dict[str, Any]) -> dict[str, Any]:
+    """Make an ABSENT fixture option indistinguishable from a missing key.
+
+    br-frankenpandas-l7r1p. The Rust side serializes `PacketFixture` with every
+    unset `Option<T>` written as an explicit JSON `null`, so the key is PRESENT
+    in the payload. That silently kills the second argument of
+    `payload.get(key, default)`: `.get` only substitutes a default when the key
+    is MISSING, and it never is. Counted across this file, 64 call sites over 45
+    distinct keys had a dead default -- `dt_freq` "D", `corr_method` "pearson",
+    `diff_periods` 1, `keep` "first", `sort_ascending` True, and so on.
+
+    The failure was invisible in the worst way. Where pandas rejects the None
+    (`series.value_counts(ascending=None)` -> "expected type bool, received type
+    NoneType") the harness classified the raised OracleError as
+    ORACLE-UNAVAILABLE, so the test PASSED BY SKIP. Where pandas accepts None
+    with a meaning that differs from the documented default, the oracle answered
+    a different question than the fixture asked, and the comparison was against
+    the wrong expectation.
+
+    Stripping is TOP-LEVEL ONLY, and that restriction is load-bearing: nested
+    payloads encode a missing VALUE as `{"kind": "null", "value": ...}` and, in
+    `left["values"]`, as literal nulls. Recursing would delete the very data the
+    null-handling fixtures exist to test.
+
+    This cannot change how a handler reads a key it already handles: because the
+    Rust side ALWAYS writes the key, no handler can be using `key in payload` to
+    mean anything, and `payload.get(key)` / `payload.get(key, None)` return None
+    either way. The only behavior that moves is a default becoming reachable.
+    """
+    return {key: value for key, value in payload.items() if value is not None}
+
+
 def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    payload = drop_absent_top_level_options(payload)
     op = payload.get("operation")
     if op == "series_add":
         return op_series_add(pd, payload)
