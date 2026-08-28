@@ -146,6 +146,33 @@ rustflags = ["-Ctarget-feature=+avx2,+fma"]
 # blend instructions; `sqrt` lowers to SSE2 `sqrtpd` either way and `log` is a libm
 # call in both. The narrower flag is chosen so the rejected collateral cannot recur,
 # and the claim is checkable in object code rather than argued.
+# BIT-IDENTITY GATE: EXECUTED 2026-08-27, PASSED. br-frankenpandas-cu22b asked
+# for this before any wider adoption and nobody had run it, because `cargo test`
+# uses the DEV profile — the stanza below is scoped to the two release profiles,
+# so the `cfg(target_feature = "sse4.1")` arm that actually SHIPS is not compiled
+# by the ordinary suite. (The `const _: () = assert!` lock in fp-columnar is
+# disarmed under `debug_assertions` for exactly that reason.) Run under
+# `RUSTFLAGS='-C target-feature=+sse4.1'`:
+#
+#     fp-columnar     677 passed, 0 failed
+#     fp-frame       3450 passed, 0 failed
+#     fp-types        355 passed, 0 failed
+#     fp-conformance 1618 passed, 0 failed   (full packet corpus)
+#
+# NO golden was regenerated and none differed — `git status` clean across
+# fixtures. Non-vacuity witness, because "tests pass" alone cannot show the arm
+# was even built: the FLAGGED test binary contains 9 rounding instructions and
+# the plain one contains 0.
+#
+# ⚠️ DO NOT PROMOTE THIS TO `.cargo/config.toml`. cu22b's remaining item was
+# whether the flag belongs there instead; it does not. CI runs `macos-latest`,
+# which is ARM64, and `windows-latest` alongside ubuntu. rustc does NOT reject an
+# unknown target-feature — it warns "unknown and unstable feature specified" and
+# "it is still passed through to the codegen backend, but use of this feature
+# might be unsound" (verified directly with `-C target-feature=+neon` on x86_64,
+# the mirror case). A global entry would hand an x86 feature to the ARM backend
+# on every crate of that runner. The per-package form below is the correct scope
+# and is already what ships.
 [profile.release.package.fp-columnar]
 rustflags = ["-Ctarget-feature=+sse4.1"]
 
