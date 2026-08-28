@@ -29350,12 +29350,58 @@ impl Column {
             // compared at equal worker count. Unset it is exactly the shipped
             // behaviour — this adds a measurement knob, it does not move the gate.
             let runs_serial = max_workers <= 1 || data.len() < policy_par_min;
-            let two_pass = match std::env::var("FP_INT64_WIDEN_TWO_PASS") {
-                Ok(value) if value == "1" => true,
-                Ok(value) if value == "0" => false,
-                _ => runs_serial,
-            };
-            if two_pass {
+            // "block" is a THIRD arm, measurable but not default. The full
+            // two-pass widen allocates an f64 buffer the size of the column
+            // (800 KB at 100k) and walks memory twice; the fused arm avoids the
+            // buffer but interleaves the i64->f64 conversion into the kernel,
+            // which keeps the loop off the vector unit (no `vcvtqq2pd` without
+            // AVX512DQ). Blocking is meant to get both: widen a cache-resident
+            // tile, map it, move on — vectorised like two-pass, resident like
+            // fused, and never allocating a full-size second buffer.
+            // THE GATE IS UNCHANGED: `runs_serial` still decides widen-then-map
+            // versus fused, exactly as 4kig1 set it. What changed is HOW the
+            // widen-then-map arm is implemented — blocked instead of full-size.
+            //   unset  -> runs_serial ? BLOCKED : fused   (shipped)
+            //   "block"-> blocked      "1" -> full (legacy)      "0" -> fused
+            // "1" is kept so the pre-blocking behaviour stays measurable.
+            let mode = std::env::var("FP_INT64_WIDEN_TWO_PASS").unwrap_or_default();
+            let two_pass_full = mode == "1";
+            let blocked = mode == "block" || (mode.is_empty() && runs_serial);
+            if blocked {
+                // Bit-identical to the full two-pass by construction: the map is
+                // elementwise with no cross-element state, so splitting the input
+                // cannot change any output value, the domain verdict (AND over
+                // blocks) or the finiteness witness (AND over blocks).
+                const WIDEN_BLOCK: usize = 8_192;
+                let derived = preserves_finiteness.then_some(true);
+                let mut out: Vec<f64> = Vec::with_capacity(data.len());
+                let mut widened: Vec<f64> = Vec::with_capacity(WIDEN_BLOCK.min(data.len()));
+                let mut domain_held = true;
+                let mut all_finite = true;
+                for chunk in data.chunks(WIDEN_BLOCK) {
+                    widened.clear();
+                    widened.extend(chunk.iter().map(|&x| x as f64));
+                    let (mut block, block_domain, block_finite) = par_map_slice_f64_domain_fused(
+                        &widened,
+                        &in_domain,
+                        &f,
+                        max_workers,
+                        policy_par_min,
+                        derived,
+                    );
+                    domain_held &= block_domain;
+                    all_finite &= block_finite;
+                    out.append(&mut block);
+                }
+                if !domain_held {
+                    return Some(Self::from_f64_values(out));
+                }
+                return Some(Self::from_f64_all_valid_with_finite_opt(
+                    out,
+                    Some(all_finite),
+                ));
+            }
+            if two_pass_full {
                 let widened: Vec<f64> = data.iter().map(|&x| x as f64).collect();
                 let derived = preserves_finiteness.then_some(true);
                 // NOTE: the inner map keeps the ORIGINAL threading inputs, so
@@ -32322,6 +32368,36 @@ mod validity_packed_words_uza04 {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    /// br-frankenpandas-4kig1: the Int64 widen-then-map arm is BLOCKED, and the
+    /// blocking must not change a single output value.
+    ///
+    /// Bit-identity is claimed by construction — the map is elementwise with no
+    /// cross-element state, so splitting the input cannot change an output, the
+    /// domain verdict (AND over blocks) or the finiteness witness (AND over
+    /// blocks). This pins it anyway, and deliberately spans the 8192-element
+    /// block boundary in both directions: an exact multiple would never exercise
+    /// a short final block, which is where an off-by-one in `append` would live.
+    #[test]
+    fn blocked_int64_widen_matches_the_scalar_reference_4kig1() {
+        for len in [1_usize, 8_191, 8_192, 8_193, 20_000] {
+            // Positive and small enough that `x as f64` is exact (|x| < 2^53), so
+            // any difference is the blocking rather than the widening.
+            let values: Vec<i64> = (0..len).map(|i| (i as i64 % 4_096) + 1).collect();
+            let column = super::Column::from_i64_values(values.clone());
+            let actual = column.log().expect("log over a positive Int64 column");
+            let actual = actual.as_f64_slice().expect("all-valid Float64 output");
+            assert_eq!(actual.len(), len, "length at len={len}");
+            for (index, &raw) in values.iter().enumerate() {
+                let expected = (raw as f64).ln();
+                assert_eq!(
+                    actual[index].to_bits(),
+                    expected.to_bits(),
+                    "bit-identity at len={len} index={index} (input {raw})"
+                );
+            }
+        }
+    }
 
     use fp_types::{
         DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType,
