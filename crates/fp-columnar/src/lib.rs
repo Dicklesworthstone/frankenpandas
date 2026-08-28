@@ -389,10 +389,30 @@ impl ValidityMask {
     #[must_use]
     pub fn all_valid(len: usize) -> Self {
         Self {
-            words: Arc::new(Vec::new()),
+            words: Self::shared_empty_words(),
             invalid_ranges: None,
             len,
         }
+    }
+
+    /// The all-valid sentinel's `words` vector is EMPTY and is never mutated in
+    /// place, so every all-valid mask can share one allocation.
+    ///
+    /// br-frankenpandas-l4vzc: this used to be `Arc::new(Vec::new())`, i.e. a
+    /// malloc and a free per call to hand back an EMPTY Vec. It is invisible on
+    /// an ordinary column and dominant where column COUNT scales with the data:
+    /// a transposed 100k-row frame builds 100_000 columns, so it paid 100_000
+    /// allocator round trips for nothing (`_mi_page_malloc_zero` 3.28% +
+    /// `mi_free` 3.72% of `df_transpose_full_materialize_positional @100k`).
+    ///
+    /// Sharing is safe because the sentinel is COPY-ON-WRITE and the write path
+    /// never touches this buffer: `set` calls `materialize_if_all_valid_sentinel`
+    /// first, which REPLACES `self.words` with a fresh `Arc::new(...)` before any
+    /// `Arc::make_mut`. A second holder therefore cannot observe a mutation, and
+    /// `make_mut` on the shared handle would clone an empty Vec anyway.
+    fn shared_empty_words() -> Arc<Vec<u64>> {
+        static EMPTY: OnceLock<Arc<Vec<u64>>> = OnceLock::new();
+        Arc::clone(EMPTY.get_or_init(|| Arc::new(Vec::new())))
     }
 
     /// Build a mask from pre-packed validity words (LSB-first within each
