@@ -29372,6 +29372,21 @@ impl Column {
                 // elementwise with no cross-element state, so splitting the input
                 // cannot change any output value, the domain verdict (AND over
                 // blocks) or the finiteness witness (AND over blocks).
+                //
+                // MEASURED ON TWO OPS, worker-side against live pandas 3.0.5, each
+                // pair one ELF in one invocation with both arms certifying:
+                //
+                //   op          @100k   legacy full     BLOCKED        speedup
+                //   log_int64           1298.515us      666.330us      1.949x
+                //                       ratio 0.4589    ratio 0.8866
+                //   sqrt_int64           828.026us      198.709us      4.167x
+                //                       ratio 0.2769    ratio 1.1642  <- SIGN FLIP
+                //
+                // The cheaper the kernel, the more the full-size buffer dominated:
+                // `sqrt` costs ~1-2ns/element against `log`'s ~4ns, so the same
+                // 800 KB round trip was a larger share of it. `sqrt_int64 @100k`
+                // was a certified 3.6x LOSS and is now a certified WIN — the
+                // widening, not the kernel, was the whole gap.
                 const WIDEN_BLOCK: usize = 8_192;
                 let derived = preserves_finiteness.then_some(true);
                 let mut out: Vec<f64> = Vec::with_capacity(data.len());
