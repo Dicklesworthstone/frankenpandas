@@ -15,6 +15,7 @@
 //! and at what version, and this executable's own sha256 — the same
 //! self-reported ELF identity a head-to-head row would have to carry.
 
+use sha2::Digest as _;
 use std::process::Command;
 
 fn sha256_of_self() -> String {
@@ -22,10 +23,15 @@ fn sha256_of_self() -> String {
     // exactly as the vs-pandas harness records `bench_elf_sha256`.
     match std::fs::read("/proc/self/exe") {
         Ok(bytes) => {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            format!("{:x}", hasher.finalize())
+            // sha2 0.11's `finalize()` returns an `Array` with no `LowerHex`, so
+            // hex it byte-wise -- the same idiom as `fp-bench`'s `self_identity`.
+            use std::fmt::Write as _;
+            let digest = sha2::Sha256::digest(&bytes);
+            let mut hex = String::with_capacity(64);
+            for byte in digest {
+                write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            format!("{hex} ({} bytes)", bytes.len())
         }
         Err(err) => format!("<unreadable: {err}>"),
     }
