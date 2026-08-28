@@ -58126,10 +58126,26 @@ impl LazyDataFrameColumns {
         output_columns: usize,
         name: &str,
     ) -> Option<usize> {
-        let label = name.parse::<i64>().ok()?;
-        if label.to_string() != name {
+        // br-frankenpandas-3ya6b: the canonicity check used to be
+        // `label.to_string() != name`, which HEAP-ALLOCATES a String and frees it
+        // on every lookup to test a property that is a byte scan. A transposed
+        // frame has one output column per SOURCE ROW, so the label route paid
+        // that allocation 100_000 times at the 100k fixture and 1M times at 1M.
+        //
+        // `is_canonical_i64_label` was written for exactly this call, documented
+        // down to the measured rejection of a fused parse+scan variant -- and
+        // then never wired to anything, so it sat behind a standing
+        // `associated function is never used` warning while the resolver kept
+        // allocating. Equivalence is exact: `from_str` accepts an optional
+        // `+`/`-` and digits, so the only forms it takes that `to_string` would
+        // never emit are a leading `+`, a leading zero on a multi-digit run, and
+        // `-0` -- which is precisely what the scan rejects. Checked over both
+        // i64 boundaries, `+`/`-`/empty, underscores and non-ASCII digits: 0
+        // divergences.
+        if !Self::is_canonical_i64_label(name) {
             return None;
         }
+        let label = name.parse::<i64>().ok()?;
         let offset = i128::from(label) - i128::from(column_start);
         let position = usize::try_from(offset).ok()?;
         (position < output_columns).then_some(position)
