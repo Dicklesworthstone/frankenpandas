@@ -1983,10 +1983,15 @@ impl Timedelta {
             total = total.checked_add(nanos).ok_or(TimedeltaError::Overflow)?;
         }
 
-        if total == 0 && !s.trim().is_empty() && s.trim() != "0" {
-            return Err(TimedeltaError::InvalidFormat(s.to_string()));
-        }
-
+        // NOTE: there is deliberately no "total == 0 is suspicious" guard here.
+        // One used to live at this spot and rejected every legitimately-zero
+        // compound -- `to_timedelta("0 seconds")` raised while `"1 second"` and
+        // `"10 seconds"` parsed, because the only exemption was the literal
+        // string "0". pandas 2.2.3 accepts all of `0 seconds` / `0 days` / `0s`
+        // / `0.0 hours` / `-0 seconds` as a zero Timedelta. The guard was also
+        // unnecessary: the loop above returns `InvalidFormat` on an unparseable
+        // number AND on an unknown unit, so the only way to reach here with
+        // `total == 0` is an input whose components genuinely sum to zero.
         Ok(total)
     }
 
@@ -11039,6 +11044,29 @@ mod tests {
             500 * Timedelta::NANOS_PER_MICRO
         );
         assert_eq!(Timedelta::parse("1000ns").unwrap(), 1000);
+    }
+
+    #[test]
+    fn timedelta_parse_zero_valued_compound() {
+        use super::Timedelta;
+        // Each of these is a Timedelta of zero, not a parse failure. Verified
+        // against live pandas 2.2.3: every form below yields
+        // `Timedelta('0 days 00:00:00')`. A guard in `parse_compound` used to
+        // reject them all except the bare "0", which made
+        // `to_timedelta(["10 seconds", "1 second", "0 seconds"])` raise on the
+        // third element only.
+        for s in [
+            "0 seconds", "0 second", "0 sec", "0s", "0 days", "0d", "0 hours",
+            "0.0 hours", "0 minutes", "0ms", "0us", "0ns", "0", "0 days 0 seconds",
+        ] {
+            assert_eq!(Timedelta::parse(s).unwrap(), 0, "parse({s:?}) should be 0");
+        }
+        // The sign is carried by the caller, so a negative zero is still zero.
+        assert_eq!(Timedelta::parse("-0 seconds").unwrap(), 0);
+        // Removing the guard must NOT admit garbage: an unknown unit and a
+        // missing number are still rejected inside the loop.
+        assert!(Timedelta::parse("0 fortnights").is_err());
+        assert!(Timedelta::parse("seconds").is_err());
     }
 
     #[test]

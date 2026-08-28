@@ -2236,8 +2236,21 @@ pub struct PacketFixture {
     pub sort_column: Option<String>,
     #[serde(default)]
     pub sort_ascending: Option<bool>,
+    // br-frankenpandas-l7r1p: `series_sort_values` fixtures could declare
+    // `sort_ascending` but not a na_position, so the oracle hardcoded
+    // na_position="last" and a fixture exercising "first" could not be
+    // expressed at all -- it deserialized as an unknown field and panicked.
+    #[serde(default)]
+    pub sort_na_position: Option<String>,
     #[serde(default)]
     pub value_counts_normalize: Option<bool>,
+    // br-frankenpandas-l7r1p: same for `dropna`, which the oracle pinned True.
+    #[serde(default)]
+    pub value_counts_dropna: Option<bool>,
+    // br-frankenpandas-l7r1p: `op_series_to_frame` has always READ `frame_name`;
+    // no fixture could set it because the field did not exist here.
+    #[serde(default)]
+    pub frame_name: Option<String>,
     #[serde(default)]
     pub memory_usage_index: Option<bool>,
     #[serde(default)]
@@ -3825,7 +3838,13 @@ struct OracleRequest {
     #[serde(default)]
     sort_ascending: Option<bool>,
     #[serde(default)]
+    sort_na_position: Option<String>,
+    #[serde(default)]
     value_counts_normalize: Option<bool>,
+    #[serde(default)]
+    value_counts_dropna: Option<bool>,
+    #[serde(default)]
+    frame_name: Option<String>,
     #[serde(default)]
     memory_usage_index: Option<bool>,
     #[serde(default)]
@@ -13653,7 +13672,10 @@ fn capture_live_oracle_expected(
         quantile_numeric_only: fixture.quantile_numeric_only,
         sort_column: fixture.sort_column.clone(),
         sort_ascending: fixture.sort_ascending,
+        sort_na_position: fixture.sort_na_position.clone(),
         value_counts_normalize: fixture.value_counts_normalize,
+        value_counts_dropna: fixture.value_counts_dropna,
+        frame_name: fixture.frame_name.clone(),
         memory_usage_index: fixture.memory_usage_index,
         memory_usage_deep: fixture.memory_usage_deep,
         concat_axis: fixture.concat_axis,

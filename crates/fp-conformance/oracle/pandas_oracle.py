@@ -252,6 +252,19 @@ def label_from_json(value: dict[str, Any]) -> Any:
     # (see fp-types Scalar: #[serde(alias = "string", alias = "str")]).
     if kind in ("utf8", "str", "string"):
         return str(raw)
+    # br-frankenpandas-l7r1p: the read side of the same asymmetry. `label_to_json`
+    # has been able to WRITE kind="null" since the NaN branch landed, but this
+    # function raised on it, so a null index label could never round-trip.
+    if kind == "null":
+        if raw in ("null", None):
+            return None
+        if raw == "na_n":
+            return float("nan")
+        if raw == "na_t":
+            if _PD is None:
+                raise OracleError("null label kind 'na_t' needs pandas loaded")
+            return _PD.NaT
+        raise OracleError(f"unsupported null label marker: {raw!r}")
     raise OracleError(f"unsupported index label kind: {kind!r}")
 
 
@@ -394,6 +407,17 @@ def label_to_json(value: Any) -> dict[str, Any]:
     # is Null/NaN/NaT with no Inf and routing an infinite label to a null kind
     # would claim it is MISSING, which is false. Deciding a real +/-inf spelling
     # still needs a matching Rust-side change.
+    # br-frankenpandas-l7r1p: the THIRD sibling of the bool and float
+    # asymmetries above. A `None` label -- which is what `value_counts(
+    # dropna=False)` puts in the index of an object-dtype Series -- had no
+    # branch, so it fell through to `str(value)` and was written as
+    # {"kind":"utf8","value":"None"}: a null label encoded as the four-character
+    # STRING "None". FrankenPandas emits `Null(Null)` there, so the comparison
+    # reported an index mismatch that was purely this encoder's. The spelling is
+    # `scalar_to_json`'s own ({"kind":"null","value":"null"}, NullKind::Null),
+    # not a new choice, exactly as the float branch below borrows its "na_n".
+    if value is None or scalar_is_pandas_extension_missing(value):
+        return {"kind": "null", "value": "null"}
     if isinstance(value, bool):
         return {"kind": "bool", "value": value}
     if isinstance(value, int):
@@ -3566,8 +3590,16 @@ def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if left is None:
         raise OracleError("series_value_counts requires left payload")
 
-    normalize = payload.get("value_counts_normalize", False)
-    ascending = payload.get("sort_ascending", False)
+    # br-frankenpandas-l7r1p: `payload.get(key, default)` is WRONG against this
+    # payload. The Rust side serializes every absent Option as an explicit JSON
+    # `null`, so the key is PRESENT and `.get` returns None rather than the
+    # default -- pandas 2.2.3 then raises "expected type bool, received type
+    # NoneType" and the harness reported that as OracleUnavailable, i.e. the
+    # test passed by SKIP. Resolve None explicitly.
+    normalize = payload.get("value_counts_normalize")
+    normalize = False if normalize is None else bool(normalize)
+    ascending = payload.get("sort_ascending")
+    ascending = False if ascending is None else bool(ascending)
     categories_raw = payload.get("categorical_categories")
     if isinstance(categories_raw, list):
         # Categorical input: build from codes + categories so value_counts
@@ -3590,7 +3622,11 @@ def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
         # value_counts index then stays int64 as the fixtures expect.
         series = fixture_series_from_payload(pd, left, "series_value_counts")
         orig = [scalar_from_json(item) for item in left["values"]]
-    out = series.value_counts(normalize=normalize, sort=True, ascending=ascending, dropna=True)
+    # br-frankenpandas-l7r1p: dropna was pinned True, so a dropna=False fixture
+    # could not be expressed. Default stays True to preserve every banked answer.
+    dropna = payload.get("value_counts_dropna")
+    dropna = True if dropna is None else bool(dropna)
+    out = series.value_counts(normalize=normalize, sort=True, ascending=ascending, dropna=dropna)
 
     # FP breaks count ties by the value's FIRST-OCCURRENCE order in the input
     # (pandas uses a different tie break). Re-sort to match.
@@ -3639,7 +3675,11 @@ def op_series_sort_values(pd, payload: dict[str, Any]) -> dict[str, Any]:
     # sorted output came back as float64 3.0 where the corpus declares Int64 3.
     # (br-frankenpandas-6k29f)
     series = fixture_series_from_payload(pd, left, "series_sort_values")
-    out = series.sort_values(ascending=bool(ascending), na_position="last")
+    # br-frankenpandas-l7r1p: na_position was pinned to "last", so a fixture
+    # asking for "first" silently got the oracle's answer for "last" and the
+    # comparison recorded a divergence that was the ORACLE's, not FrankenPandas'.
+    na_position = payload.get("sort_na_position") or "last"
+    out = series.sort_values(ascending=bool(ascending), na_position=na_position)
 
     # br-frankenpandas-xi5li: was an inline copy of series_to_expected's dict,
     # which meant it never picked up the `name` key that emitter now writes.
