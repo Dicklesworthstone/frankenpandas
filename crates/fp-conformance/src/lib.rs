@@ -225,9 +225,41 @@ impl HarnessConfig {
 
     #[must_use]
     pub fn allows_system_pandas_fallback(&self) -> bool {
-        self.allow_system_pandas_fallback
-            || Self::env_flag("FP_ALLOW_SYSTEM_PANDAS_FALLBACK")
-            || self.require_live_oracle
+        // `require_live_oracle` is DELIBERATELY not probe-gated: when a caller
+        // (CI sets FP_REQUIRE_LIVE_ORACLE=1) demands a live oracle, a missing
+        // pandas must stay a LOUD FAILURE. Softening it here would reintroduce
+        // exactly the pass-by-skip defect br-frankenpandas-l7r1p exists to remove.
+        if self.require_live_oracle {
+            return true;
+        }
+        // An OPT-IN, by contrast, is a preference and not a demand, so it must
+        // answer honestly: "may I fall back to system pandas" is false when there
+        // is no system pandas to fall back to.
+        //
+        // br-frankenpandas-l7r1p: ad3e05d1c opted 161 conformance_* tests into the
+        // system pandas, which is right on a machine that HAS it and wrong on one
+        // that does not. The script-backed helpers (JSONL, to_html, tseries,
+        // groupby.apply) re-raise ModuleNotFoundError, and their callers `.expect`
+        // it, so 30 tests HARD-FAILED on an rch worker with no pandas installed
+        // while passing here. Skipping is the correct outcome there; failing is not.
+        (self.allow_system_pandas_fallback || Self::env_flag("FP_ALLOW_SYSTEM_PANDAS_FALLBACK"))
+            && Self::system_pandas_importable()
+    }
+
+    /// Can the configured interpreter actually `import pandas`? Probed ONCE per
+    /// process and cached, because it is asked per fixture.
+    fn system_pandas_importable() -> bool {
+        static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *PROBE.get_or_init(|| {
+            let python = std::env::var("FP_PYTHON_BIN").unwrap_or_else(|_| "python3".to_owned());
+            std::process::Command::new(python)
+                .args(["-c", "import pandas"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
     }
 
     #[must_use]
