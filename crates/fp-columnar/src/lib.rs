@@ -3373,6 +3373,36 @@ impl ScalarValues {
         }
     }
 
+    /// Sibling of [`Self::lazy_all_valid_float64_slice`] for windows that share
+    /// ONE buffer, which is the transposed-frame plan's page shape.
+    ///
+    /// br-frankenpandas-l4vzc/3ya6b: `shared_values` has existed on this variant
+    /// since the page-contiguous f64 buffer landed, documented as "for sibling
+    /// windows over one buffer (the transposed-frame plan)" -- and nothing ever
+    /// populated it, so every window fell back to its own `values` OnceLock. The
+    /// f64 VIEW was one allocation per 256 columns while the SCALAR view stayed
+    /// one allocation per column, which is what `df_transpose_full_materialize`
+    /// actually times (`col.values().len()`).
+    fn lazy_all_valid_float64_slice_shared(
+        data: Arc<[f64]>,
+        start: usize,
+        len: usize,
+        shared_values: Arc<OnceLock<Vec<Scalar>>>,
+    ) -> Self {
+        debug_assert!(
+            start.checked_add(len).is_some_and(|end| end <= data.len()),
+            "Float64 view window must lie within source data"
+        );
+        Self::LazyAllValidFloat64Slice {
+            data,
+            start,
+            len,
+            all_finite: OnceLock::new(),
+            values: OnceLock::new(),
+            shared_values: Some(shared_values),
+        }
+    }
+
     fn lazy_all_valid_float64_dot(
         a_cols: Arc<[Float64DotInput]>,
         b_col: Arc<[f64]>,
@@ -5403,16 +5433,31 @@ impl ScalarValues {
                 start,
                 len,
                 values,
+                shared_values,
                 ..
-            } => values
-                .get_or_init(|| {
-                    data[*start..*start + *len]
-                        .iter()
-                        .copied()
-                        .map(Scalar::Float64)
-                        .collect()
-                })
-                .as_slice(),
+            } => match shared_values {
+                // PAGE-SHARED SCALAR VIEW. `shared_values` covers the WHOLE of
+                // `data`, so this window is just `start..start + len` of it. The
+                // first sibling to ask materialises the page once; the other 255
+                // return a borrow. That is 1 allocation per page instead of 1 per
+                // column -- the Scalar-view counterpart of the page-contiguous f64
+                // buffer, which had no Scalar sibling until now.
+                Some(shared) => {
+                    let page = shared.get_or_init(|| {
+                        data.iter().copied().map(Scalar::Float64).collect()
+                    });
+                    &page[*start..*start + *len]
+                }
+                None => values
+                    .get_or_init(|| {
+                        data[*start..*start + *len]
+                            .iter()
+                            .copied()
+                            .map(Scalar::Float64)
+                            .collect()
+                    })
+                    .as_slice(),
+            },
             Self::LazyAllValidFloat64Dot {
                 a_cols,
                 b_col,
@@ -12330,6 +12375,29 @@ impl Column {
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_all_valid_float64_slice(data, start, len),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
+    /// [`Self::from_f64_shared_window`] for a window whose siblings share both
+    /// the f64 buffer AND one lazy Scalar view of it. See
+    /// `lazy_all_valid_float64_slice_shared`.
+    #[doc(hidden)]
+    pub fn from_f64_shared_window_paged(
+        data: Arc<[f64]>,
+        start: usize,
+        len: usize,
+        shared_values: Arc<OnceLock<Vec<Scalar>>>,
+    ) -> Self {
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_slice_shared(
+                data,
+                start,
+                len,
+                shared_values,
+            ),
             validity: ValidityMask::all_valid(len),
             data: None,
         }

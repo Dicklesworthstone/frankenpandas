@@ -57532,13 +57532,30 @@ impl LazyTransposeFramePlan {
             // one allocation for its columns, zero per-slot OnceLocks.
             if let Some(buffer) = self.page_contiguous_buffer(page_index, page_start, page_len) {
                 let ncols = self.source_columns.len();
+                // ONE lazy Scalar view for the whole page, shared by its columns.
+                // The f64 buffer above has been one allocation per page since the
+                // contiguous path landed, but `Column::values()` -- which is what
+                // `df_transpose_full_materialize` actually times, via
+                // `col.values().len()` -- still built a fresh `Vec<Scalar>` PER
+                // COLUMN, because `shared_values` was declared, documented "for
+                // sibling windows over one buffer (the transposed-frame plan)",
+                // and then never populated by anything. At the 100k fixture that
+                // is 100_000 small allocations for the Scalar view against 391
+                // for the f64 view.
+                //
+                // Laziness is unchanged in KIND and coarsened in GRAIN exactly as
+                // the f64 buffer already coarsened it: nothing is built until a
+                // caller asks for a Scalar view, and the first asker materialises
+                // its page (page_len * ncols Scalars) rather than the frame.
+                let shared_values: Arc<OnceLock<Vec<Scalar>>> = Arc::new(OnceLock::new());
                 return LazyTransposeColumnSlotPage::Contiguous(
                     (0..page_len)
                         .map(|slot| {
-                            Column::from_f64_shared_window(
+                            Column::from_f64_shared_window_paged(
                                 Arc::clone(&buffer),
                                 slot * ncols,
                                 ncols,
+                                Arc::clone(&shared_values),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -99407,6 +99424,73 @@ mod tests {
     ///   ['not-a-date','2024-06-15 12:34:56.123456'] -> [NaT, Timestamp(...)]
     ///     (an unreadable FIRST element takes NO lock — pandas'
     ///      guess_datetime_format returning None — so later rows parse freely)
+    /// br-frankenpandas-l4vzc/3ya6b: the page-shared Scalar view is REACHED and
+    /// bit-identical, and it really is one allocation per page.
+    ///
+    /// `shared_values` sat on `LazyAllValidFloat64Slice` documented "for sibling
+    /// windows over one buffer (the transposed-frame plan)" and nothing populated
+    /// it, so `Column::values()` allocated a fresh `Vec<Scalar>` per output
+    /// column. A values-only assertion cannot see that -- both spellings return
+    /// the same numbers -- so this also pins the SHARING with an address witness.
+    #[test]
+    fn transpose_page_shares_one_scalar_view_per_page_l4vzc() {
+        // 300 source rows spans two 256-column pages after transposing.
+        let rows = 300usize;
+        let ncols = 3usize;
+        // The lazy transpose plan requires an Int64 UNIT-RANGE source index
+        // (`Index::int64_unit_range_labels`), which is what the transposed
+        // frame's integer column names come from -- a Utf8 index falls back to
+        // the eager materializer and never reaches the page path at all.
+        let index = Index::from_range(0, rows as i64, 1);
+        let mut store: BTreeMap<String, Column> = BTreeMap::new();
+        for c in 0..ncols {
+            let values: Vec<f64> = (0..rows).map(|r| (r * ncols + c) as f64).collect();
+            store.insert(format!("c{c}"), Column::from_f64_values(values));
+        }
+        let df = DataFrame::new(index, store).expect("source frame");
+        let t = df.transpose().expect("transpose");
+        assert_eq!(t.num_columns(), rows);
+
+        // VALUES: every output column is the corresponding source ROW.
+        for r in 0..rows {
+            let col = t.column_at(r).expect("column");
+            let got: Vec<f64> = col
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Float64(v) => *v,
+                    other => panic!("expected Float64, got {other:?}"),
+                })
+                .collect();
+            let want: Vec<f64> = (0..ncols).map(|c| (r * ncols + c) as f64).collect();
+            assert_eq!(got, want, "transposed column {r}");
+        }
+
+        // SHARING: siblings inside one page are windows into ONE Vec<Scalar>, so
+        // their slices are exactly `ncols` elements apart. Address arithmetic
+        // only -- no dereference, no unsafe.
+        let stride = std::mem::size_of::<Scalar>() * ncols;
+        let addr = |i: usize| t.column_at(i).unwrap().values().as_ptr() as usize;
+        assert_eq!(
+            addr(1),
+            addr(0) + stride,
+            "columns 0 and 1 share a page and must be adjacent in one Scalar buffer"
+        );
+        assert_eq!(addr(255), addr(0) + 255 * stride, "column 255 is still page 0");
+        // And the sharing is PER PAGE, not global: 256 opens a new page, so it
+        // cannot continue page 0's buffer.
+        assert_ne!(
+            addr(256),
+            addr(0) + 256 * stride,
+            "column 256 belongs to the next page and must not extend page 0"
+        );
+        assert_eq!(
+            addr(257),
+            addr(256) + stride,
+            "columns 256 and 257 share page 1"
+        );
+    }
+
     #[test]
     fn to_datetime_locks_one_format_from_the_first_element_like_pandas() {
         let parse = |items: &[&str]| -> Vec<bool> {
