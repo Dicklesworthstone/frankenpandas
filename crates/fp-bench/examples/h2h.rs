@@ -80,12 +80,22 @@ path, workload = sys.argv[1], sys.argv[2]
 # An `_int64` workload feeds BOTH arms an integer column, so the incumbent pays
 # its own widening too and the comparison is not float-vs-int.
 is_int = workload.endswith("_int64")
+is_frame = workload.startswith("df_transpose")
 values = np.fromfile(path, dtype="<i8" if is_int else "<f8")
-series = pd.Series(values)
+if is_frame:
+    # Same shape as the corpus fixture: rows x 10, so the transposed frame has
+    # one column per SOURCE ROW -- the shape the l4vzc claim is about.
+    frame = pd.DataFrame(values.reshape(-1, 10))
+else:
+    series = pd.Series(values)
 base = workload[:-6] if is_int else workload
 sys.stderr.write("PANDAS_VERSION=%s\nNUMPY_VERSION=%s\n" % (pd.__version__, np.__version__))
 sys.stderr.flush()
 def run():
+    # pandas' best available whole-frame materialisation, unchanged from the
+    # banked lane: `.T` is a view over the block manager and `.to_numpy()` is
+    # what forces it across the boundary.
+    if base == "df_transpose_full_materialize": return frame.T.to_numpy().shape
     if base == "log":     return np.log(series)
     if base == "sqrt":    return np.sqrt(series)
     if base == "floor":   return np.floor(series)
@@ -100,7 +110,7 @@ for line in sys.stdin:
     out = run()
     t1 = time.perf_counter_ns()
     # Touch the result so a lazy/deferred pandas cannot make the rep vacuous.
-    _ = out.iloc[0]
+    _ = out if is_frame else out.iloc[0]
     print((t1 - t0) / 1000.0, flush=True)
 "#;
 
@@ -136,6 +146,36 @@ impl Incumbent {
         self.stdout.read_line(&mut line).expect("incumbent timing");
         line.trim().parse().expect("incumbent timing is a number")
     }
+}
+
+/// Number of source COLUMNS in the transpose fixture. The transposed frame then
+/// has one column per source ROW, which is the shape l4vzc is about.
+const TRANSPOSE_COLS: usize = 10;
+
+/// Consecutive reps per arm slot. 1 reproduces the old rep-by-rep interleave.
+const PHASE: usize = 8;
+
+enum Subject {
+    Col(fp_columnar::Column),
+    Frame(fp_frame::DataFrame),
+}
+
+/// The transpose lane, matching the banked positional arm: transpose, then read
+/// EVERY output column. `touched` and the `black_box` are load-bearing — without
+/// them the loop is dead code and the lane would report an enormous false win.
+fn fp_transpose_rep_us(frame: &fp_frame::DataFrame) -> f64 {
+    let start = Instant::now();
+    let transposed = frame.transpose().expect("transpose");
+    let mut touched = 0usize;
+    for position in 0..transposed.num_columns() {
+        let column = transposed
+            .column_at(position)
+            .expect("positional column present");
+        touched += column.values().len();
+    }
+    let elapsed = start.elapsed().as_nanos() as f64 / 1000.0;
+    std::hint::black_box((&transposed, touched));
+    elapsed
 }
 
 fn fp_one_rep_us(workload: &str, column: &fp_columnar::Column) -> f64 {
@@ -205,33 +245,96 @@ fn main() {
 
 fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
     let path = std::env::temp_dir().join(format!("fp_h2h_{workload}_{n}.bin"));
-    let column = if workload.ends_with("_int64") {
+    let subject = if workload.starts_with("df_transpose") {
+        let values = fixture(n * TRANSPOSE_COLS);
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(&path, &bytes).expect("write fixture");
+        // A RANGE index is required: the lazy transpose plan needs
+        // `Index::int64_unit_range_labels`, and a Utf8 index silently falls back
+        // to the eager materializer — a different code path from the banked lane.
+        let index = fp_index::Index::from_range(0, n as i64, 1);
+        let mut store: std::collections::BTreeMap<String, fp_columnar::Column> =
+            std::collections::BTreeMap::new();
+        for col in 0..TRANSPOSE_COLS {
+            let slice: Vec<f64> = (0..n).map(|row| values[row * TRANSPOSE_COLS + col]).collect();
+            store.insert(format!("{col}"), fp_columnar::Column::from_f64_values(slice));
+        }
+        let frame = fp_frame::DataFrame::new(index, store).expect("source frame");
+        Subject::Frame(frame)
+    } else if workload.ends_with("_int64") {
         let values = fixture_i64(n);
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(&path, &bytes).expect("write fixture");
-        fp_columnar::Column::from_i64_values(values)
+        Subject::Col(fp_columnar::Column::from_i64_values(values))
     } else {
         let values = fixture(n);
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(&path, &bytes).expect("write fixture");
-        fp_columnar::Column::from_f64_values(values)
+        Subject::Col(fp_columnar::Column::from_f64_values(values))
+    };
+    // One place decides which arm a workload runs, so the warm-up and every
+    // timed round cannot disagree about it.
+    let fp_rep = |subject: &Subject| -> f64 {
+        match subject {
+            Subject::Col(column) => fp_one_rep_us(workload, column),
+            Subject::Frame(frame) => fp_transpose_rep_us(frame),
+        }
     };
     let mut incumbent = Incumbent::spawn(path.to_str().expect("utf8 path"), workload);
 
     // Warm both arms before any timed round.
     for _ in 0..3 {
-        fp_one_rep_us(workload, &column);
+        fp_rep(&subject);
         incumbent.one_rep_us();
     }
 
     let (mut fp_a, mut fp_b) = (Vec::new(), Vec::new());
     let (mut pd_a, mut pd_b) = (Vec::new(), Vec::new());
-    for _ in 0..rounds {
-        // A B B A — the second half mirrors the first so drift cancels.
-        fp_a.push(fp_one_rep_us(workload, &column));
-        pd_a.push(incumbent.one_rep_us());
-        pd_b.push(incumbent.one_rep_us());
-        fp_b.push(fp_one_rep_us(workload, &column));
+    for round in 0..rounds {
+        // ROUND ORDER ALTERNATES ABBA / BAAB, and that is a correction to this
+        // harness rather than a flourish. With ABBA alone, `pd_a` ALWAYS runs
+        // immediately after a FrankenPandas rep and `pd_b` always after another
+        // pandas rep — two structurally different positions, so the incumbent's
+        // A/A null measures cache state rather than the incumbent.
+        //
+        // Invisible while the FP rep was ~600us; dominant on
+        // `df_transpose_full_materialize @100k`, where the FP rep is ~40ms and
+        // churns memory: the two pandas positions came out 454.5us vs 99.8us and
+        // the pandas null hit 4.55 (limit 1.02), refusing the row. Alternating the
+        // order gives each arm both positions equally.
+        // PHASE-BLOCKED, not rep-by-rep, and the reason is measured. Alternating
+        // the ORDER alone still left the incumbent's A/A null at 1.48-1.75 on
+        // `df_transpose_full_materialize @100k` (limit 1.02), because pandas' rep
+        // there is BIMODAL by cache state — ~100us warm against ~450us cold —
+        // while FrankenPandas' rep is ~41ms and evicts everything between them.
+        // A median over a 50/50 cold/warm mix is unstable no matter how the two
+        // labels are balanced.
+        //
+        // Running PHASE consecutive reps per slot makes all but the first rep in
+        // a phase warm, so each arm's median describes the arm rather than what
+        // ran before it. Interleaving survives at phase granularity: the slots
+        // still alternate ABBA/BAAB, so drift between phases cancels as before.
+        let mut fp_phase = |out: &mut Vec<f64>| {
+            for _ in 0..PHASE {
+                out.push(fp_rep(&subject));
+            }
+        };
+        let mut pd_phase = |out: &mut Vec<f64>, inc: &mut Incumbent| {
+            for _ in 0..PHASE {
+                out.push(inc.one_rep_us());
+            }
+        };
+        if round % 2 == 0 {
+            fp_phase(&mut fp_a);
+            pd_phase(&mut pd_a, &mut incumbent);
+            pd_phase(&mut pd_b, &mut incumbent);
+            fp_phase(&mut fp_b);
+        } else {
+            pd_phase(&mut pd_a, &mut incumbent);
+            fp_phase(&mut fp_a);
+            fp_phase(&mut fp_b);
+            pd_phase(&mut pd_b, &mut incumbent);
+        }
     }
 
     let fp_med_a = median(&mut fp_a.clone());
