@@ -8468,7 +8468,7 @@ impl Series {
             _ => return Ok(None),
         };
 
-        let mut output = Vec::with_capacity(self.len());
+        let mut output: Vec<i64> = Vec::with_capacity(self.len());
         for (left, right) in self.values().iter().zip(other.values()) {
             let raw = match (left, right) {
                 (Scalar::Timedelta64(left), Scalar::Timedelta64(right))
@@ -8490,14 +8490,39 @@ impl Series {
                 }
                 _ => Timedelta::NAT,
             };
-            output.push(if output_datetime {
-                Scalar::Datetime64(raw)
-            } else {
-                Scalar::Timedelta64(raw)
-            });
+            output.push(raw);
         }
 
-        Ok(Some(Column::from_values(output)?))
+        // The NaT SENTINEL is not a value. `try_add`/`try_sub` are
+        // NaT-propagating and the `_` arm above maps a missing operand to
+        // `Timedelta::NAT`, so `raw` carries i64::MIN exactly when the row is
+        // missing. This used to push `Scalar::Timedelta64(i64::MIN)`, handing
+        // the raw sentinel back as an elapsed duration of -9223372036854775808ns
+        // that answers `isna() == False`. The columnar kernel folds this case
+        // into the validity mask (fp-columnar `binary_numeric`, the
+        // `if v == Timedelta::NAT { validity.set(i, false) }` loop); this
+        // function reimplements that kernel and dropped the fold-down.
+        //
+        // Probed on live pandas 2.2.3 -- both the propagating and the boundary
+        // case are MISSING rows that keep their dtype:
+        //     (Series([NaT]) - Series([Timestamp]))        -> [NaT], timedelta64[ns]
+        //     (Series([Timedelta.min]) - Series([1ns]))    -> [NaT], isna() True
+        //
+        // Building through `Column::from_values` cannot express that: an
+        // all-missing output infers `DType::Null` and loses timedelta64/
+        // datetime64, which is why the mask is applied through the TYPED
+        // constructors instead, exactly as the columnar kernel does.
+        let mut validity = ValidityMask::all_valid(output.len());
+        for (i, &raw) in output.iter().enumerate() {
+            if raw == Timedelta::NAT {
+                validity.set(i, false);
+            }
+        }
+        Ok(Some(if output_datetime {
+            Column::from_datetime64_values_with_validity(output, validity)
+        } else {
+            Column::from_timedelta64_values_with_validity(output, validity)
+        }))
     }
 
     pub fn add_with_policy(
@@ -168226,10 +168251,36 @@ mod tests {
             vec![Scalar::Timedelta64(i64::MIN + 1)],
         )
         .unwrap();
+        // The first half of this test is unchanged: landing one nanosecond below
+        // Timedelta.min is NOT an overflow, it is a NaT-sentinel collision, and
+        // it must not raise.
+        //
+        // The SPELLING of that result changed, and live pandas 2.2.3 is the
+        // reason. This assertion used to expect `Scalar::Timedelta64(i64::MIN)`
+        // -- the raw sentinel handed back as if it were an elapsed duration of
+        // -9223372036854775808ns, which reports as PRESENT. Probed directly:
+        //
+        //     >>> s = pd.Series([pd.Timedelta.min])       # value -9223372036854775807
+        //     >>> (s - pd.Series([pd.Timedelta(1, "ns")])).tolist()
+        //     [NaT]
+        //     >>> (s - pd.Series([pd.Timedelta(1, "ns")])).isna().tolist()
+        //     [True]
+        //
+        // pandas calls the row MISSING, so FrankenPandas must too; a sentinel
+        // that answers `isna() == False` is the bug this fixes. The dtype is
+        // still timedelta64[ns] on both sides.
+        let boundary = boundary_left.sub(&one_ns_boundary).unwrap();
         assert_eq!(
-            boundary_left.sub(&one_ns_boundary).unwrap().values(),
-            &[Scalar::Timedelta64(Timedelta::NAT)],
-            "the NaT-sentinel collision one nanosecond below Timedelta.min is not an overflow"
+            boundary.values(),
+            &[Scalar::Null(NullKind::NaT)],
+            "the NaT-sentinel collision one nanosecond below Timedelta.min is not an overflow, \
+             and the sentinel is a MISSING row rather than a -9223372036854775808ns duration"
+        );
+        assert_eq!(boundary.dtype(), DType::Timedelta64);
+        assert_eq!(
+            boundary.isna().unwrap().values(),
+            &[Scalar::Bool(true)],
+            "pandas reports isna()==True here; a raw sentinel presented as a value would be False"
         );
     }
 
