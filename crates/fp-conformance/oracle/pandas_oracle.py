@@ -4243,6 +4243,13 @@ def pandas_dtype_from_constructor_spec(dtype_spec: str) -> str:
         return "float64"
     if normalized in {"utf8", "string", "str"}:
         return "string"
+    # br-frankenpandas-jozfk scope item 2, mirrored from the Rust side so the two
+    # spec parsers cannot drift (which is the failure the docstring above records
+    # for the Int64 case). pandas accepts this spelling and succeeds:
+    #     pd.DataFrame([["2026-01-01"]], dtype="datetime64[ns]")
+    #       -> dtype datetime64[ns], Timestamp('2026-01-01 00:00:00')
+    if normalized in {"datetime64[ns]", "datetime64"}:
+        return "datetime64[ns]"
     raise OracleError(f"unsupported constructor dtype {dtype_spec!r}")
 
 

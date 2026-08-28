@@ -15224,6 +15224,15 @@ fn parse_constructor_dtype_spec(dtype_spec: &str) -> Result<DType, String> {
         "int64" | "int" | "i64" => Ok(DType::Int64),
         "float64" | "float" | "f64" => Ok(DType::Float64),
         "utf8" | "string" | "str" => Ok(DType::Utf8),
+        // br-frankenpandas-jozfk scope item 2. `DType::Datetime64` EXISTS and
+        // `with_constructor_dtype` already handles temporal targets, so refusing
+        // the spelling was a harness gap, not a product limit — unlike `uint64`
+        // and `boolean[pyarrow]`, which have no fp-types variant at all and stay
+        // refused. Verified against live pandas 2.2.3:
+        //     pd.DataFrame([["2026-01-01"]], dtype="datetime64[ns]")
+        //       -> dtype datetime64[ns], Timestamp('2026-01-01 00:00:00')
+        // i.e. pandas SUCCEEDS where the corpus asserted it raises.
+        "datetime64[ns]" | "datetime64" => Ok(DType::Datetime64),
         _ => Err(format!(
             "unsupported constructor dtype '{}'",
             dtype_spec.trim()
@@ -28876,20 +28885,45 @@ mod constructor_dtype_tier_locks_jozfk {
         );
     }
 
-    /// The four spellings the corpus pins as UNSUPPORTED stay unsupported. Two are
-    /// harness gaps (`datetime64[ns]` — `DType::Datetime64` exists; `object` — needs
-    /// a semantics decision) and two are REAL PRODUCT GAPS (`uint64` and
-    /// `boolean[pyarrow]`: fp-types has no unsigned integer and no arrow-backed
-    /// variants at all). Pinned so that widening the parser is a DECISION rather than
-    /// a side effect of touching this function.
+    /// The spellings the corpus pins as UNSUPPORTED stay unsupported, and the one
+    /// that was DELIBERATELY admitted stays admitted. Pinned in BOTH directions so
+    /// that moving the boundary is a decision rather than a side effect of touching
+    /// this function.
+    ///
+    /// `datetime64[ns]` LEFT this set on purpose (br-frankenpandas-jozfk scope item
+    /// 2). This lock previously demanded it be refused, and that demand was correct
+    /// until someone asked the incumbent. Live pandas 2.2.3:
+    ///
+    ///     pd.DataFrame([["2026-01-01"]], dtype="datetime64[ns]")
+    ///       -> dtype datetime64[ns], Timestamp('2026-01-01 00:00:00')
+    ///
+    /// pandas SUCCEEDS, `DType::Datetime64` exists, and `with_constructor_dtype`
+    /// already handles temporal targets — so the refusal was a harness gap, and the
+    /// corpus fixture asserting `expected_error_contains: "unsupported constructor
+    /// dtype 'datetime64[ns]'"` was pinning FrankenPandas' own error message as the
+    /// incumbent's behaviour, attested `error_agreement`. That fixture now carries
+    /// the measured value instead.
+    ///
+    /// The other three stay refused for reasons that have NOT changed: `uint64` and
+    /// `boolean[pyarrow]` are REAL PRODUCT GAPS (fp-types has no unsigned integer and
+    /// no arrow-backed variants), and `object` needs a semantics decision because it
+    /// can hold mixed types where `Utf8` cannot.
     #[test]
     fn the_unsupported_set_must_not_widen_by_accident_jozfk() {
-        for spec in ["uint64", "object", "boolean[pyarrow]", "datetime64[ns]"] {
+        for spec in ["uint64", "object", "boolean[pyarrow]"] {
             assert!(
                 parse_constructor_dtype_spec(spec).is_err(),
-                "{spec:?} must still be refused; widening this set changes what four \
+                "{spec:?} must still be refused; widening this set changes what the \
                  corpus fixtures assert and is a decision, not a refactor"
             );
         }
+        // The other direction: admitting datetime64 must not silently regress.
+        assert_eq!(
+            parse_constructor_dtype_spec("datetime64[ns]"),
+            Ok(DType::Datetime64),
+            "datetime64[ns] was deliberately admitted against live pandas 2.2.3; \
+             re-refusing it would restore a fixture that asserts FrankenPandas' own \
+             error text as pandas' behaviour"
+        );
     }
 }

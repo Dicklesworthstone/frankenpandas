@@ -1,19 +1,37 @@
 {
-  "packet_id": "FP-P2D-024",
-  "case_id": "dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict",
-  "mode": "strict",
-  "operation": "dataframe_constructor_list_like",
-  "fixture_provenance": {
-    "pandas_version": "2.2.3",
-    "oracle_script_sha256": "ef135bb3088ad340319998b43cdc945af9754fc4d8e943dcb0137729af14fb41",
-    "generated_at": "2026-08-08T08:56:06Z",
-    "oracle_attestation": "error_agreement"
-},
-  "constructor_dtype": "datetime64[ns]",
-  "matrix_rows": [
-    [
-      { "kind": "utf8", "value": "2026-01-01" }
-    ]
+ "packet_id": "FP-P2D-024",
+ "case_id": "dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict",
+ "mode": "strict",
+ "operation": "dataframe_constructor_list_like",
+ "fixture_provenance": {
+  "pandas_version": "2.2.3",
+  "oracle_script_sha256": "ef135bb3088ad340319998b43cdc945af9754fc4d8e943dcb0137729af14fb41",
+  "generated_at": "2026-08-28T00:00:00Z",
+  "oracle_attestation": "value_agreement"
+ },
+ "constructor_dtype": "datetime64[ns]",
+ "matrix_rows": [
+  [
+   {
+    "kind": "utf8",
+    "value": "2026-01-01"
+   }
+  ]
+ ],
+ "expected_frame": {
+  "index": [
+   {
+    "kind": "int64",
+    "value": 0
+   }
   ],
-  "expected_error_contains": "unsupported constructor dtype 'datetime64[ns]'"
+  "columns": {
+   "0": [
+    {
+     "kind": "datetime64",
+     "value": 1767225600000000000
+    }
+   ]
+  }
+ }
 }
