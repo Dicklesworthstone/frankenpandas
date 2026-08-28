@@ -29387,6 +29387,21 @@ impl Column {
                 // 800 KB round trip was a larger share of it. `sqrt_int64 @100k`
                 // was a certified 3.6x LOSS and is now a certified WIN — the
                 // widening, not the kernel, was the whole gap.
+                //
+                // ⚠️ AND IT MUST STAY BELOW `runs_serial`. Blocking is SERIAL: each
+                // tile is 8192 elements, far under `policy_par_min`, so the inner
+                // map never threads. Above the gate that is the wrong trade, and
+                // the margin is not close. `log_int64 @1M`, same ELF, one
+                // invocation, both arms certifying:
+                //
+                //   DEFAULT = fused PARALLEL   fp 2390.428us   ratio 2.5696 FASTER
+                //   forced blocked (serial)    fp 7332.506us   ratio 0.8104 SLOWER
+                //
+                // 3.07x, and it is the difference between a certified WIN and a
+                // certified LOSS. So the boundary 4kig1 chose is now measured from
+                // BOTH sides on this fleet: below it blocking beats everything,
+                // above it threading does. Widening the blocked arm past the gate
+                // would undo a 2.57x win.
                 const WIDEN_BLOCK: usize = 8_192;
                 let derived = preserves_finiteness.then_some(true);
                 let mut out: Vec<f64> = Vec::with_capacity(data.len());
