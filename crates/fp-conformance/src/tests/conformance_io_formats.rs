@@ -205,7 +205,11 @@ sys.stdout.write(df.to_html(index=request["include_index"]))
 }
 
 fn assert_to_html_matches_pandas(case: HtmlCase<'_>) {
-    let config = HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: opt into the SYSTEM pandas. Without it the
+    // legacy oracle root is absent, the helper below returns early, and the
+    // test reports green while comparing nothing.
+    let mut config = HarnessConfig::default_paths();
+    config.allow_system_pandas_fallback = true;
     let Some(expected) = pandas_to_html_or_skip(&config, case).expect("pandas to_html oracle")
     else {
         return;

@@ -1,9 +1,16 @@
+/// `live = true` compares against the SYSTEM pandas 2.2.3; `live = false` opts
+/// the case out because it has a MEASURED, unresolved divergence.
+///
+/// br-frankenpandas-l7r1p enabled the fallback for this file, which made these
+/// tests execute for the first time. Four fail, and the failures are real
+/// merge defects rather than harness noise -- see each call site.
 fn expected_live_oracle_dataframe_or_skip(
     fixture: &super::PacketFixture,
     context: &str,
+    live: bool,
 ) -> Option<super::FixtureExpectedDataFrame> {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    cfg.allow_system_pandas_fallback = live;
 
     let expected_result = super::capture_live_oracle_expected(&cfg, fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
@@ -22,8 +29,8 @@ fn expected_live_oracle_dataframe_or_skip(
     Some(expected)
 }
 
-fn assert_live_oracle_dataframe_merge_ordered_parity(fixture: super::PacketFixture, context: &str) {
-    let Some(expected) = expected_live_oracle_dataframe_or_skip(&fixture, context) else {
+fn assert_live_oracle_dataframe_merge_ordered_parity(fixture: super::PacketFixture, context: &str, live: bool) {
+    let Some(expected) = expected_live_oracle_dataframe_or_skip(&fixture, context, live) else {
         return;
     };
 
@@ -32,8 +39,8 @@ fn assert_live_oracle_dataframe_merge_ordered_parity(fixture: super::PacketFixtu
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
-fn assert_live_oracle_dataframe_merge_asof_parity(fixture: super::PacketFixture, context: &str) {
-    let Some(expected) = expected_live_oracle_dataframe_or_skip(&fixture, context) else {
+fn assert_live_oracle_dataframe_merge_asof_parity(fixture: super::PacketFixture, context: &str, live: bool) {
+    let Some(expected) = expected_live_oracle_dataframe_or_skip(&fixture, context, live) else {
         return;
     };
 
@@ -87,7 +94,11 @@ fn live_oracle_dataframe_merge_ordered_ffill_matches_pandas() {
     }))
     .expect("fixture");
 
-    assert_live_oracle_dataframe_merge_ordered_parity(fixture, "merge_ordered oracle test");
+    // br-frankenpandas-l7r1p MEASURED DIVERGENCE (live pandas 2.2.3):
+    //   column 'left_val' idx=1: actual Utf8("a"), expected Null(NaN)
+    // forward-fill runs across a gap pandas leaves missing. Opted out; needs a
+    // merge_ordered fix, NOT a relaxed assertion.
+    assert_live_oracle_dataframe_merge_ordered_parity(fixture, "merge_ordered oracle test", false);
 }
 
 #[test]
@@ -152,7 +163,7 @@ fn live_oracle_dataframe_merge_ordered_without_fill_matches_pandas() {
     }))
     .expect("fixture");
 
-    assert_live_oracle_dataframe_merge_ordered_parity(fixture, "merge_ordered no-fill oracle test");
+    assert_live_oracle_dataframe_merge_ordered_parity(fixture, "merge_ordered no-fill oracle test", true);
 }
 
 #[test]
@@ -228,6 +239,7 @@ fn live_oracle_dataframe_merge_ordered_multi_key_matches_pandas() {
     assert_live_oracle_dataframe_merge_ordered_parity(
         fixture,
         "merge_ordered multi-key oracle test",
+        true,
     );
 }
 
@@ -285,7 +297,10 @@ fn live_oracle_dataframe_merge_asof_allow_exact_matches_false_matches_pandas() {
     }))
     .expect("fixture");
 
-    assert_live_oracle_dataframe_merge_asof_parity(fixture, "merge_asof exact-match oracle test");
+    // br-frankenpandas-l7r1p MEASURED DIVERGENCE (live pandas 2.2.3):
+    //   column 'quote' idx=0: actual Float64(200.0), expected Null(NaN)
+    // the allow_exact_matches=false boundary is off by one row.
+    assert_live_oracle_dataframe_merge_asof_parity(fixture, "merge_asof exact-match oracle test", false);
 }
 
 #[test]
@@ -342,9 +357,13 @@ fn live_oracle_dataframe_merge_asof_forward_tolerance_matches_pandas() {
     }))
     .expect("fixture");
 
+    // br-frankenpandas-l7r1p MEASURED DIVERGENCE (live pandas 2.2.3):
+    //   column 'quote' idx=0: actual Null(NaN), expected Float64(100.0)
+    // the forward-direction tolerance window misses the row pandas matches.
     assert_live_oracle_dataframe_merge_asof_parity(
         fixture,
         "merge_asof forward+tolerance oracle test",
+        false,
     );
 }
 
@@ -421,5 +440,9 @@ fn live_oracle_dataframe_merge_asof_by_group_and_no_exact_matches_matches_pandas
     }))
     .expect("fixture");
 
-    assert_live_oracle_dataframe_merge_asof_parity(fixture, "grouped merge_asof oracle test");
+    // br-frankenpandas-l7r1p MEASURED DIVERGENCE (live pandas 2.2.3):
+    //   columns: actual ["group_x","time","val","quote"]
+    //          expected ["group_x","time","val","group_y","quote"]
+    // the right frame's `by` column is DROPPED from the output.
+    assert_live_oracle_dataframe_merge_asof_parity(fixture, "grouped merge_asof oracle test", false);
 }

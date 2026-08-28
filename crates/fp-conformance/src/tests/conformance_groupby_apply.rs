@@ -5,7 +5,11 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 fn pandas_groupby_apply_shapes_or_skip() -> Result<Option<Value>, String> {
-    let config = super::HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: opt into the SYSTEM pandas. Without it the
+    // legacy oracle root is absent, the helper below returns early, and the
+    // test reports green while comparing nothing.
+    let mut config = super::HarnessConfig::default_paths();
+    config.allow_system_pandas_fallback = true;
     if !config.oracle_root.exists() && !config.allows_live_oracle_fallback() {
         eprintln!(
             "live pandas unavailable; skipping GroupBy.apply shape conformance: legacy oracle root does not exist: {}",

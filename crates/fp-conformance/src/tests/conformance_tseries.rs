@@ -441,7 +441,11 @@ fn datetime_labels(index: &Index) -> Result<Vec<i64>, String> {
 }
 
 fn assert_date_range_matches_pandas(case: DateRangeCase<'_>) -> Result<(), String> {
-    let config = HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: opt into the SYSTEM pandas. Without it the
+    // legacy oracle root is absent, the helper below returns early, and the
+    // test reports green while comparing nothing.
+    let mut config = HarnessConfig::default_paths();
+    config.allow_system_pandas_fallback = true;
     let Some(expected) = pandas_date_range_or_skip(&config, case)? else {
         return Ok(());
     };
@@ -478,7 +482,11 @@ fn assert_date_range_rejects_like_pandas<F>(
 where
     F: FnOnce(&DateRangeError) -> bool,
 {
-    let config = HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: opt into the SYSTEM pandas. Without it the
+    // legacy oracle root is absent, the helper below returns early, and the
+    // test reports green while comparing nothing.
+    let mut config = HarnessConfig::default_paths();
+    config.allow_system_pandas_fallback = true;
     match pandas_date_range_or_skip(&config, case) {
         Ok(None) => return Ok(()),
         Ok(Some(expected)) => {
@@ -522,7 +530,11 @@ where
 }
 
 fn assert_bdate_range_matches_pandas(case: BusinessDateRangeCase<'_>) -> Result<(), String> {
-    let config = HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: opt into the SYSTEM pandas. Without it the
+    // legacy oracle root is absent, the helper below returns early, and the
+    // test reports green while comparing nothing.
+    let mut config = HarnessConfig::default_paths();
+    config.allow_system_pandas_fallback = true;
     let Some(expected) = pandas_bdate_range_or_skip(&config, case)? else {
         return Ok(());
     };
@@ -546,7 +558,11 @@ fn assert_bdate_range_matches_pandas(case: BusinessDateRangeCase<'_>) -> Result<
 }
 
 fn assert_offset_matches_pandas(case: DateOffsetCase<'_>) -> Result<(), String> {
-    let config = HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: opt into the SYSTEM pandas. Without it the
+    // legacy oracle root is absent, the helper below returns early, and the
+    // test reports green while comparing nothing.
+    let mut config = HarnessConfig::default_paths();
+    config.allow_system_pandas_fallback = true;
     let Some(expected) = pandas_offset_or_skip(&config, case)? else {
         return Ok(());
     };
@@ -563,7 +579,11 @@ fn assert_offset_matches_pandas(case: DateOffsetCase<'_>) -> Result<(), String> 
 }
 
 fn assert_infer_freq_matches_pandas(case: InferFreqCase<'_>) -> Result<(), String> {
-    let config = HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: opt into the SYSTEM pandas. Without it the
+    // legacy oracle root is absent, the helper below returns early, and the
+    // test reports green while comparing nothing.
+    let mut config = HarnessConfig::default_paths();
+    config.allow_system_pandas_fallback = true;
     let Some(expected) = pandas_infer_freq_or_skip(&config, case)? else {
         return Ok(());
     };

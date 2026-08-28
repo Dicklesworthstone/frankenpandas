@@ -11,7 +11,16 @@ use super::{
 };
 
 fn strict_config() -> HarnessConfig {
-    HarnessConfig::default_paths()
+    let mut cfg = HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: without this every test in this file SKIPS. The
+    // legacy oracle root (`legacy_pandas_code/pandas`) does not exist on this
+    // host, so `capture_live_oracle_expected` returns OracleUnavailable and
+    // `check_index_fixture` returns before comparing anything -- the tests
+    // report green while executing no differential at all. The live_oracle_*
+    // suites already opt into the SYSTEM pandas (2.2.3) for exactly this
+    // reason; the conformance_* suites never did.
+    cfg.allow_system_pandas_fallback = true;
+    cfg
 }
 
 fn live_oracle_available(cfg: &HarnessConfig, fixture: &PacketFixture) -> Result<bool, String> {

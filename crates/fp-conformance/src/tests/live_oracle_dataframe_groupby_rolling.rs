@@ -2,7 +2,10 @@ use super::*;
 
 fn assert_live_oracle_dataframe_groupby_rolling_frame_parity(fixture: super::PacketFixture) {
     let mut cfg = HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // br-frankenpandas-l7r1p: opt into the SYSTEM pandas 2.2.3. This was the
+    // never-converted default, not a recorded divergence -- with it false the
+    // absent legacy oracle root made every test in this file skip.
+    cfg.allow_system_pandas_fallback = true;
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {

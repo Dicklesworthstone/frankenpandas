@@ -118,6 +118,25 @@ fn live_oracle_expected_frame_or_skip(
     context: &str,
 ) -> Option<super::FixtureExpectedDataFrame> {
     let mut cfg = super::HarnessConfig::default_paths();
+    // br-frankenpandas-l7r1p: HELD OPTED-OUT on MEASURED evidence, not by
+    // default. Enabling the system-pandas fallback made all NINE tests in this
+    // file execute for the first time and ALL NINE fail, against live pandas
+    // 2.2.3, with two distinct causes:
+    //
+    //   COLUMN ORDER (7 tests: identity, loc_prefix, xs_level, reset_index,
+    //   and the csv / json-split / parquet round-trips)
+    //       actual ["cost","sales"]  expected ["sales","cost"]
+    //   FrankenPandas reorders the columns of a row-MultiIndex frame; pandas
+    //   preserves construction order. One cause, seven symptoms.
+    //
+    //   MULTIINDEX KEY SPELLING (1 test: groupby_sum_multikey)
+    //       index actual [Utf8("north, apple"), Utf8("north, pear"), ...]
+    //   the composite key is flattened to a comma-joined STRING instead of a
+    //   tuple -- the same flat-vs-two-level gap as br-frankenpandas-ums1z and
+    //   br-frankenpandas-09ygw.
+    //
+    // Re-enable this line once the column-order defect is fixed; it should take
+    // seven of the nine with it. Do NOT resolve by reordering the fixtures.
     cfg.allow_system_pandas_fallback = false;
 
     let expected_result = super::capture_live_oracle_expected(&cfg, fixture);
