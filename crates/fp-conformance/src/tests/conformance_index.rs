@@ -239,6 +239,38 @@ fn conformance_index_first_positions_mixed_labels() {
 }
 
 #[test]
+fn conformance_index_first_positions_repeated_null_labels() {
+    // br-frankenpandas-l4xuh: the case the old oracle got WRONG. It resolved
+    // label identity with a Python dict, and because `label_from_json` mints a
+    // fresh `float("nan")` per element and `nan != nan`, each NaN became its own
+    // key -- [0, 1, 2] where pandas says [0, 0, 2]. Live pandas 2.2.3:
+    //
+    //     >>> pd.Index([nan, nan, 1.0]).get_indexer_for([nan])
+    //     array([0, 1])
+    //     >>> pd.Index([nan, 'a', nan]).has_duplicates
+    //     True
+    //
+    // NaN is a matchable, duplicable index label. This pins that, and it is
+    // only expressible at all because label_to_json/label_from_json learned the
+    // null kind (br-frankenpandas-l7r1p).
+    let fixture: PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-CONF-INDEX-POS-003",
+        "case_id": "index_first_positions_repeated_null_labels",
+        "mode": "strict",
+        "operation": "index_first_positions",
+        "oracle_source": "live_legacy_pandas",
+        "index": [
+            { "kind": "null", "value": "na_n" },
+            { "kind": "null", "value": "na_n" },
+            { "kind": "float64", "value": 1.0 },
+            { "kind": "null", "value": "na_n" }
+        ]
+    }))
+    .expect("fixture");
+    check_index_fixture(fixture);
+}
+
+#[test]
 fn conformance_index_monotonic_increasing_duplicate_plateau() {
     let fixture: PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-CONF-INDEX-MONO-001",

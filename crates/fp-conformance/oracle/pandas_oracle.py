@@ -1126,14 +1126,35 @@ def op_index_first_positions(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("index_first_positions requires index payload")
     labels = [label_from_json(item) for item in labels_raw]
 
-    first_map: dict[Any, int] = {}
-    for pos, label in enumerate(labels):
-        if label not in first_map:
-            first_map[label] = pos
+    # br-frankenpandas-l4xuh: ASK PANDAS which labels are the same label.
+    #
+    # This used to build a plain Python `dict` and read first positions out of
+    # it, which made the op a definition of FrankenPandas' behaviour rather than
+    # a measurement of the incumbent's -- l4xuh's own closing note asks for a
+    # scan of exactly this, and this handler is what it turns up.
+    #
+    # The two are NOT interchangeable, and the difference is missing labels.
+    # `label_from_json` mints a fresh `float("nan")` per element, and since
+    # `nan != nan` each one became its OWN dict key, so repeated NaN labels came
+    # back as [0, 1, 2] where pandas says [0, 0, 2]. Python also keeps `None`
+    # and `nan` apart unconditionally, while pandas' answer depends on the
+    # index's inferred DTYPE: an object index (mixed with a string) keeps None,
+    # nan and NaT distinct, but an all-missing/numeric index infers float64 and
+    # coerces None to nan, merging them. A Python dict cannot express a
+    # dtype-dependent rule, which is the whole reason to delegate.
+    #
+    # `get_indexer_for` is the right primitive (NOT `factorize`, which with
+    # use_na_sentinel=False collapses None/nan/NaT into ONE bucket and disagrees
+    # with pandas' own index lookup). It must be given the index's STORED label
+    # `idx[i]`, not the original Python object: on a float64 index that coerced
+    # None to nan, looking up the original `None` returns -1, "not found".
+    idx = pd.Index(labels)
+    positions: list[int | None] = []
+    for position in range(len(idx)):
+        hits = idx.get_indexer_for([idx[position]])
+        positions.append(int(min(hits)) if len(hits) else None)
 
-    return {
-        "expected_positions": [first_map.get(label, None) for label in labels],
-    }
+    return {"expected_positions": positions}
 
 
 def fixture_series_from_payload(pd, payload: dict[str, Any], op_name: str):
