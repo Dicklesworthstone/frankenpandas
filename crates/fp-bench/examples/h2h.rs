@@ -89,6 +89,10 @@ if is_frame:
 else:
     series = pd.Series(values)
 base = workload[:-6] if is_int else workload
+# `_typed` only changes which FrankenPandas accessor the Rust arm uses; the
+# incumbent's work is identical, so strip it here.
+if base.endswith("_typed"):
+    base = base[:-6]
 sys.stderr.write("PANDAS_VERSION=%s\nNUMPY_VERSION=%s\n" % (pd.__version__, np.__version__))
 sys.stderr.flush()
 def run():
@@ -163,7 +167,15 @@ enum Subject {
 /// The transpose lane, matching the banked positional arm: transpose, then read
 /// EVERY output column. `touched` and the `black_box` are load-bearing — without
 /// them the loop is dead code and the lane would report an enormous false win.
-fn fp_transpose_rep_us(frame: &fp_frame::DataFrame) -> f64 {
+/// `typed = false` reads each output column through `values()` (the `&[Scalar]`
+/// boundary the banked lane uses); `typed = true` reads it through
+/// `as_f64_slice()`, the zero-copy typed view a caller who wants NUMBERS would
+/// actually use.
+///
+/// The pair is a DECOMPOSITION, not two competing lanes: both transpose the same
+/// frame and touch every output column, so their difference is exactly what the
+/// Scalar boundary costs on top of building the columns.
+fn fp_transpose_rep_us(frame: &fp_frame::DataFrame, typed: bool) -> f64 {
     let start = Instant::now();
     let transposed = frame.transpose().expect("transpose");
     let mut touched = 0usize;
@@ -171,7 +183,11 @@ fn fp_transpose_rep_us(frame: &fp_frame::DataFrame) -> f64 {
         let column = transposed
             .column_at(position)
             .expect("positional column present");
-        touched += column.values().len();
+        touched += if typed {
+            column.as_f64_slice().expect("typed f64 output column").len()
+        } else {
+            column.values().len()
+        };
     }
     let elapsed = start.elapsed().as_nanos() as f64 / 1000.0;
     std::hint::black_box((&transposed, touched));
@@ -226,15 +242,25 @@ fn main() {
         && std::env::var("FP_ELEMENTWISE_PAR_MIN").is_err()
     {
         let exe = std::env::current_exe().expect("current exe");
-        // Accept either a bare par_min value (back-compatible) or an explicit
-        // KEY=VALUE, so any env-gated constant can be A/B'd in one invocation.
+        // Three forms, so a single invocation can A/B whatever the question needs:
+        //   `workload=NAME`  respawn on a DIFFERENT workload (same n/rounds)
+        //   `KEY=VALUE`      respawn with that env set
+        //   bare number      shorthand for FP_ELEMENTWISE_PAR_MIN
         let (key, value) = match par_min.split_once('=') {
             Some((key, value)) => (key.to_owned(), value.to_owned()),
             None => ("FP_ELEMENTWISE_PAR_MIN".to_owned(), par_min.clone()),
         };
+        let respawn_workload = if key == "workload" {
+            value.clone()
+        } else {
+            workload.clone()
+        };
         let status = Command::new(exe)
-            .args([&workload, &n.to_string(), &rounds.to_string()])
-            .env(&key, &value)
+            .args([&respawn_workload, &n.to_string(), &rounds.to_string()])
+            .env(
+                if key == "workload" { "FP_H2H_UNUSED" } else { &key },
+                &value,
+            )
             .stderr(Stdio::inherit())
             .stdout(Stdio::inherit())
             .status()
@@ -277,7 +303,7 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
     let fp_rep = |subject: &Subject| -> f64 {
         match subject {
             Subject::Col(column) => fp_one_rep_us(workload, column),
-            Subject::Frame(frame) => fp_transpose_rep_us(frame),
+            Subject::Frame(frame) => fp_transpose_rep_us(frame, workload.ends_with("_typed")),
         }
     };
     let mut incumbent = Incumbent::spawn(path.to_str().expect("utf8 path"), workload);
