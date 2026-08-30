@@ -846,7 +846,7 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
                 seen_dot = true;
                 pos += 1;
             }
-            Some(_) => return None,
+            Some(_) | None => return None,
         }
     }
 
@@ -5596,13 +5596,13 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         && raw_columns.len() == columns.len();
     if let Some(ref dtype_map) = options.dtype {
         for (i, name) in headers.iter().enumerate() {
-            if let Some(&target_dt) = dtype_map.get(name) {
+            if let Some(target_dt) = dtype_map.get(name) {
                 let raw_column = if raw_text_is_aligned {
                     raw_columns.get(i)
                 } else {
                     None
                 };
-                if target_dt == DType::Utf8
+                if *target_dt == DType::Utf8
                     && raw_column.is_some_and(|raw| raw.len() == columns[i].len())
                 {
                     let raw_column = raw_column.expect("checked immediately above");
@@ -5620,7 +5620,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 }
                 let coerced = columns[i]
                     .iter()
-                    .map(|v| fp_types::cast_scalar(v, target_dt))
+                    .map(|v| fp_types::cast_scalar(v, target_dt.clone()))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|err| IoError::Column(ColumnError::from(err)))?;
                 columns[i] = coerced;
@@ -9206,7 +9206,7 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
             .column(name)
             .ok_or_else(|| IoError::Parquet(format!("missing column: {name}")))?;
         let dt = col.dtype();
-        let mut field = Field::new(name.as_str(), dtype_to_arrow(dt), true);
+        let mut field = Field::new(name.as_str(), dtype_to_arrow(dt.clone()), true);
         if let Some(tag) = nullable_extension_tag(dt) {
             field = field.with_metadata(std::collections::HashMap::from([(
                 FP_DTYPE_METADATA_KEY.to_owned(),
@@ -12648,8 +12648,8 @@ mod nullable_dtype_sql_pairing_lkrb8 {
     fn sqlite_nullable_dtypes_declare_the_same_column_as_their_base() {
         for (nullable, base) in NULLABLE_PAIRS {
             assert_eq!(
-                super::dtype_to_sql(nullable),
-                super::dtype_to_sql(base),
+                super::dtype_to_sql(nullable.clone()),
+                super::dtype_to_sql(base.clone()),
                 "{nullable:?} must declare the same SQLite column type as {base:?}"
             );
         }
@@ -12661,8 +12661,8 @@ mod nullable_dtype_sql_pairing_lkrb8 {
     fn mysql_nullable_dtypes_declare_the_same_column_as_their_base() {
         for (nullable, base) in NULLABLE_PAIRS {
             assert_eq!(
-                super::mysql_dtype_sql(nullable),
-                super::mysql_dtype_sql(base),
+                super::mysql_dtype_sql(nullable.clone()),
+                super::mysql_dtype_sql(base.clone()),
                 "{nullable:?} must declare the same MySQL column type as {base:?}"
             );
         }
@@ -13295,7 +13295,7 @@ fn sql_query_to_columns<C: SqlConnection + ?Sized>(
                     .iter()
                     .any(|d| d == header)
             {
-                dtype_hints[idx] = Some(*dtype);
+                dtype_hints[idx] = Some(dtype.clone());
             }
         }
     }
@@ -13328,7 +13328,7 @@ fn apply_sql_dtype_overrides(
             // pass through cast_scalar_owned unchanged so missingness is
             // preserved across the override.
             let taken = std::mem::replace(value, Scalar::Null(NullKind::Null));
-            *value = cast_scalar_owned(taken, *target_dtype).map_err(|e| {
+            *value = cast_scalar_owned(taken, target_dtype.clone()).map_err(|e| {
                 IoError::Sql(format!(
                     "dtype override on column '{header}' to {target_dtype:?} failed: {e}"
                 ))
@@ -13348,7 +13348,7 @@ fn dataframe_from_sql_columns(
     let mut column_order = Vec::new();
 
     for (idx, (name, values)) in headers.into_iter().zip(columns).enumerate() {
-        let dtype_hint = dtype_hints.get(idx).copied().flatten();
+        let dtype_hint = dtype_hints.get(idx).cloned().flatten();
         let has_observed_value = values.iter().any(|value| !matches!(value, Scalar::Null(_)));
         let column = match (has_observed_value, dtype_hint) {
             (false, Some(dtype)) => Column::new(dtype, values)?,
@@ -26721,7 +26721,7 @@ mod tests {
 
     #[test]
     fn csv_dtype_coercion() {
-        let input = "id,score\n1,95\n2,87\n";
+        let input = "id,score\n1,95\n2,87\n3,42\n";
         let mut dtype_map = std::collections::HashMap::new();
         dtype_map.insert("score".to_owned(), fp_types::DType::Float64);
         let opts = CsvReadOptions {
@@ -26737,6 +26737,10 @@ mod tests {
         assert_eq!(
             frame.column("score").unwrap().values()[1],
             Scalar::Float64(87.0)
+        );
+        assert_eq!(
+            frame.column("score").unwrap().values()[2],
+            Scalar::Float64(42.0)
         );
         // id column should remain Int64 (not in dtype map)
         assert_eq!(frame.column("id").unwrap().values()[0], Scalar::Int64(1));
