@@ -555,6 +555,141 @@ mod tests {
         assert!(out.iter().all(|v| *v == f64::INFINITY));
     }
 
+    /// br-frankenpandas-uza04. Same obligation the `div` test above discharges,
+    /// for the three siblings: bit-identical values and an identical witness
+    /// against the scalar fold, at lengths that straddle the 4-lane chunk so the
+    /// remainder loop is exercised too.
+    ///
+    /// THE FIXTURE IS BUILT FOR THESE OPS, not copied from `div`. The shapes that
+    /// can mint a NaN differ per op and a fixture that never produces one would
+    /// pass while testing nothing about the witness:
+    ///   * `inf + -inf`, `inf - inf`     -> NaN
+    ///   * `0 * inf`                     -> NaN
+    ///   * `inf + inf`, `inf * inf`      -> inf, a PRESENT value the witness must
+    ///                                      NOT flag (the same trap the div test
+    ///                                      pins with `x/0`)
+    ///   * a NaN operand                 -> NaN, propagated by all three
+    #[test]
+    fn add_sub_mul_simd_witnesses_match_the_scalar_fold_including_inf_and_remainder() {
+        fn scalar(a: &[f64], b: &[f64], op: fn(f64, f64) -> f64) -> (Vec<f64>, bool) {
+            let mut out = vec![0.0; a.len()];
+            let mut nan = false;
+            for i in 0..a.len() {
+                let r = op(a[i], b[i]);
+                nan |= r.is_nan();
+                out[i] = r;
+            }
+            (out, nan)
+        }
+
+        type Kernel = fn(&[f64], &[f64], &mut [f64]) -> bool;
+        let cases: [(&str, Kernel, fn(f64, f64) -> f64); 3] = [
+            ("add", add_f64_into, |x, y| x + y),
+            ("sub", sub_f64_into, |x, y| x - y),
+            ("mul", mul_f64_into, |x, y| x * y),
+        ];
+
+        for (name, kernel, scalar_op) in cases {
+            for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 1000, 1001] {
+                let mut a = Vec::with_capacity(len);
+                let mut b = Vec::with_capacity(len);
+                let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+                for i in 0..len {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let unit = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                    match i % 11 {
+                        // inf + -inf and inf - inf are NaN; inf * -inf is -inf.
+                        0 => {
+                            a.push(f64::INFINITY);
+                            b.push(f64::NEG_INFINITY);
+                        }
+                        // inf - inf is NaN; inf + inf and inf * inf are +inf,
+                        // PRESENT values the witness must not flag.
+                        1 => {
+                            a.push(f64::INFINITY);
+                            b.push(f64::INFINITY);
+                        }
+                        // 0 * inf is NaN; 0 +/- inf is +/-inf.
+                        2 => {
+                            a.push(0.0);
+                            b.push(f64::INFINITY);
+                        }
+                        // A NaN operand: propagated by all three ops.
+                        3 => {
+                            a.push(f64::NAN);
+                            b.push(unit);
+                        }
+                        // Signed zero, which `sub` distinguishes: 0.0 - 0.0 is
+                        // +0.0 but 0.0 + -0.0 is +0.0 and -0.0 + -0.0 is -0.0.
+                        // Compared by BITS below, so a sign slip is caught.
+                        4 => {
+                            a.push(-0.0);
+                            b.push(0.0);
+                        }
+                        // Overflow to inf, and denormal underflow to zero.
+                        5 => {
+                            a.push(f64::MAX);
+                            b.push(f64::MAX);
+                        }
+                        6 => {
+                            a.push(f64::MIN_POSITIVE);
+                            b.push(f64::MIN_POSITIVE);
+                        }
+                        _ => {
+                            a.push(unit * 1e6 - 5e5);
+                            b.push(unit * 7.0 + 0.5);
+                        }
+                    }
+                }
+                let (want, want_nan) = scalar(&a, &b, scalar_op);
+                let mut got = vec![0.0; len];
+                let got_nan = kernel(&a, &b, &mut got);
+                assert_eq!(got_nan, want_nan, "{name}: witness disagrees at len {len}");
+                for i in 0..len {
+                    assert_eq!(
+                        got[i].to_bits(),
+                        want[i].to_bits(),
+                        "{name}: value disagrees at len {len} index {i}"
+                    );
+                }
+            }
+        }
+
+        // NON-VACUITY: the fixture above must actually MINT a NaN for each op,
+        // or the witness assertions passed against `false == false` and proved
+        // nothing. Checked positively rather than assumed.
+        let a = [f64::INFINITY, 0.0];
+        let b = [f64::NEG_INFINITY, f64::INFINITY];
+        let mut out = [0.0; 2];
+        assert!(add_f64_into(&a, &b, &mut out), "inf + -inf must be NaN");
+        assert!(
+            sub_f64_into(&[f64::INFINITY], &[f64::INFINITY], &mut out[..1]),
+            "inf - inf must be NaN"
+        );
+        assert!(
+            mul_f64_into(&[0.0], &[f64::INFINITY], &mut out[..1]),
+            "0 * inf must be NaN"
+        );
+
+        // And the mirror of the div test's trap: an all-inf, no-NaN result must
+        // report NO nan, because inf is a PRESENT value under pandas semantics.
+        let a = vec![f64::INFINITY; 8];
+        let b = vec![f64::INFINITY; 8];
+        let mut out = vec![0.0; 8];
+        assert!(
+            !add_f64_into(&a, &b, &mut out),
+            "inf + inf is +inf, a PRESENT value; the witness must not claim NaN"
+        );
+        assert!(out.iter().all(|v| *v == f64::INFINITY));
+        assert!(
+            !mul_f64_into(&a, &b, &mut out),
+            "inf * inf is +inf, a PRESENT value; the witness must not claim NaN"
+        );
+        assert!(out.iter().all(|v| *v == f64::INFINITY));
+    }
+
     #[test]
     fn matches_a_scalar_reference_sum() {
         let a0 = [1.0_f64, 2.0, 3.0];
