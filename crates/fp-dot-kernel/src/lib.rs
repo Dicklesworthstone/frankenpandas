@@ -33,6 +33,7 @@
 
 use std::simd::StdFloat as _;
 use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+use std::simd::num::SimdFloat as _;
 use std::simd::{Mask, Simd};
 
 /// Materialize `out[row] = Σ_j a_slices[j][row] * b_col[j]` for `len` rows.
@@ -772,6 +773,74 @@ mod tests {
             "inf * inf is +inf, a PRESENT value; the witness must not claim NaN"
         );
         assert!(out.iter().all(|v| *v == f64::INFINITY));
+    }
+
+    /// br-frankenpandas-uza04. `sqrt_f64_into` must agree with the SCALAR fold on
+    /// values AND on both witnesses, at lengths straddling the 4-lane chunk.
+    ///
+    /// THE NaN CASE IS THE WHOLE POINT of this test. `domain_held` is
+    /// `all(x >= 0.0)`, and a natural-looking `simd_lt(zero)` fold gets NaN
+    /// BACKWARDS — `NaN < 0.0` is false, so NaN would read as in-domain and
+    /// `sqrt(NaN)` would be handed back as a PRESENT value where the caller's
+    /// predicate marks it missing. The fixture therefore contains NaN, and a
+    /// non-vacuity block below proves each witness actually goes false somewhere.
+    #[test]
+    fn sqrt_kernel_matches_the_scalar_fold_on_values_and_both_witnesses() {
+        fn scalar(a: &[f64]) -> (Vec<f64>, bool, bool) {
+            let mut out = vec![0.0; a.len()];
+            let (mut domain, mut finite) = (true, true);
+            for i in 0..a.len() {
+                domain &= a[i] >= 0.0;
+                let r = a[i].sqrt();
+                finite &= r.is_finite();
+                out[i] = r;
+            }
+            (out, domain, finite)
+        }
+
+        // Case sets chosen so the two witnesses vary INDEPENDENTLY: all-positive
+        // (both true), with +inf (domain true, finite false), with a negative
+        // (domain false), with NaN (domain false via the `!(x >= 0)` fold).
+        let shapes: [(&str, fn(usize) -> f64); 4] = [
+            ("positive", |i| (i as f64) * 1.5 + 0.25),
+            ("with_inf", |i| if i % 7 == 3 { f64::INFINITY } else { (i as f64) + 1.0 }),
+            ("with_negative", |i| if i % 5 == 2 { -(i as f64) - 1.0 } else { (i as f64) + 1.0 }),
+            ("with_nan", |i| if i % 6 == 4 { f64::NAN } else { (i as f64) + 1.0 }),
+        ];
+
+        for (name, make) in shapes {
+            for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 1000, 1001] {
+                let a: Vec<f64> = (0..len).map(make).collect();
+                let (want, want_domain, want_finite) = scalar(&a);
+                let mut got = vec![0.0; len];
+                let (got_domain, got_finite) = sqrt_f64_into(&a, &mut got);
+                assert_eq!(got_domain, want_domain, "{name}: domain witness at len {len}");
+                assert_eq!(got_finite, want_finite, "{name}: finite witness at len {len}");
+                for i in 0..len {
+                    assert_eq!(
+                        got[i].to_bits(),
+                        want[i].to_bits(),
+                        "{name}: value at len {len} index {i}"
+                    );
+                }
+            }
+        }
+
+        // NON-VACUITY: each witness must actually be observed FALSE, or the
+        // equality assertions above passed against `true == true` throughout.
+        let mut out = [0.0; 8];
+        assert!(!sqrt_f64_into(&[-1.0; 8], &mut out).0, "negative must clear domain");
+        assert!(
+            !sqrt_f64_into(&[f64::NAN; 8], &mut out).0,
+            "NaN must clear domain: `!(x >= 0.0)`, NOT `x < 0.0`"
+        );
+        assert!(
+            !sqrt_f64_into(&[f64::INFINITY; 8], &mut out).1,
+            "sqrt(inf) is inf, which is NOT finite"
+        );
+        let both = sqrt_f64_into(&[4.0; 8], &mut out);
+        assert_eq!(both, (true, true), "a clean positive column must set both");
+        assert!(out.iter().all(|v| *v == 2.0));
     }
 
     #[test]
