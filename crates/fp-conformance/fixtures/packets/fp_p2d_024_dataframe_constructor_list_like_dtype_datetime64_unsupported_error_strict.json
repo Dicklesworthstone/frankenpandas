@@ -5,9 +5,9 @@
  "operation": "dataframe_constructor_list_like",
  "fixture_provenance": {
   "pandas_version": "2.2.3",
-  "oracle_script_sha256": "ef135bb3088ad340319998b43cdc945af9754fc4d8e943dcb0137729af14fb41",
-  "generated_at": "2026-08-28T00:00:00Z",
-  "oracle_attestation": "value_agreement"
+  "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
+  "generated_at": "2026-08-30T20:20:00Z",
+  "oracle_attestation": "Live oracle run 2026-08-30: /data/projects/frankenpandas/.venv-oracle/bin/python crates/fp-conformance/oracle/pandas_oracle.py --legacy-root /dp/frankenpandas/legacy_pandas_code/pandas --allow-system-pandas-fallback < fp_p2d_024_dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict.json; pandas 2.2.3 returned error=null and expected_frame column 0=[datetime64(1767225600000000000)]."
  },
  "constructor_dtype": "datetime64[ns]",
  "matrix_rows": [
@@ -32,6 +32,7 @@
      "value": 1767225600000000000
     }
    ]
-  }
+  },
+  "column_order": ["0"]
  }
 }

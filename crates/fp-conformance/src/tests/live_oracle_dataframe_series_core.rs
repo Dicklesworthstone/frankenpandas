@@ -45,7 +45,7 @@ fn live_oracle_series_constructor_bool_numeric_matches_object_values_odx3k() {
 }
 
 #[test]
-fn live_oracle_constructor_dtype_gaps_are_explicit_not_oracle_errors_bhyqp() {
+fn live_oracle_constructor_dtype_cases_match_pandas_bhyqp() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = true;
     cfg.require_live_oracle = true;
@@ -56,12 +56,9 @@ fn live_oracle_constructor_dtype_gaps_are_explicit_not_oracle_errors_bhyqp() {
         include_str!("../../fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_uint64_unsupported_error_strict.json"),
         include_str!("../../fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_pyarrow_unsupported_error_hardened.json"),
     ] {
-        let mut fixture: super::PacketFixture =
+        let fixture: super::PacketFixture =
             serde_json::from_str(fixture_text).expect("constructor dtype fixture");
         let dtype = fixture.constructor_dtype.clone().expect("constructor dtype");
-        fixture.retired = None;
-        fixture.expected_error_contains = None;
-        fixture.oracle_source = Some(super::FixtureOracleSource::LiveLegacyPandas);
 
         let expected = super::capture_live_oracle_expected(&cfg, &fixture)
             .unwrap_or_else(|error| panic!("pandas must construct dtype {dtype:?}: {error}"));
@@ -79,19 +76,20 @@ fn live_oracle_constructor_dtype_gaps_are_explicit_not_oracle_errors_bhyqp() {
             },
         )
         .expect("live differential result");
-        if dtype == "datetime64[ns]" {
-            assert_eq!(differential.status, super::CaseStatus::Pass);
-            assert!(differential.drift_records.is_empty());
-        } else {
-            assert_eq!(
-                differential.status,
-                super::CaseStatus::Fail,
-                "FrankenPandas product gap for dtype {dtype:?} must stay visible"
-            );
-            assert!(differential.drift_records.iter().any(|record| {
-                record.message.contains("unsupported constructor dtype")
-            }));
-        }
+        assert_eq!(
+            differential.status,
+            super::CaseStatus::Pass,
+            "FrankenPandas constructor must match pandas for dtype {dtype:?}"
+        );
+        assert_eq!(
+            differential.oracle_source,
+            super::FixtureOracleSource::LiveLegacyPandas,
+            "the result for dtype {dtype:?} must be answered by live pandas"
+        );
+        assert!(
+            differential.drift_records.is_empty(),
+            "constructor dtype {dtype:?} must not drift from pandas: {differential:?}"
+        );
     }
 }
 

@@ -644,7 +644,7 @@ pub fn evaluate(
         }
         Expr::Astype { expr, dtype } => {
             let input = evaluate(expr, context, policy, ledger)?;
-            input.astype(*dtype).map_err(ExprError::from)
+            input.astype(dtype.clone()).map_err(ExprError::from)
         }
         Expr::CombineFirst { left, right } => {
             let lhs = evaluate(left, context, policy, ledger)?;
@@ -1445,7 +1445,7 @@ fn evaluate_delta(
         }
         Expr::Astype { expr, dtype } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.astype(*dtype).map_err(ExprError::from)
+            input.astype(dtype.clone()).map_err(ExprError::from)
         }
         Expr::CombineFirst { left, right } => {
             let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
@@ -2278,6 +2278,23 @@ fn parse_top_n_literal_argument(
 }
 
 fn parse_dtype_alias(value: &str) -> Result<DType, ExprError> {
+    const DATETIME64_TZ_PREFIX: &str = "datetime64[ns, ";
+
+    if value.len() > DATETIME64_TZ_PREFIX.len() + 1
+        && value
+            .get(..DATETIME64_TZ_PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(DATETIME64_TZ_PREFIX))
+        && value.ends_with(']')
+    {
+        let timezone = &value[DATETIME64_TZ_PREFIX.len()..value.len() - 1];
+        if !timezone.trim().is_empty() {
+            // The timezone is dtype metadata, so preserve its spelling. In
+            // particular, lowercasing `America/New_York` here would make the
+            // expression route disagree with pandas' dtype display contract.
+            return Ok(DType::datetime64_tz(timezone));
+        }
+    }
+
     match value.to_ascii_lowercase().as_str() {
         "null" | "none" => Ok(DType::Null),
         "bool" | "boolean" | "?" => Ok(DType::Bool),
@@ -8034,6 +8051,45 @@ mod tests {
 
         let filtered = super::query_str("a.astype(\"bool\")", &frame, &policy, &mut ledger)?;
         assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn astype_routes_timezone_aware_datetime_dtype_hp2ko() -> Result<(), ExprError> {
+        // Differential lock: pandas 2.2.3 evaluates this exact source series
+        // as `datetime64[ns, UTC+05:30]`, retaining the dtype timezone while
+        // storing the two UTC instants as nanoseconds.
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "aware",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Utf8("2024-01-15 10:30:00+05:30".to_owned()),
+                    Scalar::Utf8("2024-01-16 11:00:00+05:30".to_owned()),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let out = super::eval_str(
+            "aware.astype(\"datetime64[ns, UTC+05:30]\")",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+
+        assert_eq!(out.dtype(), DType::datetime64_tz("UTC+05:30"));
+        assert_eq!(out.column().timezone(), Some("UTC+05:30"));
+        assert_eq!(
+            out.values(),
+            &[
+                Scalar::Datetime64(1_705_294_800_000_000_000),
+                Scalar::Datetime64(1_705_385_700_000_000_000),
+            ]
+        );
         Ok(())
     }
 
