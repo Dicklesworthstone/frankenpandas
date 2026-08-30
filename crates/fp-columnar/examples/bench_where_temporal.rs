@@ -32,7 +32,7 @@ fn main() {
     let other = Scalar::Datetime64(base);
 
     let got = col.where_cond(&cond, &other).unwrap();
-    assert_eq!(got.dtype(), fp_types::DType::Datetime64);
+    assert_eq!(got.dtype(), fp_types::DType::datetime64_naive());
     println!("where_cond(Datetime64) OK");
 
     // Reference = the OLD generic path.

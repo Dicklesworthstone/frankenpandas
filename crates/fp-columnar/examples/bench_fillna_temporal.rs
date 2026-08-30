@@ -31,7 +31,7 @@ fn main() {
 
     // Correctness spot check.
     let got = col.fillna(&fill).unwrap();
-    assert_eq!(got.dtype(), fp_types::DType::Datetime64);
+    assert_eq!(got.dtype(), fp_types::DType::datetime64_naive());
     for (i, &d) in data.iter().enumerate().take(n.min(1000)) {
         let want = if validity.get(i) { d } else { base };
         assert_eq!(got.values()[i], Scalar::Datetime64(want), "row {i}");

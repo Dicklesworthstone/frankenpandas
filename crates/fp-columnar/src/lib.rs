@@ -9619,6 +9619,7 @@ const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 /// pandas 2.2.3 on one
 /// ELF via the `FP_ELEMENTWISE_PAR_MIN` env A/B, 64 rounds each:
 ///
+/// ```text
 ///     op      serial      threaded    FP-side   threaded vs pandas
 ///     acosh   1601.94us   593.78us    2.70x     2.4885x  BOTH ARMS CERTIFIED
 ///     asinh   1667.82us   645.48us    2.58x     2.7519x
@@ -9633,6 +9634,7 @@ const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 ///     ---- break-even sits in here (~400us of serial work) ----
 ///     log2     474.08     417.93      1.13x     1.2886x
 ///     exp      423.89     416.05      1.02x     1.2335x  <- gains NOTHING
+/// ```
 ///
 /// Every one of the nine above the line was on the shared 200_000 default purely
 /// because the bench carried ONE representative per cost class — `sin` for trig,

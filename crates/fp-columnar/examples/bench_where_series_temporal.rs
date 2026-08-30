@@ -56,7 +56,7 @@ fn main() {
     let cond = Column::from_bool_values(cbits.clone());
 
     let got = s_col.where_cond_series(&cond, &o_col).unwrap();
-    assert_eq!(got.dtype(), fp_types::DType::Datetime64);
+    assert_eq!(got.dtype(), fp_types::DType::datetime64_naive());
     println!("where_cond_series(Datetime64) OK");
 
     let mut best_new = u128::MAX;
