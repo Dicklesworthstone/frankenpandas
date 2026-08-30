@@ -70,7 +70,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DType {
     Null,
@@ -109,8 +109,14 @@ pub enum DType {
     Utf8,
     Categorical,
     Timedelta64,
-    /// Nanosecond-precision datetime since Unix epoch. Matches pandas `datetime64[ns]`.
-    Datetime64,
+    /// Nanosecond-precision datetime since Unix epoch.
+    ///
+    /// A timezone is metadata shared by the whole column; values remain UTC
+    /// nanoseconds in the contiguous datetime buffer.
+    Datetime64 {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tz: Option<String>,
+    },
     /// Period ordinal. Matches pandas `period[freq]`. Stores ordinal + frequency code.
     Period,
     /// Numeric interval value. Matches pandas `interval[float64]`.
@@ -155,7 +161,7 @@ impl DType {
     /// Returns true if the dtype is datetime.
     #[must_use]
     pub const fn is_datetime(&self) -> bool {
-        matches!(self, Self::Datetime64)
+        matches!(self, Self::Datetime64 { .. })
     }
 
     /// Returns true if the dtype is timedelta.
@@ -203,7 +209,7 @@ impl DType {
             // capital-letter convention as Int64/boolean.
             Self::Float64Nullable => "Float64",
             Self::Utf8 => "object",
-            Self::Datetime64 => "datetime64[ns]",
+            Self::Datetime64 { .. } => "datetime64[ns]",
             Self::Timedelta64 => "timedelta64[ns]",
             Self::Categorical => "category",
             Self::Period => "period",
@@ -226,7 +232,7 @@ impl DType {
             // Int64Nullable reports 'i'.
             Self::Float64 | Self::Float64Nullable => 'f',
             Self::Utf8 => 'O',
-            Self::Datetime64 => 'M',
+            Self::Datetime64 { .. } => 'M',
             Self::Timedelta64 => 'm',
             Self::Categorical => 'O',
             Self::Period => 'O',
@@ -247,7 +253,7 @@ impl DType {
             | Self::Int64Nullable
             | Self::Float64
             | Self::Float64Nullable
-            | Self::Datetime64
+            | Self::Datetime64 { .. }
             | Self::Timedelta64
             | Self::Period => 8,
             Self::Utf8 | Self::Categorical | Self::Interval | Self::Sparse | Self::Null => 8,
@@ -288,12 +294,12 @@ impl DType {
     /// For nullable extension dtypes, returns the numpy equivalent.
     /// For non-nullable dtypes, returns self.
     #[must_use]
-    pub const fn to_non_nullable(&self) -> Self {
+    pub fn to_non_nullable(&self) -> Self {
         match self {
             Self::Int64Nullable => Self::Int64,
             Self::Float64Nullable => Self::Float64,
             Self::BoolNullable => Self::Bool,
-            other => *other,
+            other => other.clone(),
         }
     }
 
@@ -302,12 +308,12 @@ impl DType {
     /// For numpy int64/bool, returns the nullable extension dtype.
     /// For already-nullable or other dtypes, returns self.
     #[must_use]
-    pub const fn to_nullable(&self) -> Self {
+    pub fn to_nullable(&self) -> Self {
         match self {
             Self::Int64 => Self::Int64Nullable,
             Self::Float64 => Self::Float64Nullable,
             Self::Bool => Self::BoolNullable,
-            other => *other,
+            other => other.clone(),
         }
     }
 
@@ -356,7 +362,7 @@ impl DType {
     /// Matches `pd.api.types.is_datetime64_any_dtype()` family.
     #[must_use]
     pub const fn is_datetime_like(&self) -> bool {
-        matches!(self, Self::Datetime64 | Self::Timedelta64 | Self::Period)
+        matches!(self, Self::Datetime64 { .. } | Self::Timedelta64 | Self::Period)
     }
 
     /// Return the numpy dtype character code.
@@ -369,7 +375,7 @@ impl DType {
             Self::Int64 | Self::Int64Nullable => 'l',
             Self::Float64 | Self::Float64Nullable => 'd',
             Self::Utf8 => 'O',
-            Self::Datetime64 => 'M',
+            Self::Datetime64 { .. } => 'M',
             Self::Timedelta64 => 'm',
             Self::Categorical | Self::Period | Self::Interval | Self::Sparse | Self::Null => 'O',
         }
@@ -385,7 +391,7 @@ impl DType {
             Self::Int64 | Self::Int64Nullable => 7,
             Self::Float64 | Self::Float64Nullable => 12,
             Self::Utf8 => 17,
-            Self::Datetime64 => 21,
+            Self::Datetime64 { .. } => 21,
             Self::Timedelta64 => 22,
             Self::Categorical | Self::Period | Self::Interval | Self::Sparse | Self::Null => 17,
         }
@@ -409,9 +415,41 @@ impl DType {
             Self::Int64 | Self::Int64Nullable => "<i8",
             Self::Float64 | Self::Float64Nullable => "<f8",
             Self::Utf8 => "|O8",
-            Self::Datetime64 => "<M8[ns]",
+            Self::Datetime64 { .. } => "<M8[ns]",
             Self::Timedelta64 => "<m8[ns]",
             Self::Categorical | Self::Period | Self::Interval | Self::Sparse | Self::Null => "|O8",
+        }
+    }
+
+    /// Construct pandas' timezone-naive `datetime64[ns]` dtype.
+    #[must_use]
+    pub const fn datetime64_naive() -> Self {
+        Self::Datetime64 { tz: None }
+    }
+
+    /// Construct a timezone-aware `datetime64[ns, tz]` dtype.
+    #[must_use]
+    pub fn datetime64_tz(tz: impl Into<String>) -> Self {
+        Self::Datetime64 {
+            tz: Some(tz.into()),
+        }
+    }
+
+    /// Return the column-level timezone carried by a datetime dtype.
+    #[must_use]
+    pub fn timezone(&self) -> Option<&str> {
+        match self {
+            Self::Datetime64 { tz } => tz.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Render the pandas dtype spelling, including a timezone when present.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Datetime64 { tz: Some(tz) } => format!("datetime64[ns, {tz}]"),
+            _ => self.name().to_owned(),
         }
     }
 }
@@ -434,9 +472,9 @@ impl SparseDType {
         }
 
         let fill_value = if fill_value.is_missing() {
-            Scalar::missing_for_dtype(value_dtype)
+            Scalar::missing_for_dtype(value_dtype.clone())
         } else {
-            cast_scalar_owned(fill_value, value_dtype)?
+            cast_scalar_owned(fill_value, value_dtype.clone())?
         };
 
         Ok(Self {
@@ -606,7 +644,7 @@ impl Scalar {
             Self::Float64(_) => DType::Float64,
             Self::Utf8(_) => DType::Utf8,
             Self::Timedelta64(_) => DType::Timedelta64,
-            Self::Datetime64(_) => DType::Datetime64,
+            Self::Datetime64(_) => DType::datetime64_naive(),
             Self::Period(_) => DType::Period,
             Self::Interval(_) => DType::Interval,
         }
@@ -696,7 +734,7 @@ impl Scalar {
             // is exactly the gap br-frankenpandas-qkqfb was filed for.
             DType::Float64Nullable => Self::Null(NullKind::Null),
             DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
-            DType::Datetime64 => Self::Datetime64(Timestamp::NAT),
+            DType::Datetime64 { .. } => Self::Datetime64(Timestamp::NAT),
             DType::Period => Self::Period(Period::new(i64::MIN, PeriodFreq::Daily)),
             DType::Null => Self::Null(NullKind::Null),
             DType::Bool
@@ -879,7 +917,7 @@ impl Scalar {
             }),
             Self::Datetime64(v) => Err(TypeError::NonNumericValue {
                 value: format!("Timestamp[{v}]"),
-                dtype: DType::Datetime64,
+                dtype: DType::datetime64_naive(),
             }),
             Self::Period(p) if p.ordinal == i64::MIN => Err(TypeError::ValueIsMissing {
                 kind: NullKind::NaT,
@@ -1003,13 +1041,13 @@ pub enum TypeError {
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
     use DType::{
-        Bool, BoolNullable, Categorical, Datetime64, Float64, Float64Nullable, Int64,
+        Bool, BoolNullable, Categorical, Float64, Float64Nullable, Int64,
         Int64Nullable, Null, Sparse, Timedelta64,
     };
 
-    let out = match (left, right) {
-        (a, b) if a == b => a,
-        (Null, other) | (other, Null) => other,
+    let out = match (&left, &right) {
+        (a, b) if a == b => a.clone(),
+        (Null, other) | (other, Null) => other.clone(),
         (Categorical, Categorical) => Categorical,
 
         // Bool promotions (nullable absorbs non-nullable)
@@ -1068,10 +1106,22 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
 
         // Datetime/Timedelta
         (Timedelta64, Timedelta64) => Timedelta64,
-        (Datetime64, Datetime64) => Datetime64,
+        (
+            DType::Datetime64 { tz: left_tz },
+            DType::Datetime64 { tz: right_tz },
+        ) if left_tz == right_tz => DType::Datetime64 {
+            tz: left_tz.clone(),
+        },
 
-        (Sparse, _) | (_, Sparse) => return Err(TypeError::IncompatibleDtypes { left, right }),
-        _ => return Err(TypeError::IncompatibleDtypes { left, right }),
+        (Sparse, _) | (_, Sparse) => {
+            return Err(TypeError::IncompatibleDtypes {
+                left: left.clone(),
+                right: right.clone(),
+            });
+        }
+        _ => {
+            return Err(TypeError::IncompatibleDtypes { left, right });
+        }
     };
 
     Ok(out)
@@ -1130,14 +1180,14 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
                     });
                 }
             }
-            DType::Datetime64 => {
+            DType::Datetime64 { .. } => {
                 saw_datetime = true;
                 if current == DType::Null {
-                    current = DType::Datetime64;
-                } else if current != DType::Datetime64 {
+                    current = DType::datetime64_naive();
+                } else if !current.is_datetime() {
                     return Err(TypeError::IncompatibleDtypes {
                         left: current,
-                        right: DType::Datetime64,
+                        right: DType::datetime64_naive(),
                     });
                 }
             }
@@ -1167,7 +1217,7 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
         }
         if saw_datetime && saw_non_utf8_non_null {
             return Err(TypeError::IncompatibleDtypes {
-                left: DType::Datetime64,
+                left: DType::datetime64_naive(),
                 right: current,
             });
         }
@@ -1389,7 +1439,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
                 .map_err(|_| TypeError::InvalidCast { from, to: target }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Datetime64 => match &value {
+        DType::Datetime64 { .. } => match &value {
             // See the Timedelta64 arm above for the measurement and for why the
             // constructor's stricter refusal is not encoded here.
             Scalar::Bool(v) => Ok(Scalar::Datetime64(i64::from(*v))),
@@ -7031,7 +7081,7 @@ mod tests {
     /// disagree on dtype.
     #[test]
     fn common_dtype_lattice_axioms_be314() {
-        const ALL: [DType; 14] = [
+        let all: [DType; 14] = [
             DType::Null,
             DType::Bool,
             DType::BoolNullable,
@@ -7044,38 +7094,42 @@ mod tests {
             DType::Utf8,
             DType::Categorical,
             DType::Timedelta64,
-            DType::Datetime64,
+            DType::datetime64_naive(),
             DType::Period,
             DType::Interval,
             DType::Sparse,
         ];
 
-        for &a in &ALL {
+        for a in &all {
             // Idempotence: a promoted with itself is itself.
-            assert_eq!(common_dtype(a, a), Ok(a), "idempotent {a:?}");
+            assert_eq!(
+                common_dtype(a.clone(), a.clone()),
+                Ok(a.clone()),
+                "idempotent {a:?}"
+            );
             // Null is the identity element of the promotion lattice.
             assert_eq!(
-                common_dtype(DType::Null, a),
-                Ok(a),
+                common_dtype(DType::Null, a.clone()),
+                Ok(a.clone()),
                 "null-left identity {a:?}"
             );
             assert_eq!(
-                common_dtype(a, DType::Null),
-                Ok(a),
+                common_dtype(a.clone(), DType::Null),
+                Ok(a.clone()),
                 "null-right identity {a:?}"
             );
 
-            for &b in &ALL {
+            for b in &all {
                 // Commutativity: same Ok value AND same ok-ness. An asymmetric
                 // match arm would make binary-op output dtype order-dependent.
                 assert_eq!(
-                    common_dtype(a, b).ok(),
-                    common_dtype(b, a).ok(),
+                    common_dtype(a.clone(), b.clone()).ok(),
+                    common_dtype(b.clone(), a.clone()).ok(),
                     "commutative value {a:?},{b:?}"
                 );
                 assert_eq!(
-                    common_dtype(a, b).is_ok(),
-                    common_dtype(b, a).is_ok(),
+                    common_dtype(a.clone(), b.clone()).is_ok(),
+                    common_dtype(b.clone(), a.clone()).is_ok(),
                     "commutative ok-ness {a:?},{b:?}"
                 );
             }
@@ -7083,11 +7137,15 @@ mod tests {
 
         // Associativity over the Ok-closed subset: when both nestings succeed,
         // promotion order must not change the result.
-        for &a in &ALL {
-            for &b in &ALL {
-                for &c in &ALL {
-                    if let (Ok(ab), Ok(bc)) = (common_dtype(a, b), common_dtype(b, c))
-                        && let (Ok(left), Ok(right)) = (common_dtype(ab, c), common_dtype(a, bc))
+        for a in &all {
+            for b in &all {
+                for c in &all {
+                    if let (Ok(ab), Ok(bc)) =
+                        (common_dtype(a.clone(), b.clone()), common_dtype(b.clone(), c.clone()))
+                        && let (Ok(left), Ok(right)) = (
+                            common_dtype(ab, c.clone()),
+                            common_dtype(a.clone(), bc),
+                        )
                     {
                         assert_eq!(left, right, "associative {a:?},{b:?},{c:?}");
                     }
@@ -7171,7 +7229,7 @@ mod tests {
     /// stays missing.
     #[test]
     fn missing_for_dtype_always_missing_1ews0() {
-        const ALL: [DType; 14] = [
+        let all: [DType; 14] = [
             DType::Null,
             DType::Bool,
             DType::BoolNullable,
@@ -7182,25 +7240,25 @@ mod tests {
             DType::Utf8,
             DType::Categorical,
             DType::Timedelta64,
-            DType::Datetime64,
+            DType::datetime64_naive(),
             DType::Period,
             DType::Interval,
             DType::Sparse,
         ];
-        for &dt in &ALL {
-            let m = Scalar::missing_for_dtype(dt);
+        for dt in &all {
+            let m = Scalar::missing_for_dtype(dt.clone());
             assert!(m.is_missing(), "missing_for_dtype({dt:?}) must be missing");
-            for &target in &ALL {
-                let cast = cast_scalar(&m, target).expect("cast of missing");
-                if target == DType::Utf8 {
+            for target in &all {
+                let cast = cast_scalar(&m, target.clone()).expect("cast of missing");
+                if target == &DType::Utf8 {
                     // Casting a missing value to string follows pandas astype(str):
                     // it yields a string ("None"/"NaN"/"NaT"), NOT a missing value.
                     assert!(
                         matches!(cast, Scalar::Utf8(_)),
                         "cast(missing {dt:?} -> Utf8) yields a string, got {cast:?}"
                     );
-                } else if matches!(dt, DType::Timedelta64 | DType::Datetime64)
-                    && matches!(target, DType::Bool | DType::Int64)
+                } else if matches!(dt, DType::Timedelta64 | DType::Datetime64 { .. })
+                    && (target.is_bool() || target.is_integer())
                 {
                     // ⚠️ TWO MORE PLACES pandas BREAKS this invariant, and both
                     // are the same underlying fact: NaT is not a separate
@@ -7344,7 +7402,7 @@ mod tests {
             (1e18, 1_000_000_000_000_000_000),
         ] {
             assert_eq!(
-                cast_scalar(&Scalar::Float64(input), DType::Datetime64).unwrap(),
+                cast_scalar(&Scalar::Float64(input), DType::datetime64_naive()).unwrap(),
                 Scalar::Datetime64(want),
                 "datetime64 cast of {input}"
             );
@@ -7370,7 +7428,7 @@ mod tests {
             -9_223_372_036_854_775_808.0, // exactly -2^63, which IS the NaT sentinel
         ] {
             assert_eq!(
-                cast_scalar(&Scalar::Float64(input), DType::Datetime64).unwrap(),
+                cast_scalar(&Scalar::Float64(input), DType::datetime64_naive()).unwrap(),
                 Scalar::Datetime64(Timestamp::NAT),
                 "datetime64 cast of {input} must be NaT"
             );
@@ -7385,7 +7443,7 @@ mod tests {
         // pandas renders it 2262-04-11 23:47:16.854774784.
         let just_inside = 9_223_372_036_854_774_784.0_f64; // 2^63 - 1024
         assert_eq!(
-            cast_scalar(&Scalar::Float64(just_inside), DType::Datetime64).unwrap(),
+            cast_scalar(&Scalar::Float64(just_inside), DType::datetime64_naive()).unwrap(),
             Scalar::Datetime64(9_223_372_036_854_774_784),
             "the largest representable float must NOT be treated as NaT"
         );
@@ -7393,7 +7451,7 @@ mod tests {
         // THE CONTRAST. Same input, three dtypes, two different rules — the
         // temporal ones truncate where int64 refuses outright.
         assert_eq!(
-            cast_scalar(&Scalar::Float64(1.5), DType::Datetime64).unwrap(),
+            cast_scalar(&Scalar::Float64(1.5), DType::datetime64_naive()).unwrap(),
             Scalar::Datetime64(1)
         );
         assert_eq!(
@@ -7461,7 +7519,7 @@ mod tests {
         // A bool is 0 or 1 NANOSECONDS on the astype path.
         for (flag, want) in [(true, 1_i64), (false, 0)] {
             assert_eq!(
-                cast_scalar(&Scalar::Bool(flag), DType::Datetime64).unwrap(),
+                cast_scalar(&Scalar::Bool(flag), DType::datetime64_naive()).unwrap(),
                 Scalar::Datetime64(want)
             );
             assert_eq!(
@@ -8188,7 +8246,7 @@ mod tests {
         assert_eq!(
             cast_scalar(
                 &Scalar::Utf8("2024-01-15T10:30:45".to_owned()),
-                DType::Datetime64
+                DType::datetime64_naive()
             )
             .expect("datetime cast"),
             Scalar::Datetime64(expected_nanos)
@@ -9469,7 +9527,7 @@ mod tests {
             got.is_missing(),
             "all-NaT mean must be missing, got {got:?}"
         );
-        assert_eq!(got.dtype(), DType::Datetime64, "must stay Datetime64");
+        assert_eq!(got.dtype(), DType::datetime64_naive(), "must stay Datetime64");
     }
 
     /// FP is EXACT here and pandas is not: pandas routes datetime
@@ -11657,6 +11715,24 @@ mod tests {
 
         let dtype: DType = serde_json::from_str("\"string\"").unwrap();
         assert_eq!(dtype, DType::Utf8);
+    }
+
+    #[test]
+    fn datetime64_dtype_carries_timezone_00ze3() {
+        let naive = DType::datetime64_naive();
+        assert_eq!(naive.timezone(), None);
+        assert_eq!(naive.display_name(), "datetime64[ns]");
+
+        let aware = DType::datetime64_tz("America/New_York");
+        assert_eq!(aware.timezone(), Some("America/New_York"));
+        assert_eq!(aware.display_name(), "datetime64[ns, America/New_York]");
+        assert_ne!(aware, naive, "timezone must participate in dtype identity");
+
+        let json = serde_json::to_string(&aware).expect("serialize timezone dtype");
+        assert_eq!(
+            serde_json::from_str::<DType>(&json).expect("deserialize timezone dtype"),
+            aware
+        );
     }
 
     #[test]
