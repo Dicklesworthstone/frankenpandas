@@ -475,6 +475,89 @@ elementwise_f64_kernel!(
     "Lane-wise `out[i] = a[i] * b[i]`, four doubles per instruction."
 );
 
+/// Lane-wise `out[i] = sqrt(a[i])`, four doubles per instruction, folding the
+/// TWO witnesses `Column::sqrt`'s typed arm needs: `(domain_held, all_finite)`.
+///
+/// br-frankenpandas-uza04 / oxv4u. `sqrt @10M` measured **0.808x** against live
+/// pandas 2.2.3 on 2026-08-30 (fp 19302.89us vs pandas 16101.55us, cv 7.46% /
+/// 3.56%, `effect_ci_excludes_unity` and the A/A null BOTH true, thread count 1).
+/// The mechanism is settled and is NOT "we lower to scalar `sqrtsd`" — that
+/// attribution was checked and REFUTED (docs/NEGATIVE_EVIDENCE.md 2026-08-16
+/// CrimsonPine): the baseline kernel already emits PACKED `sqrtpd`. It is simply
+/// 2 lanes against numpy's 4-lane `vsqrtpd`, and `+sse4.1` has no 4-wide square
+/// root to offer.
+///
+/// THE BLANKET ROUTE IS REJECTED AND THIS IS NOT IT. A global `x86-64-v3` policy
+/// was measured and rejected (2026-07-31 CyanLynx: sqrt 0.361x, log regressed),
+/// and `#[target_feature]` / local `allow(unsafe_code)` / portable-SIMD-at-
+/// baseline were all compiled and are dead (E0133, E0453, and 4-wide vectors
+/// lowering to 2xSSE2 respectively). Per-package rustflags on THIS crate is the
+/// one mechanism that produced ymm registers, which is why the op comes here
+/// rather than the flag going to fp-columnar.
+///
+/// WHY TWO WITNESSES AND NOT ONE. The caller
+/// (`typed_float_domain_fused_unary_with_finiteness`, via `Column::sqrt`) fuses a
+/// domain test and a finiteness fold into the same pass, and both must come back
+/// or the caller pays a second traversal that this kernel exists to avoid:
+///
+///   * `domain_held` is `all(x >= 0.0)`. ⚠️ It is folded as `!(x >= 0.0)`, NOT as
+///     `x < 0.0`. Those differ on NaN: `NaN < 0.0` is FALSE, so a `simd_lt` fold
+///     would report a NaN input as IN domain and hand back `sqrt(NaN)` as a
+///     PRESENT value, where the scalar predicate `|x| x >= 0.0` marks it missing.
+///     That is a parity break, not a rounding difference.
+///   * `all_finite` is `all(out[i].is_finite())`, folded as `!(|y| < inf)` so that
+///     both NaN and +/-inf count as non-finite, matching `f64::is_finite`.
+///
+/// BIT-IDENTICAL to the baseline loop. IEEE-754 square root is correctly rounded
+/// and lane-independent, so `vsqrtpd` returns the same bits per lane as `sqrtpd`
+/// or `sqrtsd` on the same input; width changes throughput, not results. There is
+/// no reduction to reassociate and no `a * b + c` for this crate's `+fma` to
+/// contract.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, for the reason on
+/// [`materialize_float64_dot`]: an inlinable entry point codegens in the caller's
+/// baseline crate and the `+avx2` flag is silently lost — a green build with
+/// correct values and no speedup.
+///
+/// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`; this crate emits
+/// AVX2 unconditionally and entering it on a pre-AVX2 CPU is SIGILL.
+///
+/// # Panics
+/// Panics if `a` and `out` do not have the same length.
+#[inline(never)]
+pub fn sqrt_f64_into(a: &[f64], out: &mut [f64]) -> (bool, bool) {
+    assert_eq!(a.len(), out.len(), "sqrt_f64_into: out length mismatch");
+
+    const LANES: usize = 4;
+    let n = a.len();
+    let chunk_end = n - n % LANES;
+    let zero = Simd::<f64, LANES>::splat(0.0);
+    let inf = Simd::<f64, LANES>::splat(f64::INFINITY);
+    let mut out_of_domain = Mask::<i64, LANES>::splat(false);
+    let mut non_finite = Mask::<i64, LANES>::splat(false);
+    let mut index = 0usize;
+    while index < chunk_end {
+        let av = Simd::<f64, LANES>::from_slice(&a[index..index + LANES]);
+        // `!(x >= 0.0)` so NaN counts as OUT of domain; see the note above.
+        out_of_domain |= !av.simd_ge(zero);
+        let r = av.sqrt();
+        non_finite |= !r.abs().simd_lt(inf);
+        r.copy_to_slice(&mut out[index..index + LANES]);
+        index += LANES;
+    }
+    let mut domain_held = !out_of_domain.any();
+    let mut all_finite = !non_finite.any();
+    // Scalar remainder, identical to the baseline body.
+    for offset in chunk_end..n {
+        let x = a[offset];
+        domain_held &= x >= 0.0;
+        let r = x.sqrt();
+        all_finite &= r.is_finite();
+        out[offset] = r;
+    }
+    (domain_held, all_finite)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
