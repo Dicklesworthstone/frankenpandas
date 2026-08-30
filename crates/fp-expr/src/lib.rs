@@ -8087,7 +8087,9 @@ mod tests {
             out.values(),
             &[
                 Scalar::Datetime64(1_705_294_800_000_000_000),
-                Scalar::Datetime64(1_705_385_700_000_000_000),
+                // pandas 2.2.3 oracle: 2024-01-16 11:00:00+05:30 is
+                // 2024-01-16 05:30:00 UTC, not the 06:15 instant for 11:45.
+                Scalar::Datetime64(1_705_383_000_000_000_000),
             ]
         );
         Ok(())

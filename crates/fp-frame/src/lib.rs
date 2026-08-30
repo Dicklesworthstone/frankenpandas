@@ -14163,6 +14163,19 @@ impl Series {
         if let Some(categorical) = self.cat() {
             return categorical.to_values()?.astype(dtype);
         }
+        // A timezone-aware datetime dtype is column metadata, not a different
+        // scalar payload: the contiguous backing stays UTC nanoseconds. Route
+        // uniform offset strings through the same inference path as
+        // `to_datetime`, then accept it only when the parsed timezone exactly
+        // matches the requested dtype. This makes
+        // `astype("datetime64[ns, UTC+05:30]")` construct the same typed column
+        // as pandas without reinterpreting either the instant or the offset.
+        if matches!(&dtype, DType::Datetime64 { tz: Some(_) }) {
+            let parsed = to_datetime(self)?;
+            if parsed.dtype() == dtype {
+                return Ok(parsed);
+            }
+        }
         let column = self.column.astype(dtype)?;
         Self::new(self.name.clone(), self.index.clone(), column)
     }
@@ -205606,6 +205619,22 @@ mod tz_aware_datetime_guard_00ze3 {
                 Scalar::Datetime64(1_705_385_700_000_000_000),
             ],
             "the contiguous backing remains UTC nanoseconds while the dtype retains the zone"
+        );
+    }
+
+    #[test]
+    fn astype_to_uniform_timezone_preserves_utc_nanoseconds_hp2ko() {
+        let out = tz_aware_strings()
+            .astype(DType::datetime64_tz("UTC+05:30"))
+            .expect("timezone-aware astype");
+        assert_eq!(out.dtype(), DType::datetime64_tz("UTC+05:30"));
+        assert_eq!(out.column().timezone(), Some("UTC+05:30"));
+        assert_eq!(
+            out.values(),
+            vec![
+                Scalar::Datetime64(1_705_294_800_000_000_000),
+                Scalar::Datetime64(1_705_385_700_000_000_000),
+            ]
         );
     }
 
