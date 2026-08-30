@@ -9500,11 +9500,13 @@ const ELEMENTWISE_WITNESS_DEFAULT_WORKERS: usize = 8;
 /// crossing is now measured on both sides rather than inferred. Worker-side h2h
 /// against LIVE pandas 3.0.5, each row one ELF with both A/A nulls inside 2%:
 ///
-///     lane          @100k (SERIAL band)        @1M (THREADED band)
+/// ```text
+/// lane          @100k (SERIAL band)        @1M (THREADED band)
 ///     log           0.9107 SLOWER              2.4844 FASTER
 ///     log_int64     0.8866 SLOWER              2.5696 FASTER
 ///     sqrt_int64    1.1642 FASTER              --
 ///     expm1         1.0845 FASTER              --
+/// ```
 ///
 /// Above this constant FrankenPandas threads and wins ~2.5x. Below it we run
 /// serial and sit at or just under parity. So the residual sub-parity in this
@@ -9530,7 +9532,8 @@ const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 /// across the unary maps — measured at 100k on one ELF, serial against
 /// `FP_ELEMENTWISE_PAR_MIN=50000`, interleaved:
 ///
-///     sin     15.1 ns/elem   1513.1us -> 541.4us   2.79x
+/// ```text
+/// sin     15.1 ns/elem   1513.1us -> 541.4us   2.79x
 ///     log1p    9.3           934.1   -> 455.2     2.05x
 ///     atan     7.5           754.2   -> 406.3     1.86x
 ///     ---- crossover sits in here ----
@@ -9539,6 +9542,7 @@ const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 ///     expm1    2.9           288.0   -> 349.9     0.82x  <- parallel LOSES
 ///     sqrt     1.1           113.7   -> 115.2     0.99x
 ///     floor    0.18           18.0   ->  28.1     0.64x
+/// ```
 ///
 /// ⚠ THE VALUE IS INTERPOLATED, NOT MEASURED. At 10k all three lose badly
 /// (sin 0.50x, atan 0.30x, log1p 0.30x), so the crossover is between 10k and
