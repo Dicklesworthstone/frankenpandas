@@ -516,7 +516,7 @@ fn expand_dtype_aliases(names: &[&str]) -> Result<Vec<DType>, FrameError> {
     for alias in names {
         for dt in expand_dtype_alias(alias)? {
             if !out.contains(dt) {
-                out.push(*dt);
+                out.push(dt.clone());
             }
         }
     }
@@ -14193,7 +14193,7 @@ impl Series {
                     .column
                     .values()
                     .iter()
-                    .map(|val| coerce_scalar(val, dtype))
+                    .map(|val| coerce_scalar(val, dtype.clone()))
                     .collect();
                 self.with_values_preserving_index(out)
             }
@@ -26793,7 +26793,7 @@ impl Series {
         let sparse_dtype = SparseDType::new(value_dtype, fill_value)
             .map_err(|err| FrameError::CompatibilityRejected(err.to_string()))?;
         let index = Index::new(index_labels);
-        let column = Column::new(sparse_dtype.value_dtype, values)?;
+        let column = Column::new(sparse_dtype.value_dtype.clone(), values)?;
         if index.len() != column.len() {
             return Err(FrameError::LengthMismatch {
                 index_len: index.len(),
@@ -44165,7 +44165,7 @@ impl SparseAccessor<'_> {
     /// the dtype, and its `subtype`, hangs off the Series itself.
     #[must_use]
     pub fn value_dtype(&self) -> DType {
-        self.dtype.value_dtype
+        self.dtype.value_dtype.clone()
     }
 
     /// Return the sparse fill value.
@@ -63124,7 +63124,7 @@ impl DataFrame {
                 let is_na = raw.is_empty() || na_set.contains(raw);
                 let value = if let Some(dtype) = options.dtypes.get(&col_names[idx]) {
                     if is_na {
-                        Scalar::missing_for_dtype(*dtype)
+                        Scalar::missing_for_dtype(dtype.clone())
                     } else {
                         match dtype {
                             DType::Null => Scalar::Null(NullKind::Null),
@@ -66252,11 +66252,11 @@ impl DataFrame {
         }
 
         let mut columns = self.columns.clone();
-        for &(name, dtype) in mapping {
+        for &(name, ref dtype) in mapping {
             let source = self.columns.get(name).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!("column '{name}' not found"))
             })?;
-            let casted = source.astype(dtype)?;
+            let casted = source.astype(dtype.clone())?;
             columns.insert(name.to_owned(), casted);
         }
 
@@ -66276,7 +66276,7 @@ impl DataFrame {
     pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
         let mut columns = BTreeMap::new();
         for (name, col) in &self.columns {
-            let casted = col.astype(dtype)?;
+            let casted = col.astype(dtype.clone())?;
             columns.insert(name.clone(), casted);
         }
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
@@ -66413,7 +66413,7 @@ impl DataFrame {
                 // pandas' "True" rather than Rust's "true"), then put the missing
                 // values back where they were. Restoring is what makes this
                 // different from `astype`, NOT the casting.
-                let cast = Column::new(dtype, original.to_vec())?;
+                let cast = Column::new(dtype.clone(), original.to_vec())?;
                 let mut values = cast.values().to_vec();
                 for (slot, source) in values.iter_mut().zip(original.iter()) {
                     if let Scalar::Null(kind) = source {
@@ -66423,7 +66423,7 @@ impl DataFrame {
                 // Every element is now Utf8-or-Null, which is the arm of
                 // `Column::new` that preserves a missing value instead of
                 // coercing it.
-                Column::new(dtype, values)?
+                Column::new(dtype.clone(), values)?
             } else if dtype == DType::Bool {
                 // numpy `bool` HAS NO NA, and pandas resolves that by COERCING
                 // rather than by raising (as `int64` does) or by carrying a null.
@@ -66436,9 +66436,9 @@ impl DataFrame {
                         *slot = Scalar::Bool(!matches!(kind, NullKind::Null));
                     }
                 }
-                Column::new(dtype, values)?
+                Column::new(dtype.clone(), values)?
             } else {
-                Column::new(dtype, original.to_vec())?
+                Column::new(dtype.clone(), original.to_vec())?
             };
             columns.insert(name.clone(), coerced);
         }
@@ -66617,16 +66617,16 @@ impl DataFrame {
             "ignore" => self.astype_columns(mapping).or_else(|_| Ok(self.clone())),
             "coerce" => {
                 let mut columns = self.columns.clone();
-                for &(name, dtype) in mapping {
+                for &(name, ref dtype) in mapping {
                     let source = self.columns.get(name).ok_or_else(|| {
                         FrameError::CompatibilityRejected(format!("column '{name}' not found"))
                     })?;
                     let vals: Vec<Scalar> = source
                         .values()
                         .iter()
-                        .map(|val| coerce_scalar(val, dtype))
+                        .map(|val| coerce_scalar(val, dtype.clone()))
                         .collect();
-                    let casted = Column::new(dtype, vals)?;
+                    let casted = Column::new(dtype.clone(), vals)?;
                     columns.insert(name.to_owned(), casted);
                 }
                 Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
@@ -66644,7 +66644,7 @@ impl DataFrame {
         let mapping: Vec<(&str, DType)> = self
             .column_order
             .iter()
-            .map(|n| (n.as_str(), dtype))
+            .map(|n| (n.as_str(), dtype.clone()))
             .collect();
         self.astype_columns_safe(&mapping, errors)
     }
@@ -67310,12 +67310,12 @@ impl DataFrame {
             let inc = if include.is_empty() {
                 matches!(dt, DType::Int64 | DType::Float64)
             } else {
-                include.iter().any(|f| dtype_matches(dt, f))
+                include.iter().any(|f| dtype_matches(dt.clone(), f))
             };
             let exc = if exclude.is_empty() {
                 false
             } else {
-                exclude.iter().any(|f| dtype_matches(dt, f))
+                exclude.iter().any(|f| dtype_matches(dt.clone(), f))
             };
             inc && !exc
         };
@@ -67323,7 +67323,7 @@ impl DataFrame {
         // For non-numeric types, describe shows count, unique, top, freq
         let has_non_numeric = self.column_order.iter().any(|name| {
             let dt = self.columns[name].dtype();
-            should_include(dt) && !matches!(dt, DType::Int64 | DType::Float64)
+            should_include(dt.clone()) && !matches!(dt, DType::Int64 | DType::Float64)
         });
 
         if has_non_numeric {

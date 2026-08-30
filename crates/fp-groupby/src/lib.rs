@@ -2486,7 +2486,7 @@ fn try_groupby_sum_prod_integer_counter(
     keys: &[Scalar],
     values: &[Scalar],
     func: AggFunc,
-    value_dtype: DType,
+    value_dtype: &DType,
     dropna: bool,
     sort: bool,
 ) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
@@ -2585,7 +2585,7 @@ fn try_groupby_sum_prod_float_counter(
     keys: &[Scalar],
     values: &[Scalar],
     func: AggFunc,
-    value_dtype: DType,
+    value_dtype: &DType,
     dropna: bool,
     sort: bool,
 ) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
@@ -2835,7 +2835,7 @@ pub fn groupby_agg(
             key_vals,
             val_vals,
             func,
-            value_dtype,
+            &value_dtype,
             options.dropna,
             options.sort,
         )
@@ -2851,7 +2851,7 @@ pub fn groupby_agg(
             key_vals,
             val_vals,
             func,
-            value_dtype,
+            &value_dtype,
             options.dropna,
             options.sort,
         )
