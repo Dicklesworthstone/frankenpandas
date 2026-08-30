@@ -93,6 +93,11 @@ base = workload[:-6] if is_int else workload
 # incumbent's work is identical, so strip it here.
 if base.endswith("_typed"):
     base = base[:-6]
+# br-frankenpandas-lrpp2: `_nullable` changes only the INPUT — every tenth slot
+# is NaN in the shared fixture file, so numpy sees exactly the missing values
+# FrankenPandas does and the incumbent's op is unchanged.
+if base.endswith("_nullable"):
+    base = base[:-9]
 sys.stderr.write("PANDAS_VERSION=%s\nNUMPY_VERSION=%s\n" % (pd.__version__, np.__version__))
 sys.stderr.flush()
 def run():
@@ -217,7 +222,11 @@ fn fp_transpose_rep_us(frame: &fp_frame::DataFrame, typed: bool) -> f64 {
 }
 
 fn fp_one_rep_us(workload: &str, column: &fp_columnar::Column) -> f64 {
-    let base = workload.strip_suffix("_int64").unwrap_or(workload);
+    // br-frankenpandas-lrpp2: `_nullable` selects a NaN-holed fixture, not a
+    // different op, so it is stripped here exactly as `_int64` is.
+    let base = workload
+        .strip_suffix("_nullable")
+        .unwrap_or_else(|| workload.strip_suffix("_int64").unwrap_or(workload));
     let start = Instant::now();
     let out = match base {
         "log" => column.log(),
@@ -363,10 +372,34 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
         // magnitude. BOTH ARMS READ THIS SAME FILE, so the shift reaches numpy
         // and FrankenPandas identically and cannot become a difference between
         // the engines.
-        let values: Vec<f64> = if workload == "acosh" {
+        let base_values: Vec<f64> = if workload.starts_with("acosh") {
             fixture(n).into_iter().map(|v| 1.0 + v * 9.0).collect()
         } else {
             fixture(n)
+        };
+        // br-frankenpandas-lrpp2. A `_nullable` lane holes every tenth slot with
+        // NaN. That is not cosmetic — it changes WHICH KERNEL RUNS. The
+        // domain-fused arm needs `as_f64_slice()`, which requires all-valid, so a
+        // holed column declines it and falls to `typed_float_unary_par` ->
+        // `par_map_vec_f64`, whose threshold is a HARDCODED
+        // `const PAR_MIN: usize = 200_000` — not the per-op override the all-valid
+        // path now carries, and not even env-reachable. So the same op at the same
+        // size runs THREADED on all-valid input and SERIAL on nullable input.
+        //
+        // 10% missing is chosen to match the corpus's existing `float64_nan10`
+        // dtype rather than invented here, and it is sparse enough that the op
+        // still does real work on 90% of the elements.
+        //
+        // Both arms read this one file, so numpy sees exactly the same NaNs and
+        // the incumbent's operation is unchanged by the suffix.
+        let values: Vec<f64> = if workload.ends_with("_nullable") {
+            base_values
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| if i % 10 == 0 { f64::NAN } else { v })
+                .collect()
+        } else {
+            base_values
         };
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(&path, &bytes).expect("write fixture");
