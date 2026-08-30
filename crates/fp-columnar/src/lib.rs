@@ -16200,7 +16200,7 @@ impl Column {
             .zip(other.values.iter())
             .map(|(a, b)| func(a, b))
             .collect();
-        let inferred = infer_dtype(&out).unwrap_or(self.dtype);
+        let inferred = infer_dtype(&out).unwrap_or_else(|_| self.dtype.clone());
         Self::new(inferred, out)
     }
 
@@ -16525,8 +16525,8 @@ impl Column {
                     .values
                     .get(*idx)
                     .cloned()
-                    .unwrap_or_else(|| Scalar::missing_for_dtype(self.dtype)),
-                None => Scalar::missing_for_dtype(self.dtype),
+                    .unwrap_or_else(|| Scalar::missing_for_dtype(self.dtype.clone())),
+                None => Scalar::missing_for_dtype(self.dtype.clone()),
             })
             .collect::<Vec<_>>();
 
@@ -16562,7 +16562,7 @@ impl Column {
             return Ok(self.take_positions(&present_positions));
         }
 
-        if absent == Scalar::missing_for_dtype(self.dtype) {
+        if absent == Scalar::missing_for_dtype(self.dtype.clone()) {
             return self.reindex_by_positions(positions);
         }
 
@@ -16599,7 +16599,7 @@ impl Column {
     ) -> Option<Result<Self, ColumnError>> {
         // Vectorized path: both sides same numeric dtype, no NaN-vs-Null
         // distinction needed (i.e. both Int64, or both Float64 / promoted to Float64).
-        match out_dtype {
+        match &out_dtype {
             DType::Float64 => {
                 // Typed-input fast path: both operands are already all-valid
                 // contiguous Float64 (as_f64_slice => validity.all() AND no NaN),
@@ -16812,14 +16812,14 @@ impl Column {
                     .enumerate()
                     .map(|(i, v)| {
                         if !result_validity.get(i) {
-                            Scalar::missing_for_dtype(out_dtype)
+                            Scalar::missing_for_dtype(out_dtype.clone())
                         } else {
                             Scalar::Int64(*v)
                         }
                     })
                     .collect();
 
-                Some(Self::new(out_dtype, values))
+                Some(Self::new(out_dtype.clone(), values))
             }
             _ => None, // Bool, Utf8, etc. — use scalar fallback
         }
@@ -16914,8 +16914,8 @@ impl Column {
     ) -> Result<Self, ColumnError> {
         if !matches!(self.dtype, DType::Float64) || !matches!(right.dtype, DType::Float64) {
             return Err(ColumnError::DTypeMismatch {
-                left: self.dtype,
-                right: right.dtype,
+                left: self.dtype.clone(),
+                right: right.dtype.clone(),
             });
         }
 
@@ -17005,8 +17005,8 @@ impl Column {
     ) -> Result<Self, ColumnError> {
         if !matches!(self.dtype, DType::Int64) || !matches!(right.dtype, DType::Int64) {
             return Err(ColumnError::DTypeMismatch {
-                left: self.dtype,
-                right: right.dtype,
+                left: self.dtype.clone(),
+                right: right.dtype.clone(),
             });
         }
 
@@ -17040,14 +17040,14 @@ impl Column {
 
         let Some((lsrc, lvalid)) = self.as_i64_slice_with_validity() else {
             return Err(ColumnError::DTypeMismatch {
-                left: self.dtype,
-                right: right.dtype,
+                left: self.dtype.clone(),
+                right: right.dtype.clone(),
             });
         };
         let Some((rsrc, rvalid)) = right.as_i64_slice_with_validity() else {
             return Err(ColumnError::DTypeMismatch {
-                left: self.dtype,
-                right: right.dtype,
+                left: self.dtype.clone(),
+                right: right.dtype.clone(),
             });
         };
         let apply = binary_f64_apply(op);
@@ -17322,7 +17322,7 @@ impl Column {
             });
         }
 
-        let mut out_dtype = common_dtype(self.dtype, right.dtype)?;
+        let mut out_dtype = common_dtype(self.dtype.clone(), right.dtype.clone())?;
         if matches!(out_dtype, DType::Bool) {
             out_dtype = DType::Int64;
         }
@@ -17337,7 +17337,7 @@ impl Column {
         }
 
         // AG-10: Try vectorized path first; fallback to scalar path.
-        if let Some(result) = self.try_vectorized_binary(right, op, out_dtype) {
+        if let Some(result) = self.try_vectorized_binary(right, op, out_dtype.clone()) {
             return result;
         }
 
@@ -17370,7 +17370,7 @@ impl Column {
                     return Ok::<_, ColumnError>(if left.is_nan() || right.is_nan() {
                         Scalar::Null(NullKind::NaN)
                     } else {
-                        Scalar::missing_for_dtype(out_dtype)
+                        Scalar::missing_for_dtype(out_dtype.clone())
                     });
                 }
 
@@ -17767,7 +17767,7 @@ impl Column {
                 }
             }
         }
-        let dtype = match self.dtype {
+        let dtype = match &self.dtype {
             DType::Int64 => DType::Int64,
             _ => DType::Float64,
         };
@@ -17982,7 +17982,7 @@ impl Column {
                 }
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Element-wise bitwise OR.
@@ -18017,7 +18017,7 @@ impl Column {
                 }
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Element-wise bitwise XOR.
@@ -18047,12 +18047,12 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{a:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Element-wise left bit shift.
@@ -18086,7 +18086,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{a:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -18125,7 +18125,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{a:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -18170,12 +18170,12 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Alias for bitwise_not.
@@ -19227,10 +19227,12 @@ impl Column {
                     right: mask.len(),
                 });
             }
-            return Self::new(self.dtype, Vec::new());
+            return Self::new(self.dtype.clone(), Vec::new());
         }
         if mask.dtype != DType::Bool {
-            return Err(ColumnError::InvalidMaskType { dtype: mask.dtype });
+            return Err(ColumnError::InvalidMaskType {
+                dtype: mask.dtype.clone(),
+            });
         }
         if self.len() != mask.len() {
             return Err(ColumnError::LengthMismatch {
@@ -19397,7 +19399,7 @@ impl Column {
                 .zip(mask_bits)
                 .filter_map(|(val, &m)| m.then_some(val.clone()))
                 .collect::<Vec<_>>();
-            return Self::new(self.dtype, values);
+            return Self::new(self.dtype.clone(), values);
         }
 
         if let Some(data) = self.as_f64_slice() {
@@ -19462,7 +19464,7 @@ impl Column {
             })
             .collect::<Vec<_>>();
 
-        Self::new(self.dtype, values)
+        Self::new(self.dtype.clone(), values)
     }
 
     /// Fill missing values with a replacement scalar.
@@ -19501,7 +19503,7 @@ impl Column {
         // alone still yields Int64 where pandas has float64 and cannot be made
         // green. Blocked on br-frankenpandas-9ooer (oracle dtype chooser) and
         // the int64->float64-on-null construction divergence.
-        let cast_fill = cast_scalar(fill_value, self.dtype)?;
+        let cast_fill = cast_scalar(fill_value, self.dtype.clone())?;
 
         // Typed Float64 fast path (br-frankenpandas-e8vzt): fill every missing
         // slot with the finite f64 fill into an all-valid typed buffer, skipping
@@ -19709,7 +19711,7 @@ impl Column {
             })
             .collect();
 
-        Self::new(self.dtype, values)
+        Self::new(self.dtype.clone(), values)
     }
 
     /// Remove missing values, returning a shorter column.
@@ -19761,7 +19763,7 @@ impl Column {
             .cloned()
             .collect();
 
-        Self::new(self.dtype, values)
+        Self::new(self.dtype.clone(), values)
     }
 
     /// Gather rows by integer position.
@@ -19783,7 +19785,7 @@ impl Column {
                 }
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Replace elements at specified indices with given values.
@@ -19806,7 +19808,7 @@ impl Column {
             }
             out[i] = v.clone();
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Contiguous slice by positional range `start..start+len`.
@@ -19816,7 +19818,7 @@ impl Column {
     /// matching pandas' permissive slice semantics.
     pub fn slice(&self, start: usize, len: usize) -> Result<Self, ColumnError> {
         if start >= self.values.len() {
-            return Self::new(self.dtype, Vec::new());
+            return Self::new(self.dtype.clone(), Vec::new());
         }
         let end = start.saturating_add(len).min(self.values.len());
         Ok(self.take_contiguous_range(start, end - start))
@@ -19873,8 +19875,8 @@ impl Column {
     pub fn concat(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.dtype != other.dtype {
             return Err(ColumnError::DTypeMismatch {
-                left: self.dtype,
-                right: other.dtype,
+                left: self.dtype.clone(),
+                right: other.dtype.clone(),
             });
         }
         // perf: typed buffer concat for the ubiquitous all-valid Int64/Float64
@@ -19901,7 +19903,7 @@ impl Column {
         let mut values = Vec::with_capacity(self.values.len() + other.values.len());
         values.extend_from_slice(&self.values);
         values.extend_from_slice(&other.values);
-        Self::new(self.dtype, values)
+        Self::new(self.dtype.clone(), values)
     }
 
     /// Alias for concat, matching np.append.
@@ -19918,7 +19920,7 @@ impl Column {
         out.extend_from_slice(&self.values[..idx]);
         out.extend_from_slice(values);
         out.extend_from_slice(&self.values[idx..]);
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Delete values at given indices.
@@ -19936,7 +19938,7 @@ impl Column {
             .filter(|(i, _)| !to_delete.contains(i))
             .map(|(_, v)| v.clone())
             .collect();
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Resize column to new size, padding or truncating as needed.
@@ -19944,7 +19946,7 @@ impl Column {
     /// Matches np.resize(). If new size is larger, values cycle from beginning.
     pub fn resize(&self, new_size: usize) -> Result<Self, ColumnError> {
         if new_size == 0 || self.values.is_empty() {
-            return Self::new(self.dtype, Vec::new());
+            return Self::new(self.dtype.clone(), Vec::new());
         }
         let mut out = Vec::with_capacity(new_size);
         let mut i = 0;
@@ -19952,7 +19954,7 @@ impl Column {
             out.push(self.values[i % self.values.len()].clone());
             i += 1;
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Repeat each value `repeats` times contiguously.
@@ -19961,7 +19963,7 @@ impl Column {
     /// column; `repeats=1` is a clone.
     pub fn repeat(&self, repeats: usize) -> Result<Self, ColumnError> {
         if repeats == 0 {
-            return Self::new(self.dtype, Vec::new());
+            return Self::new(self.dtype.clone(), Vec::new());
         }
         if repeats == 1 {
             return Ok(self.clone());
@@ -19972,7 +19974,7 @@ impl Column {
                 out.push(v.clone());
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Tile (repeat) the entire column n times.
@@ -19981,7 +19983,7 @@ impl Column {
     /// tile duplicates the entire array.
     pub fn tile(&self, reps: usize) -> Result<Self, ColumnError> {
         if reps == 0 {
-            return Self::new(self.dtype, Vec::new());
+            return Self::new(self.dtype.clone(), Vec::new());
         }
         if reps == 1 {
             return Ok(self.clone());
@@ -19990,7 +19992,7 @@ impl Column {
         for _ in 0..reps {
             out.extend_from_slice(&self.values);
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Reverse the row order of the column.
@@ -19999,7 +20001,7 @@ impl Column {
     pub fn reverse(&self) -> Result<Self, ColumnError> {
         let mut values = self.values.to_vec();
         values.reverse();
-        Self::new(self.dtype, values)
+        Self::new(self.dtype.clone(), values)
     }
 
     /// Alias for reverse, matching np.flip.
@@ -20025,7 +20027,7 @@ impl Column {
         let split = len - shift;
         out.extend_from_slice(&self.values[split..]);
         out.extend_from_slice(&self.values[..split]);
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Filter values based on a boolean condition column.
@@ -20046,12 +20048,12 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{c:?}"),
-                        dtype: condition.dtype,
+                        dtype: condition.dtype.clone(),
                     }));
                 }
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Cumulative sum, null-propagating per fp-types::nancumsum.
@@ -21183,7 +21185,7 @@ impl Column {
             return None;
         }
 
-        Some(if matches!(self.dtype, DType::Timedelta64) {
+        Some(if matches!(&self.dtype, DType::Timedelta64) {
             Scalar::Timedelta64(Timedelta::NAT)
         } else {
             Scalar::Float64(f64::NAN)
@@ -21277,7 +21279,7 @@ impl Column {
         }
 
         if matches!(
-            self.dtype,
+            &self.dtype,
             DType::Bool
                 | DType::BoolNullable
                 | DType::Int64
@@ -21373,7 +21375,7 @@ impl Column {
                 _ => out.push(v.clone()),
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Alias for [`ffill`](Self::ffill), matching deprecated `pd.Series.pad()`.
@@ -21462,7 +21464,7 @@ impl Column {
                 _ => out[i] = v.clone(),
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Alias for [`bfill`](Self::bfill), matching deprecated `pd.Series.backfill()`.
@@ -21717,7 +21719,7 @@ impl Column {
             .iter()
             .map(|&idx| self.values[idx].clone())
             .collect();
-        Self::new(self.dtype, values)
+        Self::new(self.dtype.clone(), values)
     }
 
     /// Position of the first non-missing value, or None when every
@@ -21875,7 +21877,7 @@ impl Column {
 
     fn missingness_is_validity_only(&self) -> bool {
         matches!(
-            self.dtype,
+            &self.dtype,
             DType::Bool
                 | DType::BoolNullable
                 | DType::Int64
@@ -22086,7 +22088,7 @@ impl Column {
         // — var now has both). nanstd's numeric arm is literally sqrt(nanvar), and
         // typed var == nanvar for these dtypes, so this is bit-identical. Timedelta
         // and other dtypes keep nanstd's dtype-preserving path.
-        if matches!(self.dtype, DType::Float64 | DType::Int64) {
+        if matches!(&self.dtype, DType::Float64 | DType::Int64) {
             return match self.var(ddof) {
                 Scalar::Float64(v) => Scalar::Float64(v.sqrt()),
                 other => other,
@@ -22168,7 +22170,7 @@ impl Column {
     /// borrow. Widening the dtype gate without a constructor to feed it is dead
     /// code. Fix the constructor side first, then this arm becomes real.
     fn typed_numeric_values(&self) -> Option<TypedNumericValues<'_>> {
-        match self.dtype {
+        match &self.dtype {
             DType::Float64 => self
                 .as_f64_slice_with_validity()
                 .map(|(d, v)| TypedNumericValues::F64(d, v)),
@@ -22721,7 +22723,7 @@ impl Column {
                 other => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: other.to_string(),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             },
@@ -22739,12 +22741,12 @@ impl Column {
     /// count.
     pub fn describe(&self) -> Result<Vec<(&'static str, Scalar)>, ColumnError> {
         if !matches!(
-            self.dtype,
+            &self.dtype,
             DType::Int64 | DType::Float64 | DType::Timedelta64
         ) {
             return Err(ColumnError::Type(TypeError::NonNumericValue {
                 value: format!("{:?}", self.dtype),
-                dtype: self.dtype,
+                dtype: self.dtype.clone(),
             }));
         }
         let count = Scalar::Int64(self.count() as i64);
@@ -22847,7 +22849,7 @@ impl Column {
                 }
             })
             .collect();
-        let inferred = infer_dtype(&out).unwrap_or(self.dtype);
+        let inferred = infer_dtype(&out).unwrap_or_else(|_| self.dtype.clone());
         Self::new(inferred, out)
     }
 
@@ -23112,7 +23114,7 @@ impl Column {
             .zip(other.values.iter())
             .map(|(a, b)| if a.is_missing() { b.clone() } else { a.clone() })
             .collect();
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Clip values below `lower`, leaving the upper bound free.
@@ -23150,7 +23152,7 @@ impl Column {
                 out.push(v.clone());
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Element-wise comparison against `other`, emitting a 2-column
@@ -23180,7 +23182,10 @@ impl Column {
                 right.push(b.clone());
             }
         }
-        Ok((Self::new(self.dtype, left)?, Self::new(other.dtype, right)?))
+        Ok((
+            Self::new(self.dtype.clone(), left)?,
+            Self::new(other.dtype.clone(), right)?,
+        ))
     }
 
     /// Apply a unary function over each value.
@@ -23195,7 +23200,7 @@ impl Column {
         F: FnMut(&Scalar) -> Scalar,
     {
         let out: Vec<Scalar> = self.values.iter().map(&mut func).collect();
-        let target = infer_dtype(&out).unwrap_or(self.dtype);
+        let target = infer_dtype(&out).unwrap_or_else(|_| self.dtype.clone());
         Self::new(target, out)
     }
 
@@ -23482,7 +23487,7 @@ impl Column {
                         winners.push(Scalar::Int64(min + s as i64));
                     }
                 }
-                return Self::new(self.dtype, winners);
+                return Self::new(self.dtype.clone(), winners);
             }
             // Wide/sparse all-valid Int64: out of dense-histogram range, but the
             // raw &[i64] avoids Scalar materialization — tally+argmax via the
@@ -23524,7 +23529,9 @@ impl Column {
             return Ok(if self.dtype == DType::Timedelta64 {
                 Self::from_timedelta64_values_with_validity(winners, ValidityMask::all_valid(len))
             } else {
-                Self::from_datetime64_values(winners)
+                let mut column = Self::from_datetime64_values(winners);
+                column.dtype = self.dtype.clone();
+                column
             });
         }
 
@@ -23548,7 +23555,7 @@ impl Column {
                 *counts.entry(&bytes[w[0]..w[1]]).or_insert(0) += 1;
             }
             if counts.is_empty() {
-                return Self::new(self.dtype, Vec::new());
+                return Self::new(self.dtype.clone(), Vec::new());
             }
             let max_count = counts.values().copied().max().unwrap_or(0);
             let mut winners: Vec<&[u8]> = counts
@@ -23600,7 +23607,7 @@ impl Column {
                 }
             }
             if counts.is_empty() {
-                return Self::new(self.dtype, Vec::new());
+                return Self::new(self.dtype.clone(), Vec::new());
             }
             let max_count = counts.values().copied().max().unwrap_or(0);
             let mut winners: Vec<&[u8]> = counts
@@ -23677,7 +23684,7 @@ impl Column {
             }
         }
         if counts.is_empty() {
-            return Self::new(self.dtype, Vec::new());
+            return Self::new(self.dtype.clone(), Vec::new());
         }
         let max_count = counts.values().map(|(c, _)| *c).max().unwrap_or(0);
         let mut winners: Vec<Scalar> = counts
@@ -23691,7 +23698,7 @@ impl Column {
             })
             .collect();
         winners.sort_by(|a, b| compare_scalars_na_last(a, b, true));
-        Self::new(self.dtype, winners)
+        Self::new(self.dtype.clone(), winners)
     }
 
     /// Approximate memory footprint in bytes.
@@ -23703,7 +23710,7 @@ impl Column {
     /// Utf8, 0 for Null). The ValidityMask is counted separately.
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
-        let element_bytes = match self.dtype {
+        let element_bytes = match &self.dtype {
             DType::Bool => 1,
             DType::Int64 | DType::Float64 | DType::Timedelta64 => 8,
             DType::Utf8 => std::mem::size_of::<usize>(),
@@ -23923,14 +23930,14 @@ impl Column {
             .zip(other.values.iter())
             .map(|(v, o)| {
                 if v.is_missing() {
-                    cast_scalar(o, self.dtype)
+                    cast_scalar(o, self.dtype.clone())
                 } else {
                     Ok(v.clone())
                 }
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(ColumnError::Type)?;
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Element-wise quotient and remainder against `divisor`.
@@ -23999,7 +24006,9 @@ impl Column {
     /// differs, values coming from `other` are cast via `cast_scalar`.
     pub fn where_cond_series(&self, cond: &Self, other: &Self) -> Result<Self, ColumnError> {
         if cond.dtype != DType::Bool {
-            return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
+            return Err(ColumnError::InvalidMaskType {
+                dtype: cond.dtype.clone(),
+            });
         }
         if self.values.len() != cond.values.len() || self.values.len() != other.values.len() {
             return Err(ColumnError::LengthMismatch {
@@ -24090,12 +24099,12 @@ impl Column {
             .zip(cond.values.iter().zip(other.values.iter()))
             .map(|(v, (c, o))| match c {
                 Scalar::Bool(true) => Ok(v.clone()),
-                Scalar::Bool(false) => cast_scalar(o, self.dtype),
+                Scalar::Bool(false) => cast_scalar(o, self.dtype.clone()),
                 _ => Ok(Scalar::Null(NullKind::NaN)),
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(ColumnError::Type)?;
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Replace values where `cond` is true with values from `other`
@@ -24104,7 +24113,9 @@ impl Column {
     /// Matches `pd.Series.mask(cond, other)` when `other` is a Series.
     pub fn mask_series(&self, cond: &Self, other: &Self) -> Result<Self, ColumnError> {
         if cond.dtype != DType::Bool {
-            return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
+            return Err(ColumnError::InvalidMaskType {
+                dtype: cond.dtype.clone(),
+            });
         }
         if self.values.len() != cond.values.len() || self.values.len() != other.values.len() {
             return Err(ColumnError::LengthMismatch {
@@ -24183,13 +24194,13 @@ impl Column {
             .iter()
             .zip(cond.values.iter().zip(other.values.iter()))
             .map(|(v, (c, o))| match c {
-                Scalar::Bool(true) => cast_scalar(o, self.dtype),
+                Scalar::Bool(true) => cast_scalar(o, self.dtype.clone()),
                 Scalar::Bool(false) => Ok(v.clone()),
                 _ => Ok(Scalar::Null(NullKind::NaN)),
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(ColumnError::Type)?;
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Pairwise value substitution.
@@ -24357,7 +24368,7 @@ impl Column {
                 v.clone()
             })
             .collect();
-        let inferred = infer_dtype(&out).unwrap_or(self.dtype);
+        let inferred = infer_dtype(&out).unwrap_or_else(|_| self.dtype.clone());
         Self::new(inferred, out)
     }
 
@@ -24445,7 +24456,9 @@ impl Column {
     /// positions in `cond` propagate as Null(NaN) in the result.
     pub fn where_cond(&self, cond: &Self, other: &Scalar) -> Result<Self, ColumnError> {
         if cond.dtype != DType::Bool {
-            return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
+            return Err(ColumnError::InvalidMaskType {
+                dtype: cond.dtype.clone(),
+            });
         }
         if self.values.len() != cond.values.len() {
             return Err(ColumnError::LengthMismatch {
@@ -24592,7 +24605,7 @@ impl Column {
                 _ => Scalar::Null(NullKind::NaN),
             })
             .collect();
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Alias for [`where_cond`](Self::where_cond), matching
@@ -24618,7 +24631,7 @@ impl Column {
         if !valid_method {
             return Err(ColumnError::Type(TypeError::NonNumericValue {
                 value: method.to_string(),
-                dtype: self.dtype,
+                dtype: self.dtype.clone(),
             }));
         }
 
@@ -25234,7 +25247,7 @@ impl Column {
         if side != "left" && side != "right" {
             return Err(ColumnError::Type(TypeError::NonNumericValue {
                 value: side.to_string(),
-                dtype: self.dtype,
+                dtype: self.dtype.clone(),
             }));
         }
         if needle.is_missing() {
@@ -25357,13 +25370,13 @@ impl Column {
                 Scalar::Int64(x) => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("negative value {x}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -25390,7 +25403,7 @@ impl Column {
         if bin_edges.len() < 2 {
             return Err(ColumnError::Type(TypeError::NonNumericValue {
                 value: "histogram requires at least 2 bin edges".to_owned(),
-                dtype: self.dtype,
+                dtype: self.dtype.clone(),
             }));
         }
         let n_bins = bin_edges.len() - 1;
@@ -25479,7 +25492,7 @@ impl Column {
         if n_bins == 0 {
             return Err(ColumnError::Type(TypeError::NonNumericValue {
                 value: "histogram requires at least 1 bin".to_owned(),
-                dtype: self.dtype,
+                dtype: self.dtype.clone(),
             }));
         }
 
@@ -25866,7 +25879,7 @@ impl Column {
         let out: Vec<Scalar> = self
             .values
             .iter()
-            .map(|v| cast_scalar(v, target))
+            .map(|v| cast_scalar(v, target.clone()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ColumnError::Type)?;
         Self::new(target, out)
@@ -25924,9 +25937,9 @@ impl Column {
                 // Datetime64 is i64-ns; with the exact Datetime64 comparator,
                 // sort_values+take == i64 cmp + position. No-NaT (NaT=i64::MIN is
                 // missing → would sort to the end / be excluded) routes here.
-                return Ok(Self::from_datetime64_values(nkeep_typed_i64(
-                    data, n, false,
-                )));
+                let mut column = Self::from_datetime64_values(nkeep_typed_i64(data, n, false));
+                column.dtype = self.dtype.clone();
+                return Ok(column);
             } else if self.dtype == DType::Int64
                 && let Some((data, validity)) = self.as_i64_slice_with_validity()
             {
@@ -25978,7 +25991,7 @@ impl Column {
         let sorted = self.sort_values(false)?;
         let take = n.min(sorted.values.len());
         let values: Vec<Scalar> = sorted.values[..take].to_vec();
-        Self::new(self.dtype, values)
+        Self::new(self.dtype.clone(), values)
     }
 
     /// Return the `n` smallest values.
@@ -25999,7 +26012,9 @@ impl Column {
                 && !data.contains(&i64::MIN)
                 && n < data.len()
             {
-                return Ok(Self::from_datetime64_values(nkeep_typed_i64(data, n, true)));
+                let mut column = Self::from_datetime64_values(nkeep_typed_i64(data, n, true));
+                column.dtype = self.dtype.clone();
+                return Ok(column);
             } else if self.dtype == DType::Int64
                 && let Some((data, validity)) = self.as_i64_slice_with_validity()
             {
@@ -26040,7 +26055,7 @@ impl Column {
         let sorted = self.sort_values(true)?;
         let take = n.min(sorted.values.len());
         let values: Vec<Scalar> = sorted.values[..take].to_vec();
-        Self::new(self.dtype, values)
+        Self::new(self.dtype.clone(), values)
     }
 
     /// Replace values where `cond` is true with `other`; otherwise keep.
@@ -26049,7 +26064,9 @@ impl Column {
     /// `where_cond`. Same validation rules apply.
     pub fn mask(&self, cond: &Self, other: &Scalar) -> Result<Self, ColumnError> {
         if cond.dtype != DType::Bool {
-            return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
+            return Err(ColumnError::InvalidMaskType {
+                dtype: cond.dtype.clone(),
+            });
         }
         if self.values.len() != cond.values.len() {
             return Err(ColumnError::LengthMismatch {
@@ -26178,7 +26195,7 @@ impl Column {
                 _ => Scalar::Null(NullKind::NaN),
             })
             .collect();
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Sort values in ascending or descending order.
@@ -26436,9 +26453,9 @@ impl Column {
             && let Some(data) = self.as_datetime64_slice()
             && !data.contains(&i64::MIN)
         {
-            return Ok(Self::from_datetime64_values(radix_sort_i64_values(
-                data, ascending,
-            )));
+            let mut column = Self::from_datetime64_values(radix_sort_i64_values(data, ascending));
+            column.dtype = self.dtype.clone();
+            return Ok(column);
         }
         // All-valid Utf8: gather by the stable MSD radix permutation. The
         // fallback below sorts (idx, &Scalar) pairs stably with the same
@@ -26447,7 +26464,7 @@ impl Column {
         if let Some(strs) = self.as_all_valid_str_vec() {
             let perm = utf8_msd_argsort(&strs, ascending);
             let sorted: Vec<Scalar> = perm.iter().map(|&i| self.values[i].clone()).collect();
-            return Self::new(self.dtype, sorted);
+            return Self::new(self.dtype.clone(), sorted);
         }
         // Nullable contiguous-Utf8 (`LazyNullableUtf8`): the all-valid Utf8 arm above
         // bailed on the missing bit and `typed_radix_perm` is numeric-only, so a nullable
@@ -26565,14 +26582,14 @@ impl Column {
                 _ => {
                     let src = self.values.as_slice();
                     let sorted: Vec<Scalar> = perm.iter().map(|&i| src[i].clone()).collect();
-                    return Self::new(self.dtype, sorted);
+                    return Self::new(self.dtype.clone(), sorted);
                 }
             }
         }
         let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
         indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
         let sorted: Vec<Scalar> = indexed.into_iter().map(|(_, v)| v.clone()).collect();
-        Self::new(self.dtype, sorted)
+        Self::new(self.dtype.clone(), sorted)
     }
 
     /// Positions that would sort the column ascending.
@@ -26671,7 +26688,7 @@ impl Column {
     pub fn partition(&self, kth: usize) -> Result<Self, ColumnError> {
         let indices = self.argpartition(kth)?;
         let out: Vec<Scalar> = indices.iter().map(|&i| self.values[i].clone()).collect();
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// First-order difference: `values[i] - values[i - periods]`.
@@ -26689,7 +26706,7 @@ impl Column {
         // result with a missing leading element — NOT numeric subtraction
         // (older pandas gave [-1, 0, 1]). Timedelta64 keeps its dtype; all other
         // numeric types diff as Float64.
-        let out_dtype = match self.dtype {
+        let out_dtype = match &self.dtype {
             DType::Timedelta64 => DType::Timedelta64,
             DType::Bool => DType::Bool,
             _ => DType::Float64,
@@ -27461,9 +27478,11 @@ impl Column {
             && !data.contains(&i64::MIN)
         {
             let (codes, uniques) = factorize_i64_typed(data, sort);
+            let mut uniques = Self::from_datetime64_values(uniques);
+            uniques.dtype = self.dtype.clone();
             return Ok((
                 Self::from_i64_values_owned(codes),
-                Self::from_datetime64_values(uniques),
+                uniques,
             ));
         }
 
@@ -27536,7 +27555,7 @@ impl Column {
         }
 
         let codes_col = Self::from_i64_values_owned(codes);
-        let uniques_col = Self::new(self.dtype, uniques)?;
+        let uniques_col = Self::new(self.dtype.clone(), uniques)?;
         Ok((codes_col, uniques_col))
     }
 
@@ -27665,7 +27684,7 @@ impl Column {
                 }
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Alias for abs, matching np.fabs.
@@ -27742,12 +27761,12 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Unary positive (identity for numeric, error for non-numeric).
@@ -27761,7 +27780,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -27776,6 +27795,65 @@ impl Column {
 
     /// Square root of numeric values. Matches numpy's sqrt ufunc.
     pub fn sqrt(&self) -> Result<Self, ColumnError> {
+        // ISA-ISOLATED 4-LANE ARM, ahead of the generic domain-fused one below.
+        // br-frankenpandas-uza04 / oxv4u.
+        //
+        // MEASURED 2026-08-30 against live pandas 2.2.3, balanced-square, one
+        // invocation, host thinkstation1: `sqrt @10M` = 0.808x (fp 19302.89us vs
+        // pandas 16101.55us, cv 7.46% / 3.56%, thread count 1), with
+        // `effect_ci_excludes_unity` TRUE and the A/A null clause TRUE — the
+        // largest non-structural loss on the current census that is not flagged
+        // stale-and-refuted.
+        //
+        // THE MECHANISM IS WIDTH, and the competing explanation is already dead:
+        // "math_unary lowers to scalar `sqrtsd` because we build generic x86-64"
+        // was counted and REFUTED (docs/NEGATIVE_EVIDENCE.md 2026-08-16
+        // CrimsonPine) — the baseline kernel emits PACKED `sqrtpd` already. It is
+        // 2 lanes against numpy's 4-lane `vsqrtpd`, and `+sse4.1` has no 4-wide
+        // square root. So the op is routed to the one crate carrying `+avx2`
+        // rather than the flag being widened to this one, which is exactly the
+        // split that keeps `log` out of the blast radius of the blanket
+        // `x86-64-v3` policy CyanLynx measured and rejected (sqrt 0.361x, log
+        // regressed).
+        //
+        // ISOMORPHIC TO THE GENERIC ARM, clause by clause, which is why it can sit
+        // in front of it: `typed_float_domain_fused_unary_with_finiteness` is
+        // called with `preserves_finiteness = true` and `par_min = usize::MAX`, so
+        // for an `as_f64_slice` input it runs SERIALLY over the whole slice and
+        // returns `from_f64_all_valid_with_finite_opt(out, all_finite)` when the
+        // domain held, `None` otherwise. `sqrt_f64_into` folds the SAME two
+        // witnesses in the same pass — `domain_held = all(x >= 0.0)` and
+        // `all_finite = all(out.is_finite())` — and `all_finite` is then
+        // overridden by the input witness when one is known, mirroring
+        // `known_all_finite.unwrap_or(computed)` in the generic block. A negative
+        // or NaN element falls through to exactly the path it would have taken.
+        //
+        // ⚠️ GUARDED, and the guard is not optional: fp-dot-kernel emits AVX2
+        // unconditionally, so entering it on a pre-AVX2 CPU is SIGILL rather than
+        // a graceful fallback. Everything below is the complete original
+        // implementation and is reached whenever the feature is absent.
+        //
+        // ⚠️ NOT under `elementwise_write_once_enabled()`: that flag chooses
+        // between two OUTPUT REPRESENTATIONS in the generic arm (owned chunks vs
+        // one buffer), and this arm produces the single-buffer form, which is the
+        // shipped default. When the write-once path is selected this arm is
+        // skipped so the representation choice stays with the generic code.
+        #[cfg(target_arch = "x86_64")]
+        if !elementwise_write_once_enabled()
+            && std::arch::is_x86_feature_detected!("avx2")
+            && let Some(data) = self.as_f64_slice()
+        {
+            let mut out = vec![0.0_f64; data.len()];
+            let (domain_held, computed_all_finite) = fp_dot_kernel::sqrt_f64_into(data, &mut out);
+            if domain_held {
+                let all_finite = self.f64_finite_witness().unwrap_or(computed_all_finite);
+                return Ok(Self::from_f64_all_valid_with_finite_opt(
+                    out,
+                    Some(all_finite),
+                ));
+            }
+        }
+
         // All-valid f64 with no negative element: `sqrt` cannot mint a NaN, so the
         // validity mask needs no per-element derivation. Falls through to the
         // shared arm the moment a negative appears. br-frankenpandas-4kig1.
@@ -27824,7 +27902,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -27864,7 +27942,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -27928,7 +28006,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -27978,7 +28056,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28007,7 +28085,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28044,7 +28122,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28075,7 +28153,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28106,7 +28184,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28137,7 +28215,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28168,7 +28246,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28203,7 +28281,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28234,7 +28312,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28265,7 +28343,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28296,7 +28374,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28327,7 +28405,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28358,7 +28436,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -28389,7 +28467,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -29670,7 +29748,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -29706,7 +29784,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -29742,7 +29820,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -29811,7 +29889,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             };
@@ -29842,7 +29920,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -29866,7 +29944,7 @@ impl Column {
     pub fn trim_zeros(&self, trim: &str) -> Result<Self, ColumnError> {
         let values = &self.values;
         if values.is_empty() {
-            return Self::new(self.dtype, vec![]);
+            return Self::new(self.dtype.clone(), vec![]);
         }
 
         let is_zero = |s: &Scalar| -> bool {
@@ -29893,7 +29971,7 @@ impl Column {
             }
         }
 
-        Self::new(self.dtype, values[start..end].to_vec())
+        Self::new(self.dtype.clone(), values[start..end].to_vec())
     }
 
     /// Round to the given number of decimals.
@@ -29926,7 +30004,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -29961,7 +30039,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             };
@@ -30045,7 +30123,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30082,7 +30160,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30134,7 +30212,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30164,7 +30242,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30199,7 +30277,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30279,7 +30357,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30450,7 +30528,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30502,7 +30580,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30606,7 +30684,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30631,7 +30709,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30661,7 +30739,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30691,7 +30769,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -30724,12 +30802,12 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
         }
-        let dtype = match self.dtype {
+        let dtype = match &self.dtype {
             DType::Int64 => DType::Int64,
             _ => DType::Float64,
         };
@@ -30823,7 +30901,7 @@ impl Column {
                 out.push(fill.clone());
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Clip numeric values to `[lower, upper]`.
@@ -31334,7 +31412,9 @@ impl Column {
             && let Some(data) = self.as_datetime64_slice()
             && !data.contains(&i64::MIN)
         {
-            return Ok(Self::from_datetime64_values(unique_i64_wide(data)));
+            let mut column = Self::from_datetime64_values(unique_i64_wide(data));
+            column.dtype = self.dtype.clone();
+            return Ok(column);
         }
 
         // Timedelta64 sibling of the Datetime64 branch above: an all-valid, no-NAT
@@ -31469,7 +31549,7 @@ impl Column {
                 out.push(v.clone());
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Set difference: values in self that are not in other.
@@ -31494,7 +31574,7 @@ impl Column {
                 out.push(v.clone());
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Set intersection: values common to both columns.
@@ -31517,7 +31597,7 @@ impl Column {
                 out.push(v.clone());
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Set union: unique values from both columns.
@@ -31526,7 +31606,7 @@ impl Column {
     pub fn union1d(&self, other: &Self) -> Result<Self, ColumnError> {
         let mut combined = self.values.to_vec();
         combined.extend(other.values().iter().cloned());
-        let temp = Self::new(self.dtype, combined)?;
+        let temp = Self::new(self.dtype.clone(), combined)?;
         temp.unique()
     }
 
@@ -31566,7 +31646,7 @@ impl Column {
                 out.push(v.clone());
             }
         }
-        Self::new(self.dtype, out)
+        Self::new(self.dtype.clone(), out)
     }
 
     /// Test whether each element is contained in other.
@@ -31629,7 +31709,9 @@ impl Column {
             {
                 let (values, counts) = value_counts_i64_typed(data, normalize, sort, ascending);
                 let ns = values.as_i64_slice().expect("typed i64 values").to_vec();
-                return Ok((Column::from_datetime64_values(ns), counts));
+                let mut values = Column::from_datetime64_values(ns);
+                values.dtype = self.dtype.clone();
+                return Ok((values, counts));
             }
             if let Some(data) = self.as_timedelta64_slice()
                 && !data.contains(&i64::MIN)
@@ -31915,7 +31997,7 @@ impl Column {
             }
         }
 
-        let values = Self::new(self.dtype, values_out)?;
+        let values = Self::new(self.dtype.clone(), values_out)?;
         let counts = Self::new(
             if normalize {
                 DType::Float64
@@ -33374,7 +33456,7 @@ mod tests {
             (DType::Int64, Scalar::Int64(7)),
         ] {
             let source = Column::new(
-                dtype,
+                dtype.clone(),
                 vec![
                     Scalar::Null(NullKind::NaN),
                     Scalar::Null(NullKind::NaT),
@@ -34511,8 +34593,8 @@ mod tests {
             (DType::Float64Nullable, DType::Float64),
             (DType::BoolNullable, DType::Bool),
         ] {
-            let zeros_nullable = Column::zeros(3, nullable).expect("zeros nullable");
-            let zeros_base = Column::zeros(3, base).expect("zeros base");
+            let zeros_nullable = Column::zeros(3, nullable.clone()).expect("zeros nullable");
+            let zeros_base = Column::zeros(3, base.clone()).expect("zeros base");
             assert_eq!(
                 zeros_nullable.values()[0],
                 zeros_base.values()[0],
@@ -34520,8 +34602,8 @@ mod tests {
             );
             assert_eq!(zeros_nullable.dtype(), nullable);
 
-            let ones_nullable = Column::ones(3, nullable).expect("ones nullable");
-            let ones_base = Column::ones(3, base).expect("ones base");
+            let ones_nullable = Column::ones(3, nullable.clone()).expect("ones nullable");
+            let ones_base = Column::ones(3, base.clone()).expect("ones base");
             assert_eq!(
                 ones_nullable.values()[0],
                 ones_base.values()[0],
@@ -55336,7 +55418,7 @@ mod tests {
             if bin_edges.len() < 2 {
                 return Err(ColumnError::Type(crate::TypeError::NonNumericValue {
                     value: "histogram requires at least 2 bin edges".to_owned(),
-                    dtype: col.dtype,
+                    dtype: col.dtype.clone(),
                 }));
             }
             let n_bins = bin_edges.len() - 1;
