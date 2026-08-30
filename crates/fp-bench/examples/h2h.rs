@@ -104,6 +104,25 @@ def run():
     if base == "sqrt":    return np.sqrt(series)
     if base == "floor":   return np.floor(series)
     if base == "expm1":   return np.expm1(series)
+    # br-frankenpandas-lrpp2: the eleven unary maps that have never been measured
+    # and therefore inherit a `par_min` chosen for the cheapest ops in the family.
+    # Every one of these is a numpy ufunc over the same (0, 1] fixture, so the
+    # incumbent arm is doing exactly what the FrankenPandas arm is.
+    if base == "exp":     return np.exp(series)
+    if base == "log2":    return np.log2(series)
+    if base == "cos":     return np.cos(series)
+    if base == "tan":     return np.tan(series)
+    if base == "asin":    return np.arcsin(series)
+    if base == "acos":    return np.arccos(series)
+    if base == "sinh":    return np.sinh(series)
+    if base == "cosh":    return np.cosh(series)
+    if base == "tanh":    return np.tanh(series)
+    if base == "asinh":   return np.arcsinh(series)
+    if base == "atanh":   return np.arctanh(series)
+    # Already opted in to `ELEMENTWISE_EXPENSIVE_PAR_MIN`, carried so the sweep has
+    # in-run CONTROLS rather than comparing against numbers from another ELF.
+    if base == "sin":     return np.sin(series)
+    if base == "atan":    return np.arctan(series)
     raise SystemExit("unknown workload " + workload)
 run()  # warm the ufunc dispatch before any timed rep
 print("READY", flush=True)
@@ -202,6 +221,37 @@ fn fp_one_rep_us(workload: &str, column: &fp_columnar::Column) -> f64 {
         "sqrt" => column.sqrt(),
         "floor" => column.floor(),
         "expm1" => column.expm1(),
+        // br-frankenpandas-lrpp2. `Column` has nineteen unary float maps; six carry
+        // a per-op `par_min_override` and two more were measured and correctly left
+        // on the shared default. These eleven have never been measured at ALL, so
+        // they inherit `ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN = 200_000` — a threshold
+        // whose own source comment records per-element cost spanning ~80x across
+        // this family, which is the argument that already produced the six overrides.
+        //
+        // Eleven lanes and not one representative, because unlike the earlier sweep
+        // the question here is PER-OP: a representative can locate the crossover but
+        // cannot tell you which side of it `cosh` falls on.
+        //
+        // ⚠ `acosh` is absent ON PURPOSE. Its domain is `x >= 1` and `fixture` is
+        // (0, 1], so a lane for it would time the out-of-domain fallback rather than
+        // the kernel. It needs its own fixture and is not in this sweep.
+        "exp" => column.exp(),
+        "log2" => column.log2(),
+        "cos" => column.cos(),
+        "tan" => column.tan(),
+        "asin" => column.asin(),
+        "acos" => column.acos(),
+        "sinh" => column.sinh(),
+        "cosh" => column.cosh(),
+        "tanh" => column.tanh(),
+        "asinh" => column.asinh(),
+        "atanh" => column.atanh(),
+        // CONTROLS, already on `ELEMENTWISE_EXPENSIVE_PAR_MIN`. The sweep's
+        // break-even model is inherited from a table measured on a different ELF;
+        // carrying the two ops that table opted in means each run can re-derive the
+        // crossover from its OWN numbers instead of trusting a banked constant.
+        "sin" => column.sin(),
+        "atan" => column.atan(),
         other => panic!("unknown workload {other}"),
     }
     .expect("frankenpandas arm");
