@@ -42753,3 +42753,61 @@ THE BREAK-EVEN MODEL IS 9-FOR-9 OUT OF SAMPLE: every op above ~400us of serial w
 gained, gain tracks distance above the line, and both ops AT the line gained
 nothing. That is the durable result — the next unary map can be classified from its
 per-element cost without spending a measurement window.
+
+### 2026-08-30 BeigeAspen — acosh was unmeasurable on the shared fixture, not slow by nature: a certified sign flip 0.9479x -> 2.4885x, and the unary family is now complete at 19/19 [br-frankenpandas-lrpp2]
+
+`acosh` was the last of the nineteen unary float maps never measured on either side
+of the parallel threshold. The obstacle was the FIXTURE: `acosh` is defined on
+x >= 1 and every bench fixture lands in (0, 1], so a lane on the shared fixture
+would have timed the OUT-OF-DOMAIN FALLBACK and reported it as the kernel — a
+number that looks fine and measures the wrong code.
+
+**Campaign result class:** `incumbent-win`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae invocation_id=h2h-20260830T222600Z-acosh-100k-r64-envab measured_ratio=2.4885x
+
+**Executing ELF SHA-256 (self-reported by process):** bench_elf_sha256=ed7eae8cd6c3be3ebeef9a8ff856ccba9a46d26a9f2e7fed52b8ac655c6264d1 (10895600 bytes) /data/projects/.scratch/beigeaspen/lrpp2/h2h-acosh
+
+**A/A null control (same invocation):** the A/A null median ratio for each arm, FrankenPandas and pandas, limit 0.02 absolute deviation from unity — serial arm FrankenPandas=1.01658 pandas=1.01682 (both inside, row CERTIFIED SLOWER at 0.9479x); threaded arm FrankenPandas=1.01534 pandas=1.00972 (both inside, row CERTIFIED FASTER at 2.4885x). BOTH arms certify in the same invocation.
+
+**Median-CI decision:** the threaded median effect is 1.4885 (ratio 2.4885) and the serial median effect is 0.0521 (ratio 0.9479); both CIs cleared the required 2x null-margin threshold, decidable.
+
+**CV role:** provenance only; CV had no vote.
+
+examples/h2h.rs now shifts THIS ONE LANE's fixture into (1, 10]. Both arms read the
+SAME file, so the shift reaches numpy and FrankenPandas identically and cannot
+become a difference between engines.
+
+MEASURED at 100k, live pandas 2.2.3 / numpy 2.3.5, one ELF, env-only A/B via
+`FP_ELEMENTWISE_PAR_MIN`, 64 rounds, host thinkstation1, load 7.9, rch worker hz4:
+
+| arm | fp p50 | pandas p50 | ratio | verdict |
+|---|---:|---:|---:|---|
+| serial | 1601.94us | 1518.54us | 0.9479x | CERTIFIED SLOWER |
+| threaded | 593.78us | 1477.60us | **2.4885x** | CERTIFIED FASTER |
+
+A certified LOSS and a certified WIN for the same op in the same invocation,
+differing only by an environment variable. FP-side 2.698x; the incumbent moved 2.7%
+between arms.
+
+NON-VACUITY, on the SHIPPED binary with NO env override (post-change ELF
+2bf2e4fd6ae0c87e8bb058f044b4369afb0e669e272b1bbed7e4713bad60ea24): fp 641.53us vs pandas 1679.93us, RATIO 2.6186 FASTER, nulls
+1.01983 / 1.00163 — against its own former 1601.94us serial. The override is live
+and routing, which a passing suite cannot establish because it does not observe
+which arm runs.
+
+⚠️ THE SHIPPED ROW (2.6186x) AND THE PROBE ROW (2.4885x) ARE NOT THE SAME
+MEASUREMENT and are not averaged here: pandas itself is 14% slower in the later
+window (1477.60 -> 1679.93us), so the ratio moved for a host reason as well as a
+code reason. The FP-side figures (1601.94 -> 593.78 -> 641.53us) are the stable
+part; 2.5-2.6x is the range, not either endpoint.
+
+**Counted mechanism:** ~16.0 ns/element, so 100k rows is ~1600us of serial work
+against a ~350-420us per-call `thread::scope` tax; crossover ~25_000 rows, below
+the 65_536 constant it now uses.
+
+THE FAMILY IS CLOSED at 19/19, and THE BREAK-EVEN MODEL FINISHES 10-FOR-10 OUT OF
+SAMPLE: every op above ~400us of serial work gained, gain tracks distance above the
+line, and both ops AT the line (`exp` 423.89us, `log2` 474.08us) gained nothing and
+stay on the shared default. `acosh` was predicted correctly from its per-element
+cost before it was run — which is the durable result, not any single ratio.
