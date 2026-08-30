@@ -8008,23 +8008,32 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
     Some((cols, keys))
 }
 
-/// Append cell `(col, r)` as a JSON value, byte-identical to serde:
-/// `i64` via `append_i64_decimal`, finite `f64` via serde's own
-/// `CompactFormatter::write_f64` (exact exponent spelling, e.g. `1e+20`),
-/// non-finite `f64` as `null` (matching `scalar_to_json`), `bool` as
-/// `true`/`false`. `fbytes` is a reusable scratch to avoid a per-cell alloc.
+/// Append a finite JSON float with the same shortest-round-trip spelling serde
+/// uses, but without constructing a formatter or a temporary byte vector per
+/// cell. `ryu::Buffer` owns its fixed stack scratch and is reused for the
+/// complete JSON document.
 #[inline]
-fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &mut Vec<u8>) {
-    use serde_json::ser::{CompactFormatter, Formatter};
+fn append_json_finite_f64(out: &mut String, value: f64, float_buffer: &mut ryu::Buffer) {
+    out.push_str(float_buffer.format_finite(value));
+}
+
+/// Append cell `(col, r)` as a JSON value, byte-identical to serde:
+/// `i64` via `append_i64_decimal`, finite `f64` via Ryu's shortest formatter,
+/// non-finite `f64` as `null` (matching `scalar_to_json`), `bool` as
+/// `true`/`false`. `float_buffer` is a reusable direct-byte formatter scratch.
+#[inline]
+fn append_typed_json_value(
+    out: &mut String,
+    col: &JCol<'_>,
+    r: usize,
+    float_buffer: &mut ryu::Buffer,
+) {
     match col {
         JCol::I(s) => append_i64_decimal(out, s[r]),
         JCol::F(s) => {
             let v = s[r];
             if v.is_finite() {
-                fbytes.clear();
-                // Writing into a Vec<u8> is infallible.
-                let _ = CompactFormatter.write_f64(fbytes, v);
-                out.push_str(std::str::from_utf8(fbytes).unwrap_or("null"));
+                append_json_finite_f64(out, v, float_buffer);
             } else {
                 out.push_str("null");
             }
@@ -8060,9 +8069,7 @@ fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, fbytes: &
         JCol::FN(s, validity) => {
             let v = s[r];
             if validity.get(r) && v.is_finite() {
-                fbytes.clear();
-                let _ = CompactFormatter.write_f64(fbytes, v);
-                out.push_str(std::str::from_utf8(fbytes).unwrap_or("null"));
+                append_json_finite_f64(out, v, float_buffer);
             } else {
                 out.push_str("null");
             }
@@ -8097,7 +8104,7 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
     if !as_jsonl {
         out.push('[');
     }
-    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    let mut float_buffer = ryu::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(if as_jsonl { '\n' } else { ',' });
@@ -8108,7 +8115,7 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
                 out.push(',');
             }
             out.push_str(&keys[c]);
-            append_typed_json_value(&mut out, col, r, &mut fbytes);
+            append_typed_json_value(&mut out, col, r, &mut float_buffer);
         }
         out.push('}');
     }
@@ -8190,7 +8197,7 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
             .saturating_add(16),
     );
     out.push('{');
-    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    let mut float_buffer = ryu::Buffer::new();
     for (c, col) in cols.iter().enumerate() {
         if c > 0 {
             out.push(',');
@@ -8202,7 +8209,7 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
                 out.push(',');
             }
             out.push_str(&keybuf[keyoff[r]..keyoff[r + 1]]);
-            append_typed_json_value(&mut out, col, r, &mut fbytes);
+            append_typed_json_value(&mut out, col, r, &mut float_buffer);
         }
         out.push('}');
     }
@@ -8230,7 +8237,7 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
             .saturating_add(16),
     );
     out.push('{');
-    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    let mut float_buffer = ryu::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(',');
@@ -8242,7 +8249,7 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
                 out.push(',');
             }
             out.push_str(&colkeys[c]);
-            append_typed_json_value(&mut out, col, r, &mut fbytes);
+            append_typed_json_value(&mut out, col, r, &mut float_buffer);
         }
         out.push('}');
     }
@@ -8255,7 +8262,7 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
 /// section of the `split` orient.
 fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize) {
     out.push('[');
-    let mut fbytes: Vec<u8> = Vec::with_capacity(32);
+    let mut float_buffer = ryu::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(',');
@@ -8265,7 +8272,7 @@ fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize) {
             if c > 0 {
                 out.push(',');
             }
-            append_typed_json_value(out, col, r, &mut fbytes);
+            append_typed_json_value(out, col, r, &mut float_buffer);
         }
         out.push(']');
     }
@@ -20518,6 +20525,35 @@ mod tests {
         let frame = read_csv_str("x\n1.5\ninf\n-inf\n").expect("parse");
         let json = write_json_string(&frame, JsonOrient::Records).expect("json");
         assert_eq!(json, r#"[{"x":1.5},{"x":null},{"x":null}]"#);
+    }
+
+    #[test]
+    fn json_direct_ryu_float_spelling_matches_serde() {
+        // The typed writer deliberately bypasses serde's formatter on its hot
+        // path. Lock its shortest-round-trip spelling to the serde reference
+        // at fixed, scientific, subnormal, signed-zero, and largest-finite
+        // boundaries before the writer uses it for every cell in a document.
+        for value in [
+            -0.0,
+            0.0,
+            1.0,
+            -1.0,
+            1.25,
+            1e-7,
+            1e-6,
+            1e20,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            f64::MAX,
+        ] {
+            let mut direct = String::new();
+            let mut float_buffer = ryu::Buffer::new();
+            super::append_json_finite_f64(&mut direct, value, &mut float_buffer);
+            assert_eq!(
+                direct,
+                serde_json::to_string(&value).expect("finite JSON float")
+            );
+        }
     }
 
     #[test]
