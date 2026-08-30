@@ -363,6 +363,117 @@ pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     output_nan
 }
 
+/// The `+`, `-` and `*` siblings of [`div_f64_into`], generated from one body.
+///
+/// br-frankenpandas-uza04. `div` was given this crate's 4-lane width because
+/// `div @1M` was a certified 0.885x loss; `add`, `sub` and `mul` share EVERY part
+/// of that kernel — the same `&[f64]` in, the same contiguous store, the same
+/// NaN witness fold — and were left on the baseline `+sse4.1` build, which is
+/// 2-lane `addpd`/`subpd`/`mulpd` against numpy's 4-lane AVX2. Nothing about the
+/// three ops made them a different case; `div` was simply the row that certified
+/// in the window where the width work was done.
+///
+/// TWO SEPARATE GAINS, and the second is why these should beat the 1.2707x that a
+/// blanket `+avx2` flag bought `add @1M` on 2026-08-17 (docs/NEGATIVE_EVIDENCE.md,
+/// CrimsonPine, a row that measured the WIDTH only):
+///
+///   1. WIDTH. 4 lanes per instruction instead of 2.
+///   2. THE WITNESS FOLD. That is the half the flag alone cannot reach. A `bool`
+///      accumulator makes LLVM narrow every 256-bit compare back to 128 bits —
+///      `vcmpunordpd` then `vextractf128` + `vpackssdw` + `vpor`, four
+///      instructions per four doubles — while an explicit `Mask` fold is
+///      `vcmpXpd` + `vorpd`, both 256-bit. The div comment above measures that
+///      overhead directly, and it is proportionally LARGER here than it was
+///      there: it is a fixed per-element cost sitting beside one `vaddpd` (~4
+///      cycles) instead of beside one `vdivpd` (~13), so the fraction of the
+///      loop it wastes is bigger for the cheap ops, not smaller.
+///
+/// BIT-IDENTICAL to the baseline loop, for the same reason `div` is: IEEE-754
+/// `+`, `-` and `*` are each correctly rounded and lane-independent, so a 4-wide
+/// `vaddpd` returns the same bits per lane as `addsd` on the same inputs. Width
+/// changes how many retire per cycle, not what any one returns. There is no
+/// reduction here to reassociate; and although this crate carries `+fma`, a lone
+/// `a + b` / `a - b` / `a * b` has no `a * b + c` shape for the compiler to
+/// contract, so the FMA half of the profile cannot alter the arithmetic either.
+///
+/// `x != x` is NaN by IEEE, so `simd_ne(r, r)` is exactly lane-wise `is_nan` and
+/// the returned witness is the same boolean the scalar fold produces.
+///
+/// ⚠️ `#[inline(never)]` AND NON-GENERIC, for the reason documented on
+/// [`materialize_float64_dot`]: an inlinable or generic entry point codegens in
+/// the CALLER's baseline crate and the `+avx2` flag is silently lost, leaving a
+/// green build with correct values and no speedup. That is why this is a macro
+/// over three concrete `pub fn`s rather than one function generic over the op.
+///
+/// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`. This crate is
+/// compiled for AVX2 unconditionally; entering it on a pre-AVX2 CPU is SIGILL.
+macro_rules! elementwise_f64_kernel {
+    ($name:ident, $simd_op:expr, $scalar_op:expr, $doc:literal) => {
+        #[doc = $doc]
+        ///
+        /// Returns whether any output element was NaN. See
+        /// [`elementwise_f64_kernel`] for the width/witness rationale and the
+        /// bit-identity argument.
+        ///
+        /// # Panics
+        /// Panics if `a`, `b` and `out` do not all have the same length.
+        #[inline(never)]
+        pub fn $name(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+            assert_eq!(
+                a.len(),
+                b.len(),
+                concat!(stringify!($name), ": a/b length mismatch")
+            );
+            assert_eq!(
+                a.len(),
+                out.len(),
+                concat!(stringify!($name), ": out length mismatch")
+            );
+
+            const LANES: usize = 4;
+            let n = a.len();
+            let chunk_end = n - n % LANES;
+            let mut nan_acc = Mask::<i64, LANES>::splat(false);
+            let mut index = 0usize;
+            while index < chunk_end {
+                let av = Simd::<f64, LANES>::from_slice(&a[index..index + LANES]);
+                let bv = Simd::<f64, LANES>::from_slice(&b[index..index + LANES]);
+                let r = $simd_op(av, bv);
+                nan_acc |= r.simd_ne(r);
+                r.copy_to_slice(&mut out[index..index + LANES]);
+                index += LANES;
+            }
+            let mut output_nan = nan_acc.any();
+            // Scalar remainder, identical to the baseline body.
+            for offset in chunk_end..n {
+                let r = $scalar_op(a[offset], b[offset]);
+                output_nan |= r.is_nan();
+                out[offset] = r;
+            }
+            output_nan
+        }
+    };
+}
+
+elementwise_f64_kernel!(
+    add_f64_into,
+    |x: Simd<f64, 4>, y: Simd<f64, 4>| x + y,
+    |x: f64, y: f64| x + y,
+    "Lane-wise `out[i] = a[i] + b[i]`, four doubles per instruction."
+);
+elementwise_f64_kernel!(
+    sub_f64_into,
+    |x: Simd<f64, 4>, y: Simd<f64, 4>| x - y,
+    |x: f64, y: f64| x - y,
+    "Lane-wise `out[i] = a[i] - b[i]`, four doubles per instruction."
+);
+elementwise_f64_kernel!(
+    mul_f64_into,
+    |x: Simd<f64, 4>, y: Simd<f64, 4>| x * y,
+    |x: f64, y: f64| x * y,
+    "Lane-wise `out[i] = a[i] * b[i]`, four doubles per instruction."
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
