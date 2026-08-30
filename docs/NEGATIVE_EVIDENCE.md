@@ -42550,3 +42550,73 @@ product-side. The six above should not be carried as FrankenPandas divergences
 and should not be "fixed" in the product — changing FrankenPandas to match those
 expectations would make it disagree with live pandas, which is the exact
 inversion this campaign exists to prevent.
+
+### 2026-08-30 BeigeAspen — sqrt's ISA-isolated 4-lane arm is a KEPT WIN at 1M (0.931x -> 1.724x certified) and a measured ZERO-GAIN at 10M, where the lane is bandwidth-bound and width cannot help [br-frankenpandas-uza04]
+
+`Column::sqrt` now routes an all-valid `&[f64]` through `fp_dot_kernel::sqrt_f64_into`
+(4-lane `vsqrtpd`) instead of the baseline `+sse4.1` kernel's 2-lane `sqrtpd`. This
+entry records BOTH halves of the measurement, because the second half refutes the
+hypothesis I opened the work with.
+
+**Campaign result class:** `incumbent-win`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae invocation_id=vs-pandas-20260830T204127.500211Z-pid3773519 measured_ratio=1.724x
+
+**Executing ELF SHA-256 (self-reported by process):** bench_elf_sha256=1c90308f8532508e0f4fff37347e2794dc6aba72e8d7883b6cf26e38d700ba53 (87335512 bytes) /data/projects/.scratch/beigeaspen/sqrt-ab/target/release-perf/fp-bench
+
+**A/A null control (same invocation):** the A/A null median ratio for each arm, FrankenPandas and pandas, limit 0.02 absolute deviation from unity — 1M candidate FrankenPandas=0.995733 pandas=0.999066 (both inside); 1M baseline FrankenPandas=1.000273 pandas=0.996559 (both inside); 10M candidate FrankenPandas=0.981121 pandas=0.998385 (both inside); 10M baseline FrankenPandas=1.040940 OUTSIDE the limit with pandas=1.003877 inside, which is why that one row is NULL_UNDECIDABLE and is not quoted as a result. The 1M pair additionally shows the pandas arm itself moving only 1077.91us to 1080.04us, 0.2%, across the two FrankenPandas arms, so the 1M effect is FrankenPandas changing and not host drift between arms.
+
+**Median-CI decision:** the 1M candidate median effect is 0.724 (ratio 1.724) and its CI cleared the required 2x null-margin threshold, so the row is decidable; the 10M candidate median effect is 0.304 (ratio 0.696) and its CI also cleared that threshold, decidable, and is a true certified LOSS the arm did not change.
+
+**CV role:** provenance only; CV had no vote. Observed CV 5.4-8.5% across all four rows.
+
+THE A/B IS EXACT. Both ELFs are built from the same pre-migration base
+(d6464c642), so the 00ze3 DType-ownership migration is absent from both and cannot
+confound. They differ by the sqrt arm and nothing else, confirmed by symbol:
+candidate `1c90308f8532` has `sqrt_f64_into` (56 `%ymm`, 5 `vsqrtpd`); baseline
+`ea9a6b2d9044` does not contain the symbol at all.
+
+MEASURED, live pandas 2.2.3 / numpy 2.3.5, balanced-square, host thinkstation1
+(Threadripper 5975WX, 32c/64t, avx2+fma, no avx512f), arms run back to back in one
+window, load 11-16, threads=1 on every row:
+
+| n | arm | ratio | fp p50 | pandas p50 | verdict |
+|---|---|---:|---:|---:|---|
+| 1M | candidate | **1.724x** | 628.69us | 1077.91us | CERTIFIED FASTER |
+| 1M | baseline | 0.931x | 1156.50us | 1080.04us | CERTIFIED SLOWER |
+| 10M | candidate | 0.696x | 25133.91us | 17411.19us | CERTIFIED SLOWER |
+| 10M | baseline | 0.704x | 25035.45us | 17295.22us | NULL_UNDECIDABLE |
+
+`sqrt @1M` FLIPS SIGN: certified 0.931x loss -> certified 1.724x win, FP-side
+1156.50 / 628.69 = **1.8395x**. It lands on the figure bead 4kig1 banked for a
+blanket `+avx2` build (1.725x) by a different mechanism — per-package ISA
+isolation, which leaves `log` and the rest of fp-columnar at baseline and so avoids
+the collateral that got the blanket `x86-64-v3` policy rejected on 2026-07-31
+(sqrt 0.361x, log regressed).
+
+**ZERO-GAIN AT 10M, AND THE HYPOTHESIS IS REFUTED THERE.** 25133.91us against the
+baseline's 25035.45us is 0.4% SLOWER, inside noise: the arm buys nothing. This was
+PRE-REGISTERED as the falsification condition on br-frankenpandas-uza04 before the
+run ("if the post-arm row does not move materially off 0.808x, the width hypothesis
+is wrong for this lane"), and at 10M it is met.
+
+**Counted mechanism:** 10M f64 is 80MB in + 80MB out; this host's L3 is 128MB, so
+the working set does not fit and the lane is memory-bandwidth-bound — 160MB at
+25.1ms is ~6.4 GB/s against pandas' ~9.2 GB/s on the same bytes. Widening the
+arithmetic cannot help a pipeline waiting on DRAM. At 1M the working set is 8MB +
+8MB, L3-resident, so the square-root unit's throughput is the actual limit and 4
+lanes double it. The error being recorded is applying a result banked AT 1M to a
+lane at 10M and calling it the same lever.
+
+DECISION: KEEP. Certified 1.85x FP-side at 1M, neutral at 10M, so there is no size
+at which the arm costs anything; reverting to honour the 10M null would discard the
+1M win. Live on main as 833d3c5b5 (the arm, swept in under another pane's commit)
+plus fff1aa253 (the `record_elementwise_workers(1)` fix without which sqrt reports a
+parallel split it never took, and every `thread_count_actually_used` for the lane is
+wrong).
+
+DO NOT RE-RUN THE WIDTH EXPERIMENT AT 10M. It is measured and dead. `sqrt @10M`
+remains a real ~0.70x loss and it is a STREAMING problem: not ISA width, and not
+thread count either — both arms ran serial, and sqrt's `par_min_override =
+usize::MAX` is a measured choice (parallelism worth 1.038x at 10M, inside noise),
+not an oversight.
