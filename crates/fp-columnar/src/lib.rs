@@ -27843,6 +27843,17 @@ impl Column {
             && std::arch::is_x86_feature_detected!("avx2")
             && let Some(data) = self.as_f64_slice()
         {
+            // ⚠️ RECORD THE SPLIT, or every `sqrt` row's thread count is a lie.
+            // This arm bypasses `par_map_slice_f64_domain_fused*`, which is where
+            // `record_elementwise_workers` normally runs, and the recorder is a
+            // LAST-WRITER cell — skipping it does not report "unknown", it
+            // reports whatever op ran before. Caught by
+            // `the_kernel_reports_the_worker_split_it_actually_chose_284ul`, which
+            // failed `left: 4, right: 1`: sqrt appeared to have taken a parallel
+            // split it never took. `1` is correct and not a guess — this kernel is
+            // a single serial pass, which is also what sqrt's
+            // `par_min_override = usize::MAX` selects on the generic arm.
+            record_elementwise_workers(1);
             let mut out = vec![0.0_f64; data.len()];
             let (domain_held, computed_all_finite) = fp_dot_kernel::sqrt_f64_into(data, &mut out);
             if domain_held {
