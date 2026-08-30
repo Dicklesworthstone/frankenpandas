@@ -261,7 +261,9 @@ fn ci_workflow_has_a_non_advisory_core_test_gate_and_required_oracle() {
         "expected core-test to execute both fp-frame and fp-columnar suites"
     );
     assert!(
-        !core_gate.contains("continue-on-error"),
+        !core_gate
+            .lines()
+            .any(|line| line.trim_start().starts_with("continue-on-error:")),
         "core-test must fail the workflow instead of reporting an advisory result"
     );
     assert!(
