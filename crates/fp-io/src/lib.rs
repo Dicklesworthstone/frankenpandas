@@ -8008,17 +8008,17 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
     Some((cols, keys))
 }
 
-/// Append a finite JSON float with the same shortest-round-trip spelling serde
-/// uses, but without constructing a formatter or a temporary byte vector per
-/// cell. `ryu::Buffer` owns its fixed stack scratch and is reused for the
-/// complete JSON document.
+/// Append a finite JSON float with the exact shortest-round-trip spelling
+/// `serde_json` uses, but without constructing a formatter or a temporary byte
+/// vector per cell. `zmij::Buffer` owns its fixed stack scratch and is reused
+/// for the complete JSON document.
 #[inline]
-fn append_json_finite_f64(out: &mut String, value: f64, float_buffer: &mut ryu::Buffer) {
+fn append_json_finite_f64(out: &mut String, value: f64, float_buffer: &mut zmij::Buffer) {
     out.push_str(float_buffer.format_finite(value));
 }
 
 /// Append cell `(col, r)` as a JSON value, byte-identical to serde:
-/// `i64` via `append_i64_decimal`, finite `f64` via Ryu's shortest formatter,
+/// `i64` via `append_i64_decimal`, finite `f64` via serde's Zmij formatter,
 /// non-finite `f64` as `null` (matching `scalar_to_json`), `bool` as
 /// `true`/`false`. `float_buffer` is a reusable direct-byte formatter scratch.
 #[inline]
@@ -8026,7 +8026,7 @@ fn append_typed_json_value(
     out: &mut String,
     col: &JCol<'_>,
     r: usize,
-    float_buffer: &mut ryu::Buffer,
+    float_buffer: &mut zmij::Buffer,
 ) {
     match col {
         JCol::I(s) => append_i64_decimal(out, s[r]),
@@ -8104,7 +8104,7 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
     if !as_jsonl {
         out.push('[');
     }
-    let mut float_buffer = ryu::Buffer::new();
+    let mut float_buffer = zmij::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(if as_jsonl { '\n' } else { ',' });
@@ -8197,7 +8197,7 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
             .saturating_add(16),
     );
     out.push('{');
-    let mut float_buffer = ryu::Buffer::new();
+    let mut float_buffer = zmij::Buffer::new();
     for (c, col) in cols.iter().enumerate() {
         if c > 0 {
             out.push(',');
@@ -8237,7 +8237,7 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
             .saturating_add(16),
     );
     out.push('{');
-    let mut float_buffer = ryu::Buffer::new();
+    let mut float_buffer = zmij::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(',');
@@ -8262,7 +8262,7 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
 /// section of the `split` orient.
 fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize) {
     out.push('[');
-    let mut float_buffer = ryu::Buffer::new();
+    let mut float_buffer = zmij::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(',');
@@ -20528,7 +20528,7 @@ mod tests {
     }
 
     #[test]
-    fn json_direct_ryu_float_spelling_matches_serde() {
+    fn json_direct_float_spelling_matches_serde() {
         // The typed writer deliberately bypasses serde's formatter on its hot
         // path. Lock its shortest-round-trip spelling to the serde reference
         // at fixed, scientific, subnormal, signed-zero, and largest-finite
@@ -20547,7 +20547,7 @@ mod tests {
             f64::MAX,
         ] {
             let mut direct = String::new();
-            let mut float_buffer = ryu::Buffer::new();
+            let mut float_buffer = zmij::Buffer::new();
             super::append_json_finite_f64(&mut direct, value, &mut float_buffer);
             assert_eq!(
                 direct,

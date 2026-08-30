@@ -74,6 +74,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde-pickle = "1.2.0"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 thiserror = "2.0.19"
+zmij = "1.0.21"
 # tracing: optional observability layer per br-frankenpandas-7gd4.
 # Downstream crates add `tracing = { workspace = true, optional = true }`
 # and gate it behind their own `tracing` feature so users who don't opt
