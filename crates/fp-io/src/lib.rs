@@ -798,8 +798,8 @@ struct FusedNumericField {
     end: usize,
 }
 
-/// Scans one CSV field starting at `start`, fusing delimiter detection with
-/// decimal digit accumulation in a single pass over the bytes.
+/// Scans one CSV field starting at `start`, using an optimized byte delimiter
+/// scan before decimal digit accumulation.
 ///
 /// Admits only `[+-]?digits[.digits]` tokens with at most 18 mantissa digits
 /// (so the `u64` accumulator and the `i64` integer route can never overflow)
@@ -814,6 +814,8 @@ struct FusedNumericField {
 /// `None` and must take the existing per-field fallback route.
 #[inline]
 fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumericField> {
+    let remaining = data.get(start..)?;
+    let end = start + memchr::memchr2(b',', b'\n', remaining).unwrap_or(remaining.len());
     let mut pos = start;
     let mut negative = false;
     match data.get(pos) {
@@ -829,7 +831,7 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
     let mut digits = 0usize;
     let mut frac_digits = 0usize;
     let mut seen_dot = false;
-    loop {
+    while pos < end {
         match data.get(pos) {
             Some(&byte @ b'0'..=b'9') => {
                 if digits == 18 {
@@ -844,7 +846,6 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
                 seen_dot = true;
                 pos += 1;
             }
-            Some(b',' | b'\n') | None => break,
             Some(_) => return None,
         }
     }
@@ -861,7 +862,7 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
         Some(FusedNumericField {
             int_value: None,
             float_value: if negative { -magnitude } else { magnitude },
-            end: pos,
+            end,
         })
     } else {
         // digits <= 18 => mantissa < 10^18 < i64::MAX, so the cast is exact.
@@ -878,7 +879,7 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
             } else {
                 float_magnitude
             },
-            end: pos,
+            end,
         })
     }
 }
@@ -1023,7 +1024,7 @@ fn split_simple_numeric_csv_chunks(
     while start < data.len() {
         let mut end = start.saturating_add(target_len).min(data.len());
         if end < data.len() {
-            let relative_newline = data[end..].iter().position(|byte| *byte == b'\n')?;
+            let relative_newline = memchr::memchr(b'\n', &data[end..])?;
             end += relative_newline + 1;
         }
         if end <= start {
@@ -1059,16 +1060,23 @@ fn parse_simple_numeric_csv_chunk(
             // Fallback: locate the delimiter with the original abort rules
             // (quote or bare CR anywhere rejects the whole chunk) and route
             // the raw field through the general numeric field parser.
-            let mut idx = pos;
-            let end = loop {
-                match data.get(idx) {
-                    None | Some(b',' | b'\n') => break idx,
-                    Some(b'"') => return None,
-                    Some(b'\r') if data.get(idx + 1).copied() != Some(b'\n') => return None,
-                    Some(_) => idx += 1,
+            let remaining = &data[pos..];
+            let end = pos
+                + memchr::memchr2(b',', b'\n', remaining).unwrap_or(remaining.len());
+            let field = &data[pos..end];
+            let mut special_start = 0usize;
+            while let Some(relative_special) =
+                memchr::memchr2(b'"', b'\r', &field[special_start..])
+            {
+                let special = special_start + relative_special;
+                if field[special] == b'"'
+                    || data.get(pos + special + 1).copied() != Some(b'\n')
+                {
+                    return None;
                 }
-            };
-            if !push_csv_default_numeric_field(&mut typed_columns[column_idx], &data[pos..end]) {
+                special_start = special + 1;
+            }
+            if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field) {
                 return None;
             }
             end
@@ -2319,7 +2327,7 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                 return None;
             }
             cols.push(FastCol::BN(s, validity));
-        } else if column.dtype() == DType::Datetime64 {
+        } else if column.dtype().is_datetime() {
             // A validity-mask null (data slot ≠ NaT) would diverge from the
             // general path's `Scalar::Null` → na_rep; require no mask-nulls. NaT
             // sentinels (kept AS DATA by an all-valid backing) are rendered as
@@ -2587,7 +2595,7 @@ pub fn write_csv_string_with_options(
         .iter()
         .map(|name| {
             frame.column(name).and_then(|column| {
-                (column.dtype() == DType::Datetime64).then(|| datetime_csv_format(column))
+                column.dtype().is_datetime().then(|| datetime_csv_format(column))
             })
         })
         .collect();
@@ -8905,7 +8913,7 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Bool | DType::BoolNullable => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
         DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
-        DType::Datetime64 => ArrowDataType::Int64, // store as nanoseconds
+        DType::Datetime64 { .. } => ArrowDataType::Int64, // store as nanoseconds
         DType::Period => ArrowDataType::Int64, // store as ordinal
         DType::Interval => ArrowDataType::Utf8, // store as string until arrow interval lands
         DType::Sparse => ArrowDataType::Utf8, // marker fallback until sparse arrays land
@@ -8999,7 +9007,7 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             }
             Arc::new(builder.finish())
         }
-        DType::Datetime64 => {
+        DType::Datetime64 { .. } => {
             let mut builder = Int64Builder::with_capacity(column.len());
             for value in column.values() {
                 match value {
@@ -11639,7 +11647,7 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
         DType::Bool | DType::BoolNullable => "INTEGER",
         DType::Null => "TEXT",
         DType::Timedelta64 => "INTEGER", // store as nanoseconds
-        DType::Datetime64 => "INTEGER",  // store as nanoseconds
+        DType::Datetime64 { .. } => "INTEGER",  // store as nanoseconds
         DType::Period => "INTEGER",      // store as ordinal
         DType::Interval => "TEXT",       // store as string
         DType::Sparse => "TEXT",
@@ -12564,7 +12572,7 @@ fn mysql_dtype_sql(dtype: DType) -> &'static str {
         DType::Int64 | DType::Int64Nullable => "BIGINT",
         DType::Float64 | DType::Float64Nullable => "DOUBLE",
         DType::Utf8 => "TEXT",
-        DType::Datetime64 => "DATETIME",
+        DType::Datetime64 { .. } => "DATETIME",
         DType::Timedelta64 => "TIME",
         _ => "TEXT",
     }
@@ -18306,7 +18314,7 @@ mod tests {
         // sub-second component and always wrote 00:00:00.)
         fn dt_frame(nanos: &[i64]) -> DataFrame {
             let values: Vec<Scalar> = nanos.iter().map(|&n| Scalar::Datetime64(n)).collect();
-            let col = Column::new(DType::Datetime64, values).expect("col");
+            let col = Column::new(DType::datetime64_naive(), values).expect("col");
             let mut cols = BTreeMap::new();
             cols.insert("d".to_string(), col);
             let index = Index::from_i64((0..nanos.len() as i64).collect());
@@ -23611,7 +23619,7 @@ mod tests {
                 | DType::Bool
                 | DType::BoolNullable
                 | DType::Timedelta64
-                | DType::Datetime64 => "BIGINT",
+                | DType::Datetime64 { .. } => "BIGINT",
                 // Paired with `Float64` the way `Int64Nullable` is paired with
                 // `Int64` above. This match is EXHAUSTIVE on purpose — leaving it
                 // that way is what turned the missing variant into a compile error
@@ -27848,7 +27856,7 @@ mod tests {
         let col = frame.column("ts").expect("ts");
         // parse_dates wins over the dtype override and yields typed
         // Datetime64[ns] (br-frankenpandas-0ezw7).
-        assert_eq!(col.dtype(), DType::Datetime64);
+        assert_eq!(col.dtype(), DType::datetime64_naive());
     }
 
     // ── Schema probes (br-frankenpandas-6dk9 / fd90.13) ─────────────────
@@ -34724,6 +34732,42 @@ mod fused_numeric_csv_field_tests {
             }
             CsvTypedColumnValues::Int64(_) => panic!("expected Float64 column"),
         }
+    }
+}
+
+#[cfg(test)]
+mod simd_csv_delimiter_tests {
+    use super::{
+        CsvTypedColumnValues, parse_simple_numeric_csv_chunk, split_simple_numeric_csv_chunks,
+    };
+
+    #[test]
+    fn delimiter_scan_keeps_chunks_on_record_boundaries() {
+        let data = b"1,2\n3,4\n5,6\n7,8\n";
+        let chunks = split_simple_numeric_csv_chunks(data, 3)
+            .expect("multiple newline-terminated rows must split");
+
+        assert_eq!(chunks.first().map(|&(start, _)| start), Some(0));
+        assert_eq!(chunks.last().map(|&(_, end)| end), Some(data.len()));
+        for window in chunks.windows(2) {
+            assert_eq!(window[0].1, window[1].0);
+        }
+        for &(_, end) in &chunks {
+            assert_eq!(data[end - 1], b'\n');
+        }
+    }
+
+    #[test]
+    fn fallback_delimiter_scan_preserves_crlf_and_rejects_quotes() {
+        let (columns, rows) = parse_simple_numeric_csv_chunk(b"1,2\r\n3,4\r\n", 2)
+            .expect("CRLF numeric records must retain the fallback behavior");
+        assert_eq!(rows, 2);
+        assert!(matches!(
+            columns.as_slice(),
+            [CsvTypedColumnValues::Int64(left), CsvTypedColumnValues::Int64(right)]
+                if left == &[1, 3] && right == &[2, 4]
+        ));
+        assert!(parse_simple_numeric_csv_chunk(b"1,\"2\"\n", 2).is_none());
     }
 }
 

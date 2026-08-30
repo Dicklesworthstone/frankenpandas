@@ -24,6 +24,7 @@ fp-frame = { path = "../fp-frame", version = "0.2.0" }
 fp-index = { path = "../fp-index", version = "0.2.0" }
 fp-types = { path = "../fp-types", version = "0.2.0" }
 hdf5 = { workspace = true, optional = true }
+memchr = { workspace = true }
 parquet = { workspace = true }
 quick-xml = { workspace = true }
 rust_xlsxwriter = { workspace = true }

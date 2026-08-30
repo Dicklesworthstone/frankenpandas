@@ -6907,7 +6907,7 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
         DType::Timedelta64 => {
             Scalar::Timedelta64(i64::from(payload % 100) * Timedelta::NANOS_PER_HOUR)
         }
-        DType::Datetime64 => Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000),
+        DType::Datetime64 { .. } => Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000),
         DType::Period => Scalar::Period(Period::new(i64::from(payload % 100), PeriodFreq::Daily)),
         DType::Interval => Scalar::Interval(fp_types::Interval {
             left: f64::from(payload % 10),
@@ -15232,7 +15232,7 @@ fn parse_constructor_dtype_spec(dtype_spec: &str) -> Result<DType, String> {
         //     pd.DataFrame([["2026-01-01"]], dtype="datetime64[ns]")
         //       -> dtype datetime64[ns], Timestamp('2026-01-01 00:00:00')
         // i.e. pandas SUCCEEDS where the corpus asserted it raises.
-        "datetime64[ns]" | "datetime64" => Ok(DType::Datetime64),
+        "datetime64[ns]" | "datetime64" => Ok(DType::datetime64_naive()),
         _ => Err(format!(
             "unsupported constructor dtype '{}'",
             dtype_spec.trim()
@@ -28920,7 +28920,7 @@ mod constructor_dtype_tier_locks_jozfk {
         // The other direction: admitting datetime64 must not silently regress.
         assert_eq!(
             parse_constructor_dtype_spec("datetime64[ns]"),
-            Ok(DType::Datetime64),
+            Ok(DType::datetime64_naive()),
             "datetime64[ns] was deliberately admitted against live pandas 2.2.3; \
              re-refusing it would restore a fixture that asserts FrankenPandas' own \
              error text as pandas' behaviour"

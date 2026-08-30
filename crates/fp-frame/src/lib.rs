@@ -474,7 +474,7 @@ fn dtype_memory_width(dtype: DType) -> usize {
         | DType::Float64Nullable
         | DType::Categorical
         | DType::Timedelta64
-        | DType::Datetime64
+        | DType::Datetime64 { .. }
         | DType::Period => 8,
         DType::Interval => 24,
         DType::Utf8 => std::mem::size_of::<usize>(),
@@ -3506,7 +3506,7 @@ fn dtype_to_table_schema_type(dtype: DType) -> &'static str {
         DType::Float64 | DType::Float64Nullable => "number",
         DType::Utf8 | DType::Categorical => "string",
         DType::Timedelta64 => "duration",
-        DType::Datetime64 => "datetime",
+        DType::Datetime64 { .. } => "datetime",
         DType::Period | DType::Interval => "string",
         DType::Null | DType::Sparse => "any",
     }
@@ -4787,7 +4787,7 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
             },
             _ => Scalar::Timedelta64(Timedelta::NAT),
         },
-        DType::Datetime64 => match val {
+        DType::Datetime64 { .. } => match val {
             Scalar::Datetime64(_) => val.clone(),
             Scalar::Int64(n) => Scalar::Datetime64(*n),
             Scalar::Utf8(s) => parse_datetime64_nanos(s)
@@ -8459,12 +8459,12 @@ impl Series {
         op: ArithmeticOp,
     ) -> Result<Option<Column>, FrameError> {
         let output_datetime = match (self.column.dtype(), other.column.dtype(), op) {
-            (DType::Datetime64, DType::Datetime64, ArithmeticOp::Sub)
+            (DType::Datetime64 { .. }, DType::Datetime64 { .. }, ArithmeticOp::Sub)
             | (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub) => {
                 false
             }
-            (DType::Datetime64, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub)
-            | (DType::Timedelta64, DType::Datetime64, ArithmeticOp::Add) => true,
+            (DType::Datetime64 { .. }, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub)
+            | (DType::Timedelta64, DType::Datetime64 { .. }, ArithmeticOp::Add) => true,
             _ => return Ok(None),
         };
 
@@ -18699,7 +18699,7 @@ impl Series {
     ///
     /// Matches `pd.Series.cummin(skipna=True)`.
     pub fn cummin(&self) -> Result<Self, FrameError> {
-        if self.column.dtype() == DType::Datetime64 {
+        if self.column.dtype().is_datetime() {
             return self.cum_datetime64_extreme(false);
         }
         // Typed prefix-min fast path: Int64 acc.min(v); Float64 strict `v<acc`
@@ -18928,7 +18928,7 @@ impl Series {
     ///
     /// Matches `pd.Series.cummax(skipna=True)`.
     pub fn cummax(&self) -> Result<Self, FrameError> {
-        if self.column.dtype() == DType::Datetime64 {
+        if self.column.dtype().is_datetime() {
             return self.cum_datetime64_extreme(true);
         }
         // Typed prefix-max fast path: Int64 acc.max(v); Float64 strict `v>acc`
@@ -19969,7 +19969,7 @@ impl Series {
         // is false ⇒ Bool(false), matching the generic path's `val.is_missing() ⇒
         // Bool(false)`. Bit-identical to the (now Datetime64-aware) generic loop.
         let temporal_bounds: Option<(i64, i64)> = match (self.column.dtype(), left, right) {
-            (DType::Datetime64, Scalar::Datetime64(lo), Scalar::Datetime64(hi))
+            (DType::Datetime64 { .. }, Scalar::Datetime64(lo), Scalar::Datetime64(hi))
                 if *lo != fp_types::Timestamp::NAT && *hi != fp_types::Timestamp::NAT =>
             {
                 Some((*lo, *hi))
@@ -19983,7 +19983,7 @@ impl Series {
         };
         if let Some((lo, hi)) = temporal_bounds
             && self.column.validity().all()
-            && let Some(d) = if self.column.dtype() == DType::Datetime64 {
+            && let Some(d) = if self.column.dtype().is_datetime() {
                 self.column.as_datetime64_slice()
             } else {
                 self.column.as_timedelta64_slice()
@@ -49707,7 +49707,7 @@ impl DatetimeAccessor<'_> {
 
     /// True when the underlying column is a typed `Datetime64` backing.
     fn is_typed_datetime(&self) -> bool {
-        self.series.column().dtype() == DType::Datetime64
+        self.series.column().dtype().is_datetime()
     }
 
     /// Extract year component.
@@ -54146,6 +54146,21 @@ pub fn to_datetime_with_options(
         }
     }
 
+    // A uniform timezone-aware input is a typed pandas datetime column, not an
+    // object/string column. Keep UTC nanoseconds in Column's contiguous datetime
+    // backing and carry the shared zone on its dtype. Mixed zones intentionally
+    // do not enter this path: pandas cannot unify them into one DatetimeTZDtype.
+    if options.unit.is_none()
+        && options.format.is_none()
+        && options.origin.is_none()
+        && !options.utc
+        && let Some((nanos, timezone)) = uniform_timezone_datetime_values(series.values())
+    {
+        let index = series.index().clone();
+        let column = Column::from_datetime64_values_with_timezone(nanos, timezone);
+        return Series::new(series.name().to_owned(), index, column);
+    }
+
     let converted = to_datetime_values_with_options(series.values(), options)?;
 
     // Per br-frankenpandas-iy82u: pandas pd.to_datetime preserves source axis name.
@@ -54664,6 +54679,41 @@ fn datetime64_scalar_from_parsed_datetime(value: Scalar) -> Scalar {
         }
         other => other,
     }
+}
+
+/// Return UTC nanoseconds and the one shared pandas timezone for a fully
+/// timezone-aware string sequence. A single dtype cannot represent a mixture
+/// of zones, so any null, non-string, naive, invalid, or differently-labelled
+/// input deliberately declines this typed path.
+fn uniform_timezone_datetime_values(values: &[Scalar]) -> Option<(Vec<i64>, String)> {
+    let mut timezone: Option<String> = None;
+    let mut nanos = Vec::with_capacity(values.len());
+
+    for value in values {
+        let Scalar::Utf8(rendered) = value else {
+            return None;
+        };
+        let trimmed = rendered.trim();
+        let (without_annotation, named_zone) = split_zone_annotation(trimmed);
+        let parsed = parse_tz_aware_datetime(trimmed).ok()?;
+        let label = match named_zone {
+            Some(name) => name.to_owned(),
+            None if fixed_offset_suffix(without_annotation) == Some("Z") => "UTC".to_owned(),
+            None => format!("UTC{}", parsed.fixed.format("%:z")),
+        };
+        match &timezone {
+            Some(existing) if existing != &label => return None,
+            None => timezone = Some(label),
+            Some(_) => {}
+        }
+        let value = parsed.fixed.timestamp_nanos_opt()?;
+        if value == fp_types::Timestamp::NAT {
+            return None;
+        }
+        nanos.push(value);
+    }
+
+    Some((nanos, timezone?))
 }
 
 /// Normalize a parsed `to_datetime(utc=True)` scalar to a UTC `Datetime64`.
@@ -57470,7 +57520,7 @@ impl LazyTransposeFramePlan {
                     })
                     .collect(),
             ),
-            DType::Datetime64 => Column::from_datetime64_values(
+            DType::Datetime64 { .. } => Column::from_datetime64_values(
                 self.source_columns
                     .iter()
                     .map(|source| {
@@ -58936,7 +58986,7 @@ impl HomogeneousTransposeColumns<'_> {
             }
             Self::Int64(_) | Self::NullableInt64(_) => DType::Int64,
             Self::Bool(_) => DType::Bool,
-            Self::Datetime64(_) => DType::Datetime64,
+            Self::Datetime64(_) => DType::datetime64_naive(),
             Self::Timedelta64(_) => DType::Timedelta64,
             Self::Utf8(_) => DType::Utf8,
         }
@@ -61752,7 +61802,7 @@ impl DataFrame {
                 | DType::Utf8
                 | DType::Categorical
                 | DType::Timedelta64
-                | DType::Datetime64
+                | DType::Datetime64 { .. }
                 | DType::Period => {
                     let mut seen = HashSet::with_capacity(column.len());
                     for value in column.values() {
@@ -63127,7 +63177,7 @@ impl DataFrame {
                                         col_names[idx]
                                     ))
                                 })?,
-                            DType::Datetime64 => parse_datetime64_nanos(raw)
+                            DType::Datetime64 { .. } => parse_datetime64_nanos(raw)
                                 .map(Scalar::Datetime64)
                                 .map_err(|_| {
                                     FrameError::CompatibilityRejected(format!(
@@ -78493,7 +78543,7 @@ impl DataFrame {
             | DType::Int64
             | DType::Float64
             | DType::Timedelta64
-            | DType::Datetime64 => true,
+            | DType::Datetime64 { .. } => true,
             // A string column orders lexicographically, but only if EVERY value
             // is a string: pandas compares the raw objects, so a nan among them
             // raises rather than being skipped.
@@ -84549,7 +84599,7 @@ impl DataFrame {
                 ))
             } else if matches!(
                 col.dtype(),
-                DType::Int64 | DType::Float64 | DType::Bool | DType::Datetime64
+                DType::Int64 | DType::Float64 | DType::Bool | DType::Datetime64 { .. }
             ) {
                 // Numeric columns and Datetime64 use the Series operation. The
                 // latter accumulates extrema but correctly refuses sum/product.
@@ -85146,7 +85196,7 @@ impl DataFrame {
                 column.dtype() == DType::Int64 && !column.values().iter().any(Scalar::is_missing);
             if is_all_valid_numpy_int {
                 Scalar::Null(NullKind::NaN)
-            } else if matches!(column.dtype(), DType::Datetime64 | DType::Timedelta64) {
+            } else if matches!(column.dtype(), DType::Datetime64 { .. } | DType::Timedelta64) {
                 // Nullable temporal column backing materializes an invalid slot
                 // as `Null(NaT)`.  Keep alignment on that representation rather
                 // than mixing it with the scalar `Datetime64(NAT)`/`Timedelta64(NAT)`
@@ -97659,7 +97709,7 @@ impl GroupByResample<'_> {
                             || dt == DType::Float64
                             || dt == DType::Utf8
                             || dt == DType::Bool
-                            || dt == DType::Datetime64
+                            || dt.is_datetime()
                     }
                 }
             })
@@ -99623,7 +99673,7 @@ mod tests {
         )
         .unwrap();
         let shifted = dates.add(&offsets).unwrap();
-        assert_eq!(shifted.dtype(), DType::Datetime64);
+        assert_eq!(shifted.dtype(), DType::datetime64_naive());
         assert_eq!(
             shifted.values(),
             &[
@@ -99633,7 +99683,7 @@ mod tests {
             ]
         );
         let back = dates.sub(&offsets).unwrap();
-        assert_eq!(back.dtype(), DType::Datetime64);
+        assert_eq!(back.dtype(), DType::datetime64_naive());
         assert_eq!(back.values()[0], Scalar::Datetime64(base - 10));
     }
 
@@ -100411,7 +100461,7 @@ mod tests {
 
         // ⚠️ datetime64 HAS NO SUCH REFUSAL: its constructor yields NaT for inf.
         let datetime = one_value(f64::INFINITY)
-            .with_constructor_dtype(DType::Datetime64)
+            .with_constructor_dtype(DType::datetime64_naive())
             .expect("datetime64 accepts inf");
         assert!(datetime.column("a").expect("column").values()[0].is_missing());
     }
@@ -110208,7 +110258,7 @@ mod tests {
             restored_col.values(),
             &[Scalar::Datetime64(t0), Scalar::Datetime64(t1)]
         );
-        assert_eq!(restored_col.dtype(), DType::Datetime64);
+        assert_eq!(restored_col.dtype(), DType::datetime64_naive());
         assert!(
             restored.column("index").is_none(),
             "named index must reset to its name, not 'index'"
@@ -134012,7 +134062,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(s.dtype(), DType::Datetime64);
+        assert_eq!(s.dtype(), DType::datetime64_naive());
 
         // This column carries a NaT, so every numeric component is float64 —
         // measured on live pandas 2.2.3, see
@@ -134113,7 +134163,7 @@ mod tests {
         const DAY: i64 = 86_400 * NS;
         let midnight_b = ts_a + 40 * DAY; // 2021-02-10 00:00:00
         let floor_d = s.dt().floor("D").unwrap();
-        assert_eq!(floor_d.dtype(), DType::Datetime64);
+        assert_eq!(floor_d.dtype(), DType::datetime64_naive());
         assert_eq!(floor_d.values()[0], Scalar::Datetime64(ts_a));
         assert_eq!(floor_d.values()[1], Scalar::Datetime64(midnight_b));
         let norm = s.dt().normalize().unwrap();
@@ -134941,7 +134991,7 @@ mod tests {
         )
         .unwrap();
         let datetime = Column::new(
-            DType::Datetime64,
+            DType::datetime64_naive(),
             vec![
                 Scalar::Datetime64(1_700_000_000_000_000_000),
                 Scalar::Datetime64(1_700_000_000_001_000_000),
@@ -134978,7 +135028,7 @@ mod tests {
         );
         // Temporal data retains its temporal dtype and uses NaT for the row
         // alignment minted instead of inheriting the global NaN marker.
-        assert_eq!(aligned.column("when").unwrap().dtype(), DType::Datetime64);
+        assert_eq!(aligned.column("when").unwrap().dtype(), DType::datetime64_naive());
         assert_eq!(
             aligned.column("when").unwrap().values(),
             &[
@@ -140026,7 +140076,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(s.dtype(), DType::Datetime64);
+        assert_eq!(s.dtype(), DType::datetime64_naive());
         boqep_assert_matches_pandas("typed Datetime64", &boqep_all_accessors(&s));
     }
 
@@ -152392,7 +152442,7 @@ mod tests {
     fn df_from_csv_with_options_parses_temporal_extension_dtypes() {
         let csv = "dt;period;interval\n2024-01-15 10:30:45;2024Q1;(0, 1]\nNaT;2024-01;[2.5, 3.5)";
         let mut dtypes = BTreeMap::new();
-        dtypes.insert("dt".to_owned(), DType::Datetime64);
+        dtypes.insert("dt".to_owned(), DType::datetime64_naive());
         dtypes.insert("period".to_owned(), DType::Period);
         dtypes.insert("interval".to_owned(), DType::Interval);
         let options = DataFrameCsvReadOptions {
@@ -152403,7 +152453,7 @@ mod tests {
 
         let df = DataFrame::from_csv_with_options(csv, &options).unwrap();
 
-        assert_eq!(df.columns()["dt"].dtype(), DType::Datetime64);
+        assert_eq!(df.columns()["dt"].dtype(), DType::datetime64_naive());
         assert_eq!(
             df.columns()["dt"].values(),
             &[
@@ -161501,7 +161551,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(s.dtype(), DType::Datetime64);
+        assert_eq!(s.dtype(), DType::datetime64_naive());
         let ic = s.dt().isocalendar().unwrap();
         assert_eq!(
             ic.get_column("year").column().values()[0],
@@ -168524,7 +168574,7 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.dtype(), DType::Datetime64);
+        assert_eq!(result.dtype(), DType::datetime64_naive());
         assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 00:00:00"));
         assert_eq!(result.values()[1], datetime64_scalar("2024-06-30 00:00:00"));
     }
@@ -187621,7 +187671,7 @@ mod tests {
         )
         .unwrap();
         let datetime_view = datetime_df.transpose_view().unwrap().unwrap();
-        assert_eq!(datetime_view.dtype(), DType::Datetime64);
+        assert_eq!(datetime_view.dtype(), DType::datetime64_naive());
         assert_eq!(
             datetime_view.get_datetime64(1, 0),
             Some(1_700_000_000_000_000_010)
@@ -187910,7 +187960,7 @@ mod tests {
         cached_datetime_columns.insert(
             "x".to_owned(),
             Column::new(
-                DType::Datetime64,
+                DType::datetime64_naive(),
                 vec![
                     Scalar::Datetime64(1_700_000_000_000_000_000),
                     Scalar::Datetime64(2),
@@ -187921,7 +187971,7 @@ mod tests {
         cached_datetime_columns.insert(
             "y".to_owned(),
             Column::new(
-                DType::Datetime64,
+                DType::datetime64_naive(),
                 vec![
                     Scalar::Datetime64(1_700_000_000_000_000_010),
                     Scalar::Datetime64(20),
@@ -188025,7 +188075,7 @@ mod tests {
         datetime_cols.insert(
             "x".to_owned(),
             Column::new(
-                DType::Datetime64,
+                DType::datetime64_naive(),
                 vec![
                     Scalar::Datetime64(1_700_000_000_000_000_000),
                     Scalar::Null(NullKind::NaT),
@@ -205536,22 +205586,26 @@ mod tz_aware_datetime_guard_00ze3 {
         .expect("tz-aware series")
     }
 
-    /// THE GUARD. If this starts failing with `Datetime64`, the zone was discarded
-    /// somewhere — check that the wall-clock is still right before believing it is
-    /// an improvement.
+    /// The dtype and UTC nanoseconds both carry the live pandas contract: a
+    /// uniform fixed-offset input has one timezone and is representable as a
+    /// timezone-aware datetime column.
     #[test]
-    fn tz_aware_without_utc_must_stay_loudly_divergent_not_silently_naive_00ze3() {
+    fn tz_aware_without_utc_keeps_uniform_timezone_00ze3() {
         let out = to_datetime_with_options(&tz_aware_strings(), ToDatetimeOptions::default())
             .expect("to_datetime");
         assert_eq!(
             out.dtype(),
-            DType::Utf8,
-            "tz-aware input without utc must remain Utf8. pandas returns \
-             datetime64[ns, tz] and we cannot represent that (br-frankenpandas-00ze3: \
-             DType::Datetime64 carries no zone). If this now reports Datetime64, the \
-             ZONE WAS DISCARDED — a silent wrong-wall-clock divergence replacing a \
-             visible one. That is 00ze3's explicitly forbidden fix; take the decision \
-             rather than deleting this assertion."
+            DType::datetime64_tz("UTC+05:30"),
+            "the shared fixed offset is dtype metadata, not an erased scalar suffix"
+        );
+        assert_eq!(out.column().timezone(), Some("UTC+05:30"));
+        assert_eq!(
+            out.values(),
+            vec![
+                Scalar::Datetime64(1_705_294_800_000_000_000),
+                Scalar::Datetime64(1_705_385_700_000_000_000),
+            ],
+            "the contiguous backing remains UTC nanoseconds while the dtype retains the zone"
         );
     }
 
@@ -205572,7 +205626,7 @@ mod tz_aware_datetime_guard_00ze3 {
         .expect("to_datetime utc");
         assert_eq!(
             out.dtype(),
-            DType::Datetime64,
+            DType::datetime64_naive(),
             "with utc=true the zone is applied and the result is genuinely UTC, so \
              Datetime64 is correct here. If this regresses to Utf8, the guard above \
              would still pass while tz support got strictly worse."
@@ -205628,7 +205682,7 @@ mod tz_surface_audit_00ze3 {
             .expect("tz_localize");
         assert_ne!(
             out.dtype(),
-            DType::Datetime64,
+            DType::datetime64_naive(),
             "tz_localize returned a BARE Datetime64. pandas returns \
              datetime64[ns, tz], and DType::Datetime64 carries no zone \
              (br-frankenpandas-00ze3), so a bare Datetime64 here means the zone was \
@@ -205650,7 +205704,7 @@ mod tz_surface_audit_00ze3 {
             .tz_localize(Some("UTC"))
             .expect("tz_localize utc");
         assert!(
-            matches!(out.dtype(), DType::Datetime64 | DType::Utf8),
+            matches!(out.dtype(), DType::Datetime64 { .. } | DType::Utf8),
             "tz_localize(UTC) produced {:?}, which is neither of the two defensible \
              answers. UTC is the one zone a bare Datetime64 can carry without losing \
              information, so Datetime64 is honest here; Utf8 is the current \
@@ -205667,7 +205721,7 @@ mod tz_surface_audit_00ze3 {
         let series = naive_datetimes();
         let out = series.dt().tz_localize(None).expect("tz_localize none");
         assert!(
-            matches!(out.dtype(), DType::Datetime64 | DType::Utf8),
+            matches!(out.dtype(), DType::Datetime64 { .. } | DType::Utf8),
             "tz_localize(None) produced {:?}; stripping a zone yields naive data, \
              which a bare Datetime64 represents exactly, so this must not become \
              something exotic.",
@@ -205880,7 +205934,7 @@ mod to_datetime_mixed_offsets_00ze3 {
             },
         )
         .expect("to_datetime utc");
-        assert_eq!(out.dtype(), DType::Datetime64);
+        assert_eq!(out.dtype(), DType::datetime64_naive());
         assert_eq!(
             out.values(),
             vec![

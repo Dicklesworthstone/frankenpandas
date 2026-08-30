@@ -2286,7 +2286,7 @@ fn parse_dtype_alias(value: &str) -> Result<DType, ExprError> {
         "object" | "string" | "str" | "utf8" | "o" => Ok(DType::Utf8),
         "category" | "categorical" => Ok(DType::Categorical),
         "timedelta" | "timedelta64" | "timedelta64[ns]" | "m8" | "m8[ns]" => Ok(DType::Timedelta64),
-        "datetime" | "datetime64" | "datetime64[ns]" => Ok(DType::Datetime64),
+        "datetime" | "datetime64" | "datetime64[ns]" => Ok(DType::datetime64_naive()),
         "period" => Ok(DType::Period),
         "interval" => Ok(DType::Interval),
         "sparse" => Ok(DType::Sparse),

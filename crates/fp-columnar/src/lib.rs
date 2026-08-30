@@ -1666,7 +1666,7 @@ impl ColumnData {
                     .collect();
                 Self::Timedelta64(data)
             }
-            DType::Datetime64 => {
+            DType::Datetime64 { .. } => {
                 let data: Vec<i64> = values
                     .iter()
                     .map(|v| match v {
@@ -1719,7 +1719,7 @@ impl ColumnData {
                 .enumerate()
                 .map(|(i, v)| {
                     if !validity.get(i) {
-                        Scalar::missing_for_dtype(dtype)
+                        Scalar::missing_for_dtype(dtype.clone())
                     } else {
                         Scalar::Float64(*v)
                     }
@@ -1730,7 +1730,7 @@ impl ColumnData {
                 .enumerate()
                 .map(|(i, v)| {
                     if !validity.get(i) {
-                        Scalar::missing_for_dtype(dtype)
+                        Scalar::missing_for_dtype(dtype.clone())
                     } else {
                         Scalar::Int64(*v)
                     }
@@ -1741,7 +1741,7 @@ impl ColumnData {
                 .enumerate()
                 .map(|(i, v)| {
                     if !validity.get(i) {
-                        Scalar::missing_for_dtype(dtype)
+                        Scalar::missing_for_dtype(dtype.clone())
                     } else {
                         Scalar::Bool(*v)
                     }
@@ -1752,7 +1752,7 @@ impl ColumnData {
                 .enumerate()
                 .map(|(i, v)| {
                     if !validity.get(i) {
-                        Scalar::missing_for_dtype(dtype)
+                        Scalar::missing_for_dtype(dtype.clone())
                     } else {
                         Scalar::Utf8(v.clone())
                     }
@@ -1796,7 +1796,7 @@ impl ColumnData {
                 .enumerate()
                 .map(|(i, v)| {
                     if !validity.get(i) {
-                        Scalar::missing_for_dtype(dtype)
+                        Scalar::missing_for_dtype(dtype.clone())
                     } else {
                         Scalar::Interval(*v)
                     }
@@ -1837,7 +1837,7 @@ fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<boo
         && let Ok(common) = fp_types::common_dtype(left_dtype, right_dtype)
         && common == DType::Int64
     {
-        let l_cast = fp_types::cast_scalar(left, common)?;
+        let l_cast = fp_types::cast_scalar(left, common.clone())?;
         let r_cast = fp_types::cast_scalar(right, common)?;
         // Handle Int64 comparisons to avoid precision loss in f64 cast.
         if let (Scalar::Int64(a), Scalar::Int64(b)) = (&l_cast, &r_cast) {
@@ -7014,7 +7014,7 @@ impl Clone for Column {
             _ => None,
         };
         Self {
-            dtype: self.dtype,
+            dtype: self.dtype.clone(),
             values,
             validity: self.validity.clone(),
             data,
@@ -11267,16 +11267,16 @@ pub enum ColumnError {
 impl SparseColumn {
     pub fn from_dense(dtype: SparseDType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
         let len = values.len();
-        let value_dtype = dtype.value_dtype;
+        let value_dtype = dtype.value_dtype.clone();
         let fill_value = dtype.fill_value.clone();
         let mut indices = Vec::new();
         let mut sparse_values = Vec::new();
 
         for (idx, value) in values.into_iter().enumerate() {
             let value = if value.dtype() == value_dtype || value.dtype() == DType::Null {
-                Column::normalize_missing_for_dtype(value, value_dtype)
+                Column::normalize_missing_for_dtype(value, value_dtype.clone())
             } else {
-                cast_scalar_owned(value, value_dtype)?
+                cast_scalar_owned(value, value_dtype.clone())?
             };
 
             if !value.semantic_eq(&fill_value) {
@@ -11304,7 +11304,7 @@ impl SparseColumn {
 
     #[must_use]
     pub fn value_dtype(&self) -> DType {
-        self.dtype.value_dtype
+        self.dtype.value_dtype.clone()
     }
 
     #[must_use]
@@ -11356,7 +11356,7 @@ impl SparseColumn {
     }
 
     pub fn to_dense_column(&self) -> Result<Column, ColumnError> {
-        Column::new(self.dtype.value_dtype, self.to_dense_values())
+        Column::new(self.dtype.value_dtype.clone(), self.to_dense_values())
     }
 }
 
@@ -11425,7 +11425,7 @@ impl Column {
             return None;
         }
 
-        match (&self.data, self.dtype) {
+        match (&self.data, &self.dtype) {
             (Some(ColumnData::Bool(data)), DType::Bool) if data.len() == self.values.len() => {
                 // Carry the contiguous bool buffer through the clone as a lazy
                 // all-valid backing (mirrors the Float64 arm) so `as_bool_slice`
@@ -11464,7 +11464,7 @@ impl Column {
                     data.iter().copied().map(Scalar::Timedelta64).collect(),
                 ))
             }
-            (Some(ColumnData::Datetime64(data)), DType::Datetime64)
+            (Some(ColumnData::Datetime64(data)), DType::Datetime64 { .. })
                 if data.len() == self.values.len() =>
             {
                 Some(ScalarValues::from_vec(
@@ -11487,14 +11487,14 @@ impl Column {
     }
 
     fn cached_data_for_values(dtype: DType, values: &[Scalar]) -> Option<ColumnData> {
-        match dtype {
+        match &dtype {
             DType::Bool
             | DType::BoolNullable
             | DType::Int64
             | DType::Int64Nullable
             | DType::Float64
             | DType::Timedelta64
-            | DType::Datetime64
+            | DType::Datetime64 { .. }
             | DType::Period => Some(ColumnData::from_scalars(values, dtype)),
             _ => None,
         }
@@ -11545,7 +11545,7 @@ impl Column {
         let coerced = if preserve_utf8_object_bucket {
             values
                 .into_iter()
-                .map(|value| Self::normalize_missing_for_dtype(value, dtype))
+                .map(|value| Self::normalize_missing_for_dtype(value, dtype.clone()))
                 .collect()
         } else if needs_coercion {
             values
@@ -11582,9 +11582,9 @@ impl Column {
                     // so `cast_scalar_owned`'s Utf8 arm must still see the raw
                     // missing and render it. (br-frankenpandas-nywa8)
                     if value.is_missing() && dtype != DType::Utf8 {
-                        return Ok(Self::normalize_missing_for_dtype(value, dtype));
+                        return Ok(Self::normalize_missing_for_dtype(value, dtype.clone()));
                     }
-                    cast_scalar_owned(value, dtype)
+                    cast_scalar_owned(value, dtype.clone())
                 })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
@@ -11592,13 +11592,13 @@ impl Column {
             // Preserve explicit NaN/NaT markers; remap generic Null to dtype-specific missing.
             values
                 .into_iter()
-                .map(|value| Self::normalize_missing_for_dtype(value, dtype))
+                .map(|value| Self::normalize_missing_for_dtype(value, dtype.clone()))
                 .collect()
         };
 
         let validity = ValidityMask::from_values(&coerced);
-        let data = Self::cached_data_for_values(dtype, &coerced);
-        let values = match (&data, dtype, validity.all()) {
+        let data = Self::cached_data_for_values(dtype.clone(), &coerced);
+        let values = match (&data, &dtype, validity.all()) {
             (Some(ColumnData::Bool(data)), DType::Bool, true) => {
                 ScalarValues::lazy_all_valid_bool_arc(Arc::clone(data))
             }
@@ -11792,11 +11792,31 @@ impl Column {
     pub fn from_datetime64_values(data: Vec<i64>) -> Self {
         let len = data.len();
         Self {
-            dtype: DType::Datetime64,
+            dtype: DType::datetime64_naive(),
             values: ScalarValues::lazy_all_valid_datetime64(data),
             validity: ValidityMask::all_valid(len),
             data: None,
         }
+    }
+
+    /// Build an all-valid timezone-aware `Datetime64` column. Values remain
+    /// UTC nanoseconds in the same contiguous backing; the uniform timezone is
+    /// carried by the column dtype rather than by boxed scalar values.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_datetime64_values_with_timezone(
+        data: Vec<i64>,
+        timezone: impl Into<String>,
+    ) -> Self {
+        let mut column = Self::from_datetime64_values(data);
+        column.dtype = DType::datetime64_tz(timezone);
+        column
+    }
+
+    /// Return this column's uniform datetime timezone, if it has one.
+    #[must_use]
+    pub fn timezone(&self) -> Option<&str> {
+        self.dtype.timezone()
     }
 
     /// Build an all-valid Period column from ordinals and a uniform frequency,
@@ -12879,14 +12899,14 @@ impl Column {
         debug_assert_eq!(data.len(), validity.len());
         if validity.all() {
             return Self {
-                dtype: DType::Datetime64,
+                dtype: DType::datetime64_naive(),
                 values: ScalarValues::lazy_all_valid_datetime64_owned(data),
                 validity,
                 data: None,
             };
         }
         Self {
-            dtype: DType::Datetime64,
+            dtype: DType::datetime64_naive(),
             values: ScalarValues::lazy_nullable_datetime64(data, validity.clone()),
             validity,
             data: None,
@@ -13451,7 +13471,7 @@ impl Column {
     #[must_use]
     #[doc(hidden)]
     pub fn as_datetime64_slice(&self) -> Option<&[i64]> {
-        if self.dtype != DType::Datetime64 {
+        if !self.dtype.is_datetime() {
             return None;
         }
         // LazyAllValidDatetime64 (br-frankenpandas-j5150, the to_datetime output
@@ -14306,7 +14326,7 @@ impl Column {
                     .is_some_and(|end| end <= src_data.len())
             {
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_float64_slice(src_data, view_start, n),
                     validity: ValidityMask::all_valid(n),
                     data: None,
@@ -14329,7 +14349,7 @@ impl Column {
                 // `Arc<[f64]>` backing (their zero-copy row-range views need it, and a
                 // scattered result can't be viewed anyway).
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_float64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
@@ -14348,7 +14368,7 @@ impl Column {
                 // LazyAllValidInt64Vec is all-valid Int64, as_i64_slice/values() match
                 // LazyAllValidInt64. Contiguous/strided i64 views keep Arc<[i64]>.
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_int64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
@@ -14382,7 +14402,7 @@ impl Column {
             // `from_datetime64_values` (lazy_all_valid_datetime64) materializes
             // `Scalar::Datetime64(ns)` exactly as the primitive path would, same
             // all-valid mask, and a NaT sentinel is carried through unchanged.
-            if self.dtype == DType::Datetime64
+            if self.dtype.is_datetime()
                 && let Some(src) = self.as_datetime64_slice()
             {
                 let mut data = Vec::with_capacity(n);
@@ -14390,7 +14410,7 @@ impl Column {
                     data.push(src[pos]);
                 }
                 return Self {
-                    dtype: DType::Datetime64,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_datetime64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
@@ -14442,7 +14462,7 @@ impl Column {
                 && let Some(range_start) = contiguous_ascending_start(positions)
             {
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_utf8_slice(
                         src_bytes,
                         src_offsets,
@@ -14474,7 +14494,7 @@ impl Column {
                     new_offsets.push(new_bytes.len());
                 }
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_contiguous_utf8(new_bytes, new_offsets),
                     validity: ValidityMask::all_valid(n),
                     data: None,
@@ -14505,7 +14525,7 @@ impl Column {
                     new_offsets.push(new_bytes.len());
                 }
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_contiguous_utf8(new_bytes, new_offsets),
                     validity: ValidityMask::all_valid(n),
                     data: None,
@@ -14521,7 +14541,7 @@ impl Column {
                         .collect()
                 });
             return Self {
-                dtype: self.dtype,
+                dtype: self.dtype.clone(),
                 values: ScalarValues::from_vec(values),
                 validity: ValidityMask::all_valid(n),
                 data: None,
@@ -14747,7 +14767,7 @@ impl Column {
             values.push(value);
         }
         Self {
-            dtype: self.dtype,
+            dtype: self.dtype.clone(),
             values: ScalarValues::from_vec(values),
             validity: ValidityMask::from_words(words, n),
             data: None,
@@ -14846,7 +14866,7 @@ impl Column {
                     data.extend_from_slice(&src[start..start + len]);
                 }
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_float64(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
@@ -14859,7 +14879,7 @@ impl Column {
                     data.extend_from_slice(&src[start..start + len]);
                 }
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_int64(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
@@ -14872,7 +14892,7 @@ impl Column {
                     data.extend_from_slice(&src[start..start + len]);
                 }
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_bool(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
@@ -14882,7 +14902,7 @@ impl Column {
             // Datetime64 / Timedelta64 run gather (temporal sibling of the Int64
             // arm; both store i64 ns) — MOVE the gathered Vec in via the owned
             // backing instead of falling to the per-row Scalar path. Bit-identical.
-            if self.dtype == DType::Datetime64
+            if self.dtype.is_datetime()
                 && let Some(src) = self.as_datetime64_slice()
             {
                 let mut data = Vec::with_capacity(out_len);
@@ -14890,7 +14910,7 @@ impl Column {
                     data.extend_from_slice(&src[start..start + len]);
                 }
                 return Self {
-                    dtype: DType::Datetime64,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_datetime64_owned(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
@@ -15034,7 +15054,7 @@ impl Column {
                     .is_some_and(|view_end| view_end <= src_data.len())
             {
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_float64_slice(src_data, view_start, len),
                     validity: ValidityMask::all_valid(len),
                     data: None,
@@ -15058,7 +15078,7 @@ impl Column {
                     .is_some_and(|view_end| view_end <= src_data.len())
             {
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_int64_slice(src_data, view_start, len),
                     validity: ValidityMask::all_valid(len),
                     data: None,
@@ -15071,7 +15091,7 @@ impl Column {
 
             if let Some((src_bytes, src_offsets, src_start)) = self.utf8_arc_view_source() {
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_utf8_slice(
                         src_bytes,
                         src_offsets,
@@ -15091,7 +15111,7 @@ impl Column {
                     new_offsets.push(offset - byte_start);
                 }
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_contiguous_utf8(
                         bytes[byte_start..byte_end].to_vec(),
                         new_offsets,
@@ -15157,7 +15177,7 @@ impl Column {
                     *last &= (1_u64 << tail) - 1;
                 }
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_float64_slice(buffer, view_start, len),
                     validity: ValidityMask::from_words(words, len),
                     data: None,
@@ -15245,7 +15265,7 @@ impl Column {
                     .is_some_and(|view_end| view_end <= buffer.len())
             {
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_nullable_float64_window(
                         buffer,
                         view_start,
@@ -15278,7 +15298,7 @@ impl Column {
                     .is_some_and(|view_end| view_end <= buffer.len())
             {
                 return Self {
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_float64_slice(buffer, view_start, len),
                     validity: mask,
                     data: None,
@@ -15391,7 +15411,7 @@ impl Column {
         }
 
         Some(Self {
-            dtype: self.dtype,
+            dtype: self.dtype.clone(),
             values: ScalarValues::lazy_strided_float64(data, start, step, len),
             validity: ValidityMask::all_valid(len),
             data: None,
@@ -15414,7 +15434,7 @@ impl Column {
         let (start, step) = Self::bounded_arithmetic_progression_positions(positions, data.len())?;
 
         Some(Self {
-            dtype: self.dtype,
+            dtype: self.dtype.clone(),
             values: ScalarValues::lazy_strided_float64(data, start, step, positions.len()),
             validity: ValidityMask::all_valid(positions.len()),
             data: None,
@@ -15491,7 +15511,7 @@ impl Column {
                     }
                 }
             }
-            DType::Datetime64 => {
+            DType::Datetime64 { .. } => {
                 for &pos in positions {
                     match &self.values[pos] {
                         Scalar::Datetime64(value) => values.push(Scalar::Datetime64(*value)),
@@ -15516,7 +15536,7 @@ impl Column {
         &self,
         positions: &[usize],
     ) -> Option<Vec<Scalar>> {
-        match self.dtype {
+        match &self.dtype {
             DType::Bool => {
                 if let Some(data) = self.as_bool_slice() {
                     let mut values = Vec::with_capacity(positions.len());
@@ -15549,7 +15569,7 @@ impl Column {
 
         let data = self.data.as_ref()?;
         let mut values = Vec::with_capacity(positions.len());
-        match (self.dtype, data) {
+        match (&self.dtype, data) {
             (DType::Bool | DType::BoolNullable, ColumnData::Bool(data)) => {
                 for &pos in positions {
                     values.push(Scalar::Bool(data[pos]));
@@ -15570,7 +15590,7 @@ impl Column {
                     values.push(Scalar::Timedelta64(data[pos]));
                 }
             }
-            (DType::Datetime64, ColumnData::Datetime64(data)) => {
+            (DType::Datetime64 { .. }, ColumnData::Datetime64(data)) => {
                 for &pos in positions {
                     values.push(Scalar::Datetime64(data[pos]));
                 }
@@ -15597,7 +15617,7 @@ impl Column {
         // a float column `Scalar::Int64(0)` and a BOOL column an integer, which
         // is not a bool at all; `Column::new` then had to coerce every one of
         // the `n` seeds back to the declared dtype.
-        let zero = match dtype {
+        let zero = match &dtype {
             DType::Int64 | DType::Int64Nullable => Scalar::Int64(0),
             DType::Float64 | DType::Float64Nullable => Scalar::Float64(0.0),
             DType::Bool | DType::BoolNullable => Scalar::Bool(false),
@@ -15611,7 +15631,7 @@ impl Column {
     /// Matches np.ones().
     pub fn ones(n: usize, dtype: DType) -> Result<Self, ColumnError> {
         // Same pairing as `zeros`. See the note there.
-        let one = match dtype {
+        let one = match &dtype {
             DType::Int64 | DType::Int64Nullable => Scalar::Int64(1),
             DType::Float64 | DType::Float64Nullable => Scalar::Float64(1.0),
             DType::Bool | DType::BoolNullable => Scalar::Bool(true),
@@ -15630,22 +15650,22 @@ impl Column {
 
     /// Create a zeros column with same shape and dtype as self.
     pub fn zeros_like(&self) -> Result<Self, ColumnError> {
-        Self::zeros(self.len(), self.dtype)
+        Self::zeros(self.len(), self.dtype.clone())
     }
 
     /// Create a ones column with same shape and dtype as self.
     pub fn ones_like(&self) -> Result<Self, ColumnError> {
-        Self::ones(self.len(), self.dtype)
+        Self::ones(self.len(), self.dtype.clone())
     }
 
     /// Create a column filled with fill_value with same shape as self.
     pub fn full_like(&self, fill_value: Scalar) -> Result<Self, ColumnError> {
-        Self::new(self.dtype, vec![fill_value; self.len()])
+        Self::new(self.dtype.clone(), vec![fill_value; self.len()])
     }
 
     /// Create an empty column with same dtype as self.
     pub fn empty_like(&self) -> Result<Self, ColumnError> {
-        Self::new(self.dtype, Vec::new())
+        Self::new(self.dtype.clone(), Vec::new())
     }
 
     /// Create a column with evenly spaced values in [start, stop).
@@ -15817,7 +15837,7 @@ impl Column {
 
     #[must_use]
     pub fn dtype(&self) -> DType {
-        self.dtype
+        self.dtype.clone()
     }
 
     /// Returns true if this column contains any null/missing values.
@@ -16372,7 +16392,7 @@ impl Column {
         // Datetime64/Timedelta64(ns). All-valid source only (a NAT sentinel in a valid
         // slot is carried through unchanged, matching the Scalar path).
         if self.validity.all()
-            && self.dtype == DType::Datetime64
+            && self.dtype.is_datetime()
             && let Some(slice) = self.as_datetime64_slice()
         {
             let mut data = Vec::with_capacity(n);
@@ -16512,7 +16532,7 @@ impl Column {
 
         let validity = ValidityMask::from_values(&values);
         Ok(Self {
-            dtype: self.dtype,
+            dtype: self.dtype.clone(),
             values: ScalarValues::from_vec(values),
             validity,
             data: None,
@@ -16559,7 +16579,7 @@ impl Column {
             .collect::<Vec<_>>();
         let validity = ValidityMask::from_values(&values);
         Ok(Self {
-            dtype: self.dtype,
+            dtype: self.dtype.clone(),
             values: ScalarValues::from_vec(values),
             validity,
             data: None,
@@ -17265,13 +17285,15 @@ impl Column {
         // Datetime64 (pandas raises), Timedelta64 - Datetime64 (raises), mul/div/mod/pow/
         // floordiv — falls through to the existing path, which errors / rejects via
         // IncompatibleDtypes, matching pandas raising.
-        let temporal_out: Option<DType> = match (self.dtype, right.dtype, op) {
-            (DType::Datetime64, DType::Datetime64, ArithmeticOp::Sub) => Some(DType::Timedelta64),
+        let temporal_out: Option<DType> = match (&self.dtype, &right.dtype, op) {
+            (DType::Datetime64 { .. }, DType::Datetime64 { .. }, ArithmeticOp::Sub) => Some(DType::Timedelta64),
             (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::Sub | ArithmeticOp::Add) => {
                 Some(DType::Timedelta64)
             }
-            (DType::Datetime64, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub)
-            | (DType::Timedelta64, DType::Datetime64, ArithmeticOp::Add) => Some(DType::Datetime64),
+            (dtype @ DType::Datetime64 { .. }, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub)
+            | (DType::Timedelta64, dtype @ DType::Datetime64 { .. }, ArithmeticOp::Add) => {
+                Some(dtype.clone())
+            }
             _ => None,
         };
         if let Some(out_dtype) = temporal_out
@@ -17291,7 +17313,11 @@ impl Column {
                 }
             }
             return Ok(match out_dtype {
-                DType::Datetime64 => Self::from_datetime64_values_with_validity(data, validity),
+                DType::Datetime64 { .. } => {
+                    let mut column = Self::from_datetime64_values_with_validity(data, validity);
+                    column.dtype = out_dtype;
+                    column
+                }
                 _ => Self::from_timedelta64_values_with_validity(data, validity),
             });
         }
@@ -17736,7 +17762,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -17777,7 +17803,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -17844,7 +17870,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -17880,7 +17906,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{a:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -17916,7 +17942,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{a:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -17951,7 +17977,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{a:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -17986,7 +18012,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{a:?}"),
-                        dtype: self.dtype,
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -18605,8 +18631,8 @@ impl Column {
     /// path). Shared by the typed temporal arms of `binary_comparison` and
     /// `compare_scalar`; a method (not a closure) so the borrows tie to `self`.
     fn temporal_i64_backing(&self) -> Option<(&[i64], &ValidityMask, i64)> {
-        let (all_valid, nat) = match self.dtype {
-            DType::Datetime64 => (self.as_datetime64_slice(), Timestamp::NAT),
+        let (all_valid, nat) = match &self.dtype {
+            DType::Datetime64 { .. } => (self.as_datetime64_slice(), Timestamp::NAT),
             DType::Timedelta64 => (self.as_timedelta64_slice(), Timedelta::NAT),
             _ => return None,
         };
@@ -19149,8 +19175,8 @@ impl Column {
         // f64 promotion would round for `|ns| > 2^53` (epoch-ns are ~1.6e18) — and mask a
         // row whose column value is missing (validity bit unset OR the NaT sentinel in the
         // buffer, == the generic `v.is_missing()`). A NaT scalar keeps the generic path.
-        let temporal_needle = match (self.dtype, scalar) {
-            (DType::Datetime64, Scalar::Datetime64(s)) if *s != Timestamp::NAT => Some(*s),
+        let temporal_needle = match (&self.dtype, scalar) {
+            (DType::Datetime64 { .. }, Scalar::Datetime64(s)) if *s != Timestamp::NAT => Some(*s),
             (DType::Timedelta64, Scalar::Timedelta64(s)) if *s != Timedelta::NAT => Some(*s),
             _ => None,
         };
@@ -23718,7 +23744,7 @@ impl Column {
             | DType::Int64Nullable
             | DType::Float64
             | DType::Float64Nullable
-            | DType::Datetime64
+            | DType::Datetime64 { .. }
             | DType::Timedelta64
             | DType::Period => 8,
             DType::Utf8 => {
@@ -23861,7 +23887,7 @@ impl Column {
             _ => {
                 return Err(ColumnError::Type(TypeError::NonNumericValue {
                     value: format!("invalid mode '{mode}', expected 'full', 'same', or 'valid'"),
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                 }));
             }
         };
@@ -24049,8 +24075,10 @@ impl Column {
                         vmask.set(i, false);
                     }
                 }
-                return Ok(if self.dtype == DType::Datetime64 {
-                    Self::from_datetime64_values_with_validity(out, vmask)
+                return Ok(if self.dtype.is_datetime() {
+                    let mut column = Self::from_datetime64_values_with_validity(out, vmask);
+                    column.dtype = self.dtype.clone();
+                    column
                 } else {
                     Self::from_timedelta64_values_with_validity(out, vmask)
                 });
@@ -24141,8 +24169,10 @@ impl Column {
                         vmask.set(i, false);
                     }
                 }
-                return Ok(if self.dtype == DType::Datetime64 {
-                    Self::from_datetime64_values_with_validity(out, vmask)
+                return Ok(if self.dtype.is_datetime() {
+                    let mut column = Self::from_datetime64_values_with_validity(out, vmask);
+                    column.dtype = self.dtype.clone();
+                    column
                 } else {
                     Self::from_timedelta64_values_with_validity(out, vmask)
                 });
@@ -24521,8 +24551,8 @@ impl Column {
             // NaT` ⇒ cleared bit), cond-false ⇒ the `other` ns. All-valid cond ⇒ the only
             // missing source is cond-true+self-missing, whose cleared bit materializes exactly
             // as the generic loop's `v.clone()` of a missing temporal slot. Bit-identical.
-            let temporal_other = match (self.dtype, other) {
-                (DType::Datetime64, Scalar::Datetime64(o)) if *o != Timestamp::NAT => Some(*o),
+            let temporal_other = match (&self.dtype, other) {
+                (DType::Datetime64 { .. }, Scalar::Datetime64(o)) if *o != Timestamp::NAT => Some(*o),
                 (DType::Timedelta64, Scalar::Timedelta64(o)) if *o != Timedelta::NAT => Some(*o),
                 _ => None,
             };
@@ -24543,8 +24573,10 @@ impl Column {
                         out[i] = o;
                     }
                 }
-                return Ok(if self.dtype == DType::Datetime64 {
-                    Self::from_datetime64_values_with_validity(out, vmask)
+                return Ok(if self.dtype.is_datetime() {
+                    let mut column = Self::from_datetime64_values_with_validity(out, vmask);
+                    column.dtype = self.dtype.clone();
+                    column
                 } else {
                     Self::from_timedelta64_values_with_validity(out, vmask)
                 });
@@ -24756,9 +24788,9 @@ impl Column {
         // is_missing(Datetime64/Timedelta64(v)) == (v == i64::MIN)) — the same split
         // the generic non_missing filter AND typed_radix_perm use — so the present
         // prefix + typed i64 `==` tie-walk are bit-identical to the comparator rank.
-        if matches!(self.dtype, DType::Datetime64 | DType::Timedelta64) {
-            let ns: Option<&[i64]> = match self.dtype {
-                DType::Datetime64 => self.as_datetime64_slice().or(match &self.values {
+        if matches!(self.dtype, DType::Datetime64 { .. } | DType::Timedelta64) {
+            let ns: Option<&[i64]> = match &self.dtype {
+                DType::Datetime64 { .. } => self.as_datetime64_slice().or(match &self.values {
                     ScalarValues::LazyNullableDatetime64 { data, .. } => Some(data.as_slice()),
                     _ => None,
                 }),
@@ -25170,7 +25202,7 @@ impl Column {
             if side != "left" && side != "right" {
                 return Err(ColumnError::Type(TypeError::NonNumericValue {
                     value: side.to_string(),
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                 }));
             }
             if needle.is_missing() {
@@ -25762,7 +25794,7 @@ impl Column {
         // renders as the STRING "NaT", not as a missing value — casting to
         // string never keeps missingness, which is the same rule the Utf8 arm of
         // `cast_scalar` already follows.
-        if target == DType::Utf8 && self.dtype == DType::Datetime64 {
+        if target == DType::Utf8 && self.dtype.is_datetime() {
             // Bound once so the resolution scan and the format pass read the
             // same slice.
             let values = self.values();
@@ -26107,8 +26139,8 @@ impl Column {
             // ns, cond-false ⇒ self[i] (present ⇒ its ns, missing=`!validity || NaT` ⇒ cleared
             // bit). All-valid cond ⇒ the only missing source is cond-false+self-missing.
             // Bit-identical to the generic loop (cond[i] ? other : self[i]).
-            let temporal_other = match (self.dtype, other) {
-                (DType::Datetime64, Scalar::Datetime64(o)) if *o != Timestamp::NAT => Some(*o),
+            let temporal_other = match (&self.dtype, other) {
+                (DType::Datetime64 { .. }, Scalar::Datetime64(o)) if *o != Timestamp::NAT => Some(*o),
                 (DType::Timedelta64, Scalar::Timedelta64(o)) if *o != Timedelta::NAT => Some(*o),
                 _ => None,
             };
@@ -26127,8 +26159,10 @@ impl Column {
                         vmask.set(i, false);
                     }
                 }
-                return Ok(if self.dtype == DType::Datetime64 {
-                    Self::from_datetime64_values_with_validity(out, vmask)
+                return Ok(if self.dtype.is_datetime() {
+                    let mut column = Self::from_datetime64_values_with_validity(out, vmask);
+                    column.dtype = self.dtype.clone();
+                    column
                 } else {
                     Self::from_timedelta64_values_with_validity(out, vmask)
                 });
@@ -26309,8 +26343,8 @@ impl Column {
         // NaT indices append in original order. Bit-identical to the stable Scalar
         // na-last comparator. The buffer accessor also reaches the LazyNullable*
         // backing (as_datetime64_slice only exposes the all-valid backings).
-        let temporal_ns: Option<&[i64]> = match self.dtype {
-            DType::Datetime64 => self.as_datetime64_slice().or(match &self.values {
+        let temporal_ns: Option<&[i64]> = match &self.dtype {
+            DType::Datetime64 { .. } => self.as_datetime64_slice().or(match &self.values {
                 ScalarValues::LazyNullableDatetime64 { data, .. } => Some(data.as_slice()),
                 _ => None,
             }),
@@ -26923,7 +26957,7 @@ impl Column {
             other => {
                 return Err(ColumnError::Type(TypeError::NonNumericValue {
                     value: other.to_string(),
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                 }));
             }
         };
@@ -27215,7 +27249,7 @@ impl Column {
             other => {
                 return Err(ColumnError::Type(TypeError::NonNumericValue {
                     value: other.to_string(),
-                    dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                 }));
             }
         };
@@ -27626,7 +27660,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                        dtype: self.dtype,
+                    dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -31125,9 +31159,9 @@ impl Column {
         // all-valid gate means there is no missing value (which the generic path
         // maps to false), so direct probing introduces no spurious match; missing
         // needles are skipped exactly as `key_of` skips them.
-        let i64_raw: Option<&[i64]> = match self.dtype {
+        let i64_raw: Option<&[i64]> = match &self.dtype {
             DType::Int64 => self.as_i64_slice(),
-            DType::Datetime64 if self.validity.all() => self.as_datetime64_slice(),
+            DType::Datetime64 { .. } if self.validity.all() => self.as_datetime64_slice(),
             DType::Timedelta64 if self.validity.all() => self.as_timedelta64_slice(),
             _ => None,
         };
@@ -31137,9 +31171,9 @@ impl Column {
                 if n.is_missing() {
                     continue;
                 }
-                match (self.dtype, n) {
+                match (&self.dtype, n) {
                     (DType::Int64, Scalar::Int64(v))
-                    | (DType::Datetime64, Scalar::Datetime64(v))
+                    | (DType::Datetime64 { .. }, Scalar::Datetime64(v))
                     | (DType::Timedelta64, Scalar::Timedelta64(v)) => {
                         set.insert(*v);
                     }
@@ -33193,7 +33227,7 @@ mod tests {
                 ],
             ),
             (
-                DType::Datetime64,
+                DType::datetime64_naive(),
                 vec![
                     Scalar::Datetime64(10),
                     Scalar::Datetime64(-5),
@@ -33466,7 +33500,7 @@ mod tests {
 
         let dt = Column::from_datetime64_values_with_validity(vec![100, 0, 300, 400], v.clone());
         let dtr = dt.take_positions(&positions);
-        assert_eq!(dtr.dtype(), DType::Datetime64);
+        assert_eq!(dtr.dtype(), DType::datetime64_naive());
         assert_eq!(
             dtr.values(),
             &[
@@ -33990,12 +34024,12 @@ mod tests {
 
         // Datetime64 is ns-backed by an i64 buffer; the window must not claim it.
         let stamps = Column::new(
-            DType::Datetime64,
+            DType::datetime64_naive(),
             (0..8i64).map(|i| Scalar::Datetime64(i * 1_000)).collect(),
         )
         .unwrap();
         let sliced = stamps.take_contiguous_range(2, 4);
-        assert_eq!(sliced.dtype(), DType::Datetime64);
+        assert_eq!(sliced.dtype(), DType::datetime64_naive());
         assert_eq!(
             sliced.values(),
             (2..6i64)
@@ -36513,7 +36547,7 @@ mod tests {
                     assert_eq!(
                         got.dtype(),
                         if out_dt {
-                            DType::Datetime64
+                            DType::datetime64_naive()
                         } else {
                             DType::Timedelta64
                         }
@@ -37712,7 +37746,7 @@ mod tests {
                 v.clone(),
             );
             let dtr = dt.filter_by_mask(&mask).expect("dt filter");
-            assert_eq!(dtr.dtype(), DType::Datetime64);
+            assert_eq!(dtr.dtype(), DType::datetime64_naive());
             assert_eq!(
                 dtr.values(),
                 &[
@@ -38933,7 +38967,7 @@ mod tests {
                         }
                     }
                     let dtype = if is_dt {
-                        DType::Datetime64
+                        DType::datetime64_naive()
                     } else {
                         DType::Timedelta64
                     };
@@ -44472,7 +44506,7 @@ mod tests {
             let shifted = dt_max
                 .binary_numeric(&td_two, ArithmeticOp::Add)
                 .expect("dt + td");
-            assert_eq!(shifted.dtype(), DType::Datetime64);
+            assert_eq!(shifted.dtype(), DType::datetime64_naive());
             assert!(
                 shifted.values()[0].is_missing(),
                 "overflowing dt+td must be masked missing, got {:?}",
@@ -51978,7 +52012,7 @@ mod tests {
                         cbits.push(next() % 2 == 0);
                     }
                     let dtype = if is_dt {
-                        DType::Datetime64
+                        DType::datetime64_naive()
                     } else {
                         DType::Timedelta64
                     };
@@ -52053,7 +52087,7 @@ mod tests {
                     }
                 }
                 let dtype = if is_dt {
-                    DType::Datetime64
+                    DType::datetime64_naive()
                 } else {
                     DType::Timedelta64
                 };
@@ -53865,7 +53899,7 @@ mod tests {
             };
             let column = |nanos: Vec<i64>| {
                 Column::new(
-                    DType::Datetime64,
+                    DType::datetime64_naive(),
                     nanos.into_iter().map(Scalar::Datetime64).collect(),
                 )
                 .expect("datetime col")
@@ -53922,7 +53956,7 @@ mod tests {
             // nanosecond rung — and renders as the STRING "NaT", not as a
             // missing value. Casting to string never keeps missingness.
             let with_nat = Column::new(
-                DType::Datetime64,
+                DType::datetime64_naive(),
                 vec![Scalar::Datetime64(MIDNIGHT), Scalar::Null(NullKind::NaT)],
             )
             .expect("datetime col")

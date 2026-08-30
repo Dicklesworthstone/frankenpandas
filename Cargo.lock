@@ -1441,6 +1441,7 @@ dependencies = [
  "fp-index",
  "fp-types",
  "hdf5-metno",
+ "memchr",
  "mysql",
  "parquet",
  "quick-xml",

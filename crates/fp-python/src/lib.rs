@@ -38,7 +38,7 @@ fn parse_dtype(name: &str) -> PyResult<fp_types::DType> {
         "float" | "float64" | "f64" | "Float64" => Ok(DType::Float64),
         "str" | "string" | "object" | "O" | "utf8" => Ok(DType::Utf8),
         "bool" | "boolean" => Ok(DType::Bool),
-        "datetime64" | "datetime64[ns]" | "datetime" => Ok(DType::Datetime64),
+        "datetime64" | "datetime64[ns]" | "datetime" => Ok(DType::datetime64_naive()),
         "timedelta64" | "timedelta64[ns]" | "timedelta" => Ok(DType::Timedelta64),
         other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "unsupported dtype {other:?}"
