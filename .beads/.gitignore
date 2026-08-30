@@ -46,3 +46,9 @@ redirect
 # patterns above only match those exact suffixes, so the .bak-*
 # variants slip through and recur untracked across rounds.
 *.bak-*
+*-fsqlite-ns-gate
+*-fsqlite-ns-use
+*.vacuum-wal-cert*
+*.stale_*
+*schemabroken*
+*.bad_*
