@@ -9613,12 +9613,14 @@ const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 /// still takes the measured win at 100k. If a fixture between 10k and 100k ever
 /// exists, measure there before trusting this number.
 ///
-/// TWELVE ops opt in as of br-frankenpandas-lrpp2, not three. The original three
-/// (`sin`, `log1p`, `atan`) plus `cos`, `tan`, `asin`, `acos`, `sinh`, `cosh`,
-/// `tanh`, `asinh`, `atanh` — measured at 100k against LIVE pandas 2.2.3 on one
+/// THIRTEEN ops opt in as of br-frankenpandas-lrpp2, not three. The original
+/// three (`sin`, `log1p`, `atan`) plus `cos`, `tan`, `asin`, `acos`, `sinh`,
+/// `cosh`, `tanh`, `asinh`, `atanh`, `acosh` — measured at 100k against LIVE
+/// pandas 2.2.3 on one
 /// ELF via the `FP_ELEMENTWISE_PAR_MIN` env A/B, 64 rounds each:
 ///
 ///     op      serial      threaded    FP-side   threaded vs pandas
+///     acosh   1601.94us   593.78us    2.70x     2.4885x  BOTH ARMS CERTIFIED
 ///     asinh   1667.82us   645.48us    2.58x     2.7519x
 ///     atanh   1477.65     580.90      2.54x     2.0685x
 ///     acos    1442.01     550.32      2.62x     2.1915x
@@ -28532,7 +28534,25 @@ impl Column {
         // NaN below 1. `acosh(1.0)` = `0.0` and `acosh(+inf)` = `+inf`, both present.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x >= 1.0, f64::acosh) {
+        // br-frankenpandas-lrpp2. THE LAST OP IN THE FAMILY TO BE MEASURED, and the
+        // only one the sweep could not reach on the shared fixture: `acosh` needs
+        // x >= 1 and every bench fixture lands in (0, 1], so a lane on it would
+        // have timed the OUT-OF-DOMAIN FALLBACK and reported that as the kernel.
+        // It got a shifted (1, 10] fixture in examples/h2h.rs, and it is the
+        // cleanest row of the eleven — BOTH arms certify, in one invocation:
+        //
+        //     serial    fp 1601.94us  vs pandas 1518.54us  = 0.9479x  CERTIFIED SLOWER
+        //     threaded  fp  593.78us  vs pandas 1477.60us  = 2.4885x  CERTIFIED FASTER
+        //
+        // A certified sign flip, FP-side 2.698x, with the incumbent moving only
+        // 2.7% between the two arms. At ~16.0 ns/element its crossover is ~25_000
+        // rows, comfortably below this constant.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x >= 1.0,
+            f64::acosh,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::acosh) {
