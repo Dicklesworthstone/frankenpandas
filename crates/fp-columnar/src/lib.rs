@@ -9613,9 +9613,37 @@ const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 /// still takes the measured win at 100k. If a fixture between 10k and 100k ever
 /// exists, measure there before trusting this number.
 ///
-/// ONLY the three ops above opt in. The other fourteen callers of
-/// `typed_float_domain_fused_unary` keep the shared default — including
-/// `exp_m1`, which was measured and is CORRECTLY left serial at 100k.
+/// TWELVE ops opt in as of br-frankenpandas-lrpp2, not three. The original three
+/// (`sin`, `log1p`, `atan`) plus `cos`, `tan`, `asin`, `acos`, `sinh`, `cosh`,
+/// `tanh`, `asinh`, `atanh` — measured at 100k against LIVE pandas 2.2.3 on one
+/// ELF via the `FP_ELEMENTWISE_PAR_MIN` env A/B, 64 rounds each:
+///
+///     op      serial      threaded    FP-side   threaded vs pandas
+///     asinh   1667.82us   645.48us    2.58x     2.7519x
+///     atanh   1477.65     580.90      2.54x     2.0685x
+///     acos    1442.01     550.32      2.62x     2.1915x
+///     sinh    1425.48     537.11      2.65x     2.6655x
+///     asin    1391.48     542.07      2.57x     2.4116x  CERTIFIED
+///     tanh    1245.42     569.13      2.19x     2.3059x  CERTIFIED
+///     tan     1094.06     526.07      2.08x     2.2346x
+///     cosh    1047.62     496.66      2.11x     2.0924x
+///     cos      950.96     485.99      1.96x     1.9964x  CERTIFIED
+///     ---- break-even sits in here (~400us of serial work) ----
+///     log2     474.08     417.93      1.13x     1.2886x
+///     exp      423.89     416.05      1.02x     1.2335x  <- gains NOTHING
+///
+/// Every one of the nine above the line was on the shared 200_000 default purely
+/// because the bench carried ONE representative per cost class — `sin` for trig,
+/// `atan` for inverse trig, and nothing at all for the hyperbolics. The cost class
+/// was already known; the ops were not measured.
+///
+/// ⚠️ `exp` AND `log2` ARE DELIBERATELY EXCLUDED, and they are the reason this is a
+/// per-op override rather than a lower shared constant. Their serial cost at 100k
+/// (424us, 474us) sits ON the break-even, so their crossovers are ~94_000 and
+/// ~84_000 rows — ABOVE this constant. Opting them in at 65_536 would engage the
+/// parallel arm in the 65k-90k band where it has NOT yet paid for itself, buying a
+/// measured 1.02x/1.13x at 100k in exchange for a loss below it. `exp_m1` is
+/// excluded for the same reason and was measured earlier.
 const ELEMENTWISE_EXPENSIVE_PAR_MIN: usize = 65_536;
 
 /// Worker cap and parallel threshold for the UNARY witness map, from
@@ -28146,7 +28174,21 @@ impl Column {
         // `cos(±inf)` is NaN — there is no limit to return; every finite input is in.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.is_finite(), f64::cos) {
+        // br-frankenpandas-lrpp2. MEASURED at 100k against live pandas 2.2.3, one
+        // ELF, env-only A/B (`FP_ELEMENTWISE_PAR_MIN`), 64 rounds: serial 950.96us
+        // -> threaded 485.996us, and the threaded arm CERTIFIES at 1.9964x with
+        // both A/A nulls clean (0.98978 / 0.99724) where the serial arm sits at
+        // parity (1.0082x). `cos` costs ~9.5 ns/element, so 100k of it is ~950us of
+        // work against a ~350-420us `thread::scope` tax — far above the ~400us
+        // break-even, and its crossover is ~42_000 rows, which 65_536 clears with
+        // margin. It was left on the shared 200_000 default only because `sin` was
+        // the single trig representative the bench carried.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x.is_finite(),
+            f64::cos,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::cos) {
@@ -28177,7 +28219,15 @@ impl Column {
         // `tan(±inf)` is NaN. Finite inputs near a pole give a huge finite value, not NaN.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.is_finite(), f64::tan) {
+        // br-frankenpandas-lrpp2. Same sweep as `cos`: serial 1094.06us -> threaded
+        // 526.07us at 100k (2.08x FP-side), threaded ratio 2.2346x vs live pandas.
+        // ~10.9 ns/element, crossover ~37_000 rows.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x.is_finite(),
+            f64::tan,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::tan) {
@@ -28208,7 +28258,18 @@ impl Column {
         // NaN outside [-1, 1], and `abs(±inf) > 1` so the infinities are excluded by the same test.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.abs() <= 1.0, f64::asin) {
+        // br-frankenpandas-lrpp2. Serial 1391.48us -> threaded 542.07us at 100k
+        // (2.57x FP-side); the threaded arm CERTIFIES at 2.4116x vs live pandas
+        // while the serial arm is 0.9436x. ~13.9 ns/element, crossover ~29_000 rows.
+        // `atan` was already opted in at this constant; `asin`/`acos` are MORE
+        // expensive than `atan`, not less, and were left behind only because the
+        // bench carried one inverse-trig representative.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x.abs() <= 1.0,
+            f64::asin,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::asin) {
@@ -28239,7 +28300,15 @@ impl Column {
         // Same domain as `asin`.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.abs() <= 1.0, f64::acos) {
+        // br-frankenpandas-lrpp2. Serial 1442.01us -> threaded 550.32us at 100k
+        // (2.62x FP-side), threaded ratio 2.1915x vs live pandas against the serial
+        // arm's 0.9436x. ~14.4 ns/element, crossover ~28_000 rows.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x.abs() <= 1.0,
+            f64::acos,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::acos) {
@@ -28305,7 +28374,17 @@ impl Column {
         // TOTAL: `sinh(±inf)` = `±inf`, and a finite overflow gives `±inf` — present, not NaN.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::sinh) {
+        // br-frankenpandas-lrpp2. Serial 1425.48us -> threaded 537.11us at 100k
+        // (2.65x FP-side), threaded ratio 2.6655x vs live pandas. ~14.3
+        // ns/element, crossover ~28_000 rows. The hyperbolics had NO representative
+        // in the bench at all before this sweep, so none of them had ever been
+        // measured on either side of the threshold.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |_| true,
+            f64::sinh,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::sinh) {
@@ -28336,7 +28415,15 @@ impl Column {
         // TOTAL: `cosh(±inf)` = `+inf`, finite overflow gives `+inf`.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::cosh) {
+        // br-frankenpandas-lrpp2. Serial 1047.62us -> threaded 496.66us at 100k
+        // (2.11x FP-side), threaded ratio 2.0924x vs live pandas against the serial
+        // arm's 1.0121x. ~10.5 ns/element, crossover ~38_000 rows.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |_| true,
+            f64::cosh,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::cosh) {
@@ -28367,7 +28454,15 @@ impl Column {
         // TOTAL and bounded: `tanh(±inf)` = `±1.0`.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::tanh) {
+        // br-frankenpandas-lrpp2. Serial 1245.42us -> threaded 569.13us at 100k
+        // (2.19x FP-side); the threaded arm CERTIFIES at 2.3059x vs live pandas
+        // where the serial arm is 0.8741x. ~12.5 ns/element, crossover ~32_000 rows.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |_| true,
+            f64::tanh,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::tanh) {
@@ -28398,7 +28493,15 @@ impl Column {
         // TOTAL: defined on all reals, `asinh(±inf)` = `±inf`.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|_| true, f64::asinh) {
+        // br-frankenpandas-lrpp2. The most expensive op in the sweep: serial
+        // 1667.82us -> threaded 645.48us at 100k (2.58x FP-side), threaded ratio
+        // 2.7519x vs live pandas. ~16.7 ns/element, crossover ~24_000 rows.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |_| true,
+            f64::asinh,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::asinh) {
@@ -28460,7 +28563,15 @@ impl Column {
         // NaN outside [-1, 1]. The ENDPOINTS are `±inf`, which are PRESENT values, so the bound is inclusive.
         // Domain transcribed from a std probe, not from memory; asserted by
         // `trig_family_domains_match_std_4kig1`. br-frankenpandas-4kig1.
-        if let Some(out) = self.typed_float_domain_fused_unary(|x| x.abs() <= 1.0, f64::atanh) {
+        // br-frankenpandas-lrpp2. Serial 1477.65us -> threaded 580.90us at 100k
+        // (2.54x FP-side), threaded ratio 2.0685x vs live pandas against the serial
+        // arm's 0.8415x. ~14.8 ns/element, crossover ~27_000 rows.
+        if let Some(out) = self.typed_float_domain_fused_unary_with_finiteness(
+            |x| x.abs() <= 1.0,
+            f64::atanh,
+            false,
+            Some(ELEMENTWISE_EXPENSIVE_PAR_MIN),
+        ) {
             return Ok(out);
         }
         if let Some(out) = self.typed_float_unary_par(f64::atanh) {
