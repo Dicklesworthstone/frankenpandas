@@ -142,7 +142,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target
       TMPDIR: ${{ github.workspace }}/.tmp
-      FP_PYTHON_BIN: python
+      FP_PYTHON_BIN: .venv-oracle/bin/python
       FP_REQUIRE_LIVE_ORACLE: "1"
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
@@ -173,8 +173,12 @@ jobs:
       - name: Create temp dirs
         run: mkdir -p .tmp .target
 
-      - name: Install pinned pandas oracle dependency
-        run: python -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt
+      - name: Install and verify required pandas oracle
+        run: |
+          python -m venv .venv-oracle
+          "$FP_PYTHON_BIN" -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt
+          test -x "$FP_PYTHON_BIN" || { echo "required live pandas oracle interpreter is missing: $FP_PYTHON_BIN" >&2; exit 1; }
+          "$FP_PYTHON_BIN" -c 'import pandas; print(f"live pandas oracle {pandas.__version__}")'
 
       - name: Workspace tests (--no-fail-fast)
         # br-frankenpandas-edn3q: keep collecting failures across all
@@ -192,6 +196,38 @@ jobs:
         # --no-fail-fast a single crate's broken doctest hides every later
         # crate's. Same target-ordering defect as the conformance job below.
         run: cargo test --doc --workspace --no-fail-fast
+
+  core-test:
+    # br-frankenpandas-ey5sl: this is the smallest independent correctness
+    # gate for the two core execution crates. It deliberately has no `needs`
+    # and no `continue-on-error`: a red fp-frame or fp-columnar suite must
+    # fail the workflow even when another broad workspace job is already red.
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target-core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: Core fp-frame and fp-columnar tests
+        run: cargo test -p fp-frame -p fp-columnar --no-fail-fast
 
   eager-frame:
     # br-frankenpandas-it6kj: the default build uses lazy transpose storage,
@@ -241,7 +277,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-conformance
       TMPDIR: ${{ github.workspace }}/.tmp
-      FP_PYTHON_BIN: python
+      FP_PYTHON_BIN: .venv-oracle/bin/python
       FP_REQUIRE_LIVE_ORACLE: "1"
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
@@ -272,8 +308,12 @@ jobs:
       - name: Create temp dirs
         run: mkdir -p .tmp .target-conformance
 
-      - name: Install pinned pandas oracle dependency
-        run: python -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements-dev.txt
+      - name: Install and verify required pandas oracle
+        run: |
+          python -m venv .venv-oracle
+          "$FP_PYTHON_BIN" -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements-dev.txt
+          test -x "$FP_PYTHON_BIN" || { echo "required live pandas oracle interpreter is missing: $FP_PYTHON_BIN" >&2; exit 1; }
+          "$FP_PYTHON_BIN" -c 'import pandas; print(f"live pandas oracle {pandas.__version__}")'
 
       - name: Oracle pytest suite
         # Per br-frankenpandas-urhy: the 4985-LOC pandas_oracle.py is the
@@ -347,7 +387,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-gates
       TMPDIR: ${{ github.workspace }}/.tmp
-      FP_PYTHON_BIN: python
+      FP_PYTHON_BIN: .venv-oracle/bin/python
       FP_REQUIRE_LIVE_ORACLE: "1"
       FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
@@ -378,8 +418,12 @@ jobs:
       - name: Create temp dirs
         run: mkdir -p .tmp .target-gates
 
-      - name: Install pinned pandas oracle dependency
-        run: python -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt
+      - name: Install and verify required pandas oracle
+        run: |
+          python -m venv .venv-oracle
+          "$FP_PYTHON_BIN" -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt
+          test -x "$FP_PYTHON_BIN" || { echo "required live pandas oracle interpreter is missing: $FP_PYTHON_BIN" >&2; exit 1; }
+          "$FP_PYTHON_BIN" -c 'import pandas; print(f"live pandas oracle {pandas.__version__}")'
 
       - name: Phase2C gate check
         run: ./scripts/phase2c_gate_check.sh

@@ -245,3 +245,31 @@ fn ci_workflow_runs_workspace_rustdoc_gate() {
         "expected CI to build workspace docs with all features"
     );
 }
+
+#[test]
+fn ci_workflow_has_a_non_advisory_core_test_gate_and_required_oracle() {
+    let root = repo_root();
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci");
+    let core_gate = ci
+        .split("  core-test:\n")
+        .nth(1)
+        .and_then(|section| section.split("\n  eager-frame:").next())
+        .expect("expected standalone core-test job before eager-frame");
+
+    assert!(
+        core_gate.contains("cargo test -p fp-frame -p fp-columnar --no-fail-fast"),
+        "expected core-test to execute both fp-frame and fp-columnar suites"
+    );
+    assert!(
+        !core_gate.contains("continue-on-error"),
+        "core-test must fail the workflow instead of reporting an advisory result"
+    );
+    assert!(
+        ci.contains("FP_PYTHON_BIN: .venv-oracle/bin/python"),
+        "expected CI to use its isolated, pinned live-oracle interpreter"
+    );
+    assert!(
+        ci.contains("required live pandas oracle interpreter is missing"),
+        "expected a clear hard failure when the required live oracle is absent"
+    );
+}
