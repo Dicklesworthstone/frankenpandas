@@ -6877,12 +6877,12 @@ fn fuzz_feather_dtype_from_byte(byte: u8) -> DType {
     }
 }
 
-fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
+fn fuzz_feather_scalar_for_dtype(dtype: &DType, bytes: &[u8]) -> Scalar {
     let tag = bytes.first().copied().unwrap_or_default();
     let payload = bytes.get(1).copied().unwrap_or_default();
 
     if tag % 5 == 0 {
-        return Scalar::missing_for_dtype(dtype);
+        return Scalar::missing_for_dtype(dtype.clone());
     }
 
     match dtype {
@@ -6937,7 +6937,7 @@ fn fuzz_feather_frame_from_bytes(bytes: &[u8]) -> Result<DataFrame, FpIoError> {
         let values = (0..row_count)
             .map(|row_idx| {
                 fuzz_feather_scalar_for_dtype(
-                    dtype,
+                    &dtype,
                     &[
                         byte_at(8 + col_idx * 11 + row_idx * 2),
                         byte_at(9 + col_idx * 11 + row_idx * 2),
@@ -6980,9 +6980,9 @@ fn fuzz_eval_frame_from_bytes(bytes: &[u8]) -> Result<DataFrame, FrameError> {
                 let tag = byte_at(8 + col_idx * 17 + row_idx * 2);
                 let payload = byte_at(9 + col_idx * 17 + row_idx * 2);
                 if tag % 7 == 0 {
-                    Scalar::missing_for_dtype(dtype)
+                    Scalar::missing_for_dtype(dtype.clone())
                 } else {
-                    match dtype {
+                    match &dtype {
                         DType::Int64 => Scalar::Int64(i64::from(payload % 17) - 8),
                         DType::Float64 => Scalar::Float64(match payload % 6 {
                             0 => 0.0,
@@ -7816,7 +7816,7 @@ fn fuzz_semantic_eq_scalar(dtype_tag: u8, value_tag: u8) -> Scalar {
         1 => Scalar::Null(NullKind::NaN),
         2 => Scalar::Null(NullKind::NaT),
         3 if dtype == DType::Float64 => Scalar::Float64(f64::NAN),
-        _ => fuzz_feather_scalar_for_dtype(dtype, &[value_tag, value_tag.rotate_left(1)]),
+        _ => fuzz_feather_scalar_for_dtype(&dtype, &[value_tag, value_tag.rotate_left(1)]),
     }
 }
 
@@ -7899,8 +7899,8 @@ pub fn fuzz_common_dtype_bytes(input: &[u8]) -> Result<(), String> {
     let left = fuzz_dtype_from_byte(*left_tag);
     let right = fuzz_dtype_from_byte(*right_tag);
 
-    let forward = common_dtype(left, right);
-    let reverse = common_dtype(right, left);
+    let forward = common_dtype(left.clone(), right.clone());
+    let reverse = common_dtype(right.clone(), left.clone());
 
     match (forward, reverse) {
         (Ok(common), Ok(reverse_common)) => {
@@ -7911,7 +7911,7 @@ pub fn fuzz_common_dtype_bytes(input: &[u8]) -> Result<(), String> {
                 ));
             }
 
-            let left_idempotent = common_dtype(common, left).map_err(|err| {
+            let left_idempotent = common_dtype(common.clone(), left.clone()).map_err(|err| {
                 format!(
                     "common_dtype lost left compatibility: left={left:?} right={right:?} \
                      common={common:?} err={err}"
@@ -7924,7 +7924,7 @@ pub fn fuzz_common_dtype_bytes(input: &[u8]) -> Result<(), String> {
                 ));
             }
 
-            let right_idempotent = common_dtype(common, right).map_err(|err| {
+            let right_idempotent = common_dtype(common.clone(), right.clone()).map_err(|err| {
                 format!(
                     "common_dtype lost right compatibility: left={left:?} right={right:?} \
                      common={common:?} err={err}"
@@ -7962,8 +7962,8 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
 
     let target = fuzz_dtype_from_byte(target_tag);
     let value = fuzz_scalar_from_bytes(scalar_bytes);
-    let owned = cast_scalar_owned(value.clone(), target);
-    let borrowed = cast_scalar(&value, target);
+    let owned = cast_scalar_owned(value.clone(), target.clone());
+    let borrowed = cast_scalar(&value, target.clone());
 
     if format!("{owned:?}") != format!("{borrowed:?}") {
         return Err(format!(
@@ -7981,7 +7981,7 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
             }
 
             if value.is_missing() {
-                let expected = Scalar::missing_for_dtype(target);
+                let expected = Scalar::missing_for_dtype(target.clone());
                 if result != expected {
                     return Err(format!(
                         "missing cast drifted: value={value:?} target={target:?} \
@@ -8003,7 +8003,7 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
                 ));
             }
 
-            let owned_idempotent = cast_scalar_owned(result.clone(), target).map_err(|err| {
+            let owned_idempotent = cast_scalar_owned(result.clone(), target.clone()).map_err(|err| {
                 format!(
                     "successful cast lost idempotence on owned path: \
                      value={value:?} target={target:?} result={result:?} err={err:?}"
@@ -8016,7 +8016,7 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
                 ));
             }
 
-            let borrowed_idempotent = cast_scalar(&result, target).map_err(|err| {
+            let borrowed_idempotent = cast_scalar(&result, target.clone()).map_err(|err| {
                 format!(
                     "successful cast lost idempotence on borrowed path: \
                      value={value:?} target={target:?} result={result:?} err={err:?}"
@@ -8289,7 +8289,7 @@ fn scalars_equivalent(actual: &Scalar, expected: &Scalar, preserves_nan_missing:
     }
 }
 
-fn column_arith_preserves_nan_missing(left: &Column, right: &Column, out_dtype: DType) -> bool {
+fn column_arith_preserves_nan_missing(left: &Column, right: &Column, out_dtype: &DType) -> bool {
     !(matches!(out_dtype, DType::Int64)
         && matches!(left.dtype(), DType::Int64)
         && matches!(right.dtype(), DType::Int64))
@@ -8417,7 +8417,7 @@ pub fn fuzz_column_arith_bytes(input: &[u8]) -> Result<(), String> {
     }
 
     let expected_dtype = fuzz_expected_column_arith_dtype(&left, &right, op)?;
-    let preserves_nan_missing = column_arith_preserves_nan_missing(&left, &right, expected_dtype);
+    let preserves_nan_missing = column_arith_preserves_nan_missing(&left, &right, &expected_dtype);
     if result.dtype() != expected_dtype {
         return Err(format!(
             "column arithmetic dtype drifted: op={op:?} left_dtype={:?} right_dtype={:?} \
@@ -8439,7 +8439,7 @@ pub fn fuzz_column_arith_bytes(input: &[u8]) -> Result<(), String> {
             left_value,
             right_value,
             op,
-            expected_dtype,
+            expected_dtype.clone(),
             preserves_nan_missing,
         )?;
         if !scalars_equivalent(actual, &expected, preserves_nan_missing) {
@@ -18049,9 +18049,9 @@ fn declared_payload_dtype(values: &[Scalar]) -> Option<DType> {
     if !has_null {
         return None;
     }
-    match kinds.iter().copied().collect::<Vec<_>>().as_slice() {
-        [DType::Int64] => Some(DType::Int64Nullable),
-        [DType::Bool] => Some(DType::BoolNullable),
+    match kinds.iter().next() {
+        Some(DType::Int64) if kinds.len() == 1 => Some(DType::Int64Nullable),
+        Some(DType::Bool) if kinds.len() == 1 => Some(DType::BoolNullable),
         _ => None,
     }
 }
@@ -18155,7 +18155,7 @@ fn build_series_for_dtype_check(fixture: &PacketFixture) -> Result<Series, Strin
         let fill_value = fixture
             .fill_value
             .clone()
-            .unwrap_or_else(|| Scalar::missing_for_dtype(value_dtype));
+            .unwrap_or_else(|| Scalar::missing_for_dtype(value_dtype.clone()));
         return Series::from_sparse_dense(
             left.name.clone(),
             left.index.clone(),

@@ -3460,7 +3460,7 @@ const ALL_DTYPES: [fp_types::DType; 14] = [
     fp_types::DType::Utf8,
     fp_types::DType::Categorical,
     fp_types::DType::Timedelta64,
-    fp_types::DType::Datetime64,
+    fp_types::DType::datetime64_naive(),
     fp_types::DType::Period,
     fp_types::DType::Interval,
     fp_types::DType::Sparse,
@@ -3490,7 +3490,7 @@ const ALL_DTYPES: [fp_types::DType; 14] = [
 /// gate that reports the absence of work as the success of work.
 /// (br-frankenpandas-nv8az)
 fn arb_dtype() -> impl Strategy<Value = fp_types::DType> {
-    proptest::sample::select(&ALL_DTYPES[..])
+    proptest::sample::select(ALL_DTYPES.to_vec())
 }
 
 proptest! {
@@ -3499,11 +3499,11 @@ proptest! {
     /// common_dtype is symmetric: common_dtype(a, b) == common_dtype(b, a).
     #[test]
     fn prop_common_dtype_symmetric(a in arb_dtype(), b in arb_dtype()) {
-        let ab = fp_types::common_dtype(a, b);
-        let ba = fp_types::common_dtype(b, a);
+        let ab = fp_types::common_dtype(a.clone(), b.clone());
+        let ba = fp_types::common_dtype(b.clone(), a.clone());
         match (ab, ba) {
             (Ok(ab_dt), Ok(ba_dt)) => {
-                prop_assert_eq!(ab_dt, ba_dt,
+                prop_assert_eq!(&ab_dt, &ba_dt,
                     "common_dtype must be symmetric: ({:?},{:?}) -> {:?} vs {:?}", a, b, ab_dt, ba_dt);
             }
             (Err(_), Err(_)) => { /* both incompatible: ok */ }
@@ -3517,14 +3517,14 @@ proptest! {
     /// common_dtype is reflexive: common_dtype(a, a) == Ok(a).
     #[test]
     fn prop_common_dtype_reflexive(a in arb_dtype()) {
-        let result = fp_types::common_dtype(a, a);
-        prop_assert_eq!(result, Ok(a), "common_dtype({:?}, {:?}) must be {:?}", a, a, a);
+        let result = fp_types::common_dtype(a.clone(), a.clone());
+        prop_assert_eq!(result, Ok(a.clone()), "common_dtype({:?}, {:?}) must be {:?}", a, a, a);
     }
 
     /// common_dtype with Null is identity: common_dtype(Null, x) == Ok(x).
     #[test]
     fn prop_common_dtype_null_identity(x in arb_dtype()) {
-        let result = fp_types::common_dtype(fp_types::DType::Null, x);
+        let result = fp_types::common_dtype(fp_types::DType::Null, x.clone());
         prop_assert_eq!(result, Ok(x), "Null is the identity element for common_dtype");
     }
 
@@ -3533,17 +3533,17 @@ proptest! {
     /// then common_dtype(a, common_dtype(b, c)) should also be Ok(abc).
     #[test]
     fn prop_common_dtype_transitive(a in arb_dtype(), b in arb_dtype(), c in arb_dtype()) {
-        let ab = fp_types::common_dtype(a, b);
-        let bc = fp_types::common_dtype(b, c);
+        let ab = fp_types::common_dtype(a.clone(), b.clone());
+        let bc = fp_types::common_dtype(b.clone(), c.clone());
 
         // Only test transitivity when both intermediate steps succeed.
         if let (Ok(ab_dt), Ok(bc_dt)) = (ab, bc) {
-            let ab_c = fp_types::common_dtype(ab_dt, c);
-            let a_bc = fp_types::common_dtype(a, bc_dt);
+            let ab_c = fp_types::common_dtype(ab_dt, c.clone());
+            let a_bc = fp_types::common_dtype(a.clone(), bc_dt);
 
             match (ab_c, a_bc) {
                 (Ok(left), Ok(right)) => {
-                    prop_assert_eq!(left, right,
+                    prop_assert_eq!(&left, &right,
                         "common_dtype transitivity: ({:?},{:?},{:?}) -> {:?} vs {:?}",
                         a, b, c, left, right);
                 }
@@ -3584,7 +3584,7 @@ proptest! {
     #[test]
     fn prop_cast_identity(scalar in arb_numeric_scalar()) {
         let target = scalar.dtype();
-        let result = fp_types::cast_scalar(&scalar, target);
+        let result = fp_types::cast_scalar(&scalar, target.clone());
         match result {
             Ok(casted) => {
                 if scalar.is_missing() {
@@ -3616,7 +3616,7 @@ proptest! {
     ) {
         prop_assume!(target != fp_types::DType::Utf8);
         let scalar = Scalar::Null(kind);
-        let result = fp_types::cast_scalar(&scalar, target);
+        let result = fp_types::cast_scalar(&scalar, target.clone());
         match result {
             Ok(casted) => {
                 prop_assert!(casted.is_missing(),
@@ -3665,9 +3665,9 @@ proptest! {
     ) {
         let dt_a = a.dtype();
         let dt_b = b.dtype();
-        if let Ok(target) = fp_types::common_dtype(dt_a, dt_b) {
-            let cast_a = fp_types::cast_scalar(&a, target);
-            let cast_b = fp_types::cast_scalar(&b, target);
+        if let Ok(target) = fp_types::common_dtype(dt_a.clone(), dt_b.clone()) {
+            let cast_a = fp_types::cast_scalar(&a, target.clone());
+            let cast_b = fp_types::cast_scalar(&b, target.clone());
             prop_assert!(cast_a.is_ok(),
                 "cast {:?} ({:?}) to {:?} must succeed", a, dt_a, target);
             prop_assert!(cast_b.is_ok(),
@@ -12378,7 +12378,7 @@ mod dtype_generator_exhaustiveness_nv8az {
 
     /// Non-exhaustive matches are a hard error, so a new `DType` variant breaks
     /// the build here rather than silently shrinking the property surface.
-    fn dtype_variant_name(dtype: DType) -> &'static str {
+    fn dtype_variant_name(dtype: &DType) -> &'static str {
         match dtype {
             DType::Null => "Null",
             DType::Bool => "Bool",
@@ -12390,7 +12390,7 @@ mod dtype_generator_exhaustiveness_nv8az {
             DType::Utf8 => "Utf8",
             DType::Categorical => "Categorical",
             DType::Timedelta64 => "Timedelta64",
-            DType::Datetime64 => "Datetime64",
+            DType::Datetime64 { .. } => "Datetime64",
             DType::Period => "Period",
             DType::Interval => "Interval",
             DType::Sparse => "Sparse",
@@ -12400,7 +12400,7 @@ mod dtype_generator_exhaustiveness_nv8az {
     #[test]
     fn all_dtypes_has_no_duplicates_and_names_every_variant() {
         let mut seen: Vec<&'static str> =
-            ALL_DTYPES.iter().copied().map(dtype_variant_name).collect();
+            ALL_DTYPES.iter().map(dtype_variant_name).collect();
         let total = seen.len();
         seen.sort_unstable();
         seen.dedup();
@@ -12440,10 +12440,10 @@ mod dtype_generator_exhaustiveness_nv8az {
             let tree = strategy
                 .new_tree(&mut runner)
                 .expect("arb_dtype must produce a value");
-            drawn.insert(dtype_variant_name(tree.current()));
+            drawn.insert(dtype_variant_name(&tree.current()));
         }
         let expected: std::collections::BTreeSet<&'static str> =
-            ALL_DTYPES.iter().copied().map(dtype_variant_name).collect();
+            ALL_DTYPES.iter().map(dtype_variant_name).collect();
         let missing: Vec<_> = expected.difference(&drawn).copied().collect();
         assert!(
             missing.is_empty(),
@@ -12470,7 +12470,7 @@ mod dtype_generator_exhaustiveness_nv8az {
                  what DISC-011 and br-frankenpandas-vprpg are changing, and a \
                  generator that cannot draw it makes every dtype property here \
                  unfalsifiable",
-                dtype_variant_name(required)
+                dtype_variant_name(&required)
             );
         }
     }

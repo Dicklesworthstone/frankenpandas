@@ -510,19 +510,20 @@ fn coalesce_temporal_i64_key_column(
         return None;
     }
 
-    let (left_keys, right_keys, nat, is_datetime) =
+    let (left_keys, right_keys, nat, datetime_dtype) =
         match (left_key_col.dtype(), right_key_col.dtype()) {
-            (DType::Datetime64, DType::Datetime64) => (
+            (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz })
+                if left_tz == right_tz => (
                 left_key_col.as_datetime64_slice()?,
                 right_key_col.as_datetime64_slice()?,
                 fp_types::Timestamp::NAT,
-                true,
+                Some(DType::Datetime64 { tz: left_tz }),
             ),
             (DType::Timedelta64, DType::Timedelta64) => (
                 left_key_col.as_timedelta64_slice()?,
                 right_key_col.as_timedelta64_slice()?,
                 fp_types::Timedelta::NAT,
-                false,
+                None,
             ),
             _ => return None,
         };
@@ -541,8 +542,8 @@ fn coalesce_temporal_i64_key_column(
     }
 
     let validity = ValidityMask::all_valid(data.len());
-    Some(if is_datetime {
-        Column::from_datetime64_values_with_validity(data, validity)
+    Some(if let Some(dtype) = datetime_dtype {
+        Column::from_datetime64_values_with_validity(data, validity).with_dtype(dtype)
     } else {
         Column::from_timedelta64_values_with_validity(data, validity)
     })
@@ -7398,7 +7399,7 @@ fn temporal_i64_inner_positions(
     }
 
     let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
-        (DType::Datetime64, DType::Datetime64) => (
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz => (
             left_key.as_datetime64_slice()?,
             right_key.as_datetime64_slice()?,
             fp_types::Timestamp::NAT,
@@ -7469,7 +7470,7 @@ fn temporal_i64_left_positions(
     }
 
     let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
-        (DType::Datetime64, DType::Datetime64) => (
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz => (
             left_key.as_datetime64_slice()?,
             right_key.as_datetime64_slice()?,
             fp_types::Timestamp::NAT,
@@ -7554,7 +7555,7 @@ fn ordered_unique_temporal_i64_right_match_positions(
     }
 
     let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
-        (DType::Datetime64, DType::Datetime64) => (
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz => (
             left_key.as_datetime64_slice()?,
             right_key.as_datetime64_slice()?,
             fp_types::Timestamp::NAT,
@@ -7612,7 +7613,7 @@ fn ordered_unique_temporal_i64_outer_positions(
     }
 
     let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
-        (DType::Datetime64, DType::Datetime64) => (
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz => (
             left_key.as_datetime64_slice()?,
             right_key.as_datetime64_slice()?,
             fp_types::Timestamp::NAT,
@@ -10321,7 +10322,10 @@ fn try_asof_datetime_shift(
     right_key: &Column,
     on: &str,
 ) -> Option<Result<ShiftedDatetimeAsofKeys, JoinError>> {
-    if left_key.dtype() != DType::Datetime64 || right_key.dtype() != DType::Datetime64 {
+    if !matches!(
+        (left_key.dtype(), right_key.dtype()),
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz
+    ) {
         return None;
     }
     let ld = left_key.as_datetime64_slice()?;
@@ -10626,7 +10630,10 @@ fn try_asof_datetime_matches(
     allow_exact_matches: bool,
     tolerance: Option<f64>,
 ) -> Option<Result<Vec<Option<usize>>, JoinError>> {
-    if left_key.dtype() != DType::Datetime64 || right_key.dtype() != DType::Datetime64 {
+    if !matches!(
+        (left_key.dtype(), right_key.dtype()),
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz
+    ) {
         return None;
     }
     let left = datetime64_key_parts(left_key)?;
@@ -12950,9 +12957,9 @@ mod tests {
 
         let left_ns = [30, 10, 20, 10];
         let right_ns = [10, 30, 10, 40];
-        for temporal in [DType::Datetime64, DType::Timedelta64] {
-            let scalar = |ns| match temporal {
-                DType::Datetime64 => Scalar::Datetime64(ns),
+        for temporal in [DType::datetime64_naive(), DType::Timedelta64] {
+            let scalar = |ns| match &temporal {
+                DType::Datetime64 { .. } => Scalar::Datetime64(ns),
                 DType::Timedelta64 => Scalar::Timedelta64(ns),
                 _ => unreachable!("test iterates only temporal dtypes"),
             };
@@ -13142,7 +13149,7 @@ mod tests {
             ],
         )?;
         let merged = merge_dataframes_on(&left, &right, &["key"], JoinType::Inner)?;
-        assert_eq!(merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(merged.columns["key"].dtype(), DType::datetime64_naive());
         assert_eq!(
             merged_values(&merged, "key")?,
             &[
@@ -13198,7 +13205,7 @@ mod tests {
             "NaT must retain the scalar Missing-key fallback"
         );
         let nat_merged = merge_dataframes_on(&nat_left, &nat_right, &["key"], JoinType::Inner)?;
-        assert_eq!(nat_merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(nat_merged.columns["key"].dtype(), DType::datetime64_naive());
         assert_eq!(nat_merged.index.len(), 2);
         assert!(merged_values(&nat_merged, "key")?[0].is_missing());
         assert_eq!(
@@ -13235,9 +13242,9 @@ mod tests {
 
         let left_ns = [30, 10, 20, 10, 50];
         let right_ns = [10, 30, 10, 40];
-        for temporal in [DType::Datetime64, DType::Timedelta64] {
-            let scalar = |ns| match temporal {
-                DType::Datetime64 => Scalar::Datetime64(ns),
+        for temporal in [DType::datetime64_naive(), DType::Timedelta64] {
+            let scalar = |ns| match &temporal {
+                DType::Datetime64 { .. } => Scalar::Datetime64(ns),
                 DType::Timedelta64 => Scalar::Timedelta64(ns),
                 _ => unreachable!("test iterates only temporal dtypes"),
             };
@@ -13305,7 +13312,7 @@ mod tests {
             ],
         )?;
         let merged = merge_dataframes_on(&left, &right, &["key"], JoinType::Left)?;
-        assert_eq!(merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(merged.columns["key"].dtype(), DType::datetime64_naive());
         assert_eq!(
             merged_values(&merged, "key")?,
             &[
@@ -13378,7 +13385,7 @@ mod tests {
             "NaT must retain the scalar Missing-key fallback"
         );
         let nat_merged = merge_dataframes_on(&nat_left, &nat_right, &["key"], JoinType::Left)?;
-        assert_eq!(nat_merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(nat_merged.columns["key"].dtype(), DType::datetime64_naive());
         assert_eq!(nat_merged.index.len(), 3);
         assert!(merged_values(&nat_merged, "key")?[0].is_missing());
         assert_eq!(
@@ -13408,9 +13415,9 @@ mod tests {
 
         let left_ns = [-20, 10, 30, 50];
         let right_ns = [-30, -20, 20, 30, 60];
-        for temporal in [DType::Datetime64, DType::Timedelta64] {
-            let scalar = |ns| match temporal {
-                DType::Datetime64 => Scalar::Datetime64(ns),
+        for temporal in [DType::datetime64_naive(), DType::Timedelta64] {
+            let scalar = |ns| match &temporal {
+                DType::Datetime64 { .. } => Scalar::Datetime64(ns),
                 DType::Timedelta64 => Scalar::Timedelta64(ns),
                 _ => unreachable!("test iterates only temporal dtypes"),
             };
@@ -13618,7 +13625,7 @@ mod tests {
             ],
         )?;
         let merged = merge_dataframes_on(&left, &right, &["key"], JoinType::Right)?;
-        assert_eq!(merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(merged.columns["key"].dtype(), DType::datetime64_naive());
         assert_eq!(
             merged_values(&merged, "key")?,
             &[
@@ -13681,7 +13688,7 @@ mod tests {
             "NaT must retain the scalar Missing-key fallback",
         );
         let nat_merged = merge_dataframes_on(&nat_left, &nat_right, &["key"], JoinType::Right)?;
-        assert_eq!(nat_merged.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(nat_merged.columns["key"].dtype(), DType::datetime64_naive());
         assert_eq!(nat_merged.index.len(), 3);
         assert!(merged_values(&nat_merged, "key")?[0].is_missing());
         assert_eq!(
@@ -13705,10 +13712,10 @@ mod tests {
         let left_ns = vec![-20, 10, 30, 50];
         let right_ns = vec![-30, -20, 20, 30, 60];
         let union_ns = [-30, -20, 10, 20, 30, 50, 60];
-        let temporal_column = |dtype, values: Vec<i64>| {
+        let temporal_column = |dtype: &DType, values: Vec<i64>| {
             let len = values.len();
             match dtype {
-                DType::Datetime64 => Column::from_datetime64_values_with_validity(
+                DType::Datetime64 { .. } => Column::from_datetime64_values_with_validity(
                     values,
                     ValidityMask::all_valid(len),
                 ),
@@ -13720,9 +13727,9 @@ mod tests {
             }
         };
 
-        for temporal in [DType::Datetime64, DType::Timedelta64] {
-            let left = temporal_column(temporal, left_ns.clone());
-            let right = temporal_column(temporal, right_ns.clone());
+        for temporal in [DType::datetime64_naive(), DType::Timedelta64] {
+            let left = temporal_column(&temporal, left_ns.clone());
+            let right = temporal_column(&temporal, right_ns.clone());
             let candidate = super::coalesce_temporal_i64_key_column(
                 &left,
                 &right,
@@ -13732,8 +13739,8 @@ mod tests {
             .expect("supported temporal key coalesce");
             assert_eq!(candidate.dtype(), temporal);
             assert!(candidate.validity().all());
-            let candidate_ns = match temporal {
-                DType::Datetime64 => candidate.as_datetime64_slice(),
+            let candidate_ns = match &temporal {
+                DType::Datetime64 { .. } => candidate.as_datetime64_slice(),
                 DType::Timedelta64 => candidate.as_timedelta64_slice(),
                 _ => unreachable!("test iterates only temporal dtypes"),
             };
@@ -13752,9 +13759,10 @@ mod tests {
             assert_eq!(candidate, reference);
         }
 
-        let datetime_left = temporal_column(DType::Datetime64, left_ns);
-        let datetime_right = temporal_column(DType::Datetime64, right_ns);
-        let timedelta_right = temporal_column(DType::Timedelta64, vec![-30, -20, 20, 30, 60]);
+        let naive_datetime = DType::datetime64_naive();
+        let datetime_left = temporal_column(&naive_datetime, left_ns);
+        let datetime_right = temporal_column(&naive_datetime, right_ns);
+        let timedelta_right = temporal_column(&DType::Timedelta64, vec![-30, -20, 20, 30, 60]);
         let mut nullable_validity = ValidityMask::all_valid(datetime_left.len());
         nullable_validity.set(1, false);
         let nullable_left =
@@ -13892,9 +13900,9 @@ mod tests {
             vec![None, Some(0), Some(1), None, Some(2), Some(3), None],
             vec![Some(0), Some(1), None, Some(2), Some(3), None, Some(4)],
         );
-        for temporal in [DType::Datetime64, DType::Timedelta64] {
-            let scalar = |ns| match temporal {
-                DType::Datetime64 => Scalar::Datetime64(ns),
+        for temporal in [DType::datetime64_naive(), DType::Timedelta64] {
+            let scalar = |ns| match &temporal {
+                DType::Datetime64 { .. } => Scalar::Datetime64(ns),
                 DType::Timedelta64 => Scalar::Timedelta64(ns),
                 _ => unreachable!("test iterates only temporal dtypes"),
             };
@@ -14072,9 +14080,9 @@ mod tests {
         let left_ns = [-20, 10, 30, 50];
         let right_ns = [-30, -20, 20, 30, 60];
         let union_ns = [-30, -20, 10, 20, 30, 50, 60];
-        for temporal in [DType::Datetime64, DType::Timedelta64] {
-            let scalar = |ns| match temporal {
-                DType::Datetime64 => Scalar::Datetime64(ns),
+        for temporal in [DType::datetime64_naive(), DType::Timedelta64] {
+            let scalar = |ns| match &temporal {
+                DType::Datetime64 { .. } => Scalar::Datetime64(ns),
                 DType::Timedelta64 => Scalar::Timedelta64(ns),
                 _ => unreachable!("test iterates only temporal dtypes"),
             };
@@ -14197,7 +14205,7 @@ mod tests {
             },
         )?;
         assert_eq!(nat_candidate, nat_generic);
-        assert_eq!(nat_candidate.columns["key"].dtype(), DType::Datetime64);
+        assert_eq!(nat_candidate.columns["key"].dtype(), DType::datetime64_naive());
         assert!(
             merged_values(&nat_candidate, "key")?
                 .iter()
@@ -14274,7 +14282,7 @@ mod tests {
             2,
             "datetime composite component must discriminate, not collapse to Missing"
         );
-        assert_eq!(merged.columns["ts"].dtype(), DType::Datetime64);
+        assert_eq!(merged.columns["ts"].dtype(), DType::datetime64_naive());
         // Pair (lv, rv) up per output row, order-independently.
         let mut pairs: Vec<(i64, i64)> = merged_values(&merged, "lv")?
             .iter()

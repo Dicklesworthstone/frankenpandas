@@ -237,7 +237,7 @@ fn dtype_to_pandas_jsonl_name(dtype: DType) -> &'static str {
         DType::Float64 | DType::Float64Nullable => "float64",
         DType::Int64 | DType::Int64Nullable => "int64",
         DType::Utf8 | DType::Categorical | DType::Sparse | DType::Timedelta64 => "object",
-        DType::Datetime64 => "datetime64[ns]",
+        DType::Datetime64 { .. } => "datetime64[ns]",
         DType::Period => "period",
         DType::Interval => "interval",
         DType::Null => "float64",

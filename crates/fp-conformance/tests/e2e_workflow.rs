@@ -105,7 +105,7 @@ fn e2e_step2_to_datetime() {
     // strings), so the result is a `Datetime64` column of nanosecond epochs.
     assert_eq!(
         parsed.dtype(),
-        DType::Datetime64,
+        DType::datetime64_naive(),
         "to_datetime yields datetime64[ns], matching pandas"
     );
     let first = &parsed.values()[0];
