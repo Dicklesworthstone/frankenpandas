@@ -25,6 +25,15 @@ fn packet_filter_runs_only_requested_packet() {
 }
 
 #[test]
+fn packet_filter_runs_dataframe_filter_packet() {
+    let cfg = HarnessConfig::default_paths();
+    let report = run_packet_by_id(&cfg, "FP-P2D-468", OracleMode::FixtureExpected).expect("report");
+    assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-468"));
+    assert_eq!(report.fixture_count, 4, "expected every dataframe_filter shape");
+    assert!(report.is_green(), "expected report green: {report:?}");
+}
+
+#[test]
 fn packet_filter_runs_series_add_packet() {
     let cfg = HarnessConfig::default_paths();
     let report = run_packet_by_id(&cfg, "FP-P2C-003", OracleMode::FixtureExpected).expect("report");

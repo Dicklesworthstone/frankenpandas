@@ -1,0 +1,21 @@
+{
+  "packet_id": "FP-P2D-468",
+  "case_id": "dataframe_filter_axis0_duplicate_labels_strict",
+  "mode": "strict",
+  "operation": "dataframe_filter",
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "62efe8df401e0e92107a6f8e01a86af1feb93cc1f17385b667fe9550ecbf467d",
+    "generated_at": "2026-08-30T18:51:28Z"
+  },
+  "filter_axis": 0,
+  "filter_items": ["dup"],
+  "frame": {
+    "index": [{ "kind": "utf8", "value": "dup" }, { "kind": "utf8", "value": "dup" }, { "kind": "utf8", "value": "solo" }],
+    "column_order": ["alpha"],
+    "columns": {
+      "alpha": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }, { "kind": "int64", "value": 30 }]
+    }
+  },
+  "expected_error_contains": "duplicate"
+}
