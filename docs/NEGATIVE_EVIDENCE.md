@@ -42690,3 +42690,66 @@ THE HONEST CEILING AT 1M IS PARITY. The candidate's blocker is
 `effect_exceeds_two_x_null_margin` against a 1.6% effect — genuine parity, not an
 instrument limitation — so no round count converts this into a certified win. Do
 not spend a window trying.
+
+### 2026-08-30 BeigeAspen — nine unary math maps sat on a par_min set for the CHEAPEST ops in their family; opting them in is 2.0-2.75x, with asin and tanh CERTIFIED on the shipped binary [br-frankenpandas-lrpp2]
+
+`cos`, `tan`, `asin`, `acos`, `sinh`, `cosh`, `tanh`, `asinh` and `atanh` inherited
+`ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN` (200_000), which keeps them SERIAL at 100k.
+Not a judgement that they were cheap — the bench carried "one representative per
+cost class" (`sin` for trig, `atan` for inverse trig, nothing for the hyperbolics),
+so the class was known and the ops were never measured.
+
+**Campaign result class:** `incumbent-win`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae invocation_id=h2h-20260830T215200Z-asin-100k-r64-shipped measured_ratio=2.4144x
+
+**Executing ELF SHA-256 (self-reported by process):** bench_elf_sha256=c99ec086dd9dcd6d8ea624987c46fabccdb10063d306f540795df1799936cb6a (10653064 bytes) /data/projects/.scratch/beigeaspen/lrpp2/h2h-after
+
+**A/A null control (same invocation):** the A/A null median ratio for each arm, FrankenPandas and pandas, limit 0.02 absolute deviation from unity, measured on the SHIPPED binary with no env override — asin FrankenPandas=1.01732 pandas=1.01595 (both inside, row CERTIFIED FASTER); tanh FrankenPandas=1.01633 pandas=1.00767 (both inside, row CERTIFIED FASTER); cos FrankenPandas=1.02585 pandas=1.01160 (FrankenPandas just outside, so that row is NULL_UNDECIDABLE and is not quoted as certified).
+
+**Median-CI decision:** the asin median effect is 1.4144 (ratio 2.4144) and the tanh median effect is 1.2951 (ratio 2.2951); both CIs cleared the required 2x null-margin threshold, decidable, on the shipped configuration.
+
+**CV role:** provenance only; CV had no vote.
+
+ONE ELF, ENV-ONLY A/B. `examples/h2h.rs` measures itself and then RESPAWNS itself
+with `FP_ELEMENTWISE_PAR_MIN` set, so both configurations meet the same live
+incumbent in one invocation on one binary, differing by an environment variable
+and nothing else. Pre-change ELF 871ba867211bb44b (rch worker vmi1293453), 64
+rounds, host thinkstation1:
+
+| op | serial | threaded | FP-side | threaded vs pandas |
+|---|---:|---:|---:|---:|
+| asinh | 1667.82us | 645.48us | 2.58x | 2.7519x |
+| atanh | 1477.65 | 580.90 | 2.54x | 2.0685x |
+| acos | 1442.01 | 550.32 | 2.62x | 2.1915x |
+| sinh | 1425.48 | 537.11 | 2.65x | 2.6655x |
+| asin | 1391.48 | 542.07 | 2.57x | **2.4116x** |
+| tanh | 1245.42 | 569.13 | 2.19x | **2.3059x** |
+| tan | 1094.06 | 526.07 | 2.08x | 2.2346x |
+| cosh | 1047.62 | 496.66 | 2.11x | 2.0924x |
+| cos | 950.96 | 485.99 | 1.96x | **1.9964x** |
+| log2 | 474.08 | 417.93 | 1.13x | 1.2886x |
+| exp | 423.89 | 416.05 | 1.02x | 1.2335x |
+
+⭐ NON-VACUITY VERIFIED, and it is the part that matters: a passing suite proves
+nothing about WHICH ARM RUNS. The post-change ELF was re-measured with NO env
+override and lands within 1% of the env-override arm — cos 950.96 -> 490.19us,
+asin 1391.48 -> 542.57us, tanh 1245.42 -> 569.74us. The override is live and
+routing, not merely present.
+
+**Counted mechanism:** each of the nine costs 9.5-16.7 ns/element, so 100k rows is
+950-1670us of serial work against a ~350-420us per-call `thread::scope` tax. Their
+crossovers are 24_000-42_000 rows, all below the 65_536 constant they now use.
+
+⚠️ `exp` AND `log2` DELIBERATELY EXCLUDED — the reason this is a per-op override
+and not a lower shared constant. Their serial cost at 100k (423.89us, 474.08us)
+sits ON the break-even, putting their crossovers at ~94_000 and ~84_000 rows, ABOVE
+65_536. Opting them in would engage the parallel arm in the 65k-90k band where it
+has not yet paid for itself, buying 1.02x/1.13x at 100k in exchange for a loss
+below it. `exp` gains nothing (423.89 -> 416.05us). Lowering the shared constant
+takes both with it — the regression `expm1` was already excluded for.
+
+THE BREAK-EVEN MODEL IS 9-FOR-9 OUT OF SAMPLE: every op above ~400us of serial work
+gained, gain tracks distance above the line, and both ops AT the line gained
+nothing. That is the durable result — the next unary map can be classified from its
+per-element cost without spending a measurement window.
