@@ -2643,7 +2643,7 @@ def op_dataframe_constructor_list_like(pd, payload: dict[str, Any]) -> dict[str,
     except Exception as exc:
         raise OracleError(f"dataframe_constructor_list_like failed: {exc}") from exc
 
-    return {"expected_frame": dataframe_to_json(out)}
+    return {"expected_frame": dataframe_to_json(out, datetime_as_typed=True)}
 
 
 def op_dataframe_melt(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4250,6 +4250,12 @@ def pandas_dtype_from_constructor_spec(dtype_spec: str) -> str:
     #       -> dtype datetime64[ns], Timestamp('2026-01-01 00:00:00')
     if normalized in {"datetime64[ns]", "datetime64"}:
         return "datetime64[ns]"
+    # These are pandas constructor dtypes even though FrankenPandas currently
+    # lacks equivalent storage for some of them.  The oracle must still ask
+    # pandas rather than turn FrankenPandas' product boundary into a claimed
+    # pandas error (br-frankenpandas-bhyqp).
+    if normalized in {"object", "uint64", "boolean[pyarrow]"}:
+        return normalized
     raise OracleError(f"unsupported constructor dtype {dtype_spec!r}")
 
 

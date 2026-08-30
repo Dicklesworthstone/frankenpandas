@@ -6753,6 +6753,47 @@ fn scan_json_record_boundaries(s: &[u8]) -> Option<(usize, usize, Vec<usize>)> {
     Some((body_start, body_end, commas))
 }
 
+/// SIMD-assisted boundary scan for the deliberately narrow numeric records path.
+///
+/// `fp-bench` writes compact records as `{"a":1},{"a":2}`, so `},{"` is an
+/// unambiguous record separator for that payload. A user key can legally contain
+/// those bytes, however, so this function is only an *admission candidate*: every
+/// resulting range is subsequently parsed by [`parse_json_records_numeric_range`].
+/// Any false boundary (or non-compact whitespace spelling) makes that parser return
+/// `None`, which sends the input to the existing string/depth-aware scanner and
+/// generic JSON parser. The fast path therefore never changes accepted semantics.
+///
+/// The previous generic scan examined every byte serially before numeric workers
+/// began parsing. `memmem` locates the compact separators with its byte-search
+/// implementation, leaving the typed builders as the only per-record work on the
+/// benchmark's homogeneous Float64 payload.
+fn scan_json_numeric_record_boundaries(s: &[u8]) -> Option<(usize, usize, Vec<usize>)> {
+    let mut start = 0usize;
+    while start < s.len() && matches!(s[start], b' ' | b'\t' | b'\n' | b'\r') {
+        start += 1;
+    }
+    if s.get(start) != Some(&b'[') {
+        return None;
+    }
+    let body_start = start + 1;
+    let mut closing = s.len();
+    while closing > body_start && matches!(s[closing - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        closing -= 1;
+    }
+    if closing <= body_start || s[closing - 1] != b']' {
+        return None;
+    }
+    let body_end = closing - 1;
+    if body_start >= body_end {
+        return None;
+    }
+
+    let commas = memchr::memmem::find_iter(&s[body_start..body_end], b"},{\"")
+        .map(|separator_start| body_start + separator_start + 1)
+        .collect();
+    Some((body_start, body_end, commas))
+}
+
 /// A numeric column being built directly from a flat records payload.  Keeping
 /// the numeric representation here avoids creating a `Scalar` for every cell
 /// only for `Column::from_values` to immediately infer the same representation
@@ -6984,7 +7025,7 @@ fn parse_json_records_numeric_range(
 /// an Int64 chunk is promoted only when another chunk proves the column Float64.
 fn try_read_json_records_numeric_parallel(input: &str) -> Result<Option<DataFrame>, IoError> {
     let s = input.as_bytes();
-    let Some((body_start, body_end, commas)) = scan_json_record_boundaries(s) else {
+    let Some((body_start, body_end, commas)) = scan_json_numeric_record_boundaries(s) else {
         return Ok(None);
     };
     let record_count = commas.len() + 1;
@@ -15793,6 +15834,34 @@ mod tests {
         );
         assert_eq!(typed.column("i").expect("i").dtype(), DType::Int64);
         assert_eq!(typed.column("f").expect("f").dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn json_read_numeric_simd_boundaries_are_parser_validated_92n1x() {
+        let compact = br#"[{"a":1},{"a":2}]"#;
+        let (body_start, body_end, commas) =
+            super::scan_json_numeric_record_boundaries(compact).expect("compact records");
+        assert_eq!(&compact[body_start..body_end], br#"{"a":1},{"a":2}"#);
+        assert_eq!(commas.len(), 1);
+        assert_eq!(compact[commas[0]], b',');
+        assert!(
+            super::parse_json_records_numeric_range(compact, body_start, commas[0]).is_some(),
+            "the first SIMD-delimited range is a complete numeric record"
+        );
+
+        // A legal unescaped key can itself contain `},{`. The substring scan may
+        // see that byte sequence, but range parsing must reject the false split so
+        // `try_read_json_records_numeric_parallel` falls back instead of assigning
+        // fields to the wrong row.
+        let false_separator = br#"[{"},{":1},{"a":2}]"#;
+        let (body_start, _body_end, commas) =
+            super::scan_json_numeric_record_boundaries(false_separator)
+                .expect("outer records array");
+        assert!(
+            super::parse_json_records_numeric_range(false_separator, body_start, commas[0])
+                .is_none(),
+            "a key-contained separator is never admitted as a typed record boundary"
+        );
     }
 
     #[test]

@@ -78,6 +78,45 @@ def test_series_nunique_counts_distinct(oracle, pd):
     assert response["expected_scalar"]["value"] == 3
 
 
+@pytest.mark.parametrize(
+    ("dtype_spec", "value", "expected_dtype", "expected_kind", "expected_value"),
+    [
+        ("object", 1, "object", "int64", 1),
+        (
+            "datetime64[ns]",
+            "2026-01-01",
+            "datetime64[ns]",
+            "datetime64",
+            1767225600000000000,
+        ),
+        ("uint64", 1, "uint64", "int64", 1),
+        ("boolean[pyarrow]", True, "bool[pyarrow]", "bool", True),
+    ],
+)
+def test_dataframe_constructor_list_like_asks_pandas_for_supported_dtype_specs_bhyqp(
+    oracle, pd, dtype_spec, value, expected_dtype, expected_kind, expected_value
+):
+    """Do not report a FrankenPandas dtype gap as an oracle-adapter error."""
+    previous_pd = oracle._PD
+    oracle._PD = pd
+    try:
+        response = oracle.dispatch(
+            pd,
+            {
+                "operation": "dataframe_constructor_list_like",
+                "constructor_dtype": dtype_spec,
+                "matrix_rows": [[oracle.scalar_to_json(value)]],
+            },
+        )
+    finally:
+        oracle._PD = previous_pd
+
+    actual_dtype = str(pd.DataFrame([[value]], dtype=dtype_spec).dtypes.iloc[0])
+    assert actual_dtype == expected_dtype
+    actual = response["expected_frame"]["columns"]["0"][0]
+    assert actual == {"kind": expected_kind, "value": expected_value}
+
+
 def test_dataframe_cumsum_preserves_integer_dtype(oracle, pd):
     payload = {
         "operation": "dataframe_cumsum",

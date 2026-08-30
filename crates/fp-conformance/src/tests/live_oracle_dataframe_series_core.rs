@@ -1,4 +1,101 @@
 #[test]
+fn live_oracle_series_constructor_bool_numeric_matches_object_values_odx3k() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+    cfg.require_live_oracle = true;
+
+    let fixture: super::PacketFixture = serde_json::from_str(include_str!(
+        "../../fixtures/packets/fp_p2d_017_series_constructor_bool_numeric_coerces_int_strict.json"
+    ))
+    .expect("bool/numeric fixture");
+    let expected = super::capture_live_oracle_expected(&cfg, &fixture)
+        .expect("required live pandas oracle must resolve bool/numeric constructor");
+    let super::ResolvedExpected::Series(expected) = expected else {
+        panic!("live pandas must return a series for bool/numeric constructor");
+    };
+
+    assert_eq!(
+        expected.values,
+        vec![
+            fp_types::Scalar::Bool(true),
+            fp_types::Scalar::Int64(2),
+            fp_types::Scalar::Bool(false),
+        ]
+    );
+    let actual = super::build_series(fixture.left.as_ref().expect("fixture left series"))
+        .expect("FrankenPandas bool/numeric constructor");
+    assert_eq!(actual.dtype_name(), "object");
+    super::compare_series_expected(&actual, &expected).expect("live pandas object-value parity");
+
+    let differential = super::run_differential_fixture(
+        &cfg,
+        &fixture,
+        &super::SuiteOptions {
+            packet_filter: None,
+            oracle_mode: super::OracleMode::LiveLegacyPandas,
+        },
+    )
+    .expect("live differential result");
+    assert_eq!(differential.status, super::CaseStatus::Pass);
+    assert_eq!(
+        differential.oracle_source,
+        super::FixtureOracleSource::LiveLegacyPandas
+    );
+    assert!(differential.drift_records.is_empty());
+}
+
+#[test]
+fn live_oracle_constructor_dtype_gaps_are_explicit_not_oracle_errors_bhyqp() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+    cfg.require_live_oracle = true;
+
+    for fixture_text in [
+        include_str!("../../fixtures/packets/fp_p2d_023_dataframe_constructor_list_like_dtype_unknown_error_strict.json"),
+        include_str!("../../fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_datetime64_unsupported_error_strict.json"),
+        include_str!("../../fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_uint64_unsupported_error_strict.json"),
+        include_str!("../../fixtures/packets/fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_pyarrow_unsupported_error_hardened.json"),
+    ] {
+        let mut fixture: super::PacketFixture =
+            serde_json::from_str(fixture_text).expect("constructor dtype fixture");
+        let dtype = fixture.constructor_dtype.clone().expect("constructor dtype");
+        fixture.retired = None;
+        fixture.expected_error_contains = None;
+        fixture.oracle_source = Some(super::FixtureOracleSource::LiveLegacyPandas);
+
+        let expected = super::capture_live_oracle_expected(&cfg, &fixture)
+            .unwrap_or_else(|error| panic!("pandas must construct dtype {dtype:?}: {error}"));
+        assert!(
+            matches!(expected, super::ResolvedExpected::Frame(_)),
+            "pandas must return a frame for dtype {dtype:?}: {expected:?}"
+        );
+
+        let differential = super::run_differential_fixture(
+            &cfg,
+            &fixture,
+            &super::SuiteOptions {
+                packet_filter: None,
+                oracle_mode: super::OracleMode::LiveLegacyPandas,
+            },
+        )
+        .expect("live differential result");
+        if dtype == "datetime64[ns]" {
+            assert_eq!(differential.status, super::CaseStatus::Pass);
+            assert!(differential.drift_records.is_empty());
+        } else {
+            assert_eq!(
+                differential.status,
+                super::CaseStatus::Fail,
+                "FrankenPandas product gap for dtype {dtype:?} must stay visible"
+            );
+            assert!(differential.drift_records.iter().any(|record| {
+                record.message.contains("unsupported constructor dtype")
+            }));
+        }
+    }
+}
+
+#[test]
 fn live_oracle_series_constructor_mixed_utf8_numeric_reports_object_values() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = true;

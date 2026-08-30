@@ -8,7 +8,12 @@
     "oracle_script_sha256": "ef135bb3088ad340319998b43cdc945af9754fc4d8e943dcb0137729af14fb41",
     "generated_at": "2026-08-08T08:56:06Z",
     "oracle_attestation": "error_agreement"
-},
+  },
+  "retired": {
+    "reason": "pandas constructs dtype 'boolean[pyarrow]'; FrankenPandas has no Arrow-backed boolean dtype, so this fixture must not present its product refusal as a pandas error.",
+    "retired_at": "2026-08-30T20:00:00Z",
+    "bead": "br-frankenpandas-bhyqp"
+  },
   "constructor_dtype": "boolean[pyarrow]",
   "matrix_rows": [
     [
