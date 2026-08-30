@@ -119,6 +119,9 @@ def run():
     if base == "tanh":    return np.tanh(series)
     if base == "asinh":   return np.arcsinh(series)
     if base == "atanh":   return np.arctanh(series)
+    # br-frankenpandas-lrpp2: fed the SHIFTED (1, 10] fixture, so this is the
+    # kernel and not the out-of-domain path. See the note in `run_h2h`.
+    if base == "acosh":   return np.arccosh(series)
     # Already opted in to `ELEMENTWISE_EXPENSIVE_PAR_MIN`, carried so the sweep has
     # in-run CONTROLS rather than comparing against numbers from another ELF.
     if base == "sin":     return np.sin(series)
@@ -246,6 +249,10 @@ fn fp_one_rep_us(workload: &str, column: &fp_columnar::Column) -> f64 {
         "tanh" => column.tanh(),
         "asinh" => column.asinh(),
         "atanh" => column.atanh(),
+        // br-frankenpandas-lrpp2. The last unmeasured op in the family. `run_h2h`
+        // shifts its fixture into (1, 10] because `acosh` needs x >= 1; without
+        // that this lane would time the missing-value fallback, not the kernel.
+        "acosh" => column.acosh(),
         // CONTROLS, already on `ELEMENTWISE_EXPENSIVE_PAR_MIN`. The sweep's
         // break-even model is inherited from a table measured on a different ELF;
         // carrying the two ops that table opted in means each run can re-derive the
@@ -343,7 +350,24 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
         std::fs::write(&path, &bytes).expect("write fixture");
         Subject::Col(fp_columnar::Column::from_i64_values(values))
     } else {
-        let values = fixture(n);
+        // br-frankenpandas-lrpp2. `acosh` is the ONE op in the 19-member unary
+        // family that the sweep could not measure, and the reason is the fixture,
+        // not the op: `fixture` lands in (0, 1] and `acosh` is defined on x >= 1,
+        // so every value would be out of domain. A lane on the shared fixture
+        // would have timed the missing-value fallback and reported it as the
+        // kernel — a measurement of the wrong thing that would still have looked
+        // like a number.
+        //
+        // Shifting into (1, 10] puts every element in domain and spans a decade,
+        // so the lane exercises argument reduction rather than one narrow
+        // magnitude. BOTH ARMS READ THIS SAME FILE, so the shift reaches numpy
+        // and FrankenPandas identically and cannot become a difference between
+        // the engines.
+        let values: Vec<f64> = if workload == "acosh" {
+            fixture(n).into_iter().map(|v| 1.0 + v * 9.0).collect()
+        } else {
+            fixture(n)
+        };
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(&path, &bytes).expect("write fixture");
         Subject::Col(fp_columnar::Column::from_f64_values(values))
