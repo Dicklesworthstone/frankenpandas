@@ -42620,3 +42620,73 @@ remains a real ~0.70x loss and it is a STREAMING problem: not ISA width, and not
 thread count either — both arms ran serial, and sqrt's `par_min_override =
 usize::MAX` is a measured choice (parallelism worth 1.038x at 10M, inside noise),
 not an oversight.
+
+### 2026-08-30 BeigeAspen — the add/sub/mul AVX2 dispatch REMOVES a certified loss: baseline `add @1M` certifies 0.771x SLOWER and the dispatched arm reaches parity, FP-side 1.39-1.47x reproduced three times [br-frankenpandas-uza04]
+
+`apply_f64_slices_nan_tracked_into` now routes Add/Sub/Mul through
+fp-dot-kernel's 4-lane kernels, as Div already did. The kernels were on main as
+DEAD CODE (zero call sites, d1da53938); 9a526f41d added the call sites. This entry
+measures what the call sites are worth.
+
+**Campaign result class:** `incumbent-win`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3 artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae invocation_id=vs-pandas-20260830T205724Z-add-1M-r128 measured_ratio=1.016x
+
+**Executing ELF SHA-256 (self-reported by process):** bench_elf_sha256=ea9a6b2d90447a9a2dc511fd6f8c03606564b5e98e237aba6bc4a247cffd3ad9 (87326520 bytes) /data/projects/.scratch/beigeaspen/uza04-head/target/release-perf/fp-bench
+
+**A/A null control (same invocation):** the A/A null median ratio for each arm, FrankenPandas and pandas, limit 0.02 absolute deviation from unity — 1M r128 candidate and 1M r128 baseline both passed the clause (`null_medians_within_2pct_unity` true on both, and the baseline row is decidable on all three clauses); the 1M r64 baseline and the 100k r64 candidate FAILED that clause and are reported below but are NOT quoted as certified results.
+
+**Median-CI decision:** the 1M r128 baseline median effect is 0.229 (ratio 0.771) and its CI cleared the required 2x null-margin threshold, decidable — a certified LOSS; the 1M r128 candidate median effect is 0.016 (ratio 1.016), CI excludes unity but does NOT clear the required threshold, so that row is parity and is reported as UNDECIDABLE rather than as a win.
+
+**CV role:** provenance only; CV had no vote. Observed CV 12.2-17.6% across the rows below.
+
+⚠️ NOT A WIN CLAIM. The post-change row is PARITY, not certified FASTER. What is
+certified is the row it replaces.
+
+THE A/B IS EXACT AND THE KERNELS ARE IN BOTH ELFs — only the call sites differ, so
+this isolates the dispatch rather than the kernel. Verified by symbol: candidate
+`ea9a6b2d9044` carries `add_f64_into` (39 `%ymm`, 8 `vaddpd`); baseline
+`4e529f16f3b6` does not contain the symbol.
+
+MEASURED, live pandas 2.2.3 / numpy 2.3.5, balanced-square, arms back to back,
+host thinkstation1, threads=1 on every row:
+
+| n | rounds | arm | ratio | fp p50 | pandas p50 | load | verdict |
+|---|---|---|---:|---:|---:|---|---|
+| 1M | 128 | candidate | 1.016x | 279.12us | 289.34us | 3.0-5.0 | UNDECIDABLE (parity) |
+| 1M | 128 | baseline | **0.771x** | 409.20us | 320.98us | 2.8-7.0 | **CERTIFIED SLOWER** |
+| 1M | 64 | candidate | 1.024x | 291.36us | 303.40us | 5.9-7.2 | UNDECIDABLE |
+| 1M | 64 | baseline | 0.733x | 410.76us | 313.83us | 5.9-6.4 | UNDECIDABLE (null failed) |
+| 100k | 64 | candidate | 1.568x | 32.52us | 50.72us | 8.5-10.0 | UNDECIDABLE (null failed) |
+| 100k | 64 | baseline | 1.261x | 45.11us | 57.40us | 7.8-9.5 | CERTIFIED FASTER |
+
+THE CERTIFIED STATEMENT IS ABOUT THE BASELINE: `add @1M` without the dispatch is a
+certified 0.771x LOSS in the quietest window of the day. That REPRODUCES this
+ledger's banked history for the lane — 0.748x and 0.809x, 2026-08-17 CrimsonPine —
+on an independent ELF two weeks later. The lane really was losing; the dispatch is
+what stops it.
+
+FP-side gain, three independent runs across two sizes: 409.20/279.12 = 1.466x,
+410.76/291.36 = 1.410x, 45.11/32.52 = 1.387x. The consistency is the evidence; no
+single row here would be.
+
+⚠️ THE INCUMBENT CONTROL IS WEAKER THAN ON THE sqrt ENTRY, stated rather than left
+to be noticed: pandas measured 289.34us and 320.98us across the two 1M r128 arms,
+10% apart, against 0.2% on the sqrt pair. There IS host drift between those arms.
+It does not explain the result — the FP arms differ by 47%, 4.6x the drift — but
+the cross-arm ratio carries that uncertainty and the FP-side figures are the
+stronger evidence.
+
+**Counted mechanism:** the baseline emits 2-lane `addpd` from the workspace's
+`+sse4.1` target; the candidate emits 8 `vaddpd` on `%ymm` inside fp-dot-kernel's
+`+avx2` package. The dispatch also replaces a `bool` NaN-witness accumulator, which
+forces LLVM to narrow each 256-bit compare to 128 (`vextractf128` + `vpackssdw`),
+with an explicit `Mask` fold that stays 256-bit — a fixed per-element cost removed
+from beside a ~4-cycle add.
+
+NO REVERT: removes a certified loss, costs nothing measured, already live on main.
+
+THE HONEST CEILING AT 1M IS PARITY. The candidate's blocker is
+`effect_exceeds_two_x_null_margin` against a 1.6% effect — genuine parity, not an
+instrument limitation — so no round count converts this into a certified win. Do
+not spend a window trying.
