@@ -476,6 +476,21 @@ fn build_telemetry_string_batches(rows: usize) -> Vec<Series> {
 /// Build one Float64 column of `rows` values per the requested dtype, advancing
 /// the shared RNG so columns differ (mirrors numpy's column-by-column fill).
 fn gen_f64_column(rng: &mut SplitMix64, rows: usize, dtype: &str) -> Vec<f64> {
+    if dtype == "float64_crowded_prefix" {
+        // Keep the high sixteen IEEE-754 bits fixed while spreading the next
+        // byte over all 256 values. This is a narrow, positive Float64 range
+        // ([1.0, 1.0625)) that exercises the multi-key radix refinement after
+        // its first prefix partition without manufacturing monotonic input.
+        const PREFIX: u64 = 0x3ff0_0000_0000_0000;
+        const LOW_40_BITS: u64 = (1_u64 << 40) - 1;
+        return (0..rows)
+            .map(|_| {
+                let next_byte = (rng.next_u64() & 0xff) << 40;
+                let suffix = rng.next_u64() & LOW_40_BITS;
+                f64::from_bits(PREFIX | next_byte | suffix)
+            })
+            .collect();
+    }
     let nan_frac = match dtype {
         "float64_nan10" => 0.10,
         "float64_nan50" => 0.50,
@@ -4517,9 +4532,10 @@ mod harness_contract_tests {
     use fp_types::Scalar;
 
     use super::{
-        ITERS, TELEMETRY_STRING_BATCH_ROWS, paired_time_us, runtime_isa_features, self_identity,
-        size_rows_cols, size_rows_cols_checked, stateful_apply_step, stateful_expanding_step,
-        stateful_rolling_step, telemetry_string_batch_ranges,
+        ITERS, TELEMETRY_STRING_BATCH_ROWS, SplitMix64, gen_f64_column, paired_time_us,
+        runtime_isa_features, self_identity, size_rows_cols, size_rows_cols_checked,
+        stateful_apply_step, stateful_expanding_step, stateful_rolling_step,
+        telemetry_string_batch_ranges,
     };
 
     #[test]
@@ -4651,6 +4667,27 @@ mod harness_contract_tests {
                 "size label {label:?} disagrees with benches/vs_pandas_harness.py SIZE_CONFIGS"
             );
         }
+    }
+
+    #[test]
+    fn crowded_prefix_float64_fixture_has_one_primary_prefix_and_many_next_bytes() {
+        let values = gen_f64_column(
+            &mut SplitMix64(0x5151_5151_5151_5151),
+            16_384,
+            "float64_crowded_prefix",
+        );
+        let first_prefix = values[0].to_bits() >> 48;
+        let mut next_byte_seen = [false; 256];
+        for value in values {
+            let bits = value.to_bits();
+            assert_eq!(bits >> 48, first_prefix);
+            assert!((1.0..1.0625).contains(&value));
+            next_byte_seen[((bits >> 40) & 0xff) as usize] = true;
+        }
+        assert!(
+            next_byte_seen.iter().filter(|seen| **seen).count() > 1,
+            "the fixture must expose independent second-prefix buckets"
+        );
     }
 
     #[test]

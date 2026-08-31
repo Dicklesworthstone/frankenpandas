@@ -1447,6 +1447,17 @@ def generate_test_data(rows: int, cols: int, dtype: str, seed: int = 42) -> pd.D
                 for i in range(cols)}
     elif dtype == "float64":
         data = {f"col_{i}": rng.random(rows) * 1_000_000 for i in range(cols)}
+    elif dtype == "float64_crowded_prefix":
+        # [1.0, 1.0625) keeps bits 63..48 fixed while deliberately varying
+        # bits 47..40, matching the direct multi-key radix-prefix workload in
+        # fp-bench without using ordered or repeated input.
+        prefix = np.uint64(0x3FF0_0000_0000_0000)
+        next_byte = rng.integers(0, 256, size=rows, dtype=np.uint64) << np.uint64(40)
+        low_bits = rng.integers(0, 1 << 40, size=rows, dtype=np.uint64)
+        data = {
+            f"col_{i}": (prefix | next_byte | low_bits).view(np.float64)
+            for i in range(cols)
+        }
     elif dtype == "float64_nan10":
         data = {}
         for i in range(cols):
