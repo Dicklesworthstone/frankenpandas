@@ -2655,6 +2655,13 @@ enum ScalarValues {
         len: usize,
         data: OnceLock<Vec<f64>>,
         all_finite: OnceLock<bool>,
+        /// Present only for chunked write-once output whose map produced missing
+        /// values. Keeping the worker-owned value chunks separate from this
+        /// compact mask avoids both the parallel output zero-fill and a second
+        /// full-sized concatenation merely to retain nullable semantics. The
+        /// scalar view continues to expose its raw Float64 payloads (including
+        /// NaN), exactly like `from_f64_values_owned` does.
+        nullable_validity: Option<ValidityMask>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Zero-copy contiguous row-range view over an `Arc`-shared all-valid
@@ -3371,11 +3378,26 @@ impl ScalarValues {
         len: usize,
         all_finite: Option<bool>,
     ) -> Self {
+        Self::lazy_float64_chunks_with_finite_and_validity(chunks, len, all_finite, None)
+    }
+
+    fn lazy_float64_chunks_with_finite_and_validity(
+        chunks: Arc<[Float64Chunk]>,
+        len: usize,
+        all_finite: Option<bool>,
+        nullable_validity: Option<ValidityMask>,
+    ) -> Self {
+        debug_assert!(
+            nullable_validity
+                .as_ref()
+                .is_none_or(|validity| validity.len() == len)
+        );
         Self::LazyAllValidFloat64Chunks {
             chunks,
             len,
             data: OnceLock::new(),
             all_finite: Self::bool_once_lock(all_finite),
+            nullable_validity,
             values: OnceLock::new(),
         }
     }
@@ -6597,9 +6619,15 @@ impl Clone for ScalarValues {
                 chunks,
                 len,
                 all_finite,
+                nullable_validity,
                 ..
             } => {
-                let cloned = Self::lazy_all_valid_float64_chunks(Arc::clone(chunks), *len);
+                let cloned = Self::lazy_float64_chunks_with_finite_and_validity(
+                    Arc::clone(chunks),
+                    *len,
+                    all_finite.get().copied(),
+                    nullable_validity.clone(),
+                );
                 if let Self::LazyAllValidFloat64Chunks {
                     all_finite: cloned_finite,
                     ..
@@ -9450,6 +9478,84 @@ fn par_map_vec_f64_with_par_min<G: Fn(usize) -> f64 + Sync>(
         }
     });
     out
+}
+
+/// Write-once chunked form of [`par_map_vec_f64_with_par_min`].
+///
+/// `par_map_vec_f64_with_par_min` must allocate one shared zeroed output buffer
+/// before workers can borrow disjoint slices. For a nullable unary map that
+/// buffer is immediately overwritten, while the input validity check still
+/// makes the route too irregular for the slice-based all-valid helper. Each
+/// worker instead owns its output chunk here; the chunks and their validity
+/// words remain separate in the resulting column, so no concatenation copy is
+/// needed to preserve null semantics.
+fn par_map_vec_f64_to_owned_chunks<G: Fn(usize) -> f64 + Sync>(
+    n: usize,
+    g: G,
+    par_min: usize,
+) -> (OwnedFloat64Chunks, Vec<u64>, bool, bool) {
+    fn block<G: Fn(usize) -> f64>(
+        start: usize,
+        len: usize,
+        g: &G,
+    ) -> (Vec<f64>, Vec<u64>, bool, bool) {
+        let mut out = Vec::with_capacity(len);
+        let mut words = Vec::with_capacity(len.div_ceil(64));
+        let (mut all_valid, mut all_finite) = (true, true);
+        for block_start in (0..len).step_by(64) {
+            let block_len = (len - block_start).min(64);
+            let output_start = out.len();
+            out.extend((0..block_len).map(|offset| g(start + block_start + offset)));
+            let mut bits = 0_u64;
+            for (offset, &value) in out[output_start..].iter().enumerate() {
+                all_finite &= value.is_finite();
+                bits |= u64::from(!value.is_nan()) << offset;
+            }
+            all_valid &= bits == low_bit_mask(block_len);
+            words.push(bits);
+        }
+        (out, words, all_valid, all_finite)
+    }
+
+    let workers = cached_available_parallelism().min(8);
+    if workers <= 1 || n < par_min {
+        let (out, words, all_valid, all_finite) = block(0, n, &g);
+        let chunks = if n == 0 {
+            Vec::new()
+        } else {
+            vec![(Arc::new(out), 0, n)]
+        };
+        return (chunks, words, all_valid, all_finite);
+    }
+
+    let chunk = n.div_ceil(workers).div_ceil(64).max(1) * 64;
+    let block_count = n.div_ceil(chunk);
+    let mut built: Vec<Option<(Vec<f64>, Vec<u64>, bool, bool)>> =
+        (0..block_count).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        for (index, slot) in built.iter_mut().enumerate() {
+            let start = index * chunk;
+            let len = (n - start).min(chunk);
+            let g = &g;
+            scope.spawn(move || {
+                *slot = Some(block(start, len, g));
+            });
+        }
+    });
+
+    let mut chunks = Vec::with_capacity(block_count);
+    let mut words = Vec::with_capacity(n.div_ceil(64));
+    let (mut all_valid, mut all_finite) = (true, true);
+    for slot in built {
+        let (out, mut chunk_words, valid, finite) =
+            slot.expect("every chunk is written by exactly one worker");
+        all_valid &= valid;
+        all_finite &= finite;
+        let len = out.len();
+        chunks.push((Arc::new(out), 0, len));
+        words.append(&mut chunk_words);
+    }
+    (chunks, words, all_valid, all_finite)
 }
 
 /// Fused sibling of [`par_map_vec_f64`] for maps that may yield NaN: each worker
@@ -12710,6 +12816,45 @@ impl Column {
                 all_finite,
             ),
             validity: ValidityMask::all_valid(len),
+            data: None,
+        }
+    }
+
+    /// Build a nullable Float64 column from worker-owned output chunks without
+    /// concatenating them into a second full-sized buffer.
+    ///
+    /// The chunks are in row order and the explicit validity mask has one bit per
+    /// output row. Its scalar view preserves the raw NaN payload at an invalid
+    /// slot, matching [`Self::from_f64_values_owned`], while the column-level
+    /// validity mask retains missingness for typed consumers. This is the exact
+    /// representation already used by the nullable unary fallback.
+    fn from_f64_owned_chunks_with_validity(
+        chunks: Vec<(Arc<Vec<f64>>, usize, usize)>,
+        len: usize,
+        validity: ValidityMask,
+        all_finite: Option<bool>,
+    ) -> Self {
+        debug_assert_eq!(
+            chunks
+                .iter()
+                .map(|(_, _, chunk_len)| *chunk_len)
+                .sum::<usize>(),
+            len
+        );
+        debug_assert_eq!(validity.len(), len);
+        let chunks: Vec<Float64Chunk> = chunks
+            .into_iter()
+            .map(|(data, start, chunk_len)| Float64Chunk::owned(data, start, chunk_len))
+            .collect();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_float64_chunks_with_finite_and_validity(
+                Arc::from(chunks),
+                len,
+                all_finite,
+                Some(validity.clone()),
+            ),
+            validity,
             data: None,
         }
     }
@@ -28877,6 +29022,25 @@ impl Column {
         if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
+            if elementwise_write_once_enabled() {
+                let (chunks, words, _, all_finite) = par_map_vec_f64_to_owned_chunks(
+                    data.len(),
+                    |index| {
+                        if validity.get(index) {
+                            f(data[index])
+                        } else {
+                            f64::NAN
+                        }
+                    },
+                    par_min,
+                );
+                return Some(Self::from_f64_owned_chunks_with_validity(
+                    chunks,
+                    data.len(),
+                    ValidityMask::from_words(words, data.len()),
+                    Some(all_finite),
+                ));
+            }
             return Some(Self::from_f64_values_owned(par_map_vec_f64_with_par_min(
                 data.len(),
                 |i| {
@@ -28892,6 +29056,25 @@ impl Column {
         if self.dtype == DType::Int64
             && let Some((data, validity)) = self.as_i64_slice_with_validity()
         {
+            if elementwise_write_once_enabled() {
+                let (chunks, words, _, all_finite) = par_map_vec_f64_to_owned_chunks(
+                    data.len(),
+                    |index| {
+                        if validity.get(index) {
+                            f(data[index] as f64)
+                        } else {
+                            f64::NAN
+                        }
+                    },
+                    par_min,
+                );
+                return Some(Self::from_f64_owned_chunks_with_validity(
+                    chunks,
+                    data.len(),
+                    ValidityMask::from_words(words, data.len()),
+                    Some(all_finite),
+                ));
+            }
             return Some(Self::from_f64_values_owned(par_map_vec_f64_with_par_min(
                 data.len(),
                 |i| {
@@ -48055,6 +48238,59 @@ mod tests {
                         trial,
                     );
                 }
+            }
+        }
+
+        #[test]
+        fn write_once_nullable_unary_chunks_match_shared_output_lrpp2() {
+            // br-frankenpandas-lrpp2. The write-once arm must preserve the
+            // distinction between a missing input (Null) and a valid input whose
+            // map produces NaN (also missing for this unary family), across worker
+            // and 64-bit validity-word boundaries. This reaches the 65_536
+            // nullable `cos` threshold and the owned-chunk path; smaller tests do
+            // not exercise either condition.
+            let n = 131_137_usize;
+            let mut validity = crate::ValidityMask::all_valid(n);
+            let mut data: Vec<f64> = (0..n).map(|index| (index as f64 * 0.001).sin()).collect();
+            for index in [0, 63, 64, 65_535, 65_536, n - 1] {
+                validity.set(index, false);
+                data[index] = 0.0;
+            }
+            // A valid NaN exercises the output-derived validity bit separately
+            // from the input holes above.
+            data[97] = f64::NAN;
+            let column = Column::from_f64_values_with_validity(data, validity);
+
+            crate::set_elementwise_write_once(false);
+            let shared = column.cos().expect("shared nullable cos");
+            crate::set_elementwise_write_once(true);
+            let owned = column.cos().expect("owned nullable cos");
+            crate::clear_elementwise_write_once();
+
+            assert!(matches!(
+                &owned.values,
+                ScalarValues::LazyAllValidFloat64Chunks {
+                    nullable_validity: Some(_),
+                    ..
+                }
+            ));
+            assert_eq!(shared.len(), owned.len());
+            for (index, (left, right)) in shared.values().iter().zip(owned.values()).enumerate() {
+                match (left, right) {
+                    (Scalar::Float64(a), Scalar::Float64(b)) => {
+                        assert_eq!(a.to_bits(), b.to_bits(), "value bits at {index}");
+                    }
+                    (Scalar::Null(_), Scalar::Null(_)) => {}
+                    _ => panic!(
+                        "shared and owned nullable outputs differ at {index}: {left:?} vs {right:?}"
+                    ),
+                }
+            }
+            for index in [0, 63, 64, 97, 65_535, 65_536, n - 1] {
+                assert!(
+                    owned.values()[index].is_missing(),
+                    "missing output at {index}"
+                );
             }
         }
 
