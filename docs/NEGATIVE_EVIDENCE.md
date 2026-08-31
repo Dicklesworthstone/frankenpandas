@@ -43057,3 +43057,62 @@ NO LEVER SHIPPED. This is a decomposition, and the honest output is that the two
 cheap-looking targets on the profile are not worth taking alone: the column-name
 strings are 2.99% and the slot-page init is a consequence of the representation,
 not a defect in it.
+
+### 2026-08-31 BeigeAspen — transpose PHASE-SPLIT closed on ONE ELF: the label-addressing API tax is 7.5% (906.9us), not the ~25% the census's cross-binary pair implied — and removing it entirely still leaves 301x [br-frankenpandas-l4vzc] [br-frankenpandas-3ya6b]
+
+The split itself already existed: `df_transpose_full_materialize` addresses each
+output column by LABEL (`column_name_at` returns an owned `String`, `column(name)`
+parses it back into the position it was formatted from) while
+`..._positional` calls `column_at(i)` straight into the lazy plan. It was built by
+3ya6b precisely to separate API tax from the representational gap.
+
+⚠️ WHAT WAS WRONG WITH IT: the census carried the two rows on DIFFERENT ELFs —
+48f20936bf52 at 0.004x and 9bb7e4bd4407 at 0.005x. Subtracting those attributes to
+the addressing mode everything that also changed between two binaries, and it
+suggested an API tax of roughly 25%. That number was never measured; it was
+inferred from a cross-binary difference.
+
+**Counted mechanism:** the by-label lane performs 100_000 `String` allocations for
+column names plus 100_000 parses of those strings back to the integer position they
+were formatted from — two allocations and a parse per output column, and a
+transpose has one output column per SOURCE row. The positional lane performs ZERO
+of those allocations, and the measured difference between the two lanes on one
+binary is 906.9us of 13074.6us.
+
+MEASURED, both lanes on ONE ELF (ea51647dd8717ff08f2b6bc2acb27fc0f5c7305411c7aca8c13b29bde199d32e),
+back to back, live pandas 2.2.3, host thinkstation1, load 1.27 — the quietest
+window this campaign has had:
+
+    lane          fp p50       fp cv   pandas p50   ratio    verdict
+    by-label     13074.6us     3.1%     39.60us     0.003x   CERTIFIED SLOWER
+    positional   12167.7us     6.9%     40.42us     0.003x   NULL_UNDECIDABLE
+
+**A/A null control (same invocation):** the A/A null median ratio for each arm,
+FrankenPandas and pandas, limit 0.02 absolute deviation from unity — by-label
+FrankenPandas=0.99409 pandas=0.99365, both inside, so that row is decidable and
+CERTIFIED SLOWER at 0.003x. The positional row's PANDAS arm failed at 1.05159 and
+is recorded as NULL_UNDECIDABLE; its vs-incumbent ratio is NOT quoted as a result.
+
+⭐ THE API TAX IS 7.5%, NOT 25%. 13074.6 / 12167.7 = 1.0745x, i.e. 906.9us. This is
+an FP-vs-FP attribution and it is valid as one: BOTH FrankenPandas A/A nulls passed
+(0.99409 and 0.98869) on one binary in one window, so the two arms are comparable
+even though the positional lane's pandas arm was too unstable to certify a
+vs-incumbent ratio. It also agrees with the independent profile in 0cb3a4dd1, where
+`spec_to_string` (2.99%) plus `column_name_at` (1.35%) plus the label lookup land in
+the same neighbourhood.
+
+AND REMOVING IT ENTIRELY CHANGES ALMOST NOTHING. Deleting the whole API tax moves
+the lane from 13074.6us to 12167.7us against a pandas arm of ~40us — from 0.0030x
+to 0.0033x, and pandas is still 301x ahead. The addressing mode is not the problem
+and a lever there cannot become one.
+
+THE INCUMBENT IS O(1) AND THAT IS THE WHOLE STORY. pandas measured 39.60us and
+40.42us across the two runs, matching the flat 45.2 / 44.6 / 44.6us from 10k to 1M
+rows already banked in 778a7eeb2: `.T.to_numpy()` returns a VIEW over the 2D
+BlockManager, so its cost does not grow with rows at all. FrankenPandas builds
+100_000 columns. That is the l4vzc wall, and this entry closes the phase-split
+question by showing the API half of it is 7.5% and therefore not where the answer
+is.
+
+NO LEVER SHIPPED, and none is warranted here: a perfect fix to label addressing is
+bounded at 7.5% of a lane that is 300x behind.
