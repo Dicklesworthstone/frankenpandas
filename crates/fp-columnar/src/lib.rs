@@ -9385,9 +9385,46 @@ fn par_map_slice_f64<F: Fn(f64) -> f64 + Sync>(data: &[f64], f: F) -> Vec<f64> {
 }
 
 fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
-    const PAR_MIN: usize = 200_000;
+    par_map_vec_f64_with_par_min(n, g, PAR_MAP_VEC_DEFAULT_PAR_MIN)
+}
+
+/// The threshold [`par_map_vec_f64`] keeps for callers that do not name one.
+///
+/// br-frankenpandas-lrpp2. This stays 200_000 ON PURPOSE. `par_map_vec_f64` is
+/// shared with CHEAP bandwidth-bound callers — `df_abs @100k` among them, whose
+/// serial arm is a deliberate write-once optimisation documented below — so
+/// lowering it globally would drag them onto a parallel arm that has never paid
+/// for itself. The expensive ops name their own threshold instead.
+const PAR_MAP_VEC_DEFAULT_PAR_MIN: usize = 200_000;
+
+/// As [`par_map_vec_f64`], but the caller names the length at which the parallel
+/// arm is taken.
+///
+/// br-frankenpandas-lrpp2. THIS EXISTS BECAUSE THE PER-OP OVERRIDE STOPPED HALF
+/// WAY. `dac337fd7` gave thirteen expensive unary maps
+/// `par_min_override = ELEMENTWISE_EXPENSIVE_PAR_MIN`, but that override lives on
+/// the DOMAIN-FUSED arm, which requires `as_f64_slice()` — i.e. ALL-VALID input. A
+/// NULLABLE column declines that arm and falls through to `typed_float_unary_par`
+/// and hence to here, where the threshold was a hardcoded 200_000. So the same op
+/// at the same size was THREADED on clean input and SERIAL on holed input.
+///
+/// MEASURED, live pandas 2.2.3, 100k, one ELF (`b4bd5459cae71966`), via the
+/// `_nullable` h2h lane added in 6e810390d:
+///
+///     cos            fp  492.93us   ratio 1.9754   <- threaded, opted in at 65_536
+///     cos_nullable   fp 1503.53us   ratio 0.5543   <- serial, stuck on 200_000
+///
+/// A ~2x win against the incumbent became a ~0.55x loss, 3.05x apart, on one op.
+/// And `FP_ELEMENTWISE_PAR_MIN` could not reach it — 1386.87us against 1382.47us,
+/// 0.3% apart — which is what a hardcoded constant looks like from outside and is
+/// why the fix had to be a parameter rather than an env knob.
+fn par_map_vec_f64_with_par_min<G: Fn(usize) -> f64 + Sync>(
+    n: usize,
+    g: G,
+    par_min: usize,
+) -> Vec<f64> {
     let workers = cached_available_parallelism().min(8);
-    if workers <= 1 || n < PAR_MIN {
+    if workers <= 1 || n < par_min {
         // SERIAL ARM WRITES ONCE. The shared `vec![0.0; n]` below exists so the
         // parallel arm can hand each worker a disjoint `chunks_mut`; the serial
         // arm never needed it, and paid a full zero-fill of the output before
@@ -28084,7 +28121,12 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::log10) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold. `log10`
+        // already carries its own LOG10_PAR_MIN (65_536) on the domain-fused arm;
+        // this makes the nullable fallback agree instead of sitting on 200_000.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::log10, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28150,7 +28192,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::sin) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::sin, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28195,7 +28240,13 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::cos) {
+        // br-frankenpandas-lrpp2: the NULLABLE half of this op's threshold. The
+        // domain-fused arm above needs all-valid input, so a holed column lands
+        // here — where the shared 200_000 kept it serial and turned a 1.9754x win
+        // into a 0.5543x loss at 100k.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::cos, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28234,7 +28285,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::tan) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::tan, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28276,7 +28330,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::asin) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::asin, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28315,7 +28372,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::acos) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::acos, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28350,7 +28410,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::atan) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::atan, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28391,7 +28454,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::sinh) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::sinh, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28430,7 +28496,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::cosh) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::cosh, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28469,7 +28538,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::tanh) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::tanh, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28508,7 +28580,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::asinh) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::asinh, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28557,7 +28632,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::acosh) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::acosh, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28596,7 +28674,10 @@ impl Column {
         ) {
             return Ok(out);
         }
-        if let Some(out) = self.typed_float_unary_par(f64::atanh) {
+        // br-frankenpandas-lrpp2: nullable half of this op's threshold.
+        if let Some(out) =
+            self.typed_float_unary_par_with_par_min(f64::atanh, ELEMENTWISE_EXPENSIVE_PAR_MIN)
+        {
             return Ok(out);
         }
         let mut out = Vec::with_capacity(self.values.len());
@@ -28745,16 +28826,43 @@ impl Column {
     /// to_degrees — which keep the serial path). Bit-identical: same `f`, same
     /// order (chunk base+j → global index), same from_f64_values_owned output.
     fn typed_float_unary_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
+        self.typed_float_unary_par_with_par_min(f, PAR_MAP_VEC_DEFAULT_PAR_MIN)
+    }
+
+    /// As [`Self::typed_float_unary_par`], but the caller names the parallel
+    /// threshold instead of inheriting the shared 200_000.
+    ///
+    /// br-frankenpandas-lrpp2. THIS IS THE NULLABLE HALF OF THE PER-OP OVERRIDE.
+    /// The thirteen expensive unary maps already pass
+    /// `ELEMENTWISE_EXPENSIVE_PAR_MIN` to the domain-fused arm, but that arm needs
+    /// `as_f64_slice()` and therefore ALL-VALID input; a nullable column declines
+    /// it and lands here, where the threshold used to be hardcoded. Same op, same
+    /// per-element cost, opposite arm — `cos @100k` measured 492.93us threaded on
+    /// clean input against 1503.53us serial on 10%-holed input, a 1.9754x win
+    /// against a 0.5543x loss.
+    ///
+    /// ⚠️ CHEAP CALLERS MUST NOT BE MOVED. `typed_float_unary_par` keeps the
+    /// 200_000 default for exactly that reason — the same reason
+    /// `ELEMENTWISE_EXPENSIVE_PAR_MIN` is a per-op override and not a lower shared
+    /// constant. An op earns this threshold by costing enough per element to clear
+    /// the ~350-420us `thread::scope` tax, and that is a measurement, not a guess.
+    fn typed_float_unary_par_with_par_min<F: Fn(f64) -> f64 + Sync>(
+        &self,
+        f: F,
+        par_min: usize,
+    ) -> Option<Self> {
         if let Some(data) = self.as_f64_slice() {
-            return Some(Self::from_f64_values_owned(par_map_vec_f64(
+            return Some(Self::from_f64_values_owned(par_map_vec_f64_with_par_min(
                 data.len(),
                 |i| f(data[i]),
+                par_min,
             )));
         }
         if let Some(data) = self.as_i64_slice() {
-            return Some(Self::from_f64_values_owned(par_map_vec_f64(
+            return Some(Self::from_f64_values_owned(par_map_vec_f64_with_par_min(
                 data.len(),
                 |i| f(data[i] as f64),
+                par_min,
             )));
         }
         // Nullable Float64/Int64 INPUT: the all-valid accessors above bail on ANY
@@ -28769,7 +28877,7 @@ impl Column {
         if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
-            return Some(Self::from_f64_values_owned(par_map_vec_f64(
+            return Some(Self::from_f64_values_owned(par_map_vec_f64_with_par_min(
                 data.len(),
                 |i| {
                     if validity.get(i) {
@@ -28778,12 +28886,13 @@ impl Column {
                         f64::NAN
                     }
                 },
+                par_min,
             )));
         }
         if self.dtype == DType::Int64
             && let Some((data, validity)) = self.as_i64_slice_with_validity()
         {
-            return Some(Self::from_f64_values_owned(par_map_vec_f64(
+            return Some(Self::from_f64_values_owned(par_map_vec_f64_with_par_min(
                 data.len(),
                 |i| {
                     if validity.get(i) {
@@ -28792,6 +28901,7 @@ impl Column {
                         f64::NAN
                     }
                 },
+                par_min,
             )));
         }
         None
