@@ -42870,3 +42870,32 @@ untouched. NOT a closure of the lane — `cos_nullable` remains a certified loss
 REMAINING LEVER, NAMED AND UNMEASURED: give `par_map_vec_f64` the write-once
 owned-chunks shape the domain-fused arm already uses, so the nullable parallel arm
 stops zero-filling a buffer it immediately overwrites. No number is claimed for it.
+
+⚠️ CORRECTION TO THE LINE ABOVE, added the same night after actually reading the
+code rather than reasoning from the mechanism. That lever is NOT the small wiring
+job I made it sound like, and anyone picking it up should know both obstacles
+before spending a window:
+
+  1. THE PRODUCER SHAPE DOES NOT FIT. `par_map_slice_f64_to_owned_chunks` takes a
+     SLICE plus a per-ELEMENT `f(T) -> f64`. The nullable arm needs an INDEX
+     closure, because it must consult `validity.get(i)` per slot. Mapping `f` over
+     the raw data instead is a CORRECTNESS BREAK, not a shortcut: an invalid slot's
+     underlying datum can be an ordinary number (a 0.0 sentinel or stale value), so
+     `f(data[i])` would yield a non-NaN for a slot that must stay missing, and the
+     NaN-derived validity would then mark it PRESENT. Closing this needs a new
+     index-closure variant producing `(chunks, validity_words, all_valid,
+     all_finite)`, not a call-site change.
+  2. AND IT WOULD SHIP INERT. The write-once path is gated on
+     `elementwise_write_once_enabled()`, which reads `FP_ELEMENTWISE_WRITE_ONCE`
+     and is OFF BY DEFAULT. So the work would land behind a flag nobody sets, would
+     not move the 0.8539x row, and would be a kernel with no live caller — the same
+     shape as the add/sub/mul kernels that sat on main unreached until 9a526f41d.
+     Turning write-once on by default is a SEPARATE measured question owned by
+     br-frankenpandas-284ul / tyiss, not a side effect to take here.
+
+The `from_f64_owned_chunks_with_validity` constructor DOES exist, so the output
+side is not the blocker — which is worth saying, because the comment on
+`typed_float_unary_nullable_owned_par` warns that "the chunked column constructor
+is an ALL-VALID form" and that is true only of
+`from_f64_all_valid_owned_chunks`. The blockers are the producer signature and the
+default-off gate, in that order.
