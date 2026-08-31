@@ -42974,3 +42974,86 @@ materializations. Against `drop_duplicates`' 9.5% self time the ceiling is ~150u
 I am recording that estimate rather than committing the change, because a
 micro-optimization shipped without a vs-incumbent row is exactly the
 maintenance-as-progress this campaign forbids.
+
+### 2026-08-31 BeigeAspen — df_transpose_full_materialize @100k (0.004x, the worst standing loss): DECOMPOSED FROM THE INSIDE — ~32% is Scalar materialization and ~17% is irreducible PER-COLUMN bookkeeping, which is the asymptotic wall stated as numbers rather than as an argument [br-frankenpandas-l4vzc]
+
+The worst row on the census board, attacked with a falsifiable decomposition
+rather than a lever, because l4vzc's own conclusion — that this needs 2D-block
+storage — has been an ARGUMENT since 2026-06-20 and deserved a measurement.
+
+Earlier this campaign I decomposed the lane from the OUTSIDE (702b3d010): the
+`Scalar` accessor arm ran 39732.999us against the typed `as_f64_slice` arm's
+21620.234us, so the Scalar boundary is 45.6% of the lane — and removing it entirely
+still left pandas 260x ahead. That said WHERE half the time went and left the other
+half unexplained. This profiles the inside.
+
+**Counted mechanism:** the lane performs 100_000 per-column `Vec<Scalar>` allocations plus 100_000 `String` allocations for the column names — one of each per OUTPUT column, and a transpose has one output column per SOURCE row — and that allocation count is UNCHANGED by any accessor swap, because it is set by the representation rather than by how the values are read. The 45.6% Scalar boundary measured in 702b3d010 removes the first 100_000; the second 100_000 and the 100_000 lazy column-slot initializations remain, which is why the outside decomposition still left pandas 260x ahead after deleting the boundary entirely.
+
+Profiled with `perf record -F 999 -g --call-graph dwarf,16384` on the lane run
+STANDALONE (fp-bench takes the workload directly, so no python in the trace), ELF
+ea51647dd8717ff08f2b6bc2acb27fc0f5c7305411c7aca8c13b29bde199d32e, host
+thinkstation1. `kernel.perf_event_paranoid` raised 4 -> 1 for the pass and RESTORED
+to 4 afterwards (verified). Self time:
+
+    17.42%  OnceLock<Vec<Scalar>>::initialize   via ScalarValues::as_slice
+    14.17%  Arc<OnceLock<Vec<Scalar>>>::drop_slow
+    13.75%  OnceLock<LazyTransposeColumnSlotPage>::initialize
+    11.40%  __memmove_avx_unaligned_erms
+     6.87%  Column::from_f64_shared_window_paged
+     5.10%  sha2 compress                        <- ARTIFACT, discount
+     4.09%  LazyDataFrameColumns::get_one
+     3.29%  drop_glue::<Column>
+     3.10%  drop_glue::<ScalarValues>
+     2.99%  <i64 as SpecToString>::spec_to_string
+     2.51%  LazyTransposeFramePlan::cached_column
+     1.86%  drop_glue::<Option<ColumnData>>
+     1.35%  DataFrame::column_name_at
+
+(The `sha2` frame is `self_identity()` SHA-256ing the 87 MB ELF once at startup —
+a standalone-profile artifact the harness amortizes. Discount it.)
+
+⭐ THE LAZY TRANSPOSE MACHINERY IS LIVE IN THE DEFAULT BUILD. `LazyTransposeFramePlan`,
+`LazyDataFrameColumns::get_one` and `from_f64_shared_window_paged` are all on the
+profile, so this is NOT the eager materializer and the lane is already getting the
+lazy plan. That matters because l4vzc's notes describe the lazy view as
+feature-gated with the default API still eager; on this ELF the plan is running and
+the lane is still 0.004x.
+
+TWO NUMBERS ARE THE FINDING:
+
+  1. ~31.6% IS Scalar MATERIALIZATION AND ITS DESTRUCTION —
+     `OnceLock<Vec<Scalar>>::initialize` (17.42%) plus
+     `Arc<OnceLock<Vec<Scalar>>>::drop_slow` (14.17%). This is the boundary the
+     outside decomposition measured at 45.6%, now seen from within and confirmed as
+     the single largest cost. Note the DROP is nearly as expensive as the build:
+     freeing 100_000 `Vec<Scalar>` is not free, which an accessor-swap alone does
+     not avoid unless the Vec is never built.
+
+  2. ~17% IS PURE PER-COLUMN BOOKKEEPING, INDEPENDENT OF THE DATA —
+     `OnceLock<LazyTransposeColumnSlotPage>::initialize` (13.75%) plus
+     `i64::spec_to_string` (2.99%) plus `column_name_at` (1.35%). The transposed
+     frame has ONE COLUMN PER SOURCE ROW, so at 100k rows the lane initializes
+     100_000 lazy column slots and formats 100_000 integer column NAMES into
+     `String`s. None of that touches an f64.
+
+THAT SECOND NUMBER IS THE WALL, STATED AS A MEASUREMENT. Even with a perfect
+zero-copy data path — no Scalar, no memmove, no window paging — the lane would
+still pay ~17% of its current time on per-column object and name construction that
+pandas does not pay at all, because `.T.to_numpy()` returns a VIEW over one block
+and creates no per-column objects and no names. The cost is proportional to the
+OUTPUT COLUMN COUNT, which for a transpose is the input ROW count. That is why
+l4vzc's 2D-block conclusion is right, and it is now supported by a number rather
+than by reasoning: you cannot make 100_000 Column structs cheap; you can only avoid
+creating them.
+
+FALSIFIABLE PREDICTION, recorded so it can be scored later rather than
+rationalized: any lever that keeps the one-Column-per-source-row representation is
+bounded above by ~1.5x on this lane, because ~17% is per-column overhead that such
+a lever cannot touch and ~11% is memmove that a zero-copy path can only partly
+remove. Reaching parity requires not creating the columns — i.e. the block-backed
+variant l4vzc scopes, not an accessor or allocator fix.
+
+NO LEVER SHIPPED. This is a decomposition, and the honest output is that the two
+cheap-looking targets on the profile are not worth taking alone: the column-name
+strings are 2.99% and the slot-page init is a consequence of the representation,
+not a defect in it.
