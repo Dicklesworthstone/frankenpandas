@@ -1547,9 +1547,9 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
     // Column::from_values + build_csv_object_aware_column produce for those inputs.
     // `valid: None` = all-valid so far (the common fast case, no per-cell bit
-    // tracking); `Some(mask)` = at least one NA has appeared. Numeric and Bool
-    // columns with nulls stay typed: Int64 missing → Null(Null), Float64 missing
-    // → Null(NaN), and Bool missing → Null(Null).
+    // tracking); `Some(mask)` = at least one NA has appeared. A missing value
+    // promotes inferred numpy-style integers to Float64, because pandas' int64
+    // cannot represent NA; Float64 and Bool keep their typed missing form.
     enum ColAcc {
         Int(Vec<i64>, Option<Vec<bool>>),
         Float(Vec<f64>, Option<Vec<bool>>),
@@ -1591,10 +1591,13 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
             if is_pandas_default_na(field) {
                 match acc {
                     ColAcc::Int(buf, valid) => {
-                        valid
-                            .get_or_insert_with(|| vec![true; buf.len()])
-                            .push(false);
-                        buf.push(0);
+                        let mut promoted: Vec<f64> =
+                            buf.iter().map(|&value| value as f64).collect();
+                        promoted.push(0.0);
+                        let mut promoted_valid =
+                            valid.take().unwrap_or_else(|| vec![true; buf.len()]);
+                        promoted_valid.push(false);
+                        *acc = ColAcc::Float(promoted, Some(promoted_valid));
                     }
                     ColAcc::Float(buf, valid) => {
                         valid
@@ -4999,18 +5002,18 @@ fn days_from_ymd(year: i64, month: i64, day: i64) -> i64 {
 }
 
 fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
-    // DISC-011: Nullable extension Int64 dtype parity.
-    // Previously: Int64 columns with nulls promoted to Float64 for CSV output.
-    // Now: Int64 columns preserve integer encoding; only promote when the
-    // column actually contains Float64 values (mixed Int64/Float64 → Float64).
+    // A CSV field has no declared nullable-extension dtype. Match pandas' numpy
+    // inference instead: an integer column widens when it contains either a
+    // fractional value or a missing value, because numpy int64 cannot hold NA.
     let mut saw_int = false;
     let mut saw_float = false;
+    let mut saw_null = false;
 
     for value in values {
         match value {
             Scalar::Int64(_) => saw_int = true,
             Scalar::Float64(_) => saw_float = true,
-            Scalar::Null(_) => {}
+            Scalar::Null(_) => saw_null = true,
             Scalar::Bool(_)
             | Scalar::Utf8(_)
             | Scalar::Timedelta64(_)
@@ -5022,7 +5025,7 @@ fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
         }
     }
 
-    saw_int && saw_float
+    saw_int && (saw_float || saw_null)
 }
 
 fn apply_pandas_csv_numeric_promotions(columns: &mut [Vec<Scalar>]) {
@@ -15964,6 +15967,35 @@ mod tests {
     }
 
     #[test]
+    fn csv_integer_column_with_missing_value_promotes_to_float64_b8n0q() {
+        let input = "a,b\n1,x\n,y\n3,z\n";
+        let df = read_csv_str(input).expect("read");
+        let column = df.column("a").expect("a");
+        assert_eq!(
+            column.dtype(),
+            DType::Float64,
+            "pandas int64 + NA -> float64"
+        );
+        assert_eq!(column.values()[0], Scalar::Float64(1.0));
+        assert!(
+            column.values()[1].is_missing(),
+            "middle empty field must be NA"
+        );
+        assert_eq!(column.values()[2], Scalar::Float64(3.0));
+
+        let options = CsvReadOptions {
+            nrows: Some(3),
+            ..CsvReadOptions::default()
+        };
+        let options_df = read_csv_with_options(input, &options).expect("options read");
+        assert_eq!(
+            options_df.column("a").expect("options a").dtype(),
+            DType::Float64,
+            "generic options path must apply the same promotion"
+        );
+    }
+
+    #[test]
     fn csv_header_only_zero_rows_yqfw0() {
         // br-frankenpandas-yqfw0: a header-only CSV parses to a 0-row frame that still
         // exposes the header columns.
@@ -16171,24 +16203,17 @@ mod tests {
             df.columns()["b"].values(),
             &[Scalar::Int64(2), Scalar::Int64(5), Scalar::Int64(8)]
         );
-        // The short row's missing 'c' is the pad.
-        //
-        // ⚠️ DTYPE DIVERGENCE, deliberately NOT fixed here: pandas promotes 'c'
-        // to float64 ([3.0, NaN, 9.0]) because introducing a null into an int
-        // column forces the promotion. FrankenPandas keeps a NULLABLE Int64 and
-        // reports [3, NA, 9]. That is the repo-wide "int64 -> float64 on null"
-        // divergence (the KIND int64->float64 class on
-        // br-frankenpandas-fixture-divergence-triage-9s0c4), not this bead's,
-        // and folding it in here would hide it. Asserted as FP ACTUALLY behaves
-        // so this test tells the truth about the current state.
+        // The short row's missing 'c' is the pad and promotes the inferred
+        // integer column to pandas-compatible Float64.
         let c = df.columns()["c"].values();
-        assert_eq!(c[0], Scalar::Int64(3));
+        assert_eq!(df.columns()["c"].dtype(), DType::Float64);
+        assert_eq!(c[0], Scalar::Float64(3.0));
         assert!(
             c[1].is_missing(),
             "short row pads 'c' with NA, got {:?}",
             c[1]
         );
-        assert_eq!(c[2], Scalar::Int64(9));
+        assert_eq!(c[2], Scalar::Float64(9.0));
     }
 
     /// The OTHER thing the strict reader used to catch only by accident. pandas
@@ -18359,9 +18384,8 @@ mod tests {
     /// The same fast path must PAD a short row rather than reject it — the
     /// gtkz1 fixture's own input (fp_p2d_016_csv_round_trip_ragged_row_error).
     /// Measured: pd.read_csv("a,b\n1,2\n3\n") -> a=[1,3], b=[2.0, NaN].
-    /// FP pads identically but keeps 'b' as nullable Int64 rather than
-    /// promoting to float64 — see the dtype note on
-    /// `csv_short_row_pads_with_na_like_pandas_4hpid`.
+    /// Both paths must infer `b` as Float64 because pandas' numpy-style int64
+    /// inference widens when a short row introduces an NA.
     #[test]
     fn read_csv_typed_numeric_fast_path_pads_short_row() {
         let df = read_csv_str("a,b\n1,2\n3\n").expect("short row pads");
@@ -18370,7 +18394,8 @@ mod tests {
             &[Scalar::Int64(1), Scalar::Int64(3)]
         );
         let b = df.columns()["b"].values();
-        assert_eq!(b[0], Scalar::Int64(2));
+        assert_eq!(df.columns()["b"].dtype(), DType::Float64);
+        assert_eq!(b[0], Scalar::Float64(2.0));
         assert!(b[1].is_missing(), "padded 'b' must be NA, got {:?}", b[1]);
     }
 
@@ -20828,8 +20853,7 @@ mod tests {
 
     #[test]
     fn csv_on_bad_lines_skip_preserves_short_rows_as_missing() {
-        // DISC-011: Int64 columns with missing values stay Int64 (extension dtype parity).
-        // Missing values use NullKind::Null (pd.NA semantics) not NullKind::NaN.
+        // Pandas widens inferred int64 to float64 when a short row introduces NA.
         let input = "a,b\n1,2\n3\n6,7\n";
         let opts = CsvReadOptions {
             on_bad_lines: CsvOnBadLines::Skip,
@@ -20839,10 +20863,8 @@ mod tests {
         let frame = read_csv_with_options(input, &opts).expect("parse short row");
         assert_eq!(frame.index().len(), 3);
         assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Int64(3));
-        assert_eq!(
-            frame.column("b").unwrap().values()[1],
-            Scalar::Null(NullKind::Null)
-        );
+        assert_eq!(frame.column("b").unwrap().dtype(), DType::Float64);
+        assert!(frame.column("b").unwrap().values()[1].is_missing());
     }
 
     #[test]
@@ -21171,7 +21193,7 @@ mod tests {
 
     #[test]
     fn json_records_write_preserves_nullable_int_column() {
-        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
+        // CSV inference widens integer fields with an NA to pandas-compatible Float64.
         let frame = DataFrame::from_dict_with_index(
             vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
             vec!["row".into(), "row".into()],
@@ -21301,7 +21323,8 @@ mod tests {
         );
         assert!(frame.column("id").is_none());
         assert!(frame.column("val").unwrap().values()[0].is_missing());
-        assert_eq!(frame.column("val").unwrap().values()[1], Scalar::Int64(2));
+        assert_eq!(frame.column("val").unwrap().dtype(), DType::Float64);
+        assert_eq!(frame.column("val").unwrap().values()[1], Scalar::Float64(2.0));
 
         std::fs::remove_file(&path).ok();
     }
@@ -21332,15 +21355,16 @@ mod tests {
 
     #[test]
     fn read_table_with_options_overrides_default_delimiter_4pwr9() {
-        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
+        // CSV inference widens integer fields with an NA to pandas-compatible Float64.
         let input = "x\ty\n1\tNA\n2\t3\n";
         let opts = CsvReadOptions {
             na_values: vec!["NA".into()],
             ..Default::default()
         };
         let frame = super::read_table_with_options(input, &opts).expect("parse tsv with na");
+        assert_eq!(frame.column("y").unwrap().dtype(), DType::Float64);
         assert!(frame.column("y").unwrap().values()[0].is_missing());
-        assert_eq!(frame.column("y").unwrap().values()[1], Scalar::Int64(3));
+        assert_eq!(frame.column("y").unwrap().values()[1], Scalar::Float64(3.0));
     }
 
     #[test]
@@ -21393,7 +21417,7 @@ mod tests {
 
     #[test]
     fn read_fwf_str_threads_na_handling_23n8u() {
-        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
+        // CSV inference widens integer fields with an NA to pandas-compatible Float64.
         let input = "id   val\nA    NA \nB    7  \n";
         let opts = super::FwfReadOptions {
             colspecs: Some(vec![(0, 5), (5, 9)]),
@@ -21402,8 +21426,9 @@ mod tests {
         };
         let frame = super::read_fwf_str(input, &opts).expect("parse fwf na");
         let col = frame.column("val").unwrap().values();
+        assert_eq!(frame.column("val").unwrap().dtype(), DType::Float64);
         assert!(col[0].is_missing());
-        assert_eq!(col[1], Scalar::Int64(7));
+        assert_eq!(col[1], Scalar::Float64(7.0));
     }
 
     #[test]
@@ -26923,14 +26948,13 @@ mod tests {
     }
 
     #[test]
-    fn csv_missing_numeric_column_preserves_int() {
-        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
+    fn csv_missing_numeric_column_promotes_int_to_float64() {
+        // A numeric CSV field with an NA follows pandas' numpy-style widening.
         let input = "a,b,c\n,NA,NaN\n1,,x\n";
         let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
-        assert_eq!(
-            frame.column("a").unwrap().values(),
-            &[Scalar::Null(NullKind::Null), Scalar::Int64(1)]
-        );
+        assert_eq!(frame.column("a").unwrap().dtype(), DType::Float64);
+        assert!(frame.column("a").unwrap().values()[0].is_missing());
+        assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Float64(1.0));
         assert!(frame.column("b").unwrap().values()[0].is_missing());
         assert!(frame.column("b").unwrap().values()[1].is_missing());
         assert_eq!(
