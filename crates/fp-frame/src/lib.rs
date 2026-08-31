@@ -52285,9 +52285,59 @@ impl DatetimeAccessor<'_> {
     /// removes timezone information.
     pub fn tz_convert(&self, tz: Option<&str>) -> Result<Series, FrameError> {
         let target_tz = tz.map(parse_tz_spec).transpose()?;
+        let target_dtype = match &target_tz {
+            Some(TimeZoneSpec::Fixed(offset)) => DType::datetime64_tz(format!("UTC{offset}")),
+            Some(TimeZoneSpec::Named { name, .. }) => DType::datetime64_tz(name),
+            None => DType::datetime64_naive(),
+        };
+
+        // A typed datetime stores UTC nanoseconds, so converting its timezone
+        // changes only presentation.  The columnar timezone metadata mutation
+        // is intentionally kept out of this accessor: a typed source is
+        // converted through the same scalar rendering path as the established
+        // Utf8 implementation, preserving DST-aware wall clocks and missing
+        // values for a chained conversion.
+        if self.is_typed_datetime() {
+            if self.series.column().timezone().is_none() {
+                return Err(FrameError::CompatibilityRejected(
+                    "Cannot convert tz-naive timestamps, use tz_localize to localize".to_owned(),
+                ));
+            }
+            let values = self
+                .series
+                .column()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) if *nanos != fp_types::Timestamp::NAT => {
+                        let seconds = nanos.div_euclid(1_000_000_000);
+                        let subsec_nanos = nanos.rem_euclid(1_000_000_000) as u32;
+                        Utc.timestamp_opt(seconds, subsec_nanos)
+                            .single()
+                            .map_or(Scalar::Null(NullKind::NaN), |utc| match &target_tz {
+                                Some(TimeZoneSpec::Fixed(offset)) => Scalar::Utf8(
+                                    format_aware_datetime(utc.with_timezone(offset), None),
+                                ),
+                                Some(TimeZoneSpec::Named { zone, name }) => {
+                                    let localized = utc.with_timezone(zone);
+                                    Scalar::Utf8(format_aware_datetime(
+                                        localized.with_timezone(&localized.offset().fix()),
+                                        Some(name),
+                                    ))
+                                }
+                                None => Scalar::Utf8(format_naive_datetime(utc.naive_utc())),
+                            })
+                    }
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect();
+            let column = Column::from_values(values)?;
+            return Series::new(self.series.name().to_owned(), self.series.index().clone(), column);
+        }
+
         // DATETIME domain: pandas infers one format and NaTs the rest (mhygz);
         // the NaT then propagates through the tz conversion.
-        self.try_extract_component_one_format(
+        let converted = self.try_extract_component_one_format(
             |s| {
                 if !has_tz_suffix(s) {
                     return Err(FrameError::CompatibilityRejected(
@@ -52313,7 +52363,17 @@ impl DatetimeAccessor<'_> {
                 }
             },
             self.series.name(),
-        )
+        )?;
+
+        // Fixed offsets remain fully represented in their scalar spelling.
+        // Named zones, however, need their shared identifier on the dtype; the
+        // temporary annotation above is consumed by `to_datetime` rather than
+        // exposed as part of the value.  That is pandas' `datetime64[ns, tz]`
+        // representation and preserves both the instant and future DST rules.
+        if matches!(target_tz, Some(TimeZoneSpec::Named { .. })) {
+            return converted.astype(target_dtype);
+        }
+        Ok(converted)
     }
 }
 
@@ -165916,14 +165976,36 @@ mod tests {
     fn dt_tz_convert_named_zone_tracks_dst_offset() {
         let s = Series::from_values(
             "ts",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("2024-06-20 12:00:00+00:00".into())],
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-03-10 06:30:00+00:00".into()),
+                Scalar::Utf8("2024-03-10 07:30:00+00:00".into()),
+            ],
         )
         .unwrap();
         let result = s.dt().tz_convert(Some("America/New_York")).unwrap();
         assert_eq!(
-            result.values()[0],
-            Scalar::Utf8("2024-06-20 08:00:00-04:00[America/New_York]".into())
+            result.dtype(),
+            DType::datetime64_tz("America/New_York"),
+            "the named zone belongs in datetime dtype metadata, not a [Zone] suffix"
+        );
+        assert_eq!(result.column().timezone(), Some("America/New_York"));
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Datetime64(1_710_052_200_000_000_000),
+                Scalar::Datetime64(1_710_055_800_000_000_000),
+            ],
+            "UTC instants must remain unchanged across the spring-forward boundary"
+        );
+        let utc = result.dt().tz_convert(Some("UTC")).unwrap();
+        assert_eq!(
+            utc.values(),
+            &[
+                Scalar::Utf8("2024-03-10 06:30:00+00:00".into()),
+                Scalar::Utf8("2024-03-10 07:30:00+00:00".into()),
+            ],
+            "a typed named-zone result must remain convertible without losing either instant"
         );
     }
 
