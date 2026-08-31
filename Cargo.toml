@@ -63,12 +63,12 @@ mimalloc = "0.1"
 # `undefined symbol: PyGILState_Ensure` and friends, so the whole crate's suite
 # was dark. br-frankenpandas-r18qs, CrimsonPine 2026-08-17.
 pyo3 = { version = "0.29" }
-quick-xml = "0.41"
+quick-xml = "0.42"
 regex = "1.12.3"
-rust_xlsxwriter = "0.98.2"
+rust_xlsxwriter = "0.99.0"
 rusqlite = { version = "0.40.1", features = ["bundled", "column_decltype"] }
 ryu = "1.0.23"
-sas7bdat = "0.2.0"
+sas7bdat = "0.8.1"
 sas_xport = "0.4.1"
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
