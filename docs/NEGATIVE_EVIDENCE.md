@@ -42811,3 +42811,62 @@ SAMPLE: every op above ~400us of serial work gained, gain tracks distance above 
 line, and both ops AT the line (`exp` 423.89us, `log2` 474.08us) gained nothing and
 stay on the shared default. `acosh` was predicted correctly from its per-element
 cost before it was run — which is the durable result, not any single ratio.
+
+### 2026-08-30 BeigeAspen — my ~2x prediction for the nullable arm is REJECTED: measured 1.355x, and cos_nullable is STILL a certified 0.8539x LOSS — the break-even model's first counterexample [br-frankenpandas-lrpp2]
+
+`e0603b243` threaded the per-op `par_min` into the nullable unary fallback, which
+had been stuck on a hardcoded 200_000 while the all-valid arm threaded at 65_536.
+This entry records that it helped and that my pre-registered prediction MISSED.
+
+⚠️ NO RESULT-CLASS MARKER, DELIBERATELY, AND THE GATE IS WHAT TAUGHT ME WHY. I
+tried the win class first and preflight refused it, because that class requires a
+ratio above 1.0x and this row is 0.8539x — a loss to the incumbent. I tried the
+self-speedup class and preflight refused that too, because it may not quote a
+pandas-facing ratio and this row IS a certified vs-incumbent measurement. Neither
+positive class is truthful: the CODE is kept and improving while the HYPOTHESIS is
+what failed. So the entry carries the negative contract against the PREDICTION,
+which is the thing that was actually refuted. The change itself stays in
+(e0603b243) — bit-identical, a strict 1.355x FP-side improvement, cheap callers
+untouched.
+
+The measured incumbent arm for the row is live pandas 2.2.3, artifact sha256
+3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae, same
+invocation, at 947.155us against FrankenPandas' 1109.18us.
+
+**Executing ELF SHA-256 (self-reported by process):** bench_elf_sha256=dfefe8c11b59f4cbb378059c1832cfb39f3c23b16cbdb124faeb3c8cbff93ac5 (10907952 bytes) /data/projects/.scratch/beigeaspen/lrpp2/h2h-nullfix
+
+**A/A null control (same invocation):** the A/A null median ratio for each arm, FrankenPandas and pandas, limit 0.02 absolute deviation from unity — cos_nullable post-fix FrankenPandas=1.01914 pandas=1.00067, both inside, so that row is decidable and CERTIFIED SLOWER at 0.8539x. The acosh_nullable and tanh_nullable rows FAILED that clause on the PANDAS arm (1.11222 and 1.07031) and are recorded as NULL_UNDECIDABLE, not quoted as results.
+
+**Median-CI decision:** the cos_nullable median effect is 0.1461 (ratio 0.8539) and its CI cleared the required 2x null-margin threshold, decidable — a certified LOSS that the fix reduced but did not remove.
+
+**CV role:** provenance only; CV had no vote.
+
+PRE-REGISTERED ON THE BEAD BEFORE THE RUN: "predicts it clears easily and lands
+near 2x, taking the lane from ~0.55x to roughly parity-or-better. If it does NOT,
+the model has found its first counterexample."
+
+MEASURED, 100k, 64 rounds, no env override:
+
+| lane | pre-fix fp | post-fix fp | FP-side | post-fix ratio |
+|---|---:|---:|---:|---:|
+| cos_nullable | 1503.53us | 1109.18us | **1.355x** | **0.8539x** CERTIFIED SLOWER |
+
+⭐ PREDICTED ~2x, MEASURED 1.355x — a ~35% shortfall, and the lane moved
+0.5543x -> 0.8539x rather than to parity. Scored as a MISS.
+
+**Counted mechanism:** the all-valid domain-fused arm writes through
+`par_map_slice_f64_domain_fused_to_owned_chunks` — per-worker OWNED chunks, no
+shared buffer. `par_map_vec_f64`'s parallel arm instead allocates
+`vec![0.0_f64; n]` up front so workers can take disjoint `chunks_mut`: an 800 KB
+zero-fill at 100k that the SERIAL arm explicitly skips, and whose cost that
+function's own comment measures at 4.76% memset plus 6.03% `clear_page_erms` on
+`df_abs @100k`. The nullable parallel arm therefore pays a zero-fill the all-valid
+parallel arm does not. The break-even model assumed the two parallel arms cost the
+same; they do not, and that is where the missing ~35% went.
+
+KEPT: a strict improvement, bit-identical, with the default for cheap callers
+untouched. NOT a closure of the lane — `cos_nullable` remains a certified loss.
+
+REMAINING LEVER, NAMED AND UNMEASURED: give `par_map_vec_f64` the write-once
+owned-chunks shape the domain-fused arm already uses, so the nullable parallel arm
+stops zero-filling a buffer it immediately overwrites. No number is claimed for it.
