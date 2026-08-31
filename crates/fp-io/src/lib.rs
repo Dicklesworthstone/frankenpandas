@@ -3587,17 +3587,13 @@ pub fn read_xml_str_with_options(
             }
             Event::Text(event) => {
                 if current_field.is_some() {
-                    let decoded = event
-                        .xml_content(xml_version)
-                        .map_err(|err| IoError::Xml(err.to_string()))?;
+                    let decoded = event.xml_content(xml_version);
                     field_text.push_str(&decoded);
                 }
             }
             Event::CData(event) => {
                 if current_field.is_some() {
-                    let decoded = event
-                        .xml_content(xml_version)
-                        .map_err(|err| IoError::Xml(err.to_string()))?;
+                    let decoded = event.xml_content(xml_version);
                     field_text.push_str(&decoded);
                 }
             }
@@ -3632,8 +3628,8 @@ pub fn read_xml_str_with_options(
             Event::Decl(decl) => {
                 if let Ok(v) = decl.version() {
                     xml_version = match v.as_ref() {
-                        b"1.0" => XmlVersion::Explicit1_0,
-                        b"1.1" => XmlVersion::Explicit1_1,
+                        "1.0" => XmlVersion::Explicit1_0,
+                        "1.1" => XmlVersion::Explicit1_1,
                         _ => xml_version,
                     };
                 }
@@ -3744,14 +3740,13 @@ pub fn write_xml_string_with_options(
 }
 
 fn xml_event_name(name: quick_xml::name::QName<'_>) -> Result<String, IoError> {
-    std::str::from_utf8(name.as_ref())
-        .map(ToOwned::to_owned)
-        .map_err(|err| IoError::Xml(format!("invalid utf-8 xml element name: {err}")))
+    // quick-xml 0.42 QName is str-based, so names are always valid UTF-8.
+    Ok(name.as_ref().to_owned())
 }
 
 fn decode_xml_general_ref(reference: quick_xml::events::BytesRef<'_>) -> Result<String, IoError> {
-    let raw = std::str::from_utf8(reference.as_ref())
-        .map_err(|err| IoError::Xml(format!("invalid utf-8 xml entity reference: {err}")))?;
+    // quick-xml 0.42 BytesRef is str-based, so references are always valid UTF-8.
+    let raw: &str = reference.as_ref();
     match raw {
         "amp" => Ok("&".to_owned()),
         "lt" => Ok("<".to_owned()),
