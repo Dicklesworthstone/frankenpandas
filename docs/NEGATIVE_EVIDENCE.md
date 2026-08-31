@@ -42899,3 +42899,78 @@ side is not the blocker — which is worth saying, because the comment on
 is an ALL-VALID form" and that is true only of
 `from_f64_all_valid_owned_chunks`. The blockers are the producer signature and the
 default-off gate, in that order.
+
+### 2026-08-31 BeigeAspen — drop_duplicates nan10 (0.803x): NO STRUCTURAL LEVER, REJECTED after profiling — every component runs at a sane rate and the 26% gap is distributed [br-frankenpandas-p3x6h]
+
+A certified vs-incumbent loss with no cheap fix behind it. Recorded so the next
+agent does not spend a window hunting a defect that is not there — three plausible
+structural causes were checked and all three are alive and working.
+
+THE ROW (certified, two independent windows): `drop_duplicates @100k float64_nan10`
+FrankenPandas 2975.61us against pandas 2364.53us = 0.803x SLOWER, all three gate
+clauses true; an earlier run in a separate window gave 0.840x.
+
+**A/A null control (same invocation):** the A/A null median ratio for each arm,
+FrankenPandas and pandas, limit 0.02 absolute deviation from unity — nan10 lane
+FrankenPandas=1.00587 pandas=1.01214, both inside, so the row is decidable and
+CERTIFIED SLOWER at 0.803x. The clean-float64 companion lane in the same sweep gave
+FrankenPandas=1.00243 pandas=1.00119 at ratio 3.907x, also decidable.
+
+**Counted mechanism:** profiled standalone (fp-bench takes the workload directly,
+so no python in the trace), `perf record -F 999 -g --call-graph dwarf,16384`, ELF
+ea51647dd8717ff08f2b6bc2acb27fc0f5c7305411c7aca8c13b29bde199d32e, host
+thinkstation1. `kernel.perf_event_paranoid` was raised from 4 to 1 for the pass and
+RESTORED to 4 afterwards. Self time, after discounting a 16.47% `sha2` frame that
+is `self_identity()` SHA-256ing the 87 MB ELF once at startup — a standalone-profile
+artifact the harness amortizes:
+
+    take_positions                       23.7%
+    FxHashMap<u64,()>::insert            18.9%
+    DataFrame::drop_duplicates            9.5%
+    duplicated_mask                       5.8%
+    take_rows_by_positions_unchecked      3.6%
+
+THREE STRUCTURAL HYPOTHESES, ALL REJECTED:
+
+  1. "The typed dedup fast path is unreached." REJECTED WITH POSITIVE EVIDENCE: the
+     `FxHashMap<u64, ()>` insert frame IS `duplicated_single_f64`'s probe, exactly
+     as that function's comment describes it. The `thread_count_actually_used = 10`
+     that suggested otherwise was the last-writer thread-local lying again — a
+     routing question needs a routing witness, and this profile is one.
+
+  2. "The clean/nullable asymmetry." REJECTED: `drop_duplicates` early-exits via
+     `subset_has_all_valid_unique_column` when the subset column is all-valid AND
+     unique, so the clean lane returns a CLONE without deduping. The nan10 lane
+     cannot and must not — pandas treats NaN as SELF-DUPLICATING, so 10% NaN over
+     100k rows is ~10_000 genuine duplicates. The lanes do different work and the
+     3.907x is not a baseline for the 0.803x.
+
+  3. "The nullable gather is missing its typed path." REJECTED: `take_positions`
+     does gate four typed gathers behind `validity.all()`, but immediately below
+     sits the typed nullable Float64 gather from br-frankenpandas-s2i37, which
+     explicitly handles `LazyAllValidFloat64` paired with a not-all-valid mask —
+     "the shape `from_f64_values` produces for a column with NaN".
+
+⭐ AND THE ARITHMETIC SAYS THE BIGGEST FRAME IS ALREADY EFFICIENT, which is what
+turns this from "unfinished" into "rejected". The bench frame is the synthetic
+TEN-column frame, so `take_rows_by_positions` gathers 10 x ~90_000 = ~900_000
+values, not 90_000. Its 23.7% is ~705us, i.e. ~0.78 ns per gathered value — at
+random-gather memory bandwidth. I had implicitly costed it against 90_000 and it
+looked slow; against the real 900_000 it is not. The `FxHashMap` probe is ~5.6
+ns/row over 100k inserts including growth, which is ordinary for that structure.
+No component is operating at an anomalous rate.
+
+CONCLUSION: the 26% is DISTRIBUTED and each piece is doing a sane amount of work at
+a sane speed. There is no missing fast path, no wrong arm, and no boxed-Scalar
+fallback to delete. Closing it needs an ALGORITHMIC change — pandas simply absorbs
+10% missing values more cheaply than a mask -> positions -> gather pipeline does.
+
+NOT ATTEMPTED, AND DELIBERATELY NOT SHIPPED UNMEASURED: the pipeline makes three
+passes over the row space (`duplicated_mask` builds a `Vec<bool>`, `drop_duplicates`
+converts it to a `Vec<usize>` without reserving capacity, then the gather runs).
+Fusing them and preallocating would remove ~17 geometric reallocs and two 100k-element
+materializations. Against `drop_duplicates`' 9.5% self time the ceiling is ~150us of
+2975us — about 5%, which would move 0.803x to roughly 0.845x and would NOT certify.
+I am recording that estimate rather than committing the change, because a
+micro-optimization shipped without a vs-incumbent row is exactly the
+maintenance-as-progress this campaign forbids.
