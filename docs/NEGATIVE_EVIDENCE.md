@@ -43689,3 +43689,110 @@ above 32 MiB of input, or through `probe_csv_read_uncached` / an uncached entry 
 points that straddle the cache ceiling are not evidence of parser shape and must not be fitted.
 
 ---
+
+### 2026-09-01 BlackThrush (br-frankenpandas-g1g2n) — the honest CSV read, measured above the cache ceiling: 3.497x at 200k, 3.586x at 1M, 3.67x at 2M. The lead is FLAT across a 10x size range, and the pre-registered 170k/200k step landed at 27.3x
+
+**Completes the entry above** (`br-frankenpandas-od63a`, same day), which showed from source,
+byte arithmetic and instruction counts that the "344x for 10x" was `read_csv_str`'s 32 MiB
+content-cache ceiling and not the parser. That entry deliberately claimed **no** corrected
+vs-pandas ratio. This one measures them, against a live incumbent, above the ceiling, where
+every sample on both arms is a real parse.
+
+**Campaign result class:** incumbent-win
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=195b4bc2912f4bafd4809fe0ed08d2be192bd267b9cff0fd7b6a9998ce8654ac
+(88032688 bytes) /data/projects/.scratch/blackthrush/fp-bench-sizelanes-5075fae9a`
+The 2M companion row ran on the preserved default ELF
+`bench_elf_sha256=e72dddb435a51103218c170fe4f389d3d9174329f3ddf0a6c9c192e6f33aa4fd
+(88032168 bytes) /data/projects/.scratch/blackthrush/fp-bench-default-ee4def703`.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae
+invocation_id=vs-pandas-20260901T180931.937529Z-pid1753107 measured_ratio=3.497x
+
+**A/A null control (same invocation):** on the headline 200k row the FrankenPandas null
+median ratio is 1.005087 and the pandas null median ratio is 1.007273, both inside the 2%
+band. The 2M row's nulls are 1.001085 and 0.998134. Every row banked here holds its null —
+unlike every row this lane has ever produced at 100k and below, which is the point.
+
+**Median-CI decision:** the 200k effect median ratio is 3.497x with a 95% CI of
+[3.45704689, 3.61794329], cleared against the harness's
+null_median_maximum_absolute_deviation = 0.02, and the CI excludes unity. All three clauses
+TRUE (effect_ci_excludes_unity, effect_exceeds_two_x_null_margin, null_medians_within_2pct_unity);
+best-vs-best 3.5447x (FP min 47413.26 us, pandas min 168064.98 us), direction agreeing with the
+median. The 2M row is likewise decidable, effect median 3.67x, CI [3.61814067, 3.6886236], all
+three clauses TRUE, best-vs-best 3.7211x.
+
+**CV role:** provenance only; CV had no vote. The 200k FP cv is 1.57% and pandas 3.71%; the 2M FP cv is 2.47% and pandas 1.49%. None of these gated admission — the decision is the three-clause median-CI gate above.
+
+**THE HONEST SIZE CURVE.** balanced-square ABBAABBA, 8 rounds, one size per invocation.
+`csv bytes` is the fixture's own 181.6 B/row against the 33,554,432 B ceiling:
+
+| size | csv | FP p50 | FP ns/row | pandas p50 | pandas ns/row | ratio | verdict |
+|---|---|---|---|---|---|---|---|
+| 100k | 17.32 MiB | 778.66 us | 7.79 | ~88000 us | ~880 | *112.5x* | **artifact — CACHE HIT** |
+| **200k** | **34.64 MiB** | **48812.36 us** | **244.06** | **171598.15 us** | **857.99** | **3.497x** | **FASTER** |
+| 1M | 173.19 MiB | 229026.21 us | 229.03 | 821936.92 us | 821.94 | 3.586x | FASTER |
+| 2M | 346.37 MiB | 453087.47 us | 226.54 | 1652215.95 us | 826.11 | 3.67x | FASTER |
+
+**THE LEAD DOES NOT COLLAPSE.** Across 200k → 2M, a 10x size range entirely above the ceiling,
+the ratio is 3.497x → 3.586x → 3.67x. It is flat, and if anything it rises. Both engines are
+flat in per-row cost over that range: FrankenPandas 244.06 → 229.03 → 226.54 ns/row, pandas
+857.99 → 821.94 → 826.11 ns/row. There is no crossing and nothing to extrapolate toward one.
+The 112.5x at 100k was never a lead over pandas' parser — it was our cache against their parser.
+
+**200k IS THE SMALLEST SIZE THIS LANE CAN MEASURE HONESTLY WITH NO CODE CHANGE**, because
+34.64 MiB simply exceeds the ceiling. That is why the lane's four new size labels exist
+(`5075fae9a`, `de2fddece`).
+
+**⚠️ THE 100k ROW IS STILL NOT MEASURED AND IS NOT CLAIMED HERE.** 17.32 MiB is under the
+ceiling, so this lane caches at 100k no matter what is passed to it; only the K-distinct-inputs
+fix (br-frankenpandas-g1g2n) can price that size. Per-row cost is flat at ~230-244 ns across
+everything above the ceiling, which *suggests* 100k would land near 3.5x too — that is an
+inference from the curve, **not a measurement**, and must not be banked as a 100k ratio.
+SlateOtter's 2026-06-24 probe measured the uncached FP side at 100k as 15.65 ms against this
+curve's ~24 ms extrapolation; the two used different generators and are four months apart on
+the calendar of this host, so I am not reconciling them either.
+
+**THE PRE-REGISTERED STEP TEST RAN, AND IT IS THE CLEANEST RESULT OF THE DAY.** Registered at
+`.../scratchpad/od63a_prediction.md` before the ELF carrying these size labels existed.
+FP-only, one process per size, ELF `195b4bc2...`:
+
+| size | csv | p50 | per-row | regime |
+|---|---|---|---|---|
+| 100k | 17.32 MiB | 778.66 us | 7.79 ns | cached |
+| 150k | 25.98 MiB | 1551.41 us | 10.34 ns | cached |
+| 170k | 29.44 MiB | 1772.18 us | 10.42 ns | cached |
+| 200k | 34.64 MiB | 48446.12 us | 242.23 ns | UNCACHED |
+| 250k | 43.30 MiB | 60483.33 us | 241.93 ns | UNCACHED |
+| 1M | 173.19 MiB | 235308.03 us | 235.31 ns | UNCACHED |
+
+**170k → 200k is 27.3x for 1.18x the rows.** The cache hypothesis predicted ~32x; a
+superlinear parser fitted through 100k and 1M (exponent 2.44) predicts 1.46x and is refuted by
+a factor of 19. Per-row cost is flat WITHIN each regime — 7.79/10.34/10.42 ns below, and
+242.23/241.93/235.31 ns above — which is a step function, not a curve. The two uncached points
+were predicted at **49.1 ms and 61.4 ms** before this ELF existed; measured **48.4 and 60.5**,
+inside 1.5%. The two cached points were predicted at 1.34 and 1.52 ms and measured 1.55 and
+1.77, ~16% high — the cached arm is the half I modelled worst, and I am recording that rather
+than rounding it away.
+
+**⚠️ PROVENANCE NOTE.** The 200k invocation reports `thread_count_actually_used` = 2 for pandas
+where the 1M and 2M invocations report 1. The harness's thread probe reports a peak and is
+known to over-report; nothing in the pandas arm is threaded here. It is recorded because it
+differs, not because it is believed to have moved the row.
+
+**A UNIT CORRECTION I OWE `5075fae9a`.** That commit's message gave 170k and 200k as
+"30.9 MiB" and "36.3 MiB". Those figures are MB: the correct values are **29.44 MiB** and
+**34.64 MiB** (30,872,000 B and 36,320,000 B against a 33,554,432 B ceiling). Both sizes stay
+on the same side of the ceiling, so nothing concluded from them changes, but 170k's true margin
+is wider than that message implied. `de2fddece` carries the corrected figures in the source
+comment.
+
+**WHAT REMAINS.** The lane still times a cache hit at every size at or below the ceiling, and
+still pairs an in-memory `&str` read against pandas' file read — both open on
+br-frankenpandas-g1g2n, which now has a measured 200k anchor to fix the lane against. The
+pipeline lane (br-frankenpandas-qnkah) is untouched and worse: both its inputs sit under the
+ceiling at every size it runs.
+
+---
