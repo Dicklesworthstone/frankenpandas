@@ -9412,6 +9412,60 @@ fn par_map_slice_f64<F: Fn(f64) -> f64 + Sync>(data: &[f64], f: F) -> Vec<f64> {
     out
 }
 
+/// Policy-aware sibling of [`par_map_slice_f64`] for maps whose validity witness is
+/// the INPUT'S — no per-element NaN test, no validity words to merge, so the only
+/// thing left to split is the map itself.
+///
+/// br-frankenpandas-uza04. [`Column::typed_float_witness_free_unary`] was a bare
+/// `data.iter().map(f).collect()` with no threshold and no parallel branch, and it is
+/// tried BEFORE the `typed_float_unary_nullable_owned_par` arm that floor/ceil/trunc
+/// advertise as "PARALLEL, like sqrt/exp/log". For an all-valid contiguous `f64`
+/// column the witness-free arm therefore claimed every input at EVERY size and the
+/// parallel arm was unreachable — which is the shape the `floor @4M float64` census
+/// row measures, and the shape `Column::from_f64_values` gives the bench series.
+/// `floor_ceil_trunc_reach_a_parallel_split_on_an_all_valid_f64_column_uza04` pins it.
+///
+/// Reads the SAME policy as the witness maps (`FP_ELEMENTWISE_MAX_WORKERS` /
+/// `FP_ELEMENTWISE_PAR_MIN`) so serial-vs-parallel on this path can be A/B'd on ONE
+/// binary, which is the interleaved method the ledger prescribes at 9293 — and, given
+/// that entry's own retraction, the only method whose answer here is worth having.
+///
+/// BIT-IDENTICAL to the serial form by construction: the same `f` is applied to the
+/// same element, and every output slot is written exactly once by exactly one worker,
+/// so neither the values nor their order can depend on the split.
+fn par_map_slice_f64_witness_free<F: Fn(f64) -> f64 + Sync>(data: &[f64], f: &F) -> Vec<f64> {
+    let n = data.len();
+    let (max_workers, par_min) = elementwise_witness_policy();
+    let available = cached_available_parallelism();
+    let cap = if max_workers == 0 {
+        available
+    } else {
+        max_workers
+    };
+    let workers = available.min(cap);
+
+    if workers <= 1 || n < par_min {
+        record_elementwise_workers(1);
+        return data.iter().map(|&x| f(x)).collect();
+    }
+
+    // `.max(1)`: with `par_min` a policy value a short input can reach here, and a
+    // `chunk` of 0 makes `chunks_mut(0)` panic.
+    let chunk = n.div_ceil(workers).max(1);
+    record_elementwise_workers(n.div_ceil(chunk));
+    let mut out = vec![0.0_f64; n];
+    std::thread::scope(|scope| {
+        for (out_chunk, src_chunk) in out.chunks_mut(chunk).zip(data.chunks(chunk)) {
+            scope.spawn(move || {
+                for (slot, &x) in out_chunk.iter_mut().zip(src_chunk.iter()) {
+                    *slot = f(x);
+                }
+            });
+        }
+    });
+    out
+}
+
 fn par_map_vec_f64<G: Fn(usize) -> f64 + Sync>(n: usize, g: G) -> Vec<f64> {
     par_map_vec_f64_with_par_min(n, g, PAR_MAP_VEC_DEFAULT_PAR_MIN)
 }
@@ -30196,10 +30250,12 @@ impl Column {
         None
     }
 
-    fn typed_float_witness_free_unary<F: Fn(f64) -> f64>(&self, f: F) -> Option<Self> {
+    fn typed_float_witness_free_unary<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
         let data = self.as_f64_slice()?;
         let witness = self.f64_finite_witness();
-        let out: Vec<f64> = data.iter().map(|&x| f(x)).collect();
+        // Policy-gated split — see `par_map_slice_f64_witness_free` for why this arm
+        // was the reason floor/ceil/trunc never reached the parallel arm below it.
+        let out = par_map_slice_f64_witness_free(data, &f);
         Some(Self::from_f64_all_valid_with_finite_opt(out, witness))
     }
 
@@ -35273,6 +35329,154 @@ mod tests {
             4,
             "the counter latched instead of tracking the last map"
         );
+
+        crate::clear_elementwise_witness_policy();
+    }
+
+    /// br-frankenpandas-uza04 / xv9qf / o57rj. Does `floor` on an ALL-VALID
+    /// contiguous `f64` column reach a parallel split at all?
+    ///
+    /// `Column::floor` carries a comment saying its nullable-owned arm is
+    /// "PARALLEL, like sqrt/exp/log". That arm is real, but for an all-valid `f64`
+    /// column it is UNREACHABLE: `typed_float_witness_free_unary` is tried first,
+    /// and it is a plain serial `data.iter().map(f).collect()` with no threshold
+    /// and no parallel branch, so it claims every all-valid input at EVERY size.
+    /// `floor @4M float64` — the census row — is exactly that shape.
+    ///
+    /// THE POLICY HERE LEAVES NO OTHER EXPLANATION: 4 workers, `par_min` 1. Under
+    /// it, any op reaching a policy-aware parallel map must report 4. `log` is the
+    /// control: it shares the policy and is known-parallel, so if the control
+    /// assertion fails the policy is broken and the rest of the test is unreadable
+    /// — which is the failure this test must not silently pass through.
+    ///
+    /// This test is a PROBE, not a lock on current behaviour: it is written to
+    /// state what floor/ceil/trunc SHOULD do, and it is the regression guard for
+    /// the arm ordering. If someone reorders those arms again, this fires.
+    #[test]
+    fn floor_ceil_trunc_reach_a_parallel_split_on_an_all_valid_f64_column_uza04() {
+        // NON-INTEGRAL on purpose. `typed_float_integral_identity` claims an
+        // all-integral column before either arm below, so an integral fixture
+        // would measure that early return and report whatever ran previously.
+        let col =
+            Column::from_f64_values((0..4096_u32).map(f64::from).map(|v| v + 0.5).collect());
+
+        crate::set_elementwise_witness_policy(4, 1);
+
+        col.log().expect("parallel log control");
+        assert_eq!(
+            crate::elementwise_last_worker_count(),
+            4,
+            "the 4-worker par_min=1 policy is NOT in effect - the assertions below \
+             cannot be read as evidence about floor/ceil/trunc"
+        );
+
+        // ⚠️ POISON THE COUNTER BEFORE EACH READING. `elementwise_last_worker_count`
+        // is a LAST-WRITER thread-local: an op that never calls
+        // `record_elementwise_workers` leaves the previous op's value standing. The
+        // first version of this test asserted 4 straight after the `log` control and
+        // PASSED — reading the control's own 4 back, which is exactly the reading a
+        // silently-serial floor would produce. `sqrt` is serial BY DESIGN
+        // (`par_min_override = usize::MAX`) and does record, so it stamps a 1 that
+        // only the op under test can overwrite.
+        let mut serial_ops: Vec<&str> = Vec::new();
+        for name in ["floor", "ceil", "trunc"] {
+            col.sqrt().expect("serial-by-design sqrt poisons the counter");
+            assert_eq!(
+                crate::elementwise_last_worker_count(),
+                1,
+                "sqrt did not stamp the counter, so the {name} reading below would \
+                 be inherited rather than measured"
+            );
+
+            match name {
+                "floor" => col.floor().map(|_| ()),
+                "ceil" => col.ceil().map(|_| ()),
+                _ => col.trunc().map(|_| ()),
+            }
+            .unwrap_or_else(|e| panic!("{name} failed on an all-valid f64 column: {e:?}"));
+
+            if crate::elementwise_last_worker_count() != 4 {
+                serial_ops.push(name);
+            }
+        }
+        assert!(
+            serial_ops.is_empty(),
+            "{serial_ops:?} ran SERIAL (or recorded nothing) on an all-valid f64 \
+             column under a 4-worker par_min=1 policy - the parallel arm is shadowed \
+             by typed_float_witness_free_unary"
+        );
+
+        crate::clear_elementwise_witness_policy();
+    }
+
+    /// br-frankenpandas-uza04. The split must not move a bit.
+    ///
+    /// `par_map_slice_f64_witness_free` splits the map across workers, so the guard
+    /// that matters is that the RESULT cannot tell. Compared by BITS, not by `==`,
+    /// because `-0.0 == 0.0` is true and `floor`/`ceil`/`trunc` are exactly the
+    /// kernels that produce signed zeros — `ceil(-0.5)` is `-0.0`, and an `==`
+    /// comparison would wave through a sign flip. That defect is not hypothetical
+    /// here: `ceil_fast`'s own doc records 359 mismatches of precisely this shape.
+    ///
+    /// The fixture straddles the chunk boundary (4 workers over 1000 values leaves a
+    /// ragged tail) and includes negatives, signed zeros, halves, infinities and NaN
+    /// so the tail and the sign paths are both covered.
+    #[test]
+    fn the_witness_free_split_is_bit_identical_to_the_serial_map_uza04() {
+        let mut raw: Vec<f64> = (0..1000)
+            .map(|i| (f64::from(i) - 500.0) * 0.5 + 0.25)
+            .collect();
+        // NO NaN HERE, deliberately: `from_f64_values` derives validity from NaN, so a
+        // NaN would hole the mask and route the column off the all-valid witness-free
+        // arm this test exists to cover. The nullable arm has its own tests.
+        raw.extend_from_slice(&[
+            0.0,
+            -0.0,
+            -0.5,
+            0.5,
+            -1.5,
+            1.5,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ]);
+        let col = Column::from_f64_values(raw);
+
+        for name in ["floor", "ceil", "trunc"] {
+            let run = |c: &Column| match name {
+                "floor" => c.floor(),
+                "ceil" => c.ceil(),
+                _ => c.trunc(),
+            };
+
+            crate::set_elementwise_witness_policy(1, usize::MAX);
+            let serial = run(&col).expect("serial arm");
+            assert_eq!(
+                crate::elementwise_last_worker_count(),
+                1,
+                "{name}: the serial arm did not run serially, so this is not an A/B"
+            );
+
+            crate::set_elementwise_witness_policy(4, 1);
+            let parallel = run(&col).expect("parallel arm");
+            assert_eq!(
+                crate::elementwise_last_worker_count(),
+                4,
+                "{name}: the parallel arm did not split, so this compares serial to serial"
+            );
+
+            let (a, b) = (
+                serial.as_f64_slice().expect("serial is contiguous f64"),
+                parallel.as_f64_slice().expect("parallel is contiguous f64"),
+            );
+            assert_eq!(a.len(), b.len(), "{name}: length changed with the split");
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "{name}: element {i} differs between the serial and parallel maps"
+                );
+            }
+        }
 
         crate::clear_elementwise_witness_policy();
     }

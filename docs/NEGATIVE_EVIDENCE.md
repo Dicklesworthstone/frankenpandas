@@ -43116,3 +43116,75 @@ is.
 
 NO LEVER SHIPPED, and none is warranted here: a perfect fix to label addressing is
 bounded at 7.5% of a lane that is 300x behind.
+
+### 2026-08-31 BeigeAspen — NOSHIP: the lazy-transpose page length is STALE IN ORIGIN but its VALUE cannot be shown wrong — a sequential sweep said 512 by 4.5%, interleaving flipped the sign [br-frankenpandas-l4vzc]
+
+Followed the stale-constant pattern into `LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN = 256`
+(`crates/fp-frame/src/lib.rs`), which governs the worst lane on the board and showed
+up in the 0cb3a4dd1 profile as `OnceLock<LazyTransposeColumnSlotPage>::initialize` at
+13.75%.
+
+THE ORIGIN IS GENUINELY STALE, and that part holds. `cached_column`'s own comment
+records that `shared_values` "was declared, documented ... and then never populated
+by anything", so when 256 was chosen `Column::values()` built a `Vec<Scalar>` PER
+COLUMN — 100_000 allocations at 100k rows. Populating `shared_values` moved that to
+one allocation PER PAGE (391). The constant now sets the granularity AND the count of
+the largest single cost on the lane, which is not the tradeoff it was picked for.
+
+⚠️ BUT A STALE PROVENANCE IS NOT A WRONG VALUE, AND I NEARLY REPORTED IT AS ONE.
+
+Instrumented it as `FP_LAZY_TRANSPOSE_PAGE_LEN` (296e50243, default unchanged, all six
+runtime derivations behind one read so page geometry cannot disagree with itself) and
+swept on ONE ELF, sha256
+3b543331b47a91c7a108f7f2c53b7fb018071656047cd797797aed32f3df0eec (87955752 bytes),
+`df_transpose_full_materialize @100k float64`, host thinkstation1.
+
+**Executing ELF SHA-256 (self-reported by process):** bench_elf_sha256=3b543331b47a91c7a108f7f2c53b7fb018071656047cd797797aed32f3df0eec (87955752 bytes) /data/projects/.scratch/beigeaspen/fp-bench-pagelen
+
+**Counted mechanism:** the page length sets the COUNT of the lane's largest single
+cost. At 100k rows page_len 256 builds 391 pages and therefore 391 `Vec<Scalar>`
+allocations; page_len 16 builds 6250 allocations and page_len 16384 builds 7. Before
+`shared_values` was populated the same lane paid 100000 allocations, one per column.
+That is the sense in which the constant is stale: it was chosen when the count it
+controls was fixed at 100000 regardless of its value.
+
+**Non-vacuity witness:** page_len 16 = 1123033us vs 256 = 840342us vs 16384 = 894083us.
+Those three geometries do not cost the same, so the override reaches the kernel. A flat
+sweep here would have been indistinguishable from "256 is optimal" and this is what
+rules that out.
+
+SEQUENTIAL SWEEP, min-of-7 whole-process wall, load 5.95 — a clean unimodal curve:
+
+    page_len    64       128      256      512      1024     2048     4096
+    min_wall  897048   866582   808993   772357   850896   889410   934043
+
+That reads as 512 winning by 4.5% with both neighbours worse. It is an artifact.
+
+⭐ INTERLEAVED 256 vs 512, ABABAB, 12 rounds each — THE TWO ESTIMATORS DISAGREE IN SIGN:
+
+    page_len=256   min=819330us   median=875168us
+    page_len=512   min=792990us   median=924517us
+    median ratio 256/512 = 0.9466      min ratio 256/512 = 1.0332
+
+THE DECISION: the median says 256 is 5.3% faster and the min says 512 is 3.3% faster.
+An effect whose SIGN depends on the estimator is below the resolution of this host at
+this load, so no threshold is met and the comparison is UNDECIDABLE rather than a 512
+win. No A/A null is quoted because an undecidable arm ratio cannot be rescued by one —
+the interleave IS the control here, and the interleave is what failed.
+
+MEASUREMENT ONLY, NO DEFAULT CHANGED. The sequential curve
+and the interleaved pair disagree because sequential ordering lets load drift
+accumulate along the sweep; alternating arms see the same excursions. This is the same
+failure the ledger already documents one level up at 9293 ("A/B parallel-vs-serial
+INTERLEAVED under identical load"), and my own sequential curve reproduced it faithfully
+enough to look like a result.
+
+NO DEFAULT CHANGED. 256 stays. The instrument stays because it is what makes the
+question answerable on a quiet box, and the retry predicate is exactly that: re-run the
+interleaved pair at load < 2 and ship 512 only if median AND min agree in sign.
+
+AND IT WOULD NOT MATTER MUCH IF THEY DID. Page-slot init is 13.75% of a lane measured
+at 0.003x, so a perfect page length is bounded by ~1.16x against an incumbent that is
+300x ahead. This lane's answer remains the one 702b3d010 and 0cb3a4dd1 already
+established — `.T.to_numpy()` returns a VIEW and FrankenPandas builds 100_000 Columns —
+and no constant on this path changes that.
