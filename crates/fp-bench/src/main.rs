@@ -1006,6 +1006,48 @@ where
     paired_time_us(op, 1, false)
 }
 
+/// How many DISTINCT CSV strings the cache-missing read lane cycles through.
+///
+/// `fp_io::read_csv_str` memoizes on input CONTENT (fp-io:1761) in a cache
+/// holding `CSV_PARSE_CACHE_MAX_ENTRIES = 2` entries (fp-io:1388). THREE inputs
+/// read round-robin therefore guarantee that the one being read has always been
+/// evicted since its last read — two would not, and one is the bug this lane
+/// exists to avoid. br-frankenpandas-g1g2n.
+const CSV_UNCACHED_DISTINCT_INPUTS: usize = 3;
+
+/// K CSVs holding GENUINELY DIFFERENT numbers, for the cache-missing read lane.
+///
+/// Each variant is seeded differently, so the digits differ, not just the
+/// labels. A header-only perturbation would defeat the content cache just as
+/// well and would be cheaper — but every variant's data bytes would be
+/// identical, and a lane whose whole purpose is to prove a real parse happened
+/// should not lean on inputs that are byte-identical where the parsing work is.
+///
+/// Variant 0 is seeded exactly as `build_frame`, so its bytes match the
+/// `csv_read` lane's single input and the two lanes are reading the same first
+/// document at the same size.
+fn build_distinct_f64_csvs(rows: usize, cols: usize, k: usize) -> Vec<String> {
+    (0..k)
+        .map(|variant| {
+            let mut rng = SplitMix64(
+                0x5151_5151_5151_5151 ^ (variant as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            );
+            let index = Index::new_known_unique_int64_unit_range(0, rows);
+            let mut columns = BTreeMap::new();
+            let mut column_order = Vec::with_capacity(cols);
+            for c in 0..cols {
+                let name = format!("col_{c}");
+                let data = gen_f64_column(&mut rng, rows, "float64");
+                columns.insert(name.clone(), Column::from_f64_values(data));
+                column_order.push(name);
+            }
+            let frame = DataFrame::new_with_column_order(index, columns, column_order)
+                .expect("fp-bench distinct-csv frame construction");
+            fp_io::write_csv_string(&frame).expect("csv serialize")
+        })
+        .collect()
+}
+
 #[cfg(feature = "lazy-transpose-prototype")]
 fn time_us_repeated<F, T>(repeat: usize, op: F) -> PairedSamples
 where
@@ -3545,6 +3587,31 @@ fn run(
             let csv = fp_io::write_csv_string(&df).expect("csv serialize");
             time_us(|| {
                 let _ = fp_io::read_csv_str(&csv).expect("read_csv");
+            })
+        }
+        // The CACHE-MISSING twin of `csv_read`. Same parser, same fixture
+        // generator, same shape; the only difference is that consecutive samples
+        // read DIFFERENT strings, so `read_csv_str`'s content cache cannot serve
+        // any of them and every sample is a real parse.
+        //
+        // WHY THIS IS A NEW NAME INSTEAD OF A FIX TO `csv_read`. Every `csv_read`
+        // row ever banked at or below the cache's 32 MiB ceiling was timed against
+        // a HIT, so silently correcting that lane would re-plot corrected numbers
+        // against contaminated ones on the same axis. A new name breaks
+        // comparability exactly once, visibly. Measured evidence for all of this
+        // is in docs/NEGATIVE_EVIDENCE.md at 4bcba16ee; the mechanism is at
+        // 03519bc5f. br-frankenpandas-g1g2n.
+        //
+        // ⚠️ MEMORY: this holds K whole CSVs live at once — ~3 x 173 MiB at 1M x 10
+        // and ~3 x 346 MiB at 2M, on top of the unused base frame. That is the
+        // price of a cache miss you can prove, and it is why K is 3 and not 12.
+        ("io", "csv_read_uncached") => {
+            let csvs = build_distinct_f64_csvs(rows, cols, CSV_UNCACHED_DISTINCT_INPUTS);
+            let mut next = 0usize;
+            time_us(move || {
+                let csv = &csvs[next % CSV_UNCACHED_DISTINCT_INPUTS];
+                next += 1;
+                let _ = fp_io::read_csv_str(csv).expect("read_csv");
             })
         }
         #[cfg(feature = "block-storage")]

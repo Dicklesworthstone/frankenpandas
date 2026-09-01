@@ -145,6 +145,14 @@ SIZE_CONFIGS = {
     "10M": {"rows": 10_000_000, "cols": 10},
 }
 
+# Distinct payloads the cache-missing read lane cycles through. Mirrors
+# CSV_UNCACHED_DISTINCT_INPUTS in crates/fp-bench/src/main.rs: fp_io's CSV parse
+# cache holds CSV_PARSE_CACHE_MAX_ENTRIES = 2 entries, so THREE inputs guarantee
+# the one being read has been evicted since its last read. Keep the two in
+# lockstep — if they diverge, the two arms cycle different numbers of payloads
+# and stop doing the same work. br-frankenpandas-g1g2n.
+CSV_UNCACHED_DISTINCT_INPUTS = 3
+
 PAIRED_ROUNDS = 25
 # A complete balanced square gives each arm every early/late position twice.
 # Unlike the legacy host-wide gate, this is sound on a shared host: co-tenant
@@ -1609,6 +1617,46 @@ def bench_csv_read_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     csv_path = tmp_path / "bench.csv"
     df.to_csv(csv_path, index=False)
     return time_operation(lambda: pd.read_csv(csv_path))
+
+
+def bench_csv_read_uncached_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
+    """Cache-missing twin of csv_read: K distinct payloads, read round-robin.
+
+    THE FRANKENPANDAS SIDE IS WHY THIS LANE EXISTS. `fp_io::read_csv_str`
+    memoizes on input CONTENT with a 2-entry, 32 MiB-ceilinged cache, so the
+    plain `csv_read` lane — which re-reads ONE string every sample — times a
+    cache HIT at every size at or below that ceiling, against a pandas arm that
+    re-parses every time. Cycling K=3 distinct payloads defeats it on our side.
+    See br-frankenpandas-g1g2n and docs/NEGATIVE_EVIDENCE.md at 4bcba16ee.
+
+    pandas has no such cache, so K is not needed HERE to force a parse — it is
+    here so both arms do the same work. An arm reading one warm payload while
+    the other cycles three is not the same measurement, whatever the reason.
+
+    ⚠️ AND THE SOURCE PAIRING IS DELIBERATE AND DIFFERENT FROM `csv_read`. That
+    lane pairs our in-memory `&str` read against `pd.read_csv(FILE)`, so the
+    incumbent pays an open/read/decode our side never does — a second one-sided
+    asymmetry stacked on the cache. Here both arms parse from memory, so the
+    ratio prices the PARSER and nothing else. That makes this lane's number NOT
+    comparable to `csv_read`'s even above the ceiling; it is a different, and
+    narrower, question. The three seeds match the Rust side's
+    `build_distinct_f64_csvs`, but the VALUES do not need to: each engine parses
+    its own K payloads of the same shape, exactly as `csv_read` already has each
+    engine serialize its own document.
+    """
+    del tmp_path
+    payloads = [
+        df.sample(frac=1.0, random_state=seed).reset_index(drop=True).to_csv(index=False)
+        for seed in range(CSV_UNCACHED_DISTINCT_INPUTS)
+    ]
+    cursor = [0]
+
+    def read_next():
+        payload = payloads[cursor[0] % CSV_UNCACHED_DISTINCT_INPUTS]
+        cursor[0] += 1
+        return pd.read_csv(StringIO(payload))
+
+    return time_operation(read_next)
 
 
 def bench_csv_read_block_view_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
@@ -3214,6 +3262,7 @@ def bench_dt_month_name_pandas(df: pd.DataFrame) -> PairedSamples:
 PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
+        "csv_read_uncached": bench_csv_read_uncached_pandas,
         "csv_read_block_view": bench_csv_read_block_view_pandas,
         "csv_write": bench_csv_write_pandas,
         "json_read_records": bench_json_read_records_pandas,
