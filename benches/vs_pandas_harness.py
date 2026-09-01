@@ -110,6 +110,33 @@ SIZE_CONFIGS = {
     "1k": {"rows": 1_000, "cols": 10},
     "10k": {"rows": 10_000, "cols": 10},
     "100k": {"rows": 100_000, "cols": 10},
+    # CACHE-CEILING LANES. br-frankenpandas-od63a, BlackThrush 2026-09-01.
+    #
+    # These four exist to answer ONE question: is the CSV read's measured
+    # "344x for 10x data" between 100k and 1M a property of the PARSER, or of
+    # `fp_io::read_csv_str`'s content-addressed parse cache, whose input
+    # ceiling is `CSV_PARSE_CACHE_MAX_INPUT_BYTES = 32 MiB` (fp-io:1389)?
+    #
+    # The io/csv_read lane times `read_csv_str(&csv)` on the SAME string every
+    # sample (fp-bench:3533), so below the ceiling every post-warmup sample is
+    # a cache HIT and above it every sample is a real parse. The float64
+    # fixture writes 181.6 bytes/row at 10 cols, which puts the ceiling
+    # crossing at 32 MiB / 181.6 = ~184,748 rows — i.e. BETWEEN the only two
+    # sizes the corpus had. 100k is 17.32 MiB (cached); 1M is 173.21 MiB (not).
+    #
+    # 170k (29.44 MiB) and 200k (34.64 MiB) straddle that crossing at a
+    # row-count ratio of only 1.18x. MEASURED on ELF 195b4bc2 (FP-only, one
+    # process per size): the pair steps 1772.18 us -> 48446.12 us, a 27.3x jump
+    # for 1.18x the rows, and per-row cost is flat WITHIN each regime
+    # (7.79/10.34/10.42 ns below the ceiling; 242.23/241.93/235.31 ns above).
+    # A superlinear parser fitted through 100k and 1M (exponent 2.44) predicts
+    # 1.46x across that pair and is refuted by a factor of 19. 150k and 250k are
+    # the outer anchors. Nothing else changes — these are opt-in via `--sizes`
+    # and `--all` does not reach them, so every banked row stays comparable.
+    "150k": {"rows": 150_000, "cols": 10},
+    "170k": {"rows": 170_000, "cols": 10},
+    "200k": {"rows": 200_000, "cols": 10},
+    "250k": {"rows": 250_000, "cols": 10},
     "1M": {"rows": 1_000_000, "cols": 10},
     "2M": {"rows": 2_000_000, "cols": 10},
     "4M": {"rows": 4_000_000, "cols": 10},
@@ -5548,7 +5575,7 @@ def main():
                         help="Run specific category")
     parser.add_argument("--all", action="store_true", help="Run all categories")
     parser.add_argument("--sizes", default="10k,100k,1M",
-                        help="Comma-separated sizes (10k,100k,1M,2M,4M,6M,8M,10M)")
+                        help="Comma-separated sizes (10k,100k,150k,170k,200k,250k,1M,2M,4M,6M,8M,10M)")
     parser.add_argument("--dtypes", default="float64",
                         help="Comma-separated dtypes")
     parser.add_argument("--workloads",
