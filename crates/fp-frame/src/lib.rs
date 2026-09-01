@@ -57405,6 +57405,42 @@ fn concat_dataframes_axis1(
 #[cfg(feature = "lazy-transpose-view")]
 const LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN: usize = 256;
 
+/// The lazy-transpose page length actually in force, overridable for measurement
+/// by `FP_LAZY_TRANSPOSE_PAGE_LEN`.
+///
+/// br-frankenpandas-l4vzc. THE CONSTANT ABOVE PREDATES THE COST STRUCTURE IT NOW
+/// GOVERNS, which is why it needed to become measurable rather than argued about.
+/// When 256 was chosen, `shared_values` on the contiguous page was — in
+/// `cached_column`'s own words — "declared, documented ... and then never
+/// populated by anything", so `Column::values()` built a fresh `Vec<Scalar>` PER
+/// COLUMN and the page length traded off only the f64 buffer. Populating
+/// `shared_values` moved the Scalar view to ONE ALLOCATION PER PAGE, so the page
+/// length now also sets the granularity and count of the single largest cost on
+/// this lane: profiling `df_transpose_full_materialize @100k` puts
+/// `OnceLock<Vec<Scalar>>::initialize` at 17.42% and its `drop_slow` at 14.17%
+/// (0cb3a4dd1). A constant tuned before that change is not evidence about it.
+///
+/// ⚠️ READ ONCE PER PROCESS AND CACHED. Every use — the two `div_ceil` page-count
+/// computations, and the `/`, `%`, `*`, `min` in `cached_column` /
+/// `cached_column_values` — MUST see the same value, or a page computed under one
+/// length would be indexed under another and hand back the wrong column. A
+/// `OnceLock` read makes that structural rather than a discipline anyone has to
+/// remember.
+///
+/// The default is unchanged at 256, so a process that sets nothing behaves exactly
+/// as before.
+#[cfg(feature = "lazy-transpose-view")]
+fn lazy_transpose_page_len() -> usize {
+    static PAGE_LEN: OnceLock<usize> = OnceLock::new();
+    *PAGE_LEN.get_or_init(|| {
+        std::env::var("FP_LAZY_TRANSPOSE_PAGE_LEN")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|&len| len > 0)
+            .unwrap_or(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN)
+    })
+}
+
 #[cfg(feature = "lazy-transpose-view")]
 type LazyTransposeColumnSlot = OnceLock<Box<Column>>;
 
@@ -57456,7 +57492,7 @@ impl LazyTransposeFramePlan {
         self.column_slot_pages.get_or_init(|| {
             (0..self
                 .output_columns
-                .div_ceil(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN))
+                .div_ceil(lazy_transpose_page_len()))
                 .map(|_| OnceLock::new())
                 .collect::<Vec<_>>()
                 .into_boxed_slice()
@@ -57467,7 +57503,7 @@ impl LazyTransposeFramePlan {
         self.page_buffers.get_or_init(|| {
             (0..self
                 .output_columns
-                .div_ceil(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN))
+                .div_ceil(lazy_transpose_page_len()))
                 .map(|_| OnceLock::new())
                 .collect::<Vec<_>>()
                 .into_boxed_slice()
@@ -57646,10 +57682,13 @@ impl LazyTransposeFramePlan {
     #[inline(never)]
     fn cached_column(&self, output_column: usize) -> &Column {
         debug_assert!(output_column < self.output_columns);
-        let page_index = output_column / LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
-        let slot_index = output_column % LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
-        let page_start = page_index * LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
-        let page_len = (self.output_columns - page_start).min(LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN);
+        // One read, reused for all four derivations, so page geometry cannot
+        // disagree with itself even if the override were somehow to change.
+        let page_len_cfg = lazy_transpose_page_len();
+        let page_index = output_column / page_len_cfg;
+        let slot_index = output_column % page_len_cfg;
+        let page_start = page_index * page_len_cfg;
+        let page_len = (self.output_columns - page_start).min(page_len_cfg);
         let page = self.column_slot_page_slots()[page_index].get_or_init(|| {
             // Try the contiguous shape first: one gathered buffer for the page,
             // one allocation for its columns, zero per-slot OnceLocks.
@@ -57782,8 +57821,11 @@ impl LazyTransposeFramePlan {
 
     fn cached_column_if_present(&self, output_column: usize) -> Option<&Column> {
         debug_assert!(output_column < self.output_columns);
-        let page_index = output_column / LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
-        let slot_index = output_column % LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN;
+        // Same single read as `cached_column`: this function INDEXES pages that
+        // function BUILT, so the two must derive their geometry identically.
+        let page_len_cfg = lazy_transpose_page_len();
+        let page_index = output_column / page_len_cfg;
+        let slot_index = output_column % page_len_cfg;
         match self.column_slot_page_slots()[page_index].get()? {
             LazyTransposeColumnSlotPage::Contiguous(columns) => columns.get(slot_index),
             LazyTransposeColumnSlotPage::PerSlot(slots) => {
