@@ -43796,3 +43796,125 @@ pipeline lane (br-frankenpandas-qnkah) is untouched and worse: both its inputs s
 ceiling at every size it runs.
 
 ---
+
+### 2026-09-01 BlackThrush (br-frankenpandas-g1g2n) — a cache-missing `csv_read_uncached` lane, and the correction I had to make to it: 3.361x at 200k parser-vs-parser, 100k honestly UNDECIDABLE, and the two lanes agree within 4% once my own encode bias is removed
+
+**Third and last entry in today's CSV thread.** The first (`od63a`, `03519bc5f`) found that
+`io/csv_read` times a content-cache HIT at every size at or below 32 MiB. The second
+(`4bcba16ee`) measured the honest ratios above the ceiling. This one adds the lane that can
+measure BELOW it — and records that my first version of that lane was biased in
+FrankenPandas' favour.
+
+**Campaign result class:** incumbent-win
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=5f2945af8b647fb543775a868f6ff981e9b36d2fc50d4ac74f1ed285046a25e2
+(88095616 bytes) /data/projects/.scratch/blackthrush/fp-bench-uncachedlane`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae
+invocation_id=vs-pandas-20260901T190217.575189Z-pid3826280 measured_ratio=3.361x
+
+**A/A null control (same invocation):** on the headline 200k row the FrankenPandas null median
+ratio is 1.007142 and the pandas null median ratio is 1.019381, both inside the 2% band —
+pandas' at 1.9% is close to the limit and is recorded as such. **The 100k row's null FAILED in
+both arms at 0.972124 / 0.972385, a 2.8% deviation, so that row is NULL_UNDECIDABLE and its
+2.728x is not a result.**
+
+**Median-CI decision:** the 200k effect median ratio is 3.361x with a 95% CI of
+[3.28834686, 3.47302971], cleared against null_median_maximum_absolute_deviation = 0.02, and
+the CI excludes unity. All three clauses TRUE; best-vs-best 3.3008x (FP min 52314.45 us,
+pandas min 172677.18 us), direction agreeing with the median. The 100k row is decidable=False:
+`null_medians_within_2pct_unity` is FALSE while the other two clauses are TRUE.
+
+**CV role:** provenance only; CV had no vote. Dispersion is recorded for provenance alone:
+200k FrankenPandas 4.69% / pandas 3.57%, 100k FrankenPandas 3.39% / pandas 5.47%. The
+three-clause median-CI decision above is what admitted or refused each row, and nothing else.
+
+**THE LANE** (`85ff9651c`). `csv_read_uncached` cycles K=3 distinct payloads on both arms, so
+`read_csv_str`'s cache (`CSV_PARSE_CACHE_MAX_ENTRIES = 2`) can never serve one. K=3 is the
+smallest count that guarantees eviction between reads. Non-vacuity witness, same ELF, same
+sizes:
+
+| size | `csv_read` | `csv_read_uncached` | divergence |
+|---|---|---|---|
+| 100k | 831.27 us | **30394.86 us** | **36.6x** — cache defeated |
+| 200k | 53284.78 us | 56030.44 us | 5.2% — neither lane can cache here |
+
+The 200k row is what makes the 100k row mean something: above the ceiling the two lanes agree,
+so the 36.6x below it is the cache being defeated and not the new lane merely being slower.
+
+**⚠️ AND THEN THE CORRECTION, WHICH IS THE PART WORTH READING.** My first version handed pandas
+a `StringIO`. FrankenPandas' `read_csv_str` takes a `&str` and parses its UTF-8 bytes directly,
+converting nothing; `StringIO` makes pandas' parser encode str → bytes on **every sample** —
+work our arm never does. I built a lane to remove one asymmetry and introduced another, in our
+favour. Measured at 200k x 10:
+
+    pandas read_csv(StringIO)   1350.43 ns/row
+    pandas read_csv(BytesIO)     881.20 ns/row      1.532x charged to the incumbent alone
+    pandas read_csv(FILE)        857.99 ns/row      <- csv_read lane, same size
+
+BytesIO landing beside the FILE path is the independent check that the ENCODE was the cost and
+not the memory source. Payloads are now encoded once in setup (`6820bfc54`). What it was worth,
+re-measured on the same ELF:
+
+| size | StringIO | **BytesIO** | verdict after the fix |
+|---|---|---|---|
+| 200k | 4.676x | **3.361x** | FASTER |
+| 100k | 4.281x | 2.728x | **NULL_UNDECIDABLE** |
+
+Our arm is unchanged across the pair — 270.73 → 270.72 ns/row at 200k — so only the incumbent
+moved, which is what fixing the incumbent's handicap should do.
+
+**⚠️ BOTH STRINGIO ROWS PASSED THE THREE-CLAUSE GATE WHILE MEASURING THE WRONG THING.** They
+were decidable, all clauses TRUE, CIs tight. Certification proves an instrument was *stable*,
+not that it was pointed at the right question — which is precisely the failure that produced
+the 112.5x this bead started from. Their artifacts are renamed
+`blackthrush_VOID_stringio_pairing_csv_read_uncached_{100k,200k}.json` because they parse as
+clean rows to any scanner of `artifacts/bench/`; **they may not be banked.**
+
+**THE TWO LANES NOW AGREE, AND THAT IS THE STRONGEST RESULT HERE.** At 200k, two independently
+built lanes with different source pairings:
+
+| lane | pandas source | FP ns/row | pandas ns/row | ratio |
+|---|---|---|---|---|
+| `csv_read` | file | 244.06 | 857.99 | 3.497x |
+| `csv_read_uncached` | BytesIO | 270.72 | 921.87 | 3.361x |
+
+4% apart. Our arm is 11% slower in the new lane because it holds K=3 payloads live (a larger
+working set), and pandas is 7% slower from BytesIO versus a page-cache-warm file. Before the
+encode fix these two disagreed by 34%.
+
+**WHAT THE HONEST CSV READ COSTS**, gathering all of today's certified rows:
+
+| size | lane | ratio | verdict |
+|---|---|---|---|
+| 100k | `csv_read_uncached` | *2.728x* | **NULL_UNDECIDABLE** |
+| 200k | `csv_read_uncached` | **3.361x** | FASTER |
+| 200k | `csv_read` | 3.497x | FASTER |
+| 1M | `csv_read` | 3.586x | FASTER |
+| 2M | `csv_read` | 3.67x | FASTER |
+
+Against the banked `csv_read @100k` rows of **112.5x, 133.6x and 116.8x** (ledger 43450, 18754,
+18820) and **155.3x at 10k** (18753). FrankenPandas' honest FP-side cost at 100k is ~30 ms —
+measured three independent ways (30394.86 FP-only, 29166.19 and 30598.88 in the two harness
+runs) — against the 0.78-0.89 ms those rows recorded.
+
+**⚠️ 100k STILL HAS NO CERTIFIED RATIO**, and after two attempts I am recording that as the
+result rather than reaching for a third. The lane can now reach the size; the host window would
+not hold a null for it today. Its FP-side p50 is solid; its ratio is not measured.
+
+**⚠️ NEITHER LANE IS FILE-VS-FILE, AND NOBODY HAS MEASURED THAT.** `csv_read` pairs our
+in-memory `&str` against pandas' file (we skip I/O the incumbent pays); `csv_read_uncached`
+pairs memory against memory (fair on source, but neither arm pays the open/read a user does).
+The user-facing question — `fp_io::read_csv(path)` against `pd.read_csv(path)` — is still
+unmeasured, and ⚠️ our side of it routes through the SAME cache
+(`read_csv_with_options_path` → `read_csv_with_options` → `read_csv_str`, fp-io:5758/5341/5360),
+so it needs the K-distinct treatment too. That is the remaining work on this bead.
+
+**FILENAME DISAMBIGUATION.** `blackthrush_g1g2n_csv_read_uncached_{200k,2M}.json` (banked at
+`4bcba16ee`) hold **`csv_read`** rows — "uncached" there means "measured above the ceiling",
+not the lane name. The `csv_read_uncached` LANE's rows are the `..._bytesio_{100k,200k}.json`
+files. I named the earlier pair before the lane existed.
+
+---
