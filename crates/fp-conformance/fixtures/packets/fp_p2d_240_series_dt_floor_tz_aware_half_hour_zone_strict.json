@@ -5,8 +5,8 @@
   "operation": "series_dt_floor",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "19b306d5bf22851c17aa23091bb6b58d0e1618306ee3201ac717e239eb8be1ca",
-    "generated_at": "2026-08-18T10:07:25Z"
+    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
+    "generated_at": "2026-09-01T06:10:40Z"
   },
   "dt_freq": "D",
   "left": {

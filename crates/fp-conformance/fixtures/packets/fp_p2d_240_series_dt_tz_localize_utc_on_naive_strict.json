@@ -21,8 +21,8 @@
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f1b49690d2c46914c58c4b623758f98bddbdbcf4a9a6c7a0c7d91e9d3d8810c7",
-    "generated_at": "2026-08-18T10:32:39Z"
+    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
+    "generated_at": "2026-09-01T06:10:41Z"
   },
   "expected_series": {
     "index": [

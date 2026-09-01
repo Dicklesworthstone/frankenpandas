@@ -5,8 +5,8 @@
   "operation": "dataframe_constructor_list_like",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "04844f59208ee6443d54d31bbc7bc71be1d504a6b0d10acc4cb5fdf3a9134cba",
-    "generated_at": "2026-08-18T09:20:53Z"
+    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
+    "generated_at": "2026-09-01T06:09:22Z"
   },
   "constructor_dtype": "Int64",
   "matrix_rows": [

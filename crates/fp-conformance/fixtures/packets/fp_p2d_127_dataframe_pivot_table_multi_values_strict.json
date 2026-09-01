@@ -5,8 +5,8 @@
   "operation": "dataframe_pivot_table",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "27743b7ff089406ba1f2c8e6f08f434def284f26010758dab55bc14d00776859",
-    "generated_at": "2026-08-20T16:50:48Z"
+    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
+    "generated_at": "2026-09-01T06:10:11Z"
   },
   "pivot_values": [
     "sales",

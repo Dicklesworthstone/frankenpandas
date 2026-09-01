@@ -6,7 +6,7 @@
   "fixture_provenance": {
     "pandas_version": "2.2.3",
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
-    "generated_at": "2026-08-30T20:20:00Z",
+    "generated_at": "2026-09-01T06:09:22Z",
     "oracle_attestation": "Live oracle run 2026-08-30: /data/projects/frankenpandas/.venv-oracle/bin/python crates/fp-conformance/oracle/pandas_oracle.py --legacy-root /dp/frankenpandas/legacy_pandas_code/pandas --allow-system-pandas-fallback < fp_p2d_023_dataframe_constructor_list_like_dtype_unknown_error_strict.json; pandas 2.2.3 returned error=null and expected_frame column 0=[int64(1)]."
   },
   "constructor_dtype": "object",

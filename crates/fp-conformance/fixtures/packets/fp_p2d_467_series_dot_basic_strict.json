@@ -87,7 +87,7 @@
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "0ce3fc1917d76368f8e513af6d6d5ebe275ba5d4a298d034de4944b25dec9d82",
-    "generated_at": "2026-08-18T16:16:25Z"
+    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
+    "generated_at": "2026-09-01T06:11:09Z"
   }
 }

@@ -16,7 +16,8 @@
   "expected_error_contains": "Cannot convert tz-naive timestamps",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "b48fb3339fb77eb988f64fe349732dd49b54d24bf4b78a017e4cfcab36290dee",
-    "generated_at": "2026-08-26T03:34:48Z"
+    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
+    "generated_at": "2026-09-01T06:10:41Z",
+    "oracle_attestation": "error_agreement"
   }
 }

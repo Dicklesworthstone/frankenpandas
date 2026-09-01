@@ -5,8 +5,8 @@
   "operation": "dataframe_filter",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "62efe8df401e0e92107a6f8e01a86af1feb93cc1f17385b667fe9550ecbf467d",
-    "generated_at": "2026-08-30T18:51:27Z"
+    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
+    "generated_at": "2026-09-01T06:11:10Z"
   },
   "filter_axis": 0,
   "filter_items": ["row_c", "missing", "row_a", "row_c"],
