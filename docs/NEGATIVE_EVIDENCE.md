@@ -43575,3 +43575,117 @@ a frame read and never observed as an array it is a straight 17.9% loss. Decidin
 default the feature ON needs that missing cell, plus a view of how often the observation happens.
 
 ---
+
+### 2026-09-01 BlackThrush (br-frankenpandas-od63a) — REJECTED: the "344x for 10x" CSV scaling wall is not in the parser. The parser is LINEAR to four figures; the wall is `read_csv_str`'s 32 MiB content-cache ceiling falling between 100k and 1M, and the bench lane has been timing cache HITS at every size at or below it since the corpus began
+
+**Retracts the alarm in my own entry immediately above** (same day, `br-frankenpandas-l6uyi`),
+which recorded a 344x-for-10x scaling wall and warned of a crossing where pandas overtakes us.
+There is no wall and there is no crossing. **The three CERTIFIED 1M rows in that entry stand
+unchanged** — 1M is *above* the ceiling, so those cells measured real parses and their 3.027x /
+3.079x / 3.586x are unaffected. What falls is the two 100k rows (already banked
+`NULL_UNDECIDABLE` there, so no certified row is withdrawn) and the scaling narrative built on
+the pair.
+
+**Counted mechanism:** instructions measured 523,341,379,689 for the whole 1M invocation
+against a threshold of 17,290,000,000 — the count the linear law fitted on the 1k/10k/100k
+invocations requires at that row count — i.e. 30.3x above the limit; the linear hypothesis
+failed it by 506,051,379,689 instructions. page-faults measured 58,820 at 1M versus 596 at
+100k, a 98.7x rise for 10x data.
+
+**This is not a new discovery, and that is the finding.** `crates/fp-io/examples/probe_csv_read_uncached.rs`
+has said so in its own first three lines since 2026-06-24: *"`read_csv_str` caches by input
+string, so the vs-pandas harness (re-reading one string) measures cache hits."* The probe was
+written, used once (SlateOtter's `fp-io read_csv 9.82x` row above), and the **bench lane was
+never changed**. Every `io/csv_read` row at or below the ceiling banked since then has been
+timing a cache hit against pandas' real parse.
+
+**THE MECHANISM, from source.** `fp_io::read_csv_str` (`crates/fp-io/src/lib.rs:1761`) consults
+a content-addressed parse cache before parsing. `CSV_PARSE_CACHE_MAX_ENTRIES = 2` and
+`CSV_PARSE_CACHE_MAX_INPUT_BYTES = 32 * 1024 * 1024` (`lib.rs:1388-1389`); a lookup returns
+`None` outright above that ceiling (`lib.rs:1425`), and a hit costs a length check, a byte
+compare, and a frame clone (`lib.rs:1424-1447`). The `io/csv_read` lane serializes ONE csv in
+setup and then times `read_csv_str(&csv)` on that same string every sample
+(`crates/fp-bench/src/main.rs:3533-3541`), so below the ceiling every post-warmup sample is a
+hit and above it every sample is a parse. `csv_read_block_view` (`main.rs:3542`) reads the same
+string and is exposed identically.
+
+**THE CEILING FALLS BETWEEN THE ONLY TWO SIZES THE CORPUS HAD.** Computed from the fixture's
+own generator (`gen_f64_column` = `rng.unit() * 1e6`, `main.rs:499-501`) and its own writer
+(`scalar_to_csv` → `f64::to_string()`, `lib.rs:4404-4410`), which is 181.6 bytes/row at 10
+columns:
+
+| size | csv bytes | vs 33,554,432 B ceiling |
+|---|---|---|
+| 1k | 181,808 | cached |
+| 10k | 1,816,629 | cached |
+| 100k | **18,163,530** | **cached** |
+| 1M | **181,628,715** | **NOT cached** |
+| 2M | 363,257,415 | NOT cached |
+
+The crossing is at 33,554,432 / 181.6 = **~184,748 rows**. 18,163,530 B independently matches
+the "18.2MB" recorded in SlateOtter's 2026-06-24 row above for the same shape.
+
+**THE COUNTED EVIDENCE, which is immune to the co-tenant load this host was under.**
+`perf stat` on the preserved default-build ELF
+`bench_elf_sha256=e72dddb435a51103218c170fe4f389d3d9174329f3ddf0a6c9c192e6f33aa4fd
+(88032168 bytes) /data/projects/.scratch/blackthrush/fp-bench-default-ee4def703`, one whole
+invocation per size, 50 timed samples each. Every component of this invocation — fixture build,
+CSV serialization, and the samples themselves — is linear in row count *except* the cache:
+
+| size | instructions | growth | page-faults | FP p50 | per-row |
+|---|---|---|---|---|---|
+| 1k | 257,180,007 | — | 553 | 4.32 us | 4.3 ns |
+| 10k | 415,069,269 | 1.61x /10x | 579 | 30.0 us | 3.0 ns |
+| 100k | 1,949,372,675 | 4.70x /10x | 596 | 890 us | 8.9 ns |
+| 1M | 523,341,379,689 | **268.5x /10x** | 58,820 | 245,491 us | 245.5 ns |
+| 2M | 1,047,025,411,851 | **2.0007x /2x** | 189,344 | 477,953 us | 239.0 ns |
+
+Three things settle it. (1) Below the ceiling the whole invocation grows **sub**-linearly —
+1.61x then 4.70x per 10x data — which is what a fixed 50 near-free samples plus a linear setup
+must look like, and which no parser can do. (2) Crossing the ceiling costs 268.5x for 10x. (3)
+**Above the ceiling the parser is linear to four significant figures: 2.0007x instructions for
+2x data**, 1.95x in wall time. A parser that is linear at 1M→2M was never superlinear at
+100k→1M.
+
+**THE MARGINAL-COST FIT, and the bound it gives.** Below the ceiling the invocation costs
+17,048 instructions/row over 10k→100k and 17,544 over 1k→10k — one law, two decades. That law
+predicts 17.29e9 instructions at 1M; the measured 523.34e9 is 30.3x more. Since those 17.0k
+instructions/row cover the setup *and* all 50 samples, one cached read costs **at most** 341
+instructions/row (34 per f64 cell), against **~1,012 instructions per f64 cell** for a real
+parse at 1M. That is a floor of ~30x on the contamination, not an estimate of it.
+
+**⚠️ WHAT THE HONEST 100k NUMBER IS, AND WHAT I AM NOT CLAIMING.** The uncached FP cost at 100k
+was measured by SlateOtter on 2026-06-24 through `probe_csv_read_uncached` at **15.65 ms**,
+against this lane's cached **0.89 ms** — a 17.6x gap in the same direction and of the same
+order as the counted floor above. My own linear extrapolation from the uncached regime
+(245.5 ns/row) says 24.5 ms. I am NOT reconciling those two into a number: they are two
+different harnesses, two months and an unknown amount of drift apart, and neither ran beside a
+live pandas arm today. **No corrected vs-pandas ratio at 100k is claimed here and none should
+be quoted from this entry.** What is established is the mechanism, its direction, and its
+magnitude floor.
+
+**PRE-REGISTERED, AND HELD IN THE PART THAT WAS TESTABLE TODAY.** Before any of the perf-stat
+numbers existed I wrote the mechanism, the 181.6 B/row arithmetic, the ~184,748-row crossing,
+and a discriminating step test at 170k/200k, recorded at
+`.../scratchpad/od63a_prediction.md`. The instruction-count law is post-hoc — I fitted it after
+measuring — and is reported as corroboration, not as a prediction that held. The 170k/200k step
+itself is **not yet run**: it needs an ELF carrying the four new size labels and rch has had no
+admissible worker all window. The lanes are added (`SIZE_CONFIGS`, `size_rows_cols_checked`) so
+the step is a build away, and 200k/250k are also the smallest sizes at which this lane can
+measure an honest vs-pandas csv_read ratio *without any code change*, because they simply
+exceed the ceiling.
+
+**BLAST RADIUS — banked rows that timed a hit, not a parse.** Every `io/csv_read` and
+`io/csv_read_block_view` row at 100k and below, which includes `39349` (csv_read @100k
+"undecidable because OUR arm is too fast" — this is why), `43361` (block_view @100k 99.501x),
+`43450`/`43451` (@100k 112.549x / 112.522x), `18753` (@10k 155.292x), `18754` (@100k 133.628x),
+and `18820` (@100k 116.79x). All are at or below the ceiling. The 1M and larger rows are clean.
+The `pipeline/etl_job` lane is exposed differently and worse — both its input CSVs are under the
+ceiling at *every* size it runs, so its cache hit never lifts — filed separately as
+**br-frankenpandas-qnkah**.
+
+**RETRY CONDITION.** Re-open a "CSV read is superlinear" investigation only on evidence gathered
+above 32 MiB of input, or through `probe_csv_read_uncached` / an uncached entry point. Two
+points that straddle the cache ceiling are not evidence of parser shape and must not be fitted.
+
+---
