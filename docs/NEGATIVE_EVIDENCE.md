@@ -43427,3 +43427,151 @@ FP's arm is long enough to hold a null; (3) only then decide whether the
 merge-into-block lever is worth building.
 
 ---
+
+### 2026-09-01 BlackThrush (br-frankenpandas-l6uyi) — block-born CSV priced on a verified two-ELF pair: taking the view is FREE, BUILDING the block costs 17.9% of every read, and the same five cells expose a 344x-for-10x scaling wall
+
+**Supersedes the open questions in my own entry two above** (same bead, same day), which
+recorded that rch had refused every build and that the lane's only row was `NULL_UNDECIDABLE`.
+Both are now answered, and that entry's *counted* prediction is now measured — see the
+pre-registration paragraph. Its two-passes count stands.
+
+**Campaign result class:** incumbent-win
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=b93aff934d94d43b13086332604d15c47d274244136db62433ebe50e3e49b69d
+(87473656 bytes) /data/projects/.scratch/blackthrush/fp-bench-blockstorage-ee4def703`
+
+**THE FIVE CELLS.** `balanced-square`, 8 rounds each, five adjacent invocations, two ELFs built
+from the same source. `csv_read_block_view` is `read_csv_str` then `to_numpy_block_view()`;
+`csv_read` is the same read without the view.
+
+| ELF | lane | size | FP p50 | pandas p50 | ratio | verdict | FP null | FP cv |
+|---|---|---|---|---|---|---|---|---|
+| block | `csv_read_block_view` | 100k | 779.34 us | 87639.45 us | 112.549x | NULL_UNDECIDABLE | 1.055341 | 7.73% |
+| block | `csv_read` | 100k | 786.67 us | 88931.36 us | 112.522x | NULL_UNDECIDABLE | 0.935798 | 7.40% |
+| **block** | **`csv_read_block_view`** | **1M** | **268417.12 us** | **813656.70 us** | **3.027x** | **FASTER** | **1.00204** | 0.74% |
+| block | `csv_read` | 1M | 270056.55 us | 825369.73 us | 3.079x | FASTER | 1.005763 | 6.65% |
+| **default** | **`csv_read`** | **1M** | **229026.21 us** | **821936.92 us** | **3.586x** | **FASTER** | **1.008382** | 1.75% |
+
+**Median-CI decision:** the headline row's effect median ratio is 3.027x with a 95% CI
+interval of [3.01980626, 3.05720943], cleared against the required harness threshold
+null_median_maximum_absolute_deviation = 0.02, and the CI excludes unity. All three clauses
+TRUE (effect_ci_excludes_unity, effect_exceeds_two_x_null_margin, null_medians_within_2pct_unity);
+best-vs-best 3.0384x (FP min 264296.18 us, pandas min 803032.14 us), direction agreeing with the
+median. The default-ELF row is likewise decidable, effect median 3.586x, CI interval
+[3.56493421, 3.63007696], all three clauses TRUE, best-vs-best 3.5881x.
+
+**A/A null control (same invocation):** on the headline row the FrankenPandas null median
+ratio is 1.00204 and the pandas null median ratio is 1.002578, both inside the 2% band, a 0.2%
+deviation from unity on our side. Every 1M row holds its null; the two 100k rows are the
+undecidable ones, which is the finding set out below.
+
+**⚠️ BUILDING THE BLOCK COSTS 17.9% OF EVERY READ. TAKING THE VIEW COSTS NOTHING.** These are
+two different questions and the same ELF cannot answer both, because `block-storage` is a
+COMPILE-TIME feature: on the block ELF `read_csv_str` builds the block on BOTH lanes, so those
+two cells differ only in whether the view is taken. Hence the second ELF.
+
+    view observation   268417.12 vs 270056.55 us  (block ELF, same size)  -> 0.6%, view lane
+                       779.34    vs 786.67    us  (block ELF, 100k)       -> 0.9%, view lane
+                       nominally FASTER in both, inside the control's own cv (6.65%, 7.40%)
+                       => NO MEASURABLE COST. An Arc refcount bump, which is what it should be.
+
+    block construction 270056.55 (block ELF) vs 229026.21 us (default ELF), same lane, same
+                       size, same source => +41030.34 us, or 1.179x -- the block-storage build
+                       is 17.9% SLOWER on the ordinary CSV read path, and that cost is paid on
+                       EVERY read whether or not .values is ever observed. Against pandas it
+                       spends 3.586x -> 3.079x, about 14% of our lead.
+
+**PRE-REGISTERED, AND IT HELD IN SIGN AND ORDER.** Before either ELF existed I counted the
+passes from source and predicted the added cost at **~+57 ms** at 1M x 10 (two extra cold
+80 MB passes — `block.append` at `fp-io:975` and `Arc::from(block)` at `fp-frame:62127` — at the
+repo's own documented `~5.7ms/1M, page-fault-bound` for the `Arc::from(Vec)` realloc,
+`fp-columnar:12731`). Measured: **+41.0 ms**, 72% of the prediction. I also pre-registered that
+the block lane's ratio would land close to the `csv_read` control's because parse cost dominates;
+it did (3.027x against 3.079x). Recorded at
+`.../scratchpad/l6uyi_prediction.md` before any number existed.
+
+**THE WINDOW IS CONTROLLED BY THE INCUMBENT ITSELF, which is why the 17.9% is not drift.** The
+three 1M invocations ran in different windows (launch loadavg 5.24, 8.14, 4.83), and the two
+`csv_read` cells being compared are NOT same-invocation. But pandas ran in every one of them and
+its p50 spans only **1.4%** — 813656.70 / 825369.73 / 821936.92 us. So the instrument and the
+host were effectively constant across the three, while FrankenPandas' default-ELF arm sits
+**15% below** both block-ELF arms. A window effect large enough to manufacture 17.9% on our arm
+would have moved pandas' far more than 1.4%.
+
+**⚠️⚠️ AND THE FINDING I DID NOT GO LOOKING FOR: A 344x-FOR-10x SCALING WALL IN THE CSV READ.**
+Same ELF, same lanes, 100k to 1M:
+
+    FrankenPandas  csv_read_block_view   779.34 us -> 268417.12 us  = 344x for 10x data
+    FrankenPandas  csv_read              786.67 us -> 270056.55 us  = 343x
+    pandas         (either lane)        ~88000  us -> ~819000   us  =   9.3x   (linear)
+
+pandas scales linearly and we do not. A linear FrankenPandas would sit near 7.8 ms at 1M; it sits
+at 268 ms, **~34x worse than its own 100k rate**, and our lead collapses from **112.5x at 100k to
+3.03x at 1M**. **A certified 3.027x win and a 344x superlinearity are the same measurement**, and
+publishing the first without the second would be the more misleading half. Note the wall is
+~8x larger than the block: the default ELF, with no block at all, still shows 229 ms at 1M.
+
+**Counted mechanism:** the block-construction term only — 2 full buffer passes against the eager
+route's 1, counted from source in my earlier entry and now priced at 41.0 ms / 1M x 10. I have
+**not** diagnosed the scaling wall and do not guess at it here. What the five cells establish is
+where it is *not*: not the block view (identical across lanes), not block construction (present
+on the default ELF too), and not the incumbent or the host (pandas is linear across the same
+invocations, spread 1.4%). Two linear extra passes cannot produce a superlinear term.
+
+**Provenance, and it took Route 1 to get.** Both ELFs built at HEAD `ee4def703`
+(source-identical to the recorded `743c0b531`: `git diff ee4def703 743c0b531 -- crates/ benches/`
+empty; `dirty_src=0` asserted inside every build and every run), remotely on worker `hz4` via the
+rch cargo hook with `-j 2`. **rch's artifact retrieval then returned "4 files, 654 bytes" and no
+ELF**, four times — the identical signature to the 2026-07-10 `cod_fp` entry at line 12903. The
+build was never the problem (`Finished release-perf profile in 31.54s`, `exit=0`), so
+`--features block-storage` links; my earlier entry's "confirm it even links" is answered YES. Both
+ELFs were fetched by `scp` from their worker pool dirs and **content-verified rather than
+trusted** — the pool dir is shared across builds and the candidate's mtime PREDATED my `-j 2`
+jobs. Identity came from the two mutually exclusive cfg arms:
+
+    candidate b93aff93...  'homogeneous Float64 CSV must be block-backed' = 1   'requires ... --features block-storage' = 0
+    default   e72dddb4...  'homogeneous Float64 CSV must be block-backed' = 0   'requires ... --features block-storage' = 1
+
+and the two sha256s were asserted to DIFFER before either was measured — the byte-identical-ELF
+trap that has twice produced a false 1.00x in this campaign. Default ELF:
+`e72dddb435a51103218c170fe4f389d3d9174329f3ddf0a6c9c192e6f33aa4fd` (88032168 bytes)
+`/data/projects/.scratch/blackthrush/fp-bench-default-ee4def703`. Non-vacuity of the view lane is
+asserted by the bench itself: `crates/fp-bench/src/main.rs:3542` `.expect()`s
+`to_numpy_block_view()`, so a frame that did NOT come out block-backed PANICS.
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae
+invocation_id=vs-pandas-20260901T114925.682654Z-pid2663314 role=Oracle
+measured_ratio=3.027x
+
+Pinned incumbent, same invocation as each FP arm: pandas **2.2.3**, artifact sha256
+`3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae` (43,340,106 bytes, 1,511
+files), interpreter sha256 `263dd6cc0c5b61880e54abfb2b1b4ea9aef7ae64e5f0e0b9f3eb15b8e8b9ae4e`
+(28,858,616 bytes), pyarrow 25.0.1. Host `thinkstation1`, AMD Ryzen Threadripper PRO 5975WX,
+32 physical / 64 logical, kernel `7.0.0-30-generic`. Shared invocation id for the headline row:
+`vs-pandas-20260901T114925.682654Z-pid2663314`; for the default-ELF row:
+`vs-pandas-20260901T134321.670923Z-pid1096081`.
+
+**⚠️ THE SIZE LEVER IS WHY THIS CERTIFIES AT ALL, AND IT GENERALISES.** The lane's only prior run
+(`artifacts/bench/olivecarp_csv_read_block_view_100k_2026-08-27.json`, 99.501x) failed with FP's
+null at **0.877**. I reproduced that failure regime on my OWN ELF — at 100k both lanes are
+undecidable, nulls 1.0553 and 0.9358 — then removed it by changing ONE variable, size. FP's arm
+goes 0.78 ms -> 268 ms and its null goes 5.5% off unity -> **0.2%**. This is a clean confirmation
+of the `g0apw` invariant and, more usefully, of its remedy: **for this family the fix is to
+lengthen the arm, not to add rounds.** I used 8 rounds, not the ledger's customary 64 — 64 is
+unaffordable here (~53 s per pandas slot at 1M) and on this evidence was never the binding
+constraint.
+
+**CV role:** provenance only, no vote. Quoted to characterise the instrument rather than to
+decide anything: the headline row's FP cv is 0.74% against pandas 1.54%, and the two 100k rows sit
+at 7.4-7.7% — dispersion tracks the too-short-arm regime exactly as the verdicts do.
+
+**WHAT IS STILL NOT MEASURED, so the trade is not yet decided.** The default ELF has no
+`read + .values` lane, so the consolidation the block route *saves* has no number. The honest
+statement of the trade is therefore: block-born costs a measured **41.0 ms** up front on every
+1M x 10 read, to save an unmeasured consolidation on reads whose array is actually observed. For
+a frame read and never observed as an array it is a straight 17.9% loss. Deciding whether to
+default the feature ON needs that missing cell, plus a view of how often the observation happens.
+
+---
