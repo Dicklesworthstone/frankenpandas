@@ -43250,3 +43250,48 @@ what I got wrong was assuming an unreachable parallel arm must be a defect. The
 `vs-pandas-reality-check` lesson generalizes: this codebase's serial paths are more
 often deliberate than accidental, and a comment promising parallelism is not evidence
 that parallelism pays.
+
+### 2026-08-31 BeigeAspen — REJECTED as stale: the census's `floor @4M 0.310x` row. Two independent re-measures straddle UNITY (0.973x and 1.036x); the lane is at parity and is NOT the worst non-transpose loss [br-frankenpandas-uza04]
+
+The census carries `floor @4M float64` at **0.310x**, measured 2026-08-16 on ELF
+`7f0fce36a6c0`, and it reads as the worst loss on the board outside transpose. It is
+stale by more than drift: `o57rj` has since made `floor_fast` lower to ONE `roundpd`
+under `+sse4.1`, so the row's SUBJECT changed, not just its number.
+
+MEASURED on the shipping binary
+`da95b7be8dc885b1fe59fa852c10ddac4778ab3263564e0594fedbb3d1d6c388`, host thinkstation1,
+load 0.90 — the quietest window this campaign has had — 64 balanced-square rounds, both
+arms one invocation, `env -u FP_ELEMENTWISE_MAX_WORKERS -u FP_ELEMENTWISE_PAR_MIN`:
+
+    fp p50 3422.69us (cv 13.11%)   pandas p50 3298.37us (cv 11.88%)   ratio 0.973x
+    arm threads: frankenpandas 1 / pandas 1
+
+**A/A null control (same invocation):** BOTH arms passed — frankenpandas median ratio
+0.995762 and pandas 0.999920, limit 0.02 absolute deviation from unity. The row is
+still recorded UNDECIDABLE, but for a DIFFERENT clause than usual:
+`null_medians_within_2pct_unity` = true, `effect_ci_excludes_unity` = true,
+`effect_exceeds_two_x_null_margin` = FALSE. The 2.7% gap is below the instrument's own
+resolution — the arms cannot be separated, which is what parity looks like here.
+
+AN INDEPENDENT EARLIER RE-MEASURE AGREES FROM THE OTHER SIDE: `remeasure_floor_4M_
+20260831T015159Z.json` recorded fp 4334.2us vs pandas 4615.1us = **1.036x**, i.e.
+FrankenPandas FASTER, also UNDECIDABLE (its pandas null failed at 0.952235). Two runs,
+different windows, straddling unity at 0.973 and 1.036. Neither certifies, and that is
+the point: NOTHING in this pair is consistent with 0.310x.
+
+**Counted mechanism:** at 4M the op moves 32 MB in and 32 MB out and performs one
+`roundpd` per element on both sides; pandas' `np.floor` allocates one output array and
+FrankenPandas' `.collect()` allocates one output buffer — the same traffic and the same
+count of allocations per call. Two implementations doing identical memory traffic with a
+single-instruction kernel cannot differ 3.2x, and they do not: they differ by 2.7%.
+
+⚠️ THE ROW CANNOT BE RETIRED FROM THE CENSUS BY THIS ENTRY, and that is correct
+behaviour — an UNDECIDABLE result must not overwrite a CERTIFIED one. A 128-round
+attempt to force decidability was killed before producing output and is NOT reported
+here. So `0.310x` will keep appearing in the table and keep attracting agents to a lane
+that is not losing; anyone selecting work from it should read this entry first. The
+census's own warning already says as much — it flags the row STALE ELF and names
+`da95b7be8dc8` as the binary the lane has since run on.
+
+RETRY PREDICATE for a decidable row: 128+ rounds at load < 1 on a box where the pandas
+arm's cv drops below ~5%. NOT worth a rebuild or a lever — there is no gap to close.
