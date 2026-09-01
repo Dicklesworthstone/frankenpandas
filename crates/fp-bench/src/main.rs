@@ -421,6 +421,15 @@ fn size_rows_cols_checked(size: &str) -> Option<(usize, usize)> {
         "1k" => Some((1_000, 10)),
         "10k" => Some((10_000, 10)),
         "100k" => Some((100_000, 10)),
+        // Cache-ceiling lanes; see the matching note in the harness's
+        // SIZE_CONFIGS. 170k and 200k straddle the 32 MiB
+        // `CSV_PARSE_CACHE_MAX_INPUT_BYTES` crossing (~184,748 rows at the
+        // float64 fixture's 181.6 bytes/row), which is the only thing that
+        // separates a cache step from a superlinear parser.
+        "150k" => Some((150_000, 10)),
+        "170k" => Some((170_000, 10)),
+        "200k" => Some((200_000, 10)),
+        "250k" => Some((250_000, 10)),
         "1M" => Some((1_000_000, 10)),
         "2M" => Some((2_000_000, 10)),
         "4M" => Some((4_000_000, 10)),
@@ -436,8 +445,8 @@ fn size_rows_cols(size: &str) -> (usize, usize) {
         Some(pair) => pair,
         None => {
             eprintln!(
-                "fp-bench: unknown --size {size:?}. Known sizes: 100, 1k, 10k, 100k, 1M, 2M, 4M, \
-                 6M, 8M, 10M. Refusing to guess: a default here would run FrankenPandas at one \
+                "fp-bench: unknown --size {size:?}. Known sizes: 100, 1k, 10k, 100k, 150k, 170k, \
+                 200k, 250k, 1M, 2M, 4M, 6M, 8M, 10M. Refusing to guess: a default here would run FrankenPandas at one \
                  row count while the harness ran pandas at another, and the resulting ratio would \
                  look fully provenanced (br-frankenpandas-kko5z)."
             );
