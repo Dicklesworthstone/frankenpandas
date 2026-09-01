@@ -43295,3 +43295,135 @@ census's own warning already says as much — it flags the row STALE ELF and nam
 
 RETRY PREDICATE for a decidable row: 128+ rounds at load < 1 on a box where the pandas
 arm's cv drops below ~5%. NOT worth a rebuild or a lever — there is no gap to close.
+
+### 2026-09-01 BlackThrush (br-frankenpandas-l6uyi) — REJECTED: "block-born IO adds no copy" is false, it adds a SECOND full pass; and the one row that exists for the lane is NULL_UNDECIDABLE, banked as an artifact but never entered here
+
+**Status:** source-read at HEAD `ee4def7031f5137becc571f4d447c33d9b5fd8a6`, working tree
+clean over `crates/` and `benches/` at read time. **NO BUILD AND NO NEW MEASUREMENT OF MY
+OWN** — rch refused every request for ~35 minutes across five bounded attempts
+(`[RCH] remote required; refusing local fallback (no admissible workers:
+critical_pressure=1,insufficient_slots=1,insufficient_total_slots=10)`, `cargo_exit=103`,
+155-byte logs). A refusal is a scheduling failure and never a result, so no ratio, no A/A
+null and no ELF SHA of mine appears below, and none should be read into this entry.
+
+**THE PREMISE THIS ENTRY REJECTS.** `br-frankenpandas-l6uyi` scoped the structural arm as:
+"have read_csv/read_parquet write a homogeneous all-valid f64 result directly into the
+`Float64BlockStore` column-major buffer (**the parser is writing a buffer anyway, so no
+copy is added**)". That parenthesis is the entire economic case for the arm. The landed
+code does not do what it describes.
+
+**Counted mechanism:** full passes over the frame's entire f64 buffer, counted from source
+rather than from a profile. The block route makes **2**; the eager route it replaces makes
+**1**. At the `1M x 10` bench shape that buffer is 10,000,000 `f64` = 80 MB, so the block
+route moves 160 MB where the eager route moves 80 MB. At the cost this repo has already
+measured for the dominant term (**~5.7 ms/1M, page-fault-bound**, quoted from the tree
+below) the added pass predicts **~+57 ms** per read at that shape. Both passes are cold:
+`Vec::with_capacity` reserves pages it never touches, so `append` faults them in on first
+write exactly as `Arc::from` does.
+
+    PASS 1  crates/fp-io/src/lib.rs:975      build_typed_numeric_csv_frame
+              let mut block = Vec::with_capacity(capacity);
+              for values in typed_columns { block.append(&mut values); }
+    PASS 2  crates/fp-frame/src/lib.rs:62127  from_f64_block_columns
+              block: Arc::from(block)
+
+**THE SECOND PASS IS DOCUMENTED IN THIS REPO, ON A CONSTRUCTOR WRITTEN TO AVOID IT**, so
+this is not an inference about `std`. `crates/fp-columnar/src/lib.rs:12731`:
+
+    /// Like `from_f64_values` but, for the all-valid (no-NaN) case, MOVES the
+    /// owned `Vec<f64>` into the backing (`Arc::new`, one tiny box) instead of
+    /// `Arc::from(Vec)`'s cold-buffer realloc-copy (~5.7ms/1M, page-fault-bound).
+
+and `:12686` says the same of the slice-backed constructor. `Arc<[T]>` cannot adopt a
+`Vec<T>`'s allocation because the refcount header is inline with the slice; the repo knew
+this and built `from_f64_values_all_valid_owned_unchecked` specifically to dodge it. The
+block path does not use that escape and **cannot**: `Arc<[f64]>` is load-bearing —
+`Float64BlockStore::materialize_column` (`fp-frame:58514`) hands the same `Arc` to
+`Column::from_f64_all_valid_chunks` for the zero-copy per-column view, so the field cannot
+become `Arc<Vec<f64>>` without surrendering that.
+
+**SO THE TRADE IS NOT THE ONE THE BEAD PRICED.** Block-born does not remove a copy at parse
+time; it adds one, pays for it on **every** read, and refunds it only on a frame whose
+`.values`/`.to_numpy` is actually observed. For a frame read and never observed as an array
+it is a straight loss.
+
+**⚠️ I FIRST WROTE THAT THE LANE HAD NEVER BEEN RUN. THAT WAS WRONG, AND THE WAY IT WAS
+WRONG IS THE MORE USEFUL FINDING.** `grep csv_read_block_view docs/NEGATIVE_EVIDENCE.md`
+returns **0**, and I nearly banked "zero rows, never measured" on that alone — the
+`ls`-returns-nothing class. The same grep over `artifacts/bench/` finds a committed,
+tracked run:
+
+    artifacts/bench/olivecarp_csv_read_block_view_100k_2026-08-27.json
+    invocation vs-pandas-20260827T010225.677233Z-pid248027, balanced-square
+
+| lane | size | ratio | verdict | FP p50 | pandas p50 | FP null | pandas null |
+|---|---|---|---|---|---|---|---|
+| `csv_read_block_view` | 100k | 99.501x | **NULL_UNDECIDABLE** | 1011.71 us | 101389.47 us | **0.877379** | 1.001214 |
+
+So the lane HAS a number, it is enormous, and it **does not count**: FrankenPandas' own A/A
+null landed at 0.877, a **12.3%** miss against a 2% band — not marginal, not a rounding
+question. `claim_validated: false`, `decidable_workloads: 0`. The artifact was committed;
+the ledger was never told. That is the "it LOOKS filed" shape — a row that reads as
+measured to anyone who checks the artifact directory and as unmeasured to anyone who checks
+the ledger.
+
+**AND ITS TWO DESIGN CHOICES BOTH POINT THE SAME WAY.** The run used
+`balanced_square.rounds = 5` and `--sizes 100k`. Both are known-bad for this family:
+`csv_read @100k` is already banked NULL_UNDECIDABLE at `39349` for precisely this reason —
+"**too fast to certify** is not a pandas pathology, it is a property of ANY arm short
+enough", with FP's 0.82 ms arm sampling timer and scheduler noise in its own control. At
+1.01 ms this arm is in the same regime. **The 0.877 null is evidence about the instrument,
+not about the block.** A re-run belongs at **1M** (FP's arm gets ~10x longer) and at **64
+rounds**, not 5.
+
+**A/A null control (same invocation):** the only one on record is the OliveCarp
+invocation's, FP 0.877379 against pandas 1.001214, and it **FAILED** — which is why that
+99.501x ratio is not a certified row and is not quoted here as one. I ran no invocation of
+my own, so I contribute no null.
+
+**⚠️ AND THE LANE MAY STILL LACK THE RESOLUTION EVEN WHEN IT CERTIFIES.** Pre-registered
+before my ELF existed: the `csv_read_block_view` ratio should land close to the `csv_read`
+control ratio measured in the same invocation, because parsing ~190 MB of CSV **text**
+plausibly dwarfs an 80 MB memcpy. **If it does, the honest reading is that the bench cannot
+price a `.values` that costs a memcpy against a read that costs a parse — not that the
+block is free.** Falsifier: the two lanes separating by materially more than their own
+dispersion. The OliveCarp run cannot settle this either way because it ran the block lane
+alone, with no `csv_read` control in the same invocation.
+
+**Non-vacuity is asserted by the bench, not by a reader.** `crates/fp-bench/src/main.rs:3542`
+`.expect()`s `to_numpy_block_view()`, so a frame that did NOT come out block-backed PANICS
+rather than quietly measuring the eager path. The pandas side
+(`benches/vs_pandas_harness.py:1587`) is `pd.read_csv(path).to_numpy(copy=False)`.
+
+**THE LEVER THE BEAD DESCRIBED IS STILL UNBUILT, AND IT IS SAFE RUST.**
+`merge_one_simple_numeric_csv_column` (`fp-io:1118`) already concatenates each column's
+per-chunk sources into a fresh `Vec` with `out.extend(src)` — a pass the parser makes
+anyway. Hand it the column-major block and its own stride region instead, and
+`copy_from_slice` into `block[c*rows..(c+1)*rows]`. That deletes PASS 1 outright and is
+literally the "the parser is writing a buffer anyway" the bead assumed was already true.
+PASS 2 cannot be removed under `#![forbid(unsafe_code)]` (`fp-frame:8`). **Not landed
+here:** it is an untested change to the CSV parser's merge on a shared checkout, and rch
+could gate neither a build nor a test.
+
+**CV role:** provenance only, no vote. Quoted for the OliveCarp row solely to characterise
+the instrument: FP 13.96% against pandas 4.01% — the dispersion is on our short arm, which
+is consistent with the failed null being a too-fast-to-certify artefact.
+
+**⚠️ DO NOT REUSE THE OliveCarp ELF TO SAVE A BUILD.** It still exists
+(`/data/projects/fp-wt-divlead/tdl29/release-perf/fp-bench`, 82 MB, 2026-08-26) but its
+worktree is at `a3569ba85` with `crates/fp-columnar`, `crates/fp-dot-kernel` and
+`crates/fp-frame` all **modified** — it is another pane's dirty tree, so nothing it
+produces is attributable to any commit.
+
+**What the next agent should do, in order:** (1) build `fp-bench --features block-storage`
+and confirm it links at all — my one scheduled build (worker `hz4`, 237.2 s) reported
+"artifacts retrieved: 4 files, 643 bytes" and left only `.rustc_info.json` in the target
+dir, the identical signature to the 2026-07-10 `cod_fp` entry at `12903` where the ELF
+simply did not arrive, and a `tail -5` destroyed the log that would have separated "no
+retrieval" from "did not compile"; (2) run `--category io --workloads
+csv_read_block_view,csv_read --sizes 1M --measurement-mode balanced-square
+--balanced-square-rounds 64` so the block lane and its own control share one invocation and
+FP's arm is long enough to hold a null; (3) only then decide whether the
+merge-into-block lever is worth building.
+
+---
