@@ -42,7 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import cache, partial
-from io import StringIO
+from io import BytesIO, StringIO
 from json import JSONDecodeError
 from pathlib import Path
 from statistics import mean, stdev
@@ -1636,7 +1636,7 @@ def bench_csv_read_uncached_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     ⚠️ AND THE SOURCE PAIRING IS DELIBERATE AND DIFFERENT FROM `csv_read`. That
     lane pairs our in-memory `&str` read against `pd.read_csv(FILE)`, so the
     incumbent pays an open/read/decode our side never does — a second one-sided
-    asymmetry stacked on the cache. Here both arms parse from memory, so the
+    asymmetry stacked on the cache. Here both arms parse UTF-8 bytes from memory, so the
     ratio prices the PARSER and nothing else. That makes this lane's number NOT
     comparable to `csv_read`'s even above the ceiling; it is a different, and
     narrower, question. The three seeds match the Rust side's
@@ -1645,8 +1645,21 @@ def bench_csv_read_uncached_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     engine serialize its own document.
     """
     del tmp_path
+    # ⚠️ BytesIO OVER StringIO, AND THE REASON IS A MEASURED 1.532x. FrankenPandas'
+    # read_csv_str takes a &str and parses its UTF-8 bytes directly, converting
+    # nothing. Handing pandas a StringIO makes ITS parser encode str -> bytes on
+    # every sample — work our arm never does. Measured at 200k x 10 on this host:
+    # StringIO 1350.43 ns/row vs BytesIO 881.20 ns/row, a 1.532x penalty charged
+    # to the incumbent alone. BytesIO's 881 ns/row also lands beside pandas' own
+    # FILE path (857.99 ns/row, csv_read lane, same size), which is the
+    # independent check that the ENCODE — not the memory source — was the cost.
+    # Payloads are encoded ONCE in setup so neither arm pays for it inside the
+    # timed region. br-frankenpandas-g1g2n.
     payloads = [
-        df.sample(frac=1.0, random_state=seed).reset_index(drop=True).to_csv(index=False)
+        df.sample(frac=1.0, random_state=seed)
+        .reset_index(drop=True)
+        .to_csv(index=False)
+        .encode("utf-8")
         for seed in range(CSV_UNCACHED_DISTINCT_INPUTS)
     ]
     cursor = [0]
@@ -1654,7 +1667,7 @@ def bench_csv_read_uncached_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     def read_next():
         payload = payloads[cursor[0] % CSV_UNCACHED_DISTINCT_INPUTS]
         cursor[0] += 1
-        return pd.read_csv(StringIO(payload))
+        return pd.read_csv(BytesIO(payload))
 
     return time_operation(read_next)
 
