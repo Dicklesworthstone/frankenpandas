@@ -9425,17 +9425,43 @@ fn par_map_slice_f64<F: Fn(f64) -> f64 + Sync>(data: &[f64], f: F) -> Vec<f64> {
 /// row measures, and the shape `Column::from_f64_values` gives the bench series.
 /// `floor_ceil_trunc_reach_a_parallel_split_on_an_all_valid_f64_column_uza04` pins it.
 ///
-/// Reads the SAME policy as the witness maps (`FP_ELEMENTWISE_MAX_WORKERS` /
-/// `FP_ELEMENTWISE_PAR_MIN`) so serial-vs-parallel on this path can be A/B'd on ONE
-/// binary, which is the interleaved method the ledger prescribes at 9293 — and, given
-/// that entry's own retraction, the only method whose answer here is worth having.
+/// ⭐ SERIAL BY DEFAULT, AND THAT IS A MEASUREMENT, NOT AN OVERSIGHT.
+/// `WITNESS_FREE_PAR_MIN_DEFAULT` is `usize::MAX`, so nothing splits unless a caller
+/// asks. I built this path expecting the split to be worth 2-3.5x at 4M and PRE-
+/// REGISTERED that; the split measured 1.67-1.81x SLOWER. floor @4M, one ELF
+/// (88d4a2dc447b2882), interleaved 9 rounds each, serial/parallel median 0.6004 and
+/// min 0.5537 — both estimators agreeing in sign, unlike the sequential sweep that
+/// flipped on me the same night.
+///
+/// WHY, and why the ledger's 2026-06-20 entry says the opposite: that entry measured
+/// forcing this family serial and found it cost 2.4x at 100k, so it kept them
+/// parallel — correct for the kernel it had, a libm CALL per element (floor @1M was
+/// 8194us). `o57rj` then made `floor_fast` lower to ONE `roundpd` under `+sse4.1`,
+/// taking floor @1M to ~690us. A 12x cheaper kernel over the same bytes turns a
+/// compute-bound op into a BANDWIDTH-bound one, and splitting a bandwidth op across
+/// workers does not create bandwidth — it just adds the `thread::scope` tax the
+/// ledger puts at ~350-420us, plus a `vec![0.0; n]` (`alloc_zeroed`, 32MB at 4M)
+/// that the serial `.collect()` never pays. The June conclusion did not survive its
+/// own kernel getting faster.
+///
+/// Kept rather than deleted because it is the INSTRUMENT: `FP_ELEMENTWISE_PAR_MIN`
+/// (or `set_elementwise_witness_policy`) re-enables the split, so the next agent can
+/// re-ask this on a quieter box, or after a kernel change, without a rebuild — which
+/// is exactly how the answer above was obtained. RETRY PREDICATE: re-measure only if
+/// the per-element kernel gets materially more expensive again, or on hardware whose
+/// per-core bandwidth is well below its aggregate.
 ///
 /// BIT-IDENTICAL to the serial form by construction: the same `f` is applied to the
 /// same element, and every output slot is written exactly once by exactly one worker,
 /// so neither the values nor their order can depend on the split.
 fn par_map_slice_f64_witness_free<F: Fn(f64) -> f64 + Sync>(data: &[f64], f: &F) -> Vec<f64> {
     let n = data.len();
-    let (max_workers, par_min) = elementwise_witness_policy();
+    let (max_workers, _policy_par_min) = elementwise_witness_policy();
+    // Serial unless a policy was EXPLICITLY installed (thread-local override or the
+    // environment). An unset environment must not inherit the shared 200_000 default
+    // here: that default belongs to the witness maps, whose kernels are dear enough
+    // to pay for a split, and this path's is not.
+    let par_min = elementwise_par_min_if_explicit().unwrap_or(WITNESS_FREE_PAR_MIN_DEFAULT);
     let available = cached_available_parallelism();
     let cap = if max_workers == 0 {
         available
@@ -9782,6 +9808,12 @@ const ELEMENTWISE_WITNESS_DEFAULT_WORKERS: usize = 8;
 /// decision, not a perf one, and not one to take for 10%.
 const ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN: usize = 200_000;
 
+/// `par_min` for [`par_map_slice_f64_witness_free`] when nobody names one:
+/// `usize::MAX`, i.e. NEVER SPLIT. See that function for the measurement — the split
+/// is 1.67-1.81x SLOWER on floor @4M because the post-`o57rj` kernel is one `roundpd`
+/// and the op is bandwidth-bound.
+const WITNESS_FREE_PAR_MIN_DEFAULT: usize = usize::MAX;
+
 /// `par_min` for the few unary ops whose PER-ELEMENT cost is high enough that
 /// 100k elements already pays for a `thread::scope`.
 ///
@@ -9879,6 +9911,26 @@ const ELEMENTWISE_EXPENSIVE_PAR_MIN: usize = 65_536;
 /// Harness invocations not deliberately varying these should pass
 /// `env -u FP_ELEMENTWISE_MAX_WORKERS -u FP_ELEMENTWISE_PAR_MIN`.
 ///
+/// `par_min` ONLY when someone actually asked for one — thread-local override first,
+/// then the environment — and `None` when neither is set.
+///
+/// br-frankenpandas-uza04. [`par_map_slice_f64_witness_free`] must not inherit the
+/// shared 200_000 default: that number was chosen for kernels dear enough to pay for
+/// a split, and the floor/ceil/trunc `roundpd` is not one (measured 1.67-1.81x SLOWER
+/// split at 4M). But the override must still reach it, because being able to force
+/// the split on ONE binary is how that was measured at all.
+fn elementwise_par_min_if_explicit() -> Option<usize> {
+    if let Some((_, par_min)) = ELEMENTWISE_WITNESS_OVERRIDE.with(std::cell::Cell::get) {
+        return Some(par_min);
+    }
+    static ENV_PAR_MIN: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *ENV_PAR_MIN.get_or_init(|| {
+        std::env::var("FP_ELEMENTWISE_PAR_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+    })
+}
+
 /// The environment-derived base policy. Read once and cached: this sits on every
 /// elementwise float map.
 fn elementwise_witness_policy_from_env() -> (usize, usize) {
@@ -35349,9 +35401,14 @@ mod tests {
     /// assertion fails the policy is broken and the rest of the test is unreadable
     /// — which is the failure this test must not silently pass through.
     ///
-    /// This test is a PROBE, not a lock on current behaviour: it is written to
-    /// state what floor/ceil/trunc SHOULD do, and it is the regression guard for
-    /// the arm ordering. If someone reorders those arms again, this fires.
+    /// ⭐ REACHABLE IS NOT THE SAME AS DEFAULT-ON, AND THE DEFAULT IS SERIAL.
+    /// I found this shadowing expecting the split to be worth 2-3.5x at 4M and
+    /// pre-registered that; it measured 1.67-1.81x SLOWER (floor @4M, one ELF,
+    /// interleaved, serial/parallel median 0.6004 min 0.5537), because `o57rj` made
+    /// the kernel one `roundpd` and a bandwidth-bound op gains nothing from workers.
+    /// So the shipped default is `usize::MAX` — never split — and the final block
+    /// here PINS that, while the assertions above pin that the split is still
+    /// REACHABLE when explicitly asked for, which is what makes it measurable.
     #[test]
     fn floor_ceil_trunc_reach_a_parallel_split_on_an_all_valid_f64_column_uza04() {
         // NON-INTEGRAL on purpose. `typed_float_integral_identity` claims an
@@ -35407,6 +35464,23 @@ mod tests {
         );
 
         crate::clear_elementwise_witness_policy();
+
+        // THE SHIPPED DEFAULT IS SERIAL, and this is the half that guards the
+        // measurement. 300_000 is above `ELEMENTWISE_WITNESS_DEFAULT_PAR_MIN`
+        // (200_000), so a path that inherited the shared default would split here and
+        // report >1. It must not: `WITNESS_FREE_PAR_MIN_DEFAULT` is `usize::MAX`
+        // because the split measured 1.67-1.81x SLOWER at 4M.
+        let big = Column::from_f64_values(
+            (0..300_000_u32).map(f64::from).map(|v| v + 0.5).collect(),
+        );
+        big.floor().expect("default-policy floor");
+        assert_eq!(
+            crate::elementwise_last_worker_count(),
+            1,
+            "floor SPLIT under the default policy at 300k - the witness-free path is \
+             inheriting the shared 200_000 par_min again, which measured 1.67-1.81x \
+             SLOWER at 4M"
+        );
     }
 
     /// br-frankenpandas-uza04. The split must not move a bit.

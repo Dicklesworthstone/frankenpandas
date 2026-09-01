@@ -43188,3 +43188,65 @@ at 0.003x, so a perfect page length is bounded by ~1.16x against an incumbent th
 300x ahead. This lane's answer remains the one 702b3d010 and 0cb3a4dd1 already
 established — `.T.to_numpy()` returns a VIEW and FrankenPandas builds 100_000 Columns —
 and no constant on this path changes that.
+
+### 2026-08-31 BeigeAspen — REJECTED: parallelizing the all-valid floor/ceil/trunc map is 1.67-1.81x SLOWER — the shadowed arm was accidentally RIGHT, and my pre-registered 2-3.5x prediction missed in the opposite direction [br-frankenpandas-uza04]
+
+THE DEFECT IS REAL AND STILL WORTH KNOWING. `Column::floor` advertises its
+nullable-owned arm as "PARALLEL, like sqrt/exp/log (xv9qf)", but
+`typed_float_witness_free_unary` is tried FIRST and was a bare
+`data.iter().map(f).collect()` with no threshold and no parallel branch, so for an
+all-valid contiguous `f64` column — the shape `Column::from_f64_values` gives the
+bench series at `crates/fp-bench/src/main.rs:1198`, i.e. the `floor @4M` census row —
+that arm claimed every input at EVERY size and the parallel arm below was UNREACHABLE.
+ceil and trunc are identical. That much is confirmed by
+`floor_ceil_trunc_reach_a_parallel_split_on_an_all_valid_f64_column_uza04`.
+
+⭐ BUT UNREACHABLE TURNED OUT TO BE CORRECT. I pre-registered 2.0x-3.5x for the split
+before measuring (`P1`, falsified below 1.5x). It measured SLOWER, both sizes, both
+estimators, same sign:
+
+    floor, ONE ELF 88d4a2dc447b2882, interleaved parallel-vs-serial on the same binary
+    via FP_ELEMENTWISE_PAR_MIN, host thinkstation1
+
+    size   parallel median   serial median   serial/parallel median   min
+    1M        166151us          89222us            0.5370            0.5576
+    4M        539442us         323881us            0.6004            0.5537
+
+**Counted mechanism:** the parallel arm performs one additional 32 MB `alloc_zeroed`
+allocation per call at 4M — `vec![0.0_f64; n]` written and then overwritten — where the
+serial `.collect()` writes its buffer exactly once. THE RATIO IS FLAT IN n (0.5576 at
+1M, 0.5537 at 4M) and that is the discriminating observation: a fixed per-call
+`thread::scope` tax of ~350-420us would be diluted fourfold going 1M -> 4M and the
+ratio would rise toward unity. It does not move. The cost is therefore PER-ELEMENT —
+an extra full pass over the output — not per-call, so this is not a threshold that can
+be tuned into a win at some larger size.
+
+WHY THE 2026-06-20 ENTRY SAYS THE OPPOSITE, AND WHY BOTH ARE RIGHT. That entry
+measured forcing this family serial, found it cost 2.4x at 100k (floor 775 -> 1876us),
+and REVERTED to keep them parallel. Correct for the kernel it had: `f64::floor` was a
+libm CALL per element and floor @1M ran 8194us. `o57rj` then made `floor_fast` lower to
+ONE `roundpd` under `+sse4.1`, taking floor @1M to ~690us. A 12x cheaper kernel over
+the same bytes converts a compute-bound op into a BANDWIDTH-bound one, and splitting a
+bandwidth op across workers does not create bandwidth. THE JUNE CONCLUSION DID NOT
+SURVIVE ITS OWN KERNEL GETTING FASTER — it was never wrong, it expired, and nothing
+re-measured the interaction because the later change looked like a pure win.
+
+SHIPPED STATE: `WITNESS_FREE_PAR_MIN_DEFAULT = usize::MAX`, i.e. never split, which is
+byte-for-byte the behaviour that was there before this campaign touched it. The
+policy-aware map is KEPT as the instrument — `FP_ELEMENTWISE_PAR_MIN` or
+`set_elementwise_witness_policy` re-enables the split with no rebuild, which is how the
+numbers above were obtained on one binary — and a test pins that the DEFAULT is serial
+at 300k, above the shared 200_000 par_min it must not inherit.
+
+RETRY PREDICATE: re-measure only if the per-element kernel becomes materially more
+expensive again (a target without `roundpd`, or a dtype needing a widen), or on
+hardware whose per-core memory bandwidth is far below its aggregate. Not on a quieter
+box: this is not a noise result, it is a 1.8x gap that both estimators agree on.
+
+⚠️ SCORING MY OWN PREDICTION, since the point of registering it was to be scored: P1
+MISSED, and not narrowly — I predicted 2.0-3.5x faster and got 1.8x slower, an error of
+direction, not magnitude. What I got right was the mechanism (the arm is unreachable);
+what I got wrong was assuming an unreachable parallel arm must be a defect. The
+`vs-pandas-reality-check` lesson generalizes: this codebase's serial paths are more
+often deliberate than accidental, and a comment promising parallelism is not evidence
+that parallelism pays.
