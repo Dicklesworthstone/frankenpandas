@@ -9762,7 +9762,24 @@ fn arrow_array_to_scalars(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Sca
 pub fn write_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     let batch = dataframe_to_record_batch(frame)?;
     let mut buf = Vec::new();
-    let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), None)
+    // The Arrow schema-level metadata on `batch` does not come back as batch
+    // metadata from the Parquet reader, so the row MultiIndex level names also
+    // ride in the file's own key-value metadata (br-frankenpandas-wfkzm).
+    let props = frame
+        .row_multiindex()
+        .map(
+            |row_multiindex| -> Result<parquet::file::properties::WriterProperties, IoError> {
+                let encoded = serde_json::to_string(&row_multiindex.names().to_vec())?;
+                Ok(parquet::file::properties::WriterProperties::builder()
+                    .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                        ROW_MULTIINDEX_NAMES_METADATA_KEY.to_owned(),
+                        encoded,
+                    )]))
+                    .build())
+            },
+        )
+        .transpose()?;
+    let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), props)
         .map_err(|e| IoError::Parquet(e.to_string()))?;
     writer
         .write(&batch)
@@ -9785,6 +9802,20 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     // row count collapses that to a single typed conversion, no concat. Clamp so a
     // pathological row count can't request an absurd allocation up front.
     let total_rows = builder.metadata().file_metadata().num_rows().max(0) as usize;
+    // Level names written by `write_parquet_bytes` (see there); absent on files
+    // from older builds or other writers, in which case the synthetic
+    // `__index_level_N__` names stay.
+    let level_names: Option<Vec<Option<String>>> = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|pairs| {
+            pairs
+                .iter()
+                .find(|pair| pair.key == ROW_MULTIINDEX_NAMES_METADATA_KEY)
+        })
+        .and_then(|pair| pair.value.as_deref())
+        .and_then(|raw| serde_json::from_str::<Vec<Option<String>>>(raw).ok());
     let batch_size = total_rows.clamp(1, 16 * 1024 * 1024);
     let reader = builder
         .with_batch_size(batch_size)
@@ -9807,19 +9838,20 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         )?);
     }
 
-    // For a single batch (common case), return directly
-    if all_frames.len() == 1 {
-        if let Some(frame) = all_frames.into_iter().next() {
-            return Ok(frame);
-        }
-        return Err(IoError::Parquet(
-            "parquet reader produced zero record batches".to_owned(),
-        ));
+    let frame = if all_frames.len() == 1 {
+        // For a single batch (common case), return directly
+        all_frames.into_iter().next().ok_or_else(|| {
+            IoError::Parquet("parquet reader produced zero record batches".to_owned())
+        })?
+    } else {
+        // Multiple batches: concatenate via fp_frame::concat_dataframes
+        let refs: Vec<&DataFrame> = all_frames.iter().collect();
+        fp_frame::concat_dataframes(&refs)?
+    };
+    match level_names {
+        Some(names) => restore_row_multiindex_names(frame, &names),
+        None => Ok(frame),
     }
-
-    // Multiple batches: concatenate via fp_frame::concat_dataframes
-    let refs: Vec<&DataFrame> = all_frames.iter().collect();
-    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
 }
 
 /// Write a DataFrame to a Parquet file.
