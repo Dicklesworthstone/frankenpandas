@@ -5,14 +5,14 @@
 
   **Clean-room Rust reimplementation of the full pandas API surface.**
 
-  Drop-in pandas API in safe Rust. Python bindings (`import frankenpandas`) planned via PyO3; see the Roadmap. Zero `unsafe`. Profile-proven performance. Differential conformance against a live pandas oracle on every PR.
+  Drop-in pandas API in safe Rust. A PyO3 binding crate (`fp-python`) exists but ships no wheel yet; see the Roadmap. Zero `unsafe`. Measured head-to-head against live pandas 2.2.3 on 143 certified benchmark lanes. Differential conformance against a pinned live pandas oracle in CI's daily batch and on any checkout that has `.venv-oracle`.
 
   ![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)
   ![License](https://img.shields.io/badge/license-MIT-blue)
-  ![Tests](https://img.shields.io/badge/tests-5000%2B-brightgreen)
-  ![Conformance](https://img.shields.io/badge/conformance_packets-1252-blueviolet)
+  ![Tests](https://img.shields.io/badge/tests-8700%2B-brightgreen)
+  ![Conformance](https://img.shields.io/badge/conformance_packets-1341-blueviolet)
   ![IO Formats](https://img.shields.io/badge/IO_formats-14%2B-purple)
-  ![Lines of Rust](https://img.shields.io/badge/Rust_LOC-270K-orange)
+  ![Lines of Rust](https://img.shields.io/badge/Rust_LOC-507K-orange)
 </div>
 
 ---
@@ -37,8 +37,8 @@
 | `GroupBy.agg_named()` | ✓ | ✓ (different syntax) | **✓** |
 | `merge_asof` with `tolerance` / `by` / `allow_exact_matches` | ✓ | Partial | **✓** |
 | Window operations (rolling / expanding / ewm / resample) | ✓ | Partial | **✓** |
-| 14+ IO formats (CSV/TSV/FWF/JSON/L/Parquet/Excel/Feather/IPC/SQL/HTML/XML/LaTeX/Markdown/Pickle/Stata/HDF5, ORC fail-closed pending a Tokio-free backend) | ✓ | Partial | **✓** (SQL is generic `SqlConnection` trait with default `rusqlite` backend; PostgreSQL/MySQL slices in progress) |
-| Differential conformance against live pandas | ✗ | ✗ | **✓** (1,252 packets, 1,265 fixtures, live oracle in CI) |
+| 14+ IO formats (CSV/TSV/FWF/JSON/L/Parquet/Excel/Feather/IPC/SQL/HTML/XML/LaTeX/Markdown/Pickle/Stata/HDF5, ORC fail-closed pending a Tokio-free backend) | ✓ | Partial | **✓** (SQL is a generic `SqlConnection` trait with a default `rusqlite` backend and a `sql-mysql` adapter; `sql-postgresql` is an empty placeholder feature) |
+| Differential conformance against live pandas | ✗ | ✗ | **✓** (1,341 packets; the 2026-09-01 full live-oracle run matched 1,323 of them; pinned oracle in CI's daily batch) |
 | Bayesian runtime policy + evidence ledger | ✗ | ✗ | **✓** |
 
 ## Quick Example
@@ -84,11 +84,11 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 | **Fail closed** | Unknown features, incompatible dtypes, and ambiguous coercions produce errors, not silent corruption. Strict mode rejects; hardened mode logs and recovers under a Bayesian expected-loss decision rule. |
 | **Zero unsafe** | Every crate uses `#![forbid(unsafe_code)]`. Memory safety comes from the type system, not audits. |
 | **Test everything differentially** | Conformance packets run FrankenPandas operations and compare against the pandas oracle. 1,252 packet JSON files + 1,265 fixtures + live pandas oracle in CI on every commit. |
-| **Document every divergence** | 15 known semantic divergences from pandas are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX), and reproducible test packets. No silent disagreement. |
+| **Document every divergence** | 26 numbered divergence entries (15 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible test packets. No silent disagreement. |
 
 ## What's In The Box
 
-The 2026-05-16 capability surface (~269k LOC of Rust across 12 crates):
+The 2026-09-02 capability surface (~507k lines of Rust under `src/` across 15 crates):
 
 | Category | Coverage |
 |----------|----------|
@@ -98,10 +98,10 @@ The 2026-05-16 capability surface (~269k LOC of Rust across 12 crates):
 | **GroupBy** | DataFrame-level (`DataFrameGroupBy`) and Series-level (`SeriesGroupBy`). 3 execution paths (dense Int64, arena-backed Bumpalo, HashMap fallback) with property tests proving bitwise equivalence. 14 string-dispatch aggregations + `cumsum`/`cumprod`/`cummax`/`cummin`/`rank`/`shift`/`diff`/`nth`/`head`/`tail`/`pct_change`/`value_counts`/`describe`/`get_group`/`cumcount`/`ngroup`/`pipe`/`ohlc`/`transform`/`filter`/`apply`. Window ops (`rolling`/`expanding`/`ewm`/`resample`) on both levels. |
 | **Join engine** | Inner / Left / Right / Outer / Cross / Asof (Backward / Forward / Nearest). `merge_with_options` takes `MergeExecutionOptions { indicator_name, validate_mode, suffixes, sort }` with `MergeValidateMode::{OneToOne, OneToMany, ManyToOne, ManyToMany}`. `merge_asof_with_options` takes `MergeAsofOptions { allow_exact_matches, tolerance, by }`. |
 | **Expression engine** | `df.eval(expr)` and `df.query(expr)`. Modulo, FloorDiv, Pow with correct precedence (`**` > unary > `*`/`/`/`//`/`%`). Bitwise shorthand (`&`/`\|`/`~`). Chained-comparison pairwise AND. `@local` variable bindings. Backtick column names. |
-| **IO** | 14+ formats: CSV (with full pandas option matrix incl. `usecols`/`nrows`/`skiprows`/`dtype`/`parse_dates`/`comment`/`on_bad_lines`/`decimal`/`thousands`/`true_values`/`false_values`/`skipfooter`/`lineterminator`/`index_label`/`quote`/`escape`), TSV (`read_table`), Fixed-width (`read_fwf` with colspec inference), JSON (5 orients + Table Schema), JSONL (blank-line tolerant, key-union detection, row-cap protection), Parquet (Arrow RecordBatch), Excel (`.xlsx`/`.xls`/`.xlsb`/`.ods` with full option parity), Feather, Arrow IPC stream, SQL (generic `SqlConnection` trait + `SqlInspector` for SQLAlchemy-shaped introspection), HTML (read + write), XML (read + write + `to_xml` alias), LaTeX (file + string), Markdown (`tablefmt` accepts `"github"` / `"pipe"` / `"grid"` / `"plain"` / `"simple"`), Pickle (round-trip), Stata (round-trip), HDF5 (snapshot, optional feature-gated backend). ORC APIs fail closed until a Tokio-free backend lands. Deferred surfaces: ORC backend, `to_clipboard`, `to_gbq`, SAS reader. |
+| **IO** | 14+ formats: CSV (with full pandas option matrix incl. `usecols`/`nrows`/`skiprows`/`dtype`/`parse_dates`/`comment`/`on_bad_lines`/`decimal`/`thousands`/`true_values`/`false_values`/`skipfooter`/`lineterminator`/`index_label`/`quote`/`escape`), TSV (`read_table`), Fixed-width (`read_fwf` with colspec inference), JSON (5 orients + Table Schema), JSONL (blank-line tolerant, key-union detection, row-cap protection), Parquet (Arrow RecordBatch), Excel (`.xlsx`/`.xls`/`.xlsb`/`.ods` with full option parity), Feather, Arrow IPC stream, SQL (generic `SqlConnection` trait + `SqlInspector` for SQLAlchemy-shaped introspection), HTML (read + write), XML (read + write + `to_xml` alias), LaTeX (file + string), Markdown (`tablefmt` accepts `"github"` / `"pipe"` / `"grid"` / `"plain"` / `"simple"`), Pickle (round-trip), Stata (round-trip), HDF5 (snapshot, optional feature-gated backend). ORC APIs fail closed until a Tokio-free backend lands. Clipboard IO (`read_clipboard` / `to_clipboard` via OS subprocess backends) and SAS (`read_sas`: sas7bdat and XPORT) are implemented. Deferred surfaces: ORC backend, `to_gbq`, SPSS reader. |
 | **Type system** | `Scalar`, `DType`, `NullKind` (Null / NaN / NaT). `Timestamp`, `Timedelta`, `Period`, `Interval`, `PeriodFreq`, `IntervalClosed` as proper value types. `SparseDType` scaffolded. Coercion via `common_dtype()` / `cast_scalar()` matches pandas' Null < Bool < Int64 < Float64 hierarchy. Identity-cast fast path (AG-03) skips clone when source dtype already matches target. |
 | **Runtime** | Bayesian `RuntimePolicy` (Strict / Hardened). `EvidenceLedger` with full decision trace per materialization. `ConformalGuard` for distribution-shift detection. `RaptorQEnvelope` for repair-symbol-protected durable state (conformance fixtures, benchmark baselines, migration manifests). |
-| **Conformance** | 1,252 packet JSON files, 1,265+ fixture JSONs, 15 documented divergences in `DISCREPANCIES.md` (3 fully RESOLVED; remainder are ACCEPTED / INVESTIGATING / WILL-FIX with root-cause analysis), live pandas oracle in CI. Conformance tests pass (1,586 tests, 0 failures) excluding documented structural divergences. |
+| **Conformance** | 1,341 packet JSON files, 26 numbered entries in `DISCREPANCIES.md` (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED, each with root-cause analysis), pinned live pandas 2.2.3 oracle (`.venv-oracle`) in CI and on any local checkout that has the venv. The 2026-09-01 full live-oracle pass matched 1,323 of 1,341 fixtures (1 divergent, 15 adapter errors, 2 unsupported). The live-oracle unit suite has open failures tracked as beads; they are not hidden behind skips any more. |
 
 ## Architecture
 
@@ -149,27 +149,31 @@ Plus two auxiliary crates: fp-conformance (1,252 packets / 1,265 fixtures)
 and fp-frankentui (terminal UI dashboard, experimental).
 ```
 
-The diagram above shows the runtime/data-flow crates. The total workspace is **12 crates, 269,398 lines of Rust under `crates/`** (about 250,300 of those lines live under `src/` directories, including the inline `#[cfg(test)]` modules; the remaining ~19,000 lines are out-of-`src/` test, fixture, and bench scaffolding).
+The diagram above shows the runtime/data-flow crates. The total workspace is **15 crates, about 586,000 lines of Rust under `crates/`** as of 2026-09-02 (about 506,700 of those lines live under `src/` directories, including the inline `#[cfg(test)]` modules; the rest is out-of-`src/` test, example, fixture, and bench scaffolding). Line counts below are per-crate `src/` totals from the same date.
 
 ## Workspace Structure
 
 ```
 frankenpandas/
 ├── crates/
-│   ├── frankenpandas/    # Unified facade crate with prelude (1,195 lines)
-│   ├── fp-types/         # Scalar, DType, NullKind, Timestamp, Timedelta, Period, Interval, NanOps (4,326 lines)
-│   ├── fp-columnar/      # Column, ValidityMask, vectorized kernels, full Column-API parity (8,714 lines)
-│   ├── fp-index/         # Index, MultiIndex, 5 typed variants, alignment planning (20,353 lines)
-│   ├── fp-frame/         # DataFrame, Series, Categorical, accessors, windows, resample (87,602 lines)
-│   ├── fp-expr/          # Expression parser, eval()/query(), @local + backtick (3,337 lines)
-│   ├── fp-groupby/       # GroupBy with 3 execution paths (3,314 lines)
-│   ├── fp-join/          # Inner/Left/Right/Outer/Cross/Asof joins, merge_asof tolerance/by (5,349 lines)
-│   ├── fp-io/            # 14+ IO formats, SqlConnection trait, SqlInspector (25,010 lines)
-│   ├── fp-conformance/   # 1,252 packet JSON files, live pandas oracle, drift ledger
-│   ├── fp-runtime/       # Strict/Hardened policy, EvidenceLedger, ConformalGuard, RaptorQ (2,629 lines)
-│   └── fp-frankentui/    # Terminal UI dashboard (experimental, 2,755 lines)
+│   ├── frankenpandas/    # Unified facade crate with prelude (1,201 lines)
+│   ├── fp-types/         # Scalar, DType (incl. nullable Int64/Float64/boolean), Timestamp, Timedelta, Period, Interval, NanOps (17,156 lines)
+│   ├── fp-columnar/      # Column with typed Arc<[f64]>/Arc<[i64]> backings, ValidityMask, vectorized kernels (65,340 lines)
+│   ├── fp-dot-kernel/    # The one crate compiled with +avx2,+fma: f64 dot product and elementwise kernels, runtime-dispatched (1,083 lines)
+│   ├── fp-index/         # Index, MultiIndex, 5 typed variants, alignment planning (36,097 lines)
+│   ├── fp-frame/         # DataFrame, Series, Categorical, accessors, windows, resample (208,027 lines)
+│   ├── fp-expr/          # Expression parser, eval()/query(), @local + backtick (9,747 lines)
+│   ├── fp-groupby/       # GroupBy with 3 execution paths (8,761 lines)
+│   ├── fp-join/          # Inner/Left/Right/Outer/Cross/Asof joins, merge_asof tolerance/by (21,637 lines)
+│   ├── fp-io/            # 14+ IO formats, SqlConnection trait (sqlite + mysql), SqlInspector (35,451 lines)
+│   ├── fp-conformance/   # 1,341 packet JSON files, live pandas oracle, drift ledger (88,828 lines)
+│   ├── fp-bench/         # FrankenPandas arm of the vs-pandas timing harness (4,852 lines)
+│   ├── fp-runtime/       # Strict/Hardened policy, EvidenceLedger, ConformalGuard, RaptorQ (3,920 lines)
+│   ├── fp-frankentui/    # Dashboard snapshot value types + E2E scenario harness; the TUI itself is not in-tree (2,999 lines)
+│   └── fp-python/        # PyO3 bindings: 4 classes, ~105 methods, no wheel/pyproject yet (1,326 lines)
 ├── artifacts/perf/       # Optimization round baselines and proofs
 ├── artifacts/phase2c/    # Conformance packet artifacts and drift history
+├── artifacts/bench/      # vs-pandas benchmark rows (schema v4: ELF sha, A/A null, balanced square)
 └── .beads/               # Local-first issue tracker
 ```
 
@@ -191,7 +195,7 @@ frankenpandas/
 | **XML** | `read_xml_str` | `write_xml_string` / `to_xml` | ✓ | ✓ | `XmlWriteOptions` (`include_index`, `root_name` default `"data"`, `row_name` default `"row"`, `index_label`) |
 | **LaTeX** | — | `write_latex_string` / `to_latex` / `write_latex` (path) | ✓ | ✓ | `LatexWriteOptions` (`include_index`, `na_rep`, `index_label`, `escape`); pandas' richer option matrix (caption, label, position, longtable, multicolumn/multirow) is on the roadmap |
 | **Markdown** | — | `to_markdown` / `write_markdown_string_with_options` / `write_markdown` (path) | ✓ | ✓ | `MarkdownWriteOptions` (`include_index`, `na_rep`, `index_label`); `to_markdown` `tablefmt` accepts `"github"` / `"pipe"` / `"grid"` / `"plain"` / `"simple"`; default is `"github"` |
-| **Pickle** | `read_pickle_bytes` | `write_pickle_bytes` | ✓ | ✓ | Round-trip via serde + bincode |
+| **Pickle** | `read_pickle_bytes` | `write_pickle_bytes` | ✓ | ✓ | Round-trip via `serde-pickle` (protocol 2 or 3) carrying a FrankenPandas envelope; `pandas.read_pickle` sees a dict, not a DataFrame, and foreign pickles are refused |
 | **Stata** | `read_stata_bytes` | `write_stata_bytes` | ✓ | ✓ | Round-trip (subset of `.dta` features) |
 | **ORC** | `read_orc_bytes` | `write_orc_bytes` | — | — | API retained but fail-closed under the workspace no-Tokio policy until a native Tokio-free backend lands |
 | **HDF5** | `read_hdf_*` | `to_hdf` | ✓ | ✓ (optional `hdf5` feature) | Keyed-snapshot layout (PyTables-compatible table/storer pending) |
@@ -307,9 +311,13 @@ DataFrame
 └── allows_duplicate_labels: Option<bool>     ← Persisted "flags.allows_duplicate_labels"
 
 Column
-├── dtype: DType  ← {Null, Bool, Int64, Float64, Utf8, Categorical, Timedelta64, Sparse}
-├── values: Vec<Scalar>                       ← Typed values
-└── validity: ValidityMask                    ← Bitpacked null bitmap
+├── dtype: DType  ← {Null, Bool, BoolNullable, Int64, Int64Nullable, Float64, Float64Nullable,
+│                     Utf8, Categorical, Timedelta64, Datetime64{tz}, Period, Interval, Sparse}
+├── values: ScalarValues                      ← Eager Arc<[Scalar]> OR a lazy typed backing
+│                                               (Arc<[f64]>, Arc<[i64]>, contiguous Utf8, …)
+│                                               that materializes Vec<Scalar> on demand
+├── validity: ValidityMask                    ← Bitpacked null bitmap
+└── data: Option<ColumnData>                  ← AG-10 contiguous typed view cache
 
 Scalar  = Null(NullKind) | Bool(bool) | Int64(i64) | Float64(f64) | Utf8(String)
         | Timedelta64(i64) | Datetime64(i64) | Period(i64) | Interval(Interval)
@@ -895,9 +903,9 @@ Functions matching pandas top-level API:
 
 ### vs-pandas Scorecard
 
-FrankenPandas performance is measured head-to-head against pandas 2.2.3 using identical workloads. See [`artifacts/perf/SCORECARD.md`](artifacts/perf/SCORECARD.md) for the current per-category scorecard.
+FrankenPandas performance is measured head-to-head against pandas 2.2.3 using identical workloads, with the incumbent live in the same invocation, an A/A null control per arm, a balanced ABBAABBA square, and a bootstrap median-CI gate. The current instrument is the certified census, `scripts/current_loss_census.py`, over `artifacts/bench/`: on 2026-09-02 it reported 143 certified lanes, a geometric-mean ratio of about 4x, every category above 1.0x, and 10 lanes still losing (the worst is `df_transpose_full_materialize` at 0.004x, a 2-D block-storage floor). [`artifacts/perf/SCORECARD.md`](artifacts/perf/SCORECARD.md) is a hand-maintained narrative whose verdict table dates from 2026-06-02 and is pending regeneration from the census.
 
-Benchmarks run on `release-perf` profile (LTO, opt-level=3). Each category geomean must exceed 1.0x to validate the "exceeds pandas" claim for that category. Categories below parity are documented honestly.
+Benchmarks run on `release-perf` profile (LTO, opt-level=3). Each category geomean must exceed 1.0x to validate the "exceeds pandas" claim for that category. Categories and lanes below parity are documented honestly; a certified loss is reported as a loss.
 
 ```bash
 # Run benchmarks
@@ -1091,12 +1099,12 @@ All error types are re-exported through the `frankenpandas` facade crate.
 | fp-expr tests | ~64 | Expression parsing, eval/query, @local variables, chained comparison, backtick columns |
 | fp-runtime tests | ~40 | RuntimePolicy, EvidenceLedger, ConformalGuard, RaptorQ envelopes, recovery deadlines |
 | fp-frankentui tests | ~22 | TUI snapshot model, E2E scenario harness |
-| **fp-conformance tests** | **1,252 packets + hundreds of live-oracle tests** | Differential conformance against pandas oracle (live + fixture replay) |
+| **fp-conformance tests** | **1,341 packets + 832 `live_oracle_*` and 155 `conformance_*` tests** | Differential conformance against pandas oracle (live + fixture replay). These execute a real differential only when a pandas oracle is reachable: the pinned `.venv-oracle` (auto-detected) or `FP_PYTHON_BIN`. Without one they report PASS by skipping. |
 | Property-based (proptest) | 100+ | DType coercion, IO round-trip (CSV/JSON/SQL/Excel/Feather/Parquet/Arrow IPC), ValidityMask algebra, DataFrame arithmetic invariants, stateful op-chain |
 | Fuzz harnesses | **30 targets** under `fuzz/fuzz_targets/` | Parquet IO, Arrow IPC stream, scalar cast, Series arithmetic, groupby_sum, join, column arithmetic, Excel IO, index alignment, shift metamorphic, eval/query, semantic_eq, pivot_table dispatch, groupby agg dispatch, rolling window, parallel + TSan, SQL read, DataFrame constructor + merge |
 | Metamorphic tests | Several families | Null/NaN, join/reshape, value_counts, cumsum round-trip, quantile interpolation invariants, cov_with_options, GroupBy idxmin/idxmax Utf8, shift inner-overlap |
 
-**Total: 5,173 `#[test]` markers in `src/`, plus hundreds of live-pandas-oracle test cases, plus 1,252 packet JSON files with 1,265 fixtures.**
+**Total: 7,991 `#[test]` markers under `crates/*/src` (8,753 including `crates/*/tests`), plus 1,341 packet JSON files (as of 2026-09-02).**
 
 ### Conformance Gate
 
@@ -1106,7 +1114,7 @@ All error types are re-exported through the `frankenpandas` facade crate.
 
 Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. **1,252 packet JSON files spanning 1,265 fixtures** cover alignment, join, groupby, concat, filter, CSV, dtype, null semantics, resample, rolling, groupby rolling/resample, datetime accessors, string accessors, MultiIndex, IO round-trip, and more. The live pandas oracle runs in CI on every PR (with system-pandas fallback). The drift history ledger (`artifacts/phase2c/drift_history.jsonl`) tracks parity trends over time.
 
-**14 documented divergences** in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md): 2 in the "Resolved Divergences" section (DISC-005 and DISC-013), the remaining 12 labeled ACCEPTED / INVESTIGATING / WILL-FIX. Each carries full root-cause analysis, status, affected test cases, and a review date so users hitting these failures find the explanation without having to re-derive the divergence.
+**26 documented divergence entries** (DISC-001 through DISC-026) in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md), labeled ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED. Each carries full root-cause analysis, status, affected test cases, and a review date so users hitting these failures find the explanation without having to re-derive the divergence.
 
 ## Missing Data Handling
 
@@ -1753,32 +1761,32 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
-| No Python bindings yet | PyO3 bindings planned (`br-frankenpandas-4clx` release umbrella) | Use the Rust API directly, or interop via Feather/Parquet for hand-off |
-| SQL has one bundled backend (`rusqlite`) | The generic `SqlConnection` trait + `SqlInspector` is feature-complete; PostgreSQL/MySQL/MS-SQL/Oracle slices are tracked under `br-frankenpandas-fd90` | Use SQLite via `rusqlite::Connection::open[_in_memory]`, or implement `SqlConnection` for another backend |
-| Single-threaded execution | No parallel execution yet | Profile-proven fast paths + arena-backed groupby compensate; rayon parallelism on the roadmap |
+| Python bindings are partial and unpackaged | `crates/fp-python` binds DataFrame, Series, GroupBy and Styler (~105 methods, roughly 18% of the pandas DataFrame/Series surface by name, no Index classes, no `loc`/`iloc`, no arithmetic dunders) and there is no `pyproject.toml`, wheel, or Python test suite yet | Use the Rust API directly, or interop via Feather/Parquet for hand-off |
+| SQL has two bundled backends (`rusqlite` by default, `mysql` behind `sql-mysql`) | The generic `SqlConnection` trait + `SqlInspector` is feature-complete; `sql-postgresql` is an empty placeholder feature with no adapter (a Tokio-free driver is required by workspace policy) | Use SQLite or MySQL, or implement `SqlConnection` for another backend |
+| Parallelism is hand-rolled, not pooled | Hot paths fan out with `std::thread::scope` (about 140 sites) and one persistent worker pool serves string kernels; there is no rayon and no global pool, so each parallel call pays a spawn cost of roughly 350–420 µs, which is the main structural loss at 100k-row sizes | Set `FP_ELEMENTWISE_PAR_MIN` / `FP_*_MAX_WORKERS` to tune thresholds; a shared pool is the tracked fix |
 | Native plot rendering deferred | `DataFrame::plot` / `hist` / `boxplot`, `Series::plot` / `hist`, and GroupBy plotting hooks now return backend-neutral `PlotSpec` / `HistogramSpec` / `BoxPlotSpec` data while the plotters/charming renderer is pending | Feed the returned specs to an external renderer, or use Feather/Parquet/CSV export with pandas/matplotlib |
-| Clipboard IO is deferred | System clipboard dependency | Use CSV/JSON string export and copy through the host application |
+| Clipboard IO needs an OS clipboard tool | `read_clipboard` / `to_clipboard` shell out to `wl-paste`/`xclip`/`xsel`/`pbpaste` (and the copy equivalents); with none installed they return a typed clipboard error, as pandas does without pyperclip backends | Install one of the tools, or use CSV/JSON string export |
 | GBQ IO is deferred | Google Cloud SDK dependency | Export to Parquet/CSV and use `bq load` |
-| SAS reader is deferred | Read-only proprietary format | Convert externally with `sas7bdat` or `pyreadstat` first |
+| SPSS reader is deferred | No first-party Rust `.sav` reader at parity; `read_sas` (sas7bdat and XPORT) is implemented | Convert externally with `pyreadstat` first |
 | Native Datetime DType is internally `Int64` ns timestamps | Datetime/Timedelta/Period scalars exist but DataFrame columns store nanosecond Int64 codes | Use the `.dt()` accessor for component extraction; for serde, use `to_period` / `to_timestamp` to normalize |
 | Sparse storage is dense under the hood | `SparseDType` is reportable and the `SparseAccessor` API works, but `Column` storage is still `Vec<Scalar>` (see DISC-009) | Use the `.sparse()` accessor to interrogate density / nnz on a Series; compressed-sparse physical storage is a future epic |
 | GroupBy.apply has shape-explicit variants | Rust static typing forces `apply_scalar` / `apply_series` / `apply_series_stacked` (see DISC-010) instead of pandas' shape-inferring `apply` | Pick the variant that matches your closure's output shape |
-| Int64 → Float64 promotion on null introduction | We do not yet emulate pandas' nullable-extension Int64 type (DISC-011 / DISC-014) | Aggregations that introduce nulls produce Float64; cast back to Int64 with `astype` if downstream code requires it |
+| Null-introduction promotion policy is still being settled | The nullable extension dtypes exist (`DType::Int64Nullable`, `Float64Nullable`, `BoolNullable`) and are used across storage, kernels and IO; what remains open is which paths promote `Int64` to `Float64` on null introduction versus keeping `Int64` with a validity mask (DISC-011), and the constructor dtype parser still lowercases `"Int64"` (tracked) | Cast explicitly with `astype` where downstream code depends on one representation |
 | Mixed naive/tz-aware CSV `parse_dates` falls back to raw strings | Without `utc=True`, normalization is ambiguous (DISC-012) | Pass `utc=True` to `to_datetime` or `CsvReadOptions` |
 
 ## FAQ
 
 **Q: How compatible is this with pandas?**
-A: We target absolute API parity. The same method names, same parameter names, same edge-case behavior. Differential conformance tests verify against the actual pandas oracle on every PR. **1,252 packet JSON files + 1,265 fixtures + live oracle in CI** is the current evidence. 14 divergences are documented in `DISCREPANCIES.md`, every one with root-cause analysis, affected tests, and a reproducible packet.
+A: We target absolute API parity. The same method names, same parameter names, same edge-case behavior. Differential conformance tests verify against a pinned live pandas oracle in CI and on any checkout with `.venv-oracle`. **1,341 packet JSON files, of which 1,323 matched live pandas in the 2026-09-01 full pass**, is the current evidence. 26 divergence entries are documented in `DISCREPANCIES.md`, every one with root-cause analysis, affected tests, and a reproducible packet.
 
 **Q: Why not just use Polars?**
-A: Polars is excellent but has a different API (lazy evaluation, no index alignment, different method names). FrankenPandas targets Rust teams that want pandas semantics rather than Polars' query-planner style: identical method names, identical edge-case behavior, identical alignment rules. Python drop-in requires the planned PyO3 bindings; today FrankenPandas is a Rust library.
+A: Polars is excellent but has a different API (lazy evaluation, no index alignment, different method names). FrankenPandas targets Rust teams that want pandas semantics rather than Polars' query-planner style: identical method names, identical edge-case behavior, identical alignment rules. Python drop-in is not there yet: the PyO3 crate covers a small slice of the surface and ships no wheel; today FrankenPandas is a Rust library.
 
 **Q: Is `unsafe` code used anywhere?**
 A: No. Every crate in the workspace uses `#![forbid(unsafe_code)]`. Memory safety comes from the Rust type system, not audits.
 
 **Q: How do I use this from Python?**
-A: PyO3 bindings are a planned future step. Currently this is a pure Rust library.
+A: A PyO3 binding crate (`crates/fp-python`) exists but is partial and has no packaging, so nothing installable ships. Treat FrankenPandas as a Rust library until a wheel lands.
 
 **Q: What's the `EvidenceLedger`?**
 A: Every alignment decision, dtype coercion, and policy override is logged with Bayesian confidence scores and the evidence terms (log-likelihood ratios) that drove each decision. This creates an auditable trail of exactly how your data was transformed. pandas makes these same decisions silently with no record.
@@ -1796,7 +1804,7 @@ A: We never read, reference, or copy from the pandas source code. We study panda
 A: Three distinct null kinds: `NullKind::Null` (generic missing), `NullKind::NaN` (float not-a-number), `NullKind::NaT` (not-a-time). `Float64(NaN)` also counts as missing. `is_missing()` returns true for all of these. `semantic_eq()` treats `NaN == NaN` as true (unlike IEEE 754), matching pandas behavior, and bridges all Null kinds.
 
 **Q: What's the memory overhead vs pandas?**
-A: Higher per-cell than pandas' numpy-backed primitives. `Column` persistently stores `Vec<Scalar>` (a tagged enum per element); each cell carries the dtype tag plus the largest-variant footprint, so a Float64 column is roughly 3-4× the bytes of an equivalent numpy `float64` array. The trade-off buys uniform null-handling and dtype-erased generic kernels. Where it matters, AG-10 materializes a contiguous typed view (`ColumnData::{Float64(Vec<f64>), Int64(Vec<i64>), ...}`) on the hot path so vectorized arithmetic still runs against native slices and SIMD auto-vectorizes. `ValidityMask` uses 1 bit per element (vs pandas' 8-byte nullable dtype), and arena-backed GroupBy/Join operations avoid per-group heap fragmentation.
+A: Close to pandas for typed numeric columns, higher once a scalar API forces boxing. Numeric columns are stored as typed backings (`Arc<[f64]>`, `Arc<[i64]>`, contiguous Utf8 byte buffers) at 8 bytes per element, with a lazily materialized `Vec<Scalar>` (16 bytes per element plus the dtype tag) built only when a scalar-per-element API is called. The typed backing is also what the AG-10 `ColumnData` view exposes to vectorized kernels, so SIMD auto-vectorization runs against native slices. The cost shows up on public scalar APIs that box every cell (that is why `Series.combine_first(...).values()` on 2M rows still measures well below pandas). `ValidityMask` uses 1 bit per element (vs pandas' 8-byte nullable dtype), and arena-backed GroupBy/Join operations avoid per-group heap fragmentation.
 
 **Q: How do typed Index variants differ from a base `Index`?**
 A: A base `Index` holds heterogeneous `IndexLabel`s (Int64 / Utf8 / Datetime64 / Timedelta64 / Period). The typed variants (`DatetimeIndex`, `TimedeltaIndex`, `PeriodIndex`, `RangeIndex`, `CategoricalIndex`) enforce homogeneity and expose pandas-parity methods specific to that type (e.g., `DatetimeIndex::tz_localize`, `PeriodIndex::asfreq`, `RangeIndex` lazy materialization). They live inside the `MultiIndexOrIndex` algebraic type that flows through the public API.
@@ -1804,25 +1812,26 @@ A: A base `Index` holds heterogeneous `IndexLabel`s (Int64 / Utf8 / Datetime64 /
 **Q: Can I use this for production ETL pipelines?**
 A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested (**5,000+ in-source tests** including adversarial inputs, property-based fuzzing, and a live pandas oracle in CI). This is pre-1.0 software, so API stability is not yet guaranteed, but the correctness bar is high. The known divergences are documented in `DISCREPANCIES.md`.
 
-**Q: Why are there so few open beads?**
-A: At the time of this writing, **only 2 of 1,988 tracked beads remain open** (`br-frankenpandas-ctmet` for dtype drift in 25 conformance packets, and `br-frankenpandas-qrn2w` for `groupby_sum` dropping Timedelta64). The project went through a 19-pass review-mode audit in 2026-04 that triaged the entire surface, and follow-up sessions through 2026-05 closed all but those two.
+**Q: How big is the open backlog?**
+A: As of 2026-09-02 the tracker holds about 4,000 beads, of which roughly 80 are not closed (open, in progress, or blocked). Most of the open work is datetime/timezone parity, dtype-promotion policy decisions, conformance-harness integrity, and vs-pandas performance floors; `br ready` shows what is actionable. The April 2026 review-mode audit that once drove the backlog to two items is history, not the current state.
 
 ## Roadmap
 
 | Priority | Feature | Status |
 |----------|---------|--------|
-| High | 0.1.0 release to crates.io with signed tag | Tracked by `br-frankenpandas-4clx`; release-plz workflow already in CI |
-| High | PyO3 Python bindings | Planned; would enable `import frankenpandas as fpd` from Python |
-| High | Tokio-free PostgreSQL `SqlConnection` adapter | Tracked by `br-frankenpandas-fd90` slices 2-3; `sql-postgresql` placeholder feature already in place |
-| High | MySQL `SqlConnection` adapter | `br-frankenpandas-fd90` slice 3; `sql-mysql` placeholder feature already in place |
-| Medium | Native nullable Int64 (DISC-011 / DISC-014 fix) | Required to close 25 dtype-drift packets in `br-frankenpandas-ctmet` |
-| Medium | Parallel execution (rayon) | Architecture supports it (columns are independent) |
+| Done | Release to crates.io | 0.2.0 was published on 2026-07-27 (`frankenpandas`, `fp-*`); tags are annotated, not yet signed, and about 1,700 commits have landed since |
+| High | Signed tags and a 0.3.0 release | Signing keys in `AUTHORS.md` are still pending; cut the next release from a green CI batch |
+| High | Python packaging for `fp-python` | The binding crate exists; needs `pyproject.toml` + maturin, pandas argument orders, `KeyError`-class exceptions, `loc`/`iloc`/dunders, a wheel job, and a pytest differential harness before `import frankenpandas as pd` is honest |
+| High | Tokio-free PostgreSQL `SqlConnection` adapter | `sql-postgresql` is an empty placeholder feature; no adapter code exists |
+| Done | MySQL `SqlConnection` adapter | `MysqlConnection` behind `sql-mysql` (no live-server integration test yet) |
+| Medium | Null-introduction promotion policy (DISC-011) | Nullable dtypes exist; the per-path promotion rule and the constructor dtype parser are the open items |
+| Medium | Shared thread pool | Replace per-call `thread::scope` fan-out (about 140 sites) with one pool; the spawn cost is the dominant loss at 100k rows |
 | Medium | Native plotting via plotters/charming | Public plotting hooks present and return `PlotSpec` / `BoxPlotSpec` data; backend implementation would enable PNG/SVG output |
 | Medium | Lazy evaluation / query planning | Would enable optimization across chained operations |
 | Low | Native HDF5 PyTables-compatible table/storer layouts | `read_hdf` / `to_hdf` provide a keyed snapshot surface today (feature-gated) |
-| Low | Clipboard IO | Needs system clipboard access |
+| Done | Clipboard IO | Implemented via OS clipboard tools (`wl-paste`/`xclip`/`xsel`/`pbpaste` and copy equivalents) |
 | Low | `to_gbq` Google BigQuery writer | Needs Google Cloud SDK |
-| Low | SAS reader | Read-only proprietary format |
+| Done | SAS reader | `read_sas` handles sas7bdat and XPORT; SPSS (`read_spss`) remains deferred |
 
 ## Key Documents
 
@@ -1837,7 +1846,7 @@ A: At the time of this writing, **only 2 of 1,988 tracked beads remain open** (`
 | `docs/planning/PANIC_CONTRACT_COVERAGE.md` | Per-API `# Panics` contract enforcement |
 | `docs/planning/ERROR_CONFORMANCE.md` | Pandas error catalog and FrankenPandas error parity status |
 | `docs/planning/DIFFERENTIAL_FUZZ_DESIGN.md` | Differential fuzz design notes |
-| `crates/fp-conformance/DISCREPANCIES.md` | 14 documented divergences from pandas (DISC-005 + DISC-013 fully RESOLVED; 12 ACCEPTED / INVESTIGATING / WILL-FIX) |
+| `crates/fp-conformance/DISCREPANCIES.md` | 26 numbered divergence entries from pandas (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED) |
 | `artifacts/perf/` | Optimization round baselines, opportunity matrices, proofs |
 | `artifacts/phase2c/` | Conformance packet artifacts, drift history, compat-closure attestation packs |
 
@@ -2210,7 +2219,7 @@ Beyond the differential harness, CI also runs:
 
 - `cargo fmt --check`: formatting hygiene
 - `cargo clippy --workspace --all-targets -- -D warnings`: pedantic + nursery lints
-- `cargo test --workspace`: all 5,000+ unit tests
+- `cargo test --workspace`: all 8,700+ unit tests
 - `cargo doc --workspace --no-deps` with `-D warnings`: rustdoc completeness
 - `cargo audit`: security advisories
 - `cargo deny check`: license/source policy
@@ -2218,7 +2227,7 @@ Beyond the differential harness, CI also runs:
 - **Fuzz regression corpus**: every PR replays the regression seeds for all 30 fuzz targets
 - **Perf baseline gate**: `cargo test -p fp-conformance --test perf_baselines -- --ignored` with budgets enforced
 
-A green PR has passed all of these.
+A green run has passed all of these. Cadence matters: the full matrix runs on pull requests and on a daily schedule (the push trigger was removed on 2026-08-22 because runs were superseded faster than they completed), and a lighter fast gate (`cargo fmt --check` per crate, `cargo check --workspace --all-targets`, leaf-crate unit tests) runs every two hours. `cargo fmt --check` is run per crate because rustfmt cannot format the two largest crate roots (fp-columnar, fp-frame) on any available runner; their formatting is unenforced until they are split.
 
 ## A Note On `unsafe`
 
@@ -2610,17 +2619,13 @@ The ledger is append-only. Operators inspecting historical decisions can replay 
 
 `decision_to_card(record)` (in `fp-runtime`) converts a single ledger entry to a compact, human-readable `GalaxyBrainCard` string for use in CLI output and TUI dashboards.
 
-## Designed-For-Threads, Currently Single-Threaded
+## Threading Model
 
 The codebase is internally thread-safe (no global mutable state, no `static mut`, no `RefCell` in shared types). `DataFrame`, `Series`, `Column`, `Index`, `MultiIndex`, and `ValidityMask` all implement `Send + Sync` where their components do. `ScalarKey`, `EvidenceLedger`, `DecisionRecord` are all `Send + Sync`.
 
-What we *don't* do today is exploit that thread-safety inside operations. Every `groupby`, `merge`, `rolling` operation runs on the calling thread. Adding rayon-style parallelism is a tracked roadmap item, and the architecture supports it cleanly because:
+Operations do exploit that today, but without a shared pool. Hot paths (elementwise math, column-parallel DataFrame ops, sort and take gathers, CSV/JSON parsing, joins, groupby scatter) fan out with `std::thread::scope` at roughly 140 call sites, sized from a cached `available_parallelism()`, and string kernels dispatch through one persistent worker pool. There is no rayon dependency. Worker counts and thresholds are tunable through environment variables (`FP_ELEMENTWISE_PAR_MIN`, `FP_ELEMENTWISE_MAX_WORKERS`, `FP_DOT_MAX_WORKERS`, and friends), and the benchmark harness records the thread count each arm actually used.
 
-- Columns are independent. A per-column closure can run on any thread without coordination.
-- `ValidityMask` operations are stateless (input → output, no shared state).
-- The arena allocator in GroupBy / Join is per-operation, not global; each parallel groupby task could own its own arena.
-
-The current single-threaded baseline still outperforms pandas on most operations because of (a) the AACE alignment-skip fast path, (b) the dense Int64 groupby path, (c) AG-10 typed-array vectorization enabling SIMD auto-vectorization, and (d) zero per-row Python interpretation overhead. Adding parallelism on top of that is a known multiplicative win; it's deferred until other correctness work is done.
+The structural cost of this design is the per-call spawn: creating a scoped thread set costs roughly 350–420 µs on the reference host, which is more than pandas needs for an entire 100k-row elementwise op. That is why several 100k-row lanes lose while the same lanes win at 1M rows, and why replacing per-call fan-out with a shared pool is the tracked fix. The single-threaded fast paths still carry most wins at small sizes because of (a) the AACE alignment-skip fast path, (b) the dense Int64 groupby path, (c) AG-10 typed-array vectorization enabling SIMD auto-vectorization, and (d) zero per-row Python interpretation overhead.
 
 ## How to Add a New Pandas Method to FrankenPandas
 
@@ -2767,7 +2772,7 @@ Some IO formats have unusual gotchas worth knowing up-front:
 
 **Pickle / Stata / HDF5** are round-trip-tested but use simpler implementations than pandas. **ORC** is a retained API surface that fails closed until a Tokio-free native backend lands:
 
-- **Pickle** uses `serde` + `bincode` under the hood; it's semantically a Rust-canonical binary serde, not a literal pandas-pickle. Round-trip works *within* FrankenPandas; cross-tool interop with Python pandas pickle files is not supported.
+- **Pickle** writes a real pickle stream through `serde-pickle` (protocol 2 or 3, selectable), but the payload is a FrankenPandas envelope (a tagged split-orient JSON object), not a pickled pandas `DataFrame`. Round-trip works *within* FrankenPandas; `pandas.read_pickle` on the file yields a dict, and `read_pickle_bytes` refuses foreign pickles.
 - **Stata** supports the common `.dta` formats (114–119); exotic Stata 11 / 12 / 13 features are not implemented.
 - **ORC** previously rode on `orc-rust`, which pulled Tokio into the workspace. The `read_orc*` / `write_orc*` functions now return a deterministic policy error until a no-Tokio backend replaces it.
 - **HDF5** is feature-gated (`hdf5` cargo feature, requires the `hdf5-metno` system dependency). The implementation provides a keyed-snapshot layout: every DataFrame is one HDF5 group with one dataset per column. PyTables-compatible table/storer layouts are a future epic.
@@ -2819,14 +2824,15 @@ A rough heat map of how compatible we are with pandas, by API family, as of 2026
 | Joins (Inner / Left / Right / Outer / Cross / Asof) | 🟢 | All directions + `tolerance` / `by` / `allow_exact_matches` on asof; `validate=` + `indicator=` + custom `suffixes=` on merge. |
 | MultiIndex (row + column) | 🟡 | DISC-006 notes scaffolded-not-full parity for advanced ops. Full parity for set / get / xs / IO round-trip. |
 | IO: CSV / JSON / JSONL / Parquet / Excel / Feather / IPC | 🟢 | All seven, including the full pandas option matrices. |
-| IO: HTML / XML / LaTeX / Markdown / Pickle / Stata | 🟢 | All six, with the caveat that Pickle is FrankenPandas-canonical bincode, not Python-pickle compatible. |
+| IO: HTML / XML / LaTeX / Markdown / Pickle / Stata | 🟢 | All six, with the caveat that Pickle carries a FrankenPandas envelope inside a real pickle stream, so it is not interchangeable with pandas pickle files. |
 | IO: ORC | 🔴 | Public API retained, but fail-closed under the no-Tokio policy until a native Tokio-free backend lands. |
 | IO: HDF5 | 🟡 | Feature-gated; keyed-snapshot layout, not PyTables-compatible. |
 | IO: SQL (SQLite) | 🟢 | Full read / write / chunked / inspector surface. |
-| IO: SQL (PostgreSQL / MySQL / others) | 🔴 | Generic trait is in place; bundled adapters are not. Tracked under `br-frankenpandas-fd90`. |
+| IO: SQL (MySQL) | 🟢 | `MysqlConnection` behind the `sql-mysql` feature; dtype-mapping tests only, no live-server integration test yet. |
+| IO: SQL (PostgreSQL / others) | 🔴 | Generic trait is in place; `sql-postgresql` is an empty placeholder feature with no adapter. |
 | Sparse (`.sparse()` accessor + `SparseDType`) | 🟡 | DISC-009: accessor surface works but physical storage is still dense. |
 | `apply` shape variants | 🟡 | DISC-010: Rust requires explicit shape (`apply_scalar` / `apply_series` / `apply_series_stacked`). Function-wise equivalent. |
-| Python bindings (PyO3) | 🔴 | Not shipped. Tracked under `br-frankenpandas-4clx` release umbrella. |
+| Python bindings (PyO3) | 🟡 | `crates/fp-python` binds a small slice (DataFrame, Series, GroupBy, Styler; no Index classes, no `loc`/`iloc`, no arithmetic dunders) and has no `pyproject.toml`, wheel, stubs, or Python tests; nothing installable ships. |
 | Plotting (`plot` / `hist` / `boxplot`) | 🟡 | Returns backend-neutral `PlotSpec` / `BoxPlotSpec` / `HistogramSpec` data. Renderer is deferred. |
 | Clipboard / GBQ | 🔴 | Deferred. |
 
@@ -2929,7 +2935,7 @@ Both Polars and DuckDB are excellent and overlap with FrankenPandas on parts of 
 - Want lazy / streaming execution and a real query planner (Polars optimizes across chains; FrankenPandas doesn't).
 - Have data larger than RAM and need out-of-core processing.
 - Are comfortable rewriting pandas idioms into Polars' expression DSL (it's a clean DSL but a different API).
-- Want production-grade parallelism today (Polars uses rayon by default; FrankenPandas is single-threaded).
+- Want production-grade parallelism today (Polars uses rayon by default; FrankenPandas fans out with std threads per call and has no shared pool yet).
 
 **DuckDB** is the right tool if you:
 - Want to express the analysis in SQL.
