@@ -6,7 +6,7 @@
 //! import frankenpandas as fp
 //!
 //! # Create a Series
-//! s = fp.Series("values", [1, 2, 3, 4, 5])
+//! s = fp.Series([1, 2, 3, 4, 5], name="values")
 //! print(s.sum())  # 15
 //!
 //! # Create a DataFrame
@@ -109,18 +109,52 @@ pub struct PySeries {
 impl PySeries {
     /// Create a new Series from a name and list of values.
     #[new]
-    #[pyo3(signature = (name, values))]
-    fn new(py: Python<'_>, name: &str, values: &Bound<'_, PyList>) -> PyResult<Self> {
-        let scalars: Vec<Scalar> = values
+    /// `Series(data, index=None, name=None)`, in pandas' argument order.
+    ///
+    /// The binding used to take `(name, values)`, so `fp.Series([1, 2, 3])`,
+    /// the first thing anyone types, was a TypeError. `index` accepts a list of
+    /// ints or strings; `name` defaults to the empty string because the Rust
+    /// `Series` always carries one.
+    #[pyo3(signature = (data, index=None, name=None))]
+    fn new(
+        py: Python<'_>,
+        data: &Bound<'_, PyList>,
+        index: Option<&Bound<'_, PyList>>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let scalars: Vec<Scalar> = data
             .iter()
             .map(|v| py_to_scalar(py, &v))
             .collect::<PyResult<Vec<_>>>()?;
 
-        let labels: Vec<IndexLabel> = (0..scalars.len())
-            .map(|i| IndexLabel::Int64(i as i64))
-            .collect();
+        let labels: Vec<IndexLabel> = match index {
+            Some(index) => index
+                .iter()
+                .map(|label| {
+                    if let Ok(value) = label.extract::<i64>() {
+                        Ok(IndexLabel::Int64(value))
+                    } else if let Ok(value) = label.extract::<String>() {
+                        Ok(IndexLabel::Utf8(value))
+                    } else {
+                        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "Series: index labels must be ints or strings",
+                        ))
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?,
+            None => (0..scalars.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect(),
+        };
+        if labels.len() != scalars.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of values ({}) does not match length of index ({})",
+                scalars.len(),
+                labels.len()
+            )));
+        }
 
-        let series = Series::from_values(name, labels, scalars)
+        let series = Series::from_values(name.unwrap_or(""), labels, scalars)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         Ok(PySeries { inner: series })
@@ -619,9 +653,16 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Return a column as a Series.
+    /// Return a column as a Series. A missing column is a `KeyError`, as in
+    /// pandas; the infallible `get_column` used here before fabricated an
+    /// all-NaN column instead of raising.
     fn __getitem__(&self, col: &str) -> PyResult<PySeries> {
-        let series = self.inner.get_column(col);
+        let column = self
+            .inner
+            .column(col)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.to_owned()))?;
+        let series = Series::new(col, self.inner.index().clone(), column.clone())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: series })
     }
 
@@ -915,8 +956,18 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Group by columns.
-    fn groupby(&self, by: Vec<String>) -> PyResult<PyGroupBy> {
+    /// Group by one column name or a list of them, as `df.groupby("city")`
+    /// and `df.groupby(["city", "year"])` both do in pandas.
+    fn groupby(&self, by: &Bound<'_, PyAny>) -> PyResult<PyGroupBy> {
+        let by: Vec<String> = if let Ok(single) = by.extract::<String>() {
+            vec![single]
+        } else {
+            by.extract::<Vec<String>>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "groupby: `by` must be a column name or a list of column names",
+                )
+            })?
+        };
         let by_refs: Vec<&str> = by.iter().map(|s| s.as_str()).collect();
         let _gb = self
             .inner

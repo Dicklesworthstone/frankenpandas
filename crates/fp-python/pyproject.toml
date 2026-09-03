@@ -1,0 +1,40 @@
+# Packaging for the `frankenpandas` Python extension (crates/fp-python).
+#
+# Until 2026-09-02 nothing in the repository could build a wheel: the crate
+# existed, four `fp-python-v0.x` tags had been cut, and `import frankenpandas`
+# was impossible on any machine. This is the minimum honest packaging path:
+#
+#     maturin build --release -m crates/fp-python/Cargo.toml -i python3.13
+#     pip install target/wheels/frankenpandas-*.whl
+#
+# The `extension-module` feature is passed here and ONLY here (see the note in
+# Cargo.toml: enabling it for `cargo test` makes every test binary fail to
+# link against libpython). The binding surface is still partial; see the
+# README's "Python bindings" rows before relying on it.
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "frankenpandas"
+description = "Clean-room Rust reimplementation of the pandas API, exposed to Python through PyO3"
+requires-python = ">=3.9"
+license = { text = "MIT with OpenAI/Anthropic rider; see LICENSE" }
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Scientific/Engineering",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/Dicklesworthstone/frankenpandas"
+Repository = "https://github.com/Dicklesworthstone/frankenpandas"
+
+[tool.maturin]
+features = ["extension-module"]
+module-name = "frankenpandas"
+strip = true
