@@ -56,6 +56,9 @@ fn live_oracle_unavailable_falls_back_to_fixture_when_enabled() {
     cfg.allow_system_pandas_fallback = false;
     cfg.allow_fixture_fallback = true;
     cfg.require_live_oracle = false;
+    // br-frankenpandas-00de2: opt out of the auto-detected pinned venv so
+    // there is genuinely no live oracle and the fixture fallback is exercised.
+    cfg.python_bin = "python3".to_owned();
 
     let report = super::run_packet_by_id(&cfg, "FP-P2C-001", super::OracleMode::LiveLegacyPandas)
         .expect("fixture fallback should recover live-oracle unavailability");

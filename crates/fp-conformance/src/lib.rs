@@ -25893,7 +25893,10 @@ mod tests {
             return;
         }
         let report = run_smoke(&cfg);
-        assert!(report.oracle_present, "a reachable oracle must be reported present");
+        assert!(
+            report.oracle_present,
+            "a reachable oracle must be reported present"
+        );
         assert!(report.fixture_count >= 1, "expected at least one fixture");
         assert!(report.strict_mode);
     }
