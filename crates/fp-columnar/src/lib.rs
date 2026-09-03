@@ -34433,12 +34433,6 @@ mod tests {
         assert_eq!(second.values(), expected.values());
     }
 
-    #[test]
-    /// A nullable column sliced by a contiguous range must produce EXACTLY what
-    /// the positions path produced. Covers a missing slot inside the window, one
-    /// outside it, and windows that straddle a 64-bit word boundary — the mask
-    /// is derived per output word, so an off-by-one there would silently shift
-    /// every missingness bit in the result.
     /// The word-oriented derive computes `source_validity & not_nan`. A fixture
     /// built by `from_f64_values` can never separate those two terms, because it
     /// DERIVES validity from NaN — every NaN already sits at an invalid slot, so
@@ -34498,6 +34492,11 @@ mod tests {
         }
     }
 
+    /// A nullable column sliced by a contiguous range must produce EXACTLY what
+    /// the positions path produced. Covers a missing slot inside the window, one
+    /// outside it, and windows that straddle a 64-bit word boundary — the mask
+    /// is derived per output word, so an off-by-one there would silently shift
+    /// every missingness bit in the result.
     #[test]
     fn take_contiguous_range_on_a_nullable_column_matches_take_positions() {
         // NON-VACUITY: the nullable range must SHARE the source backing, not
@@ -34713,6 +34712,10 @@ mod tests {
         );
     }
 
+    // br-frankenpandas-1rrs8: this `#[test]` had been stacked onto
+    // `take_contiguous_range_derive_separates_validity_from_nan` by a later
+    // insertion (2b2f25995), so the function compiled as dead code and never ran.
+    #[test]
     fn take_contiguous_range_uses_typed_views_without_positions() {
         let f64_data: Vec<f64> = (0..160)
             .map(|i| if i == 72 { -0.0 } else { i as f64 * 0.5 })

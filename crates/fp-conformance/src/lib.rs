@@ -8102,7 +8102,18 @@ fn fuzz_expected_column_arith_dtype(
     // Per br-frankenpandas-3w0xn: Int64 ** Int64 stays Int64 (numpy/pandas:
     // int**int -> int64, with negative integer exponents raising in the kernel
     // before this oracle runs). Any float operand promotes Pow to Float64.
-    if matches!(op, ArithmeticOp::Pow) && !matches!(out_dtype, DType::Int64) {
+    //
+    // br-frankenpandas-6dv9d: a Null-dtype operand (an all-missing column) also
+    // promotes. `common_dtype(Int64, Null)` is Int64, but every power with a
+    // missing base or exponent is itself missing, and pandas has no all-missing
+    // int64 column: its analogue is float64 NaN, and measured on 2.2.3
+    // `Series([2,3,4]) ** Series([nan,nan,nan])` is float64. The fuzzer found
+    // exactly this input (CI run 33488811029, seed `ci_crash_20260901_b.bin`)
+    // and this rule keyed on the PROMOTED dtype, so it demanded Int64 where
+    // both pandas and fp-columnar answer Float64.
+    let null_operand =
+        matches!(left.dtype(), DType::Null) || matches!(right.dtype(), DType::Null);
+    if matches!(op, ArithmeticOp::Pow) && (!matches!(out_dtype, DType::Int64) || null_operand) {
         out_dtype = DType::Float64;
     }
     if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv) && matches!(out_dtype, DType::Int64)

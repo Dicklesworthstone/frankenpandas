@@ -2030,6 +2030,26 @@ fn fuzz_column_arith_bytes_accepts_div_seed() {
     fuzz_column_arith_bytes(seed).expect("div seed should satisfy invariants");
 }
 
+/// br-frankenpandas-6dv9d: the two inputs libFuzzer crashed on in CI
+/// (`fuzz-regression` job of run 33488811029 and the 2026-09-02 nightly).
+/// They are replayed here so the failure is visible to `cargo test` on a
+/// worker with no fuzz toolchain, and stays visible after the fix.
+#[test]
+fn fuzz_column_arith_bytes_accepts_ci_crash_20260901_a() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/ci_crash_20260901_a.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("2026-09-01 CI crash input (a) should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_accepts_ci_crash_20260901_b() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/ci_crash_20260901_b.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("2026-09-01 CI crash input (b) should satisfy invariants");
+}
+
 #[test]
 fn fuzz_column_arith_bytes_accepts_mod_zero_seed() {
     let seed = include_bytes!(
