@@ -29,7 +29,11 @@ fn expected_live_oracle_dataframe_or_skip(
     Some(expected)
 }
 
-fn assert_live_oracle_dataframe_merge_ordered_parity(fixture: super::PacketFixture, context: &str, live: bool) {
+fn assert_live_oracle_dataframe_merge_ordered_parity(
+    fixture: super::PacketFixture,
+    context: &str,
+    live: bool,
+) {
     let Some(expected) = expected_live_oracle_dataframe_or_skip(&fixture, context, live) else {
         return;
     };
@@ -39,7 +43,11 @@ fn assert_live_oracle_dataframe_merge_ordered_parity(fixture: super::PacketFixtu
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
-fn assert_live_oracle_dataframe_merge_asof_parity(fixture: super::PacketFixture, context: &str, live: bool) {
+fn assert_live_oracle_dataframe_merge_asof_parity(
+    fixture: super::PacketFixture,
+    context: &str,
+    live: bool,
+) {
     let Some(expected) = expected_live_oracle_dataframe_or_skip(&fixture, context, live) else {
         return;
     };
@@ -163,7 +171,11 @@ fn live_oracle_dataframe_merge_ordered_without_fill_matches_pandas() {
     }))
     .expect("fixture");
 
-    assert_live_oracle_dataframe_merge_ordered_parity(fixture, "merge_ordered no-fill oracle test", true);
+    assert_live_oracle_dataframe_merge_ordered_parity(
+        fixture,
+        "merge_ordered no-fill oracle test",
+        true,
+    );
 }
 
 #[test]
@@ -300,7 +312,11 @@ fn live_oracle_dataframe_merge_asof_allow_exact_matches_false_matches_pandas() {
     // br-frankenpandas-l7r1p MEASURED DIVERGENCE (live pandas 2.2.3):
     //   column 'quote' idx=0: actual Float64(200.0), expected Null(NaN)
     // the allow_exact_matches=false boundary is off by one row.
-    assert_live_oracle_dataframe_merge_asof_parity(fixture, "merge_asof exact-match oracle test", false);
+    assert_live_oracle_dataframe_merge_asof_parity(
+        fixture,
+        "merge_asof exact-match oracle test",
+        false,
+    );
 }
 
 #[test]
@@ -444,5 +460,9 @@ fn live_oracle_dataframe_merge_asof_by_group_and_no_exact_matches_matches_pandas
     //   columns: actual ["group_x","time","val","quote"]
     //          expected ["group_x","time","val","group_y","quote"]
     // the right frame's `by` column is DROPPED from the output.
-    assert_live_oracle_dataframe_merge_asof_parity(fixture, "grouped merge_asof oracle test", false);
+    assert_live_oracle_dataframe_merge_asof_parity(
+        fixture,
+        "grouped merge_asof oracle test",
+        false,
+    );
 }

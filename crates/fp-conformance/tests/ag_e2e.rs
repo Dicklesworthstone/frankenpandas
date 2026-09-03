@@ -1,6 +1,5 @@
 // Paired index walks over left/right position vectors in this e2e comparison.
 #![allow(clippy::needless_range_loop)]
-
 #![forbid(unsafe_code)]
 
 //! AG-E2E: End-to-End Integration Test Suite for Alien Graveyard Optimizations

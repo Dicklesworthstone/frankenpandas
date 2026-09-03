@@ -8059,12 +8059,13 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
                 ));
             }
 
-            let owned_idempotent = cast_scalar_owned(result.clone(), target.clone()).map_err(|err| {
-                format!(
-                    "successful cast lost idempotence on owned path: \
+            let owned_idempotent =
+                cast_scalar_owned(result.clone(), target.clone()).map_err(|err| {
+                    format!(
+                        "successful cast lost idempotence on owned path: \
                      value={value:?} target={target:?} result={result:?} err={err:?}"
-                )
-            })?;
+                    )
+                })?;
             if owned_idempotent != result {
                 return Err(format!(
                     "owned cast idempotence mismatch: value={value:?} target={target:?} \
@@ -8167,8 +8168,7 @@ fn fuzz_expected_column_arith_dtype(
     // exactly this input (CI run 33488811029, seed `ci_crash_20260901_b.bin`)
     // and this rule keyed on the PROMOTED dtype, so it demanded Int64 where
     // both pandas and fp-columnar answer Float64.
-    let null_operand =
-        matches!(left.dtype(), DType::Null) || matches!(right.dtype(), DType::Null);
+    let null_operand = matches!(left.dtype(), DType::Null) || matches!(right.dtype(), DType::Null);
     if matches!(op, ArithmeticOp::Pow) && (!matches!(out_dtype, DType::Int64) || null_operand) {
         out_dtype = DType::Float64;
     }

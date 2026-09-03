@@ -81,7 +81,8 @@ fn live_oracle_dataframe_at_time_matches_pandas() {
     }))
     .expect("fixture");
 
-    let Some(expected) = expected_frame_or_skip(&fixture, "dataframe at_time oracle test", true) else {
+    let Some(expected) = expected_frame_or_skip(&fixture, "dataframe at_time oracle test", true)
+    else {
         return;
     };
 
@@ -125,7 +126,8 @@ fn live_oracle_dataframe_between_time_matches_pandas() {
     }))
     .expect("fixture");
 
-    let Some(expected) = expected_frame_or_skip(&fixture, "dataframe between_time oracle test", true)
+    let Some(expected) =
+        expected_frame_or_skip(&fixture, "dataframe between_time oracle test", true)
     else {
         return;
     };
@@ -277,7 +279,8 @@ fn live_oracle_series_repeat_scalar_matches_pandas() {
     }))
     .expect("fixture");
 
-    let Some(expected) = expected_series_or_skip(&fixture, "series repeat oracle test", true) else {
+    let Some(expected) = expected_series_or_skip(&fixture, "series repeat oracle test", true)
+    else {
         return;
     };
 

@@ -12399,8 +12399,7 @@ mod dtype_generator_exhaustiveness_nv8az {
 
     #[test]
     fn all_dtypes_has_no_duplicates_and_names_every_variant() {
-        let mut seen: Vec<&'static str> =
-            ALL_DTYPES.iter().map(dtype_variant_name).collect();
+        let mut seen: Vec<&'static str> = ALL_DTYPES.iter().map(dtype_variant_name).collect();
         let total = seen.len();
         seen.sort_unstable();
         seen.dedup();

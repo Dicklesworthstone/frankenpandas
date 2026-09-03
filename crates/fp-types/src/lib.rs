@@ -362,7 +362,10 @@ impl DType {
     /// Matches `pd.api.types.is_datetime64_any_dtype()` family.
     #[must_use]
     pub const fn is_datetime_like(&self) -> bool {
-        matches!(self, Self::Datetime64 { .. } | Self::Timedelta64 | Self::Period)
+        matches!(
+            self,
+            Self::Datetime64 { .. } | Self::Timedelta64 | Self::Period
+        )
     }
 
     /// Return the numpy dtype character code.
@@ -1041,8 +1044,8 @@ pub enum TypeError {
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
     use DType::{
-        Bool, BoolNullable, Categorical, Float64, Float64Nullable, Int64,
-        Int64Nullable, Null, Sparse, Timedelta64,
+        Bool, BoolNullable, Categorical, Float64, Float64Nullable, Int64, Int64Nullable, Null,
+        Sparse, Timedelta64,
     };
 
     let out = match (&left, &right) {
@@ -1106,12 +1109,13 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
 
         // Datetime/Timedelta
         (Timedelta64, Timedelta64) => Timedelta64,
-        (
-            DType::Datetime64 { tz: left_tz },
-            DType::Datetime64 { tz: right_tz },
-        ) if left_tz == right_tz => DType::Datetime64 {
-            tz: left_tz.clone(),
-        },
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz })
+            if left_tz == right_tz =>
+        {
+            DType::Datetime64 {
+                tz: left_tz.clone(),
+            }
+        }
 
         (Sparse, _) | (_, Sparse) => {
             return Err(TypeError::IncompatibleDtypes {
@@ -7140,12 +7144,11 @@ mod tests {
         for a in &all {
             for b in &all {
                 for c in &all {
-                    if let (Ok(ab), Ok(bc)) =
-                        (common_dtype(a.clone(), b.clone()), common_dtype(b.clone(), c.clone()))
-                        && let (Ok(left), Ok(right)) = (
-                            common_dtype(ab, c.clone()),
-                            common_dtype(a.clone(), bc),
-                        )
+                    if let (Ok(ab), Ok(bc)) = (
+                        common_dtype(a.clone(), b.clone()),
+                        common_dtype(b.clone(), c.clone()),
+                    ) && let (Ok(left), Ok(right)) =
+                        (common_dtype(ab, c.clone()), common_dtype(a.clone(), bc))
                     {
                         assert_eq!(left, right, "associative {a:?},{b:?},{c:?}");
                     }
@@ -9533,7 +9536,11 @@ mod tests {
             got.is_missing(),
             "all-NaT mean must be missing, got {got:?}"
         );
-        assert_eq!(got.dtype(), DType::datetime64_naive(), "must stay Datetime64");
+        assert_eq!(
+            got.dtype(),
+            DType::datetime64_naive(),
+            "must stay Datetime64"
+        );
     }
 
     /// FP is EXACT here and pandas is not: pandas routes datetime
@@ -11120,8 +11127,20 @@ mod tests {
         // `to_timedelta(["10 seconds", "1 second", "0 seconds"])` raise on the
         // third element only.
         for s in [
-            "0 seconds", "0 second", "0 sec", "0s", "0 days", "0d", "0 hours",
-            "0.0 hours", "0 minutes", "0ms", "0us", "0ns", "0", "0 days 0 seconds",
+            "0 seconds",
+            "0 second",
+            "0 sec",
+            "0s",
+            "0 days",
+            "0d",
+            "0 hours",
+            "0.0 hours",
+            "0 minutes",
+            "0ms",
+            "0us",
+            "0ns",
+            "0",
+            "0 days 0 seconds",
         ] {
             assert_eq!(Timedelta::parse(s).unwrap(), 0, "parse({s:?}) should be 0");
         }

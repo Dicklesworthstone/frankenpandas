@@ -2704,7 +2704,11 @@ pub fn groupby_agg(
             try_groupby_mean_dense_int64_slices(raw_keys, raw_values, options.sort)
     {
         let out_column = Column::from_values(out_values)?;
-        return Ok(Series::new(values.name(), Index::new(out_index), out_column)?);
+        return Ok(Series::new(
+            values.name(),
+            Index::new(out_index),
+            out_column,
+        )?);
     }
 
     let (key_vals, val_vals): (&[Scalar], &[Scalar]) =

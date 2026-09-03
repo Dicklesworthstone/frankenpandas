@@ -31,10 +31,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::simd::StdFloat as _;
-use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
-use std::simd::num::SimdFloat as _;
-use std::simd::{Mask, Simd};
+use std::simd::{
+    Mask, Simd, StdFloat as _,
+    cmp::{SimdPartialEq, SimdPartialOrd},
+    num::SimdFloat as _,
+};
 
 /// Materialize `out[row] = Σ_j a_slices[j][row] * b_col[j]` for `len` rows.
 ///
@@ -803,9 +804,27 @@ mod tests {
         // (domain false), with NaN (domain false via the `!(x >= 0)` fold).
         let shapes: [(&str, fn(usize) -> f64); 4] = [
             ("positive", |i| (i as f64) * 1.5 + 0.25),
-            ("with_inf", |i| if i % 7 == 3 { f64::INFINITY } else { (i as f64) + 1.0 }),
-            ("with_negative", |i| if i % 5 == 2 { -(i as f64) - 1.0 } else { (i as f64) + 1.0 }),
-            ("with_nan", |i| if i % 6 == 4 { f64::NAN } else { (i as f64) + 1.0 }),
+            ("with_inf", |i| {
+                if i % 7 == 3 {
+                    f64::INFINITY
+                } else {
+                    (i as f64) + 1.0
+                }
+            }),
+            ("with_negative", |i| {
+                if i % 5 == 2 {
+                    -(i as f64) - 1.0
+                } else {
+                    (i as f64) + 1.0
+                }
+            }),
+            ("with_nan", |i| {
+                if i % 6 == 4 {
+                    f64::NAN
+                } else {
+                    (i as f64) + 1.0
+                }
+            }),
         ];
 
         for (name, make) in shapes {
@@ -814,8 +833,14 @@ mod tests {
                 let (want, want_domain, want_finite) = scalar(&a);
                 let mut got = vec![0.0; len];
                 let (got_domain, got_finite) = sqrt_f64_into(&a, &mut got);
-                assert_eq!(got_domain, want_domain, "{name}: domain witness at len {len}");
-                assert_eq!(got_finite, want_finite, "{name}: finite witness at len {len}");
+                assert_eq!(
+                    got_domain, want_domain,
+                    "{name}: domain witness at len {len}"
+                );
+                assert_eq!(
+                    got_finite, want_finite,
+                    "{name}: finite witness at len {len}"
+                );
                 for i in 0..len {
                     assert_eq!(
                         got[i].to_bits(),
@@ -829,7 +854,10 @@ mod tests {
         // NON-VACUITY: each witness must actually be observed FALSE, or the
         // equality assertions above passed against `true == true` throughout.
         let mut out = [0.0; 8];
-        assert!(!sqrt_f64_into(&[-1.0; 8], &mut out).0, "negative must clear domain");
+        assert!(
+            !sqrt_f64_into(&[-1.0; 8], &mut out).0,
+            "negative must clear domain"
+        );
         assert!(
             !sqrt_f64_into(&[f64::NAN; 8], &mut out).0,
             "NaN must clear domain: `!(x >= 0.0)`, NOT `x < 0.0`"

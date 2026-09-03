@@ -513,12 +513,15 @@ fn coalesce_temporal_i64_key_column(
     let (left_keys, right_keys, nat, datetime_dtype) =
         match (left_key_col.dtype(), right_key_col.dtype()) {
             (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz })
-                if left_tz == right_tz => (
-                left_key_col.as_datetime64_slice()?,
-                right_key_col.as_datetime64_slice()?,
-                fp_types::Timestamp::NAT,
-                Some(DType::Datetime64 { tz: left_tz }),
-            ),
+                if left_tz == right_tz =>
+            {
+                (
+                    left_key_col.as_datetime64_slice()?,
+                    right_key_col.as_datetime64_slice()?,
+                    fp_types::Timestamp::NAT,
+                    Some(DType::Datetime64 { tz: left_tz }),
+                )
+            }
             (DType::Timedelta64, DType::Timedelta64) => (
                 left_key_col.as_timedelta64_slice()?,
                 right_key_col.as_timedelta64_slice()?,
@@ -7399,11 +7402,15 @@ fn temporal_i64_inner_positions(
     }
 
     let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
-        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz => (
-            left_key.as_datetime64_slice()?,
-            right_key.as_datetime64_slice()?,
-            fp_types::Timestamp::NAT,
-        ),
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz })
+            if left_tz == right_tz =>
+        {
+            (
+                left_key.as_datetime64_slice()?,
+                right_key.as_datetime64_slice()?,
+                fp_types::Timestamp::NAT,
+            )
+        }
         (DType::Timedelta64, DType::Timedelta64) => (
             left_key.as_timedelta64_slice()?,
             right_key.as_timedelta64_slice()?,
@@ -7470,11 +7477,15 @@ fn temporal_i64_left_positions(
     }
 
     let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
-        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz => (
-            left_key.as_datetime64_slice()?,
-            right_key.as_datetime64_slice()?,
-            fp_types::Timestamp::NAT,
-        ),
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz })
+            if left_tz == right_tz =>
+        {
+            (
+                left_key.as_datetime64_slice()?,
+                right_key.as_datetime64_slice()?,
+                fp_types::Timestamp::NAT,
+            )
+        }
         (DType::Timedelta64, DType::Timedelta64) => (
             left_key.as_timedelta64_slice()?,
             right_key.as_timedelta64_slice()?,
@@ -7555,11 +7566,15 @@ fn ordered_unique_temporal_i64_right_match_positions(
     }
 
     let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
-        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz => (
-            left_key.as_datetime64_slice()?,
-            right_key.as_datetime64_slice()?,
-            fp_types::Timestamp::NAT,
-        ),
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz })
+            if left_tz == right_tz =>
+        {
+            (
+                left_key.as_datetime64_slice()?,
+                right_key.as_datetime64_slice()?,
+                fp_types::Timestamp::NAT,
+            )
+        }
         (DType::Timedelta64, DType::Timedelta64) => (
             left_key.as_timedelta64_slice()?,
             right_key.as_timedelta64_slice()?,
@@ -7613,11 +7628,15 @@ fn ordered_unique_temporal_i64_outer_positions(
     }
 
     let (left, right, nat) = match (left_key.dtype(), right_key.dtype()) {
-        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz => (
-            left_key.as_datetime64_slice()?,
-            right_key.as_datetime64_slice()?,
-            fp_types::Timestamp::NAT,
-        ),
+        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz })
+            if left_tz == right_tz =>
+        {
+            (
+                left_key.as_datetime64_slice()?,
+                right_key.as_datetime64_slice()?,
+                fp_types::Timestamp::NAT,
+            )
+        }
         (DType::Timedelta64, DType::Timedelta64) => (
             left_key.as_timedelta64_slice()?,
             right_key.as_timedelta64_slice()?,
@@ -14205,7 +14224,10 @@ mod tests {
             },
         )?;
         assert_eq!(nat_candidate, nat_generic);
-        assert_eq!(nat_candidate.columns["key"].dtype(), DType::datetime64_naive());
+        assert_eq!(
+            nat_candidate.columns["key"].dtype(),
+            DType::datetime64_naive()
+        );
         assert!(
             merged_values(&nat_candidate, "key")?
                 .iter()

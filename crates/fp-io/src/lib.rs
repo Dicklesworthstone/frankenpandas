@@ -1061,17 +1061,13 @@ fn parse_simple_numeric_csv_chunk(
             // (quote or bare CR anywhere rejects the whole chunk) and route
             // the raw field through the general numeric field parser.
             let remaining = &data[pos..];
-            let end = pos
-                + memchr::memchr2(b',', b'\n', remaining).unwrap_or(remaining.len());
+            let end = pos + memchr::memchr2(b',', b'\n', remaining).unwrap_or(remaining.len());
             let field = &data[pos..end];
             let mut special_start = 0usize;
-            while let Some(relative_special) =
-                memchr::memchr2(b'"', b'\r', &field[special_start..])
+            while let Some(relative_special) = memchr::memchr2(b'"', b'\r', &field[special_start..])
             {
                 let special = special_start + relative_special;
-                if field[special] == b'"'
-                    || data.get(pos + special + 1).copied() != Some(b'\n')
-                {
+                if field[special] == b'"' || data.get(pos + special + 1).copied() != Some(b'\n') {
                     return None;
                 }
                 special_start = special + 1;
@@ -2598,7 +2594,10 @@ pub fn write_csv_string_with_options(
         .iter()
         .map(|name| {
             frame.column(name).and_then(|column| {
-                column.dtype().is_datetime().then(|| datetime_csv_format(column))
+                column
+                    .dtype()
+                    .is_datetime()
+                    .then(|| datetime_csv_format(column))
             })
         })
         .collect();
@@ -11686,7 +11685,7 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
         DType::Bool | DType::BoolNullable => "INTEGER",
         DType::Null => "TEXT",
         DType::Timedelta64 => "INTEGER", // store as nanoseconds
-        DType::Datetime64 { .. } => "INTEGER",  // store as nanoseconds
+        DType::Datetime64 { .. } => "INTEGER", // store as nanoseconds
         DType::Period => "INTEGER",      // store as ordinal
         DType::Interval => "TEXT",       // store as string
         DType::Sparse => "TEXT",
@@ -21319,7 +21318,10 @@ mod tests {
         assert!(frame.column("id").is_none());
         assert!(frame.column("val").unwrap().values()[0].is_missing());
         assert_eq!(frame.column("val").unwrap().dtype(), DType::Float64);
-        assert_eq!(frame.column("val").unwrap().values()[1], Scalar::Float64(2.0));
+        assert_eq!(
+            frame.column("val").unwrap().values()[1],
+            Scalar::Float64(2.0)
+        );
 
         std::fs::remove_file(&path).ok();
     }
