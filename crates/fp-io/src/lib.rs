@@ -21099,6 +21099,28 @@ mod tests {
         assert!(roundtrip.equals(&frame));
         assert!(roundtrip.row_multiindex().is_some());
         assert!(roundtrip.column("__index_level_0__").is_none());
+        // br-frankenpandas-wfkzm: the `index_names` key carries the level names.
+        assert!(json.contains("\"index_names\":[\"region\",\"product\",\"year\"]"));
+        assert_eq!(
+            roundtrip.row_multiindex().unwrap().names().to_vec(),
+            frame.row_multiindex().unwrap().names().to_vec()
+        );
+        // A payload without the key (older writer, or hand-written) still
+        // round-trips the values and keeps the synthetic names honestly.
+        let without_key = json.replace(
+            ",\"index_names\":[\"region\",\"product\",\"year\"]",
+            "",
+        );
+        let older = read_json_str(&without_key, JsonOrient::Split).expect("read old shape");
+        assert!(older.row_multiindex().is_some());
+        assert_eq!(
+            older.row_multiindex().unwrap().names().to_vec(),
+            vec![
+                Some("__index_level_0__".to_owned()),
+                Some("__index_level_1__".to_owned()),
+                Some("__index_level_2__".to_owned()),
+            ]
+        );
     }
 
     #[test]
@@ -22312,6 +22334,18 @@ mod tests {
 
         assert!(roundtrip.equals(&frame));
         assert!(roundtrip.column("__index_level_0__").is_none());
+        // br-frankenpandas-wfkzm: the level NAMES must survive too. Before the
+        // schema metadata carried them, this came back as
+        // ["__index_level_0__", "__index_level_1__", "__index_level_2__"].
+        let names = roundtrip.row_multiindex().unwrap().names().to_vec();
+        assert_eq!(names, frame.row_multiindex().unwrap().names().to_vec());
+        assert!(
+            names
+                .iter()
+                .flatten()
+                .all(|name| !name.starts_with("__index_level_")),
+            "synthetic level names leaked into the round-trip: {names:?}"
+        );
         assert_eq!(
             roundtrip
                 .row_multiindex()
