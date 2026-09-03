@@ -168,7 +168,14 @@ If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to f
 
 ### Legacy Behavioral Oracle
 
-- `/dp/frankenpandas/legacy_pandas_code/pandas`
+- The oracle is **pinned pandas 2.2.3 in the repository venv** `.venv-oracle/`
+  (gitignored). Create it once per checkout:
+  `python3 -m venv .venv-oracle && .venv-oracle/bin/pip install -r crates/fp-conformance/oracle/requirements.txt`
+- `HarnessConfig::default_paths` finds `.venv-oracle/bin/python` on its own
+  (br-frankenpandas-00de2); `FP_PYTHON_BIN` overrides it. Without the venv the
+  live-oracle tests skip and report PASS, so **no venv means no parity evidence**.
+- The vendored tree `legacy_pandas_code/pandas` (formerly cited at
+  `/dp/frankenpandas/...`) exists on no current host; do not look for it.
 - Upstream: https://github.com/pandas-dev/pandas
 
 **CRITICAL NON-REGRESSION RULE:** Index alignment and null/NaN semantics are sacred. Never trade semantic parity for speed.
@@ -190,25 +197,34 @@ This mandate applies to all planning, all beads, all architecture decisions, and
 ### Architecture
 
 ```
-API -> Expression Planner -> Vectorized Kernels -> Columnar Storage -> IO
+API -> eval()/query() expression evaluation (eager) -> Vectorized Kernels -> Columnar Storage -> IO
 ```
+
+There is no query planner and no lazy layer in the tree; every operation
+materializes eagerly. Lazy evaluation is a README roadmap item, not an
+existing component.
 
 ### Workspace Structure
 
 ```
 frankenpandas/
-├── Cargo.toml                # Workspace root
+├── Cargo.toml                # Workspace root (15 members)
 ├── crates/
 │   ├── fp-types/             # Core types, dtypes, scalars, null semantics
-│   ├── fp-columnar/          # Columnar storage, arrays, chunks
+│   ├── fp-columnar/          # Columnar storage, typed backings, vectorized kernels
+│   ├── fp-dot-kernel/        # The ONE crate built with +avx2,+fma (f64 dot / elementwise)
 │   ├── fp-frame/             # DataFrame and Series
 │   ├── fp-index/             # Index types, alignment
-│   ├── fp-expr/              # Expression planner, lazy evaluation
+│   ├── fp-expr/              # eval()/query() parser and eager evaluator
 │   ├── fp-groupby/           # GroupBy operations
 │   ├── fp-join/              # Merge/join operations
 │   ├── fp-io/                # IO (CSV, JSON, Parquet, etc.)
 │   ├── fp-conformance/       # Differential conformance tests against pandas oracle
-│   └── fp-runtime/           # Runtime, execution engine
+│   ├── fp-bench/             # vs-pandas timing harness (FrankenPandas arm)
+│   ├── fp-runtime/           # Strict/Hardened policy, EvidenceLedger, RaptorQ
+│   ├── fp-frankentui/        # Dashboard snapshot value types (no TUI in-tree)
+│   ├── fp-python/            # PyO3 bindings (no wheel/pyproject yet)
+│   └── frankenpandas/        # Unified facade crate (prelude re-exports)
 ```
 
 ### Compatibility Doctrine (Mode-Split)
