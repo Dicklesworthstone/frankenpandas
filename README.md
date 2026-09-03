@@ -5,7 +5,7 @@
 
   **Clean-room Rust reimplementation of the full pandas API surface.**
 
-  Drop-in pandas API in safe Rust. A PyO3 binding crate (`fp-python`) exists but ships no wheel yet; see the Roadmap. Zero `unsafe`. Measured head-to-head against live pandas 2.2.3 on 143 certified benchmark lanes. Differential conformance against a pinned live pandas oracle in CI's daily batch and on any checkout that has `.venv-oracle`.
+  Drop-in pandas API in safe Rust. A PyO3 binding crate (`fp-python`) builds a wheel with maturin and covers a small slice of the Python surface; see the Roadmap. Zero `unsafe`. Measured head-to-head against live pandas 2.2.3 on 143 certified benchmark lanes. Differential conformance against a pinned live pandas oracle in CI's daily batch and on any checkout that has `.venv-oracle`.
 
   ![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)
   ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -903,7 +903,7 @@ Functions matching pandas top-level API:
 
 ### vs-pandas Scorecard
 
-FrankenPandas performance is measured head-to-head against pandas 2.2.3 using identical workloads, with the incumbent live in the same invocation, an A/A null control per arm, a balanced ABBAABBA square, and a bootstrap median-CI gate. The current instrument is the certified census, `scripts/current_loss_census.py`, over `artifacts/bench/`: on 2026-09-02 it reported 143 certified lanes, a geometric-mean ratio of about 4x, every category above 1.0x, and 10 lanes still losing (the worst is `df_transpose_full_materialize` at 0.004x, a 2-D block-storage floor). [`artifacts/perf/SCORECARD.md`](artifacts/perf/SCORECARD.md) is a hand-maintained narrative whose verdict table dates from 2026-06-02 and is pending regeneration from the census.
+FrankenPandas performance is measured head-to-head against pandas 2.2.3 using identical workloads, with the incumbent live in the same invocation, an A/A null control per arm, a balanced ABBAABBA square, and a bootstrap median-CI gate. The current instrument is the certified census, `scripts/current_loss_census.py`, over `artifacts/bench/`: on 2026-09-02 it reported 143 certified lanes, a geometric-mean ratio of about 4x, every category above 1.0x, and 10 lanes still losing (the worst is `df_transpose_full_materialize` at 0.004x, a 2-D block-storage floor). [`artifacts/perf/SCORECARD.md`](artifacts/perf/SCORECARD.md) is generated from that census by `python3 scripts/gen_perf_scorecard.py --write` (per-category geomeans over certified lanes only, undecidable rows counted rather than averaged, every certified loss listed with the threads each arm used); the older hand-maintained narrative is kept below the generated section for its lever-by-lever history.
 
 Benchmarks run on `release-perf` profile (LTO, opt-level=3). Each category geomean must exceed 1.0x to validate the "exceeds pandas" claim for that category. Categories and lanes below parity are documented honestly; a certified loss is reported as a loss.
 
@@ -1761,7 +1761,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
-| Python bindings are partial and unpackaged | `crates/fp-python` binds DataFrame, Series, GroupBy and Styler (~105 methods, roughly 18% of the pandas DataFrame/Series surface by name, no Index classes, no `loc`/`iloc`, no arithmetic dunders) and there is no `pyproject.toml`, wheel, or Python test suite yet | Use the Rust API directly, or interop via Feather/Parquet for hand-off |
+| Python bindings are partial | `crates/fp-python` binds DataFrame, Series, GroupBy and Styler (~105 methods, roughly 18% of the pandas DataFrame/Series surface by name, no Index classes, no `loc`/`iloc`, no arithmetic dunders). A wheel builds locally with `maturin build -m crates/fp-python/Cargo.toml`, and `import frankenpandas`, `read_csv`, `DataFrame({...})`, `Series(data, index=, name=)`, `groupby("col").sum()` and `KeyError` on a missing column work; there is no wheel CI job, PyPI release, stub file, or Python test suite yet | Build the wheel locally for experiments; use the Rust API for real work |
 | SQL has two bundled backends (`rusqlite` by default, `mysql` behind `sql-mysql`) | The generic `SqlConnection` trait + `SqlInspector` is feature-complete; `sql-postgresql` is an empty placeholder feature with no adapter (a Tokio-free driver is required by workspace policy) | Use SQLite or MySQL, or implement `SqlConnection` for another backend |
 | Parallelism is hand-rolled, not pooled | Hot paths fan out with `std::thread::scope` (about 140 sites) and one persistent worker pool serves string kernels; there is no rayon and no global pool, so each parallel call pays a spawn cost of roughly 350–420 µs, which is the main structural loss at 100k-row sizes | Set `FP_ELEMENTWISE_PAR_MIN` / `FP_*_MAX_WORKERS` to tune thresholds; a shared pool is the tracked fix |
 | Native plot rendering deferred | `DataFrame::plot` / `hist` / `boxplot`, `Series::plot` / `hist`, and GroupBy plotting hooks now return backend-neutral `PlotSpec` / `HistogramSpec` / `BoxPlotSpec` data while the plotters/charming renderer is pending | Feed the returned specs to an external renderer, or use Feather/Parquet/CSV export with pandas/matplotlib |
@@ -2832,7 +2832,7 @@ A rough heat map of how compatible we are with pandas, by API family, as of 2026
 | IO: SQL (PostgreSQL / others) | 🔴 | Generic trait is in place; `sql-postgresql` is an empty placeholder feature with no adapter. |
 | Sparse (`.sparse()` accessor + `SparseDType`) | 🟡 | DISC-009: accessor surface works but physical storage is still dense. |
 | `apply` shape variants | 🟡 | DISC-010: Rust requires explicit shape (`apply_scalar` / `apply_series` / `apply_series_stacked`). Function-wise equivalent. |
-| Python bindings (PyO3) | 🟡 | `crates/fp-python` binds a small slice (DataFrame, Series, GroupBy, Styler; no Index classes, no `loc`/`iloc`, no arithmetic dunders) and has no `pyproject.toml`, wheel, stubs, or Python tests; nothing installable ships. |
+| Python bindings (PyO3) | 🟡 | `crates/fp-python` binds a small slice (DataFrame, Series, GroupBy, Styler; no Index classes, no `loc`/`iloc`, no arithmetic dunders). A wheel builds with maturin from `crates/fp-python/pyproject.toml`; no wheel CI, PyPI release, stubs, or Python tests yet. |
 | Plotting (`plot` / `hist` / `boxplot`) | 🟡 | Returns backend-neutral `PlotSpec` / `BoxPlotSpec` / `HistogramSpec` data. Renderer is deferred. |
 | Clipboard / GBQ | 🔴 | Deferred. |
 

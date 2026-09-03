@@ -1,3 +1,58 @@
+# vs-pandas Scorecard (certified census)
+
+Generated: 2026-09-03 04:02Z · main @ c1dfcc6f6 · `python3 scripts/gen_perf_scorecard.py --write`
+
+Every ratio here is **pandas time ÷ FrankenPandas time** from a row whose incumbent ran LIVE in the same invocation, with an A/A null control per arm and a bootstrap median-CI gate whose three clauses all passed. Rows that failed the gate (NULL_UNDECIDABLE, DROPPED_HIGH_CV, CONTRACT_INVALID) are **counted, not averaged**. One row per lane (category, workload, size, dtype): the newest certified one.
+
+- Bench corpus: 906 files, 1341 rows, 359 lanes; newest row 2026-09-01.
+- Certified lanes: **143** (oldest certified row still standing: 2026-08-15).
+- Overall certified geomean: **3.967x**.
+- Certified lanes still losing: **10**.
+
+## Per category
+
+| Category | Lanes | Certified | Geomean | Min | Max | Losing | Latest verdicts (all lanes) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| dataframe_ops | 83 | 35 | 4.581x | 0.004x | 533.314x | 4 | FASTER 42, NULL_UNDECIDABLE 24, DROPPED_HIGH_CV 10, SLOWER 7 |
+| datetime | 14 | 4 | 3.277x | 1.451x | 10.192x | 0 | FASTER 13, DROPPED_HIGH_CV 1 |
+| groupby | 90 | 9 | 4.718x | 1.502x | 16.757x | 0 | DROPPED_HIGH_CV 38, FASTER 37, SLOWER 10, NULL_UNDECIDABLE 3, PARITY 2 |
+| indexing | 18 | 9 | 5.694x | 1.182x | 430.967x | 0 | FASTER 9, DROPPED_HIGH_CV 5, NULL_UNDECIDABLE 3, SLOWER 1 |
+| io | 24 | 7 | 5.094x | 3.027x | 44.384x | 0 | FASTER 14, DROPPED_HIGH_CV 6, NULL_UNDECIDABLE 4 |
+| joins | 12 | 4 | 6.816x | 2.489x | 11.883x | 0 | FASTER 7, NULL_UNDECIDABLE 5 |
+| linalg | 3 | 3 | 3.073x | 1.125x | 16.630x | 0 | NULL_UNDECIDABLE 2, FASTER 1 |
+| math_unary | 65 | 46 | 2.395x | 0.310x | 151.171x | 6 | FASTER 37, NULL_UNDECIDABLE 26, SLOWER 2 |
+| rolling | 26 | 13 | 5.028x | 1.169x | 29.298x | 0 | FASTER 22, NULL_UNDECIDABLE 4 |
+| strings | 24 | 13 | 7.295x | 1.357x | 46.687x | 0 | FASTER 19, NULL_UNDECIDABLE 3, DROPPED_HIGH_CV 2 |
+
+A category with no certified lane is reported as such; it is not parity.
+
+## Certified losses (newest certified row per lane)
+
+| Ratio | Category | Workload | Size | dtype | FP thr | pd thr | ELF | Measured | Note |
+|---:|---|---|---|---|---:|---:|---|---|---|
+| 0.004x | dataframe_ops | `df_transpose_full_materialize` | 100k | float64 | 1 | 1 | `48f20936bf52` | 2026-08-27 |  |
+| 0.005x | dataframe_ops | `df_transpose_full_materialize_positional` | 100k | float64 | 1 | 1 | `9bb7e4bd4407` | 2026-08-27 |  |
+| 0.057x | dataframe_ops | `df_transpose_full_materialize` | 10k | float64 | 1 | 1 | `48f20936bf52` | 2026-08-27 |  |
+| 0.310x | math_unary | `floor` | 4M | float64 | 1 | 1 | `7f0fce36a6c0` | 2026-08-16 | STALE ELF: lane since run on a newer binary; re-measure before acting |
+| 0.840x | dataframe_ops | `drop_duplicates` | 100k | float64_nan10 | 10 | 1 | `ea51647dd871` | 2026-08-30 | STALE ELF: lane since run on a newer binary; re-measure before acting |
+| 0.885x | math_unary | `div` | 1M | float64 | 1 | 1 | `b75722266afc` | 2026-08-26 | STALE ELF: lane since run on a newer binary; re-measure before acting |
+| 0.895x | math_unary | `expm1` | 100k | float64 | 1 | 1 | `838d27886af9` | 2026-08-27 | STALE ELF: lane since run on a newer binary; re-measure before acting |
+| 0.900x | math_unary | `sqrt` | 10M | float64 | 1 | 2 | `ea51647dd871` | 2026-08-30 |  |
+| 0.942x | math_unary | `log` | 100k | float64 | 1 | 1 | `48f20936bf52` | 2026-08-28 |  |
+| 0.948x | math_unary | `log_int64` | 100k | float64 | 1 | 1 | `5045ee9bcbce` | 2026-08-27 |  |
+
+Thread columns are what each arm ACTUALLY used (harness-recorded). A win with FP on 8 threads against pandas on 1 is a real engine comparison, but not a single-threaded one; the harness's like_for_like block flags thread capping.
+
+## How to read a loss
+
+1. Re-measure it on a binary built today (`scripts/current_loss_census.py` flags stale ELFs).
+2. A loss that reproduces across weeks is structural; the three known floors are 2-D block storage (transpose / `.values`), str-key groupby factorization, and the df_dot GEMM microkernel (`docs/repo_vs_pandas_assessment_dustysummit.md`).
+3. Per AGENTS.md, reporting a loss is a success; a self-speedup is maintenance, not a win.
+
+## Historical narrative (pre-2026-09, hand-maintained)
+
+Everything below this line predates the generated census above, was maintained by hand, and its verdict table (dated 2026-06-02) is NOT the current state. It is kept for the lever-by-lever narrative only.
+
 # FrankenPandas vs Pandas Performance Scorecard
 
 > **Status**: Current measured results are listed with their benchmark date,
