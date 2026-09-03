@@ -762,13 +762,7 @@ impl PyDataFrame {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // `df["a"]` -> Series
         if let Ok(col) = key.extract::<String>() {
-            let column = self
-                .inner
-                .column(&col)
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.clone()))?;
-            let series = Series::new(col.as_str(), self.inner.index().clone(), column.clone())
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PySeries { inner: series })?.into_any());
+            return Ok(Py::new(py, self.column_series(&col)?)?.into_any());
         }
         // `df[["a", "b"]]` -> DataFrame with those columns in that order
         if let Ok(cols) = key.extract::<Vec<String>>() {
@@ -1554,7 +1548,7 @@ mod tests {
         assert_eq!(dataframe.columns(), vec!["0", "1", "2"]);
         assert!(dataframe.inner.is_lazy_transpose_storage());
 
-        let selected = dataframe.__getitem__("1").expect("selected column"); // ubs:ignore — asserted static transpose label exists
+        let selected = dataframe.column_series("1").expect("selected column"); // ubs:ignore — asserted static transpose label exists
         assert_eq!(
             selected.inner.values(),
             &[Scalar::Int64(20), Scalar::Int64(50)]
