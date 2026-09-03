@@ -228,3 +228,112 @@ fn collect_dict_constructor_payloads() {
         vec!["collect_dict_constructor_payloads".to_string()]
     );
 }
+
+/// Field names of the struct whose declaration starts with `header`, in
+/// source order. Attribute and comment lines are skipped; a field line is
+/// `name: Type,` (optionally `pub`).
+fn struct_field_names(source: &str, header: &str) -> Vec<String> {
+    let start = source
+        .find(header)
+        .unwrap_or_else(|| panic!("{header} not found in src/lib.rs"));
+    let body = &source[start + header.len()..];
+    let end = body.find("\n}").expect("struct body must close");
+    body[..end]
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let trimmed = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+                return None;
+            }
+            let (name, _) = trimmed.split_once(':')?;
+            let name = name.trim();
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                .then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Every option a fixture can carry must reach the oracle.
+///
+/// br-frankenpandas-00de2. `PacketFixture` (what a test declares and the
+/// FrankenPandas arm reads) and `OracleRequest` (what the pandas arm is sent)
+/// are two hand-maintained structs. A field added to the first and not the
+/// second makes the oracle run pandas' DEFAULT for that option, so the
+/// "differential" compares FrankenPandas against a question it was never
+/// asked. Nine options had drifted this way (`between_inclusive`, merge_asof
+/// `direction` / `tolerance` / `allow_exact_matches` / `by`,
+/// `merge_fill_method`, `compare_result_names`, `constructor_copy`,
+/// `str_wrap_drop_whitespace`): four live `between` tests pinned the
+/// `inclusive="both"` answer, and three merge tests plus a `compare` test
+/// failed against pandas the day the oracle first ran. Five more
+/// (`str_patterns`, `str_join_from`, `json_*`) made the oracle reject the op,
+/// which the harness rendered as a skip. This guard fails on the next one.
+#[test]
+fn every_fixture_option_reaches_the_oracle_request_00de2() {
+    let source = harness_source();
+    let fixture_fields = struct_field_names(&source, "pub struct PacketFixture {");
+    let request_fields = struct_field_names(&source, "struct OracleRequest {");
+    assert!(
+        fixture_fields.len() > 150,
+        "PacketFixture scan found only {} fields; the scanner is broken",
+        fixture_fields.len()
+    );
+    assert!(
+        request_fields.len() > 100,
+        "OracleRequest scan found only {} fields; the scanner is broken",
+        request_fields.len()
+    );
+
+    // Fields that legitimately never travel: identity and provenance
+    // metadata, the EXPECTED half of the fixture (the oracle produces it), and
+    // the binary round-trip payloads that only the generation path consumes
+    // (`capture_live_oracle_response_for_generation` serializes the whole
+    // fixture, so they reach the oracle there).
+    const NOT_FORWARDED: &[&str] = &[
+        "packet_id",
+        "case_id",
+        "mode",
+        "fixture_provenance",
+        "oracle_source",
+        "requirement_level",
+        "retired",
+        "expected_series",
+        "expected_frame",
+        "expected_join",
+        "expected_alignment",
+        "expected_bool",
+        "expected_positions",
+        "expected_scalar",
+        "expected_dtype",
+        "expected_error_contains",
+        "excel_input_base64",
+        "feather_input_base64",
+        "ipc_stream_input_base64",
+        "parquet_input_base64",
+    ];
+
+    let missing: Vec<&str> = fixture_fields
+        .iter()
+        .map(String::as_str)
+        .filter(|field| !request_fields.iter().any(|forwarded| forwarded == field))
+        .filter(|field| !NOT_FORWARDED.contains(field))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "PacketFixture options that never reach OracleRequest — add each to the struct AND to \
+         its population in capture_live_oracle_expected, or to NOT_FORWARDED with a reason: \
+         {missing:?}"
+    );
+
+    // The allowlist must not rot into a rubber stamp either.
+    let stale: Vec<&&str> = NOT_FORWARDED
+        .iter()
+        .filter(|field| !fixture_fields.iter().any(|present| present == *field))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "NOT_FORWARDED names fields PacketFixture no longer has: {stale:?}"
+    );
+}

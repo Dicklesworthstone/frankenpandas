@@ -295,6 +295,18 @@ impl HarnessConfig {
             && Self::pandas_importable(&self.python_bin)
     }
 
+    /// Is ANY pandas oracle reachable from this configuration: the vendored
+    /// legacy tree, or an interpreter this config is allowed to use?
+    ///
+    /// br-frankenpandas-00de2: `oracle_present` on every report used to be
+    /// `oracle_root.exists()`, so all 445 committed parity reports said the
+    /// oracle was absent even when CI had just run every case through the
+    /// pinned venv. This is the predicate those sites now use.
+    #[must_use]
+    pub fn oracle_reachable(&self) -> bool {
+        self.oracle_root.exists() || self.allows_system_pandas_fallback()
+    }
+
     /// Can `python` actually `import pandas`? Probed ONCE per interpreter per
     /// process and cached, because it is asked per fixture.
     fn pandas_importable(python: &str) -> bool {
@@ -348,7 +360,7 @@ pub fn run_smoke(config: &HarnessConfig) -> HarnessReport {
 
     HarnessReport {
         suite: "smoke",
-        oracle_present: config.oracle_root.exists(),
+        oracle_present: config.oracle_reachable(),
         fixture_count,
         strict_mode: config.strict_mode,
     }
@@ -4403,7 +4415,7 @@ fn ensure_phase2c_parity_reports(config: &HarnessConfig) -> Result<(), HarnessEr
         let synthetic = PacketParityReport {
             suite: format!("phase2c_packets:{packet_id}"),
             packet_id: Some(packet_id.clone()),
-            oracle_present: config.oracle_root.exists(),
+            oracle_present: config.oracle_reachable(),
             fixture_count,
             passed: 0,
             failed: fixture_count,
@@ -6575,7 +6587,7 @@ fn build_report(
     Ok(PacketParityReport {
         suite,
         packet_id,
-        oracle_present: config.oracle_root.exists(),
+        oracle_present: config.oracle_reachable(),
         fixture_count: results.len(),
         passed,
         retired,
@@ -25871,15 +25883,17 @@ mod tests {
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
         let cfg = HarnessConfig::default_paths();
-        if !cfg.oracle_root.exists() {
+        if !cfg.oracle_reachable() {
             eprintln!(
-                "oracle repo missing at {}; skipping smoke oracle check",
-                cfg.oracle_root.display()
+                "no pandas oracle reachable (legacy root {} absent, interpreter {} has no pandas); \
+                 skipping smoke oracle check",
+                cfg.oracle_root.display(),
+                cfg.python_bin
             );
             return;
         }
         let report = run_smoke(&cfg);
-        assert!(report.oracle_present, "oracle repo should be present");
+        assert!(report.oracle_present, "a reachable oracle must be reported present");
         assert!(report.fixture_count >= 1, "expected at least one fixture");
         assert!(report.strict_mode);
     }
