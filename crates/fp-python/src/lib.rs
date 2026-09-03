@@ -176,6 +176,88 @@ impl PySeries {
         format!("{}", self.inner)
     }
 
+    /// `s[i]` (position) or `s["label"]` (label), returning a Python scalar.
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let scalar = if let Ok(position) = key.extract::<i64>() {
+            self.inner
+                .iat(position)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?
+        } else if let Ok(label) = key.extract::<String>() {
+            self.inner
+                .at(&IndexLabel::Utf8(label.clone()))
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(label))?
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Series index must be an int position or a str label",
+            ));
+        };
+        scalar_to_py(py, &scalar)
+    }
+
+    // Arithmetic and comparison dunders. `other` may be another Series (index
+    // aligned by the Rust engine) or a Python scalar (broadcast over this
+    // Series' index). Comparisons return a bool Series, as in pandas, so
+    // `__eq__`/`__ne__` deliberately do not return a Python bool.
+    fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.add(&rhs))
+    }
+    fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let lhs = series_operand(py, other, &self.inner)?;
+        wrap_series(lhs.add(&self.inner))
+    }
+    fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.sub(&rhs))
+    }
+    fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let lhs = series_operand(py, other, &self.inner)?;
+        wrap_series(lhs.sub(&self.inner))
+    }
+    fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.mul(&rhs))
+    }
+    fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let lhs = series_operand(py, other, &self.inner)?;
+        wrap_series(lhs.mul(&self.inner))
+    }
+    fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.div(&rhs))
+    }
+    fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let lhs = series_operand(py, other, &self.inner)?;
+        wrap_series(lhs.div(&self.inner))
+    }
+    fn __neg__(&self) -> PyResult<PySeries> {
+        wrap_series(self.inner.neg())
+    }
+    fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.gt(&rhs))
+    }
+    fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.ge(&rhs))
+    }
+    fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.lt(&rhs))
+    }
+    fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.le(&rhs))
+    }
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.eq(&rhs))
+    }
+    fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.ne(&rhs))
+    }
+
     /// Return the sum of the Series.
     fn sum(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
@@ -656,14 +738,80 @@ impl PyDataFrame {
     /// Return a column as a Series. A missing column is a `KeyError`, as in
     /// pandas; the infallible `get_column` used here before fabricated an
     /// all-NaN column instead of raising.
-    fn __getitem__(&self, col: &str) -> PyResult<PySeries> {
-        let column = self
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // `df["a"]` -> Series
+        if let Ok(col) = key.extract::<String>() {
+            let column = self
+                .inner
+                .column(&col)
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.clone()))?;
+            let series = Series::new(col.as_str(), self.inner.index().clone(), column.clone())
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: series })?.into_any());
+        }
+        // `df[["a", "b"]]` -> DataFrame with those columns in that order
+        if let Ok(cols) = key.extract::<Vec<String>>() {
+            for col in &cols {
+                if self.inner.column(col).is_none() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.clone()));
+                }
+            }
+            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+            let frame = self
+                .inner
+                .select_columns(&refs)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        // `df[mask]` with a boolean Series -> filtered rows
+        if let Ok(mask) = key.extract::<PyRef<'_, PySeries>>() {
+            let frame = self
+                .inner
+                .filter_rows(&mask.inner)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "DataFrame key must be a column name, a list of column names, or a boolean Series",
+        ))
+    }
+
+    /// `df["c"] = series | list | scalar`, as in pandas (adds or replaces).
+    fn __setitem__(&mut self, py: Python<'_>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let n = self.inner.len();
+        let values: Vec<Scalar> = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
+            if series.inner.len() != n {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length of values ({}) does not match length of index ({n})",
+                    series.inner.len()
+                )));
+            }
+            series.inner.column().values().to_vec()
+        } else if let Ok(list) = value.cast::<PyList>() {
+            let values = list
+                .iter()
+                .map(|v| py_to_scalar(py, &v))
+                .collect::<PyResult<Vec<_>>>()?;
+            if values.len() != n {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length of values ({}) does not match length of index ({n})",
+                    values.len()
+                )));
+            }
+            values
+        } else {
+            vec![py_to_scalar(py, value)?; n]
+        };
+        self.inner = self
             .inner
-            .column(col)
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.to_owned()))?;
-        let series = Series::new(col, self.inner.index().clone(), column.clone())
+            .assign_column(name, values)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: series })
+        Ok(())
+    }
+
+    /// `"a" in df` checks the column labels, as in pandas.
+    fn __contains__(&self, name: &str) -> bool {
+        self.inner.column(name).is_some()
     }
 
     /// Return summary statistics.
