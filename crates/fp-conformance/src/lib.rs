@@ -172,6 +172,41 @@ impl HarnessConfig {
         })
     }
 
+    /// The repository's pinned pandas oracle interpreter, when it has been
+    /// created: `<repo>/.venv-oracle/bin/python`, the venv CI builds from
+    /// `crates/fp-conformance/oracle/requirements.txt` (`pandas==2.2.3`).
+    ///
+    /// br-frankenpandas-00de2: before this, `default_paths` looked only for a
+    /// vendored `legacy_pandas_code/pandas` tree (present on no host) and a
+    /// bare `python3` (no pandas here), so every `live_oracle_*` and
+    /// `conformance_*` test returned early as PASS unless `FP_PYTHON_BIN` and
+    /// `FP_ALLOW_SYSTEM_PANDAS_FALLBACK` were exported by hand — the
+    /// pass-by-skip defect of br-frankenpandas-l7r1p. The pinned venv is the
+    /// same interpreter CI uses, so finding it is a wiring fix, not a policy
+    /// change.
+    #[must_use]
+    pub fn pinned_oracle_interpreter(repo_root: &std::path::Path) -> Option<PathBuf> {
+        let candidate = repo_root.join(".venv-oracle/bin/python");
+        candidate.is_file().then_some(candidate)
+    }
+
+    /// True when `python_bin` IS the pinned oracle interpreter (compared by
+    /// canonical path, because `repo_root` carries a `../..` segment).
+    #[must_use]
+    pub fn uses_pinned_oracle_interpreter(&self) -> bool {
+        let Some(pinned) = Self::pinned_oracle_interpreter(&self.repo_root) else {
+            return false;
+        };
+        let configured = std::path::Path::new(&self.python_bin);
+        match (
+            std::fs::canonicalize(configured),
+            std::fs::canonicalize(&pinned),
+        ) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => configured == pinned,
+        }
+    }
+
     #[must_use]
     pub fn default_paths() -> Self {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -184,6 +219,9 @@ impl HarnessConfig {
                 } else {
                     Some(trimmed.to_owned())
                 }
+            })
+            .or_else(|| {
+                Self::pinned_oracle_interpreter(&repo_root).map(|path| path.display().to_string())
             })
             .unwrap_or_else(|| "python3".to_owned());
         let allow_system_pandas_fallback = Self::env_flag("FP_ALLOW_SYSTEM_PANDAS_FALLBACK");
@@ -242,24 +280,42 @@ impl HarnessConfig {
         // groupby.apply) re-raise ModuleNotFoundError, and their callers `.expect`
         // it, so 30 tests HARD-FAILED on an rch worker with no pandas installed
         // while passing here. Skipping is the correct outcome there; failing is not.
+        //
+        // br-frankenpandas-00de2: the repository's pinned oracle venv is not a
+        // "system" fallback at all — it is the interpreter CI builds from the
+        // pandas pin — so when `python_bin` is that interpreter the differential
+        // runs whether or not a caller opted in. The 49 test sites that set
+        // `allow_system_pandas_fallback = false` were refusing an UNPINNED
+        // system pandas; against the pinned venv that refusal only reproduces
+        // pass-by-skip.
+        if self.uses_pinned_oracle_interpreter() {
+            return Self::pandas_importable(&self.python_bin);
+        }
         (self.allow_system_pandas_fallback || Self::env_flag("FP_ALLOW_SYSTEM_PANDAS_FALLBACK"))
-            && Self::system_pandas_importable()
+            && Self::pandas_importable(&self.python_bin)
     }
 
-    /// Can the configured interpreter actually `import pandas`? Probed ONCE per
+    /// Can `python` actually `import pandas`? Probed ONCE per interpreter per
     /// process and cached, because it is asked per fixture.
-    fn system_pandas_importable() -> bool {
-        static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *PROBE.get_or_init(|| {
-            let python = std::env::var("FP_PYTHON_BIN").unwrap_or_else(|_| "python3".to_owned());
-            std::process::Command::new(python)
-                .args(["-c", "import pandas"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
-        })
+    fn pandas_importable(python: &str) -> bool {
+        static PROBES: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, bool>>> =
+            std::sync::OnceLock::new();
+        let probes = PROBES.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+        let mut guard = probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(known) = guard.get(python) {
+            return *known;
+        }
+        let importable = std::process::Command::new(python)
+            .args(["-c", "import pandas"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        guard.insert(python.to_owned(), importable);
+        importable
     }
 
     #[must_use]

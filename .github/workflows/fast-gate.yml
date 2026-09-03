@@ -1,0 +1,78 @@
+name: Fast gate
+
+# A ~15-minute compile-and-leaf-test check that can actually drain.
+#
+# The full CI matrix (ci.yml) runs as a daily batch by user ruling of
+# 2026-08-22: at a ~2.7-minute push median its 13-hour matrix was superseded
+# before it started and produced 0 green runs in 1,200 attempts. That left
+# main with NO enforced compile check between batches, which is how the
+# fp-types test module sat uncompilable from 2026-08-30 to 2026-09-02 with
+# nobody noticing (br-frankenpandas-ix56n).
+#
+# This workflow keeps the ruling (no push trigger) and closes the gap with a
+# job small enough to finish inside its own cadence: fmt, a workspace-wide
+# `cargo check --all-targets` (the exact step every lint leg failed on), and
+# the two leaf crates' unit tests. It runs every two hours on its own
+# concurrency group, on pull requests, and on demand.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */2 * * *"
+
+concurrency:
+  group: fast-gate-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fast-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly + rustfmt)
+        id: rust_setup
+        continue-on-error: true
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt
+
+      - name: Setup Rust (retry after transient failure)
+        if: steps.rust_setup.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fast-gate
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Type-check every target (lib, tests, examples, benches)
+        run: cargo check --workspace --all-targets
+
+      - name: Leaf-crate unit tests
+        run: cargo test -p fp-types -p fp-runtime --lib --no-fail-fast

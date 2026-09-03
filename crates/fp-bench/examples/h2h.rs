@@ -24,10 +24,13 @@
 //! ORDER IS ABBA per round pair, so a monotone drift in machine speed cancels to
 //! first order instead of being attributed to whichever arm ran first.
 
+use std::{
+    io::{BufRead, BufReader, Write},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    time::Instant,
+};
+
 use sha2::Digest as _;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::Instant;
 
 fn self_sha256() -> String {
     let Ok(path) = std::env::current_exe() else {
@@ -167,7 +170,11 @@ impl Incumbent {
             ready.trim() == "READY",
             "incumbent did not start cleanly: {ready:?}"
         );
-        Self { child, stdin, stdout }
+        Self {
+            child,
+            stdin,
+            stdout,
+        }
     }
 
     fn one_rep_us(&mut self) -> f64 {
@@ -211,7 +218,10 @@ fn fp_transpose_rep_us(frame: &fp_frame::DataFrame, typed: bool) -> f64 {
             .column_at(position)
             .expect("positional column present");
         touched += if typed {
-            column.as_f64_slice().expect("typed f64 output column").len()
+            column
+                .as_f64_slice()
+                .expect("typed f64 output column")
+                .len()
         } else {
             column.values().len()
         };
@@ -324,7 +334,11 @@ fn main() {
         let status = Command::new(exe)
             .args([&respawn_workload, &n.to_string(), &rounds.to_string()])
             .env(
-                if key == "workload" { "FP_H2H_UNUSED" } else { &key },
+                if key == "workload" {
+                    "FP_H2H_UNUSED"
+                } else {
+                    &key
+                },
                 &value,
             )
             .stderr(Stdio::inherit())
@@ -348,8 +362,13 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
         let mut store: std::collections::BTreeMap<String, fp_columnar::Column> =
             std::collections::BTreeMap::new();
         for col in 0..TRANSPOSE_COLS {
-            let slice: Vec<f64> = (0..n).map(|row| values[row * TRANSPOSE_COLS + col]).collect();
-            store.insert(format!("{col}"), fp_columnar::Column::from_f64_values(slice));
+            let slice: Vec<f64> = (0..n)
+                .map(|row| values[row * TRANSPOSE_COLS + col])
+                .collect();
+            store.insert(
+                format!("{col}"),
+                fp_columnar::Column::from_f64_values(slice),
+            );
         }
         let frame = fp_frame::DataFrame::new(index, store).expect("source frame");
         Subject::Frame(frame)
@@ -498,11 +517,18 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
     };
 
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
-    eprintln!("=== H2H {workload} n={n} rounds={rounds} arm={label} par_min_env={} two_pass_env={} ===",
+    eprintln!(
+        "=== H2H {workload} n={n} rounds={rounds} arm={label} par_min_env={} two_pass_env={} ===",
         std::env::var("FP_ELEMENTWISE_PAR_MIN").unwrap_or_else(|_| "<unset>".to_owned()),
-        std::env::var("FP_INT64_WIDEN_TWO_PASS").unwrap_or_else(|_| "<unset>".to_owned()));
+        std::env::var("FP_INT64_WIDEN_TWO_PASS").unwrap_or_else(|_| "<unset>".to_owned())
+    );
     eprintln!("fp_elf_sha256   {}", self_sha256());
-    eprintln!("host            {}", std::fs::read_to_string("/etc/hostname").unwrap_or_default().trim());
+    eprintln!(
+        "host            {}",
+        std::fs::read_to_string("/etc/hostname")
+            .unwrap_or_default()
+            .trim()
+    );
     eprintln!("loadavg         {}", load.trim());
     eprintln!("fp_median_us    {fp_med:.3}   (arm_a {fp_med_a:.3}  arm_b {fp_med_b:.3})");
     eprintln!("pd_median_us    {pd_med:.3}   (arm_a {pd_med_a:.3}  arm_b {pd_med_b:.3})");

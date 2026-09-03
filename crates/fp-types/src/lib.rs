@@ -7509,8 +7509,11 @@ mod tests {
         // (2f159e68f), so the loop variable is cloned into each call.
         for target in [DType::Int64Nullable, DType::Float64, DType::Float64Nullable] {
             assert!(
-                cast_scalar(&Scalar::Datetime64(1_710_498_645_123_456_789), target.clone())
-                    .is_err(),
+                cast_scalar(
+                    &Scalar::Datetime64(1_710_498_645_123_456_789),
+                    target.clone()
+                )
+                .is_err(),
                 "datetime64 -> {target:?} must stay refused"
             );
             assert!(
@@ -17052,8 +17055,11 @@ mod float64_nullable_qkqfb {
     fn the_nullable_float_flip_is_associative_on_its_witness_triple_qkqfb() {
         let (bn, i64n, f64d) = (DType::BoolNullable, DType::Int64, DType::Float64);
 
-        let left =
-            common_dtype(common_dtype(bn.clone(), i64n.clone()).unwrap(), f64d.clone()).unwrap();
+        let left = common_dtype(
+            common_dtype(bn.clone(), i64n.clone()).unwrap(),
+            f64d.clone(),
+        )
+        .unwrap();
         let right = common_dtype(bn, common_dtype(i64n, f64d).unwrap()).unwrap();
 
         assert_eq!(left, right, "promotion order must not change the result");

@@ -14,6 +14,8 @@
 //! print(df.head(2))
 //! ```
 
+#![forbid(unsafe_code)]
+
 use std::collections::BTreeMap;
 
 use fp_columnar::Column;

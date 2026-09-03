@@ -12,6 +12,8 @@
 //! /ewm map to more setup-heavy harnesses and are filed as follow-up; the Python
 //! side simply reports those FP workloads as INCOMPLETE until added here.
 
+#![forbid(unsafe_code)]
+
 #[cfg(feature = "lazy-transpose-prototype")]
 use std::sync::Arc;
 use std::{
@@ -4608,7 +4610,7 @@ mod harness_contract_tests {
     use fp_types::Scalar;
 
     use super::{
-        ITERS, TELEMETRY_STRING_BATCH_ROWS, SplitMix64, gen_f64_column, paired_time_us,
+        ITERS, SplitMix64, TELEMETRY_STRING_BATCH_ROWS, gen_f64_column, paired_time_us,
         runtime_isa_features, self_identity, size_rows_cols, size_rows_cols_checked,
         stateful_apply_step, stateful_expanding_step, stateful_rolling_step,
         telemetry_string_batch_ranges,

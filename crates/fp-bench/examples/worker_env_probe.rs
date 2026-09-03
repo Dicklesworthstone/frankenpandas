@@ -15,8 +15,9 @@
 //! and at what version, and this executable's own sha256 — the same
 //! self-reported ELF identity a head-to-head row would have to carry.
 
-use sha2::Digest as _;
 use std::process::Command;
+
+use sha2::Digest as _;
 
 fn sha256_of_self() -> String {
     // Hash our own image so a measurement can name the binary it came from,
@@ -65,10 +66,22 @@ fn main() {
 
     for python in ["python3", "python"] {
         println!("--- {python}");
-        println!("  version           {}", probe(python, "import sys; print(sys.version.split()[0])"));
-        println!("  executable        {}", probe(python, "import sys; print(sys.executable)"));
-        println!("  pandas            {}", probe(python, "import pandas; print(pandas.__version__)"));
-        println!("  numpy             {}", probe(python, "import numpy; print(numpy.__version__)"));
+        println!(
+            "  version           {}",
+            probe(python, "import sys; print(sys.version.split()[0])")
+        );
+        println!(
+            "  executable        {}",
+            probe(python, "import sys; print(sys.executable)")
+        );
+        println!(
+            "  pandas            {}",
+            probe(python, "import pandas; print(pandas.__version__)")
+        );
+        println!(
+            "  numpy             {}",
+            probe(python, "import numpy; print(numpy.__version__)")
+        );
     }
 
     println!("=== verdict ===");
