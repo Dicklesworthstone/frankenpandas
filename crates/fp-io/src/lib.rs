@@ -21107,10 +21107,7 @@ mod tests {
         );
         // A payload without the key (older writer, or hand-written) still
         // round-trips the values and keeps the synthetic names honestly.
-        let without_key = json.replace(
-            ",\"index_names\":[\"region\",\"product\",\"year\"]",
-            "",
-        );
+        let without_key = json.replace(",\"index_names\":[\"region\",\"product\",\"year\"]", "");
         let older = read_json_str(&without_key, JsonOrient::Split).expect("read old shape");
         assert!(older.row_multiindex().is_some());
         assert_eq!(
