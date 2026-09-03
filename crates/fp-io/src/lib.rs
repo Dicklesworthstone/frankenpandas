@@ -12605,6 +12605,10 @@ use std::cell::RefCell;
 /// pins the pairing so the next nullable variant cannot repeat it.
 #[cfg(feature = "sql-mysql")]
 fn mysql_dtype_sql(dtype: DType) -> &'static str {
+    // Exhaustive on purpose: the former `_ => "TEXT"` arm is exactly how
+    // `Float64Nullable` shipped as a TEXT column (br-frankenpandas-lkrb8). A new
+    // `DType` variant is now a compile error here, which forces the author to
+    // choose its column type instead of inheriting one silently.
     match dtype {
         DType::Bool | DType::BoolNullable => "TINYINT(1)",
         DType::Int64 | DType::Int64Nullable => "BIGINT",
@@ -12612,7 +12616,12 @@ fn mysql_dtype_sql(dtype: DType) -> &'static str {
         DType::Utf8 => "TEXT",
         DType::Datetime64 { .. } => "DATETIME",
         DType::Timedelta64 => "TIME",
-        _ => "TEXT",
+        // These genuinely serialize as text through this writer today.
+        DType::Null
+        | DType::Categorical
+        | DType::Period
+        | DType::Interval
+        | DType::Sparse => "TEXT",
     }
 }
 
