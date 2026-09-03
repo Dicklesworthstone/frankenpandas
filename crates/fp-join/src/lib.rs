@@ -11304,6 +11304,17 @@ fn build_asof_output(
     let right_name_set: HashSet<&String> = right_col_names_all.iter().collect();
     let mut excluded_names = HashSet::new();
     excluded_names.insert(on);
+    // `by` columns are equi-join keys: pandas emits them once, unsuffixed,
+    // exactly like `on`. They were left out of this set, so a `by` column
+    // present on both sides counted as an overlap and the LEFT copy came out
+    // as `group_x` (the right copy is excluded above), where pandas 2.2.3
+    // returns `group` (br-frankenpandas-fkiu9, live-oracle
+    // merge_asof_by_group_and_no_exact_matches).
+    if let Some(by) = by_cols {
+        for column in by {
+            excluded_names.insert(column.as_str());
+        }
+    }
     let overlap_names =
         collect_overlapping_column_names(&left_name_set, &right_name_set, &excluded_names);
     let overlap_set: HashSet<String> = overlap_names.iter().cloned().collect();
