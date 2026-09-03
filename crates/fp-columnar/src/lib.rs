@@ -32876,9 +32876,20 @@ impl CrackIndex {
 // probe, 2026-08-19).
 const _: () = assert!(
     cfg!(debug_assertions) || cfg!(target_feature = "sse4.1"),
-    "this crate was optimized WITHOUT `+sse4.1`, so `(lhs / rhs).floor()` in \
-     `python_floor_div_f64` is a libm call again and the standing `floordiv @10M` / \
-     `mod @10M` rows (br-frankenpandas-85clb) do not describe this binary"
+    "fp-columnar was compiled with optimizations but WITHOUT the `+sse4.1` target \
+     feature its fast paths require: without it `(lhs / rhs).floor()` in \
+     `python_floor_div_f64` lowers to a libm call again, and the certified \
+     `floordiv @10M` / `mod @10M` vs-pandas rows (br-frankenpandas-85clb) do not \
+     describe the binary being built. \
+     DOWNSTREAM CONSUMERS: profiles apply only from YOUR top-level manifest, so \
+     replicate the shipped stanza there (requires nightly cargo for \
+     `profile-rustflags`; see README 'Installation' -> 'Building release \
+     binaries that depend on frankenpandas'): \
+     `cargo-features = [\"profile-rustflags\"]` at the top of your Cargo.toml, \
+     plus `[profile.release.package.fp-columnar] rustflags = \
+     [\"-Ctarget-feature=+sse4.1\"]`. Internal contributors: build through the \
+     workspace, which already carries this stanza for the release and \
+     release-perf profiles."
 );
 
 /// REGRESSION LOCK for the two standing `@10M` claims — `floordiv` ≥ 6.504x and

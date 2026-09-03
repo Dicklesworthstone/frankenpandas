@@ -31,6 +31,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PHASE2C_DIR = REPO_ROOT / "artifacts" / "phase2c"
+FIXTURE_PACKETS_DIR = REPO_ROOT / "crates" / "fp-conformance" / "fixtures" / "packets"
 TARGET_FILE = REPO_ROOT / "docs" / "planning" / "FEATURE_PARITY.md"
 
 BEGIN_MARKER = "<!-- BEGIN AUTO-PACKET-TABLE -->"
@@ -59,6 +60,25 @@ def load_packet_results(phase2c_dir: Path) -> list[dict]:
         except json.JSONDecodeError as e:
             print(f"warning: {gate} unparseable: {e}", file=sys.stderr)
             continue
+        # br-frankenpandas-rc-stale-packet-reports-2z7q9: an artifact dir whose
+        # packet has NO fixture files in the corpus is an orphaned placeholder
+        # (e.g. FP-P2D-464/466: dirs banked red by the synthetic filler, with
+        # no real packet behind them). Counting that as a parity failure is
+        # exactly the subject/object mismatch this report exists to avoid —
+        # mark it pending-with-reason instead so the table reports the tree,
+        # not ghosts.
+        if data.get("pass") is False:
+            has_fixtures = any(
+                p.name.lower().startswith(entry.name.lower() + "_")
+                for p in FIXTURE_PACKETS_DIR.glob("*.json")
+            )
+            if not has_fixtures:
+                data = dict(data)
+                data["pass"] = None
+                data["orphaned"] = True
+                data["orphaned_reason"] = (
+                    "no fixture files for this packet id in fixtures/packets/"
+                )
         results.append(data)
     return results
 

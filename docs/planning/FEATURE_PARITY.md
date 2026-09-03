@@ -112,122 +112,94 @@ Gate enforcement and trend history:
 
 **Aggregate status (live from `artifacts/phase2c/`):**
 
-- Total packet suites: **430**
-- Gate passing: **1** (0%)
-- Gate failing: **429**
-- Pending (no gate result yet): **0**
+- Total packet suites: **445**
+- Gate passing: **443** (99%)
+- Gate failing: **0**
+- Pending (no gate result yet): **2**
 
-By family: FP-P2C **11** (1 gate-passing) · FP-P2D **419** (0 gate-passing)
+By family: FP-P2C **11** (11 gate-passing) · FP-P2D **434** (432 gate-passing)
 
 **Compact status by packet** (✓ gate-pass / ✗ gate-fail / · pending):
 
 **FP-P2C (Series-level):**
 
-`FP-P2C-001 ✓`  `FP-P2C-002 ✗`  `FP-P2C-003 ✗`  `FP-P2C-004 ✗`  `FP-P2C-005 ✗`  `FP-P2C-006 ✗`  
-`FP-P2C-007 ✗`  `FP-P2C-008 ✗`  `FP-P2C-009 ✗`  `FP-P2C-010 ✗`  `FP-P2C-011 ✗`  
+`FP-P2C-001 ✓`  `FP-P2C-002 ✓`  `FP-P2C-003 ✓`  `FP-P2C-004 ✓`  `FP-P2C-005 ✓`  `FP-P2C-006 ✓`  
+`FP-P2C-007 ✓`  `FP-P2C-008 ✓`  `FP-P2C-009 ✓`  `FP-P2C-010 ✓`  `FP-P2C-011 ✓`  
 
 **FP-P2D (DataFrame-level):**
 
-`FP-P2D-014 ✗`  `FP-P2D-015 ✗`  `FP-P2D-016 ✗`  `FP-P2D-017 ✗`  `FP-P2D-018 ✗`  `FP-P2D-019 ✗`  
-`FP-P2D-020 ✗`  `FP-P2D-021 ✗`  `FP-P2D-022 ✗`  `FP-P2D-023 ✗`  `FP-P2D-024 ✗`  `FP-P2D-025 ✗`  
-`FP-P2D-026 ✗`  `FP-P2D-027 ✗`  `FP-P2D-028 ✗`  `FP-P2D-029 ✗`  `FP-P2D-030 ✗`  `FP-P2D-031 ✗`  
-`FP-P2D-032 ✗`  `FP-P2D-033 ✗`  `FP-P2D-034 ✗`  `FP-P2D-035 ✗`  `FP-P2D-036 ✗`  `FP-P2D-037 ✗`  
-`FP-P2D-038 ✗`  `FP-P2D-039 ✗`  `FP-P2D-040 ✗`  `FP-P2D-041 ✗`  `FP-P2D-042 ✗`  `FP-P2D-043 ✗`  
-`FP-P2D-044 ✗`  `FP-P2D-045 ✗`  `FP-P2D-046 ✗`  `FP-P2D-047 ✗`  `FP-P2D-048 ✗`  `FP-P2D-049 ✗`  
-`FP-P2D-050 ✗`  `FP-P2D-051 ✗`  `FP-P2D-052 ✗`  `FP-P2D-053 ✗`  `FP-P2D-054 ✗`  `FP-P2D-055 ✗`  
-`FP-P2D-056 ✗`  `FP-P2D-057 ✗`  `FP-P2D-058 ✗`  `FP-P2D-060 ✗`  `FP-P2D-061 ✗`  `FP-P2D-062 ✗`  
-`FP-P2D-063 ✗`  `FP-P2D-064 ✗`  `FP-P2D-065 ✗`  `FP-P2D-066 ✗`  `FP-P2D-067 ✗`  `FP-P2D-068 ✗`  
-`FP-P2D-069 ✗`  `FP-P2D-070 ✗`  `FP-P2D-071 ✗`  `FP-P2D-072 ✗`  `FP-P2D-073 ✗`  `FP-P2D-074 ✗`  
-`FP-P2D-075 ✗`  `FP-P2D-076 ✗`  `FP-P2D-077 ✗`  `FP-P2D-078 ✗`  `FP-P2D-079 ✗`  `FP-P2D-080 ✗`  
-`FP-P2D-081 ✗`  `FP-P2D-082 ✗`  `FP-P2D-083 ✗`  `FP-P2D-084 ✗`  `FP-P2D-085 ✗`  `FP-P2D-086 ✗`  
-`FP-P2D-087 ✗`  `FP-P2D-088 ✗`  `FP-P2D-089 ✗`  `FP-P2D-090 ✗`  `FP-P2D-091 ✗`  `FP-P2D-092 ✗`  
-`FP-P2D-093 ✗`  `FP-P2D-094 ✗`  `FP-P2D-095 ✗`  `FP-P2D-096 ✗`  `FP-P2D-097 ✗`  `FP-P2D-098 ✗`  
-`FP-P2D-099 ✗`  `FP-P2D-100 ✗`  `FP-P2D-101 ✗`  `FP-P2D-102 ✗`  `FP-P2D-103 ✗`  `FP-P2D-104 ✗`  
-`FP-P2D-105 ✗`  `FP-P2D-106 ✗`  `FP-P2D-107 ✗`  `FP-P2D-108 ✗`  `FP-P2D-109 ✗`  `FP-P2D-110 ✗`  
-`FP-P2D-111 ✗`  `FP-P2D-112 ✗`  `FP-P2D-113 ✗`  `FP-P2D-114 ✗`  `FP-P2D-115 ✗`  `FP-P2D-116 ✗`  
-`FP-P2D-117 ✗`  `FP-P2D-118 ✗`  `FP-P2D-119 ✗`  `FP-P2D-120 ✗`  `FP-P2D-121 ✗`  `FP-P2D-122 ✗`  
-`FP-P2D-123 ✗`  `FP-P2D-124 ✗`  `FP-P2D-125 ✗`  `FP-P2D-126 ✗`  `FP-P2D-127 ✗`  `FP-P2D-128 ✗`  
-`FP-P2D-129 ✗`  `FP-P2D-130 ✗`  `FP-P2D-131 ✗`  `FP-P2D-132 ✗`  `FP-P2D-133 ✗`  `FP-P2D-134 ✗`  
-`FP-P2D-135 ✗`  `FP-P2D-136 ✗`  `FP-P2D-137 ✗`  `FP-P2D-138 ✗`  `FP-P2D-139 ✗`  `FP-P2D-140 ✗`  
-`FP-P2D-141 ✗`  `FP-P2D-142 ✗`  `FP-P2D-143 ✗`  `FP-P2D-144 ✗`  `FP-P2D-145 ✗`  `FP-P2D-146 ✗`  
-`FP-P2D-147 ✗`  `FP-P2D-148 ✗`  `FP-P2D-149 ✗`  `FP-P2D-150 ✗`  `FP-P2D-151 ✗`  `FP-P2D-152 ✗`  
-`FP-P2D-153 ✗`  `FP-P2D-154 ✗`  `FP-P2D-155 ✗`  `FP-P2D-156 ✗`  `FP-P2D-157 ✗`  `FP-P2D-158 ✗`  
-`FP-P2D-159 ✗`  `FP-P2D-160 ✗`  `FP-P2D-161 ✗`  `FP-P2D-162 ✗`  `FP-P2D-163 ✗`  `FP-P2D-164 ✗`  
-`FP-P2D-165 ✗`  `FP-P2D-166 ✗`  `FP-P2D-167 ✗`  `FP-P2D-168 ✗`  `FP-P2D-169 ✗`  `FP-P2D-170 ✗`  
-`FP-P2D-171 ✗`  `FP-P2D-172 ✗`  `FP-P2D-173 ✗`  `FP-P2D-174 ✗`  `FP-P2D-175 ✗`  `FP-P2D-176 ✗`  
-`FP-P2D-177 ✗`  `FP-P2D-178 ✗`  `FP-P2D-179 ✗`  `FP-P2D-180 ✗`  `FP-P2D-181 ✗`  `FP-P2D-182 ✗`  
-`FP-P2D-183 ✗`  `FP-P2D-184 ✗`  `FP-P2D-185 ✗`  `FP-P2D-186 ✗`  `FP-P2D-187 ✗`  `FP-P2D-188 ✗`  
-`FP-P2D-189 ✗`  `FP-P2D-190 ✗`  `FP-P2D-191 ✗`  `FP-P2D-192 ✗`  `FP-P2D-193 ✗`  `FP-P2D-194 ✗`  
-`FP-P2D-195 ✗`  `FP-P2D-196 ✗`  `FP-P2D-197 ✗`  `FP-P2D-198 ✗`  `FP-P2D-199 ✗`  `FP-P2D-200 ✗`  
-`FP-P2D-201 ✗`  `FP-P2D-202 ✗`  `FP-P2D-203 ✗`  `FP-P2D-204 ✗`  `FP-P2D-205 ✗`  `FP-P2D-206 ✗`  
-`FP-P2D-207 ✗`  `FP-P2D-208 ✗`  `FP-P2D-209 ✗`  `FP-P2D-210 ✗`  `FP-P2D-211 ✗`  `FP-P2D-212 ✗`  
-`FP-P2D-213 ✗`  `FP-P2D-214 ✗`  `FP-P2D-215 ✗`  `FP-P2D-216 ✗`  `FP-P2D-217 ✗`  `FP-P2D-218 ✗`  
-`FP-P2D-219 ✗`  `FP-P2D-220 ✗`  `FP-P2D-221 ✗`  `FP-P2D-222 ✗`  `FP-P2D-223 ✗`  `FP-P2D-224 ✗`  
-`FP-P2D-225 ✗`  `FP-P2D-226 ✗`  `FP-P2D-227 ✗`  `FP-P2D-228 ✗`  `FP-P2D-229 ✗`  `FP-P2D-230 ✗`  
-`FP-P2D-231 ✗`  `FP-P2D-232 ✗`  `FP-P2D-233 ✗`  `FP-P2D-234 ✗`  `FP-P2D-235 ✗`  `FP-P2D-236 ✗`  
-`FP-P2D-237 ✗`  `FP-P2D-238 ✗`  `FP-P2D-239 ✗`  `FP-P2D-240 ✗`  `FP-P2D-241 ✗`  `FP-P2D-242 ✗`  
-`FP-P2D-243 ✗`  `FP-P2D-244 ✗`  `FP-P2D-245 ✗`  `FP-P2D-246 ✗`  `FP-P2D-247 ✗`  `FP-P2D-248 ✗`  
-`FP-P2D-249 ✗`  `FP-P2D-250 ✗`  `FP-P2D-251 ✗`  `FP-P2D-252 ✗`  `FP-P2D-253 ✗`  `FP-P2D-254 ✗`  
-`FP-P2D-255 ✗`  `FP-P2D-256 ✗`  `FP-P2D-257 ✗`  `FP-P2D-258 ✗`  `FP-P2D-259 ✗`  `FP-P2D-260 ✗`  
-`FP-P2D-261 ✗`  `FP-P2D-262 ✗`  `FP-P2D-263 ✗`  `FP-P2D-264 ✗`  `FP-P2D-265 ✗`  `FP-P2D-266 ✗`  
-`FP-P2D-267 ✗`  `FP-P2D-268 ✗`  `FP-P2D-269 ✗`  `FP-P2D-270 ✗`  `FP-P2D-271 ✗`  `FP-P2D-272 ✗`  
-`FP-P2D-273 ✗`  `FP-P2D-274 ✗`  `FP-P2D-275 ✗`  `FP-P2D-276 ✗`  `FP-P2D-277 ✗`  `FP-P2D-278 ✗`  
-`FP-P2D-279 ✗`  `FP-P2D-280 ✗`  `FP-P2D-281 ✗`  `FP-P2D-282 ✗`  `FP-P2D-283 ✗`  `FP-P2D-284 ✗`  
-`FP-P2D-285 ✗`  `FP-P2D-286 ✗`  `FP-P2D-287 ✗`  `FP-P2D-288 ✗`  `FP-P2D-289 ✗`  `FP-P2D-290 ✗`  
-`FP-P2D-291 ✗`  `FP-P2D-292 ✗`  `FP-P2D-293 ✗`  `FP-P2D-294 ✗`  `FP-P2D-295 ✗`  `FP-P2D-296 ✗`  
-`FP-P2D-297 ✗`  `FP-P2D-298 ✗`  `FP-P2D-299 ✗`  `FP-P2D-300 ✗`  `FP-P2D-301 ✗`  `FP-P2D-302 ✗`  
-`FP-P2D-303 ✗`  `FP-P2D-304 ✗`  `FP-P2D-305 ✗`  `FP-P2D-306 ✗`  `FP-P2D-307 ✗`  `FP-P2D-308 ✗`  
-`FP-P2D-309 ✗`  `FP-P2D-310 ✗`  `FP-P2D-311 ✗`  `FP-P2D-312 ✗`  `FP-P2D-313 ✗`  `FP-P2D-314 ✗`  
-`FP-P2D-315 ✗`  `FP-P2D-316 ✗`  `FP-P2D-317 ✗`  `FP-P2D-318 ✗`  `FP-P2D-319 ✗`  `FP-P2D-320 ✗`  
-`FP-P2D-321 ✗`  `FP-P2D-322 ✗`  `FP-P2D-323 ✗`  `FP-P2D-324 ✗`  `FP-P2D-325 ✗`  `FP-P2D-326 ✗`  
-`FP-P2D-327 ✗`  `FP-P2D-328 ✗`  `FP-P2D-329 ✗`  `FP-P2D-330 ✗`  `FP-P2D-331 ✗`  `FP-P2D-332 ✗`  
-`FP-P2D-333 ✗`  `FP-P2D-334 ✗`  `FP-P2D-335 ✗`  `FP-P2D-336 ✗`  `FP-P2D-337 ✗`  `FP-P2D-338 ✗`  
-`FP-P2D-339 ✗`  `FP-P2D-340 ✗`  `FP-P2D-341 ✗`  `FP-P2D-342 ✗`  `FP-P2D-343 ✗`  `FP-P2D-344 ✗`  
-`FP-P2D-345 ✗`  `FP-P2D-346 ✗`  `FP-P2D-347 ✗`  `FP-P2D-348 ✗`  `FP-P2D-349 ✗`  `FP-P2D-350 ✗`  
-`FP-P2D-351 ✗`  `FP-P2D-352 ✗`  `FP-P2D-353 ✗`  `FP-P2D-354 ✗`  `FP-P2D-355 ✗`  `FP-P2D-356 ✗`  
-`FP-P2D-357 ✗`  `FP-P2D-358 ✗`  `FP-P2D-359 ✗`  `FP-P2D-360 ✗`  `FP-P2D-361 ✗`  `FP-P2D-362 ✗`  
-`FP-P2D-363 ✗`  `FP-P2D-364 ✗`  `FP-P2D-365 ✗`  `FP-P2D-366 ✗`  `FP-P2D-367 ✗`  `FP-P2D-368 ✗`  
-`FP-P2D-369 ✗`  `FP-P2D-370 ✗`  `FP-P2D-371 ✗`  `FP-P2D-372 ✗`  `FP-P2D-373 ✗`  `FP-P2D-374 ✗`  
-`FP-P2D-375 ✗`  `FP-P2D-376 ✗`  `FP-P2D-377 ✗`  `FP-P2D-378 ✗`  `FP-P2D-379 ✗`  `FP-P2D-380 ✗`  
-`FP-P2D-381 ✗`  `FP-P2D-382 ✗`  `FP-P2D-383 ✗`  `FP-P2D-384 ✗`  `FP-P2D-385 ✗`  `FP-P2D-386 ✗`  
-`FP-P2D-387 ✗`  `FP-P2D-388 ✗`  `FP-P2D-389 ✗`  `FP-P2D-390 ✗`  `FP-P2D-391 ✗`  `FP-P2D-392 ✗`  
-`FP-P2D-393 ✗`  `FP-P2D-394 ✗`  `FP-P2D-395 ✗`  `FP-P2D-396 ✗`  `FP-P2D-397 ✗`  `FP-P2D-398 ✗`  
-`FP-P2D-399 ✗`  `FP-P2D-400 ✗`  `FP-P2D-401 ✗`  `FP-P2D-402 ✗`  `FP-P2D-403 ✗`  `FP-P2D-404 ✗`  
-`FP-P2D-405 ✗`  `FP-P2D-406 ✗`  `FP-P2D-407 ✗`  `FP-P2D-408 ✗`  `FP-P2D-409 ✗`  `FP-P2D-410 ✗`  
-`FP-P2D-411 ✗`  `FP-P2D-412 ✗`  `FP-P2D-413 ✗`  `FP-P2D-414 ✗`  `FP-P2D-415 ✗`  `FP-P2D-416 ✗`  
-`FP-P2D-417 ✗`  `FP-P2D-418 ✗`  `FP-P2D-419 ✗`  `FP-P2D-420 ✗`  `FP-P2D-421 ✗`  `FP-P2D-422 ✗`  
-`FP-P2D-423 ✗`  `FP-P2D-424 ✗`  `FP-P2D-425 ✗`  `FP-P2D-426 ✗`  `FP-P2D-427 ✗`  `FP-P2D-428 ✗`  
-`FP-P2D-429 ✗`  `FP-P2D-430 ✗`  `FP-P2D-431 ✗`  `FP-P2D-432 ✗`  `FP-P2D-433 ✗`  
-
-**Failing packets (showing first 25 of 429):**
-
-| Packet | First reason |
-|---|---|
-| `FP-P2C-002` | failed=8 but gate requires 0 |
-| `FP-P2C-003` | failed=3 but gate requires 0 |
-| `FP-P2C-004` | failed=4 but gate requires 0 |
-| `FP-P2C-005` | failed=3 but gate requires 0 |
-| `FP-P2C-006` | failed=2 but gate requires 0 |
-| `FP-P2C-007` | failed=3 but gate requires 0 |
-| `FP-P2C-008` | failed=2 but gate requires 0 |
-| `FP-P2C-009` | failed=2 but gate requires 0 |
-| `FP-P2C-010` | failed=25 but gate requires 0 |
-| `FP-P2C-011` | failed=21 but gate requires 0 |
-| `FP-P2D-014` | failed=12 but gate requires 0 |
-| `FP-P2D-015` | failed=14 but gate requires 0 |
-| `FP-P2D-016` | failed=14 but gate requires 0 |
-| `FP-P2D-017` | failed=14 but gate requires 0 |
-| `FP-P2D-018` | failed=18 but gate requires 0 |
-| `FP-P2D-019` | failed=14 but gate requires 0 |
-| `FP-P2D-020` | failed=14 but gate requires 0 |
-| `FP-P2D-021` | failed=17 but gate requires 0 |
-| `FP-P2D-022` | failed=17 but gate requires 0 |
-| `FP-P2D-023` | failed=17 but gate requires 0 |
-| `FP-P2D-024` | failed=13 but gate requires 0 |
-| `FP-P2D-025` | failed=13 but gate requires 0 |
-| `FP-P2D-026` | failed=10 but gate requires 0 |
-| `FP-P2D-027` | failed=10 but gate requires 0 |
-| `FP-P2D-028` | failed=10 but gate requires 0 |
-| ... | _and 404 more — see `artifacts/phase2c/drift_history.jsonl`_ |
+`FP-P2D-014 ✓`  `FP-P2D-015 ✓`  `FP-P2D-016 ✓`  `FP-P2D-017 ✓`  `FP-P2D-018 ✓`  `FP-P2D-019 ✓`  
+`FP-P2D-020 ✓`  `FP-P2D-021 ✓`  `FP-P2D-022 ✓`  `FP-P2D-023 ✓`  `FP-P2D-024 ✓`  `FP-P2D-025 ✓`  
+`FP-P2D-026 ✓`  `FP-P2D-027 ✓`  `FP-P2D-028 ✓`  `FP-P2D-029 ✓`  `FP-P2D-030 ✓`  `FP-P2D-031 ✓`  
+`FP-P2D-032 ✓`  `FP-P2D-033 ✓`  `FP-P2D-034 ✓`  `FP-P2D-035 ✓`  `FP-P2D-036 ✓`  `FP-P2D-037 ✓`  
+`FP-P2D-038 ✓`  `FP-P2D-039 ✓`  `FP-P2D-040 ✓`  `FP-P2D-041 ✓`  `FP-P2D-042 ✓`  `FP-P2D-043 ✓`  
+`FP-P2D-044 ✓`  `FP-P2D-045 ✓`  `FP-P2D-046 ✓`  `FP-P2D-047 ✓`  `FP-P2D-048 ✓`  `FP-P2D-049 ✓`  
+`FP-P2D-050 ✓`  `FP-P2D-051 ✓`  `FP-P2D-052 ✓`  `FP-P2D-053 ✓`  `FP-P2D-054 ✓`  `FP-P2D-055 ✓`  
+`FP-P2D-056 ✓`  `FP-P2D-057 ✓`  `FP-P2D-058 ✓`  `FP-P2D-060 ✓`  `FP-P2D-061 ✓`  `FP-P2D-062 ✓`  
+`FP-P2D-063 ✓`  `FP-P2D-064 ✓`  `FP-P2D-065 ✓`  `FP-P2D-066 ✓`  `FP-P2D-067 ✓`  `FP-P2D-068 ✓`  
+`FP-P2D-069 ✓`  `FP-P2D-070 ✓`  `FP-P2D-071 ✓`  `FP-P2D-072 ✓`  `FP-P2D-073 ✓`  `FP-P2D-074 ✓`  
+`FP-P2D-075 ✓`  `FP-P2D-076 ✓`  `FP-P2D-077 ✓`  `FP-P2D-078 ✓`  `FP-P2D-079 ✓`  `FP-P2D-080 ✓`  
+`FP-P2D-081 ✓`  `FP-P2D-082 ✓`  `FP-P2D-083 ✓`  `FP-P2D-084 ✓`  `FP-P2D-085 ✓`  `FP-P2D-086 ✓`  
+`FP-P2D-087 ✓`  `FP-P2D-088 ✓`  `FP-P2D-089 ✓`  `FP-P2D-090 ✓`  `FP-P2D-091 ✓`  `FP-P2D-092 ✓`  
+`FP-P2D-093 ✓`  `FP-P2D-094 ✓`  `FP-P2D-095 ✓`  `FP-P2D-096 ✓`  `FP-P2D-097 ✓`  `FP-P2D-098 ✓`  
+`FP-P2D-099 ✓`  `FP-P2D-100 ✓`  `FP-P2D-101 ✓`  `FP-P2D-102 ✓`  `FP-P2D-103 ✓`  `FP-P2D-104 ✓`  
+`FP-P2D-105 ✓`  `FP-P2D-106 ✓`  `FP-P2D-107 ✓`  `FP-P2D-108 ✓`  `FP-P2D-109 ✓`  `FP-P2D-110 ✓`  
+`FP-P2D-111 ✓`  `FP-P2D-112 ✓`  `FP-P2D-113 ✓`  `FP-P2D-114 ✓`  `FP-P2D-115 ✓`  `FP-P2D-116 ✓`  
+`FP-P2D-117 ✓`  `FP-P2D-118 ✓`  `FP-P2D-119 ✓`  `FP-P2D-120 ✓`  `FP-P2D-121 ✓`  `FP-P2D-122 ✓`  
+`FP-P2D-123 ✓`  `FP-P2D-124 ✓`  `FP-P2D-125 ✓`  `FP-P2D-126 ✓`  `FP-P2D-127 ✓`  `FP-P2D-128 ✓`  
+`FP-P2D-129 ✓`  `FP-P2D-130 ✓`  `FP-P2D-131 ✓`  `FP-P2D-132 ✓`  `FP-P2D-133 ✓`  `FP-P2D-134 ✓`  
+`FP-P2D-135 ✓`  `FP-P2D-136 ✓`  `FP-P2D-137 ✓`  `FP-P2D-138 ✓`  `FP-P2D-139 ✓`  `FP-P2D-140 ✓`  
+`FP-P2D-141 ✓`  `FP-P2D-142 ✓`  `FP-P2D-143 ✓`  `FP-P2D-144 ✓`  `FP-P2D-145 ✓`  `FP-P2D-146 ✓`  
+`FP-P2D-147 ✓`  `FP-P2D-148 ✓`  `FP-P2D-149 ✓`  `FP-P2D-150 ✓`  `FP-P2D-151 ✓`  `FP-P2D-152 ✓`  
+`FP-P2D-153 ✓`  `FP-P2D-154 ✓`  `FP-P2D-155 ✓`  `FP-P2D-156 ✓`  `FP-P2D-157 ✓`  `FP-P2D-158 ✓`  
+`FP-P2D-159 ✓`  `FP-P2D-160 ✓`  `FP-P2D-161 ✓`  `FP-P2D-162 ✓`  `FP-P2D-163 ✓`  `FP-P2D-164 ✓`  
+`FP-P2D-165 ✓`  `FP-P2D-166 ✓`  `FP-P2D-167 ✓`  `FP-P2D-168 ✓`  `FP-P2D-169 ✓`  `FP-P2D-170 ✓`  
+`FP-P2D-171 ✓`  `FP-P2D-172 ✓`  `FP-P2D-173 ✓`  `FP-P2D-174 ✓`  `FP-P2D-175 ✓`  `FP-P2D-176 ✓`  
+`FP-P2D-177 ✓`  `FP-P2D-178 ✓`  `FP-P2D-179 ✓`  `FP-P2D-180 ✓`  `FP-P2D-181 ✓`  `FP-P2D-182 ✓`  
+`FP-P2D-183 ✓`  `FP-P2D-184 ✓`  `FP-P2D-185 ✓`  `FP-P2D-186 ✓`  `FP-P2D-187 ✓`  `FP-P2D-188 ✓`  
+`FP-P2D-189 ✓`  `FP-P2D-190 ✓`  `FP-P2D-191 ✓`  `FP-P2D-192 ✓`  `FP-P2D-193 ✓`  `FP-P2D-194 ✓`  
+`FP-P2D-195 ✓`  `FP-P2D-196 ✓`  `FP-P2D-197 ✓`  `FP-P2D-198 ✓`  `FP-P2D-199 ✓`  `FP-P2D-200 ✓`  
+`FP-P2D-201 ✓`  `FP-P2D-202 ✓`  `FP-P2D-203 ✓`  `FP-P2D-204 ✓`  `FP-P2D-205 ✓`  `FP-P2D-206 ✓`  
+`FP-P2D-207 ✓`  `FP-P2D-208 ✓`  `FP-P2D-209 ✓`  `FP-P2D-210 ✓`  `FP-P2D-211 ✓`  `FP-P2D-212 ✓`  
+`FP-P2D-213 ✓`  `FP-P2D-214 ✓`  `FP-P2D-215 ✓`  `FP-P2D-216 ✓`  `FP-P2D-217 ✓`  `FP-P2D-218 ✓`  
+`FP-P2D-219 ✓`  `FP-P2D-220 ✓`  `FP-P2D-221 ✓`  `FP-P2D-222 ✓`  `FP-P2D-223 ✓`  `FP-P2D-224 ✓`  
+`FP-P2D-225 ✓`  `FP-P2D-226 ✓`  `FP-P2D-227 ✓`  `FP-P2D-228 ✓`  `FP-P2D-229 ✓`  `FP-P2D-230 ✓`  
+`FP-P2D-231 ✓`  `FP-P2D-232 ✓`  `FP-P2D-233 ✓`  `FP-P2D-234 ✓`  `FP-P2D-235 ✓`  `FP-P2D-236 ✓`  
+`FP-P2D-237 ✓`  `FP-P2D-238 ✓`  `FP-P2D-239 ✓`  `FP-P2D-240 ✓`  `FP-P2D-241 ✓`  `FP-P2D-242 ✓`  
+`FP-P2D-243 ✓`  `FP-P2D-244 ✓`  `FP-P2D-245 ✓`  `FP-P2D-246 ✓`  `FP-P2D-247 ✓`  `FP-P2D-248 ✓`  
+`FP-P2D-249 ✓`  `FP-P2D-250 ✓`  `FP-P2D-251 ✓`  `FP-P2D-252 ✓`  `FP-P2D-253 ✓`  `FP-P2D-254 ✓`  
+`FP-P2D-255 ✓`  `FP-P2D-256 ✓`  `FP-P2D-257 ✓`  `FP-P2D-258 ✓`  `FP-P2D-259 ✓`  `FP-P2D-260 ✓`  
+`FP-P2D-261 ✓`  `FP-P2D-262 ✓`  `FP-P2D-263 ✓`  `FP-P2D-264 ✓`  `FP-P2D-265 ✓`  `FP-P2D-266 ✓`  
+`FP-P2D-267 ✓`  `FP-P2D-268 ✓`  `FP-P2D-269 ✓`  `FP-P2D-270 ✓`  `FP-P2D-271 ✓`  `FP-P2D-272 ✓`  
+`FP-P2D-273 ✓`  `FP-P2D-274 ✓`  `FP-P2D-275 ✓`  `FP-P2D-276 ✓`  `FP-P2D-277 ✓`  `FP-P2D-278 ✓`  
+`FP-P2D-279 ✓`  `FP-P2D-280 ✓`  `FP-P2D-281 ✓`  `FP-P2D-282 ✓`  `FP-P2D-283 ✓`  `FP-P2D-284 ✓`  
+`FP-P2D-285 ✓`  `FP-P2D-286 ✓`  `FP-P2D-287 ✓`  `FP-P2D-288 ✓`  `FP-P2D-289 ✓`  `FP-P2D-290 ✓`  
+`FP-P2D-291 ✓`  `FP-P2D-292 ✓`  `FP-P2D-293 ✓`  `FP-P2D-294 ✓`  `FP-P2D-295 ✓`  `FP-P2D-296 ✓`  
+`FP-P2D-297 ✓`  `FP-P2D-298 ✓`  `FP-P2D-299 ✓`  `FP-P2D-300 ✓`  `FP-P2D-301 ✓`  `FP-P2D-302 ✓`  
+`FP-P2D-303 ✓`  `FP-P2D-304 ✓`  `FP-P2D-305 ✓`  `FP-P2D-306 ✓`  `FP-P2D-307 ✓`  `FP-P2D-308 ✓`  
+`FP-P2D-309 ✓`  `FP-P2D-310 ✓`  `FP-P2D-311 ✓`  `FP-P2D-312 ✓`  `FP-P2D-313 ✓`  `FP-P2D-314 ✓`  
+`FP-P2D-315 ✓`  `FP-P2D-316 ✓`  `FP-P2D-317 ✓`  `FP-P2D-318 ✓`  `FP-P2D-319 ✓`  `FP-P2D-320 ✓`  
+`FP-P2D-321 ✓`  `FP-P2D-322 ✓`  `FP-P2D-323 ✓`  `FP-P2D-324 ✓`  `FP-P2D-325 ✓`  `FP-P2D-326 ✓`  
+`FP-P2D-327 ✓`  `FP-P2D-328 ✓`  `FP-P2D-329 ✓`  `FP-P2D-330 ✓`  `FP-P2D-331 ✓`  `FP-P2D-332 ✓`  
+`FP-P2D-333 ✓`  `FP-P2D-334 ✓`  `FP-P2D-335 ✓`  `FP-P2D-336 ✓`  `FP-P2D-337 ✓`  `FP-P2D-338 ✓`  
+`FP-P2D-339 ✓`  `FP-P2D-340 ✓`  `FP-P2D-341 ✓`  `FP-P2D-342 ✓`  `FP-P2D-343 ✓`  `FP-P2D-344 ✓`  
+`FP-P2D-345 ✓`  `FP-P2D-346 ✓`  `FP-P2D-347 ✓`  `FP-P2D-348 ✓`  `FP-P2D-349 ✓`  `FP-P2D-350 ✓`  
+`FP-P2D-351 ✓`  `FP-P2D-352 ✓`  `FP-P2D-353 ✓`  `FP-P2D-354 ✓`  `FP-P2D-355 ✓`  `FP-P2D-356 ✓`  
+`FP-P2D-357 ✓`  `FP-P2D-358 ✓`  `FP-P2D-359 ✓`  `FP-P2D-360 ✓`  `FP-P2D-361 ✓`  `FP-P2D-362 ✓`  
+`FP-P2D-363 ✓`  `FP-P2D-364 ✓`  `FP-P2D-365 ✓`  `FP-P2D-366 ✓`  `FP-P2D-367 ✓`  `FP-P2D-368 ✓`  
+`FP-P2D-369 ✓`  `FP-P2D-370 ✓`  `FP-P2D-371 ✓`  `FP-P2D-372 ✓`  `FP-P2D-373 ✓`  `FP-P2D-374 ✓`  
+`FP-P2D-375 ✓`  `FP-P2D-376 ✓`  `FP-P2D-377 ✓`  `FP-P2D-378 ✓`  `FP-P2D-379 ✓`  `FP-P2D-380 ✓`  
+`FP-P2D-381 ✓`  `FP-P2D-382 ✓`  `FP-P2D-383 ✓`  `FP-P2D-384 ✓`  `FP-P2D-385 ✓`  `FP-P2D-386 ✓`  
+`FP-P2D-387 ✓`  `FP-P2D-388 ✓`  `FP-P2D-389 ✓`  `FP-P2D-390 ✓`  `FP-P2D-391 ✓`  `FP-P2D-392 ✓`  
+`FP-P2D-393 ✓`  `FP-P2D-394 ✓`  `FP-P2D-395 ✓`  `FP-P2D-396 ✓`  `FP-P2D-397 ✓`  `FP-P2D-398 ✓`  
+`FP-P2D-399 ✓`  `FP-P2D-400 ✓`  `FP-P2D-401 ✓`  `FP-P2D-402 ✓`  `FP-P2D-403 ✓`  `FP-P2D-404 ✓`  
+`FP-P2D-405 ✓`  `FP-P2D-406 ✓`  `FP-P2D-407 ✓`  `FP-P2D-408 ✓`  `FP-P2D-409 ✓`  `FP-P2D-410 ✓`  
+`FP-P2D-411 ✓`  `FP-P2D-412 ✓`  `FP-P2D-413 ✓`  `FP-P2D-414 ✓`  `FP-P2D-415 ✓`  `FP-P2D-416 ✓`  
+`FP-P2D-417 ✓`  `FP-P2D-418 ✓`  `FP-P2D-419 ✓`  `FP-P2D-420 ✓`  `FP-P2D-421 ✓`  `FP-P2D-422 ✓`  
+`FP-P2D-423 ✓`  `FP-P2D-424 ✓`  `FP-P2D-425 ✓`  `FP-P2D-426 ✓`  `FP-P2D-427 ✓`  `FP-P2D-428 ✓`  
+`FP-P2D-429 ✓`  `FP-P2D-430 ✓`  `FP-P2D-431 ✓`  `FP-P2D-432 ✓`  `FP-P2D-433 ✓`  `FP-P2D-434 ✓`  
+`FP-P2D-435 ✓`  `FP-P2D-436 ✓`  `FP-P2D-437 ✓`  `FP-P2D-438 ✓`  `FP-P2D-439 ✓`  `FP-P2D-460 ✓`  
+`FP-P2D-461 ✓`  `FP-P2D-462 ✓`  `FP-P2D-463 ✓`  `FP-P2D-464 ·`  `FP-P2D-465 ✓`  `FP-P2D-466 ·`  
+`FP-P2D-467 ✓`  `FP-P2D-468 ✓`  
 
 <!-- END AUTO-PACKET-TABLE -->
