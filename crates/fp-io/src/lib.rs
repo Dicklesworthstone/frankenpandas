@@ -6631,6 +6631,45 @@ fn materialize_synthetic_row_multiindex_columns(frame: &DataFrame) -> Result<Dat
     materialize_row_multiindex_columns(frame, &names)
 }
 
+/// Schema-level metadata key under which Parquet / Feather / Arrow IPC files
+/// carry the row MultiIndex level names (a JSON array, `null` for an unnamed
+/// level). The level VALUES travel as the synthetic `__index_level_N__`
+/// columns that `promote_synthetic_row_multiindex_if_present` recognises; the
+/// NAMES had nowhere to go, so every round-trip came back as
+/// `__index_level_0__` / `__index_level_1__` / ... where pandas keeps
+/// `region` / `product` / `year` (br-frankenpandas-wfkzm).
+const ROW_MULTIINDEX_NAMES_METADATA_KEY: &str = "frankenpandas.row_multiindex_names";
+
+/// Same payload for the JSON `split` orient, as an extra top-level key. pandas
+/// cannot round-trip a MultiIndex through `split` at all
+/// (`read_json(orient="split")` raises NotImplementedError on the tuple
+/// index), so the key costs no interoperability.
+const JSON_SPLIT_INDEX_NAMES_KEY: &str = "index_names";
+
+/// Re-apply level names to a frame whose row MultiIndex was rebuilt from the
+/// synthetic columns. A length mismatch (file written by an older build, or
+/// hand-edited) leaves the synthetic names in place rather than guessing.
+fn restore_row_multiindex_names(
+    frame: DataFrame,
+    names: &[Option<String>],
+) -> Result<DataFrame, IoError> {
+    let Some(row_multiindex) = frame.row_multiindex() else {
+        return Ok(frame);
+    };
+    if row_multiindex.nlevels() != names.len() {
+        return Ok(frame);
+    }
+    let renamed = row_multiindex.clone().set_names(names.to_vec());
+    frame.with_row_multiindex(renamed).map_err(IoError::from)
+}
+
+fn row_multiindex_names_from_arrow_metadata(
+    metadata: &std::collections::HashMap<String, String>,
+) -> Option<Vec<Option<String>>> {
+    let raw = metadata.get(ROW_MULTIINDEX_NAMES_METADATA_KEY)?;
+    serde_json::from_str::<Vec<Option<String>>>(raw).ok()
+}
+
 fn promote_frame_index_columns(
     frame: &DataFrame,
     index_cols: &[&str],
@@ -7847,7 +7886,16 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 None => Index::from_i64((0..row_count).collect()),
             };
             let frame = DataFrame::new_with_column_order(index, out, col_names)?;
-            promote_synthetic_row_multiindex_if_present(&frame)
+            let frame = promote_synthetic_row_multiindex_if_present(&frame)?;
+            let level_names = obj
+                .get(JSON_SPLIT_INDEX_NAMES_KEY)
+                .and_then(|value| {
+                    serde_json::from_value::<Vec<Option<String>>>(value.clone()).ok()
+                });
+            match level_names {
+                Some(names) => restore_row_multiindex_names(frame, &names),
+                None => Ok(frame),
+            }
         }
         JsonOrient::Values => {
             let rows = parsed
@@ -8394,9 +8442,24 @@ fn try_write_json_split_typed(frame: &DataFrame) -> Option<String> {
 }
 
 pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String, IoError> {
-    if frame.row_multiindex().is_some() && orient != JsonOrient::Values {
+    if let Some(row_multiindex) = frame.row_multiindex()
+        && orient != JsonOrient::Values
+    {
         let materialized = materialize_synthetic_row_multiindex_columns(frame)?;
-        return write_json_string(&materialized, orient);
+        let mut out = write_json_string(&materialized, orient)?;
+        // The level values ride along as synthetic columns; the level NAMES
+        // need their own slot, and only `split` has an object to put it in.
+        if orient == JsonOrient::Split && out.ends_with('}') {
+            let names = serde_json::to_string(&row_multiindex.names().to_vec())
+                .map_err(|e| IoError::Json(format!("encode row multiindex names: {e}")))?;
+            out.pop();
+            out.push_str(",\"");
+            out.push_str(JSON_SPLIT_INDEX_NAMES_KEY);
+            out.push_str("\":");
+            out.push_str(&names);
+            out.push('}');
+        }
+        return Ok(out);
     }
 
     let row_count = frame.index().len();
@@ -9187,6 +9250,9 @@ fn retag_from_field_metadata(col: Column, field: &Field) -> Column {
 }
 
 fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> {
+    let row_multiindex_names = frame
+        .row_multiindex()
+        .map(|row_multiindex| row_multiindex.names().to_vec());
     let materialized = if frame.row_multiindex().is_some() {
         Some(materialize_synthetic_row_multiindex_columns(frame)?)
     } else {
@@ -9215,7 +9281,20 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
         arrays.push(arr);
     }
 
-    let schema = Arc::new(Schema::new(fields));
+    let schema = match row_multiindex_names {
+        Some(names) => {
+            let encoded = serde_json::to_string(&names)
+                .map_err(|e| IoError::Parquet(format!("encode row multiindex names: {e}")))?;
+            Arc::new(Schema::new_with_metadata(
+                fields,
+                std::collections::HashMap::from([(
+                    ROW_MULTIINDEX_NAMES_METADATA_KEY.to_owned(),
+                    encoded,
+                )]),
+            ))
+        }
+        None => Arc::new(Schema::new(fields)),
+    };
     RecordBatch::try_new(schema, arrays).map_err(|e| IoError::Parquet(e.to_string()))
 }
 
@@ -9319,7 +9398,11 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
     let index = Index::new_known_unique_int64_unit_range(0, n_rows);
 
     let frame = DataFrame::new_with_column_order(index, columns, col_order)?;
-    promote_synthetic_row_multiindex_if_present(&frame)
+    let frame = promote_synthetic_row_multiindex_if_present(&frame)?;
+    match row_multiindex_names_from_arrow_metadata(schema.metadata()) {
+        Some(names) => restore_row_multiindex_names(frame, &names),
+        None => Ok(frame),
+    }
 }
 
 fn fp_dtype_for_arrow_data_type(dt: &ArrowDataType) -> DType {
