@@ -1,12 +1,12 @@
 {
   "claim_id": "COMPAT-CLOSURE-I/attestation",
-  "generated_unix_ms": 1787886500224,
+  "generated_unix_ms": 1788406026131,
   "all_checks_passed": true,
   "coverage_percent": 100,
   "strict_zero_drift": true,
   "hardened_allowlisted_total": 2,
   "packet_count": 1,
-  "attestation_signature": "sha256:fc549563d69f9cede73c52cee4dae735abbb8af7729c8cc8138a651063da5ce8",
+  "attestation_signature": "sha256:afd3b15624696a7e3013b1cce455986ddb154c3c6e8412ec8359853d816f5aae",
   "evidence_pack_path": "artifacts/phase2c/compat_closure_final_evidence_pack.json",
   "migration_manifest_path": "artifacts/phase2c/compat_closure_migration_manifest.json"
 }
