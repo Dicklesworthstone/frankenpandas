@@ -117304,25 +117304,13 @@ mod tests {
 
     // ── reindex test ──
 
-    #[test]
-    /// A Float64 column carrying MISSING values must reindex to exactly what
-    /// the Scalar fallback produced: a resolved target keeps the source row's
-    /// value AND its nullity, an unresolved target becomes an invented gap.
-    /// The typed nullable arm is the one under test — the all-valid arm declines
-    /// these columns, so before it existed every one of them went to Scalars.
-    #[test]
-    /// melt over value vars that carry MISSING values must produce exactly what
-    /// the Scalar path produced. The typed concat arm is the one under test:
-    /// before it existed, ONE nullable value var turned the whole typed path off.
-    /// Mixes an all-valid f64 var, a nullable one, and an i64 one so the run-fill,
-    /// per-slot and widening branches all execute in a single call.
-    #[test]
-    /// A wide-range Int64 key with NULLABLE value columns must aggregate to
-    /// exactly what the generic path produced. The wide-key dense bypass used to
-    /// decline these outright, so this covers the arm it now takes — every func
-    /// its gate admits, including the ones served by the nullable branch's
-    /// catch-all (min/max), and a group that is entirely missing.
-    #[test]
+    // Four 2026-08-27 insertions (edbd27e0b, 2a08cc417, 286815e89, 6e9ee78f1)
+    // stacked their `#[test]` + doc comment in front of this function while
+    // their bodies landed further down, so `groupby_widekey_nullable_values_...`,
+    // `dataframe_melt_nullable_value_vars_...`, `dataframe_reindex_nullable_...`
+    // and `dataframe_reindex_basic` compiled as plain never-run functions.
+    // Each attribute now sits on the function it documents.
+
     /// pivot_table over a NULLABLE value column must agree with the generic
     /// per-Scalar path it used to be forced onto. The dense build now skips
     /// missing values while still counting the cell as present, so this covers
@@ -117360,6 +117348,12 @@ mod tests {
         }
     }
 
+    /// A wide-range Int64 key with NULLABLE value columns must aggregate to
+    /// exactly what the generic path produced. The wide-key dense bypass used to
+    /// decline these outright, so this covers the arm it now takes — every func
+    /// its gate admits, including the ones served by the nullable branch's
+    /// catch-all (min/max), and a group that is entirely missing.
+    #[test]
     fn groupby_widekey_nullable_values_match_the_generic_aggregation() {
         // Keys are wide-range so the BOUNDED bypass cannot claim them.
         let keys: Vec<i64> = vec![10, 5_000_000, 10, 5_000_000, 77, 10];
@@ -117406,6 +117400,12 @@ mod tests {
         }
     }
 
+    /// melt over value vars that carry MISSING values must produce exactly what
+    /// the Scalar path produced. The typed concat arm is the one under test:
+    /// before it existed, ONE nullable value var turned the whole typed path off.
+    /// Mixes an all-valid f64 var, a nullable one, and an i64 one so the run-fill,
+    /// per-slot and widening branches all execute in a single call.
+    #[test]
     fn dataframe_melt_nullable_value_vars_match_the_scalar_semantics() {
         let mut columns = BTreeMap::new();
         columns.insert(
@@ -117462,6 +117462,12 @@ mod tests {
         );
     }
 
+    /// A Float64 column carrying MISSING values must reindex to exactly what
+    /// the Scalar fallback produced: a resolved target keeps the source row's
+    /// value AND its nullity, an unresolved target becomes an invented gap.
+    /// The typed nullable arm is the one under test — the all-valid arm declines
+    /// these columns, so before it existed every one of them went to Scalars.
+    #[test]
     fn dataframe_reindex_nullable_float64_matches_the_scalar_semantics() {
         let mut columns = BTreeMap::new();
         // rows 1 and 3 are MISSING in the source.
@@ -117506,6 +117512,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn dataframe_reindex_basic() {
         let df = DataFrame::from_series(vec![
             Series::from_values(

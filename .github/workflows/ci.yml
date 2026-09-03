@@ -295,7 +295,21 @@ jobs:
               print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
           PY
 
+      # br-frankenpandas-kcwat: on 2026-09-01 this job died inside the
+      # toolchain action's rustup download (curl network error) before the
+      # oracle pytest suite or the perf gate ran, while every other job's
+      # identical step succeeded. One retry turns a transient into a non-event
+      # without hiding a real toolchain failure (the second attempt still
+      # fails the job).
       - name: Setup Rust (pinned nightly)
+        id: rust_setup
+        continue-on-error: true
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: Setup Rust (pinned nightly, retry after transient failure)
+        if: steps.rust_setup.outcome == 'failure'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}

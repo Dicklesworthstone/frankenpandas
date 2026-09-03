@@ -447,12 +447,12 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
         // a phase warm, so each arm's median describes the arm rather than what
         // ran before it. Interleaving survives at phase granularity: the slots
         // still alternate ABBA/BAAB, so drift between phases cancels as before.
-        let mut fp_phase = |out: &mut Vec<f64>| {
+        let fp_phase = |out: &mut Vec<f64>| {
             for _ in 0..PHASE {
                 out.push(fp_rep(&subject));
             }
         };
-        let mut pd_phase = |out: &mut Vec<f64>, inc: &mut Incumbent| {
+        let pd_phase = |out: &mut Vec<f64>, inc: &mut Incumbent| {
             for _ in 0..PHASE {
                 out.push(inc.one_rep_us());
             }

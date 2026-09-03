@@ -1,0 +1,32 @@
+# gitleaks configuration — br-frankenpandas-piehe
+#
+# The secret-scan CI job reported 122 `generic-api-key` findings on
+# 2026-09-01 (run 33488811029). Every one was hand-reviewed from the SARIF:
+# 117 are the same beads-tracker line replayed across `.beads/` history and
+# recovery snapshots, and the other five are prose in doc comments and
+# ledgers ("non-lowerhex keys, nullable keys", "..._int64_key_values ->",
+# "dt_day_name 267x ..."). None is a credential. This file allowlists the
+# paths that are pure project prose/data and the comment-line shape, so a
+# real key in source, config, or a workflow still fires.
+
+title = "frankenpandas"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Project prose and tracker data that the generic-api-key rule matches on ordinary words"
+paths = [
+  '''^\.beads/''',
+  '''^docs/NEGATIVE_EVIDENCE\.md$''',
+  '''^docs/LEDGER_RESURRECTION\.md$''',
+  '''^tests/artifacts/''',
+  '''^artifacts/''',
+  '''^crates/fp-conformance/fixtures/''',
+]
+# Rust doc/line comments: the matches in source were sentences such as
+# "All-valid Datetime64 (nanosecond epoch) backing — the typed counterpart".
+regexTarget = "line"
+regexes = [
+  '''^\s*//''',
+]
