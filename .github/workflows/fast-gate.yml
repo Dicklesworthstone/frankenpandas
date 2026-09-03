@@ -68,8 +68,23 @@ jobs:
         with:
           shared-key: fast-gate
 
+      # Per crate, like ci.yml (br-frankenpandas-3bu58): a workspace-wide
+      # `cargo fmt --check` dies allocating >100 GB on the two giant crate
+      # roots and has been reporting success anyway. fp-columnar and
+      # fp-frame are excluded until they are split.
       - name: Format check
-        run: cargo fmt --check
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          for crate in fp-types fp-dot-kernel fp-index fp-expr fp-groupby fp-join fp-io \
+                       fp-conformance fp-bench fp-runtime fp-frankentui fp-python frankenpandas; do
+            if ! cargo fmt --check -p "$crate"; then
+              echo "::error::rustfmt diff or failure in $crate"
+              status=1
+            fi
+          done
+          exit "$status"
 
       - name: Type-check every target (lib, tests, examples, benches)
         run: cargo check --workspace --all-targets

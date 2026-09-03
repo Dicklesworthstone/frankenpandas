@@ -55,8 +55,30 @@ jobs:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
           components: rustfmt
 
+      # br-frankenpandas-3bu58: a bare `cargo fmt --check` was VACUOUS here.
+      # On 2026-09-01 (run 33488811029) it printed 90 diffs, then rustfmt
+      # died with "memory allocation of 172598700000 bytes failed" on one of
+      # the two giant crate roots, and the step still concluded success. So
+      # the gate now runs per crate under `set -euo pipefail`, over every
+      # crate rustfmt can actually format. fp-columnar/src/lib.rs (62k lines)
+      # and fp-frame/src/lib.rs (208k lines) are excluded on purpose: rustfmt
+      # needs tens of GB for them and no runner has it. Their formatting is
+      # unenforced until they are split (tracked in the bead).
       - name: Format check
-        run: cargo fmt --check
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          for crate in fp-types fp-dot-kernel fp-index fp-expr fp-groupby fp-join fp-io \
+                       fp-conformance fp-bench fp-runtime fp-frankentui fp-python frankenpandas; do
+            echo "::group::cargo fmt --check -p $crate"
+            if ! cargo fmt --check -p "$crate"; then
+              echo "::error::rustfmt diff or failure in $crate"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
 
   lint:
     strategy:

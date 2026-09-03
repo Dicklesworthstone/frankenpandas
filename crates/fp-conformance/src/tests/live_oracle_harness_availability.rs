@@ -25,6 +25,13 @@ fn live_oracle_unavailable_propagates_without_fallback() {
     cfg.allow_system_pandas_fallback = false;
     cfg.allow_fixture_fallback = false;
     cfg.require_live_oracle = false;
+    // br-frankenpandas-00de2: `default_paths` now resolves `python_bin` to the
+    // repository's pinned oracle venv when it exists, and that interpreter is
+    // the DESIGNATED oracle rather than a system fallback, so the scenario
+    // under test ("no oracle reachable at all") has to name an interpreter
+    // that is not the pinned one. `python3` on this host has no pandas; on a
+    // host where it does, the fallback flag above still refuses it.
+    cfg.python_bin = "python3".to_owned();
 
     let report = super::run_packet_by_id(&cfg, "FP-P2C-001", super::OracleMode::LiveLegacyPandas)
         .expect("expected report even when cases fail");
