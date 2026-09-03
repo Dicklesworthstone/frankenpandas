@@ -806,7 +806,12 @@ impl PyDataFrame {
     }
 
     /// `df["c"] = series | list | scalar`, as in pandas (adds or replaces).
-    fn __setitem__(&mut self, py: Python<'_>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn __setitem__(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         let n = self.inner.len();
         let values: Vec<Scalar> = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
             if series.inner.len() != n {
