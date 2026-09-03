@@ -8450,8 +8450,7 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
         // The level values ride along as synthetic columns; the level NAMES
         // need their own slot, and only `split` has an object to put it in.
         if orient == JsonOrient::Split && out.ends_with('}') {
-            let names = serde_json::to_string(&row_multiindex.names().to_vec())
-                .map_err(|e| IoError::Json(format!("encode row multiindex names: {e}")))?;
+            let names = serde_json::to_string(&row_multiindex.names().to_vec())?;
             out.pop();
             out.push_str(",\"");
             out.push_str(JSON_SPLIT_INDEX_NAMES_KEY);
