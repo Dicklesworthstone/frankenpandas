@@ -654,6 +654,20 @@ pub struct PyDataFrame {
     inner: DataFrame,
 }
 
+impl PyDataFrame {
+    /// One column as a Series, `KeyError` when absent (shared by `__getitem__`
+    /// and the Rust-side tests).
+    fn column_series(&self, col: &str) -> PyResult<PySeries> {
+        let column = self
+            .inner
+            .column(col)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.to_owned()))?;
+        let series = Series::new(col, self.inner.index().clone(), column.clone())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: series })
+    }
+}
+
 #[pymethods]
 impl PyDataFrame {
     /// Create a new DataFrame from a dictionary of column name -> values.
