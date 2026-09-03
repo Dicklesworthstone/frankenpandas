@@ -112197,6 +112197,59 @@ mod tests {
         );
     }
 
+    /// br-frankenpandas-wfkzm: attaching a row MultiIndex to an existing frame
+    /// must not reorder its columns. The negative half pins WHY the method
+    /// exists: `new_with_row_multiindex` takes a `ColumnStore` and can only
+    /// order columns alphabetically, which is what silently reordered every
+    /// row-MultiIndex conformance fixture.
+    #[test]
+    fn with_row_multiindex_keeps_column_order_where_the_store_constructor_cannot() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("sales", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("cost", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+            vec![
+                IndexLabel::Utf8("north|2023".into()),
+                IndexLabel::Utf8("north|2024".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(df.column_names(), vec!["sales", "cost"]);
+        let row_multiindex = fp_index::MultiIndex::from_arrays(vec![
+            vec![
+                IndexLabel::Utf8("north".into()),
+                IndexLabel::Utf8("north".into()),
+            ],
+            vec![IndexLabel::Int64(2023), IndexLabel::Int64(2024)],
+        ])
+        .unwrap()
+        .set_names(vec![Some("region".into()), Some("year".into())]);
+
+        let attached = df
+            .clone()
+            .with_row_multiindex(row_multiindex.clone())
+            .unwrap();
+        assert_eq!(attached.column_names(), vec!["sales", "cost"]);
+        assert_eq!(
+            attached.row_multiindex().map(|mi| mi.names().to_vec()),
+            Some(vec![Some("region".into()), Some("year".into())])
+        );
+        assert_eq!(
+            attached.column("cost").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+
+        // The store constructor has no order to preserve and alphabetizes.
+        let rebuilt = DataFrame::new_with_row_multiindex(
+            df.index().clone(),
+            row_multiindex,
+            df.columns().clone(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt.column_names(), vec!["cost", "sales"]);
+    }
+
     #[test]
     fn dataframe_rename_axis_rejects_scalar_for_row_multiindex() {
         let row_multiindex = fp_index::MultiIndex::from_arrays(vec![
