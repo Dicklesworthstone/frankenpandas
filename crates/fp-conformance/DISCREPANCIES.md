@@ -1,14 +1,14 @@
 # Known Conformance Divergences
 
 > Every intentional divergence from pandas behavior is documented here.
-> Format: DISC-NNN, status (ACCEPTED/INVESTIGATING/WILL-FIX), affected tests.
+> Format: DISC-NNN, status (ACCEPTED/INVESTIGATING/WILL-FIX/RESOLVED), affected tests.
 >
 > **DISC numbers must be UNIQUE — check before you claim one.** On 2026-08-16 three
 > IDs were each defined twice (DISC-018, DISC-019, DISC-020), so a citation could
 > resolve to the wrong entry depending on which heading a reader hit first, and one
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
 > number on whichever entry the existing in-tree citations actually meant. The next
-> free number is DISC-025. To see every ID in use:
+> free number is DISC-027. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -85,14 +85,6 @@
 - **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
 - **Review date:** 2026-04-25
 
-### DISC-012: Mixed naive / tz-aware CSV parse_dates normalizes per value
-- **Reference:** Pandas handles a CSV column with mixed naive + tz-aware datetime strings by parsing each row independently (the naive rows produce `Timestamp` without tz; the aware rows produce `Timestamp` with tz). When converted to strings, both forms are reformatted into pandas' canonical `YYYY-MM-DD HH:MM:SS[±HH:MM]` shape.
-- **Our impl:** fp-io now parses `read_csv(parse_dates=[...])` mixed naive + tz-aware columns per value by calling `to_datetime_values_with_options` with `infer_mixed_timezone=false` and `mixed_tz_as_object=true`. The column remains object-like (`Utf8`) because pandas cannot unify mixed tz-naive/tz-aware values into one `datetime64[ns]` dtype, but each value is normalized to the pandas object-string form.
-- **Impact:** Conformance packet `FP-P2D-429` (`csv_read_frame_parse_dates_mixed_timezone_strict`) now matches the fixture: the aware row is normalized from `2024-01-15T10:30:00Z` to `2024-01-15 10:30:00+00:00`.
-- **Resolution:** RESOLVED — covered by fp-io test `csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value`; the stale accepted-divergence note was superseded by the per-value parse path used by `parse_csv_datetime_values`.
-- **Tests affected:** none expected; historical coverage remains `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
-- **Review date:** 2026-06-17
-
 ### DISC-015: memory_usage exact bytes differ from pandas (structural divergence)
 - **Reference:** pandas `DataFrame.memory_usage()` reports exact bytes consumed by numpy-backed columns. For the test frame in `FP-P2D-364`, pandas returns 234 bytes (index + column overhead + numpy array backing).
 - **Our impl:** FrankenPandas uses `Vec<Scalar>` storage which has structurally different memory characteristics. The same frame reports 32 bytes — a 7x difference reflecting heap-allocated scalars vs numpy's contiguous buffer layout.
@@ -153,6 +145,15 @@
 - **Tests affected:** `strict_reproduces_pandas_silent_timedelta_wrap_s4lkx` (pins the oracle values and states in its doc comment that a failure means pandas changed or a non-STRICT caller was misrouted — **not** that the arithmetic should be corrected), `non_strict_policies_still_refuse_to_wrap_s4lkx` (asserts the default and HARDENED still refuse to wrap, and that HARDENED still records the recovery).
 - **Review date:** 2026-08-06
 
+### DISC-025: `str.encode` returns byte LENGTHS, where pandas returns bytes objects
+- **Reference:** MEASURED, live pandas 2.2.3 on `pd.Series(['foo','hello world',None], dtype=object)`: `s.str.encode('utf-8')` → `[b'foo', b'hello world', None]`, dtype `object`, element types `bytes`/`bytes`/`NoneType` — a bytes object per element, with a supplied `None` preserved. For contrast `s.str.len()` → `[3.0, 11.0, nan]`, dtype `float64`.
+- **Our impl:** `StringAccessor::encode` (`crates/fp-frame/src/lib.rs`) is `apply_str_int(|s| s.len() as i64)` — it returns the UTF-8 byte LENGTH, `Int64` with no nulls and `Float64`/NaN when any null is present. Rust strings are always valid UTF-8, so the encoding argument is a genuine no-op; what is not a no-op is returning a number where pandas returns bytes. It is `str.len` under another name, and the two results agree on nothing except arity.
+- **Impact:** any caller treating `encode` as pandas' `encode` gets a length, not the bytes. The null MARKER is correct given this implementation — a numeric result cannot hold a `None`, so NaN is right by the `br-frankenpandas-lufpu` result-dtype rule — which is why `fp_p2d_413_series_str_encode_with_nulls_hardened` legitimately pins float64 values. The fixture is therefore consistent, but it pins a divergence as expected behaviour, the same shape as DISC-009 and `br-frankenpandas-0g9m9`.
+- **Resolution:** WILL-FIX / INVESTIGATING — decision tracked by `br-frankenpandas-rw01l`. Three options: return real bytes (needs somewhere to put them; FP has no bytes dtype, so this leans on the DISC-005 object bucket or a new one), refuse `encode` explicitly as unsupported (honest, and loses nothing since the current answer cannot be consumed as bytes), or keep byte lengths as a documented divergence. This entry is the third option's minimum and stands regardless of which is chosen.
+- **Found by:** verifying `74910f3eb`'s re-bank under `br-frankenpandas-q0ktc`. That re-bank is correct about the null markers; the implementation it reasons from is what nobody had checked. The in-code comment asserted "matches pandas", which is what let it sit unnoticed — now corrected in place.
+- **Tests affected:** `fp_p2d_413_series_str_encode_with_nulls_hardened` (consistent with the current implementation, not with pandas). `decode()` is the sibling identity op and should be re-checked when this is decided.
+- **Review date:** 2026-08-16
+
 ## Resolved Divergences
 
 ### DISC-005: Mixed string/numeric constructors now preserve pandas object semantics
@@ -167,7 +168,7 @@
 - **Reference:** Pandas `Series.add(other)` (and `series + other` operator) on differently-indexed Series performs an outer-join alignment that returns a sorted result index by default.
 - **Our impl:** RESOLVED - unique-label Series arithmetic now uses a sorted outer union for `+` / `-` / `*` / `/` and fill-value arithmetic, while preserving the duplicate-aware cross-product path tracked separately by DISC-014.
 - **Impact:** The `FP-P2C-001 series_add_alignment_union_strict` fallback fixture has been refreshed to pandas 2.2.3 output: result index `[1, 2, 3]`, values `[NaN, NaN, 34.0]`.
-- **Resolution:** FIXED in br-frankenpandas-cod1d13 by routing unique-label Series arithmetic through sorted union alignment in fp-frame instead of changing the generic fp-index discovery-order helper. NB: the listed strict test still fails today, but for a different root cause (DISC-011 nullable-Int64 dtype promotion); the sort-order issue this entry tracked is no longer present.
+- **Resolution:** RESOLVED in br-frankenpandas-cod1d13 by routing unique-label Series arithmetic through sorted union alignment in fp-frame instead of changing the generic fp-index discovery-order helper. NB: the listed strict test still fails today, but for a different root cause (DISC-011 nullable-Int64 dtype promotion); the sort-order issue this entry tracked is no longer present.
 - **Tests affected:** `series_add_aligns_on_union_index`, `series_add_fill_sorts_unique_outer_union_index`, `FP-P2C-001/series_add_alignment_union_strict`.
 - **Review date:** 2026-04-28
 
@@ -185,7 +186,7 @@
   - `intersection`: `sort=False` — result is ascending EXCEPT when BOTH operands are descending (`step < 0`), where it is descending. (Verified vs pandas 2.2.3 over 150k random pairs.)
 - **Our impl:** RESOLVED for all four. Previously fp returned every set op in self/discovery order (matching pandas only where the affine fast paths happened to already be in pandas' order), diverging for both-non-empty operands with descending or non-aligned (interleaving) lattices — union/difference/symmetric_difference for ~any descending/interleaved input, and intersection for self-descending ∩ other-ascending (≈23.5% of multi-element intersections). fp now normalizes operands to their ascending equivalent so the fast paths and fallbacks produce pandas' order, sorts the interleaving union/symmetric_difference fallbacks, and routes both-descending intersection through the operands as-is (self-order yields descending). Empty-operand and value-equal passthrough preserved; lazy affine / two-affine-run backing retained for the aligned common case (only reordered cases materialize).
 - **Impact:** all four ops now bit-match pandas across a 263-case randomized differential (descending, non-aligned, empty, value-equal, disjoint, subset), plus 150k-pair Python sweeps confirming the ordering rules.
-- **Resolution:** FIXED (DustySummit, br-frankenpandas). union/difference/symmetric_difference in commit 88e2a8487; intersection ordering in the follow-up commit.
+- **Resolution:** RESOLVED (DustySummit, br-frankenpandas). union/difference/symmetric_difference in commit 88e2a8487; intersection ordering in the follow-up commit.
 - **Tests affected:** `range_index_set_ops_match_pandas_2_2_3_differential_dustysummit` (data-driven from `testdata_rangeset_pandas_cases.rs`, all four ops); `range_index_set_ops_use_direct_values_b7nxg`, `range_index_set_ops_closed_form_membership_preserves_order_iatnc`, `range_index_set_ops_return_affine_spans_iatnc` (refreshed to pandas-correct ordering).
 - **Review date:** 2026-07-23
 
@@ -250,23 +251,6 @@
 - **Tests affected:** `series_filter_with_a_non_boolean_mask_takes_by_label_75i7h` and `series_filter_rejects_non_boolean_mask` (fp-frame); fixture `fp_p2c_010_series_filter_non_boolean_mask_strict`.
 - **Review date:** 2026-08-16
 
-## Rules
-
-1. Every divergence gets a sequential ID (DISC-NNN)
-2. Must state whether ACCEPTED, INVESTIGATING, or WILL-FIX
-3. Must list affected test cases
-4. Must include review date
-5. Tests for ACCEPTED divergences use XFAIL markers where applicable
-
-### DISC-025: `str.encode` returns byte LENGTHS, where pandas returns bytes objects
-- **Reference:** MEASURED, live pandas 2.2.3 on `pd.Series(['foo','hello world',None], dtype=object)`: `s.str.encode('utf-8')` → `[b'foo', b'hello world', None]`, dtype `object`, element types `bytes`/`bytes`/`NoneType` — a bytes object per element, with a supplied `None` preserved. For contrast `s.str.len()` → `[3.0, 11.0, nan]`, dtype `float64`.
-- **Our impl:** `StringAccessor::encode` (`crates/fp-frame/src/lib.rs`) is `apply_str_int(|s| s.len() as i64)` — it returns the UTF-8 byte LENGTH, `Int64` with no nulls and `Float64`/NaN when any null is present. Rust strings are always valid UTF-8, so the encoding argument is a genuine no-op; what is not a no-op is returning a number where pandas returns bytes. It is `str.len` under another name, and the two results agree on nothing except arity.
-- **Impact:** any caller treating `encode` as pandas' `encode` gets a length, not the bytes. The null MARKER is correct given this implementation — a numeric result cannot hold a `None`, so NaN is right by the `br-frankenpandas-lufpu` result-dtype rule — which is why `fp_p2d_413_series_str_encode_with_nulls_hardened` legitimately pins float64 values. The fixture is therefore consistent, but it pins a divergence as expected behaviour, the same shape as DISC-009 and `br-frankenpandas-0g9m9`.
-- **Resolution:** WILL-FIX / INVESTIGATING — decision tracked by `br-frankenpandas-rw01l`. Three options: return real bytes (needs somewhere to put them; FP has no bytes dtype, so this leans on the DISC-005 object bucket or a new one), refuse `encode` explicitly as unsupported (honest, and loses nothing since the current answer cannot be consumed as bytes), or keep byte lengths as a documented divergence. This entry is the third option's minimum and stands regardless of which is chosen.
-- **Found by:** verifying `74910f3eb`'s re-bank under `br-frankenpandas-q0ktc`. That re-bank is correct about the null markers; the implementation it reasons from is what nobody had checked. The in-code comment asserted "matches pandas", which is what let it sit unnoticed — now corrected in place.
-- **Tests affected:** `fp_p2d_413_series_str_encode_with_nulls_hardened` (consistent with the current implementation, not with pandas). `decode()` is the sibling identity op and should be re-checked when this is decided.
-- **Review date:** 2026-08-16
-
 ### DISC-026: `Sparse` dtype NAME omits its subtype and fill value
 - **Reference:** MEASURED, live pandas 2.2.3 — `pd.Series(pd.arrays.SparseArray([1,0,0,2], fill_value=0)).dtype` renders as **`Sparse[int64, 0]`**: the name carries the subtype and the fill value, because both are part of the dtype's identity (`Sparse[int64, 0]` and `Sparse[float64, nan]` are different dtypes).
 - **Our impl:** `fp_types::DType::name()` returns the bare string `"Sparse"` (`crates/fp-types/src/lib.rs`). This is a NAME-rendering gap, not a modelling gap: `fp_types::SparseDType` already records the subtype/fill contract (see DISC-009), so the information exists and simply is not rendered. `DType::name()` is documented as matching numpy's `dtype.name` property, so this is a divergence from its own stated contract rather than an undecided design question.
@@ -275,3 +259,20 @@
 - **Distinct from DISC-009,** which covers sparse STORAGE and `Series.sparse` accessor parity. A fix here does not need compressed storage — only `name()` and whatever renders it.
 - **Resolution:** ~~WILL-FIX~~ **DONE 2026-08-16.** Was tracked by `br-frankenpandas-8pg11`, implemented under the duplicate `br-frankenpandas-3gxc6`. Note `DType::name()` feeds the conformance dtype checks (`br-frankenpandas-62d1s` made those compare `name()` rather than Rust's `Debug`), so changing it moves any fixture asserting a sparse dtype and the two must land together.
 - **Review date:** 2026-08-16
+
+### DISC-012: Mixed naive / tz-aware CSV parse_dates normalizes per value
+- **Reference:** Pandas handles a CSV column with mixed naive + tz-aware datetime strings by parsing each row independently (the naive rows produce `Timestamp` without tz; the aware rows produce `Timestamp` with tz). When converted to strings, both forms are reformatted into pandas' canonical `YYYY-MM-DD HH:MM:SS[±HH:MM]` shape.
+- **Our impl:** fp-io now parses `read_csv(parse_dates=[...])` mixed naive + tz-aware columns per value by calling `to_datetime_values_with_options` with `infer_mixed_timezone=false` and `mixed_tz_as_object=true`. The column remains object-like (`Utf8`) because pandas cannot unify mixed tz-naive/tz-aware values into one `datetime64[ns]` dtype, but each value is normalized to the pandas object-string form.
+- **Impact:** Conformance packet `FP-P2D-429` (`csv_read_frame_parse_dates_mixed_timezone_strict`) now matches the fixture: the aware row is normalized from `2024-01-15T10:30:00Z` to `2024-01-15 10:30:00+00:00`.
+- **Resolution:** RESOLVED — covered by fp-io test `csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value`; the stale accepted-divergence note was superseded by the per-value parse path used by `parse_csv_datetime_values`.
+- **Tests affected:** none expected; historical coverage remains `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
+- **Review date:** 2026-06-17
+
+## Rules
+
+1. Every divergence gets a sequential ID (DISC-NNN)
+2. Must state whether ACCEPTED, INVESTIGATING, or WILL-FIX
+3. Must list affected test cases
+4. Must include review date
+5. Tests for ACCEPTED divergences use XFAIL markers where applicable
+

@@ -275,3 +275,102 @@ fn ci_workflow_has_a_non_advisory_core_test_gate_and_required_oracle() {
         "expected a clear hard failure when the required live oracle is absent"
     );
 }
+
+/// README numbers must match the tree they describe (br-frankenpandas-rc-readme-number-truth-mzox7).
+///
+/// Recomputes the measured quantities and asserts the README documents exactly
+/// them. Negative case a naive doc-lint would miss: each check fails when the
+/// TREE changes without a README update (the drift direction this gate exists
+/// for) and equally when the README inflates without a tree change.
+#[test]
+fn readme_documented_numbers_match_the_tree() {
+    fn walk(dir: &Path, pred: &mut impl FnMut(&Path) -> bool) -> usize {
+        let mut n = 0;
+        for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                n += walk(&path, pred);
+            } else if pred(&path) {
+                n += 1;
+            }
+        }
+        n
+    }
+    fn count_files(dir: &Path, suffix: &str) -> usize {
+        walk(dir, &mut |p| p.extension().and_then(|e| e.to_str()) == Some(suffix))
+    }
+    fn thousands(n: usize) -> String {
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        out
+    }
+    fn grep_count(root: &Path, rel: &str, needle: &str) -> usize {
+        walk(&root.join(rel), &mut |p| {
+            p.extension().and_then(|e| e.to_str()) == Some("rs")
+                && fs::read_to_string(p).map(|s| s.contains(needle)).unwrap_or(false)
+        })
+    }
+
+    let root = repo_root();
+    let readme = fs::read_to_string(root.join("README.md")).expect("read README");
+
+    // (1) Packet corpus size.
+    let packets = count_files(&root.join("crates/fp-conformance/fixtures/packets"), "json");
+    assert!(
+        readme.contains(&format!("{} packet JSON files", thousands(packets))),
+        "README packet count does not match tree ({packets}); update README or the corpus"
+    );
+
+    // (2) Fixtures-tree JSON total (packets + adversarial + side-set).
+    let fixture_json = count_files(&root.join("crates/fp-conformance/fixtures"), "json");
+    assert!(
+        readme.contains(&format!("{} fixture files", thousands(fixture_json))),
+        "README fixture-file count does not match tree ({fixture_json})"
+    );
+    // (3) thread::scope fan-out occurrences under crates/*/src (the metric the
+    // README states; files-with-hits and spawn-call counts are different
+    // denominators and drift differently).
+    fn count_matches(dir: &Path, needle: &str) -> usize {
+        let mut n = 0;
+        for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                n += count_matches(&path, needle);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+                && path.to_string_lossy().contains("/src/")
+            {
+                n += fs::read_to_string(&path)
+                    .map(|s| s.matches(needle).count())
+                    .unwrap_or(0);
+            }
+        }
+        n
+    }
+    let scope_sites = count_matches(&root.join("crates"), "thread::scope");
+    assert!(
+        readme.contains(&format!("{} occurrences across", scope_sites)),
+        "README thread::scope occurrence count does not match tree ({scope_sites})"
+    );
+
+    // (4) DISCREPANCIES section counts (README's own claim format).
+    let disc = fs::read_to_string(root.join("crates/fp-conformance/DISCREPANCIES.md"))
+        .expect("read DISCREPANCIES");
+    let total = disc.matches("\n### DISC-").count();
+    let active = disc
+        .split("## Resolved Divergences")
+        .next()
+        .map(|head| head.matches("\n### DISC-").count())
+        .unwrap_or(0);
+    assert_eq!(total, 26, "DISCREPANCIES entry count changed; update README + this gate");
+    assert_eq!(active, 15, "DISCREPANCIES active-section count changed; update README + this gate");
+    assert!(
+        readme.contains(&format!("{} numbered divergence entries ({} active", total, active)),
+        "README DISC counts do not match DISCREPANCIES.md ({total} total / {active} active)"
+    );
+}

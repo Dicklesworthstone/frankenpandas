@@ -4383,6 +4383,109 @@ pub fn append_phase2c_drift_history(
     Ok(history_path)
 }
 
+/// Newest drift-ledger row per packet id. The ledger is append-ordered, so the
+/// last row for a packet wins. A missing ledger yields an empty map and callers
+/// keep their pre-ledger behavior.
+fn latest_drift_rows_by_packet(
+    config: &HarnessConfig,
+) -> Result<BTreeMap<String, PacketDriftHistoryEntry>, HarnessError> {
+    let path = config.repo_root.join("artifacts/phase2c/drift_history.jsonl");
+    let mut map = BTreeMap::new();
+    if !path.exists() {
+        return Ok(map);
+    }
+    for line in fs::read_to_string(&path)?.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<PacketDriftHistoryEntry>(line) {
+            map.insert(entry.packet_id.clone(), entry);
+        }
+    }
+    Ok(map)
+}
+
+/// Outcome of a per-packet gate reconciliation attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateReconciliation {
+    /// On-disk gate already agrees with the newest drift row (or the drift row
+    /// itself carries the reconciliation stamp); nothing was written.
+    UpToDate,
+    /// The on-disk gate disagreed with the newest drift row and was rewritten
+    /// from it, with the drift provenance stamped into the artifact.
+    Reconciled,
+}
+/// Bring one packet's on-disk `parity_gate_result.json` in line with its
+/// newest drift-ledger row.
+///
+/// Reconciliation fires ONLY when the on-disk gate verdict DISAGREES with the
+/// newer drift row. A real packet run writes its detailed artifacts and its
+/// drift row in the same invocation, so an agreeing gate is a real artifact and
+/// is never overwritten (its per-fixture detail would be lost). A disagreeing
+/// gate means either a synthetic placeholder or a pre-fix run — the newer drift
+/// row is the later measurement and wins. The rewritten gate carries the drift
+/// timestamp + report hash so the artifact records WHICH object it describes.
+///
+/// Idempotent: after reconciliation the verdicts agree and the next call is a
+/// no-op.
+pub fn reconcile_packet_gate_with_drift(
+    config: &HarnessConfig,
+    packet_id: &str,
+    entry: &PacketDriftHistoryEntry,
+) -> Result<GateReconciliation, HarnessError> {
+    let gate_path = config.packet_artifact_root(packet_id).join("parity_gate_result.json");
+    let on_disk = fs::read_to_string(&gate_path).ok();
+    if let Some(body) = on_disk.as_deref() {
+        let agrees = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|gate| gate.get("pass").and_then(|p| p.as_bool()))
+            == Some(entry.gate_pass);
+        let already_stamped = body.contains(&format!("\"drift_ts_unix_ms\": {}", entry.ts_unix_ms));
+        if agrees || already_stamped {
+            return Ok(GateReconciliation::UpToDate);
+        }
+    }
+
+    // Reconstruct the run from the drift row's own counts and push it through
+    // the normal artifact writer so report, sidecar, decode proof, gate, and
+    // mismatch corpus all stay mutually consistent.
+    let report = PacketParityReport {
+        suite: entry.suite.clone(),
+        packet_id: Some(packet_id.to_owned()),
+        oracle_present: config.oracle_reachable(),
+        fixture_count: entry.fixture_count,
+        passed: entry.passed,
+        failed: entry.failed,
+        retired: 0,
+        results: Vec::new(),
+    };
+    write_packet_artifacts(config, &report)?;
+
+    // Stamp provenance into the freshly written gate artifact.
+    let gate_path = config.packet_artifact_root(packet_id).join("parity_gate_result.json");
+    let mut gate: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&gate_path)?)?;
+    if let Some(obj) = gate.as_object_mut() {
+        obj.insert(
+            "source".to_owned(),
+            serde_json::Value::String("drift_history_reconciliation".to_owned()),
+        );
+        obj.insert("drift_ts_unix_ms".to_owned(), serde_json::json!(entry.ts_unix_ms));
+        obj.insert(
+            "report_hash".to_owned(),
+            serde_json::Value::String(entry.report_hash.clone()),
+        );
+        if entry.gate_pass {
+            obj.insert(
+                "reasons".to_owned(),
+                serde_json::Value::Array(Vec::new()),
+            );
+        }
+    }
+    fs::write(&gate_path, serde_json::to_string_pretty(&gate)?)?;
+    Ok(GateReconciliation::Reconciled)
+}
+
 fn ensure_phase2c_parity_reports(config: &HarnessConfig) -> Result<(), HarnessError> {
     let phase_root = config.repo_root.join("artifacts/phase2c");
     if !phase_root.exists() {
@@ -4406,10 +4509,16 @@ fn ensure_phase2c_parity_reports(config: &HarnessConfig) -> Result<(), HarnessEr
         packet_ids.insert(fixture.packet_id);
     }
 
+    let drift = latest_drift_rows_by_packet(config)?;
     for packet_id in packet_ids {
-        let report_path = phase_root.join(&packet_id).join("parity_report.json");
-        if report_path.exists() {
-            continue;
+        // Newer drift verdict disagrees with the on-disk gate: reconcile (the
+        // helper no-ops when they already agree, so real run artifacts with
+        // per-fixture detail are never clobbered).
+        if let Some(entry) = drift.get(&packet_id) {
+            reconcile_packet_gate_with_drift(config, &packet_id, entry)?;
+            if phase_root.join(&packet_id).join("parity_report.json").exists() {
+                continue;
+            }
         }
         let fixture_count = load_fixtures(config, Some(&packet_id))?.len();
         let synthetic = PacketParityReport {
@@ -27635,6 +27744,90 @@ mod tests {
             written.gate_result_path.exists(),
             "missing gate result artifact"
         );
+    }
+
+    #[test]
+    fn drift_reconciliation_fixes_disagreeing_gate_and_spares_agreeing_one() {
+        use super::{GateReconciliation, PacketDriftHistoryEntry, reconcile_packet_gate_with_drift};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packet_id = "FP-P2D-998";
+        let config = HarnessConfig {
+            repo_root: dir.path().to_path_buf(),
+            oracle_root: dir.path().join("legacy_pandas_code/pandas"),
+            fixture_root: dir.path().join("fixtures"),
+            strict_mode: true,
+            python_bin: "python3".to_owned(),
+            allow_system_pandas_fallback: false,
+            allow_fixture_fallback: false,
+            require_live_oracle: false,
+        };
+        let entry = PacketDriftHistoryEntry {
+            ts_unix_ms: 1_788_412_811_653,
+            packet_id: packet_id.to_owned(),
+            suite: format!("phase2c_packets:{packet_id}"),
+            fixture_count: 2,
+            passed: 2,
+            failed: 0,
+            strict_failed: 0,
+            hardened_failed: 0,
+            gate_pass: true,
+            report_hash: "sha256:abc".to_owned(),
+        };
+        let packet_dir = dir.path().join("artifacts/phase2c").join(packet_id);
+        fs::create_dir_all(&packet_dir).expect("packet dir");
+        let gate_path = packet_dir.join("parity_gate_result.json");
+
+        // Stale/synthetic RED gate vs a newer GREEN drift row -> reconciled.
+        fs::write(
+            &gate_path,
+            r#"{"packet_id":"FP-P2D-998","pass":false,"fixture_count":2,"reasons":["failed=2 but gate requires 0"]}"#,
+        )
+        .expect("seed red gate");
+        let outcome =
+            reconcile_packet_gate_with_drift(&config, packet_id, &entry).expect("reconcile red");
+        assert_eq!(outcome, GateReconciliation::Reconciled);
+        let body = fs::read_to_string(&gate_path).expect("read reconciled gate");
+        let gate: serde_json::Value = serde_json::from_str(&body).expect("parse gate");
+        assert_eq!(gate["pass"], serde_json::json!(true), "gate must match the drift verdict");
+        assert_eq!(gate["source"], serde_json::json!("drift_history_reconciliation"));
+        assert_eq!(gate["drift_ts_unix_ms"], serde_json::json!(entry.ts_unix_ms));
+        assert_eq!(gate["reasons"], serde_json::json!([]));
+
+        // Idempotent: second call with the stamped, agreeing gate is a no-op.
+        let before = fs::read_to_string(&gate_path).expect("read gate");
+        let outcome =
+            reconcile_packet_gate_with_drift(&config, packet_id, &entry).expect("reconcile noop");
+        assert_eq!(outcome, GateReconciliation::UpToDate);
+        assert_eq!(fs::read_to_string(&gate_path).expect("reread"), before);
+
+        // NEGATIVE CASE: an AGREEING gate without a stamp must be spared —
+        // real run artifacts carry per-fixture detail that reconciliation is
+        // not allowed to clobber. Verify the file is byte-identical after.
+        let agree_body = r#"{"packet_id":"FP-P2D-998","pass":true,"fixture_count":2,"strict_total":1,"strict_failed":0,"hardened_total":1,"hardened_failed":0,"reasons":[]}"#;
+        fs::write(&gate_path, agree_body).expect("seed agreeing gate");
+        let outcome =
+            reconcile_packet_gate_with_drift(&config, packet_id, &entry).expect("spare agree");
+        assert_eq!(outcome, GateReconciliation::UpToDate);
+        assert_eq!(
+            fs::read_to_string(&gate_path).expect("reread agree"),
+            agree_body,
+            "an agreeing real-run gate must never be rewritten"
+        );
+
+        // And the reverse divergence: green gate vs newer RED drift row loses
+        // (the drift row is the later measurement — reporting a loss is fine,
+        // hiding one is not).
+        let mut red = entry.clone();
+        red.gate_pass = false;
+        red.passed = 1;
+        red.failed = 1;
+        red.ts_unix_ms += 1_000;
+        let outcome = reconcile_packet_gate_with_drift(&config, packet_id, &red).expect("to red");
+        assert_eq!(outcome, GateReconciliation::Reconciled);
+        let gate: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&gate_path).expect("read")).unwrap();
+        assert_eq!(gate["pass"], serde_json::json!(false));
     }
 
     #[test]
