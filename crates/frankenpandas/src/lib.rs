@@ -172,6 +172,11 @@ pub use fp_io::{
     list_sql_tables,
     list_sql_unique_constraints,
     list_sql_views,
+    // Clipboard IO shells out to OS clipboard tools (README Limitations);
+    // with none installed these return a typed clipboard error, as pandas
+    // does without pyperclip backends.
+    read_clipboard,
+    read_clipboard_str,
     read_csv,
     read_csv_str,
     read_csv_with_index_cols,
@@ -191,12 +196,18 @@ pub use fp_io::{
     // Feather (Arrow IPC)
     read_feather,
     read_feather_bytes,
+    // Fixed-width (read_fwf with colspec inference)
+    read_fwf,
+    read_fwf_str,
+    // Deferred fail-closed readers (typed error, ORC-style; see README)
+    read_gbq,
     read_hdf,
     read_hdf_key,
     read_hdf_with_options,
     read_html,
     read_html_str,
     read_html_str_with_options,
+    read_html_with_options,
     read_ipc_stream_bytes,
     read_json,
     read_json_str,
@@ -213,6 +224,9 @@ pub use fp_io::{
     read_pickle_bytes,
     read_pickle_bytes_with_options,
     read_pickle_with_options,
+    // Deferred fail-closed readers (typed error; see README Limitations)
+    read_sas,
+    read_spss,
     read_sql,
     read_sql_chunks,
     read_sql_chunks_with_index_col,
@@ -243,6 +257,16 @@ pub use fp_io::{
     read_sql_with_options,
     read_stata,
     read_stata_bytes,
+    // TSV (read_table; CSV options with tab default)
+    read_table,
+    read_table_str,
+    read_table_with_options,
+    read_table_with_options_path,
+    // XML (read + write)
+    read_xml,
+    read_xml_str,
+    read_xml_str_with_options,
+    read_xml_with_options,
     // fd90.264: Series-level Arrow interop (README line 1580 mentions
     // DataFrame ↔ Arrow RecordBatch; these are the Series counterparts).
     series_from_arrow_array,
@@ -270,6 +294,13 @@ pub use fp_io::{
     write_hdf,
     write_hdf_key,
     write_hdf_with_options,
+    write_hdf_series,
+    write_hdf_series_key,
+    // HTML (write; README Quick Example uses write_html_string)
+    write_html,
+    write_html_string,
+    write_html_string_with_options,
+    write_html_with_options,
     write_ipc_stream_bytes,
     write_json,
     write_json_string,
@@ -297,6 +328,11 @@ pub use fp_io::{
     write_stata_bytes,
     write_stata_bytes_with_options,
     write_stata_with_options,
+    // XML (write)
+    write_xml,
+    write_xml_string,
+    write_xml_string_with_options,
+    write_xml_with_options,
 };
 // ── Join/merge ──────────────────────────────────────────────────────────
 pub use fp_join::{
@@ -736,6 +772,8 @@ pub mod prelude {
         write_hdf,
         write_hdf_key,
         write_hdf_with_options,
+        // README Quick Example calls write_html_string via the prelude.
+        write_html_string,
         write_ipc_stream_bytes,
         write_json,
         write_json_string,
@@ -1009,6 +1047,7 @@ mod tests {
         let _ = write_feather;
         let _ = write_feather_bytes;
         let _ = write_ipc_stream_bytes;
+        let _ = write_html_string;
         let _ = write_json;
         let _ = write_jsonl;
         let _ = write_parquet;

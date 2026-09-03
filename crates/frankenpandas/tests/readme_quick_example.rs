@@ -29,6 +29,11 @@ fn readme_quick_example_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
 
     let _json = write_json_string(&summary, JsonOrient::Records)?;
     let _feather = write_feather_bytes(&summary)?;
+    // README Quick Example line: `let html = write_html_string(&summary)?;`
+    // (br-frankenpandas-rc-facade-write-reexports-yo8k1: the prelude did not
+    // re-export the write side for several formats — this line is the guard.)
+    let _html = write_html_string(&summary)?;
+    let _md = summary.to_markdown(true, None)?;
 
     // Sanity-check: only NYC group survives the query filter
     // (Alice 30 + Carol 35; LA's Bob is filtered out at age > 28).
@@ -6674,4 +6679,142 @@ fn readme_series_arrow_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let rebuilt_s = series_from_arrow_array("tags", labels, &*arr_s, &dt_s)?;
     assert_eq!(rebuilt_s.values()[0], Scalar::Utf8("a".into()));
     Ok(())
+}
+
+// ── Facade IO-surface audit (br-frankenpandas-rc-facade-write-reexports-yo8k1) ──
+//
+// Drift gate, two halves that must BOTH hold:
+//  1. Parse fp-io's source for `pub fn read_*` / `pub fn write_*` and assert
+//     nothing new appeared without a facade export (subset check).
+//  2. A compile guard referencing every expected name as `frankenpandas::<name>`
+//     (top-level facade paths, not prelude) — removing a re-export fails here.
+// A naive audit with only one half passes while the surface rots in the other.
+
+const FP_IO_EXPORTED_IO_FNS: &[&str] = &[
+    "read_clipboard", "read_clipboard_str", "read_csv", "read_csv_str",
+    "read_csv_with_index_cols", "read_csv_with_index_cols_path", "read_csv_with_options",
+    "read_csv_with_options_path", "read_excel", "read_excel_bytes",
+    "read_excel_bytes_with_index_cols", "read_excel_sheets", "read_excel_sheets_bytes",
+    "read_excel_sheets_ordered", "read_excel_sheets_ordered_bytes", "read_excel_with_index_cols",
+    "read_feather", "read_feather_bytes", "read_fwf", "read_fwf_str", "read_gbq", "read_hdf",
+    "read_hdf_key", "read_hdf_with_options", "read_html", "read_html_str",
+    "read_html_str_with_options", "read_html_with_options", "read_ipc_stream_bytes", "read_json",
+    "read_json_str", "read_jsonl", "read_jsonl_str", "read_orc", "read_orc_bytes", "read_parquet",
+    "read_parquet_bytes", "read_pickle", "read_pickle_bytes", "read_pickle_bytes_with_options",
+    "read_pickle_with_options", "read_sas", "read_spss", "read_sql", "read_sql_chunks",
+    "read_sql_chunks_with_index_col", "read_sql_chunks_with_options",
+    "read_sql_chunks_with_options_and_index_col", "read_sql_query", "read_sql_query_chunks",
+    "read_sql_query_chunks_with_index_col", "read_sql_query_chunks_with_options",
+    "read_sql_query_chunks_with_options_and_index_col", "read_sql_query_with_index_col",
+    "read_sql_query_with_options", "read_sql_query_with_options_and_index_col", "read_sql_table",
+    "read_sql_table_chunks", "read_sql_table_chunks_with_index_col",
+    "read_sql_table_chunks_with_options", "read_sql_table_chunks_with_options_and_index_col",
+    "read_sql_table_columns", "read_sql_table_columns_chunks",
+    "read_sql_table_columns_chunks_with_index_col", "read_sql_table_columns_with_index_col",
+    "read_sql_table_with_index_col", "read_sql_table_with_options",
+    "read_sql_table_with_options_and_index_col", "read_sql_with_index_col",
+    "read_sql_with_options", "read_stata", "read_stata_bytes", "read_table", "read_table_str",
+    "read_table_with_options", "read_table_with_options_path", "read_xml", "read_xml_str",
+    "read_xml_str_with_options", "read_xml_with_options", "write_csv", "write_csv_string",
+    "write_csv_string_with_options", "write_excel", "write_excel_bytes",
+    "write_excel_bytes_with_options", "write_excel_with_options", "write_feather",
+    "write_feather_bytes", "write_hdf", "write_hdf_key", "write_hdf_series",
+    "write_hdf_series_key", "write_hdf_with_options", "write_html", "write_html_string",
+    "write_html_string_with_options", "write_html_with_options", "write_ipc_stream_bytes",
+    "write_json", "write_json_string", "write_jsonl", "write_jsonl_string", "write_latex",
+    "write_latex_string", "write_latex_string_with_options", "write_latex_with_options",
+    "write_markdown", "write_markdown_string", "write_markdown_string_with_options",
+    "write_markdown_with_options", "write_orc", "write_orc_bytes", "write_parquet",
+    "write_parquet_bytes", "write_pickle", "write_pickle_bytes",
+    "write_pickle_bytes_with_options", "write_pickle_with_options", "write_sql",
+    "write_sql_with_options", "write_stata", "write_stata_bytes", "write_stata_bytes_with_options",
+    "write_stata_with_options", "write_xml", "write_xml_string", "write_xml_string_with_options",
+    "write_xml_with_options",
+];
+
+#[allow(dead_code)]
+fn facade_io_surface_compile_guard() {
+    use frankenpandas as fp;
+    let _ = (
+        fp::read_clipboard, fp::read_clipboard_str, fp::read_csv, fp::read_csv_str,
+        fp::read_csv_with_index_cols, fp::read_csv_with_index_cols_path, fp::read_csv_with_options,
+        fp::read_csv_with_options_path, fp::read_excel, fp::read_excel_bytes,
+        fp::read_excel_bytes_with_index_cols, fp::read_excel_sheets, fp::read_excel_sheets_bytes,
+        fp::read_excel_sheets_ordered, fp::read_excel_sheets_ordered_bytes,
+        fp::read_excel_with_index_cols, fp::read_feather, fp::read_feather_bytes, fp::read_fwf,
+        fp::read_fwf_str, fp::read_gbq, fp::read_hdf, fp::read_hdf_key, fp::read_hdf_with_options,
+        fp::read_html, fp::read_html_str, fp::read_html_str_with_options,
+        fp::read_html_with_options, fp::read_ipc_stream_bytes, fp::read_json, fp::read_json_str,
+        fp::read_jsonl, fp::read_jsonl_str, fp::read_orc, fp::read_orc_bytes, fp::read_parquet,
+        fp::read_parquet_bytes, fp::read_pickle, fp::read_pickle_bytes,
+        fp::read_pickle_bytes_with_options, fp::read_pickle_with_options, fp::read_sas,
+        // The `*sql*` family is generic over `C: SqlConnection` — bare fn-item
+        // references cannot infer `C` (same reason the prelude audit skips
+        // write_sql). Their export paths are exercised by the sql-sqlite
+        // readme_quick_start test and the parser half of this audit still
+        // covers them for drift.
+        fp::read_stata, fp::read_stata_bytes, fp::read_table, fp::read_table_str,
+        fp::read_table_with_options, fp::read_table_with_options_path, fp::read_xml,
+        fp::read_xml_str, fp::read_xml_str_with_options, fp::read_xml_with_options, fp::write_csv,
+        fp::write_csv_string, fp::write_csv_string_with_options, fp::write_excel,
+        fp::write_excel_bytes, fp::write_excel_bytes_with_options, fp::write_excel_with_options,
+        fp::write_feather, fp::write_feather_bytes, fp::write_hdf, fp::write_hdf_key,
+        fp::write_hdf_series, fp::write_hdf_series_key, fp::write_hdf_with_options, fp::write_html,
+        fp::write_html_string, fp::write_html_string_with_options, fp::write_html_with_options,
+        fp::write_ipc_stream_bytes, fp::write_json, fp::write_json_string, fp::write_jsonl,
+        fp::write_jsonl_string, fp::write_latex, fp::write_latex_string,
+        fp::write_latex_string_with_options, fp::write_latex_with_options, fp::write_markdown,
+        fp::write_markdown_string, fp::write_markdown_string_with_options,
+        fp::write_markdown_with_options, fp::write_orc, fp::write_orc_bytes, fp::write_parquet,
+        fp::write_parquet_bytes, fp::write_pickle, fp::write_pickle_bytes,
+        fp::write_pickle_bytes_with_options, fp::write_pickle_with_options, fp::write_stata,
+        fp::write_stata_bytes, fp::write_stata_bytes_with_options, fp::write_stata_with_options,
+        fp::write_xml, fp::write_xml_string, fp::write_xml_string_with_options,
+        fp::write_xml_with_options,
+    );
+}
+
+#[test]
+fn facade_reexports_cover_every_fp_io_read_write_fn() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let src = std::fs::read_to_string(
+        std::path::Path::new(manifest).join("../../crates/fp-io/src/lib.rs"),
+    )
+    .expect("fp-io source must be readable for the surface audit");
+
+    let mut found: Vec<String> = Vec::new();
+    let mut rest = src.as_str();
+    while let Some(idx) = rest.find("pub fn ") {
+        rest = &rest[idx + "pub fn ".len()..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+            .collect();
+        if (name.starts_with("read_") || name.starts_with("write_")) && !name.is_empty() {
+            found.push(name);
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    assert!(!found.is_empty(), "parser found nothing — the audit itself is broken");
+
+    let mut expected = FP_IO_EXPORTED_IO_FNS.to_vec();
+    expected.sort_unstable();
+    expected.dedup();
+
+    let unexported: Vec<&str> = found
+        .iter()
+        .filter(|n| !expected.contains(n))
+        .map(String::as_str)
+        .collect();
+    assert!(
+        unexported.is_empty(),
+        "fp-io gained public IO fns not re-exported from the facade: {unexported:?} — \
+         either export them via the crate root or record the exclusion decision here"
+    );
+    assert_eq!(
+        expected.len(),
+        found.len(),
+        "facade expected-list is stale vs the fp-io surface — regenerate FP_IO_EXPORTED_IO_FNS"
+    );
 }
