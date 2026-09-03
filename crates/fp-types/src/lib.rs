@@ -7505,13 +7505,16 @@ mod tests {
         //     .astype('float64') -> TypeError: Cannot cast DatetimeArray
         // Both must stay refused, which is what makes the guard on the exact
         // target load-bearing rather than cosmetic.
+        // `DType` stopped being `Copy` when `Datetime64 { tz }` landed
+        // (2f159e68f), so the loop variable is cloned into each call.
         for target in [DType::Int64Nullable, DType::Float64, DType::Float64Nullable] {
             assert!(
-                cast_scalar(&Scalar::Datetime64(1_710_498_645_123_456_789), target).is_err(),
+                cast_scalar(&Scalar::Datetime64(1_710_498_645_123_456_789), target.clone())
+                    .is_err(),
                 "datetime64 -> {target:?} must stay refused"
             );
             assert!(
-                cast_scalar(&Scalar::Timedelta64(93_784_005_006_007), target).is_err(),
+                cast_scalar(&Scalar::Timedelta64(93_784_005_006_007), target.clone()).is_err(),
                 "timedelta64 -> {target:?} must stay refused"
             );
         }
@@ -16931,7 +16934,7 @@ mod float64_nullable_qkqfb {
             DType::Float64Nullable,
         ] {
             assert_eq!(
-                common_dtype(DType::Float64Nullable, other),
+                common_dtype(DType::Float64Nullable, other.clone()),
                 Ok(DType::Float64Nullable),
                 "Float64Nullable + {other:?}"
             );
@@ -16939,7 +16942,7 @@ mod float64_nullable_qkqfb {
             // common_dtype_lattice_axioms_be314; repeated here because an
             // asymmetric arm makes df1+df2 disagree with df2+df1.
             assert_eq!(
-                common_dtype(other, DType::Float64Nullable),
+                common_dtype(other.clone(), DType::Float64Nullable),
                 Ok(DType::Float64Nullable),
                 "{other:?} + Float64Nullable"
             );
@@ -17049,7 +17052,8 @@ mod float64_nullable_qkqfb {
     fn the_nullable_float_flip_is_associative_on_its_witness_triple_qkqfb() {
         let (bn, i64n, f64d) = (DType::BoolNullable, DType::Int64, DType::Float64);
 
-        let left = common_dtype(common_dtype(bn, i64n).unwrap(), f64d).unwrap();
+        let left =
+            common_dtype(common_dtype(bn.clone(), i64n.clone()).unwrap(), f64d.clone()).unwrap();
         let right = common_dtype(bn, common_dtype(i64n, f64d).unwrap()).unwrap();
 
         assert_eq!(left, right, "promotion order must not change the result");
@@ -17145,7 +17149,7 @@ mod sparse_dtype_pandas_name_3gxc6 {
             (DType::Bool, Scalar::Bool(true)),
             (DType::Utf8, Scalar::Utf8("x".to_owned())),
         ] {
-            let rendered = name(dtype, fill);
+            let rendered = name(dtype.clone(), fill);
             assert_ne!(rendered, "Sparse", "bare name regressed for {dtype:?}");
             assert!(
                 rendered.starts_with("Sparse[") && rendered.ends_with(']'),
