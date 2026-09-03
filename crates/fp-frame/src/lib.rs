@@ -71565,8 +71565,17 @@ impl DataFrame {
     }
 
     /// Compute the pairwise covariance matrix between numeric columns.
+    ///
+    /// Matches `df.cov()`, whose pandas 2.x default is `numeric_only=False`:
+    /// a string or categorical column is an error, not silently dropped.
     pub fn cov(&self) -> Result<Self, FrameError> {
-        self.pairwise_stat_min("cov", 1)
+        self.cov_with_numeric_only(false)
+    }
+
+    /// Compute the pairwise covariance matrix, optionally restricting to
+    /// numeric dtypes. Matches `df.cov(numeric_only=...)`.
+    pub fn cov_with_numeric_only(&self, numeric_only: bool) -> Result<Self, FrameError> {
+        self.pairwise_stat_min("cov", 1, numeric_only)
     }
 
     /// Compute pairwise covariance with a minimum-observations threshold.
@@ -71574,14 +71583,62 @@ impl DataFrame {
     /// Matches `df.cov(min_periods=n)`. Pairs with fewer than `min_periods`
     /// valid (non-NaN) observations yield NaN.
     pub fn cov_min_periods(&self, min_periods: usize) -> Result<Self, FrameError> {
-        self.pairwise_stat_min("cov", min_periods)
+        self.cov_min_periods_with_numeric_only(min_periods, false)
     }
 
-    fn corr_candidate_columns(&self, _numeric_only: bool) -> Vec<String> {
+    /// Matches `df.cov(min_periods=n, numeric_only=...)`.
+    pub fn cov_min_periods_with_numeric_only(
+        &self,
+        min_periods: usize,
+        numeric_only: bool,
+    ) -> Result<Self, FrameError> {
+        self.pairwise_stat_min("cov", min_periods, numeric_only)
+    }
+
+    /// pandas 2.x `numeric_only=False` (the DEFAULT for `corr`/`cov`) does not
+    /// silently drop non-numeric columns. Measured on 2.2.3:
+    ///
+    /// ```text
+    /// DataFrame({'a':[1.,2.,3.],'b':[2.,4.,7.],'c':['x','y','z']}).corr()
+    ///   -> ValueError: could not convert string to float: 'x'
+    /// same with c = Series(['x','y','x'], dtype='category') -> same ValueError
+    /// bool / datetime64 / timedelta64 / object-int columns -> accepted
+    /// ```
+    ///
+    /// Until 2026-09-02 `numeric_only` was accepted and ignored here, so the
+    /// default call returned a numeric-only matrix where pandas raises — a
+    /// silent-wrong answer (reality-check finding). `numeric_only=true` keeps
+    /// the old filtering behaviour, which is what pandas does for `True`.
+    fn reject_non_numeric_for_pairwise_stat(&self) -> Result<(), FrameError> {
+        for name in &self.column_order {
+            let column = &self.columns[name.as_str()];
+            if matches!(column.dtype(), DType::Utf8 | DType::Categorical) {
+                let witness = column
+                    .values()
+                    .iter()
+                    .find(|value| !value.is_missing())
+                    .map(|value| match value {
+                        Scalar::Utf8(text) => text.clone(),
+                        other => format!("{other:?}"),
+                    })
+                    .unwrap_or_default();
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "could not convert string to float: '{witness}'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn corr_candidate_columns(&self, numeric_only: bool) -> Result<Vec<String>, FrameError> {
+        if !numeric_only {
+            self.reject_non_numeric_for_pairwise_stat()?;
+        }
         // Per br-frankenpandas-qk3s0: include Timedelta64 columns. pandas
         // df.corr() / df.cov() returns f64 statistics for Timedelta cols
         // by treating their ns counts as ordered numerics.
-        self.column_order
+        Ok(self
+            .column_order
             .iter()
             .filter(|name| {
                 matches!(
@@ -71590,7 +71647,7 @@ impl DataFrame {
                 )
             })
             .cloned()
-            .collect()
+            .collect())
     }
 
     fn pairwise_numeric_column_values(col: &Column, len: usize) -> std::borrow::Cow<'_, [f64]> {
@@ -72295,7 +72352,7 @@ impl DataFrame {
         numeric_only: bool,
     ) -> Result<Self, FrameError> {
         let len = self.index.len();
-        let numeric_cols = self.corr_candidate_columns(numeric_only);
+        let numeric_cols = self.corr_candidate_columns(numeric_only)?;
 
         let col_arcs: Vec<(Arc<[f64]>, usize)> = numeric_cols
             .iter()
@@ -72347,7 +72404,17 @@ impl DataFrame {
     }
 
     /// Internal helper for corr/cov pairwise matrix computation.
-    fn pairwise_stat_min(&self, stat: &str, min_periods: usize) -> Result<Self, FrameError> {
+    fn pairwise_stat_min(
+        &self,
+        stat: &str,
+        min_periods: usize,
+        numeric_only: bool,
+    ) -> Result<Self, FrameError> {
+        if !numeric_only {
+            // Same pandas 2.x contract as corr: the default refuses string and
+            // categorical columns instead of dropping them.
+            self.reject_non_numeric_for_pairwise_stat()?;
+        }
         let len = self.index.len();
         let numeric_cols: Vec<String> = self
             .column_order
@@ -72413,7 +72480,7 @@ impl DataFrame {
     /// Compute pairwise Spearman or Kendall correlation matrix between numeric columns.
     fn pairwise_rank_corr(&self, method: &str, numeric_only: bool) -> Result<Self, FrameError> {
         let len = self.index.len();
-        let numeric_cols = self.corr_candidate_columns(numeric_only);
+        let numeric_cols = self.corr_candidate_columns(numeric_only)?;
 
         let n = numeric_cols.len();
 
@@ -117118,6 +117185,21 @@ mod tests {
         assert!((corr_matrix.columns["x"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
         assert!((corr_matrix.columns["b"].values()[1].to_f64().unwrap() - 1.0).abs() < 1e-10);
         assert!((corr_matrix.columns["b"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+
+        // The DEFAULT (`numeric_only=False`) must refuse the string column
+        // instead of dropping it. Measured on pandas 2.2.3:
+        //   df.corr() / df.cov() -> ValueError: could not convert string to float: 'left'
+        // Until 2026-09-02 this returned the numeric-only matrix silently.
+        for (name, result) in [("corr", df.corr()), ("cov", df.cov())] {
+            let err = result.err().unwrap_or_else(|| {
+                panic!("{name}() with numeric_only=False must refuse a Utf8 column")
+            });
+            assert!(
+                err.to_string()
+                    .contains("could not convert string to float: 'left'"),
+                "{name}() error must carry pandas' wording, got {err}"
+            );
+        }
     }
 
     #[test]
