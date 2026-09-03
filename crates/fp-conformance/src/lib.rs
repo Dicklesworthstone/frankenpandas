@@ -18465,12 +18465,14 @@ fn attach_fixture_row_multiindex(
     };
 
     let row_multiindex = build_fixture_multiindex(spec)?;
-    DataFrame::new_with_row_multiindex(
-        frame.index().clone(),
-        row_multiindex,
-        frame.columns().clone(),
-    )
-    .map_err(|err| err.to_string())
+    // br-frankenpandas-wfkzm: `new_with_row_multiindex` takes a ColumnStore and
+    // derives the column order from its (alphabetical) keys, so every
+    // row-MultiIndex fixture reached FrankenPandas with its columns reordered
+    // and seven live tests compared the wrong frame. Keep the order the
+    // fixture declared.
+    frame
+        .with_row_multiindex(row_multiindex)
+        .map_err(|err| err.to_string())
 }
 
 fn build_dataframe(frame_spec: &FixtureDataFrame) -> Result<DataFrame, String> {

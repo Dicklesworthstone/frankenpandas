@@ -62182,6 +62182,32 @@ impl DataFrame {
         Self::new_with_axes(index, Some(row_multiindex), columns, column_order, None)
     }
 
+    /// Attach a row `MultiIndex` to an existing frame, keeping its column
+    /// order, column `MultiIndex` and duplicate-label flag.
+    ///
+    /// [`Self::new_with_row_multiindex`] takes a `ColumnStore`, whose key order
+    /// is alphabetical, so rebuilding a frame through it silently reorders the
+    /// columns. The conformance harness did exactly that to every fixture that
+    /// declares a row MultiIndex, and seven live-oracle tests failed on
+    /// `actual=["cost","sales"] expected=["sales","cost"]` the day the oracle
+    /// first ran (br-frankenpandas-wfkzm). Use this when the frame already
+    /// exists.
+    pub fn with_row_multiindex(
+        self,
+        row_multiindex: fp_index::MultiIndex,
+    ) -> Result<Self, FrameError> {
+        let allows_duplicate_labels = self.allows_duplicate_labels;
+        let mut frame = Self::new_with_axes(
+            self.index,
+            Some(row_multiindex),
+            self.columns,
+            self.column_order,
+            self.column_multiindex,
+        )?;
+        frame.allows_duplicate_labels = allows_duplicate_labels;
+        Ok(frame)
+    }
+
     fn plot_series_specs(&self) -> Vec<PlotSeriesSpec> {
         self.column_order
             .iter()
