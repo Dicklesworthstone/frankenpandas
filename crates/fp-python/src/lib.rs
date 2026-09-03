@@ -105,6 +105,27 @@ pub struct PySeries {
     inner: Series,
 }
 
+fn wrap_series(result: Result<Series, fp_frame::FrameError>) -> PyResult<PySeries> {
+    result
+        .map(|inner| PySeries { inner })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+/// The right-hand side of a Series dunder: another Series as-is, or a Python
+/// scalar broadcast over `like`'s index (what pandas does for `s + 1`).
+fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> PyResult<Series> {
+    if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+        return Ok(series.inner.clone());
+    }
+    let scalar = py_to_scalar(py, other)?;
+    Series::from_values(
+        like.name(),
+        like.index().labels().to_vec(),
+        vec![scalar; like.len()],
+    )
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
 #[pymethods]
 impl PySeries {
     /// Create a new Series from a name and list of values.
@@ -1421,6 +1442,21 @@ impl PyGroupBy {
 }
 
 /// Read a CSV file into a DataFrame.
+/// `fp.concat([df1, df2, ...])`: stack frames along the row axis, pandas'
+/// default `axis=0` / `join="outer"` behaviour.
+#[pyfunction]
+fn concat(frames: Vec<PyRef<'_, PyDataFrame>>) -> PyResult<PyDataFrame> {
+    if frames.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No objects to concatenate",
+        ));
+    }
+    let refs: Vec<&DataFrame> = frames.iter().map(|frame| &frame.inner).collect();
+    let inner = fp_frame::concat_dataframes(&refs)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(PyDataFrame { inner })
+}
+
 #[pyfunction]
 fn read_csv(path: &str) -> PyResult<PyDataFrame> {
     let path = std::path::Path::new(path);
@@ -1482,6 +1518,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_json, m)?)?;
     m.add_function(wrap_pyfunction!(read_jsonl, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
+    m.add_function(wrap_pyfunction!(concat, m)?)?;
     Ok(())
 }
 
