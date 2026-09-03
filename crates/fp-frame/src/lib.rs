@@ -22166,8 +22166,11 @@ impl Series {
         }
         match &self.column.values()[0] {
             Scalar::Bool(b) => Ok(*b),
+            // pandas 2.2.3 wording, measured live:
+            // `pd.Series([1]).bool()` -> ValueError: bool cannot act on a
+            // non-boolean single element Series
             _ => Err(FrameError::CompatibilityRejected(
-                "bool_: value must be a boolean scalar".to_string(),
+                "bool cannot act on a non-boolean single element Series".to_string(),
             )),
         }
     }
@@ -68634,8 +68637,11 @@ impl DataFrame {
         })?;
         match &self.columns[column_name].values()[0] {
             Scalar::Bool(flag) => Ok(*flag),
+            // pandas 2.2.3 wording, measured live:
+            // `pd.DataFrame({"a": [1]}).bool()` -> ValueError: bool cannot act
+            // on a non-boolean single element DataFrame
             _ => Err(FrameError::CompatibilityRejected(
-                "bool_: value must be a boolean scalar".to_string(),
+                "bool cannot act on a non-boolean single element DataFrame".to_string(),
             )),
         }
     }

@@ -4087,6 +4087,51 @@ struct OracleRequest {
     between_left: Option<Scalar>,
     #[serde(default)]
     between_right: Option<Scalar>,
+    // br-frankenpandas-00de2: declared on PacketFixture and read by the FP arm,
+    // but never copied into this payload, so the oracle always ran pandas'
+    // default `inclusive="both"` and four live between tests pinned the
+    // wrong expectation the moment the oracle actually executed.
+    #[serde(default)]
+    between_inclusive: Option<String>,
+    // Same defect class, found by a census of PacketFixture fields against
+    // this struct: every option below is read by the FrankenPandas arm and by
+    // pandas_oracle.py, but was never forwarded, so the oracle silently ran
+    // pandas' DEFAULT for it and the live test compared FP against the wrong
+    // question (merge_asof direction/tolerance/allow_exact_matches/by,
+    // merge_ordered fill_method, DataFrame.compare result_names,
+    // constructor copy, str.wrap drop_whitespace).
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    allow_exact_matches: Option<bool>,
+    #[serde(default)]
+    tolerance: Option<f64>,
+    // PacketFixture serializes this field as `by`, and that is the key the
+    // oracle's merge_asof handler reads.
+    #[serde(default, rename = "by")]
+    merge_asof_by: Option<Vec<String>>,
+    #[serde(default)]
+    merge_fill_method: Option<String>,
+    #[serde(default)]
+    compare_result_names: Option<[String; 2]>,
+    #[serde(default)]
+    constructor_copy: Option<bool>,
+    #[serde(default)]
+    str_wrap_drop_whitespace: Option<bool>,
+    // These five were never forwarded either; the oracle rejected the op
+    // ("requires str_patterns: list[str]") and the harness rendered that
+    // rejection as OracleUnavailable, so 9 str.*_any / JSON tests passed by
+    // skipping while looking like a missing oracle.
+    #[serde(default)]
+    str_patterns: Option<Vec<String>>,
+    #[serde(default)]
+    str_join_from: Option<String>,
+    #[serde(default)]
+    json_input: Option<String>,
+    #[serde(default)]
+    json_orient: Option<String>,
+    #[serde(default)]
+    jsonl_input: Option<String>,
     #[serde(default)]
     melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
@@ -13852,6 +13897,20 @@ fn capture_live_oracle_expected(
         nlargest_n: fixture.nlargest_n,
         between_left: fixture.between_left.clone(),
         between_right: fixture.between_right.clone(),
+        between_inclusive: fixture.between_inclusive.clone(),
+        direction: fixture.direction.clone(),
+        allow_exact_matches: fixture.allow_exact_matches,
+        tolerance: fixture.tolerance,
+        merge_asof_by: fixture.merge_asof_by.clone(),
+        merge_fill_method: fixture.merge_fill_method.clone(),
+        compare_result_names: fixture.compare_result_names.clone(),
+        constructor_copy: fixture.constructor_copy,
+        str_wrap_drop_whitespace: fixture.str_wrap_drop_whitespace,
+        str_patterns: fixture.str_patterns.clone(),
+        str_join_from: fixture.str_join_from.clone(),
+        json_input: fixture.json_input.clone(),
+        json_orient: fixture.json_orient.clone(),
+        jsonl_input: fixture.jsonl_input.clone(),
         melt_id_vars: fixture.melt_id_vars.clone(),
         melt_value_vars: fixture.melt_value_vars.clone(),
         melt_var_name: fixture.melt_var_name.clone(),

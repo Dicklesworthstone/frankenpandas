@@ -596,7 +596,7 @@ fn live_oracle_series_bool_non_boolean_errors_like_pandas() {
         "mode": "strict",
         "operation": "series_bool",
         "oracle_source": "live_legacy_pandas",
-        "expected_error_contains": "boolean scalar",
+        "expected_error_contains": "non-boolean single element",
         "left": {
             "name": "flag",
             "index": [{ "kind": "int64", "value": 0 }],
@@ -622,7 +622,7 @@ fn live_oracle_series_bool_non_boolean_errors_like_pandas() {
         actual
             .as_ref()
             .err()
-            .is_some_and(|message| message.contains("boolean scalar")),
+            .is_some_and(|message| message.contains("non-boolean single element")),
         "{actual:?}"
     );
 }
@@ -678,7 +678,7 @@ fn live_oracle_dataframe_bool_non_boolean_errors_like_pandas() {
         "mode": "strict",
         "operation": "dataframe_bool",
         "oracle_source": "live_legacy_pandas",
-        "expected_error_contains": "boolean scalar",
+        "expected_error_contains": "non-boolean single element",
         "frame": {
             "index": [{ "kind": "int64", "value": 0 }],
             "column_order": ["flag"],
@@ -706,7 +706,7 @@ fn live_oracle_dataframe_bool_non_boolean_errors_like_pandas() {
         actual
             .as_ref()
             .err()
-            .is_some_and(|message| message.contains("boolean scalar")),
+            .is_some_and(|message| message.contains("non-boolean single element")),
         "{actual:?}"
     );
 }
