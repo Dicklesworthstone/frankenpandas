@@ -181,6 +181,9 @@ fn pandas_temporal_error_class(error: PandasTemporalError) -> &'static str {
     }
 }
 
+/// Zero-dependency deterministic SVG renderer for the plot spec types below
+/// (`PlotSpec::to_svg` / `HistogramSpec::to_svg` / `BoxPlotSpec::to_svg`).
+mod plot_render;
 /// Logical plot kind requested by a pandas-style plotting hook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlotKind {
@@ -242,7 +245,7 @@ fn plot_series_spec(
     }
 }
 
-fn scalar_plot_label(value: &Scalar) -> String {
+pub(crate) fn scalar_plot_label(value: &Scalar) -> String {
     match value {
         Scalar::Null(_) => "NaN".to_owned(),
         Scalar::Bool(value) => {
@@ -21944,7 +21947,7 @@ impl Series {
             // Bit-identical: same predicate, same values, same order.
             if self.column.nan_missing_exact() {
                 for &v in data {
-                    if v == v {
+                    if !v.is_nan() {
                         vals.push(v);
                     }
                 }
@@ -64861,7 +64864,7 @@ impl DataFrame {
                             Some(source) => (source[i / 64] >> (i % 64)) & 1 == 1,
                             None => validity.get(i),
                         };
-                        if valid && data[i] == data[i] {
+                        if valid && !data[i].is_nan() {
                             word |= 1_u64 << bit;
                         }
                     }

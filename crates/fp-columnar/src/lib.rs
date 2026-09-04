@@ -15586,7 +15586,7 @@ impl Column {
                         };
                         let mut finite = 0_u64;
                         for (bit, &x) in chunk.iter().enumerate() {
-                            finite |= u64::from(x == x) << bit;
+                            finite |= u64::from(!x.is_nan()) << bit;
                         }
                         words[w] = valid & finite;
                         // A non-NaN datum at a slot the mask calls INVALID. See
@@ -15603,10 +15603,10 @@ impl Column {
                         let mut word = 0_u64;
                         for (bit, &x) in chunk.iter().enumerate() {
                             let valid = validity.get(base + bit);
-                            if valid && x == x {
+                            if valid && !x.is_nan() {
                                 word |= 1_u64 << bit;
                             }
-                            if !valid && x == x {
+                            if !valid && !x.is_nan() {
                                 escaped |= 1;
                             }
                         }

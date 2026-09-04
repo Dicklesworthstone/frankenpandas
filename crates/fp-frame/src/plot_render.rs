@@ -67,10 +67,11 @@ fn numeric_view(series: &PlotSeriesSpec) -> Result<Vec<Option<f64>>, FrameError>
             Scalar::Bool(b) => Ok(Some(if *b { 1.0 } else { 0.0 })),
             Scalar::Null(_) => Ok(None),
             other => Err(FrameError::CompatibilityRejected(format!(
-                "plot requires numeric values: series '{}' carries {} ({other:?})",
+                "plot requires numeric values: series '{}' carries {:?} ({other:?})",
                 series.name, series.dtype
             ))),
         })
+        .collect()
 }
 
 /// A finite min/max pair across every series; constant data is padded so the
@@ -180,7 +181,14 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
     let x_labels: Vec<String> = spec
         .series
         .first()
-        .map(|first| first.index.iter().map(crate::scalar_plot_label).collect())
+        .map(|first| {
+            first
+                .index
+                .iter()
+                .map(|label| crate::scalar_plot_label(&crate::index_label_to_scalar(label)))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let y = |v: f64| MARGIN_TOP + (scale.max - v) / (scale.max - scale.min) * PLOT_H;
     let x = |i: usize| MARGIN_LEFT + (i as f64 + 0.5) * PLOT_W / n.max(1) as f64;
@@ -266,9 +274,9 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             let r = 140.0;
             for (si, values) in views.iter().enumerate() {
                 let total: f64 = values.iter().flatten().copied().sum();
-                if total < 0.0 {
+                if values.iter().flatten().any(|v| *v < 0.0) {
                     return Err(FrameError::CompatibilityRejected(format!(
-                        "pie requires non-negative values: series '{}' sums to {total}",
+                        "pie requires non-negative values: series '{}' has a negative slice",
                         spec.series[si].name
                     )));
                 }
@@ -310,7 +318,7 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
         .map(|(i, s)| (s.name.clone(), palette(i)))
         .collect();
     Ok(format!(
-        "{}{body}{}</svg>",
+        "{}{body}{}{}</svg>",
         svg_open(&spec.method),
         svg_axes(&scale, &x_labels),
         legend(&legend_entries),
@@ -563,8 +571,8 @@ mod tests {
         };
         let svg = spec.to_svg().expect("render");
         assert!(svg.contains("<polyline"), "gaps still draw segments");
-        // Two gap boundaries -> 2 finite runs -> exactly 2 polylines.
-        assert_eq!(svg.matches("<polyline").count(), 2);
+        // Two gaps split 5 values into 3 finite runs.
+        assert_eq!(svg.matches("<polyline").count(), 3);
         assert!(!svg.contains("NaN"), "missing values must not leak as text coords");
     }
 
@@ -596,8 +604,13 @@ mod tests {
             series: vec![series("h", floats(&[0.0, 1.0, 2.0, 3.0, f64::NAN]))],
         };
         let svg = spec.to_svg().expect("render");
-        // 4 non-missing values across 4 bins -> 4 bars.
-        assert_eq!(svg.matches("<rect").count(), 4, "one bar per populated bin");
+        // 4 non-missing values across 4 bins -> 4 bars (bars are the rects
+        // with a white stroke; the legend + background rects are not).
+        assert_eq!(
+            svg.matches("stroke=\"white\"").count(),
+            4,
+            "one bar per populated bin"
+        );
     }
 
     #[test]

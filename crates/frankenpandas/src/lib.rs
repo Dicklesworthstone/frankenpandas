@@ -55,6 +55,13 @@ pub use fp_frame::{
     SeriesGroupBy,
     SeriesResetIndexResult,
     SparseAccessor,
+    // br-frankenpandas-rc-plot-renderer-zf9bf: backend-neutral plot specs +
+    // their zero-dependency SVG renderer (to_svg / to_svg_bytes methods).
+    BoxPlotSpec,
+    HistogramSpec,
+    PlotKind,
+    PlotSeriesSpec,
+    PlotSpec,
     StringAccessor,
     ToDatetimeOptions,
     ToDatetimeOrigin,
