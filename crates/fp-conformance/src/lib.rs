@@ -13825,6 +13825,60 @@ fn resolve_expected_oracle_error(
     }
 }
 
+/// Parse the pinned pandas version from the oracle requirements file
+/// (`pandas==X.Y.Z`). Returns `None` when the file is absent or has no pin —
+/// callers then degrade to the pre-guard behavior rather than inventing a pin.
+fn pinned_pandas_version(config: &HarnessConfig) -> Option<String> {
+    let path = config
+        .repo_root
+        .join("crates/fp-conformance/oracle/requirements.txt");
+    let text = fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("pandas==") {
+            return Some(rest.trim().to_owned());
+        }
+    }
+    None
+}
+
+/// Refuse to compare against an oracle that is not the PINNED pandas.
+///
+/// The oracle response self-reports its pandas version in
+/// `fixture_provenance.pandas_version`; when it differs from
+/// `oracle/requirements.txt`, the expected values describe a different library
+/// than the fixtures pin (observed: rch-offloaded runs resolved
+/// `.venv-oracle`'s symlinked interpreter to the worker's own newer pandas),
+/// so the comparison would be a cross-version artifact, not parity evidence.
+/// Fail closed into the honest-unavailable path (skip under normal policy,
+/// hard error under `FP_REQUIRE_LIVE_ORACLE`). A missing provenance block is
+/// not verified here — expected-error responses and legacy callers rely on
+/// that shape.
+fn verify_oracle_pandas_pin(
+    config: &HarnessConfig,
+    provenance: Option<&FixtureProvenance>,
+) -> Result<(), HarnessError> {
+    let Some(pin) = pinned_pandas_version(config) else {
+        return Ok(());
+    };
+    let Some(provenance) = provenance else {
+        return Ok(());
+    };
+    if provenance.pandas_version == pin {
+        return Ok(());
+    }
+    let message = format!(
+        "oracle pandas {} != pinned {pin}: refusing a cross-version comparison \
+         (br-frankenpandas-rc-oracle-provenance-guard-d8wt4)",
+        provenance.pandas_version
+    );
+    if config.require_live_oracle {
+        Err(HarnessError::LiveOracleRequired(message))
+    } else {
+        Err(HarnessError::OracleUnavailable(message))
+    }
+}
+
 fn capture_live_oracle_expected(
     config: &HarnessConfig,
     fixture: &PacketFixture,
@@ -14109,13 +14163,19 @@ fn capture_live_oracle_expected(
     }
 
     let response: OracleResponse = serde_json::from_slice(&output.stdout)?;
-    let _ = response.fixture_provenance.as_ref();
     if let Some(error) = response.error {
         if expects_error {
             return resolve_expected_oracle_error(fixture, error);
         }
         return Err(oracle_unavailable(config, error));
     }
+    // br-frankenpandas-rc-oracle-provenance-guard-d8wt4: the oracle response
+    // self-reports the pandas it ran. If that is not the PINNED version, the
+    // "expected" values describe a DIFFERENT library than the fixtures pin and
+    // any comparison is a cross-version artifact, not parity evidence
+    // (observed: rch-offloaded runs resolved .venv-oracle's symlinked python
+    // to the worker's own newer pandas). Fail closed into an HONEST skip.
+    verify_oracle_pandas_pin(config, response.fixture_provenance.as_ref())?;
 
     if expects_error {
         return Err(HarnessError::FixtureFormat(format!(
@@ -27828,6 +27888,61 @@ mod tests {
         let gate: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&gate_path).expect("read")).unwrap();
         assert_eq!(gate["pass"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn oracle_pandas_pin_guard_fails_closed_on_cross_version_d8wt4() {
+        use super::{FixtureProvenance, verify_oracle_pandas_pin};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let oracle_dir = dir.path().join("crates/fp-conformance/oracle");
+        fs::create_dir_all(&oracle_dir).expect("oracle dir");
+        fs::write(oracle_dir.join("requirements.txt"), "pandas==2.2.3\n").expect("pin");
+        let config = HarnessConfig {
+            repo_root: dir.path().to_path_buf(),
+            oracle_root: dir.path().join("legacy_pandas_code/pandas"),
+            fixture_root: dir.path().join("fixtures"),
+            strict_mode: true,
+            python_bin: "python3".to_owned(),
+            allow_system_pandas_fallback: false,
+            allow_fixture_fallback: false,
+            require_live_oracle: false,
+        };
+        let provenance = |version: &str| {
+            FixtureProvenance {
+                pandas_version: version.to_owned(),
+                oracle_script_sha256: "sha256:abc".to_owned(),
+                generated_at: "2026-09-04T00:00:00Z".to_owned(),
+                generation_command: None,
+                input_matrix: Vec::new(),
+                intentional_divergence_notes: Vec::new(),
+                oracle_attestation: None,
+            }
+        };
+
+        // Matching version: the comparison is legal.
+        assert!(verify_oracle_pandas_pin(&config, Some(&provenance("2.2.3"))).is_ok());
+
+        // NEGATIVE CASE — the whole point: an unpinned worker pandas must
+        // produce an honest UNAVAILABLE (skip), never a comparison result.
+        let err = verify_oracle_pandas_pin(&config, Some(&provenance("3.1.0")))
+            .expect_err("cross-version comparison must be refused");
+        assert!(
+            err.to_string().contains("3.1.0") && err.to_string().contains("2.2.3"),
+            "error must name both versions: {err}"
+        );
+
+        // Under require_live_oracle the same drift is a HARD error, not a skip.
+        let mut strict = config.clone();
+        strict.require_live_oracle = true;
+        assert!(matches!(
+            verify_oracle_pandas_pin(&strict, Some(&provenance("3.1.0"))),
+            Err(super::HarnessError::LiveOracleRequired(_))
+        ));
+
+        // Degrade paths: no pin file -> old behavior; no provenance -> unchecked.
+        fs::remove_file(oracle_dir.join("requirements.txt")).expect("remove pin");
+        assert!(verify_oracle_pandas_pin(&config, Some(&provenance("9.9.9"))).is_ok());
     }
 
     #[test]
