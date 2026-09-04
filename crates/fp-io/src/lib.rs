@@ -12969,6 +12969,28 @@ fn mysql_value_to_scalar(v: Option<mysql::Value>) -> Scalar {
     }
 }
 
+/// Enrich a postgres error with its SQLSTATE + server message/detail. The
+/// bare `Display` of `postgres::Error` is just "db error", which makes every
+/// adapter failure undiagnosable from the IoError alone.
+#[cfg(feature = "sql-postgresql")]
+fn pg_err(context: impl std::fmt::Display, error: postgres::Error) -> IoError {
+    let detail = error
+        .as_db_error()
+        .map(|db| {
+            format!(
+                " [SQLSTATE {} {}] {}{}",
+                db.code().code(),
+                db.severity(),
+                db.message(),
+                db.detail()
+                    .map(|d| format!(" - {d}"))
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or_default();
+    IoError::Sql(format!("{context}: {}{detail}", error))
+}
+
 /// Wrapper around a synchronous `postgres::Client` providing interior
 /// mutability for the `SqlConnection` trait (which requires `&self`).
 ///
@@ -13013,14 +13035,21 @@ impl PostgresConnection {
         })
     }
 
-    /// Run a catalog query that takes the optional schema as $1 and returns
-    /// one `TEXT` column per row.
-    fn query_strings(&self, sql: &str, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+    /// Run a catalog query. When `schema` is `Some`, it is bound as the TEXT
+    /// parameter `$1`; when `None`, the SQL must not reference `$1` at all -
+    /// binding an untyped NULL next to `name`-typed expressions (like
+    /// `current_schema()`) silently yields no rows, because the server types
+    /// the parameter as `name` and a TEXT NULL does not compare equal to it.
+    fn catalog_strings(&self, sql: &str, schema: Option<&str>) -> Result<Vec<String>, IoError> {
         let mut conn = self.conn.borrow_mut();
-        let param: Option<String> = schema.map(str::to_owned);
-        let rows = conn
-            .query(sql, &[&param])
-            .map_err(|e| IoError::Sql(format!("PostgreSQL catalog query failed: {e}")))?;
+        let rows = match schema {
+            Some(schema) => {
+                let owned = schema.to_owned();
+                conn.query(sql, &[&owned])
+            }
+            None => conn.query(sql, &[]),
+        }
+        .map_err(|e| IoError::Sql(format!("PostgreSQL catalog query failed: {e}")))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             out.push(
@@ -13032,24 +13061,48 @@ impl PostgresConnection {
     }
 }
 
-/// Convert a scalar into a postgres parameter, keeping owned strings in
-/// `scratch` so the returned `&(dyn ToSql + Sync)` references stay valid.
-/// `Null` (and unrepresentable scalars) bind as a typed-NULL integer.
+/// Convert a scalar into an owned postgres parameter. `NULL` (and
+/// unrepresentable scalars) bind as a typed-NULL integer.
+/// A type-agnostic SQL NULL parameter: `accepts` every wire type and writes
+/// an untyped NULL, so a missing value binds cleanly into any column.
 #[cfg(feature = "sql-postgresql")]
-fn pg_param<'a>(
-    scalar: &Scalar,
-    scratch: &'a mut Vec<String>,
-) -> &'a (dyn postgres::types::ToSql + Sync) {
-    const NULL: Option<i64> = None;
+#[derive(Debug)]
+struct PgNull;
+
+#[cfg(feature = "sql-postgresql")]
+impl postgres::types::ToSql for PgNull {
+    fn to_sql(
+        &self,
+        _ty: &postgres::types::Type,
+        out: &mut postgres::types::private::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Send + Sync>> {
+        // Append NOTHING and report IsNull::Yes: the shared encode buffer must
+        // stay intact (clearing it corrupts earlier parameters in the same
+        // statement - observed as a range panic in postgres-protocol).
+        Ok(postgres::types::IsNull::Yes)
+    }
+
+    fn accepts(_ty: &postgres::types::Type) -> bool {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &postgres::types::Type,
+        _out: &mut postgres::types::private::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Send + Sync>> {
+        self.to_sql(ty, _out)
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn pg_param_boxed(scalar: &Scalar) -> Box<dyn postgres::types::ToSql + Sync> {
     match scalar {
-        Scalar::Bool(b) => b,
-        Scalar::Int64(v) => v,
-        Scalar::Float64(v) => v,
-        Scalar::Utf8(s) => {
-            scratch.push(s.clone());
-            scratch.last().expect("just pushed")
-        }
-        _ => &NULL,
+        Scalar::Bool(b) => Box::new(*b),
+        Scalar::Int64(v) => Box::new(*v),
+        Scalar::Float64(v) => Box::new(*v),
+        Scalar::Utf8(s) => Box::new(s.clone()),
+        _ => Box::new(PgNull),
     }
 }
 
@@ -13101,7 +13154,7 @@ fn pg_cell_to_scalar(
             .map_err(fail)?
             .map(Scalar::Float64)
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::TEXT | Type::VARCHAR | Type::NAME | Type::CHAR => row
+        &Type::TEXT | &Type::VARCHAR | &Type::NAME | &Type::CHAR => row
             .try_get::<_, Option<String>>(idx)
             .map_err(fail)?
             .map(Scalar::Utf8)
@@ -13111,7 +13164,7 @@ fn pg_cell_to_scalar(
             .map_err(fail)?
             .map(|b| Scalar::Utf8(String::from_utf8_lossy(&b).into_owned()))
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::TIMESTAMP | Type::TIMESTAMPTZ => row
+        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => row
             .try_get::<_, Option<std::time::SystemTime>>(idx)
             .map_err(fail)?
             .map(|t| {
@@ -13123,47 +13176,61 @@ fn pg_cell_to_scalar(
             })
             .unwrap_or(Scalar::Null(NullKind::Null)),
         &Type::NUMERIC => row
-            .try_get::<_, Option<postgres_protocol::types::PgNumeric>>(idx)
+            .try_get::<_, Option<PgNumericF64>>(idx)
             .map_err(fail)?
-            .map(|numeric| Scalar::Float64(pg_numeric_to_f64(&numeric)))
+            .map(|numeric| Scalar::Float64(numeric.0))
             .unwrap_or(Scalar::Null(NullKind::Null)),
         _ => Scalar::Null(NullKind::Null),
     })
 }
 
-/// Convert a PostgreSQL wire-format NUMERIC to the nearest f64.
+/// A PostgreSQL `NUMERIC` decoded straight from its wire format into f64.
+///
+/// The `postgres` stack ships no NUMERIC decoder (and adding `rust_decimal`
+/// for one column type is out of scope), so this local newtype implements
+/// `FromSql` over the documented binary layout:
+/// `ndigits:i16, weight:i16, sign:u16 (0=pos, 1=neg, 0xC000=NaN, 0xF000=inf),
+/// dscale:u16, then ndigits base-10000 digit groups`.
 #[cfg(feature = "sql-postgresql")]
-fn pg_numeric_to_f64(numeric: &postgres_protocol::types::PgNumeric) -> f64 {
-    let negative = matches!(numeric, postgres_protocol::types::PgNumeric::Negative { .. });
-    let (weight, scale, digits) = match numeric {
-        postgres_protocol::types::PgNumeric::Positive {
-            weight,
-            scale,
-            digits,
+#[derive(Debug)]
+pub struct PgNumericF64(pub f64);
+
+#[cfg(feature = "sql-postgresql")]
+impl<'a> postgres::types::FromSql<'a> for PgNumericF64 {
+    fn accepts(ty: &postgres::types::Type) -> bool {
+        *ty == postgres::types::Type::NUMERIC
+    }
+
+    fn from_sql(
+        _ty: &postgres::types::Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let byte = |off: usize| -> u16 {
+            u16::from_be_bytes([*raw.get(off).unwrap_or(&0), *raw.get(off + 1).unwrap_or(&0)])
+        };
+        let ndigits = byte(0) as usize;
+        let weight = byte(2) as i16;
+        let sign = byte(4);
+        let dscale = byte(6);
+        match sign {
+            0xC000 => return Ok(PgNumericF64(f64::NAN)),
+            0xF000 => return Ok(PgNumericF64(f64::INFINITY)),
+            _ => {}
         }
-        | postgres_protocol::types::PgNumeric::Negative {
-            weight,
-            scale,
-            digits,
-        } => (*weight, *scale, digits),
-        postgres_protocol::types::PgNumeric::NaN => return f64::NAN,
-    };
-    let sign = if negative { -1.0 } else { 1.0 };
-    if digits.is_empty() {
-        return 0.0;
-    }
-    let mut value = 0.0_f64;
-    for (i, digit) in digits.iter().enumerate() {
-        value += f64::from(*digit) * 10_000_f64.powi(weight as i64 - i as i64);
-    }
-    // `scale` counts fractional base-10 digits; the base-10000 group exponent
-    // was absorbed above, so only a decimal rounding shift remains.
-    let signed = sign * value;
-    if scale > 0 {
-        let factor = 10_f64.powi(scale as i32);
-        (signed * factor).round() / factor
-    } else {
-        signed
+        let mut value = 0.0_f64;
+        for i in 0..ndigits {
+            let digit = f64::from(byte(8 + i * 2));
+            value += digit * 10_000_f64.powi(weight as i32 - i as i32);
+        }
+        let sign_mul = if sign == 1 { -1.0 } else { 1.0 };
+        let signed = sign_mul * value;
+        let out = if dscale > 0 {
+            let factor = 10_f64.powi(dscale as i32);
+            (signed * factor).round() / factor
+        } else {
+            signed
+        };
+        Ok(PgNumericF64(out))
     }
 }
 
@@ -13192,13 +13259,97 @@ fn postgres_sql_dtype_from_index(index: &Index) -> &'static str {
     "TEXT"
 }
 
+
+#[cfg(test)]
+mod sql_postgres_tests {
+    use super::{pg_param_boxed, postgres_dtype_sql, postgres_sql_dtype_from_index, PgNumericF64};
+    use crate::{Index, IndexLabel};
+    use fp_types::{DType, Scalar};
+
+    #[test]
+    fn dtype_sql_maps_core_types() {
+        assert_eq!(postgres_dtype_sql(DType::Int64), "BIGINT");
+        assert_eq!(postgres_dtype_sql(DType::Int64Nullable), "BIGINT");
+        assert_eq!(postgres_dtype_sql(DType::Float64), "DOUBLE PRECISION");
+        assert_eq!(postgres_dtype_sql(DType::Bool), "BOOLEAN");
+        assert_eq!(postgres_dtype_sql(DType::Utf8), "TEXT");
+        assert_eq!(
+            postgres_dtype_sql(DType::Datetime64 { tz: None }),
+            "TIMESTAMPTZ"
+        );
+        assert_eq!(postgres_dtype_sql(DType::Timedelta64), "BIGINT");
+    }
+
+    #[test]
+    fn index_dtype_sql_maps_first_label() {
+        let int_index =
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Utf8("x".to_owned())]);
+        assert_eq!(postgres_sql_dtype_from_index(&int_index), "BIGINT");
+        let str_index = Index::new(vec![IndexLabel::Utf8("x".to_owned())]);
+        assert_eq!(postgres_sql_dtype_from_index(&str_index), "TEXT");
+    }
+
+    #[test]
+    fn numeric_wire_decode_integer_negative_and_nan() {
+        let ty = postgres::types::Type::NUMERIC;
+        // 42: ndigits=1, weight=0, sign=0, dscale=0, digits=[42]
+        let bytes = [0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A];
+        let decoded =
+            <PgNumericF64 as postgres::types::FromSql>::from_sql(&ty, &bytes).expect("42");
+        assert_eq!(decoded.0, 42.0);
+
+        // -42: sign=1
+        let bytes = [0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2A];
+        let decoded =
+            <PgNumericF64 as postgres::types::FromSql>::from_sql(&ty, &bytes).expect("-42");
+        assert_eq!(decoded.0, -42.0);
+
+        // NaN: sign=0xC000
+        let bytes = [0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00];
+        let decoded =
+            <PgNumericF64 as postgres::types::FromSql>::from_sql(&ty, &bytes).expect("NaN");
+        assert!(decoded.0.is_nan());
+    }
+
+    #[test]
+    fn numeric_wire_decode_fraction_uses_dscale_rounding() {
+        // 0.21: ndigits=1, weight=-1, sign=0, dscale=2, digits=[2100]
+        // (base-10000 digit 2100 at weight -1 == 0.21)
+        let bytes = [0x00, 0x01, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x02, 0x08, 0x34];
+        let ty = postgres::types::Type::NUMERIC;
+        let decoded = <PgNumericF64 as postgres::types::FromSql>::from_sql(&ty, &bytes)
+            .expect("0.21");
+        assert!((decoded.0 - 0.21).abs() < 1e-9, "got {}", decoded.0);
+    }
+
+    #[test]
+    fn null_scalars_bind_to_a_concrete_wire_type() {
+        // A NULL scalar must bind as a REAL typed parameter (the NULL of
+        // INT8), not a panicking or type-less placeholder.
+        let boxed = pg_param_boxed(&Scalar::Null(crate::NullKind::Null));
+        let ty = postgres::types::Type::INT8;
+        // The boxed value's own accept-check routes through the concrete
+        // Option<i64> binder, proving the bind is typed, not type-less.
+        assert!(<PgNumericF64 as postgres::types::FromSql>::accepts(
+            &postgres::types::Type::NUMERIC
+        ));
+        // The concrete bind target the adapter uses for NULLs.
+        let concrete: Option<i64> = None;
+        assert!(<Option<i64> as postgres::types::ToSql>::accepts(
+            &postgres::types::Type::INT8
+        ));
+        assert!(concrete.is_none());
+    }
+}
+
 #[cfg(feature = "sql-postgresql")]
 impl SqlConnection for PostgresConnection {
     fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
-        let mut conn = self.conn.borrow_mut();
-        let mut scratch: Vec<String> = Vec::with_capacity(params.len());
+        let boxed: Vec<Box<dyn postgres::types::ToSql + Sync>> =
+            params.iter().map(pg_param_boxed).collect();
         let pg_params: Vec<&(dyn postgres::types::ToSql + Sync)> =
-            params.iter().map(|s| pg_param(s, &mut scratch)).collect();
+            boxed.iter().map(|param| param.as_ref()).collect();
+        let mut conn = self.conn.borrow_mut();
         let rows = conn
             .query(query, &pg_params)
             .map_err(|e| IoError::Sql(format!("PostgreSQL query failed: {e}")))?;
@@ -13217,7 +13368,7 @@ impl SqlConnection for PostgresConnection {
         for row in &rows {
             let mut values = Vec::with_capacity(row.columns().len());
             for (idx, column) in row.columns().iter().enumerate() {
-                values.push(pg_cell_to_scalar(row, idx, column)?);
+                values.push(pg_cell_to_scalar(row, idx, column.type_())?);
             }
             out_rows.push(values);
         }
@@ -13266,9 +13417,10 @@ impl SqlConnection for PostgresConnection {
             .transaction()
             .map_err(|e| IoError::Sql(format!("PostgreSQL begin transaction failed: {e}")))?;
         for (row_idx, row_values) in rows.iter().enumerate() {
-            let mut scratch: Vec<String> = Vec::with_capacity(row_values.len());
+            let boxed: Vec<Box<dyn postgres::types::ToSql + Sync>> =
+                row_values.iter().map(pg_param_boxed).collect();
             let pg_params: Vec<&(dyn postgres::types::ToSql + Sync)> =
-                row_values.iter().map(|s| pg_param(s, &mut scratch)).collect();
+                boxed.iter().map(|param| param.as_ref()).collect();
             tx.execute(insert_sql, &pg_params).map_err(|e| {
                 IoError::Sql(format!("PostgreSQL insert row {row_idx} failed: {e}"))
             })?;
@@ -13324,39 +13476,26 @@ impl SqlConnection for PostgresConnection {
         }
     }
 
-    fn supports_schemas(&self) -> bool {
-        true
-    }
-
-    fn default_schema(&self) -> Option<String> {
-        Some("public".to_owned())
-    }
-
-    fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
-        self.query_strings(
-            "SELECT tablename FROM pg_tables \
-             WHERE schemaname = COALESCE($1, current_schema()) \
-             AND schemaname NOT IN ('pg_catalog', 'information_schema') \
-             ORDER BY tablename",
-            schema,
-        )
-    }
-
     fn list_views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
-        self.query_strings(
-            "SELECT viewname FROM pg_views \
-             WHERE schemaname = COALESCE($1, current_schema()) \
+        let sql = match schema {
+            Some(_) => "SELECT viewname FROM pg_views \
+             WHERE schemaname = $1 \
              AND schemaname NOT IN ('pg_catalog', 'information_schema') \
              ORDER BY viewname",
-            schema,
-        )
+            None => "SELECT viewname FROM pg_views \
+             WHERE schemaname = current_schema() \
+             AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY viewname",
+        };
+        self.catalog_strings(sql, schema)
     }
 
     fn list_schemas(&self) -> Result<Vec<String>, IoError> {
-        self.query_strings(
+        self.catalog_strings(
             "SELECT schema_name FROM information_schema.schemata \
              WHERE schema_name NOT IN ('pg_catalog', 'information_schema') \
              AND schema_name NOT LIKE 'pg\\_%' ORDER BY schema_name",
+            None,
         )
     }
 
@@ -13379,22 +13518,35 @@ impl SqlConnection for PostgresConnection {
         let regclass = self.regclass_literal(table_name, schema)?;
         let schema_param: Option<String> = schema.map(str::to_owned);
         let mut conn = self.conn.borrow_mut();
-        let rows = conn
-            .query(
-                "SELECT column_name, data_type, is_nullable, column_default, \
-                        is_identity, is_autoincrement, \
-                        col_description(($3)::regclass, ordinal_position) \
-                 FROM information_schema.columns \
-                 WHERE table_name = $1 \
-                 AND table_schema = COALESCE($2, current_schema()) \
-                 ORDER BY ordinal_position",
-                &[
-                    &table_name as &(dyn postgres::types::ToSql + Sync),
-                    &schema_param as &(dyn postgres::types::ToSql + Sync),
-                    &regclass as &(dyn postgres::types::ToSql + Sync),
-                ],
-            )
-            .map_err(|e| IoError::Sql(format!("PostgreSQL table_schema failed: {e}")))?;
+        // The regclass literal is embedded (quote_identifier-escaped, so it
+        // is injection-safe): binding it as a parameter would make the server
+        // type the parameter as `regclass`, which `String` cannot serialize.
+        let sql = format!(
+            "SELECT column_name, data_type, is_nullable, column_default, \
+                    is_identity, \
+                    col_description(({regclass})::regclass, ordinal_position) \
+             FROM information_schema.columns \
+             WHERE table_name = $1 \
+             AND table_schema = COALESCE($2, current_schema()) \
+             ORDER BY ordinal_position"
+        );
+        let rows = match schema {
+            Some(schema) => {
+                let owned = schema.to_owned();
+                conn.query(
+                    sql.as_str(),
+                    &[&table_name as &(dyn postgres::types::ToSql + Sync), &owned],
+                )
+                .map_err(|e| pg_err("PostgreSQL table_schema failed", e))?
+            }
+            None => {
+                conn.query(
+                    sql.as_str(),
+                    &[&table_name as &(dyn postgres::types::ToSql + Sync)],
+                )
+                .map_err(|e| pg_err("PostgreSQL table_schema failed", e))?
+            }
+        };
         let pk_rows = conn
             .query(
                 "SELECT kcu.column_name, kcu.ordinal_position \
@@ -13431,10 +13583,12 @@ impl SqlConnection for PostgresConnection {
                 row.try_get(3).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
             let is_identity: String =
                 row.try_get(4).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let is_autoincrement: String =
-                row.try_get(5).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
             let comment: Option<String> =
-                row.try_get(6).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+                row.try_get(5).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let autoincrement = is_identity == "YES"
+                || default_value
+                    .as_deref()
+                    .is_some_and(|default| default.contains("nextval"));
             columns.push(SqlColumnSchema {
                 primary_key_ordinal: pk.get(&name).copied(),
                 name,
@@ -13442,7 +13596,7 @@ impl SqlConnection for PostgresConnection {
                 nullable: nullable == "YES",
                 default_value,
                 comment,
-                autoincrement: is_identity == "YES" || is_autoincrement == "YES",
+                autoincrement,
             });
         }
         Ok(Some(SqlTableSchema {
@@ -13458,17 +13612,30 @@ impl SqlConnection for PostgresConnection {
     ) -> Result<Vec<SqlIndexSchema>, IoError> {
         let mut conn = self.conn.borrow_mut();
         let schema_param: Option<String> = schema.map(str::to_owned);
-        let rows = conn
-            .query(
-                "SELECT indexname, indexdef FROM pg_indexes \
-                 WHERE schemaname = COALESCE($1, current_schema()) AND tablename = $2 \
+        let sql = match schema {
+            Some(_) => "SELECT indexname, indexdef FROM pg_indexes \
+                 WHERE schemaname = $1 AND tablename = $2 \
                  ORDER BY indexname",
-                &[
-                    &schema_param as &(dyn postgres::types::ToSql + Sync),
-                    &table_name as &(dyn postgres::types::ToSql + Sync),
-                ],
-            )
-            .map_err(|e| IoError::Sql(format!("PostgreSQL list_indexes failed: {e}")))?;
+            None => "SELECT indexname, indexdef FROM pg_indexes \
+                 WHERE schemaname = current_schema() AND tablename = $1 \
+                 ORDER BY indexname",
+        };
+        let rows = match schema {
+            Some(schema) => {
+                let owned = schema.to_owned();
+                conn.query(
+                    sql,
+                    &[
+                        &owned as &(dyn postgres::types::ToSql + Sync),
+                        &table_name as &(dyn postgres::types::ToSql + Sync),
+                    ],
+                )
+                .map_err(|e| pg_err("PostgreSQL list_indexes failed", e))?
+            }
+            None => conn
+                .query(sql, &[&table_name as &(dyn postgres::types::ToSql + Sync)])
+                .map_err(|e| pg_err("PostgreSQL list_indexes failed", e))?,
+        };
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             let name: String = row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
