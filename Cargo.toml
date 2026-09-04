@@ -54,6 +54,7 @@ fast-float2 = "0.2.3"
 hdf5 = { package = "hdf5-metno", version = "0.12.4" }
 parquet = { version = "59.0.0", default-features = false, features = ["arrow", "snap"] }
 mysql = "28.0"
+postgres = "0.19"
 memchr = "2.8.0"
 mimalloc = "0.1"
 # `extension-module` is DELIBERATELY NOT ENABLED HERE — it is opt-in via

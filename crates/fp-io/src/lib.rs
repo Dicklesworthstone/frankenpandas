@@ -12691,10 +12691,12 @@ fn sql_column_definition<C: SqlConnection>(
 // PostgreSQL SqlConnection placeholder (feature = "sql-postgresql")
 // ============================================================================
 
-#[cfg(feature = "sql-mysql")]
+#[cfg(any(feature = "sql-mysql", feature = "sql-postgresql"))]
 use std::cell::RefCell;
 
-// The `sql-postgresql` feature is intentionally a placeholder under the
+// The `sql-postgresql` feature ships the synchronous `postgres` driver
+// adapter (PostgresConnection) below - no Tokio (k1axt).
+// Historic note: it was intentionally a placeholder under the
 // workspace no-Tokio policy. The removed concrete adapter used the `postgres`
 // crate, which is built on tokio-postgres and pulled Tokio into all-features
 // builds even when users did not need PostgreSQL.
@@ -12967,6 +12969,623 @@ fn mysql_value_to_scalar(v: Option<mysql::Value>) -> Scalar {
     }
 }
 
+/// Wrapper around a synchronous `postgres::Client` providing interior
+/// mutability for the `SqlConnection` trait (which requires `&self`).
+///
+/// The `postgres` crate is a **synchronous** driver — it satisfies the
+/// workspace's no-Tokio policy (README Roadmap, `sql-postgresql` feature).
+/// br-frankenpandas-rc-postgres-adapter-k1axt.
+#[cfg(feature = "sql-postgresql")]
+pub struct PostgresConnection {
+    conn: RefCell<postgres::Client>,
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl PostgresConnection {
+    /// Wrap an existing client (build it yourself when you need TLS or
+    /// connection options beyond a plain URL).
+    pub fn new(client: postgres::Client) -> Self {
+        Self {
+            conn: RefCell::new(client),
+        }
+    }
+
+    /// Connect with `NoTls` from a libpq-style URL
+    /// (`postgres://user:pass@host:port/db`).
+    pub fn open(url: &str) -> Result<Self, IoError> {
+        let client = postgres::Client::connect(url, postgres::NoTls)
+            .map_err(|e| IoError::Sql(format!("PostgreSQL connect failed: {e}")))?;
+        Ok(Self {
+            conn: RefCell::new(client),
+        })
+    }
+
+    /// Schema-qualified, quoted `regclass` literal for catalog lookups.
+    fn regclass_literal(&self, table_name: &str, schema: Option<&str>) -> Result<String, IoError> {
+        let schema = schema.map(str::to_owned).or_else(|| self.default_schema());
+        Ok(match schema {
+            Some(schema) => format!(
+                "{}.{}",
+                self.quote_identifier(&schema)?,
+                self.quote_identifier(table_name)?
+            ),
+            None => self.quote_identifier(table_name)?,
+        })
+    }
+
+    /// Run a catalog query that takes the optional schema as $1 and returns
+    /// one `TEXT` column per row.
+    fn query_strings(&self, sql: &str, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        let mut conn = self.conn.borrow_mut();
+        let param: Option<String> = schema.map(str::to_owned);
+        let rows = conn
+            .query(sql, &[&param])
+            .map_err(|e| IoError::Sql(format!("PostgreSQL catalog query failed: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(
+                row.try_get(0)
+                    .map_err(|e| IoError::Sql(format!("PostgreSQL catalog row read failed: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
+}
+
+/// Convert a scalar into a postgres parameter, keeping owned strings in
+/// `scratch` so the returned `&(dyn ToSql + Sync)` references stay valid.
+/// `Null` (and unrepresentable scalars) bind as a typed-NULL integer.
+#[cfg(feature = "sql-postgresql")]
+fn pg_param<'a>(
+    scalar: &Scalar,
+    scratch: &'a mut Vec<String>,
+) -> &'a (dyn postgres::types::ToSql + Sync) {
+    const NULL: Option<i64> = None;
+    match scalar {
+        Scalar::Bool(b) => b,
+        Scalar::Int64(v) => v,
+        Scalar::Float64(v) => v,
+        Scalar::Utf8(s) => {
+            scratch.push(s.clone());
+            scratch.last().expect("just pushed")
+        }
+        _ => &NULL,
+    }
+}
+
+/// Read one cell dynamically by the column's declared PostgreSQL type.
+/// Unmapped types fall back to NULL (the mysql adapter's precedent) rather
+/// than failing a whole read over one exotic column; a mapped type whose wire
+/// value cannot be read IS an error.
+#[cfg(feature = "sql-postgresql")]
+fn pg_cell_to_scalar(
+    row: &postgres::Row,
+    idx: usize,
+    column: &postgres::types::Type,
+) -> Result<Scalar, IoError> {
+    use postgres::types::Type;
+    let fail = |e: postgres::Error| {
+        IoError::Sql(format!(
+            "PostgreSQL cell read failed ({} col {idx}): {e}",
+            column.name()
+        ))
+    };
+    Ok(match column {
+        Type::BOOL => row
+            .try_get::<_, Option<bool>>(idx)
+            .map_err(fail)?
+            .map(Scalar::Bool)
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::INT2 => row
+            .try_get::<_, Option<i16>>(idx)
+            .map_err(fail)?
+            .map(|v| Scalar::Int64(i64::from(v)))
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::INT4 => row
+            .try_get::<_, Option<i32>>(idx)
+            .map_err(fail)?
+            .map(|v| Scalar::Int64(i64::from(v)))
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::INT8 => row
+            .try_get::<_, Option<i64>>(idx)
+            .map_err(fail)?
+            .map(Scalar::Int64)
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::FLOAT4 => row
+            .try_get::<_, Option<f32>>(idx)
+            .map_err(fail)?
+            .map(|v| Scalar::Float64(f64::from(v)))
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::FLOAT8 => row
+            .try_get::<_, Option<f64>>(idx)
+            .map_err(fail)?
+            .map(Scalar::Float64)
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::TEXT | Type::VARCHAR | Type::NAME | Type::CHAR => row
+            .try_get::<_, Option<String>>(idx)
+            .map_err(fail)?
+            .map(Scalar::Utf8)
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::BYTEA => row
+            .try_get::<_, Option<Vec<u8>>>(idx)
+            .map_err(fail)?
+            .map(|b| Scalar::Utf8(String::from_utf8_lossy(&b).into_owned()))
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::TIMESTAMP | Type::TIMESTAMPTZ => row
+            .try_get::<_, Option<std::time::SystemTime>>(idx)
+            .map_err(fail)?
+            .map(|t| {
+                Scalar::Datetime64(
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as i64)
+                        .unwrap_or(0),
+                )
+            })
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        Type::NUMERIC => row
+            .try_get::<_, Option<postgres::types::PgNumeric>>(idx)
+            .map_err(fail)?
+            .map(|numeric| Scalar::Float64(pg_numeric_to_f64(&numeric)))
+            .unwrap_or(Scalar::Null(NullKind::Null)),
+        _ => Scalar::Null(NullKind::Null),
+    })
+}
+
+/// Convert a PostgreSQL wire-format NUMERIC to the nearest f64.
+#[cfg(feature = "sql-postgresql")]
+fn pg_numeric_to_f64(numeric: &postgres::types::PgNumeric) -> f64 {
+    let negative = matches!(numeric, postgres::types::PgNumeric::Negative { .. });
+    let (weight, scale, digits) = match numeric {
+        postgres::types::PgNumeric::Positive {
+            weight,
+            scale,
+            digits,
+        }
+        | postgres::types::PgNumeric::Negative {
+            weight,
+            scale,
+            digits,
+        } => (*weight, *scale, digits),
+        postgres::types::PgNumeric::NaN => return f64::NAN,
+    };
+    let sign = if negative { -1.0 } else { 1.0 };
+    if digits.is_empty() {
+        return 0.0;
+    }
+    let mut value = 0.0_f64;
+    for (i, digit) in digits.iter().enumerate() {
+        value += f64::from(*digit) * 10_000_f64.powi(weight as i64 - i as i64);
+    }
+    // `scale` counts fractional base-10 digits; the base-10000 group exponent
+    // was absorbed above, so only a decimal rounding shift remains.
+    let signed = sign * value;
+    if scale > 0 {
+        let factor = 10_f64.powi(scale as i32);
+        (signed * factor).round() / factor
+    } else {
+        signed
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn postgres_dtype_sql(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Int64 | DType::Int64Nullable | DType::Timedelta64 => "BIGINT",
+        DType::Float64 | DType::Float64Nullable => "DOUBLE PRECISION",
+        DType::Bool | DType::BoolNullable => "BOOLEAN",
+        DType::Datetime64 { .. } => "TIMESTAMPTZ",
+        _ => "TEXT",
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn postgres_sql_dtype_from_index(index: &Index) -> &'static str {
+    for label in index.labels() {
+        match label {
+            IndexLabel::Int64(_) => return "BIGINT",
+            IndexLabel::Utf8(_) => return "TEXT",
+            IndexLabel::Timedelta64(v) if *v != Timedelta::NAT => return "BIGINT",
+            IndexLabel::Datetime64(v) if *v != i64::MIN => return "TIMESTAMPTZ",
+            _ => {}
+        }
+    }
+    "TEXT"
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl SqlConnection for PostgresConnection {
+    fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+        let mut conn = self.conn.borrow_mut();
+        let mut scratch: Vec<String> = Vec::with_capacity(params.len());
+        let pg_params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            params.iter().map(|s| pg_param(s, &mut scratch)).collect();
+        let rows = conn
+            .query(query, &pg_params)
+            .map_err(|e| IoError::Sql(format!("PostgreSQL query failed: {e}")))?;
+        if rows.is_empty() {
+            return Ok(SqlQueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            });
+        }
+        let columns: Vec<String> = rows[0]
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        let mut out_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut values = Vec::with_capacity(row.columns().len());
+            for (idx, column) in row.columns().iter().enumerate() {
+                values.push(pg_cell_to_scalar(row, idx, column)?);
+            }
+            out_rows.push(values);
+        }
+        Ok(SqlQueryResult {
+            columns,
+            rows: out_rows,
+        })
+    }
+
+    fn supports_paged_sql_chunks(&self) -> bool {
+        // PostgreSQL natively supports the LIMIT/OFFSET paging wrapper.
+        true
+    }
+
+    fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+        self.conn
+            .borrow_mut()
+            .batch_execute(sql)
+            .map_err(|e| IoError::Sql(format!("PostgreSQL execute_batch failed: {e}")))
+    }
+
+    fn table_exists(&self, table_name: &str) -> Result<bool, IoError> {
+        self.table_exists_in_schema(table_name, None)
+    }
+
+    fn table_exists_in_schema(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<bool, IoError> {
+        let mut conn = self.conn.borrow_mut();
+        let param_schema: Option<String> = schema.map(str::to_owned);
+        let rows = conn
+            .query(
+                "SELECT 1 FROM information_schema.tables \
+                 WHERE table_name = $1 AND table_schema = COALESCE($2, current_schema()) LIMIT 1",
+                &[&table_name, &param_schema],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL table_exists failed: {e}")))?;
+        Ok(!rows.is_empty())
+    }
+
+    fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+        let mut conn = self.conn.borrow_mut();
+        let mut tx = conn
+            .transaction()
+            .map_err(|e| IoError::Sql(format!("PostgreSQL begin transaction failed: {e}")))?;
+        for (row_idx, row_values) in rows.iter().enumerate() {
+            let mut scratch: Vec<String> = Vec::with_capacity(row_values.len());
+            let pg_params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+                row_values.iter().map(|s| pg_param(s, &mut scratch)).collect();
+            tx.execute(insert_sql, &pg_params).map_err(|e| {
+                IoError::Sql(format!("PostgreSQL insert row {row_idx} failed: {e}"))
+            })?;
+        }
+        tx.commit()
+            .map_err(|e| IoError::Sql(format!("PostgreSQL commit failed: {e}")))?;
+        Ok(())
+    }
+
+    fn dtype_sql(&self, dtype: DType) -> &'static str {
+        postgres_dtype_sql(dtype)
+    }
+
+    fn index_dtype_sql(&self, index: &Index) -> &'static str {
+        postgres_sql_dtype_from_index(index)
+    }
+
+    fn parameter_marker(&self, ordinal: usize) -> String {
+        format!("${ordinal}")
+    }
+
+    fn dialect_name(&self) -> &'static str {
+        "postgresql"
+    }
+
+    fn supports_returning(&self) -> bool {
+        true
+    }
+
+    fn max_param_count(&self) -> Option<usize> {
+        Some(65535)
+    }
+
+    fn max_identifier_length(&self) -> Option<usize> {
+        Some(63)
+    }
+
+    fn with_transaction<T, F>(&self, f: F) -> Result<T, IoError>
+    where
+        F: FnOnce(&Self) -> Result<T, IoError>,
+        Self: Sized,
+    {
+        self.execute_batch("BEGIN")?;
+        match f(self) {
+            Ok(result) => {
+                self.execute_batch("COMMIT")?;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = self.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    fn supports_schemas(&self) -> bool {
+        true
+    }
+
+    fn default_schema(&self) -> Option<String> {
+        Some("public".to_owned())
+    }
+
+    fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        self.query_strings(
+            "SELECT tablename FROM pg_tables \
+             WHERE schemaname = COALESCE($1, current_schema()) \
+             AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY tablename",
+            schema,
+        )
+    }
+
+    fn list_views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        self.query_strings(
+            "SELECT viewname FROM pg_views \
+             WHERE schemaname = COALESCE($1, current_schema()) \
+             AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY viewname",
+            schema,
+        )
+    }
+
+    fn list_schemas(&self) -> Result<Vec<String>, IoError> {
+        self.query_strings(
+            "SELECT schema_name FROM information_schema.schemata \
+             WHERE schema_name NOT IN ('pg_catalog', 'information_schema') \
+             AND schema_name NOT LIKE 'pg\\_%' ORDER BY schema_name",
+        )
+    }
+
+    fn server_version(&self) -> Result<Option<String>, IoError> {
+        let result = self.query("SELECT current_setting('server_version')", &[])?;
+        Ok(result.rows.first().and_then(|row| match row.first() {
+            Some(Scalar::Utf8(version)) => Some(version.clone()),
+            _ => None,
+        }))
+    }
+
+    fn table_schema(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Option<SqlTableSchema>, IoError> {
+        if !self.table_exists_in_schema(table_name, schema)? {
+            return Ok(None);
+        }
+        let regclass = self.regclass_literal(table_name, schema)?;
+        let schema_param: Option<String> = schema.map(str::to_owned);
+        let mut conn = self.conn.borrow_mut();
+        let rows = conn
+            .query(
+                "SELECT column_name, data_type, is_nullable, column_default, \
+                        is_identity, is_autoincrement, \
+                        col_description(($3)::regclass, ordinal_position) \
+                 FROM information_schema.columns \
+                 WHERE table_name = $1 \
+                 AND table_schema = COALESCE($2, current_schema()) \
+                 ORDER BY ordinal_position",
+                &[&table_name, &schema_param, &regclass],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL table_schema failed: {e}")))?;
+        let pk_rows = conn
+            .query(
+                "SELECT kcu.column_name, kcu.ordinal_position \
+                 FROM information_schema.table_constraints tc \
+                 JOIN information_schema.key_column_usage kcu \
+                   ON tc.constraint_name = kcu.constraint_name \
+                  AND tc.table_schema = kcu.table_schema \
+                 WHERE tc.constraint_type = 'PRIMARY KEY' \
+                 AND tc.table_name = $1 \
+                 AND tc.table_schema = COALESCE($2, current_schema()) \
+                 ORDER BY kcu.ordinal_position",
+                &[&table_name, &schema_param],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL pk lookup failed: {e}")))?;
+        let pk: std::collections::BTreeMap<String, usize> = pk_rows
+            .into_iter()
+            .enumerate()
+            .filter_map(|(position, row)| {
+                let name: String = row.try_get(0).ok()?;
+                Some((name, position + 1))
+            })
+            .collect();
+        let mut columns = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let name: String = row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let declared_type: String =
+                row.try_get(1).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let nullable: String =
+                row.try_get(2).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let default_value: Option<String> =
+                row.try_get(3).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let is_identity: String =
+                row.try_get(4).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let is_autoincrement: String =
+                row.try_get(5).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let comment: Option<String> =
+                row.try_get(6).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            columns.push(SqlColumnSchema {
+                primary_key_ordinal: pk.get(&name).copied(),
+                name,
+                declared_type: Some(declared_type),
+                nullable: nullable == "YES",
+                default_value,
+                comment,
+                autoincrement: is_identity == "YES" || is_autoincrement == "YES",
+            });
+        }
+        Ok(Some(SqlTableSchema {
+            table_name: table_name.to_owned(),
+            columns,
+        }))
+    }
+
+    fn list_indexes(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlIndexSchema>, IoError> {
+        let mut conn = self.conn.borrow_mut();
+        let schema_param: Option<String> = schema.map(str::to_owned);
+        let rows = conn
+            .query(
+                "SELECT indexname, indexdef FROM pg_indexes \
+                 WHERE schemaname = COALESCE($1, current_schema()) AND tablename = $2 \
+                 ORDER BY indexname",
+                &[&schema_param, &table_name],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL list_indexes failed: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let name: String = row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let indexdef: String =
+                row.try_get(1).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let columns = indexdef
+                .rsplit('(')
+                .next()
+                .map(|tail| tail.trim_end_matches(')'))
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect();
+            out.push(SqlIndexSchema {
+                name,
+                columns,
+                unique: indexdef.contains("CREATE UNIQUE"),
+            });
+        }
+        Ok(out)
+    }
+
+    fn list_unique_constraints(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
+        let regclass = self.regclass_literal(table_name, schema)?;
+        let mut conn = self.conn.borrow_mut();
+        let rows = conn
+            .query(
+                "SELECT con.conname, a.attname \
+                 FROM pg_constraint con \
+                 JOIN pg_attribute a \
+                   ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey) \
+                 WHERE con.contype = 'u' AND con.conrelid = $1::regclass \
+                 ORDER BY con.conname, a.attnum",
+                &[&regclass],
+            )
+            .map_err(|e| {
+                IoError::Sql(format!("PostgreSQL list_unique_constraints failed: {e}"))
+            })?;
+        let mut out: Vec<SqlUniqueConstraintSchema> = Vec::new();
+        for row in &rows {
+            let constraint_name: String =
+                row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let column: String =
+                row.try_get(1).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            match out.last_mut() {
+                Some(last) if last.name == constraint_name => last.columns.push(column),
+                _ => out.push(SqlUniqueConstraintSchema {
+                    name: constraint_name,
+                    columns: vec![column],
+                }),
+            }
+        }
+        Ok(out)
+    }
+
+    fn table_comment(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Option<String>, IoError> {
+        let regclass = self.regclass_literal(table_name, schema)?;
+        let mut conn = self.conn.borrow_mut();
+        let row = conn
+            .query_one(
+                "SELECT obj_description(($1)::regclass, 'pg_class')",
+                &[&regclass],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL table_comment failed: {e}")))?;
+        Ok(row.try_get(0).unwrap_or(None))
+    }
+
+    fn list_foreign_keys(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
+        let regclass = self.regclass_literal(table_name, schema)?;
+        let mut conn = self.conn.borrow_mut();
+        let rows = conn
+            .query(
+                "SELECT con.conname, src.attname, ft.relname, tgt.attname \
+                 FROM pg_constraint con \
+                 JOIN pg_attribute src \
+                   ON src.attrelid = con.conrelid AND src.attnum = ANY(con.conkey) \
+                 JOIN pg_class ft ON ft.oid = con.confrelid \
+                 JOIN pg_attribute tgt \
+                   ON tgt.attrelid = con.confrelid AND tgt.attnum = ANY(con.confkey) \
+                 WHERE con.contype = 'f' AND con.conrelid = $1::regclass \
+                 ORDER BY con.conname, src.attnum",
+                &[&regclass],
+            )
+            .map_err(|e| IoError::Sql(format!("PostgreSQL list_foreign_keys failed: {e}")))?;
+        let mut out: Vec<SqlForeignKeySchema> = Vec::new();
+        for row in &rows {
+            let constraint_name: String =
+                row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let column: String =
+                row.try_get(1).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let referenced_table: String =
+                row.try_get(2).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let referenced_column: String =
+                row.try_get(3).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            match out.last_mut() {
+                Some(last)
+                    if last.constraint_name.as_deref() == Some(constraint_name.as_str())
+                        && last.referenced_table == referenced_table =>
+                {
+                    last.columns.push(column);
+                    last.referenced_columns.push(referenced_column);
+                }
+                _ => out.push(SqlForeignKeySchema {
+                    constraint_name: Some(constraint_name),
+                    columns: vec![column],
+                    referenced_table,
+                    referenced_columns: vec![referenced_column],
+                }),
+            }
+        }
+        Ok(out)
+    }
+}
 #[cfg(test)]
 fn sql_create_table_query<C: SqlConnection>(
     conn: &C,
