@@ -13071,32 +13071,32 @@ fn pg_cell_to_scalar(
         ))
     };
     Ok(match column {
-        Type::BOOL => row
+        &Type::BOOL => row
             .try_get::<_, Option<bool>>(idx)
             .map_err(fail)?
             .map(Scalar::Bool)
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::INT2 => row
+        &Type::INT2 => row
             .try_get::<_, Option<i16>>(idx)
             .map_err(fail)?
             .map(|v| Scalar::Int64(i64::from(v)))
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::INT4 => row
+        &Type::INT4 => row
             .try_get::<_, Option<i32>>(idx)
             .map_err(fail)?
             .map(|v| Scalar::Int64(i64::from(v)))
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::INT8 => row
+        &Type::INT8 => row
             .try_get::<_, Option<i64>>(idx)
             .map_err(fail)?
             .map(Scalar::Int64)
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::FLOAT4 => row
+        &Type::FLOAT4 => row
             .try_get::<_, Option<f32>>(idx)
             .map_err(fail)?
             .map(|v| Scalar::Float64(f64::from(v)))
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::FLOAT8 => row
+        &Type::FLOAT8 => row
             .try_get::<_, Option<f64>>(idx)
             .map_err(fail)?
             .map(Scalar::Float64)
@@ -13106,7 +13106,7 @@ fn pg_cell_to_scalar(
             .map_err(fail)?
             .map(Scalar::Utf8)
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::BYTEA => row
+        &Type::BYTEA => row
             .try_get::<_, Option<Vec<u8>>>(idx)
             .map_err(fail)?
             .map(|b| Scalar::Utf8(String::from_utf8_lossy(&b).into_owned()))
@@ -13122,8 +13122,8 @@ fn pg_cell_to_scalar(
                 )
             })
             .unwrap_or(Scalar::Null(NullKind::Null)),
-        Type::NUMERIC => row
-            .try_get::<_, Option<postgres::types::PgNumeric>>(idx)
+        &Type::NUMERIC => row
+            .try_get::<_, Option<postgres_protocol::types::PgNumeric>>(idx)
             .map_err(fail)?
             .map(|numeric| Scalar::Float64(pg_numeric_to_f64(&numeric)))
             .unwrap_or(Scalar::Null(NullKind::Null)),
@@ -13133,20 +13133,20 @@ fn pg_cell_to_scalar(
 
 /// Convert a PostgreSQL wire-format NUMERIC to the nearest f64.
 #[cfg(feature = "sql-postgresql")]
-fn pg_numeric_to_f64(numeric: &postgres::types::PgNumeric) -> f64 {
-    let negative = matches!(numeric, postgres::types::PgNumeric::Negative { .. });
+fn pg_numeric_to_f64(numeric: &postgres_protocol::types::PgNumeric) -> f64 {
+    let negative = matches!(numeric, postgres_protocol::types::PgNumeric::Negative { .. });
     let (weight, scale, digits) = match numeric {
-        postgres::types::PgNumeric::Positive {
+        postgres_protocol::types::PgNumeric::Positive {
             weight,
             scale,
             digits,
         }
-        | postgres::types::PgNumeric::Negative {
+        | postgres_protocol::types::PgNumeric::Negative {
             weight,
             scale,
             digits,
         } => (*weight, *scale, digits),
-        postgres::types::PgNumeric::NaN => return f64::NAN,
+        postgres_protocol::types::PgNumeric::NaN => return f64::NAN,
     };
     let sign = if negative { -1.0 } else { 1.0 };
     if digits.is_empty() {
@@ -13254,7 +13254,7 @@ impl SqlConnection for PostgresConnection {
             .query(
                 "SELECT 1 FROM information_schema.tables \
                  WHERE table_name = $1 AND table_schema = COALESCE($2, current_schema()) LIMIT 1",
-                &[&table_name, &param_schema],
+                &[&table_name as &(dyn postgres::types::ToSql + Sync), &param_schema],
             )
             .map_err(|e| IoError::Sql(format!("PostgreSQL table_exists failed: {e}")))?;
         Ok(!rows.is_empty())
@@ -13388,7 +13388,11 @@ impl SqlConnection for PostgresConnection {
                  WHERE table_name = $1 \
                  AND table_schema = COALESCE($2, current_schema()) \
                  ORDER BY ordinal_position",
-                &[&table_name, &schema_param, &regclass],
+                &[
+                    &table_name as &(dyn postgres::types::ToSql + Sync),
+                    &schema_param as &(dyn postgres::types::ToSql + Sync),
+                    &regclass as &(dyn postgres::types::ToSql + Sync),
+                ],
             )
             .map_err(|e| IoError::Sql(format!("PostgreSQL table_schema failed: {e}")))?;
         let pk_rows = conn
@@ -13402,7 +13406,10 @@ impl SqlConnection for PostgresConnection {
                  AND tc.table_name = $1 \
                  AND tc.table_schema = COALESCE($2, current_schema()) \
                  ORDER BY kcu.ordinal_position",
-                &[&table_name, &schema_param],
+                &[
+                    &table_name as &(dyn postgres::types::ToSql + Sync),
+                    &schema_param as &(dyn postgres::types::ToSql + Sync),
+                ],
             )
             .map_err(|e| IoError::Sql(format!("PostgreSQL pk lookup failed: {e}")))?;
         let pk: std::collections::BTreeMap<String, usize> = pk_rows
@@ -13456,7 +13463,10 @@ impl SqlConnection for PostgresConnection {
                 "SELECT indexname, indexdef FROM pg_indexes \
                  WHERE schemaname = COALESCE($1, current_schema()) AND tablename = $2 \
                  ORDER BY indexname",
-                &[&schema_param, &table_name],
+                &[
+                    &schema_param as &(dyn postgres::types::ToSql + Sync),
+                    &table_name as &(dyn postgres::types::ToSql + Sync),
+                ],
             )
             .map_err(|e| IoError::Sql(format!("PostgreSQL list_indexes failed: {e}")))?;
         let mut out = Vec::with_capacity(rows.len());
