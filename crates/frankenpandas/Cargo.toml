@@ -32,8 +32,7 @@ rusqlite = { workspace = true, optional = true }
 # can opt in/out without depending on inner crates directly.
 #
 # - SQL: forward fp-io's backend selection. Default is sql-sqlite.
-#   sql-postgresql ships the PostgresConnection adapter (fp-io); sql-mysql
-#   adapter is in fp-io today (fp-io exposes
+#   sql-mysql + sql-postgresql adapters ship in fp-io today (fp-io exposes
 #   them but doesn't bind concrete backends yet — that's fd90 Phase 2).
 # - HDF5: forward fp-io's native HDF5 integration. OPT-IN, because
 #   hdf5-metno-sys needs a system HDF5 library/headers at build time

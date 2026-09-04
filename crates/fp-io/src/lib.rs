@@ -13074,7 +13074,7 @@ impl postgres::types::ToSql for PgNull {
     fn to_sql(
         &self,
         _ty: &postgres::types::Type,
-        out: &mut postgres::types::private::BytesMut,
+        _out: &mut postgres::types::private::BytesMut,
     ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Send + Sync>> {
         // Append NOTHING and report IsNull::Yes: the shared encode buffer must
         // stay intact (clearing it corrupts earlier parameters in the same
@@ -13558,13 +13558,17 @@ impl SqlConnection for PostgresConnection {
         // doubled double-quotes, and any single-quote in an identifier is
         // doubled here, so the embedding is injection-safe.
         let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
+        let schema_sql = match schema {
+            Some(schema) => self.quote_identifier(schema)?,
+            None => "current_schema()".to_owned(),
+        };
         let sql = format!(
             "SELECT column_name, data_type, is_nullable, column_default, \
                     is_identity, \
                     col_description(({regclass_sql})::regclass, ordinal_position) \
              FROM information_schema.columns \
              WHERE table_name = $1 \
-             AND table_schema = COALESCE($2, current_schema()) \
+             AND table_schema = {schema_sql} \
              ORDER BY ordinal_position"
         );
         let rows = match schema {
@@ -13648,7 +13652,6 @@ impl SqlConnection for PostgresConnection {
         schema: Option<&str>,
     ) -> Result<Vec<SqlIndexSchema>, IoError> {
         let mut conn = self.conn.borrow_mut();
-        let schema_param: Option<String> = schema.map(str::to_owned);
         let sql = match schema {
             Some(_) => "SELECT indexname, indexdef FROM pg_indexes \
                  WHERE schemaname = $1 AND tablename = $2 \
@@ -13657,6 +13660,7 @@ impl SqlConnection for PostgresConnection {
                  WHERE schemaname = current_schema() AND tablename = $1 \
                  ORDER BY indexname",
         };
+        let schema_param: Option<String> = schema.map(str::to_owned);
         let rows = match schema {
             Some(schema) => {
                 let owned = schema.to_owned();
@@ -13703,17 +13707,18 @@ impl SqlConnection for PostgresConnection {
         schema: Option<&str>,
     ) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
         let regclass = self.regclass_literal(table_name, schema)?;
+        let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
+        let sql = format!(
+            "SELECT con.conname, a.attname \
+             FROM pg_constraint con \
+             JOIN pg_attribute a \
+               ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey) \
+             WHERE con.contype = 'u' AND con.conrelid = {regclass_sql}::regclass \
+             ORDER BY con.conname, a.attnum"
+        );
         let mut conn = self.conn.borrow_mut();
         let rows = conn
-            .query(
-                "SELECT con.conname, a.attname \
-                 FROM pg_constraint con \
-                 JOIN pg_attribute a \
-                   ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey) \
-                 WHERE con.contype = 'u' AND con.conrelid = $1::regclass \
-                 ORDER BY con.conname, a.attnum",
-                &[&regclass],
-            )
+            .query(sql.as_str(), &[])
             .map_err(|e| {
                 IoError::Sql(format!("PostgreSQL list_unique_constraints failed: {e}"))
             })?;
@@ -13740,12 +13745,12 @@ impl SqlConnection for PostgresConnection {
         schema: Option<&str>,
     ) -> Result<Option<String>, IoError> {
         let regclass = self.regclass_literal(table_name, schema)?;
+        let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
         let mut conn = self.conn.borrow_mut();
-        let row = conn
-            .query_one(
-                "SELECT obj_description(($1)::regclass, 'pg_class')",
-                &[&regclass],
-            )
+        let sql = format!(
+            "SELECT obj_description(({regclass_sql})::regclass, 'pg_class')"
+        );
+        let row = conn.query_one(sql.as_str(), &[])
             .map_err(|e| IoError::Sql(format!("PostgreSQL table_comment failed: {e}")))?;
         Ok(row.try_get(0).unwrap_or(None))
     }
@@ -13756,20 +13761,20 @@ impl SqlConnection for PostgresConnection {
         schema: Option<&str>,
     ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
         let regclass = self.regclass_literal(table_name, schema)?;
+        let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
+        let sql = format!(
+            "SELECT con.conname, src.attname, ft.relname, tgt.attname \
+             FROM pg_constraint con \
+             JOIN pg_attribute src \
+               ON src.attrelid = con.conrelid AND src.attnum = ANY(con.conkey) \
+             JOIN pg_class ft ON ft.oid = con.confrelid \
+             JOIN pg_attribute tgt \
+               ON tgt.attrelid = con.confrelid AND tgt.attnum = ANY(con.confkey) \
+             WHERE con.contype = 'f' AND con.conrelid = {regclass_sql}::regclass \
+             ORDER BY con.conname, src.attnum"
+        );
         let mut conn = self.conn.borrow_mut();
-        let rows = conn
-            .query(
-                "SELECT con.conname, src.attname, ft.relname, tgt.attname \
-                 FROM pg_constraint con \
-                 JOIN pg_attribute src \
-                   ON src.attrelid = con.conrelid AND src.attnum = ANY(con.conkey) \
-                 JOIN pg_class ft ON ft.oid = con.confrelid \
-                 JOIN pg_attribute tgt \
-                   ON tgt.attrelid = con.confrelid AND tgt.attnum = ANY(con.confkey) \
-                 WHERE con.contype = 'f' AND con.conrelid = $1::regclass \
-                 ORDER BY con.conname, src.attnum",
-                &[&regclass],
-            )
+        let rows = conn.query(sql.as_str(), &[])
             .map_err(|e| IoError::Sql(format!("PostgreSQL list_foreign_keys failed: {e}")))?;
         let mut out: Vec<SqlForeignKeySchema> = Vec::new();
         for row in &rows {
