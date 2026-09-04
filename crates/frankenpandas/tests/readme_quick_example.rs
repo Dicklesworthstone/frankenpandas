@@ -6804,7 +6804,7 @@ fn facade_reexports_cover_every_fp_io_read_write_fn() {
 
     let unexported: Vec<&str> = found
         .iter()
-        .filter(|n| !expected.contains(n))
+        .filter(|n| !expected.contains(&n.as_str()))
         .map(String::as_str)
         .collect();
     assert!(
