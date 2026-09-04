@@ -186,3 +186,23 @@ HEAD compile check: `cargo check -p fp-columnar` clean in-repo (dev profile disa
 ## bv validation
 
 Post-creation graph state (`bv --robot-triage` 2026-09-03T21:42Z, data_hash `705d6dd0816168a5`): 4,027 issues; open 16→**25** (+9), in_progress 56, blocked 13, not_closed 86→**95**; actionable 91. Top picks unchanged in character (disk ops `tfi8r`/`q35on`, decision docket `aj19i` — PageRank 0.16-0.19), i.e. the triage engine agrees with this audit's conclusion: the blocking constraints are the disk drain, the dead CI/bench certification, and the decision docket. `br dep cycles`: **no cycles detected**. Cycles metric state `skipped` in bv's phase-2 (phase-1 topo clean); the dedicated `br dep cycles` check is authoritative here and is empty.
+
+
+---
+
+## Closing addendum — execution wave (2026-09-04)
+
+All 12 reality-check beads + 5 spin-offs closed; committed through `083e4eab5`/`0a4dbb652` and beyond.
+
+| Bead | Outcome |
+|---|---|
+| `8oey9` live-oracle | Report emitted; full triage; **final local pinned run 832 passed / 2 failed / 5 ignored** — both failures owned (bhyqp pyarrow env, odx3k/jozfk bool+numeric constructor cluster); 3 cross-version failures disproven by exact-invocation adjudication (FP matched pinned 2.2.3 on all three) |
+| `d8wt4` provenance guard (spin-off) | `verify_oracle_pandas_pin` in `capture_live_oracle_expected` — cross-version oracles now produce honest skips, never comparisons; root cause was rch-offloaded runs resolving `.venv-oracle`'s symlinked interpreter to the worker's pandas; `.venv-oracle/` subsequently added to the rch exclude list (worker syncs skip the ~1 GB venv + symlink trap) |
+| `k1axt` PostgreSQL adapter | **Implemented + live-verified against PG 17.10**: all 28 `SqlConnection` methods, typed dynamic decode (NUMERIC wire format, timestamps→`Datetime64` ns), `PgNull` type-agnostic NULL binding, `pg_err` SQLSTATE enrichment, full pg_catalog introspection; 5 module tests + 10-step out-of-tree live probe ALL PASS. README roadmap → Done |
+| `yo8k1`/`mzox7`/`kgohb`/`hrnom`/`2z7q9`/`zf9bf`/`kf1lc` | Closed as detailed in the tables above; regression gates landed (doc-tree numbers test, facade drift gate, drift reconciliation test) |
+| `zf8eh`/`k5lhz` clippy spin-offs | Five `x == x` NaN idioms → `!x.is_nan()`; clippy 0 errors on fp-columnar/fp-frame/fp-conformance/frankenpandas |
+| `ww0m9`/`q5svu`/`p5d2q` parity spin-offs | Closed INVALID with exact-invocation proof — they were cross-version worker-pandas artifacts |
+
+**Why the three "parity failures" mattered more than they looked:** they were the first evidence of the ey5sl class ("the check's subject and its object come apart") attacking the *differential oracle itself* — offloaded runs silently substituted a different library as the reference. The provenance guard closes that class for every future run, host or worker.
+
+**Still open, correctly owned elsewhere:** `ey5sl` (CI account — human), `aj19i` (four representation rulings — maintainer), `nywa8`/`bhyqp`/`odx3k`/`jozfk` (in-progress parity clusters, now carrying fresh live evidence), `3826s` cluster (groupby-resample gaps).
