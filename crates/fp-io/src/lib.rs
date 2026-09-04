@@ -13476,6 +13476,39 @@ impl SqlConnection for PostgresConnection {
         }
     }
 
+    fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        let (sql, params): (&str, Vec<Box<dyn postgres::types::ToSql + Sync>>) = match schema {
+            Some(schema) => (
+                "SELECT tablename FROM pg_tables \
+                 WHERE schemaname = $1 \
+                 AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY tablename",
+                vec![Box::new(schema.to_owned())],
+            ),
+            None => (
+                "SELECT tablename FROM pg_tables \
+                 WHERE schemaname = current_schema() \
+                 AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY tablename",
+                Vec::new(),
+            ),
+        };
+        let pg_params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            params.iter().map(|param| param.as_ref()).collect();
+        let mut conn = self.conn.borrow_mut();
+        let rows = conn
+            .query(sql, &pg_params)
+            .map_err(|e| pg_err("PostgreSQL list_tables failed", e))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            out.push(
+                row.try_get(0)
+                    .map_err(|e| IoError::Sql(format!("PostgreSQL row read failed: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
+
     fn list_views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
         let sql = match schema {
             Some(_) => "SELECT viewname FROM pg_views \
@@ -13518,13 +13551,17 @@ impl SqlConnection for PostgresConnection {
         let regclass = self.regclass_literal(table_name, schema)?;
         let schema_param: Option<String> = schema.map(str::to_owned);
         let mut conn = self.conn.borrow_mut();
-        // The regclass literal is embedded (quote_identifier-escaped, so it
-        // is injection-safe): binding it as a parameter would make the server
-        // type the parameter as `regclass`, which `String` cannot serialize.
+        // The regclass literal is embedded as a single-quoted regclass
+        // CONSTANT ('"schema"."table"'::regclass): binding it as a parameter
+        // would make the server type the parameter as `regclass`, which
+        // `String` cannot serialize. quote_identifier output contains only
+        // doubled double-quotes, and any single-quote in an identifier is
+        // doubled here, so the embedding is injection-safe.
+        let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
         let sql = format!(
             "SELECT column_name, data_type, is_nullable, column_default, \
                     is_identity, \
-                    col_description(({regclass})::regclass, ordinal_position) \
+                    col_description(({regclass_sql})::regclass, ordinal_position) \
              FROM information_schema.columns \
              WHERE table_name = $1 \
              AND table_schema = COALESCE($2, current_schema()) \
