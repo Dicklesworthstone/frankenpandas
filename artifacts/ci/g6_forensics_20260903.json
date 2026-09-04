@@ -1,0 +1,54 @@
+{
+  "bead_id": "bd-2gi.10",
+  "artifact_path": "artifacts/ci/g6_forensics_20260903.json",
+  "report": {
+    "generated_unix_ms": 1788475362531,
+    "all_passed": false,
+    "first_failure": "G6Conformance",
+    "elapsed_ms": 1252259,
+    "passed_count": 0,
+    "total_count": 1,
+    "gate_results": [
+      {
+        "rule_id": "G6",
+        "gate": "G6Conformance",
+        "order": 7,
+        "label": "G6: Conformance",
+        "passed": false,
+        "elapsed_ms": 1252259,
+        "summary": "All 1341 fixtures passed; live-oracle ran=752 skipped=82 failed=5 observed=839/0 report=/data/projects/frankenpandas/crates/fp-conformance/../../artifacts/ci/live_oracle_report.json",
+        "errors": [
+          "live_oracle_command_exit=101",
+          "live_oracle_total_tests=839 expected=0",
+          "live_oracle_skipped=82 while FP_REQUIRE_LIVE_ORACLE=1",
+          "live_oracle_failed=5"
+        ],
+        "commands": [
+          "cargo test -p fp-conformance -- --nocapture"
+        ],
+        "repro_cmd": "cargo test -p fp-conformance -- --nocapture"
+      }
+    ],
+    "violations": [
+      {
+        "rule_id": "G6",
+        "gate": "G6Conformance",
+        "order": 7,
+        "label": "G6: Conformance",
+        "passed": false,
+        "elapsed_ms": 1252259,
+        "summary": "All 1341 fixtures passed; live-oracle ran=752 skipped=82 failed=5 observed=839/0 report=/data/projects/frankenpandas/crates/fp-conformance/../../artifacts/ci/live_oracle_report.json",
+        "errors": [
+          "live_oracle_command_exit=101",
+          "live_oracle_total_tests=839 expected=0",
+          "live_oracle_skipped=82 while FP_REQUIRE_LIVE_ORACLE=1",
+          "live_oracle_failed=5"
+        ],
+        "commands": [
+          "cargo test -p fp-conformance -- --nocapture"
+        ],
+        "repro_cmd": "cargo test -p fp-conformance -- --nocapture"
+      }
+    ]
+  }
+}
