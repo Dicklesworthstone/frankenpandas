@@ -83216,7 +83216,45 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.pow(other)` / `df1 ** df2`.
     pub fn pow_df(&self, other: &Self) -> Result<Self, FrameError> {
-        self.binary_df_op(other, |a, b| a.powf(b), "pow")
+        // br-frankenpandas-cajyl follow-through: pandas raises NotImplementedError
+        // for bool ** bool, and computes numeric results (float64) for
+        // bool ** numeric. Promote Bool columns to Float64 so the arithmetic
+        // applies (without this, Bool columns silently pass through the
+        // else-clone arm unchanged).
+        let self_has_bool = self
+            .column_order
+            .iter()
+            .any(|n| self.columns[n].dtype() == DType::Bool);
+        let other_has_bool = other
+            .column_order
+            .iter()
+            .any(|n| other.columns[n].dtype() == DType::Bool);
+        if self_has_bool && other_has_bool {
+            return Err(FrameError::CompatibilityRejected(
+                "operator 'pow' not implemented for bool dtypes".to_owned(),
+            ));
+        }
+        let promote =
+            |df: &DataFrame| -> Result<DataFrame, FrameError> {
+                let has_bool = df
+                    .column_order
+                    .iter()
+                    .any(|n| df.columns[n].dtype() == DType::Bool);
+                if has_bool {
+                    df.apply_per_column(|s| {
+                        if s.dtype() == DType::Bool {
+                            s.astype(DType::Float64)
+                        } else {
+                            Ok(s.clone())
+                        }
+                    })
+                } else {
+                    Ok(df.clone())
+                }
+            };
+        let lhs = promote(self)?;
+        let rhs = promote(other)?;
+        lhs.binary_df_op(&rhs, |a, b| a.powf(b), "pow")
     }
 
     /// Internal: element-wise binary operation between two DataFrames with fill_value.
