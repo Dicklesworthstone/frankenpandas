@@ -144,13 +144,13 @@ fn live_oracle_dataframe_asof_matches_pandas() {
         "mode": "strict",
         "operation": "dataframe_asof",
         "oracle_source": "live_legacy_pandas",
-        "asof_label": { "kind": "utf8", "value": "2024-01-02T10:00:00" },
+        "asof_label": { "kind": "datetime64", "value": 1704189600000000000i64 },
         "subset": ["b"],
         "frame": {
             "index": [
-                { "kind": "utf8", "value": "2024-01-01T10:00:00" },
-                { "kind": "utf8", "value": "2024-01-02T10:00:00" },
-                { "kind": "utf8", "value": "2024-01-03T10:00:00" }
+                { "kind": "datetime64", "value": 1704103200000000000i64 },
+                { "kind": "datetime64", "value": 1704189600000000000i64 },
+                { "kind": "datetime64", "value": 1704276000000000000i64 }
             ],
             "column_order": ["a", "b"],
             "columns": {
@@ -169,13 +169,14 @@ fn live_oracle_dataframe_asof_matches_pandas() {
     }))
     .expect("fixture");
 
-    // br-frankenpandas-l7r1p MEASURED DIVERGENCE (live pandas 2.2.3):
-    //   series name mismatch: actual "2024-01-02T10:00:00"
-    //                       expected "2024-01-02 10:00:00"
-    // FrankenPandas names the result with the ISO 'T' separator where pandas
-    // uses a space. The VALUES agree; only the name spelling differs. Opted out
-    // until the datetime-to-string separator is reconciled -- see the
-    // astype(str) width/format family. Do NOT fix by renaming in the fixture.
+    // br-frankenpandas-4hmx4: the fixture now declares TYPED datetime64
+    // labels (i64 ns), so both arms answer the same question: pandas builds a
+    // DatetimeIndex and names the asof row with a pd.Timestamp, serialized by
+    // the oracle as {"kind":"datetime64","value":ns}; FrankenPandas builds an
+    // IndexLabel::Datetime64 index and names the row the same way. The utf8
+    // variant of this fixture compared a utf8 label against pandas'
+    // str(Timestamp) spelling (space vs 'T') - that string-format coupling is
+    // what this replaces (see also br-frankenpandas-l7r1p).
     let Some(expected) = expected_series_or_skip(&fixture, "dataframe asof oracle test", false)
     else {
         return;

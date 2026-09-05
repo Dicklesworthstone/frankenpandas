@@ -265,6 +265,14 @@ def label_from_json(value: dict[str, Any]) -> Any:
                 raise OracleError("null label kind 'na_t' needs pandas loaded")
             return _PD.NaT
         raise OracleError(f"unsupported null label marker: {raw!r}")
+    # br-frankenpandas-4hmx4: datetime64 labels arrive as i64 nanoseconds and
+    # read back as pd.Timestamp, so a fixture can declare typed DatetimeIndex
+    # labels instead of utf8 ISO strings the oracle would coerce (answering a
+    # different question than FrankenPandas' utf8-label arm).
+    if kind == "datetime64":
+        if _PD is None:
+            raise OracleError("label kind 'datetime64' needs pandas loaded")
+        return _PD.Timestamp(int(raw), unit="ns")
     raise OracleError(f"unsupported index label kind: {kind!r}")
 
 
@@ -334,6 +342,13 @@ def scalar_to_json(value: Any) -> dict[str, Any]:
         return {"kind": "null", "value": "null"}
     if isinstance(value, bool):
         return {"kind": "bool", "value": value}
+    # br-frankenpandas-4hmx4: a pd.Timestamp label (e.g. the name of an
+    # asof() result row over a DatetimeIndex) writes as the TYPED datetime64
+    # label - i64 nanoseconds, the encoding of FrankenPandas'
+    # IndexLabel::Datetime64 - instead of str(value) with the space separator
+    # the two libraries disagree on.
+    if _PD is not None and isinstance(value, _PD.Timestamp):
+        return {"kind": "datetime64", "value": int(value.value)}
     if isinstance(value, int):
         return {"kind": "int64", "value": value}
     if isinstance(value, float):
@@ -420,6 +435,13 @@ def label_to_json(value: Any) -> dict[str, Any]:
         return {"kind": "null", "value": "null"}
     if isinstance(value, bool):
         return {"kind": "bool", "value": value}
+    # br-frankenpandas-4hmx4: a pd.Timestamp label (e.g. the name of an
+    # asof() result row over a DatetimeIndex) writes as the TYPED datetime64
+    # label - i64 nanoseconds, the encoding of FrankenPandas'
+    # IndexLabel::Datetime64 - instead of str(value) with the space separator
+    # the two libraries disagree on.
+    if _PD is not None and isinstance(value, _PD.Timestamp):
+        return {"kind": "datetime64", "value": int(value.value)}
     if isinstance(value, int):
         return {"kind": "int64", "value": value}
     if isinstance(value, float):
