@@ -13260,7 +13260,7 @@ fn postgres_sql_dtype_from_index(index: &Index) -> &'static str {
 }
 
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sql-postgresql"))]
 mod sql_postgres_tests {
     use super::{pg_param_boxed, postgres_dtype_sql, postgres_sql_dtype_from_index, PgNumericF64};
     use crate::{Index, IndexLabel};
