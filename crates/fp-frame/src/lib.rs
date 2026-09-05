@@ -82715,9 +82715,22 @@ impl DataFrame {
 
     /// Raise all numeric columns to a scalar power.
     pub fn pow_scalar(&self, value: f64) -> Result<Self, FrameError> {
-        // powf is libm COMPUTE-bound → parallelize within-column for few columns.
-        self.apply_scalar_op_inner(value, |a, b| a.powf(b), true)
+        // br-frankenpandas-cajyl: pandas computes bool ** numeric as float64
+        // (True -> 1.0, False -> 0.0). Without the promotion, Bool columns
+        // silently pass through the else-clone arm unchanged.
+        // br-frankenpandas-cajyl: pandas computes bool ** numeric as float64.
+        // Promote Bool columns to Float64 so the arithmetic applies (without
+        // this, Bool columns silently pass through the else-clone arm unchanged).
+        let promoted = self.apply_per_column(|s| {
+            if s.dtype() == DType::Bool {
+                s.astype(DType::Float64)
+            } else {
+                Ok(s.clone())
+            }
+        })?;
+        promoted.apply_scalar_op_inner(value, |a, b| a.powf(b), true)
     }
+
 
     /// Modulo all numeric columns by a scalar.
     pub fn mod_scalar(&self, value: f64) -> Result<Self, FrameError> {
@@ -208201,4 +208214,6 @@ mod group_bool_reduce_utf8_key_uza04 {
         let _ = IndexLabel::Int64(0);
         Ok(())
     }
+
+
 }
