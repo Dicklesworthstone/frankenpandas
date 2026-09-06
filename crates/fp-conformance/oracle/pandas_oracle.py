@@ -8550,8 +8550,28 @@ def _datetime_index_from_json(pd, index_json: list, op_name: str):
 
 def _stringify_date_index(out):
     out = out.copy()
-    out.index = [ts.strftime("%Y-%m-%d") for ts in out.index]
+    formatted = []
+    for ts in out.index:
+        if hasattr(ts, "time") and (ts.hour != 0 or ts.minute != 0 or ts.second != 0 or ts.microsecond != 0 or ts.nanosecond != 0):
+            if ts.nanosecond == 0 and ts.microsecond == 0:
+                formatted.append(ts.strftime("%Y-%m-%d %H:%M:%S"))
+            else:
+                formatted.append(ts.isoformat())
+        else:
+            formatted.append(ts.strftime("%Y-%m-%d"))
+    out.index = formatted
     return out
+
+
+def _resample_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
+    kwargs = {}
+    if payload.get("resample_closed") is not None:
+        kwargs["closed"] = payload["resample_closed"]
+    if payload.get("resample_label") is not None:
+        kwargs["label"] = payload["resample_label"]
+    if payload.get("resample_origin") is not None:
+        kwargs["origin"] = payload["resample_origin"]
+    return kwargs
 
 
 def op_series_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[str, Any]:
@@ -8570,8 +8590,9 @@ def op_series_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -> d
     limit = payload.get("resample_limit")
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
         raise OracleError(f"{op_name} resample_limit must be an integer when present")
+    kwargs = _resample_kwargs(payload)
     try:
-        resampled = series.resample(freq)
+        resampled = series.resample(freq, **kwargs)
         if agg in {"ffill", "bfill"} and limit is not None:
             out = getattr(resampled, agg)(limit=limit)
         else:
@@ -8596,8 +8617,16 @@ def op_dataframe_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -
             dtype=series_dtype_for_payload_values(col_json),
         )
     df = pd.DataFrame(data, index=index)[order]
+    limit = payload.get("resample_limit")
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
+        raise OracleError(f"{op_name} resample_limit must be an integer when present")
+    kwargs = _resample_kwargs(payload)
     try:
-        out = getattr(df.resample(freq), agg)()
+        resampled = df.resample(freq, **kwargs)
+        if agg in {"ffill", "bfill"} and limit is not None:
+            out = getattr(resampled, agg)(limit=limit)
+        else:
+            out = getattr(resampled, agg)()
     except Exception as exc:
         raise OracleError(f"{op_name} failed: {exc}") from exc
     expected_frame = dataframe_to_json(_stringify_date_index(out))

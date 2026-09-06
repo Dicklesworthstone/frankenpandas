@@ -2601,6 +2601,12 @@ pub struct PacketFixture {
     #[serde(default)]
     pub resample_limit: Option<usize>,
     #[serde(default)]
+    pub resample_closed: Option<String>,
+    #[serde(default)]
+    pub resample_label: Option<String>,
+    #[serde(default)]
+    pub resample_origin: Option<String>,
+    #[serde(default)]
     pub quantile_value: Option<f64>,
     #[serde(default)]
     pub dt_freq: Option<String>,
@@ -4200,6 +4206,12 @@ struct OracleRequest {
     resample_freq: Option<String>,
     #[serde(default)]
     resample_limit: Option<usize>,
+    #[serde(default)]
+    resample_closed: Option<String>,
+    #[serde(default)]
+    resample_label: Option<String>,
+    #[serde(default)]
+    resample_origin: Option<String>,
     #[serde(default)]
     quantile_value: Option<f64>,
     #[serde(default)]
@@ -14138,6 +14150,9 @@ fn capture_live_oracle_expected(
         ewm_alpha: fixture.ewm_alpha,
         resample_freq: fixture.resample_freq.clone(),
         resample_limit: fixture.resample_limit,
+        resample_closed: fixture.resample_closed.clone(),
+        resample_label: fixture.resample_label.clone(),
+        resample_origin: fixture.resample_origin.clone(),
         quantile_value: fixture.quantile_value,
         dt_freq: fixture.dt_freq.clone(),
         dt_tz: fixture.dt_tz.clone(),

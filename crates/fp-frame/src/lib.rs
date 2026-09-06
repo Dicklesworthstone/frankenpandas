@@ -25247,6 +25247,25 @@ impl Series {
         Resample {
             series: self,
             freq: freq.to_string(),
+            closed: None,
+            label: None,
+            origin: None,
+        }
+    }
+
+    pub fn resample_ext(
+        &self,
+        freq: &str,
+        closed: Option<&str>,
+        label: Option<&str>,
+        origin: Option<&str>,
+    ) -> Resample<'_> {
+        Resample {
+            series: self,
+            freq: freq.to_string(),
+            closed: closed.map(str::to_string),
+            label: label.map(str::to_string),
+            origin: origin.map(str::to_string),
         }
     }
 
@@ -31972,18 +31991,48 @@ fn resample_month_end_key(month_ordinal: i64) -> Option<String> {
 ///
 /// Per gauntlet bead 2.5, also supports:
 /// - Sub-day units: H, min, s, ms, us, ns with multipliers (nanosecond bucketing)
-fn resample_build_groups(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResampleClosed {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResampleLabel {
+    Left,
+    Right,
+}
+
+pub struct ResampleGrouping {
+    pub order: Vec<String>,
+    pub groups: std::collections::HashMap<String, Vec<usize>>,
+    pub lattice: Vec<(String, i64)>,
+}
+
+impl ResampleGrouping {
+    pub fn empty() -> Self {
+        Self {
+            order: Vec::new(),
+            groups: std::collections::HashMap::new(),
+            lattice: Vec::new(),
+        }
+    }
+}
+
+fn resample_build_groups_with_options(
     labels: &[IndexLabel],
     freq: &str,
-) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
+    closed_opt: Option<&str>,
+    label_opt: Option<&str>,
+    origin_opt: Option<&str>,
+) -> ResampleGrouping {
     let (mult, unit) = parse_resample_freq(freq).unwrap_or((1, freq.to_string()));
     let unit_lower = unit.to_lowercase();
 
     // Y/A/Q/M, including multiplied forms like 2M/2Q/2Y: pandas labels
     // calendar resample buckets by period right edges and synthesizes a
     // CONTIGUOUS run of buckets from the first right edge to the last present
-    // label, filling dataless buckets with empty bins (sum->0, mean->NaN) —
-    // br-frankenpandas-eov68 + br-frankenpandas-w8jn0 + br-frankenpandas-dnjq7.
+    // label, filling dataless buckets with empty bins (sum->0, mean->NaN).
     if matches!(unit.as_str(), "Y" | "A" | "Q" | "M") {
         let months_per_period = match unit.as_str() {
             "M" => 1,
@@ -31992,7 +32041,15 @@ fn resample_build_groups(
             _ => 1,
         };
         let Some(bucket_months) = mult.checked_mul(months_per_period) else {
-            return (Vec::new(), std::collections::HashMap::new());
+            return ResampleGrouping::empty();
+        };
+        let closed = match closed_opt {
+            Some("left") => ResampleClosed::Left,
+            _ => ResampleClosed::Right,
+        };
+        let label = match label_opt {
+            Some("left") => ResampleLabel::Left,
+            _ => ResampleLabel::Right,
         };
         let month_ords: Vec<Option<i64>> =
             labels.iter().map(resample_label_to_month_ordinal).collect();
@@ -32006,7 +32063,7 @@ fn resample_build_groups(
         };
         let first = match month_ords.iter().filter_map(|o| o.map(period_end_mo)).min() {
             Some(first) => first,
-            None => return (Vec::new(), std::collections::HashMap::new()),
+            None => return ResampleGrouping::empty(),
         };
         let bucket_end_mo = |mo: i64| -> i64 {
             if mo <= first {
@@ -32019,35 +32076,42 @@ fn resample_build_groups(
         };
         let last = match month_ords.iter().filter_map(|o| o.map(bucket_end_mo)).max() {
             Some(last) => last,
-            None => return (Vec::new(), std::collections::HashMap::new()),
+            None => return ResampleGrouping::empty(),
         };
         let mut order: Vec<String> = Vec::new();
         let mut groups: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
-        // Build the per-bucket key in cursor order (None when month_end_key is None).
         let mut bucket_keys: Vec<Option<String>> = Vec::new();
+        let mut lattice: Vec<(String, i64)> = Vec::new();
         let mut cursor = first;
         while cursor <= last {
             if bucket_keys.len() >= 1_000_000 {
-                return (Vec::new(), std::collections::HashMap::new());
+                return ResampleGrouping::empty();
             }
-            let key = resample_month_end_key(cursor);
+            let key = match label {
+                ResampleLabel::Left => resample_month_end_key(cursor - bucket_months),
+                ResampleLabel::Right => resample_month_end_key(cursor),
+            };
             if let Some(k) = &key {
                 order.push(k.clone());
             }
             bucket_keys.push(key);
+
+            let lat_key = match closed {
+                ResampleClosed::Left => resample_month_end_key(cursor - bucket_months),
+                ResampleClosed::Right => resample_month_end_key(cursor),
+            };
+            if let Some(lk) = lat_key {
+                if let Some(ns) = resample_label_to_ns(&IndexLabel::Utf8(lk.clone())) {
+                    lattice.push((lk, ns));
+                }
+            }
+
             let Some(next) = cursor.checked_add(bucket_months) else {
                 break;
             };
             cursor = next;
         }
-        // Dense scatter by bucket index — avoids the per-row groups.get_mut(key)
-        // SipHash (the dominant monthly cost). bucket_end_mo(mo) is always
-        // first + k*bucket_months, so bidx = (bucket_end_mo(mo) - first)/
-        // bucket_months maps each row to its cursor bucket. Merge into `groups`
-        // only for buckets whose key is Some — rows in a None-key bucket are
-        // dropped exactly as the per-row get_mut path skipped them. Bit-identical:
-        // same per-bucket row-order indices, same keys, same order.
         let mut dense: Vec<Vec<usize>> = vec![Vec::new(); bucket_keys.len()];
         for (i, mo_opt) in month_ords.iter().enumerate() {
             if let Some(mo) = *mo_opt {
@@ -32062,290 +32126,10 @@ fn resample_build_groups(
                 groups.insert(k, std::mem::take(&mut dense[bidx]));
             }
         }
-        return (order, groups);
+        return ResampleGrouping { order, groups, lattice };
     }
 
-    // Daily (D, mult 1): pandas emits a CONTIGUOUS daily index from the first to
-    // the last label, filling dataless days with empty bins (sum->0, mean->NaN,
-    // ...). Keys are "%Y-%m-%d" which match pandas' daily Timestamp labels.
-    if unit == "D" && mult <= 1 {
-        // Typed Datetime64 fast path for the day ordinal: a Datetime64 label's
-        // num_days_from_ce is ns.div_euclid(NANOS_PER_DAY) + 719163 (the CE
-        // ordinal of 1970-01-01), avoiding a per-row chrono DateTime::from_timestamp
-        // + naive_utc().date() construction (the dominant daily cost). Bit-identical
-        // (floor division composes: (ns/1e9)/86400 == ns/NANOS_PER_DAY). Utf8 / other
-        // labels keep the parse path.
-        let day_ords: Vec<Option<i64>> = labels
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Datetime64(ns) => {
-                    Some(ns.div_euclid(Timedelta::NANOS_PER_DAY) + 719_163)
-                }
-                _ => resample_label_to_date(l).map(|d| i64::from(d.num_days_from_ce())),
-            })
-            .collect();
-        let (min, max) = match day_ords.iter().filter_map(|o| *o).fold(None, |acc, o| {
-            Some(acc.map_or((o, o), |(lo, hi): (i64, i64)| (lo.min(o), hi.max(o))))
-        }) {
-            Some(bounds) => bounds,
-            None => return (Vec::new(), std::collections::HashMap::new()),
-        };
-        let key_of = |ord: i64| -> Option<String> {
-            use chrono::Datelike;
-            let d = NaiveDate::from_num_days_from_ce_opt(i32::try_from(ord).ok()?)?;
-            // Fast label (strftime write! vein): build "%Y-%m-%d" directly via
-            // format! instead of chrono's format() machinery. Bit-identical for
-            // 4-digit years (the resample daily range).
-            Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
-        };
-        let mut order: Vec<String> = Vec::new();
-        let mut groups: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
-        // Build the per-day key in ord order (None when key_of is None).
-        let mut bucket_keys: Vec<Option<String>> = Vec::new();
-        for ord in min..=max {
-            if bucket_keys.len() >= 1_000_000 {
-                return (Vec::new(), std::collections::HashMap::new());
-            }
-            let key = key_of(ord);
-            if let Some(k) = &key {
-                order.push(k.clone());
-            }
-            bucket_keys.push(key);
-        }
-        // Dense scatter by day index (ord - min) — avoids the per-row
-        // groups.get_mut(key) SipHash. bucket_keys[bidx] == key_of(min+bidx) ==
-        // the row's key_of(ord), so merging dense[ord-min] into groups[key] is
-        // bit-identical (same per-bucket row-order indices, keys, order; None-key
-        // rows dropped as the per-row path skipped them).
-        let mut dense: Vec<Vec<usize>> = vec![Vec::new(); bucket_keys.len()];
-        for (i, ord_opt) in day_ords.iter().enumerate() {
-            if let Some(ord) = *ord_opt {
-                let bidx = (ord - min) as usize;
-                if bidx < dense.len() {
-                    dense[bidx].push(i);
-                }
-            }
-        }
-        for (bidx, key) in bucket_keys.into_iter().enumerate() {
-            if let Some(k) = key {
-                groups.insert(k, std::mem::take(&mut dense[bidx]));
-            }
-        }
-        return (order, groups);
-    }
-
-    // Sub-day units: H, min, s, ms, us, ns - nanosecond-ordinal bucketing
-    let ns_per_unit: Option<i64> = match unit_lower.as_str() {
-        "h" => Some(3_600_000_000_000),
-        "min" | "t" => Some(60_000_000_000),
-        "s" => Some(1_000_000_000),
-        "ms" | "l" => Some(1_000_000),
-        "us" | "u" => Some(1_000),
-        "ns" | "n" => Some(1),
-        _ => None,
-    };
-    if let Some(ns_per) = ns_per_unit {
-        let bucket_ns = mult * ns_per;
-        let ns_ords: Vec<Option<i64>> = labels.iter().map(resample_label_to_ns).collect();
-        let origin = match ns_ords.iter().filter_map(|o| *o).min() {
-            Some(o) => o,
-            None => return (Vec::new(), std::collections::HashMap::new()),
-        };
-        let mut order: Vec<String> = Vec::new();
-        let mut bin_start_of_key: std::collections::HashMap<String, i64> =
-            std::collections::HashMap::new();
-        let mut groups: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
-        // Cache the per-bin key string: the index is time-ordered, so
-        // consecutive rows share a bin — recompute the DateTime + format! (the
-        // per-row cost) only when bin_index changes. Bit-identical (key is a
-        // deterministic fn of bin_index; contains_key still dedups `order`).
-        // Dense scatter by bin_index: the per-row `groups.entry(key.clone())`
-        // (a String clone + hash EVERY row) was the bottleneck. Scatter row
-        // indices into a dense Vec<Vec<usize>> by integer bin_index, then build
-        // the String key ONCE per non-empty bin, iterating bins in ascending
-        // order (== bin_start order). Bit-identical: same per-bin row-order
-        // indices, same keys, same final sort-by-bin_start order; a bin whose
-        // DateTime is out of range is dropped exactly as the per-row path skips
-        // it. Gated on a bounded bin range (else fall back to the per-row path).
-        let bins: Vec<Option<i64>> = ns_ords
-            .iter()
-            .map(|o| o.map(|ns| (ns - origin).div_euclid(bucket_ns)))
-            .collect();
-        let (mut bmin, mut bmax) = (i64::MAX, i64::MIN);
-        for &b in bins.iter().flatten() {
-            if b < bmin {
-                bmin = b;
-            }
-            if b > bmax {
-                bmax = b;
-            }
-        }
-        let dense_done = if bmin <= bmax
-            && (bmax as i128 - bmin as i128 + 1) <= (bins.len() as i128 * 4).max(1 << 16)
-        {
-            let mut dense: Vec<Vec<usize>> = vec![Vec::new(); (bmax - bmin + 1) as usize];
-            for (i, b) in bins.iter().enumerate() {
-                if let Some(bin) = b {
-                    dense[(*bin - bmin) as usize].push(i);
-                }
-            }
-            for bin in bmin..=bmax {
-                let didx = (bin - bmin) as usize;
-                if dense[didx].is_empty() {
-                    continue;
-                }
-                let bin_start_ns = origin + bin * bucket_ns;
-                let secs = bin_start_ns.div_euclid(1_000_000_000);
-                let nano = (bin_start_ns % 1_000_000_000) as u32;
-                // Fast label (the strftime write! vein): chrono's dt.format costs
-                // ~7ms over 16700 bins. For whole-second bins in the 4-digit-year
-                // range, build "%Y-%m-%dT%H:%M:%S" directly via the proven civil
-                // helper (chrono's %.f is empty at 0 nanos, so no fractional part).
-                // Bit-identical; falls back to chrono for sub-second / extreme years.
-                let key = if nano == 0 {
-                    let (y, mo, d) = DatetimeAccessor::datetime64_civil_from_nanos(bin_start_ns);
-                    if (1..=9999).contains(&y) {
-                        let sod = secs.rem_euclid(86_400);
-                        format!(
-                            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-                            y,
-                            mo,
-                            d,
-                            sod / 3600,
-                            (sod % 3600) / 60,
-                            sod % 60
-                        )
-                    } else {
-                        let Some(dt) = DateTime::from_timestamp(secs, nano) else {
-                            continue;
-                        };
-                        dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string()
-                    }
-                } else {
-                    let Some(dt) = DateTime::from_timestamp(secs, nano) else {
-                        continue;
-                    };
-                    dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string()
-                };
-                order.push(key.clone());
-                bin_start_of_key.insert(key.clone(), bin_start_ns);
-                groups.insert(key, std::mem::take(&mut dense[didx]));
-            }
-            true
-        } else {
-            false
-        };
-
-        if !dense_done {
-            let mut last_bin: Option<i64> = None;
-            let mut last_key: Option<String> = None;
-            for (i, ns_opt) in ns_ords.iter().enumerate() {
-                let Some(ns) = *ns_opt else { continue };
-                let bin_index = (ns - origin).div_euclid(bucket_ns);
-                if last_bin != Some(bin_index) {
-                    let bin_start_ns = origin + bin_index * bucket_ns;
-                    let secs = bin_start_ns.div_euclid(1_000_000_000);
-                    let nano = (bin_start_ns % 1_000_000_000) as u32;
-                    let Some(dt) = DateTime::from_timestamp(secs, nano) else {
-                        continue;
-                    };
-                    let key = dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string();
-                    if !groups.contains_key(&key) {
-                        order.push(key.clone());
-                        bin_start_of_key.insert(key.clone(), bin_start_ns);
-                    }
-                    last_bin = Some(bin_index);
-                    last_key = Some(key);
-                }
-                if let Some(key) = &last_key {
-                    groups.entry(key.clone()).or_default().push(i);
-                }
-            }
-            order.sort_by_key(|k| bin_start_of_key.get(k).copied().unwrap_or(i64::MAX));
-        }
-        return (order, groups);
-    }
-
-    // N-day multiple (2D, 3D, ...): origin-anchored bins stepping by `mult`
-    // days, labelled by the bin-start date. pandas synthesizes a CONTIGUOUS run
-    // of bin starts from the first to the one containing the last label, filling
-    // dataless bins with empty groups (sum->0, mean->NaN) — br-frankenpandas-eov68.
-    if unit == "D" {
-        // Typed Datetime64 fast path for the day ordinal: a Datetime64 label's
-        // num_days_from_ce is ns.div_euclid(NANOS_PER_DAY) + 719163 (the CE
-        // ordinal of 1970-01-01), avoiding a per-row chrono DateTime::from_timestamp
-        // + naive_utc().date() construction (the dominant daily cost). Bit-identical
-        // (floor division composes: (ns/1e9)/86400 == ns/NANOS_PER_DAY). Utf8 / other
-        // labels keep the parse path.
-        let day_ords: Vec<Option<i64>> = labels
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Datetime64(ns) => {
-                    Some(ns.div_euclid(Timedelta::NANOS_PER_DAY) + 719_163)
-                }
-                _ => resample_label_to_date(l).map(|d| i64::from(d.num_days_from_ce())),
-            })
-            .collect();
-        let (min, max) = match day_ords.iter().filter_map(|o| *o).fold(None, |acc, o| {
-            Some(acc.map_or((o, o), |(lo, hi): (i64, i64)| (lo.min(o), hi.max(o))))
-        }) {
-            Some(bounds) => bounds,
-            None => return (Vec::new(), std::collections::HashMap::new()),
-        };
-        let key_of = |bin_start: i64| -> Option<String> {
-            use chrono::Datelike;
-            let d = NaiveDate::from_num_days_from_ce_opt(i32::try_from(bin_start).ok()?)?;
-            // Fast label (strftime write! vein), bit-identical for 4-digit years.
-            Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
-        };
-        let mut order: Vec<String> = Vec::new();
-        let mut groups: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
-        // Bins are anchored at `min` and step by `mult` days; the last bin is the
-        // one whose start <= max.
-        let last_bin_start = min + ((max - min).div_euclid(mult)) * mult;
-        // Build the per-bin key in bin order (None when key_of is None).
-        let mut bucket_keys: Vec<Option<String>> = Vec::new();
-        let mut bin_start = min;
-        while bin_start <= last_bin_start {
-            if bucket_keys.len() >= 1_000_000 {
-                return (Vec::new(), std::collections::HashMap::new());
-            }
-            let key = key_of(bin_start);
-            if let Some(k) = &key {
-                order.push(k.clone());
-            }
-            bucket_keys.push(key);
-            bin_start += mult;
-        }
-        // Dense scatter by bin index ((ord - min)/mult) — avoids the per-row
-        // groups.get_mut(key) SipHash. bucket_keys[bidx] == key_of(min+bidx*mult)
-        // == the row's key, so the merge is bit-identical (same per-bucket
-        // row-order indices, keys, order; None-key rows dropped as before).
-        let mut dense: Vec<Vec<usize>> = vec![Vec::new(); bucket_keys.len()];
-        for (i, ord_opt) in day_ords.iter().enumerate() {
-            if let Some(ord) = *ord_opt {
-                let bidx = (ord - min).div_euclid(mult) as usize;
-                if bidx < dense.len() {
-                    dense[bidx].push(i);
-                }
-            }
-        }
-        for (bidx, key) in bucket_keys.into_iter().enumerate() {
-            if let Some(k) = key {
-                groups.insert(k, std::mem::take(&mut dense[bidx]));
-            }
-        }
-        return (order, groups);
-    }
-
-    // Business day (B, mult 1): one bin per weekday (Mon–Fri). pandas rolls a
-    // weekend timestamp BACK to the preceding Friday (Sat -1d, Sun -2d), then
-    // emits every business day from the first to the last label, filling
-    // dataless business days with empty bins. Keys ("%Y-%m-%d") match pandas'
-    // business-day Timestamp labels.
+    // Business day (B, mult 1):
     if unit == "B" && mult <= 1 {
         let business_floor = |d: NaiveDate| -> NaiveDate {
             match d.weekday() {
@@ -32364,22 +32148,20 @@ fn resample_build_groups(
             Some(acc.map_or((o, o), |(lo, hi): (i64, i64)| (lo.min(o), hi.max(o))))
         }) {
             Some(bounds) => bounds,
-            None => return (Vec::new(), std::collections::HashMap::new()),
+            None => return ResampleGrouping::empty(),
         };
         let key_of = |ord: i64| -> Option<String> {
             use chrono::Datelike;
             let d = NaiveDate::from_num_days_from_ce_opt(i32::try_from(ord).ok()?)?;
-            // Fast label (strftime write! vein): build "%Y-%m-%d" directly via
-            // format! instead of chrono's format() machinery. Bit-identical for
-            // 4-digit years (the resample daily range).
             Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
         };
         let mut order: Vec<String> = Vec::new();
         let mut groups: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
+        let mut lattice: Vec<(String, i64)> = Vec::new();
         for ord in min..=max {
             if order.len() >= 1_000_000 {
-                return (Vec::new(), std::collections::HashMap::new());
+                return ResampleGrouping::empty();
             }
             let Some(date) =
                 NaiveDate::from_num_days_from_ce_opt(i32::try_from(ord).unwrap_or(i32::MAX))
@@ -32391,10 +32173,11 @@ fn resample_build_groups(
             }
             let key = date.format("%Y-%m-%d").to_string();
             order.push(key.clone());
+            if let Some(ns) = resample_label_to_ns(&IndexLabel::Utf8(key.clone())) {
+                lattice.push((key.clone(), ns));
+            }
             groups.insert(key, Vec::new());
         }
-        // Cache the per-bday key string on ord (one business-day bucket == one
-        // ord) — recompute key_of only when ord changes. Bit-identical.
         let mut last_ord: Option<i64> = None;
         let mut last_key: Option<String> = None;
         for (i, ord_opt) in bday_ords.iter().enumerate() {
@@ -32410,32 +32193,22 @@ fn resample_build_groups(
                 }
             }
         }
-        return (order, groups);
+        return ResampleGrouping { order, groups, lattice };
     }
 
-    // Weekly (W / W-SUN): pandas labels each weekly bin by the week-ending
-    // SUNDAY (right edge) and emits a CONTIGUOUS run of weeks from the first to
-    // the last label, filling dataless weeks with empty bins. Each label maps to
-    // the first Sunday on/after its date; keys ("%Y-%m-%d") match pandas labels.
-    // Weekly multiples (W / 2W / nW): each label maps to its week-ending Sunday,
-    // then to the bin whose right edge is the smallest `min + k*(7*mult)` Sunday
-    // >= that week-Sunday (origin-anchored at the first label's week-Sunday,
-    // matching pandas 2W: data Jan1-10 -> bins ending Jan7, Jan21). Contiguous
-    // run of bin ends fills dataless multi-week bins (br-frankenpandas-eov68).
-    // For mult == 1 this is bit-identical to the prior W path: step is 7, the
-    // bin end of a week-Sunday is the week-Sunday itself, and the order runs
-    // every Sunday from first to last.
+    // Weekly (W / W-SUN):
     if unit == "W" {
-        // Sunday-ordinal (num_days_from_ce of the week-ending Sunday) per label.
+        let closed = match closed_opt {
+            Some("left") => ResampleClosed::Left,
+            _ => ResampleClosed::Right,
+        };
+        let label = match label_opt {
+            Some("left") => ResampleLabel::Left,
+            _ => ResampleLabel::Right,
+        };
         let sunday_ords: Vec<Option<i64>> = labels
             .iter()
             .map(|l| {
-                // Numeric week-ending-Sunday ordinal from the raw ns — avoids
-                // building 1M chrono NaiveDates + .weekday() per row (the post-
-                // dense-scatter bottleneck). 1970-01-01 (day 0) is a Thursday =
-                // 4 days from Sunday, so weekday-from-Sunday = (dse+4) mod 7;
-                // num_days_from_ce = dse + 719_163. Bit-identical to the chrono
-                // path. Utf8 / non-ns labels keep the chrono fallback.
                 if let Some(ns) = resample_label_to_ns(l) {
                     let dse = ns.div_euclid(Timedelta::NANOS_PER_DAY);
                     let wd_from_sun = (dse + 4).rem_euclid(7);
@@ -32453,61 +32226,302 @@ fn resample_build_groups(
             .collect();
         let min = match sunday_ords.iter().filter_map(|o| *o).min() {
             Some(m) => m,
-            None => return (Vec::new(), std::collections::HashMap::new()),
+            None => return ResampleGrouping::empty(),
         };
         let step = 7 * mult;
-        // Right edge of the bin containing week-Sunday `ws` (>= min): round the
-        // offset up to a whole `step` and re-add `min`.
         let bin_end = |ws: i64| -> i64 {
             let off = ws - min;
-            // Stable ceil-div (signed `i64::div_ceil` is unstable); `off >= 0`.
             min + ((off + step - 1) / step) * step
         };
         let max_bin_end = match sunday_ords.iter().filter_map(|o| *o).map(bin_end).max() {
             Some(m) => m,
-            None => return (Vec::new(), std::collections::HashMap::new()),
+            None => return ResampleGrouping::empty(),
         };
         let key_of = |ord: i64| -> Option<String> {
             use chrono::Datelike;
             let d = NaiveDate::from_num_days_from_ce_opt(i32::try_from(ord).ok()?)?;
-            // Fast label (strftime write! vein): build "%Y-%m-%d" directly via
-            // format! instead of chrono's format() machinery. Bit-identical for
-            // 4-digit years (the resample daily range).
             Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
         };
-        // Dense scatter by the integer bin index `(bin_end - min)/step`: the
-        // per-row `groups.get_mut(key)` hashed a String EVERY row (the bottleneck
-        // — resample 'W' was 0.17x pandas). Scatter row indices into a Vec<Vec>
-        // by bin id, then build the String-keyed order/groups ONCE per bin (every
-        // bin from first to last, so dataless bins stay filled). Bit-identical:
-        // same bins, same ascending per-bin row order, same `key_of`-None skip
-        // for out-of-range bins, same `order` sequence.
         let num_bins = ((max_bin_end - min) / step + 1) as usize;
         if num_bins >= 1_000_000 {
-            return (Vec::new(), std::collections::HashMap::new());
+            return ResampleGrouping::empty();
         }
         let mut dense: Vec<Vec<usize>> = vec![Vec::new(); num_bins];
         for (i, ord_opt) in sunday_ords.iter().enumerate() {
             if let Some(ord) = *ord_opt {
                 let bin_idx = ((bin_end(ord) - min) / step) as usize;
-                dense[bin_idx].push(i);
+                if bin_idx < dense.len() {
+                    dense[bin_idx].push(i);
+                }
             }
         }
         let mut order: Vec<String> = Vec::with_capacity(num_bins);
         let mut groups: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::with_capacity(num_bins);
+        let mut lattice: Vec<(String, i64)> = Vec::with_capacity(num_bins);
         for (bin_idx, rows) in dense.into_iter().enumerate() {
             let be = min + bin_idx as i64 * step;
-            if let Some(key) = key_of(be) {
+            let bs = be - step;
+            let agg_ord = match label {
+                ResampleLabel::Left => bs,
+                ResampleLabel::Right => be,
+            };
+            if let Some(key) = key_of(agg_ord) {
                 order.push(key.clone());
                 groups.insert(key, rows);
             }
+            let lat_ord = match closed {
+                ResampleClosed::Left => bs,
+                ResampleClosed::Right => be,
+            };
+            if let Some(lk) = key_of(lat_ord) {
+                if let Some(ns) = resample_label_to_ns(&IndexLabel::Utf8(lk.clone())) {
+                    lattice.push((lk, ns));
+                }
+            }
         }
-        return (order, groups);
+        return ResampleGrouping { order, groups, lattice };
+    }
+
+    // Tick and Daily units (D with mult, H, min, s, ms, us, ns):
+    let ns_per_unit: Option<i64> = if unit == "D" {
+        Some(Timedelta::NANOS_PER_DAY)
+    } else {
+        match unit_lower.as_str() {
+            "h" => Some(3_600_000_000_000),
+            "min" | "t" => Some(60_000_000_000),
+            "s" => Some(1_000_000_000),
+            "ms" | "l" => Some(1_000_000),
+            "us" | "u" => Some(1_000),
+            "ns" | "n" => Some(1),
+            _ => None,
+        }
+    };
+
+    if let Some(ns_per) = ns_per_unit {
+        let Some(step_ns) = mult.checked_mul(ns_per) else {
+            return ResampleGrouping::empty();
+        };
+        let ns_ords: Vec<Option<i64>> = labels.iter().map(resample_label_to_ns).collect();
+        let (first, last) = match ns_ords.iter().filter_map(|o| *o).fold(None, |acc, o| {
+            Some(acc.map_or((o, o), |(lo, hi): (i64, i64)| (lo.min(o), hi.max(o))))
+        }) {
+            Some(bounds) => bounds,
+            None => return ResampleGrouping::empty(),
+        };
+
+        let closed = match closed_opt {
+            Some("right") => ResampleClosed::Right,
+            _ => ResampleClosed::Left,
+        };
+        let label = match label_opt {
+            Some("right") => ResampleLabel::Right,
+            _ => ResampleLabel::Left,
+        };
+
+        let origin_ns = match origin_opt {
+            Some("epoch") => 0,
+            Some("start") => first,
+            Some("end") => {
+                let sub_freq_times = (last - first).div_euclid(step_ns);
+                let sub = if closed == ResampleClosed::Left { sub_freq_times + 1 } else { sub_freq_times };
+                last - sub * step_ns
+            }
+            Some("end_day") => {
+                let last_day = (last.div_euclid(Timedelta::NANOS_PER_DAY) + 1) * Timedelta::NANOS_PER_DAY;
+                let sub_freq_times = (last_day - first).div_euclid(step_ns);
+                let sub = if closed == ResampleClosed::Left { sub_freq_times + 1 } else { sub_freq_times };
+                last_day - sub * step_ns
+            }
+            Some("start_day") | None => {
+                first.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY
+            }
+            Some(custom) => {
+                resample_label_to_ns(&IndexLabel::Utf8(custom.to_string()))
+                    .unwrap_or_else(|| first.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY)
+            }
+        };
+
+        let foffset = (first - origin_ns).rem_euclid(step_ns);
+        let loffset = (last - origin_ns).rem_euclid(step_ns);
+
+        let fresult = match closed {
+            ResampleClosed::Right => {
+                if foffset > 0 {
+                    first - foffset
+                } else {
+                    first - step_ns
+                }
+            }
+            ResampleClosed::Left => {
+                if foffset > 0 {
+                    first - foffset
+                } else {
+                    first
+                }
+            }
+        };
+
+        let lresult = match closed {
+            ResampleClosed::Right => {
+                if loffset > 0 {
+                    last + (step_ns - loffset)
+                } else {
+                    last
+                }
+            }
+            ResampleClosed::Left => {
+                if loffset > 0 {
+                    last + (step_ns - loffset)
+                } else {
+                    last + step_ns
+                }
+            }
+        };
+
+        if lresult <= fresult {
+            return ResampleGrouping::empty();
+        }
+        let num_bins_i64 = (lresult - fresult).div_euclid(step_ns);
+        if num_bins_i64 <= 0 || num_bins_i64 >= 1_000_000 {
+            return ResampleGrouping::empty();
+        }
+        let num_bins = num_bins_i64 as usize;
+
+        let format_edge = |ns: i64| -> String {
+            let secs = ns.div_euclid(1_000_000_000);
+            let nano = (ns.rem_euclid(1_000_000_000)) as u32;
+            let sod = secs.rem_euclid(86_400);
+            let is_midnight = sod == 0 && nano == 0;
+            let (y, mo, d) = DatetimeAccessor::datetime64_civil_from_nanos(ns);
+            if unit == "D" && is_midnight {
+                format!("{y:04}-{mo:02}-{d:02}")
+            } else if nano == 0 {
+                format!(
+                    "{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}",
+                    sod / 3600,
+                    (sod % 3600) / 60,
+                    sod % 60
+                )
+            } else if let Some(dt) = DateTime::from_timestamp(secs, nano) {
+                dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string()
+            } else {
+                format!("{y:04}-{mo:02}-{d:02}")
+            }
+        };
+
+        let mut edge_keys = Vec::with_capacity(num_bins + 1);
+        for e in 0..=num_bins {
+            let edge_ns = fresult + (e as i64) * step_ns;
+            edge_keys.push(format_edge(edge_ns));
+        }
+
+        let mut dense: Vec<Vec<usize>> = vec![Vec::new(); num_bins];
+        for (i, ns_opt) in ns_ords.iter().enumerate() {
+            if let Some(ns) = *ns_opt {
+                let bidx = match closed {
+                    ResampleClosed::Left => (ns - fresult).div_euclid(step_ns),
+                    ResampleClosed::Right => (ns - 1 - fresult).div_euclid(step_ns),
+                };
+                if bidx >= 0 && (bidx as usize) < num_bins {
+                    dense[bidx as usize].push(i);
+                }
+            }
+        }
+
+        let mut order = Vec::with_capacity(num_bins);
+        let mut groups = std::collections::HashMap::with_capacity(num_bins);
+        for b in 0..num_bins {
+            let key = match label {
+                ResampleLabel::Left => edge_keys[b].clone(),
+                ResampleLabel::Right => edge_keys[b + 1].clone(),
+            };
+            order.push(key.clone());
+            groups.insert(key, std::mem::take(&mut dense[b]));
+        }
+
+        let mut lattice = Vec::with_capacity(num_bins);
+        for b in 0..num_bins {
+            let (k, ns) = match closed {
+                ResampleClosed::Left => (edge_keys[b].clone(), fresult + (b as i64) * step_ns),
+                ResampleClosed::Right => (edge_keys[b + 1].clone(), fresult + ((b + 1) as i64) * step_ns),
+            };
+            lattice.push((k, ns));
+        }
+
+        return ResampleGrouping { order, groups, lattice };
     }
 
     // Fallback: unknown frequency, return empty
-    (Vec::new(), std::collections::HashMap::new())
+    ResampleGrouping::empty()
+}
+
+fn resample_build_groups(
+    labels: &[IndexLabel],
+    freq: &str,
+) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
+    let g = resample_build_groups_with_options(labels, freq, None, None, None);
+    (g.order, g.groups)
+}
+
+fn validate_resample_options(
+    freq: &str,
+    closed: Option<&str>,
+    label: Option<&str>,
+    origin: Option<&str>,
+) -> Result<(), FrameError> {
+    if let Some(closed) = closed {
+        if !matches!(closed, "left" | "right") {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Unsupported value {closed} for `closed`"
+            )));
+        }
+    }
+    if let Some(label) = label {
+        if !matches!(label, "left" | "right") {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Unsupported value {label} for `label`"
+            )));
+        }
+    }
+    if let Some(origin) = origin {
+        if !matches!(origin, "epoch" | "start" | "start_day" | "end" | "end_day")
+            && resample_label_to_ns(&IndexLabel::Utf8(origin.to_string())).is_none()
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Unsupported value {origin} for `origin`"
+            )));
+        }
+    }
+    // Per gauntlet CONF-RC2 + bead 2.5: accept integer-multiplied frequency aliases
+    // Calendar units: Y, A, M, Q (and multiples like 2M, 2Q, 2Y)
+    // Day units: D (and multiples like 2D, 3D)
+    // Sub-day units: H, min/T, s, ms/L, us/U, ns/N (and multiples like 3H, 15min)
+    match parse_resample_freq(freq) {
+        Some((mult, unit)) => {
+            let unit_lower = unit.to_lowercase();
+            // `W` (weekly, W-SUN) supports multipliers (2W, 3W, ...): pandas
+            // anchors multi-week bins on Sundays `7*mult` days apart from the
+            // first week-Sunday, filling dataless bins (br-frankenpandas-eov68).
+            // `B` (business-day) is multiplier-1 only for now.
+            let valid = matches!(unit.as_str(), "Y" | "A" | "M" | "Q" | "D" | "W")
+                || (unit.as_str() == "B" && mult <= 1)
+                || matches!(
+                    unit_lower.as_str(),
+                    "h" | "min" | "t" | "s" | "ms" | "l" | "us" | "u" | "ns" | "n"
+                );
+            if valid {
+                Ok(())
+            } else {
+                Err(FrameError::CompatibilityRejected(format!(
+                    "resample: invalid frequency '{freq}'; supported: Y, A, M, Q, W, B, D (+ multiples), H, min, s, ms, us, ns"
+                )))
+            }
+        }
+        _ => Err(FrameError::CompatibilityRejected(format!(
+            "resample: invalid frequency '{freq}'; supported: Y, A, M, Q, W, B, D (+ multiples), H, min, s, ms, us, ns"
+        ))),
+    }
 }
 
 /// Time-based resampling view over a Series.
@@ -32517,9 +32531,27 @@ fn resample_build_groups(
 pub struct Resample<'a> {
     series: &'a Series,
     freq: String,
+    closed: Option<String>,
+    label: Option<String>,
+    origin: Option<String>,
 }
 
 impl Resample<'_> {
+    pub fn closed(mut self, closed: &str) -> Self {
+        self.closed = Some(closed.to_string());
+        self
+    }
+
+    pub fn label(mut self, label: &str) -> Self {
+        self.label = Some(label.to_string());
+        self
+    }
+
+    pub fn origin(mut self, origin: &str) -> Self {
+        self.origin = Some(origin.to_string());
+        self
+    }
+
     /// Per br-frankenpandas-7bc60: validate freq is one of the
     /// supported pandas-style frequency strings. Was silently falling
     /// back to daily bucketing for any unknown input — pandas raises
@@ -32528,42 +32560,24 @@ impl Resample<'_> {
     /// Per gauntlet bead 2.5: extended to support multiplied calendar units
     /// (2M, 2Q, 2Y) and sub-day units (H, min, s, ms, us, ns).
     fn validate(&self) -> Result<(), FrameError> {
-        // Per gauntlet CONF-RC2 + bead 2.5: accept integer-multiplied frequency aliases
-        // Calendar units: Y, A, M, Q (and multiples like 2M, 2Q, 2Y)
-        // Day units: D (and multiples like 2D, 3D)
-        // Sub-day units: H, min/T, s, ms/L, us/U, ns/N (and multiples like 3H, 15min)
-        match parse_resample_freq(&self.freq) {
-            Some((mult, unit)) => {
-                let unit_lower = unit.to_lowercase();
-                // `W` (weekly, W-SUN) supports multipliers (2W, 3W, ...): pandas
-                // anchors multi-week bins on Sundays `7*mult` days apart from the
-                // first week-Sunday, filling dataless bins (br-frankenpandas-eov68).
-                // `B` (business-day) is multiplier-1 only for now.
-                let valid = matches!(unit.as_str(), "Y" | "A" | "M" | "Q" | "D" | "W")
-                    || (unit.as_str() == "B" && mult <= 1)
-                    || matches!(
-                        unit_lower.as_str(),
-                        "h" | "min" | "t" | "s" | "ms" | "l" | "us" | "u" | "ns" | "n"
-                    );
-                if valid {
-                    Ok(())
-                } else {
-                    Err(FrameError::CompatibilityRejected(format!(
-                        "resample: invalid frequency '{}'; supported: Y, A, M, Q, W, B, D (+ multiples), H, min, s, ms, us, ns",
-                        self.freq
-                    )))
-                }
-            }
-            _ => Err(FrameError::CompatibilityRejected(format!(
-                "resample: invalid frequency '{}'; supported: Y, A, M, Q, W, B, D (+ multiples), H, min, s, ms, us, ns",
-                self.freq
-            ))),
-        }
+        validate_resample_options(
+            &self.freq,
+            self.closed.as_deref(),
+            self.label.as_deref(),
+            self.origin.as_deref(),
+        )
     }
 
     /// Build groups: returns (bucket_keys_in_order, bucket->row_indices).
     fn build_groups(&self) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
-        resample_build_groups(self.series.index().labels(), &self.freq)
+        let g = resample_build_groups_with_options(
+            self.series.index().labels(),
+            &self.freq,
+            self.closed.as_deref(),
+            self.label.as_deref(),
+            self.origin.as_deref(),
+        );
+        (g.order, g.groups)
     }
 
     /// Aggregate each time bucket using a function.
@@ -32742,6 +32756,9 @@ impl Resample<'_> {
         vals: &[f64],
         is_sum: bool,
     ) -> Option<Result<Series, FrameError>> {
+        if self.closed.is_some() || self.label.is_some() || self.origin.is_some() {
+            return None;
+        }
         let (mult, unit) = parse_resample_freq(&self.freq)?;
         let months_per_period = match unit.as_str() {
             "M" => 1,
@@ -33256,6 +33273,9 @@ impl Resample<'_> {
                     _ => 0,
                 };
                 if months_per_period > 0
+                    && self.closed.is_none()
+                    && self.label.is_none()
+                    && self.origin.is_none()
                     && let Some(r) =
                         self.monthly_extremum_single_pass(vals, months_per_period, mult, want_max)
                 {
@@ -33800,8 +33820,18 @@ impl Resample<'_> {
     /// origin anchoring here.
     fn bin_lattice(&self) -> Result<Vec<(String, i64)>, FrameError> {
         self.validate()?;
-        let (order, _groups) = self.build_groups();
-        order
+        let grouping = resample_build_groups_with_options(
+            self.series.index().labels(),
+            &self.freq,
+            self.closed.as_deref(),
+            self.label.as_deref(),
+            self.origin.as_deref(),
+        );
+        if !grouping.lattice.is_empty() {
+            return Ok(grouping.lattice);
+        }
+        grouping
+            .order
             .into_iter()
             .map(|key| {
                 let ns = resample_label_to_ns(&IndexLabel::Utf8(key.clone())).ok_or_else(|| {
@@ -35045,14 +35075,57 @@ impl DataFrameEwm<'_> {
 pub struct DataFrameResample<'a> {
     df: &'a DataFrame,
     freq: String,
+    closed: Option<String>,
+    label: Option<String>,
+    origin: Option<String>,
 }
 
-impl DataFrameResample<'_> {
+impl<'a> DataFrameResample<'a> {
+    pub fn closed(mut self, closed: &str) -> Self {
+        self.closed = Some(closed.to_string());
+        self
+    }
+
+    pub fn label(mut self, label: &str) -> Self {
+        self.label = Some(label.to_string());
+        self
+    }
+
+    pub fn origin(mut self, origin: &str) -> Self {
+        self.origin = Some(origin.to_string());
+        self
+    }
+
+    fn validate(&self) -> Result<(), FrameError> {
+        validate_resample_options(
+            &self.freq,
+            self.closed.as_deref(),
+            self.label.as_deref(),
+            self.origin.as_deref(),
+        )
+    }
+
     fn build_groups(&self) -> (Vec<String>, HashMap<String, Vec<usize>>) {
         // Per gauntlet CONF-RC2: share the origin-anchored N-day bucketing
         // with the Series resample path so multiplied frequencies (e.g. "2D")
         // bucket identically here.
-        resample_build_groups(self.df.index.labels(), &self.freq)
+        let g = resample_build_groups_with_options(
+            self.df.index.labels(),
+            &self.freq,
+            self.closed.as_deref(),
+            self.label.as_deref(),
+            self.origin.as_deref(),
+        );
+        (g.order, g.groups)
+    }
+
+    fn series_resample<'s>(&self, series: &'s Series) -> Resample<'s> {
+        series.resample_ext(
+            &self.freq,
+            self.closed.as_deref(),
+            self.label.as_deref(),
+            self.origin.as_deref(),
+        )
     }
 
     fn numeric_column_names(&self) -> Vec<String> {
@@ -35070,8 +35143,9 @@ impl DataFrameResample<'_> {
     /// Apply resampling to each numeric column.
     fn apply_resample<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
-        F: Fn(&Series, &str) -> Result<Series, FrameError>,
+        F: Fn(&Resample<'_>) -> Result<Series, FrameError>,
     {
+        self.validate()?;
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
         let mut result_index: Option<Index> = None;
@@ -35084,7 +35158,8 @@ impl DataFrameResample<'_> {
             }
 
             let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
-            let result = agg(&series, &self.freq)?;
+            let resample = self.series_resample(&series);
+            let result = agg(&resample)?;
             if result_index.is_none() {
                 result_index = Some(result.index().clone());
             }
@@ -35108,8 +35183,9 @@ impl DataFrameResample<'_> {
 
     fn apply_resample_all_columns<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
-        F: Fn(&Series, &str) -> Result<Series, FrameError>,
+        F: Fn(&Resample<'_>) -> Result<Series, FrameError>,
     {
+        self.validate()?;
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
         let mut result_index: Option<Index> = None;
@@ -35117,7 +35193,8 @@ impl DataFrameResample<'_> {
         for col_name in &self.df.column_order {
             let col = &self.df.columns[col_name];
             let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
-            let result = agg(&series, &self.freq)?;
+            let resample = self.series_resample(&series);
+            let result = agg(&resample)?;
             if result_index.is_none() {
                 result_index = Some(result.index().clone());
             }
@@ -35140,32 +35217,32 @@ impl DataFrameResample<'_> {
 
     /// Resample sum across all numeric columns.
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).sum())
+        self.apply_resample(|r| r.sum())
     }
 
     /// Resample mean across all numeric columns.
     pub fn mean(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).mean())
+        self.apply_resample(|r| r.mean())
     }
 
     /// Resample count across all numeric columns.
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).count())
+        self.apply_resample(|r| r.count())
     }
 
     /// Resample min across all numeric columns.
     pub fn min(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).min())
+        self.apply_resample(|r| r.min())
     }
 
     /// Resample max across all numeric columns.
     pub fn max(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).max())
+        self.apply_resample(|r| r.max())
     }
 
     /// Resample product across all numeric columns.
     pub fn prod(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).prod())
+        self.apply_resample(|r| r.prod())
     }
 
     /// Resample first across all numeric columns.
@@ -35174,14 +35251,14 @@ impl DataFrameResample<'_> {
     /// in the Resample row; fd90.200 brings the DataFrameResample direct-
     /// method surface up to parity with Series Resample.
     pub fn first(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).first())
+        self.apply_resample(|r| r.first())
     }
 
     /// Resample last across all numeric columns.
     ///
     /// Matches `df.resample(freq).last()`. fd90.200 sibling of `first`.
     pub fn last(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).last())
+        self.apply_resample(|r| r.last())
     }
 
     /// Resample standard deviation (ddof=1) across all numeric columns.
@@ -35190,35 +35267,35 @@ impl DataFrameResample<'_> {
     /// exposes std/var/median/skew/kurt on DataFrame.resample(); the
     /// fp-frame impl only had sum/mean/min/max/first/last/sem before.
     pub fn std(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).std())
+        self.apply_resample(|r| r.std())
     }
 
     /// Resample variance (ddof=1) across all numeric columns.
     ///
     /// Matches `df.resample(freq).var()`.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).var())
+        self.apply_resample(|r| r.var())
     }
 
     /// Resample median across all numeric columns.
     ///
     /// Matches `df.resample(freq).median()`.
     pub fn median(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).median())
+        self.apply_resample(|r| r.median())
     }
 
     /// Resample skewness (Fisher's definition, bias=False).
     ///
     /// Matches `df.resample(freq).skew()`.
     pub fn skew(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).skew())
+        self.apply_resample(|r| r.skew())
     }
 
     /// Resample excess kurtosis (Fisher's definition, bias=False).
     ///
     /// Matches `df.resample(freq).kurt()`.
     pub fn kurt(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).kurt())
+        self.apply_resample(|r| r.kurt())
     }
 
     /// Alias for `kurt()` — pandas exposes both spellings.
@@ -75357,6 +75434,9 @@ impl DataFrame {
         DataFrameResample {
             df: self,
             freq: freq.to_string(),
+            closed: None,
+            label: None,
+            origin: None,
         }
     }
 
