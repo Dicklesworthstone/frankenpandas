@@ -7887,11 +7887,9 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             };
             let frame = DataFrame::new_with_column_order(index, out, col_names)?;
             let frame = promote_synthetic_row_multiindex_if_present(&frame)?;
-            let level_names = obj
-                .get(JSON_SPLIT_INDEX_NAMES_KEY)
-                .and_then(|value| {
-                    serde_json::from_value::<Vec<Option<String>>>(value.clone()).ok()
-                });
+            let level_names = obj.get(JSON_SPLIT_INDEX_NAMES_KEY).and_then(|value| {
+                serde_json::from_value::<Vec<Option<String>>>(value.clone()).ok()
+            });
             match level_names {
                 Some(names) => restore_row_multiindex_names(frame, &names),
                 None => Ok(frame),
@@ -12733,11 +12731,9 @@ fn mysql_dtype_sql(dtype: DType) -> &'static str {
         DType::Datetime64 { .. } => "DATETIME",
         DType::Timedelta64 => "TIME",
         // These genuinely serialize as text through this writer today.
-        DType::Null
-        | DType::Categorical
-        | DType::Period
-        | DType::Interval
-        | DType::Sparse => "TEXT",
+        DType::Null | DType::Categorical | DType::Period | DType::Interval | DType::Sparse => {
+            "TEXT"
+        }
     }
 }
 
@@ -12982,9 +12978,7 @@ fn pg_err(context: impl std::fmt::Display, error: postgres::Error) -> IoError {
                 db.code().code(),
                 db.severity(),
                 db.message(),
-                db.detail()
-                    .map(|d| format!(" - {d}"))
-                    .unwrap_or_default()
+                db.detail().map(|d| format!(" - {d}")).unwrap_or_default()
             )
         })
         .unwrap_or_default();
@@ -13053,8 +13047,9 @@ impl PostgresConnection {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             out.push(
-                row.try_get(0)
-                    .map_err(|e| IoError::Sql(format!("PostgreSQL catalog row read failed: {e}")))?,
+                row.try_get(0).map_err(|e| {
+                    IoError::Sql(format!("PostgreSQL catalog row read failed: {e}"))
+                })?,
             );
         }
         Ok(out)
@@ -13259,12 +13254,12 @@ fn postgres_sql_dtype_from_index(index: &Index) -> &'static str {
     "TEXT"
 }
 
-
 #[cfg(all(test, feature = "sql-postgresql"))]
 mod sql_postgres_tests {
-    use super::{pg_param_boxed, postgres_dtype_sql, postgres_sql_dtype_from_index, PgNumericF64};
-    use crate::{Index, IndexLabel};
     use fp_types::{DType, Scalar};
+
+    use super::{PgNumericF64, pg_param_boxed, postgres_dtype_sql, postgres_sql_dtype_from_index};
+    use crate::{Index, IndexLabel};
 
     #[test]
     fn dtype_sql_maps_core_types() {
@@ -13282,8 +13277,7 @@ mod sql_postgres_tests {
 
     #[test]
     fn index_dtype_sql_maps_first_label() {
-        let int_index =
-            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Utf8("x".to_owned())]);
+        let int_index = Index::new(vec![IndexLabel::Int64(0), IndexLabel::Utf8("x".to_owned())]);
         assert_eq!(postgres_sql_dtype_from_index(&int_index), "BIGINT");
         let str_index = Index::new(vec![IndexLabel::Utf8("x".to_owned())]);
         assert_eq!(postgres_sql_dtype_from_index(&str_index), "TEXT");
@@ -13317,8 +13311,8 @@ mod sql_postgres_tests {
         // (base-10000 digit 2100 at weight -1 == 0.21)
         let bytes = [0x00, 0x01, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x02, 0x08, 0x34];
         let ty = postgres::types::Type::NUMERIC;
-        let decoded = <PgNumericF64 as postgres::types::FromSql>::from_sql(&ty, &bytes)
-            .expect("0.21");
+        let decoded =
+            <PgNumericF64 as postgres::types::FromSql>::from_sql(&ty, &bytes).expect("0.21");
         assert!((decoded.0 - 0.21).abs() < 1e-9, "got {}", decoded.0);
     }
 
@@ -13405,7 +13399,10 @@ impl SqlConnection for PostgresConnection {
             .query(
                 "SELECT 1 FROM information_schema.tables \
                  WHERE table_name = $1 AND table_schema = COALESCE($2, current_schema()) LIMIT 1",
-                &[&table_name as &(dyn postgres::types::ToSql + Sync), &param_schema],
+                &[
+                    &table_name as &(dyn postgres::types::ToSql + Sync),
+                    &param_schema,
+                ],
             )
             .map_err(|e| IoError::Sql(format!("PostgreSQL table_exists failed: {e}")))?;
         Ok(!rows.is_empty())
@@ -13511,14 +13508,18 @@ impl SqlConnection for PostgresConnection {
 
     fn list_views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
         let sql = match schema {
-            Some(_) => "SELECT viewname FROM pg_views \
+            Some(_) => {
+                "SELECT viewname FROM pg_views \
              WHERE schemaname = $1 \
              AND schemaname NOT IN ('pg_catalog', 'information_schema') \
-             ORDER BY viewname",
-            None => "SELECT viewname FROM pg_views \
+             ORDER BY viewname"
+            }
+            None => {
+                "SELECT viewname FROM pg_views \
              WHERE schemaname = current_schema() \
              AND schemaname NOT IN ('pg_catalog', 'information_schema') \
-             ORDER BY viewname",
+             ORDER BY viewname"
+            }
         };
         self.catalog_strings(sql, schema)
     }
@@ -13580,13 +13581,12 @@ impl SqlConnection for PostgresConnection {
                 )
                 .map_err(|e| pg_err("PostgreSQL table_schema failed", e))?
             }
-            None => {
-                conn.query(
+            None => conn
+                .query(
                     sql.as_str(),
                     &[&table_name as &(dyn postgres::types::ToSql + Sync)],
                 )
-                .map_err(|e| pg_err("PostgreSQL table_schema failed", e))?
-            }
+                .map_err(|e| pg_err("PostgreSQL table_schema failed", e))?,
         };
         let pk_rows = conn
             .query(
@@ -13615,17 +13615,24 @@ impl SqlConnection for PostgresConnection {
             .collect();
         let mut columns = Vec::with_capacity(rows.len());
         for row in &rows {
-            let name: String = row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let declared_type: String =
-                row.try_get(1).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let nullable: String =
-                row.try_get(2).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let default_value: Option<String> =
-                row.try_get(3).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let is_identity: String =
-                row.try_get(4).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let comment: Option<String> =
-                row.try_get(5).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let name: String = row
+                .try_get(0)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let declared_type: String = row
+                .try_get(1)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let nullable: String = row
+                .try_get(2)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let default_value: Option<String> = row
+                .try_get(3)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let is_identity: String = row
+                .try_get(4)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let comment: Option<String> = row
+                .try_get(5)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
             let autoincrement = is_identity == "YES"
                 || default_value
                     .as_deref()
@@ -13653,12 +13660,16 @@ impl SqlConnection for PostgresConnection {
     ) -> Result<Vec<SqlIndexSchema>, IoError> {
         let mut conn = self.conn.borrow_mut();
         let sql = match schema {
-            Some(_) => "SELECT indexname, indexdef FROM pg_indexes \
+            Some(_) => {
+                "SELECT indexname, indexdef FROM pg_indexes \
                  WHERE schemaname = $1 AND tablename = $2 \
-                 ORDER BY indexname",
-            None => "SELECT indexname, indexdef FROM pg_indexes \
+                 ORDER BY indexname"
+            }
+            None => {
+                "SELECT indexname, indexdef FROM pg_indexes \
                  WHERE schemaname = current_schema() AND tablename = $1 \
-                 ORDER BY indexname",
+                 ORDER BY indexname"
+            }
         };
         let schema_param: Option<String> = schema.map(str::to_owned);
         let rows = match schema {
@@ -13679,9 +13690,12 @@ impl SqlConnection for PostgresConnection {
         };
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
-            let name: String = row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let indexdef: String =
-                row.try_get(1).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let name: String = row
+                .try_get(0)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let indexdef: String = row
+                .try_get(1)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
             let columns = indexdef
                 .rsplit('(')
                 .next()
@@ -13719,15 +13733,15 @@ impl SqlConnection for PostgresConnection {
         let mut conn = self.conn.borrow_mut();
         let rows = conn
             .query(sql.as_str(), &[])
-            .map_err(|e| {
-                IoError::Sql(format!("PostgreSQL list_unique_constraints failed: {e}"))
-            })?;
+            .map_err(|e| IoError::Sql(format!("PostgreSQL list_unique_constraints failed: {e}")))?;
         let mut out: Vec<SqlUniqueConstraintSchema> = Vec::new();
         for row in &rows {
-            let constraint_name: String =
-                row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let column: String =
-                row.try_get(1).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let constraint_name: String = row
+                .try_get(0)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let column: String = row
+                .try_get(1)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
             match out.last_mut() {
                 Some(last) if last.name == constraint_name => last.columns.push(column),
                 _ => out.push(SqlUniqueConstraintSchema {
@@ -13747,10 +13761,9 @@ impl SqlConnection for PostgresConnection {
         let regclass = self.regclass_literal(table_name, schema)?;
         let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
         let mut conn = self.conn.borrow_mut();
-        let sql = format!(
-            "SELECT obj_description(({regclass_sql})::regclass, 'pg_class')"
-        );
-        let row = conn.query_one(sql.as_str(), &[])
+        let sql = format!("SELECT obj_description(({regclass_sql})::regclass, 'pg_class')");
+        let row = conn
+            .query_one(sql.as_str(), &[])
             .map_err(|e| IoError::Sql(format!("PostgreSQL table_comment failed: {e}")))?;
         Ok(row.try_get(0).unwrap_or(None))
     }
@@ -13774,18 +13787,23 @@ impl SqlConnection for PostgresConnection {
              ORDER BY con.conname, src.attnum"
         );
         let mut conn = self.conn.borrow_mut();
-        let rows = conn.query(sql.as_str(), &[])
+        let rows = conn
+            .query(sql.as_str(), &[])
             .map_err(|e| IoError::Sql(format!("PostgreSQL list_foreign_keys failed: {e}")))?;
         let mut out: Vec<SqlForeignKeySchema> = Vec::new();
         for row in &rows {
-            let constraint_name: String =
-                row.try_get(0).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let column: String =
-                row.try_get(1).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let referenced_table: String =
-                row.try_get(2).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
-            let referenced_column: String =
-                row.try_get(3).map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let constraint_name: String = row
+                .try_get(0)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let column: String = row
+                .try_get(1)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let referenced_table: String = row
+                .try_get(2)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
+            let referenced_column: String = row
+                .try_get(3)
+                .map_err(|e| IoError::Sql(format!("read failed: {e}")))?;
             match out.last_mut() {
                 Some(last)
                     if last.constraint_name.as_deref() == Some(constraint_name.as_str())

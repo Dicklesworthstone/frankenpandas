@@ -2708,6 +2708,7 @@ enum ScalarValues {
         ///     the hot path for the elementwise lanes that currently WIN, so the
         ///     common case pays to help one lane that stays ~2000x slower either
         ///     way.
+        ///
         /// Re-open only with a measurement showing the Plain arm is unharmed.
         shared_values: Option<Arc<OnceLock<Vec<Scalar>>>>,
     },
@@ -3587,7 +3588,9 @@ impl ScalarValues {
         validity: ValidityMask,
     ) -> Self {
         debug_assert!(
-            start.checked_add(len).is_some_and(|end| end <= buffer.len()),
+            start
+                .checked_add(len)
+                .is_some_and(|end| end <= buffer.len()),
             "nullable Float64 window must lie within source buffer"
         );
         debug_assert_eq!(len, validity.len());
@@ -5546,9 +5549,8 @@ impl ScalarValues {
                 // column -- the Scalar-view counterpart of the page-contiguous f64
                 // buffer, which had no Scalar sibling until now.
                 Some(shared) => {
-                    let page = shared.get_or_init(|| {
-                        data.iter().copied().map(Scalar::Float64).collect()
-                    });
+                    let page =
+                        shared.get_or_init(|| data.iter().copied().map(Scalar::Float64).collect());
                     &page[*start..*start + *len]
                 }
                 None => values
@@ -9560,6 +9562,10 @@ fn par_map_vec_f64_with_par_min<G: Fn(usize) -> f64 + Sync>(
     out
 }
 
+/// One worker's owned build result: the value chunk, its packed validity
+/// words, and the `(all_valid, all_finite)` reduction witnesses.
+type F64BlockBuild = (Vec<f64>, Vec<u64>, bool, bool);
+
 /// Write-once chunked form of [`par_map_vec_f64_with_par_min`].
 ///
 /// `par_map_vec_f64_with_par_min` must allocate one shared zeroed output buffer
@@ -9574,11 +9580,7 @@ fn par_map_vec_f64_to_owned_chunks<G: Fn(usize) -> f64 + Sync>(
     g: G,
     par_min: usize,
 ) -> (OwnedFloat64Chunks, Vec<u64>, bool, bool) {
-    fn block<G: Fn(usize) -> f64>(
-        start: usize,
-        len: usize,
-        g: &G,
-    ) -> (Vec<f64>, Vec<u64>, bool, bool) {
+    fn block<G: Fn(usize) -> f64>(start: usize, len: usize, g: &G) -> F64BlockBuild {
         let mut out = Vec::with_capacity(len);
         let mut words = Vec::with_capacity(len.div_ceil(64));
         let (mut all_valid, mut all_finite) = (true, true);
@@ -9610,8 +9612,7 @@ fn par_map_vec_f64_to_owned_chunks<G: Fn(usize) -> f64 + Sync>(
 
     let chunk = n.div_ceil(workers).div_ceil(64).max(1) * 64;
     let block_count = n.div_ceil(chunk);
-    let mut built: Vec<Option<(Vec<f64>, Vec<u64>, bool, bool)>> =
-        (0..block_count).map(|_| None).collect();
+    let mut built: Vec<Option<F64BlockBuild>> = (0..block_count).map(|_| None).collect();
     std::thread::scope(|scope| {
         for (index, slot) in built.iter_mut().enumerate() {
             let start = index * chunk;
@@ -10989,11 +10990,7 @@ fn radix_sort_multi_prefix_bucket(
 ) {
     debug_assert_eq!(entries.len(), scratch.len());
     for (column, keys) in keys_by_col.iter().enumerate().rev() {
-        let upper_shift = if column == 0 {
-            primary_upper_shift
-        } else {
-            64
-        };
+        let upper_shift = if column == 0 { primary_upper_shift } else { 64 };
         for shift in (0..upper_shift).step_by(8) {
             let scattered = if entries_are_input {
                 radix_scatter_positions(entries, scratch, keys, shift)
@@ -15540,7 +15537,9 @@ impl Column {
                 // `finite` only covered real elements; a raw bit-slice has to
                 // clear the last word's tail itself.
                 let tail = len % 64;
-                if tail != 0 && let Some(last) = words.last_mut() {
+                if tail != 0
+                    && let Some(last) = words.last_mut()
+                {
                     *last &= (1_u64 << tail) - 1;
                 }
                 return Self {
@@ -17570,10 +17569,7 @@ impl Column {
                 self.values.gather_float64_data()
             }
             ScalarValues::LazyNullableFloat64 {
-                buffer,
-                start,
-                len,
-                ..
+                buffer, start, len, ..
             } if *len == self.validity.len() => Some(&buffer[*start..*start + *len]),
             ScalarValues::LazyCombineFirstFloat64 { len, .. } if *len == self.validity.len() => {
                 self.values.combine_first_float64_data()
@@ -17653,11 +17649,17 @@ impl Column {
         // floordiv — falls through to the existing path, which errors / rejects via
         // IncompatibleDtypes, matching pandas raising.
         let temporal_out: Option<DType> = match (&self.dtype, &right.dtype, op) {
-            (DType::Datetime64 { .. }, DType::Datetime64 { .. }, ArithmeticOp::Sub) => Some(DType::Timedelta64),
+            (DType::Datetime64 { .. }, DType::Datetime64 { .. }, ArithmeticOp::Sub) => {
+                Some(DType::Timedelta64)
+            }
             (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::Sub | ArithmeticOp::Add) => {
                 Some(DType::Timedelta64)
             }
-            (dtype @ DType::Datetime64 { .. }, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub)
+            (
+                dtype @ DType::Datetime64 { .. },
+                DType::Timedelta64,
+                ArithmeticOp::Add | ArithmeticOp::Sub,
+            )
             | (DType::Timedelta64, dtype @ DType::Datetime64 { .. }, ArithmeticOp::Add) => {
                 Some(dtype.clone())
             }
@@ -24932,7 +24934,9 @@ impl Column {
             // missing source is cond-true+self-missing, whose cleared bit materializes exactly
             // as the generic loop's `v.clone()` of a missing temporal slot. Bit-identical.
             let temporal_other = match (&self.dtype, other) {
-                (DType::Datetime64 { .. }, Scalar::Datetime64(o)) if *o != Timestamp::NAT => Some(*o),
+                (DType::Datetime64 { .. }, Scalar::Datetime64(o)) if *o != Timestamp::NAT => {
+                    Some(*o)
+                }
                 (DType::Timedelta64, Scalar::Timedelta64(o)) if *o != Timedelta::NAT => Some(*o),
                 _ => None,
             };
@@ -26524,7 +26528,9 @@ impl Column {
             // bit). All-valid cond ⇒ the only missing source is cond-false+self-missing.
             // Bit-identical to the generic loop (cond[i] ? other : self[i]).
             let temporal_other = match (&self.dtype, other) {
-                (DType::Datetime64 { .. }, Scalar::Datetime64(o)) if *o != Timestamp::NAT => Some(*o),
+                (DType::Datetime64 { .. }, Scalar::Datetime64(o)) if *o != Timestamp::NAT => {
+                    Some(*o)
+                }
                 (DType::Timedelta64, Scalar::Timedelta64(o)) if *o != Timedelta::NAT => Some(*o),
                 _ => None,
             };
@@ -27847,10 +27853,7 @@ impl Column {
             let (codes, uniques) = factorize_i64_typed(data, sort);
             let mut uniques = Self::from_datetime64_values(uniques);
             uniques.dtype = self.dtype.clone();
-            return Ok((
-                Self::from_i64_values_owned(codes),
-                uniques,
-            ));
+            return Ok((Self::from_i64_values_owned(codes), uniques));
         }
 
         // `codes` is a typed `Vec<i64>` (factorize codes are always plain Int64,
@@ -28046,7 +28049,7 @@ impl Column {
                 _ => {
                     return Err(ColumnError::Type(TypeError::NonNumericValue {
                         value: format!("{v:?}"),
-                    dtype: self.dtype.clone(),
+                        dtype: self.dtype.clone(),
                     }));
                 }
             }
@@ -33193,7 +33196,9 @@ mod validity_packed_words_uza04 {
                 words[i / 64] |= 1_u64 << (i % 64);
             }
             let mask = ValidityMask::from_words(words, len);
-            let packed = mask.packed_words().expect("word-backed mask must expose words");
+            let packed = mask
+                .packed_words()
+                .expect("word-backed mask must expose words");
             for i in 0..len {
                 let inline = (packed[i / 64] >> (i % 64)) & 1 == 1;
                 assert_eq!(inline, mask.get(i), "len={len} idx={i}");
@@ -34458,8 +34463,8 @@ mod tests {
         for len in [70usize, 128, 130, 200] {
             let data: Vec<f64> = (0..len)
                 .map(|i| match i % 5 {
-                    0 => f64::NAN,        // NaN at a slot the mask calls VALID
-                    1 => 7.5,             // finite at a slot the mask calls INVALID
+                    0 => f64::NAN, // NaN at a slot the mask calls VALID
+                    1 => 7.5,      // finite at a slot the mask calls INVALID
                     _ => i as f64 * 0.25,
                 })
                 .collect();
@@ -34471,10 +34476,8 @@ mod tests {
                     words[i / 64] |= 1_u64 << (i % 64);
                 }
             }
-            let column = Column::from_f64_values_with_validity(
-                data,
-                ValidityMask::from_words(words, len),
-            );
+            let column =
+                Column::from_f64_values_with_validity(data, ValidityMask::from_words(words, len));
             assert!(
                 column.validity.get(0) && column.values()[0].is_missing(),
                 "len={len}: fixture must carry a NaN at a slot the MASK calls valid"
@@ -34564,17 +34567,17 @@ mod tests {
                     };
                     let left = ranged.values();
                     let right = gathered.values();
-                    assert_eq!(left.len(), right.len(), "len={len} start={start} take={take}");
+                    assert_eq!(
+                        left.len(),
+                        right.len(),
+                        "len={len} start={start} take={take}"
+                    );
                     for (i, (a, b)) in left.iter().zip(right.iter()).enumerate() {
                         match (bits(a), bits(b)) {
-                            (Some(x), Some(y)) => assert_eq!(
-                                x, y,
-                                "len={len} start={start} take={take} slot={i}"
-                            ),
-                            _ => assert_eq!(
-                                a, b,
-                                "len={len} start={start} take={take} slot={i}"
-                            ),
+                            (Some(x), Some(y)) => {
+                                assert_eq!(x, y, "len={len} start={start} take={take} slot={i}")
+                            }
+                            _ => assert_eq!(a, b, "len={len} start={start} take={take} slot={i}"),
                         }
                     }
                     assert_eq!(ranged.dtype(), gathered.dtype());
@@ -34611,10 +34614,10 @@ mod tests {
             );
             // THE INVARIANT: the mask alone determines missingness, so no
             // consumer has to re-read the buffer to find a NaN.
-            for i in 0..len {
+            for (i, &value) in data.iter().enumerate() {
                 assert_eq!(
                     column.validity.get(i),
-                    !data[i].is_nan(),
+                    !value.is_nan(),
                     "len={len} slot={i}: witness claims validity == !is_nan"
                 );
             }
@@ -34649,7 +34652,11 @@ mod tests {
                 let ranged = hand_built.take_contiguous_range(start, take);
                 let positions: Vec<usize> = (start..start + take).collect();
                 let gathered = hand_built.take_positions(&positions);
-                assert_eq!(ranged.values(), gathered.values(), "start={start} take={take}");
+                assert_eq!(
+                    ranged.values(),
+                    gathered.values(),
+                    "start={start} take={take}"
+                );
                 for i in 0..take {
                     assert_eq!(
                         ranged.validity.get(i),
@@ -34676,7 +34683,8 @@ mod tests {
         );
 
         for len in [1usize, 63, 64, 65, 200] {
-            let column = Column::from_i64_values_owned((0..len as i64).map(|i| i * 7 - 11).collect());
+            let column =
+                Column::from_i64_values_owned((0..len as i64).map(|i| i * 7 - 11).collect());
             for start in [0usize, 1, 63] {
                 if start >= len {
                     continue;
@@ -35428,8 +35436,7 @@ mod tests {
         // NON-INTEGRAL on purpose. `typed_float_integral_identity` claims an
         // all-integral column before either arm below, so an integral fixture
         // would measure that early return and report whatever ran previously.
-        let col =
-            Column::from_f64_values((0..4096_u32).map(f64::from).map(|v| v + 0.5).collect());
+        let col = Column::from_f64_values((0..4096_u32).map(f64::from).map(|v| v + 0.5).collect());
 
         crate::set_elementwise_witness_policy(4, 1);
 
@@ -35451,7 +35458,8 @@ mod tests {
         // only the op under test can overwrite.
         let mut serial_ops: Vec<&str> = Vec::new();
         for name in ["floor", "ceil", "trunc"] {
-            col.sqrt().expect("serial-by-design sqrt poisons the counter");
+            col.sqrt()
+                .expect("serial-by-design sqrt poisons the counter");
             assert_eq!(
                 crate::elementwise_last_worker_count(),
                 1,
@@ -35484,9 +35492,8 @@ mod tests {
         // (200_000), so a path that inherited the shared default would split here and
         // report >1. It must not: `WITNESS_FREE_PAR_MIN_DEFAULT` is `usize::MAX`
         // because the split measured 1.67-1.81x SLOWER at 4M.
-        let big = Column::from_f64_values(
-            (0..300_000_u32).map(f64::from).map(|v| v + 0.5).collect(),
-        );
+        let big =
+            Column::from_f64_values((0..300_000_u32).map(f64::from).map(|v| v + 0.5).collect());
         big.floor().expect("default-policy floor");
         assert_eq!(
             crate::elementwise_last_worker_count(),
@@ -42878,9 +42885,14 @@ mod tests {
             for &len in &[1_000_usize, 40_000, 70_000] {
                 let values = build(len);
 
-                let out = Column::from_f64_values(values.clone()).cbrt().expect("cbrt");
+                let out = Column::from_f64_values(values.clone())
+                    .cbrt()
+                    .expect("cbrt");
                 assert_eq!(out.len(), len, "cbrt length drift at {len}");
-                assert!(out.validity().all(), "cbrt is total: no slot may be missing");
+                assert!(
+                    out.validity().all(),
+                    "cbrt is total: no slot may be missing"
+                );
                 let got = out.as_f64_slice().expect("all-valid typed slice");
                 for (i, (&g, &x)) in got.iter().zip(values.iter()).enumerate() {
                     assert_eq!(g.to_bits(), x.cbrt().to_bits(), "cbrt len {len} at {i}");
@@ -44308,9 +44320,7 @@ mod tests {
             let mut primary = Vec::with_capacity(n);
             let mut secondary = Vec::with_capacity(n);
             for row in 0..n {
-                primary.push(
-                    (0x6A35_u64 << 48) | (((row % 251) as u64) << 40) | (row % 31) as u64,
-                );
+                primary.push((0x6A35_u64 << 48) | (((row % 251) as u64) << 40) | (row % 31) as u64);
                 secondary.push((row % 17) as u64);
             }
             let keys = vec![primary, secondary];

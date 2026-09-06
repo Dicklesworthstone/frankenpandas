@@ -27,6 +27,9 @@ pub use fp_frame::DataFrameTransposeView;
 #[cfg(feature = "block-storage")]
 pub use fp_frame::Float64BlockView;
 pub use fp_frame::{
+    // br-frankenpandas-rc-plot-renderer-zf9bf: backend-neutral plot specs +
+    // their zero-dependency SVG renderer (to_svg / to_svg_bytes methods).
+    BoxPlotSpec,
     CategoricalAccessor,
     CategoricalMetadata,
     ConcatJoin,
@@ -49,19 +52,16 @@ pub use fp_frame::{
     FrameError,
     GroupByResample,
     GroupByRolling,
+    HistogramSpec,
+    PlotKind,
+    PlotSeriesSpec,
+    PlotSpec,
     Resample,
     Rolling,
     Series,
     SeriesGroupBy,
     SeriesResetIndexResult,
     SparseAccessor,
-    // br-frankenpandas-rc-plot-renderer-zf9bf: backend-neutral plot specs +
-    // their zero-dependency SVG renderer (to_svg / to_svg_bytes methods).
-    BoxPlotSpec,
-    HistogramSpec,
-    PlotKind,
-    PlotSeriesSpec,
-    PlotSpec,
     StringAccessor,
     ToDatetimeOptions,
     ToDatetimeOrigin,
@@ -302,9 +302,9 @@ pub use fp_io::{
     write_feather_bytes,
     write_hdf,
     write_hdf_key,
-    write_hdf_with_options,
     write_hdf_series,
     write_hdf_series_key,
+    write_hdf_with_options,
     // HTML (write; README Quick Example uses write_html_string)
     write_html,
     write_html_string,

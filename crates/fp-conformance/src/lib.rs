@@ -4389,7 +4389,9 @@ pub fn append_phase2c_drift_history(
 fn latest_drift_rows_by_packet(
     config: &HarnessConfig,
 ) -> Result<BTreeMap<String, PacketDriftHistoryEntry>, HarnessError> {
-    let path = config.repo_root.join("artifacts/phase2c/drift_history.jsonl");
+    let path = config
+        .repo_root
+        .join("artifacts/phase2c/drift_history.jsonl");
     let mut map = BTreeMap::new();
     if !path.exists() {
         return Ok(map);
@@ -4433,7 +4435,9 @@ pub fn reconcile_packet_gate_with_drift(
     packet_id: &str,
     entry: &PacketDriftHistoryEntry,
 ) -> Result<GateReconciliation, HarnessError> {
-    let gate_path = config.packet_artifact_root(packet_id).join("parity_gate_result.json");
+    let gate_path = config
+        .packet_artifact_root(packet_id)
+        .join("parity_gate_result.json");
     let on_disk = fs::read_to_string(&gate_path).ok();
     if let Some(body) = on_disk.as_deref() {
         let agrees = serde_json::from_str::<serde_json::Value>(body)
@@ -4462,24 +4466,25 @@ pub fn reconcile_packet_gate_with_drift(
     write_packet_artifacts(config, &report)?;
 
     // Stamp provenance into the freshly written gate artifact.
-    let gate_path = config.packet_artifact_root(packet_id).join("parity_gate_result.json");
-    let mut gate: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&gate_path)?)?;
+    let gate_path = config
+        .packet_artifact_root(packet_id)
+        .join("parity_gate_result.json");
+    let mut gate: serde_json::Value = serde_json::from_str(&fs::read_to_string(&gate_path)?)?;
     if let Some(obj) = gate.as_object_mut() {
         obj.insert(
             "source".to_owned(),
             serde_json::Value::String("drift_history_reconciliation".to_owned()),
         );
-        obj.insert("drift_ts_unix_ms".to_owned(), serde_json::json!(entry.ts_unix_ms));
+        obj.insert(
+            "drift_ts_unix_ms".to_owned(),
+            serde_json::json!(entry.ts_unix_ms),
+        );
         obj.insert(
             "report_hash".to_owned(),
             serde_json::Value::String(entry.report_hash.clone()),
         );
         if entry.gate_pass {
-            obj.insert(
-                "reasons".to_owned(),
-                serde_json::Value::Array(Vec::new()),
-            );
+            obj.insert("reasons".to_owned(), serde_json::Value::Array(Vec::new()));
         }
     }
     fs::write(&gate_path, serde_json::to_string_pretty(&gate)?)?;
@@ -4516,7 +4521,11 @@ fn ensure_phase2c_parity_reports(config: &HarnessConfig) -> Result<(), HarnessEr
         // per-fixture detail are never clobbered).
         if let Some(entry) = drift.get(&packet_id) {
             reconcile_packet_gate_with_drift(config, &packet_id, entry)?;
-            if phase_root.join(&packet_id).join("parity_report.json").exists() {
+            if phase_root
+                .join(&packet_id)
+                .join("parity_report.json")
+                .exists()
+            {
                 continue;
             }
         }
@@ -27808,7 +27817,9 @@ mod tests {
 
     #[test]
     fn drift_reconciliation_fixes_disagreeing_gate_and_spares_agreeing_one() {
-        use super::{GateReconciliation, PacketDriftHistoryEntry, reconcile_packet_gate_with_drift};
+        use super::{
+            GateReconciliation, PacketDriftHistoryEntry, reconcile_packet_gate_with_drift,
+        };
 
         let dir = tempfile::tempdir().expect("tempdir");
         let packet_id = "FP-P2D-998";
@@ -27849,9 +27860,19 @@ mod tests {
         assert_eq!(outcome, GateReconciliation::Reconciled);
         let body = fs::read_to_string(&gate_path).expect("read reconciled gate");
         let gate: serde_json::Value = serde_json::from_str(&body).expect("parse gate");
-        assert_eq!(gate["pass"], serde_json::json!(true), "gate must match the drift verdict");
-        assert_eq!(gate["source"], serde_json::json!("drift_history_reconciliation"));
-        assert_eq!(gate["drift_ts_unix_ms"], serde_json::json!(entry.ts_unix_ms));
+        assert_eq!(
+            gate["pass"],
+            serde_json::json!(true),
+            "gate must match the drift verdict"
+        );
+        assert_eq!(
+            gate["source"],
+            serde_json::json!("drift_history_reconciliation")
+        );
+        assert_eq!(
+            gate["drift_ts_unix_ms"],
+            serde_json::json!(entry.ts_unix_ms)
+        );
         assert_eq!(gate["reasons"], serde_json::json!([]));
 
         // Idempotent: second call with the stamped, agreeing gate is a no-op.
@@ -27908,16 +27929,14 @@ mod tests {
             allow_fixture_fallback: false,
             require_live_oracle: false,
         };
-        let provenance = |version: &str| {
-            FixtureProvenance {
-                pandas_version: version.to_owned(),
-                oracle_script_sha256: "sha256:abc".to_owned(),
-                generated_at: "2026-09-04T00:00:00Z".to_owned(),
-                generation_command: None,
-                input_matrix: Vec::new(),
-                intentional_divergence_notes: Vec::new(),
-                oracle_attestation: None,
-            }
+        let provenance = |version: &str| FixtureProvenance {
+            pandas_version: version.to_owned(),
+            oracle_script_sha256: "sha256:abc".to_owned(),
+            generated_at: "2026-09-04T00:00:00Z".to_owned(),
+            generation_command: None,
+            input_matrix: Vec::new(),
+            intentional_divergence_notes: Vec::new(),
+            oracle_attestation: None,
         };
 
         // Matching version: the comparison is legal.

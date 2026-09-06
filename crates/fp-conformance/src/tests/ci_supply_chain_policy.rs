@@ -297,7 +297,9 @@ fn readme_documented_numbers_match_the_tree() {
         n
     }
     fn count_files(dir: &Path, suffix: &str) -> usize {
-        walk(dir, &mut |p| p.extension().and_then(|e| e.to_str()) == Some(suffix))
+        walk(dir, &mut |p| {
+            p.extension().and_then(|e| e.to_str()) == Some(suffix)
+        })
     }
     fn thousands(n: usize) -> String {
         let s = n.to_string();
@@ -313,7 +315,9 @@ fn readme_documented_numbers_match_the_tree() {
     fn grep_count(root: &Path, rel: &str, needle: &str) -> usize {
         walk(&root.join(rel), &mut |p| {
             p.extension().and_then(|e| e.to_str()) == Some("rs")
-                && fs::read_to_string(p).map(|s| s.contains(needle)).unwrap_or(false)
+                && fs::read_to_string(p)
+                    .map(|s| s.contains(needle))
+                    .unwrap_or(false)
         })
     }
 
@@ -367,10 +371,19 @@ fn readme_documented_numbers_match_the_tree() {
         .next()
         .map(|head| head.matches("\n### DISC-").count())
         .unwrap_or(0);
-    assert_eq!(total, 26, "DISCREPANCIES entry count changed; update README + this gate");
-    assert_eq!(active, 15, "DISCREPANCIES active-section count changed; update README + this gate");
+    assert_eq!(
+        total, 26,
+        "DISCREPANCIES entry count changed; update README + this gate"
+    );
+    assert_eq!(
+        active, 15,
+        "DISCREPANCIES active-section count changed; update README + this gate"
+    );
     assert!(
-        readme.contains(&format!("{} numbered divergence entries ({} active", total, active)),
+        readme.contains(&format!(
+            "{} numbered divergence entries ({} active",
+            total, active
+        )),
         "README DISC counts do not match DISCREPANCIES.md ({total} total / {active} active)"
     );
 }
