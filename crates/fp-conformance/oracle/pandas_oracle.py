@@ -8564,12 +8564,21 @@ def op_series_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -> d
     series = pd.Series(
         values, index=index, dtype=series_dtype_for_payload_values(left["values"])
     )
+    # `ffill` / `bfill` take pandas' `limit` (consecutive filled labels since
+    # the last observation); `asfreq` and the reductions take none. Absent
+    # payload limit means pandas' default (unbounded).
+    limit = payload.get("resample_limit")
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
+        raise OracleError(f"{op_name} resample_limit must be an integer when present")
     try:
-        out = getattr(series.resample(freq), agg)()
+        resampled = series.resample(freq)
+        if agg in {"ffill", "bfill"} and limit is not None:
+            out = getattr(resampled, agg)(limit=limit)
+        else:
+            out = getattr(resampled, agg)()
     except Exception as exc:
         raise OracleError(f"{op_name} failed: {exc}") from exc
     return {"expected_series": series_to_expected(_stringify_date_index(out))}
-
 
 def op_dataframe_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[str, Any]:
     frame = payload.get("frame")
@@ -9043,6 +9052,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_resample(pd, payload, "mean", op)
     if op == "series_resample_count":
         return op_series_resample(pd, payload, "count", op)
+    if op == "series_resample_asfreq":
+        return op_series_resample(pd, payload, "asfreq", op)
+    if op == "series_resample_ffill":
+        return op_series_resample(pd, payload, "ffill", op)
+    if op == "series_resample_bfill":
+        return op_series_resample(pd, payload, "bfill", op)
     if op == "dataframe_resample_sum":
         return op_dataframe_resample(pd, payload, "sum", op)
     if op == "dataframe_resample_mean":

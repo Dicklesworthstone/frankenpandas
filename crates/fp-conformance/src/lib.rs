@@ -1385,6 +1385,12 @@ pub enum FixtureOperation {
         alias = "series_resample_count_default"
     )]
     SeriesResampleCount,
+    #[serde(rename = "series_resample_asfreq")]
+    SeriesResampleAsfreq,
+    #[serde(rename = "series_resample_ffill")]
+    SeriesResampleFfill,
+    #[serde(rename = "series_resample_bfill")]
+    SeriesResampleBfill,
     #[serde(rename = "dataframe_rolling_mean", alias = "data_frame_rolling_mean")]
     DataFrameRollingMean,
     #[serde(rename = "dataframe_resample_sum", alias = "data_frame_resample_sum")]
@@ -1768,6 +1774,9 @@ impl FixtureOperation {
             Self::SeriesResampleSum => "series_resample_sum",
             Self::SeriesResampleMean => "series_resample_mean",
             Self::SeriesResampleCount => "series_resample_count",
+            Self::SeriesResampleAsfreq => "series_resample_asfreq",
+            Self::SeriesResampleFfill => "series_resample_ffill",
+            Self::SeriesResampleBfill => "series_resample_bfill",
             Self::DataFrameRollingMean => "dataframe_rolling_mean",
             Self::DataFrameResampleSum => "dataframe_resample_sum",
             Self::DataFrameResampleMean => "dataframe_resample_mean",
@@ -2590,6 +2599,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub resample_freq: Option<String>,
     #[serde(default)]
+    pub resample_limit: Option<usize>,
+    #[serde(default)]
     pub quantile_value: Option<f64>,
     #[serde(default)]
     pub dt_freq: Option<String>,
@@ -3187,6 +3198,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
         | FixtureOperation::SeriesResampleCount
+        | FixtureOperation::SeriesResampleAsfreq
+        | FixtureOperation::SeriesResampleFfill
+        | FixtureOperation::SeriesResampleBfill
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
         | FixtureOperation::DataFrameResampleMean
@@ -4184,6 +4198,8 @@ struct OracleRequest {
     ewm_alpha: Option<f64>,
     #[serde(default)]
     resample_freq: Option<String>,
+    #[serde(default)]
+    resample_limit: Option<usize>,
     #[serde(default)]
     quantile_value: Option<f64>,
     #[serde(default)]
@@ -13257,7 +13273,10 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
-        | FixtureOperation::SeriesResampleCount => {
+        | FixtureOperation::SeriesResampleCount
+        | FixtureOperation::SeriesResampleAsfreq
+        | FixtureOperation::SeriesResampleFfill
+        | FixtureOperation::SeriesResampleBfill => {
             let actual = execute_series_window_fixture_operation(fixture, policy, ledger)?;
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual, &series),
@@ -13623,7 +13642,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
-        | FixtureOperation::SeriesResampleCount => fixture
+        | FixtureOperation::SeriesResampleCount
+        | FixtureOperation::SeriesResampleAsfreq
+        | FixtureOperation::SeriesResampleFfill
+        | FixtureOperation::SeriesResampleBfill => fixture
             .expected_series
             .clone()
             .map(ResolvedExpected::Series)
@@ -14115,6 +14137,7 @@ fn capture_live_oracle_expected(
         ewm_span: fixture.ewm_span,
         ewm_alpha: fixture.ewm_alpha,
         resample_freq: fixture.resample_freq.clone(),
+        resample_limit: fixture.resample_limit,
         quantile_value: fixture.quantile_value,
         dt_freq: fixture.dt_freq.clone(),
         dt_tz: fixture.dt_tz.clone(),
@@ -14454,7 +14477,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
-        | FixtureOperation::SeriesResampleCount => response
+        | FixtureOperation::SeriesResampleCount
+        | FixtureOperation::SeriesResampleAsfreq
+        | FixtureOperation::SeriesResampleFfill
+        | FixtureOperation::SeriesResampleBfill => response
             .expected_series
             .map(ResolvedExpected::Series)
             .ok_or_else(|| {
@@ -16281,6 +16307,36 @@ fn execute_series_window_fixture_operation(
                 .as_deref()
                 .ok_or("resample_freq required for series_resample_count")?;
             series.resample(freq).count().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesResampleAsfreq => {
+            let freq = fixture
+                .resample_freq
+                .as_deref()
+                .ok_or("resample_freq required for series_resample_asfreq")?;
+            series
+                .resample(freq)
+                .asfreq()
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesResampleFfill => {
+            let freq = fixture
+                .resample_freq
+                .as_deref()
+                .ok_or("resample_freq required for series_resample_ffill")?;
+            series
+                .resample(freq)
+                .ffill(fixture.resample_limit)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesResampleBfill => {
+            let freq = fixture
+                .resample_freq
+                .as_deref()
+                .ok_or("resample_freq required for series_resample_bfill")?;
+            series
+                .resample(freq)
+                .bfill(fixture.resample_limit)
+                .map_err(|err| err.to_string())
         }
         _ => Err(format!(
             "unsupported window operation: {:?}",
@@ -23414,7 +23470,10 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
-        | FixtureOperation::SeriesResampleCount => {
+        | FixtureOperation::SeriesResampleCount
+        | FixtureOperation::SeriesResampleAsfreq
+        | FixtureOperation::SeriesResampleFfill
+        | FixtureOperation::SeriesResampleBfill => {
             let actual = execute_series_window_fixture_operation(fixture, policy, ledger)?;
             let expected = match expected {
                 ResolvedExpected::Series(s) => s,
