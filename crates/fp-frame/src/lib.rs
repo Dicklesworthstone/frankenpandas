@@ -35458,17 +35458,17 @@ impl<'a> DataFrameResample<'a> {
 
     /// Resample to bucket frequency without reduction.
     pub fn asfreq(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample_all_columns(|s, freq| s.resample(freq).asfreq())
+        self.apply_resample_all_columns(|r| r.asfreq())
     }
 
     /// Forward-fill each resample bucket.
     pub fn ffill(&self, limit: Option<usize>) -> Result<DataFrame, FrameError> {
-        self.apply_resample_all_columns(|s, freq| s.resample(freq).ffill(limit))
+        self.apply_resample_all_columns(|r| r.ffill(limit))
     }
 
     /// Backward-fill each resample bucket.
     pub fn bfill(&self, limit: Option<usize>) -> Result<DataFrame, FrameError> {
-        self.apply_resample_all_columns(|s, freq| s.resample(freq).bfill(limit))
+        self.apply_resample_all_columns(|r| r.bfill(limit))
     }
 
     /// Fill missing values after bucket materialization.
@@ -35478,22 +35478,22 @@ impl<'a> DataFrameResample<'a> {
 
     /// Interpolate missing values after bucket materialization.
     pub fn interpolate(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).interpolate())
+        self.apply_resample(|r| r.interpolate())
     }
 
     /// Select nearest observed value for each current non-empty bucket.
     pub fn nearest(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample_all_columns(|s, freq| s.resample(freq).nearest())
+        self.apply_resample_all_columns(|r| r.nearest())
     }
 
     /// Resample quantile across numeric columns.
     pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).quantile(q))
+        self.apply_resample(|r| r.quantile(q))
     }
 
     /// Resample standard error of the mean across numeric columns.
     pub fn sem(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|s, freq| s.resample(freq).sem())
+        self.apply_resample(|r| r.sem())
     }
 
     /// Count source rows in each resample bucket.
@@ -35513,7 +35513,7 @@ impl<'a> DataFrameResample<'a> {
 
     /// Count unique non-missing values per bucket for every column.
     pub fn nunique(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample_all_columns(|s, freq| s.resample(freq).nunique())
+        self.apply_resample_all_columns(|r| r.nunique())
     }
 
     fn ohlc_column_multiindex(&self) -> Result<fp_index::MultiIndex, FrameError> {
