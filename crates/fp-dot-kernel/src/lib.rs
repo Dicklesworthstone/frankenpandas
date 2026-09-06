@@ -652,8 +652,7 @@ mod tests {
     ///   * `inf + -inf`, `inf - inf`     -> NaN
     ///   * `0 * inf`                     -> NaN
     ///   * `inf + inf`, `inf * inf`      -> inf, a PRESENT value the witness must
-    ///                                      NOT flag (the same trap the div test
-    ///                                      pins with `x/0`)
+    ///     NOT flag (the same trap the div test pins with `x/0`)
     ///   * a NaN operand                 -> NaN, propagated by all three
     #[test]
     fn add_sub_mul_simd_witnesses_match_the_scalar_fold_including_inf_and_remainder() {
@@ -669,7 +668,8 @@ mod tests {
         }
 
         type Kernel = fn(&[f64], &[f64], &mut [f64]) -> bool;
-        let cases: [(&str, Kernel, fn(f64, f64) -> f64); 3] = [
+        type ScalarOp = fn(f64, f64) -> f64;
+        let cases: [(&str, Kernel, ScalarOp); 3] = [
             ("add", add_f64_into, |x, y| x + y),
             ("sub", sub_f64_into, |x, y| x - y),
             ("mul", mul_f64_into, |x, y| x * y),
@@ -802,7 +802,8 @@ mod tests {
         // Case sets chosen so the two witnesses vary INDEPENDENTLY: all-positive
         // (both true), with +inf (domain true, finite false), with a negative
         // (domain false), with NaN (domain false via the `!(x >= 0)` fold).
-        let shapes: [(&str, fn(usize) -> f64); 4] = [
+        type ShapeFn = fn(usize) -> f64;
+        let shapes: [(&str, ShapeFn); 4] = [
             ("positive", |i| (i as f64) * 1.5 + 0.25),
             ("with_inf", |i| {
                 if i % 7 == 3 {

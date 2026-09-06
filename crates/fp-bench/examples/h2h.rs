@@ -194,8 +194,8 @@ const TRANSPOSE_COLS: usize = 10;
 const PHASE: usize = 8;
 
 enum Subject {
-    Col(fp_columnar::Column),
-    Frame(fp_frame::DataFrame),
+    Col(Box<fp_columnar::Column>),
+    Frame(Box<fp_frame::DataFrame>),
 }
 
 /// The transpose lane, matching the banked positional arm: transpose, then read
@@ -289,7 +289,7 @@ fn fp_one_rep_us(workload: &str, column: &fp_columnar::Column) -> f64 {
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).expect("no NaN timings"));
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]
@@ -371,12 +371,12 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
             );
         }
         let frame = fp_frame::DataFrame::new(index, store).expect("source frame");
-        Subject::Frame(frame)
+        Subject::Frame(Box::new(frame))
     } else if workload.ends_with("_int64") {
         let values = fixture_i64(n);
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(&path, &bytes).expect("write fixture");
-        Subject::Col(fp_columnar::Column::from_i64_values(values))
+        Subject::Col(Box::new(fp_columnar::Column::from_i64_values(values)))
     } else {
         // br-frankenpandas-lrpp2. `acosh` is the ONE op in the 19-member unary
         // family that the sweep could not measure, and the reason is the fixture,
@@ -422,7 +422,7 @@ fn run_h2h(workload: &str, n: usize, rounds: usize, label: &str) {
         };
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(&path, &bytes).expect("write fixture");
-        Subject::Col(fp_columnar::Column::from_f64_values(values))
+        Subject::Col(Box::new(fp_columnar::Column::from_f64_values(values)))
     };
     // One place decides which arm a workload runs, so the warm-up and every
     // timed round cannot disagree about it.

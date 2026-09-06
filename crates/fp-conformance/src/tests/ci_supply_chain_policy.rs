@@ -305,22 +305,13 @@ fn readme_documented_numbers_match_the_tree() {
         let s = n.to_string();
         let mut out = String::new();
         for (i, c) in s.chars().enumerate() {
-            if i > 0 && (s.len() - i) % 3 == 0 {
+            if i > 0 && (s.len() - i).is_multiple_of(3) {
                 out.push(',');
             }
             out.push(c);
         }
         out
     }
-    fn grep_count(root: &Path, rel: &str, needle: &str) -> usize {
-        walk(&root.join(rel), &mut |p| {
-            p.extension().and_then(|e| e.to_str()) == Some("rs")
-                && fs::read_to_string(p)
-                    .map(|s| s.contains(needle))
-                    .unwrap_or(false)
-        })
-    }
-
     let root = repo_root();
     let readme = fs::read_to_string(root.join("README.md")).expect("read README");
 

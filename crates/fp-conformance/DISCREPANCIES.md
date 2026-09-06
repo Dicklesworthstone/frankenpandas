@@ -51,6 +51,12 @@
 - **Impact:** DataFrames built with a row MultiIndex may reject operations that pandas accepts, or return partial results. Error messages identify which operation is pending.
 - **Resolution:** INVESTIGATING - slices land under br-1zzp child beads until coverage parity is reached.
 - **Tests affected:** `live_oracle_dataframe_row_multiindex_*` suite (scoped to shipped operations).
+- **Update 2026-09-06 (br-frankenpandas-wfkzm):** the last open symptom in this file is closed —
+  multi-key `groupby(...).sum()` / `agg_multi` / `size` flat index labels now use the oracle's
+  `tuple_label_to_flat_string` pipe-joined spelling (`"north|apple"`) instead of `", "`-joined,
+  matching the `row_multiindex` levels the aggregation already attached. All 9
+  `live_oracle_dataframe_row_multiindex` tests pass against live pandas 2.2.3. Broader
+  slicing/xs/droplevel coverage remains under br-frankenpandas-1zzp.
 - **Review date:** 2026-04-23
 
 ### DISC-007: SQL IO is SQLite-only; pandas supports multiple backends

@@ -177,7 +177,12 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
         spec.series.iter().map(numeric_view).collect();
     let views = views?;
     let scale = data_scale(&views)?;
-    let n = spec.series.iter().map(|s| s.values.len()).max().unwrap_or(0);
+    let n = spec
+        .series
+        .iter()
+        .map(|s| s.values.len())
+        .max()
+        .unwrap_or(0);
     let x_labels: Vec<String> = spec
         .series
         .first()
@@ -340,7 +345,11 @@ fn histogram_body(
             "histogram requires at least one bin".to_owned(),
         ));
     }
-    let flat: Vec<Option<f64>> = series.iter().flat_map(|v| v.iter().copied()).map(Some).collect();
+    let flat: Vec<Option<f64>> = series
+        .iter()
+        .flat_map(|v| v.iter().copied())
+        .map(Some)
+        .collect();
     let scale = data_scale(&[flat])?;
     let step = (scale.max - scale.min) / bins as f64;
 
@@ -381,10 +390,7 @@ fn histogram_body(
             ));
         }
     }
-    Ok(format!(
-        "{}{body}</svg>",
-        svg_open(title)
-    ))
+    Ok(format!("{}{body}</svg>", svg_open(title)))
 }
 
 fn quantile(sorted: &[f64], q: f64) -> f64 {
@@ -427,7 +433,10 @@ impl HistogramSpec {
             ));
         }
         let names: Vec<String> = self.series.iter().map(|s| s.name.clone()).collect();
-        let title = format!("histogram ({})", names.first().map(String::as_str).unwrap_or("values"));
+        let title = format!(
+            "histogram ({})",
+            names.first().map(String::as_str).unwrap_or("values")
+        );
         histogram_body(&finite, &names, self.bins, &title)
     }
 
@@ -465,7 +474,11 @@ impl BoxPlotSpec {
         let mut body = String::new();
         for (si, vals) in sorted.iter().enumerate() {
             let color = palette(si);
-            let (q1, med, q3) = (quantile(vals, 0.25), quantile(vals, 0.5), quantile(vals, 0.75));
+            let (q1, med, q3) = (
+                quantile(vals, 0.25),
+                quantile(vals, 0.5),
+                quantile(vals, 0.75),
+            );
             let (lo, hi) = (vals[0], vals[vals.len() - 1]);
             let cx = MARGIN_LEFT + slot * (si as f64 + 0.5);
             let bw = slot * 0.5;
@@ -518,8 +531,8 @@ impl BoxPlotSpec {
 #[cfg(test)]
 mod tests {
     use super::{
-        numeric_view, quantile, BoxPlotSpec, FrameError, HistogramSpec, PlotKind, PlotSeriesSpec,
-        PlotSpec, Scalar,
+        BoxPlotSpec, FrameError, HistogramSpec, PlotKind, PlotSeriesSpec, PlotSpec, Scalar,
+        numeric_view, quantile,
     };
     use crate::DType;
 
@@ -527,7 +540,9 @@ mod tests {
         PlotSeriesSpec {
             name: name.to_owned(),
             dtype: DType::Float64,
-            index: (0..values.len() as i64).map(crate::IndexLabel::Int64).collect(),
+            index: (0..values.len() as i64)
+                .map(crate::IndexLabel::Int64)
+                .collect(),
             values,
             group_key: None,
         }
@@ -573,7 +588,10 @@ mod tests {
         assert!(svg.contains("<polyline"), "gaps still draw segments");
         // Two gaps split 5 values into 3 finite runs.
         assert_eq!(svg.matches("<polyline").count(), 3);
-        assert!(!svg.contains("NaN"), "missing values must not leak as text coords");
+        assert!(
+            !svg.contains("NaN"),
+            "missing values must not leak as text coords"
+        );
     }
 
     #[test]
@@ -583,7 +601,10 @@ mod tests {
             kind: PlotKind::Line,
             series: vec![series("nan", vec![Scalar::Float64(f64::NAN); 3])],
         };
-        assert!(matches!(all_nan.to_svg(), Err(FrameError::CompatibilityRejected(_))));
+        assert!(matches!(
+            all_nan.to_svg(),
+            Err(FrameError::CompatibilityRejected(_))
+        ));
 
         let utf8 = PlotSeriesSpec {
             name: "text".to_owned(),
@@ -638,7 +659,10 @@ mod tests {
             series: vec![series("<b>&\"x'", floats(&[1.0, 2.0]))],
         };
         let svg = spec.to_svg().expect("render");
-        assert!(!svg.contains("<b>&"), "raw XML-sensitive text must not leak");
+        assert!(
+            !svg.contains("<b>&"),
+            "raw XML-sensitive text must not leak"
+        );
         assert!(svg.contains("&lt;b&gt;&amp;"), "name must be escaped");
     }
 
@@ -665,6 +689,9 @@ mod tests {
             kind: PlotKind::Pie,
             series: vec![series("p", floats(&[-1.0, 2.0]))],
         };
-        assert!(matches!(negative_pie.to_svg(), Err(FrameError::CompatibilityRejected(_))));
+        assert!(matches!(
+            negative_pie.to_svg(),
+            Err(FrameError::CompatibilityRejected(_))
+        ));
     }
 }
