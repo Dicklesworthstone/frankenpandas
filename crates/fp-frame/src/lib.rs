@@ -33792,27 +33792,161 @@ impl Resample<'_> {
         Series::new(self.series.name(), index, column)
     }
 
+    /// Recover the resample lattice in ascending order as (bucket key,
+    /// bin-start ns) pairs. The group keys are the formatted bin starts, so
+    /// parsing them back yields exactly the bins every reduction emits —
+    /// including the contiguous empty bins the daily/monthly builders
+    /// already generate (br-frankenpandas-eov68) — without duplicating the
+    /// origin anchoring here.
+    fn bin_lattice(&self) -> Result<Vec<(String, i64)>, FrameError> {
+        self.validate()?;
+        let (order, _groups) = self.build_groups();
+        order
+            .into_iter()
+            .map(|key| {
+                let ns = resample_label_to_ns(&IndexLabel::Utf8(key.clone())).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "resample: cannot interpret bucket key '{key}' as a timestamp"
+                    ))
+                })?;
+                Ok((key, ns))
+            })
+            .collect()
+    }
+
+    fn finish_bucket_series(
+        &self,
+        keys: &[String],
+        out_vals: Vec<Scalar>,
+    ) -> Result<Series, FrameError> {
+        let out_labels: Vec<IndexLabel> =
+            keys.iter().map(|k| IndexLabel::Utf8(k.clone())).collect();
+        // Per br-frankenpandas-ur5fl: pandas Resampler.<agg>() returns a
+        // Series whose index.name == source.index.name.
+        let index = Index::new(out_labels).rename_index(self.series.index().name());
+        let column = Column::from_values(out_vals)?;
+        Series::new(self.series.name(), index, column)
+    }
+
+    /// VALID source observations as (timestamp ns, value) pairs sorted
+    /// ascending, filtered to timestamped labels; fill methods propagate over
+    /// missing values exactly like pandas reindex, so NaN rows are excluded.
+    fn observations_sorted(&self) -> Vec<(i64, Scalar)> {
+        let labels = self.series.index().labels();
+        let vals = self.series.column().values();
+        let mut obs: Vec<(i64, Scalar)> = labels
+            .iter()
+            .zip(vals.iter())
+            .filter_map(|(label, value)| {
+                if value.is_missing() {
+                    return None;
+                }
+                resample_label_to_ns(label).map(|ns| (ns, value.clone()))
+            })
+            .collect();
+        obs.sort_by_key(|(ns, _)| *ns);
+        obs
+    }
+
     /// Resample to bucket frequency without reduction.
     ///
-    /// Current bucketed storage has no explicit empty bucket generation, so
-    /// this selects the first observed value in each bucket.
+    /// pandas `resample(freq).asfreq()` reindexes on the full bin lattice
+    /// taking the value AT each bin start exactly; a bin whose start has no
+    /// observed timestamp becomes NaN — a value LATER in the same bucket is
+    /// not picked up. One row per bin, empty bins included
+    /// (br-frankenpandas-kmy0b, probed live pandas 2.2.3).
     pub fn asfreq(&self) -> Result<Series, FrameError> {
-        self.first()
+        let lattice = self.bin_lattice()?;
+        let obs = self.observations_sorted();
+        let mut out_vals = Vec::with_capacity(lattice.len());
+        for &(_, t) in &lattice {
+            out_vals.push(match obs.binary_search_by_key(&t, |(ns, _)| *ns) {
+                Ok(i) => obs[i].1.clone(),
+                Err(_) => Scalar::Null(NullKind::NaN),
+            });
+        }
+        let keys: Vec<String> = lattice.into_iter().map(|(k, _)| k).collect();
+        self.finish_bucket_series(&keys, out_vals)
     }
 
-    /// Forward-fill each resample bucket.
-    pub fn ffill(&self, _limit: Option<usize>) -> Result<Series, FrameError> {
-        self.first()
+    /// Forward-fill the bin lattice from the ORIGINAL observations.
+    ///
+    /// Equivalent to `series.reindex(bin_starts, method="ffill", limit)`:
+    /// each bin start takes the latest observation at-or-before it; an exact
+    /// match resets the run, and `limit` counts CONSECUTIVE filled labels
+    /// since the last observation, not buckets-with-data. Probed live
+    /// pandas 2.2.3 (br-frankenpandas-kmy0b): obs at 01T00=1, 01T06=2,
+    /// 03T12=3 with freq D gives ffill -> [1, 2, 2] and ffill(limit=1) ->
+    /// [1, 2, NaN] — the bin-03 row is two filled labels past the 01T06
+    /// observation even though a value exists later inside that bucket.
+    pub fn ffill(&self, limit: Option<usize>) -> Result<Series, FrameError> {
+        let lattice = self.bin_lattice()?;
+        let obs = self.observations_sorted();
+        let max = limit.unwrap_or(usize::MAX);
+        let mut oi = 0usize;
+        let mut fills = 0usize;
+        let mut last: Option<Scalar> = None;
+        let mut out_vals = Vec::with_capacity(lattice.len());
+        for &(_, t) in &lattice {
+            let mut exact = false;
+            while oi < obs.len() && obs[oi].0 <= t {
+                last = Some(obs[oi].1.clone());
+                fills = 0;
+                exact = obs[oi].0 == t;
+                oi += 1;
+            }
+            match (&last, exact) {
+                (Some(v), true) => out_vals.push(v.clone()),
+                (Some(v), false) if fills < max => {
+                    out_vals.push(v.clone());
+                    fills += 1;
+                }
+                _ => out_vals.push(Scalar::Null(NullKind::NaN)),
+            }
+        }
+        let keys: Vec<String> = lattice.into_iter().map(|(k, _)| k).collect();
+        self.finish_bucket_series(&keys, out_vals)
     }
 
-    /// Backward-fill each resample bucket.
-    pub fn bfill(&self, _limit: Option<usize>) -> Result<Series, FrameError> {
-        self.last()
+    /// Backward-fill the bin lattice from the ORIGINAL observations: the
+    /// mirror of [`Self::ffill`] (each bin start takes the earliest
+    /// observation at-or-after it; `limit` counts consecutive filled labels
+    /// backward). Probed live pandas 2.2.3 (br-frankenpandas-kmy0b):
+    /// bfill -> [1, 3, 3], bfill(limit=1) -> [1, NaN, 3].
+    pub fn bfill(&self, limit: Option<usize>) -> Result<Series, FrameError> {
+        let lattice = self.bin_lattice()?;
+        let mut obs = self.observations_sorted();
+        obs.reverse();
+        let max = limit.unwrap_or(usize::MAX);
+        let mut oi = 0usize;
+        let mut fills = 0usize;
+        let mut next: Option<Scalar> = None;
+        let mut out_vals = Vec::with_capacity(lattice.len());
+        for &(_, t) in lattice.iter().rev() {
+            let mut exact = false;
+            while oi < obs.len() && obs[oi].0 >= t {
+                next = Some(obs[oi].1.clone());
+                fills = 0;
+                exact = obs[oi].0 == t;
+                oi += 1;
+            }
+            match (&next, exact) {
+                (Some(v), true) => out_vals.push(v.clone()),
+                (Some(v), false) if fills < max => {
+                    out_vals.push(v.clone());
+                    fills += 1;
+                }
+                _ => out_vals.push(Scalar::Null(NullKind::NaN)),
+            }
+        }
+        out_vals.reverse();
+        let keys: Vec<String> = lattice.into_iter().map(|(k, _)| k).collect();
+        self.finish_bucket_series(&keys, out_vals)
     }
 
     /// Fill missing resampled values with a scalar.
     pub fn fillna(&self, value: &Scalar) -> Result<Series, FrameError> {
-        self.first()?.fillna(value)
+        self.asfreq()?.fillna(value)
     }
 
     /// Interpolate missing values after bucket materialization.
@@ -145376,6 +145510,93 @@ mod tests {
     }
 
     #[test]
+    fn resample_fill_ops_match_live_oracle_kmy0b() {
+        // Live pandas 2.2.3 probe (br-frankenpandas-kmy0b):
+        // values 1.0 @01-01T00, 2.0 @01-01T06, 3.0 @01-03T12, freq "D".
+        let s = Series::from_values(
+            "v",
+            vec![
+                "2020-01-01 00:00:00".into(),
+                "2020-01-01 06:00:00".into(),
+                "2020-01-03 12:00:00".into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let r = s.resample("D");
+        let labels = |series: &Series| -> Vec<String> {
+            series
+                .index()
+                .labels()
+                .iter()
+                .map(|l| match l {
+                    fp_index::IndexLabel::Utf8(k) => k.clone(),
+                    other => panic!("unexpected label {other:?}"),
+                })
+                .collect()
+        };
+
+        // asfreq: exact bin-edge lookup — 03 has no 00:00 observation, and the
+        // 12:00 value inside the bucket is NOT picked up.
+        let got = r.asfreq().unwrap();
+        assert_eq!(labels(&got), vec!["2020-01-01", "2020-01-02", "2020-01-03"]);
+        assert_eq!(
+            got.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+
+        // ffill carries the latest observation at-or-before each bin start.
+        let got = r.ffill(None).unwrap();
+        assert_eq!(
+            got.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+            ]
+        );
+
+        // limit counts consecutive FILLED labels since the last observation.
+        let got = r.ffill(Some(1)).unwrap();
+        assert_eq!(
+            got.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+
+        let got = r.bfill(None).unwrap();
+        assert_eq!(
+            got.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(3.0),
+            ]
+        );
+
+        let got = r.bfill(Some(1)).unwrap();
+        assert_eq!(
+            got.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ]
+        );
+    }
+
+    #[test]
     fn resample_yearly_mean() {
         let s = Series::from_values(
             "val",
@@ -145636,11 +145857,11 @@ mod tests {
         assert_eq!(resample.pipe(|r| Ok(r.ngroups())).unwrap(), 2);
         assert_eq!(
             resample.asfreq().unwrap().values(),
-            &[Scalar::Float64(1.0), Scalar::Float64(5.0)]
+            &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
         );
         assert_eq!(
             resample.bfill(None).unwrap().values(),
-            &[Scalar::Float64(3.0), Scalar::Float64(5.0)]
+            &[Scalar::Float64(5.0), Scalar::Null(NullKind::NaN)]
         );
     }
 
@@ -146753,7 +146974,7 @@ mod tests {
         assert_eq!(resample.pipe(|r| r.size()).unwrap().len(), 2);
         assert_eq!(
             resample.asfreq().unwrap().columns()["label"].values(),
-            &[Scalar::Utf8("a".into()), Scalar::Utf8("c".into())]
+            &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
         );
     }
 
