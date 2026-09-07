@@ -1,0 +1,162 @@
+{
+  "packet_id": "FP-P2D-482",
+  "case_id": "dataframe_binary_alias_rpow_strict",
+  "mode": "strict",
+  "operation": "dataframe_binary_alias",
+  "dataframe_binary_method": "rpow",
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "70907bc9628c21a836a1728213ddaa7651126dfa1340e0682bf3185a2e97fc52",
+    "generated_at": "2026-09-07T03:48:21Z"
+  },
+  "frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
+    ],
+    "column_order": [
+      "a",
+      "b"
+    ],
+    "columns": {
+      "a": [
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "float64",
+          "value": 3.0
+        },
+        {
+          "kind": "float64",
+          "value": 4.0
+        }
+      ],
+      "b": [
+        {
+          "kind": "float64",
+          "value": 5.0
+        },
+        {
+          "kind": "float64",
+          "value": 6.0
+        },
+        {
+          "kind": "float64",
+          "value": 7.0
+        }
+      ]
+    }
+  },
+  "frame_other": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
+    ],
+    "column_order": [
+      "a",
+      "b"
+    ],
+    "columns": {
+      "a": [
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "float64",
+          "value": 5.0
+        }
+      ],
+      "b": [
+        {
+          "kind": "float64",
+          "value": 8.0
+        },
+        {
+          "kind": "float64",
+          "value": 6.0
+        },
+        {
+          "kind": "float64",
+          "value": 4.0
+        }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      }
+    ],
+    "columns": {
+      "a": [
+        {
+          "kind": "float64",
+          "value": 4.0
+        },
+        {
+          "kind": "float64",
+          "value": 8.0
+        },
+        {
+          "kind": "float64",
+          "value": 625.0
+        }
+      ],
+      "b": [
+        {
+          "kind": "float64",
+          "value": 32768.0
+        },
+        {
+          "kind": "float64",
+          "value": 46656.0
+        },
+        {
+          "kind": "float64",
+          "value": 16384.0
+        }
+      ]
+    },
+    "column_order": [
+      "a",
+      "b"
+    ]
+  }
+}

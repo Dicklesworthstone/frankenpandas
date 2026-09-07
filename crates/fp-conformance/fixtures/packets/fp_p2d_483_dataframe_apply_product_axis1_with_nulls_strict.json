@@ -1,0 +1,82 @@
+{
+  "packet_id": "FP-P2D-483",
+  "case_id": "dataframe_apply_product_axis1_with_nulls_strict",
+  "mode": "strict",
+  "operation": "dataframe_apply_product_axis1",
+  "fixture_provenance": {
+    "pandas_version": "2.2.3",
+    "oracle_script_sha256": "70907bc9628c21a836a1728213ddaa7651126dfa1340e0682bf3185a2e97fc52",
+    "generated_at": "2026-09-07T03:52:02Z"
+  },
+  "frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "column_order": [
+      "a",
+      "b",
+      "c"
+    ],
+    "columns": {
+      "a": [
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "null",
+          "value": "na_n"
+        }
+      ],
+      "b": [
+        {
+          "kind": "float64",
+          "value": 3.0
+        },
+        {
+          "kind": "float64",
+          "value": 4.0
+        }
+      ],
+      "c": [
+        {
+          "kind": "float64",
+          "value": 5.0
+        },
+        {
+          "kind": "float64",
+          "value": 6.0
+        }
+      ]
+    }
+  },
+  "expected_series": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "values": [
+      {
+        "kind": "float64",
+        "value": 30.0
+      },
+      {
+        "kind": "float64",
+        "value": 24.0
+      }
+    ]
+  }
+}
