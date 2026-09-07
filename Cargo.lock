@@ -3339,18 +3339,25 @@ dependencies = [
 
 [[package]]
 name = "sas7bdat"
-version = "0.9.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "522410e571ea4b4510949a06709e45b13966dd7c1ad5d0c2cd8d37c57c7a7ed5"
+checksum = "fed577886ea4537b61c790386306e04c92caf51d723a6fcf55e63e8402504818"
 dependencies = [
- "bytemuck",
+ "ahash",
+ "byteorder",
+ "bytes",
+ "clap",
  "encoding_rs",
- "fearless_simd",
- "memchr",
- "memmap2",
+ "hashbrown 0.16.1",
+ "itoa",
  "rayon",
+ "rustc-hash",
+ "ryu",
  "serde",
+ "serde_json",
  "simdutf8",
+ "smallvec",
+ "thiserror",
 ]
 
 [[package]]
