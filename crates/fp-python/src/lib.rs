@@ -271,6 +271,124 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
+/// Python wrapper for Index string accessor methods.
+#[pyclass(name = "IndexStringMethods", from_py_object)]
+#[derive(Clone)]
+pub struct PyIndexStringMethods {
+    pub(crate) inner: Index,
+}
+
+#[pymethods]
+impl PyIndexStringMethods {
+    fn lower(&self) -> PyIndex {
+        let labels = self
+            .inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => IndexLabel::Utf8(s.to_lowercase()),
+                other => other.clone(),
+            })
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+
+    fn upper(&self) -> PyIndex {
+        let labels = self
+            .inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => IndexLabel::Utf8(s.to_uppercase()),
+                other => other.clone(),
+            })
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+
+    fn strip(&self) -> PyIndex {
+        let labels = self
+            .inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => IndexLabel::Utf8(s.trim().to_string()),
+                other => other.clone(),
+            })
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+
+    fn len(&self) -> PyIndex {
+        let labels = self
+            .inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => IndexLabel::Int64(s.len() as i64),
+                _ => IndexLabel::Null(NullKind::NaN),
+            })
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+
+    fn contains(&self, pat: &str) -> Vec<bool> {
+        self.inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => s.contains(pat),
+                _ => false,
+            })
+            .collect()
+    }
+
+    fn startswith(&self, pat: &str) -> Vec<bool> {
+        self.inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => s.starts_with(pat),
+                _ => false,
+            })
+            .collect()
+    }
+
+    fn endswith(&self, pat: &str) -> Vec<bool> {
+        self.inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => s.ends_with(pat),
+                _ => false,
+            })
+            .collect()
+    }
+
+    fn replace(&self, pat: &str, repl: &str) -> PyIndex {
+        let labels = self
+            .inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => IndexLabel::Utf8(s.replace(pat, repl)),
+                other => other.clone(),
+            })
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+}
+
 /// Python wrapper for FrankenPandas Index.
 #[pyclass(name = "Index", from_py_object)]
 #[derive(Clone)]
@@ -1020,6 +1138,281 @@ impl PyIndex {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let s = Series::new("count", Index::new(idx_labels), col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
+    }
+
+    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        self.to_list(py)
+    }
+
+    fn ravel(&self) -> Self {
+        self.clone()
+    }
+
+    fn view(&self) -> Self {
+        self.clone()
+    }
+
+    fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other_idx) = other.extract::<PyRef<'_, PyIndex>>() {
+            self.inner.is_(&other_idx.inner)
+        } else {
+            false
+        }
+    }
+
+    #[pyo3(signature = (names, level=None))]
+    fn set_names(&self, names: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Self> {
+        let _ = level;
+        let name_opt = if let Ok(s) = names.extract::<String>() {
+            Some(s)
+        } else if let Ok(seq) = names.cast::<pyo3::types::PySequence>() {
+            if seq.len()? > 0 {
+                Some(seq.get_item(0)?.extract::<String>()?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut inner = self.inner.clone();
+        inner = inner.set_names(name_opt.as_deref());
+        Ok(PyIndex { inner })
+    }
+
+    fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (sort=false, use_na_sentinel=true))]
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+        let _ = (sort, use_na_sentinel);
+        let (codes, uniques) = self.inner.factorize();
+        (codes, PyIndex { inner: uniques })
+    }
+
+    fn format(&self) -> Vec<String> {
+        self.inner.format()
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn diff(&self, periods: i64) -> PyResult<PyIndex> {
+        let p = if periods < 0 { 0 } else { periods as usize };
+        let diff_labels = self.inner.diff(p);
+        let labels: Vec<IndexLabel> = diff_labels
+            .into_iter()
+            .map(|opt| opt.unwrap_or(IndexLabel::Null(NullKind::NaN)))
+            .collect();
+        let mut idx = Index::new(labels);
+        if let Some(n) = self.inner.name() {
+            idx = idx.rename_index(Some(n));
+        }
+        Ok(PyIndex { inner: idx })
+    }
+
+    #[pyo3(signature = (periods=1, freq=None))]
+    fn shift(&self, periods: i64, freq: Option<&str>) -> PyResult<Self> {
+        let _ = (periods, freq);
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex; Got type Index",
+        ))
+    }
+
+    #[pyo3(signature = (decimals=0))]
+    fn round(&self, decimals: i32) -> Self {
+        let _ = decimals;
+        PyIndex {
+            inner: self.inner.round(),
+        }
+    }
+
+    fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let lbl = py_to_index_label(label)?;
+        match self.inner.asof(&lbl) {
+            Some(l) => index_label_to_py(py, &l),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[pyo3(signature = (where_, mask=None))]
+    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+        self.inner.asof_locs(&where_.inner, mask.as_deref())
+    }
+
+    #[pyo3(signature = (value, side="left", sorter=None))]
+    fn searchsorted(
+        &self,
+        value: &Bound<'_, PyAny>,
+        side: &str,
+        sorter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<usize> {
+        let _ = sorter;
+        let lbl = py_to_index_label(value)?;
+        self.inner
+            .searchsorted(&lbl, side)
+            .map_err(index_error_to_py)
+    }
+
+    fn get_slice_bound(&self, label: &Bound<'_, PyAny>, side: &str) -> PyResult<usize> {
+        let lbl = py_to_index_label(label)?;
+        self.inner
+            .get_slice_bound(&lbl, side)
+            .map_err(index_error_to_py)
+    }
+
+    fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+        let target_idx = if let Ok(py_idx) = target.extract::<PyRef<'_, PyIndex>>() {
+            py_idx.inner.clone()
+        } else {
+            let py_idx = PyIndex::new(Some(target), None)?;
+            py_idx.inner
+        };
+        Ok(self
+            .inner
+            .get_indexer_for(&target_idx)
+            .into_iter()
+            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
+            .collect())
+    }
+
+    fn get_indexer_non_unique(
+        &self,
+        target: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<isize>, Vec<usize>)> {
+        let target_idx = if let Ok(py_idx) = target.extract::<PyRef<'_, PyIndex>>() {
+            py_idx.inner.clone()
+        } else {
+            let py_idx = PyIndex::new(Some(target), None)?;
+            py_idx.inner
+        };
+        Ok(self.inner.get_indexer_non_unique(&target_idx))
+    }
+
+    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    fn sortlevel(
+        &self,
+        level: Option<usize>,
+        ascending: bool,
+        sort_remaining: Option<bool>,
+    ) -> PyResult<(Self, Vec<usize>)> {
+        let _ = (level, ascending, sort_remaining);
+        let (sorted, order) = self.inner.sortlevel();
+        Ok((PyIndex { inner: sorted }, order))
+    }
+
+    #[pyo3(signature = (other, how="left", level=None, return_indexers=false, sort=false))]
+    fn join(
+        &self,
+        other: &Bound<'_, PyAny>,
+        how: &str,
+        level: Option<usize>,
+        return_indexers: bool,
+        sort: bool,
+    ) -> PyResult<Self> {
+        let _ = (level, return_indexers, sort);
+        let other_idx = if let Ok(py_idx) = other.extract::<PyRef<'_, PyIndex>>() {
+            py_idx.inner.clone()
+        } else {
+            let py_idx = PyIndex::new(Some(other), None)?;
+            py_idx.inner
+        };
+        let joined = self
+            .inner
+            .join(&other_idx, how)
+            .map_err(index_error_to_py)?;
+        Ok(PyIndex { inner: joined })
+    }
+
+    #[pyo3(signature = (target, method=None, level=None, limit=None, tolerance=None))]
+    fn reindex(
+        &self,
+        target: &Bound<'_, PyAny>,
+        method: Option<&str>,
+        level: Option<usize>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Self, Vec<i64>)> {
+        let _ = (method, level, limit, tolerance);
+        let target_idx = if let Ok(py_idx) = target.extract::<PyRef<'_, PyIndex>>() {
+            py_idx.inner.clone()
+        } else {
+            let py_idx = PyIndex::new(Some(target), None)?;
+            py_idx.inner
+        };
+        let (out_idx, indexer) = self.inner.reindex(&target_idx);
+        let indexer_vec: Vec<i64> = indexer
+            .into_iter()
+            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
+            .collect();
+        Ok((PyIndex { inner: out_idx }, indexer_vec))
+    }
+
+    #[pyo3(signature = (cond, other=None))]
+    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let other_lbl = match other {
+            Some(o) => py_to_index_label(o)?,
+            None => IndexLabel::Null(NullKind::NaN),
+        };
+        Ok(PyIndex {
+            inner: self.inner.where_(&cond, &other_lbl),
+        })
+    }
+
+    fn putmask(&self, mask: Vec<bool>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let val = py_to_index_label(value)?;
+        Ok(PyIndex {
+            inner: self.inner.putmask(&mask, &val),
+        })
+    }
+
+    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut new_labels = Vec::with_capacity(self.inner.len());
+        for l in self.inner.labels() {
+            let py_val = index_label_to_py(py, l)?;
+            let res = mapper.call1((py_val,))?;
+            new_labels.push(py_to_index_label(&res)?);
+        }
+        let mut res = Index::new(new_labels);
+        if let Some(n) = self.inner.name() {
+            res = res.rename_index(Some(n));
+        }
+        Ok(PyIndex { inner: res })
+    }
+
+    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        if let Ok(seq) = by.cast::<pyo3::types::PySequence>() {
+            let len = seq.len()?;
+            let mut groups: std::collections::BTreeMap<IndexLabel, Vec<IndexLabel>> =
+                std::collections::BTreeMap::new();
+            for i in 0..len.min(self.inner.len()) {
+                let key = py_to_index_label(&seq.get_item(i)?)?;
+                groups
+                    .entry(key)
+                    .or_default()
+                    .push(self.inner.labels()[i].clone());
+            }
+            for (k, v) in groups {
+                let py_k = index_label_to_py(py, &k)?;
+                let py_v: Vec<Py<PyAny>> = v
+                    .iter()
+                    .map(|l| index_label_to_py(py, l))
+                    .collect::<PyResult<_>>()?;
+                let v_list = PyList::new(py, py_v)?;
+                dict.set_item(py_k, v_list)?;
+            }
+        }
+        Ok(dict.unbind())
+    }
+
+    #[getter]
+    fn r#str(&self) -> PyIndexStringMethods {
+        PyIndexStringMethods {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -13046,6 +13439,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyResampler>()?;
     m.add_class::<PyStyler>()?;
     m.add_class::<PyIndex>()?;
+    m.add_class::<PyIndexStringMethods>()?;
     m.add_class::<PyDatetimeIndex>()?;
     m.add_class::<PyTimedeltaIndex>()?;
     m.add_class::<PyRangeIndex>()?;
