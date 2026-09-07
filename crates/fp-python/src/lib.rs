@@ -25,7 +25,7 @@ use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
 };
-use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
+use fp_types::{NullKind, Period, PeriodFreq, Scalar, Timedelta};
 use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
@@ -918,12 +918,12 @@ impl PyIndex {
 
     #[pyo3(signature = (level=None))]
     fn droplevel(&self, level: Option<usize>) -> PyResult<Self> {
-        if let Some(l) = level {
-            if l != 0 {
-                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                    "Index has only 1 level; cannot drop level > 0",
-                ));
-            }
+        if let Some(l) = level
+            && l != 0
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "Index has only 1 level; cannot drop level > 0",
+            ));
         }
         Ok(self.clone())
     }
@@ -1519,9 +1519,10 @@ impl PyDatetimeIndex {
 
     fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
         let label = py_to_index_label(key)?;
-        self.inner.as_index().get_loc(&label).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}"))
-        })
+        self.inner
+            .as_index()
+            .get_loc(&label)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
     }
 
     fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
@@ -1549,7 +1550,10 @@ impl PyDatetimeIndex {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
         };
-        Ok(self.inner.as_index().slice_locs(s_lbl.as_ref(), e_lbl.as_ref()))
+        self.inner
+            .as_index()
+            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+            .map_err(index_error_to_py)
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -1936,6 +1940,309 @@ impl PyMultiIndex {
         Ok(pyo3::types::PyTuple::new(py, tuple_objs)?
             .into_any()
             .unbind())
+    }
+
+    #[getter]
+    fn hasnans(&self) -> bool {
+        false
+    }
+
+    #[getter]
+    fn has_duplicates(&self) -> bool {
+        self.inner.has_duplicates()
+    }
+
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.inner.nbytes()
+    }
+
+    #[pyo3(signature = (deep=false))]
+    fn memory_usage(&self, deep: bool) -> usize {
+        self.inner.memory_usage(deep)
+    }
+
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        self.inner.dtype()
+    }
+
+    #[getter]
+    fn dtypes(&self) -> Vec<&'static str> {
+        self.inner.dtypes()
+    }
+
+    #[getter]
+    fn levels(&self) -> Vec<PyIndex> {
+        self.inner
+            .levels()
+            .into_iter()
+            .map(|i| PyIndex { inner: i })
+            .collect()
+    }
+
+    #[getter]
+    fn codes(&self) -> Vec<Vec<isize>> {
+        self.inner.codes()
+    }
+
+    #[getter]
+    fn levshape(&self) -> Vec<usize> {
+        self.inner.levshape()
+    }
+
+    fn inferred_type(&self) -> &'static str {
+        self.inner.inferred_type()
+    }
+
+    fn is_numeric(&self) -> bool {
+        false
+    }
+
+    fn is_boolean(&self) -> bool {
+        false
+    }
+
+    fn is_floating(&self) -> bool {
+        false
+    }
+
+    fn is_integer(&self) -> bool {
+        false
+    }
+
+    fn is_categorical(&self) -> bool {
+        false
+    }
+
+    fn is_object(&self) -> bool {
+        true
+    }
+
+    fn is_interval(&self) -> bool {
+        false
+    }
+
+    fn holds_integer(&self) -> bool {
+        false
+    }
+
+    fn values(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        self.to_list(py)
+    }
+
+    fn union(&self, other: &PyMultiIndex) -> PyResult<Self> {
+        self.inner
+            .union(&other.inner)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    fn intersection(&self, other: &PyMultiIndex) -> PyResult<Self> {
+        self.inner
+            .intersection(&other.inner)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    fn difference(&self, other: &PyMultiIndex) -> PyResult<Self> {
+        self.inner
+            .difference(&other.inner)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    fn symmetric_difference(&self, other: &PyMultiIndex) -> PyResult<Self> {
+        self.inner
+            .symmetric_difference(&other.inner)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (key, level=None))]
+    fn get_loc(&self, key: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Py<PyAny>> {
+        let labels = if let Ok(seq) = key.cast::<pyo3::types::PySequence>() {
+            let len = seq.len()?;
+            let mut row = Vec::with_capacity(len);
+            for i in 0..len {
+                row.push(py_to_index_label(&seq.get_item(i)?)?);
+            }
+            row
+        } else {
+            vec![py_to_index_label(key)?]
+        };
+        let positions = self
+            .inner
+            .get_loc(&labels, level)
+            .map_err(index_error_to_py)?;
+        let py = key.py();
+        if positions.len() == 1 {
+            positions[0].into_py_any(py)
+        } else {
+            positions.into_py_any(py)
+        }
+    }
+
+    fn get_indexer(&self, target: &PyMultiIndex) -> PyResult<Vec<i64>> {
+        self.inner
+            .get_indexer(&target.inner)
+            .map(|res| res.into_iter().map(|x| x as i64).collect())
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (level=0))]
+    fn droplevel(&self, py: Python<'_>, level: usize) -> PyResult<Py<PyAny>> {
+        let res = self.inner.droplevel(level).map_err(index_error_to_py)?;
+        match res {
+            fp_index::MultiIndexOrIndex::Multi(mi) => Py::new(py, PyMultiIndex { inner: mi })?
+                .into_any()
+                .into_py_any(py),
+            fp_index::MultiIndexOrIndex::Index(idx) => Py::new(py, PyIndex { inner: idx })?
+                .into_any()
+                .into_py_any(py),
+        }
+    }
+
+    #[pyo3(signature = (index=None, name=None))]
+    fn to_series(
+        &self,
+        index: Option<&Bound<'_, PyAny>>,
+        name: Option<&str>,
+    ) -> PyResult<PySeries> {
+        let s_name = name.unwrap_or("");
+        let idx = if let Some(i_obj) = index {
+            if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
+                py_idx.inner.clone()
+            } else {
+                self.inner.to_flat_index("/")
+            }
+        } else {
+            self.inner.to_flat_index("/")
+        };
+        let flat = self.inner.to_flat_index("/");
+        let vals: Vec<Scalar> = flat
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        let col = Column::from_values(vals)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let s = Series::new(s_name, idx, col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (index=true, name=None))]
+    fn to_frame(&self, index: bool, name: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let idx = if index {
+            self.inner.to_flat_index("/")
+        } else {
+            Index::from_range(0, self.inner.len() as i64, 1)
+        };
+        let mut col_names = Vec::with_capacity(self.inner.nlevels());
+        let mut col_map = BTreeMap::new();
+        let custom_names: Option<Vec<String>> = if let Some(n_obj) = name {
+            if let Ok(list) = n_obj.extract::<Vec<String>>() {
+                Some(list)
+            } else if let Ok(s) = n_obj.extract::<String>() {
+                Some(vec![s])
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        for level_idx in 0..self.inner.nlevels() {
+            let col_name = if let Some(ref c_names) = custom_names {
+                c_names
+                    .get(level_idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{level_idx}"))
+            } else if let Some(Some(n)) = self.inner.names().get(level_idx) {
+                n.clone()
+            } else {
+                format!("{level_idx}")
+            };
+            let level_idx_obj = self
+                .inner
+                .get_level_values(level_idx)
+                .map_err(index_error_to_py)?;
+            let vals: Vec<Scalar> = level_idx_obj
+                .labels()
+                .iter()
+                .map(index_label_to_scalar)
+                .collect();
+            let col = Column::from_values(vals)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            col_map.insert(col_name.clone(), col);
+            col_names.push(col_name);
+        }
+        let df =
+            DataFrame::new_with_column_order(idx, col_map, col_names).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: df })
+    }
+
+    #[pyo3(signature = (normalize=false, sort=true, ascending=false, dropna=true))]
+    fn value_counts(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> PyResult<PySeries> {
+        let _ = (normalize, sort, ascending, dropna);
+        let pairs = self.inner.value_counts();
+        let mut labels = Vec::with_capacity(pairs.len());
+        let mut counts = Vec::with_capacity(pairs.len());
+        for (tuple, cnt) in pairs {
+            let parts: Vec<String> = tuple.into_iter().map(|l| l.to_string()).collect();
+            labels.push(IndexLabel::Utf8(format!("({})", parts.join(", "))));
+            counts.push(Scalar::Int64(cnt as i64));
+        }
+        let col = Column::from_values(counts)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let s = Series::new("count", Index::new(labels), col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn sort_values(&self) -> Self {
+        Self {
+            inner: self.inner.sort_values(),
+        }
+    }
+
+    fn sort(&self) -> Self {
+        self.sort_values()
+    }
+
+    pub fn sortlevel(&self) -> (Self, Vec<usize>) {
+        let (sorted, order) = self.inner.sortlevel();
+        (Self { inner: sorted }, order)
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    fn T(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (how="any"))]
+    fn dropna(&self, how: &str) -> Self {
+        let inner = if how == "all" {
+            self.inner.dropna_all()
+        } else {
+            self.inner.dropna_any()
+        };
+        Self { inner }
+    }
+
+    fn fillna(&self, value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let label = py_to_index_label(value)?;
+        Ok(Self {
+            inner: self.inner.fillna(&label),
+        })
     }
 }
 
@@ -2413,9 +2720,10 @@ impl PyTimedeltaIndex {
 
     fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
         let label = py_to_index_label(key)?;
-        self.inner.as_index().get_loc(&label).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}"))
-        })
+        self.inner
+            .as_index()
+            .get_loc(&label)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
     }
 
     fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
@@ -2443,7 +2751,10 @@ impl PyTimedeltaIndex {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
         };
-        Ok(self.inner.as_index().slice_locs(s_lbl.as_ref(), e_lbl.as_ref()))
+        self.inner
+            .as_index()
+            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+            .map_err(index_error_to_py)
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -2895,9 +3206,8 @@ impl PyRangeIndex {
     fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
         let label = py_to_index_label(key)?;
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
-        idx.get_loc(&label).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}"))
-        })
+        idx.get_loc(&label)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
     }
 
     fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
@@ -2925,7 +3235,8 @@ impl PyRangeIndex {
             None => None,
         };
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
-        Ok(idx.slice_locs(s_lbl.as_ref(), e_lbl.as_ref()))
+        idx.slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+            .map_err(index_error_to_py)
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -3039,7 +3350,15 @@ impl PyRangeIndex {
     fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PyIndex> {
         let _ = na_position;
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
-        let sorted = idx.sort_values(ascending);
+        let mut sorted = idx.sort_values();
+        if !ascending {
+            let mut rev_labels = sorted.labels().to_vec();
+            rev_labels.reverse();
+            sorted = Index::new(rev_labels);
+            if let Some(n) = self.inner.name() {
+                sorted = sorted.rename_index(Some(n));
+            }
+        }
         Ok(PyIndex { inner: sorted })
     }
 
@@ -3324,6 +3643,285 @@ impl PyPeriodIndex {
             "PeriodIndex indices must be integers or slices",
         ))
     }
+
+    #[getter]
+    pub fn hasnans(&self) -> bool {
+        false
+    }
+
+    #[getter]
+    pub fn nlevels(&self) -> usize {
+        1
+    }
+
+    #[getter]
+    pub fn names(&self) -> Vec<Option<String>> {
+        vec![self.inner.name().map(str::to_string)]
+    }
+
+    #[getter]
+    pub fn nbytes(&self) -> usize {
+        self.inner.to_index().nbytes()
+    }
+
+    #[pyo3(signature = (deep=false))]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        self.inner.to_index().memory_usage(deep)
+    }
+
+    pub fn inferred_type(&self) -> &'static str {
+        "period"
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        false
+    }
+
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    pub fn is_integer(&self) -> bool {
+        false
+    }
+
+    pub fn is_categorical(&self) -> bool {
+        false
+    }
+
+    pub fn is_object(&self) -> bool {
+        false
+    }
+
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    pub fn holds_integer(&self) -> bool {
+        false
+    }
+
+    pub fn union(&self, other: &PyIndex) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().union(&other.inner),
+        }
+    }
+
+    pub fn intersection(&self, other: &PyIndex) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().intersection(&other.inner),
+        }
+    }
+
+    pub fn difference(&self, other: &PyIndex) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().difference(&other.inner),
+        }
+    }
+
+    pub fn symmetric_difference(&self, other: &PyIndex) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().symmetric_difference(&other.inner),
+        }
+    }
+
+    pub fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let label = py_to_index_label(key)?;
+        self.inner
+            .to_index()
+            .get_loc(&label)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
+    }
+
+    pub fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+        self.inner
+            .to_index()
+            .get_indexer(&target.inner)
+            .into_iter()
+            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
+            .collect()
+    }
+
+    #[pyo3(signature = (start=None, end=None, step=None))]
+    pub fn slice_locs(
+        &self,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: Option<isize>,
+    ) -> PyResult<(usize, usize)> {
+        let _ = step;
+        let s_lbl = match start {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        let e_lbl = match end {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        self.inner
+            .to_index()
+            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (start=None, end=None, step=None))]
+    pub fn slice_indexer(
+        &self,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: Option<isize>,
+    ) -> PyResult<(usize, usize, isize)> {
+        let (s, e) = self.slice_locs(start, end, step)?;
+        Ok((s, e, step.unwrap_or(1)))
+    }
+
+    #[pyo3(signature = (level=0))]
+    pub fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
+        let _ = level;
+        Ok(PyIndex {
+            inner: self.inner.to_index(),
+        })
+    }
+
+    #[pyo3(signature = (level=0))]
+    pub fn get_level_values(&self, level: usize) -> PyResult<Self> {
+        let _ = level;
+        Ok(self.clone())
+    }
+
+    pub fn to_flat_index(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (index=None, name=None))]
+    pub fn to_series(
+        &self,
+        index: Option<&Bound<'_, PyAny>>,
+        name: Option<&str>,
+    ) -> PyResult<PySeries> {
+        let idx = self.inner.to_index();
+        let series_name = name.or_else(|| self.inner.name()).unwrap_or("");
+        let final_idx = if let Some(i_obj) = index {
+            if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
+                py_idx.inner.clone()
+            } else {
+                idx.clone()
+            }
+        } else {
+            idx.clone()
+        };
+        let col = Column::from_values(
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect(),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let s = Series::new(series_name, final_idx, col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (index=true, name=None))]
+    pub fn to_frame(&self, index: bool, name: Option<&str>) -> PyResult<PyDataFrame> {
+        let col_name = name.or_else(|| self.inner.name()).unwrap_or("0");
+        let idx = self.inner.to_index();
+        let final_idx = if index {
+            idx.clone()
+        } else {
+            Index::from_range(0, self.inner.len() as i64, 1)
+        };
+        let col = Column::from_values(
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect(),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let mut col_map = BTreeMap::new();
+        col_map.insert(col_name.to_string(), col);
+        let df = DataFrame::new_with_column_order(final_idx, col_map, vec![col_name.to_string()])
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: df })
+    }
+
+    #[pyo3(signature = (normalize=false, sort=true, ascending=false, dropna=true))]
+    pub fn value_counts(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> PyResult<PySeries> {
+        let idx = self.inner.to_index();
+        let counts = idx.value_counts_with_options(normalize, sort, ascending, dropna);
+        let mut idx_labels = Vec::with_capacity(counts.len());
+        let mut vals = Vec::with_capacity(counts.len());
+        for (lbl, sc) in counts {
+            idx_labels.push(lbl);
+            vals.push(sc);
+        }
+        let col = Column::from_values(vals)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let s = Series::new("count", Index::new(idx_labels), col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (ascending=true, na_position="last"))]
+    pub fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PyIndex> {
+        let _ = na_position;
+        let idx = self.inner.to_index();
+        let mut sorted = idx.sort_values();
+        if !ascending {
+            let mut rev_labels = sorted.labels().to_vec();
+            rev_labels.reverse();
+            sorted = Index::new(rev_labels);
+            if let Some(n) = self.inner.name() {
+                sorted = sorted.rename_index(Some(n));
+            }
+        }
+        Ok(PyIndex { inner: sorted })
+    }
+
+    pub fn sort(&self) -> PyResult<PyIndex> {
+        self.sort_values(true, "last")
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    pub fn T(&self) -> Self {
+        self.clone()
+    }
+
+    pub fn drop(&self, labels: Vec<Bound<'_, PyAny>>) -> PyResult<PyIndex> {
+        let mut to_drop = Vec::with_capacity(labels.len());
+        for l in labels {
+            to_drop.push(py_to_index_label(&l)?);
+        }
+        Ok(PyIndex {
+            inner: self.inner.to_index().drop_labels(&to_drop),
+        })
+    }
+
+    #[pyo3(signature = (how="any"))]
+    pub fn dropna(&self, how: &str) -> Self {
+        let _ = how;
+        self.clone()
+    }
+
+    pub fn fillna(&self, value: &Bound<'_, PyAny>) -> Self {
+        let _ = value;
+        self.clone()
+    }
 }
 
 /// Python wrapper for FrankenPandas CategoricalIndex.
@@ -3507,6 +4105,305 @@ impl PyCategoricalIndex {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "CategoricalIndex indices must be integers or slices",
         ))
+    }
+
+    #[getter]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        self.inner.to_index().is_monotonic_increasing()
+    }
+
+    #[getter]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        self.inner.to_index().is_monotonic_decreasing()
+    }
+
+    #[getter]
+    pub fn is_unique(&self) -> bool {
+        self.inner.to_index().is_unique()
+    }
+
+    #[getter]
+    pub fn has_duplicates(&self) -> bool {
+        self.inner.to_index().has_duplicates()
+    }
+
+    #[getter]
+    pub fn hasnans(&self) -> bool {
+        self.inner.to_index().hasnans()
+    }
+
+    #[getter]
+    pub fn nlevels(&self) -> usize {
+        1
+    }
+
+    #[getter]
+    pub fn names(&self) -> Vec<Option<String>> {
+        vec![self.inner.name().map(str::to_string)]
+    }
+
+    #[getter]
+    pub fn nbytes(&self) -> usize {
+        self.inner.to_index().nbytes()
+    }
+
+    #[pyo3(signature = (deep=false))]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        self.inner.to_index().memory_usage(deep)
+    }
+
+    pub fn inferred_type(&self) -> &'static str {
+        "categorical"
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        false
+    }
+
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    pub fn is_integer(&self) -> bool {
+        false
+    }
+
+    pub fn is_categorical(&self) -> bool {
+        true
+    }
+
+    pub fn is_object(&self) -> bool {
+        false
+    }
+
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    pub fn holds_integer(&self) -> bool {
+        false
+    }
+
+    pub fn union(&self, other: &PyIndex) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().union(&other.inner),
+        }
+    }
+
+    pub fn intersection(&self, other: &PyIndex) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().intersection(&other.inner),
+        }
+    }
+
+    pub fn difference(&self, other: &PyIndex) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().difference(&other.inner),
+        }
+    }
+
+    pub fn symmetric_difference(&self, other: &PyIndex) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().symmetric_difference(&other.inner),
+        }
+    }
+
+    pub fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let label = py_to_index_label(key)?;
+        self.inner
+            .to_index()
+            .get_loc(&label)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
+    }
+
+    pub fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+        self.inner
+            .to_index()
+            .get_indexer(&target.inner)
+            .into_iter()
+            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
+            .collect()
+    }
+
+    #[pyo3(signature = (start=None, end=None, step=None))]
+    pub fn slice_locs(
+        &self,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: Option<isize>,
+    ) -> PyResult<(usize, usize)> {
+        let _ = step;
+        let s_lbl = match start {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        let e_lbl = match end {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        self.inner
+            .to_index()
+            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (start=None, end=None, step=None))]
+    pub fn slice_indexer(
+        &self,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: Option<isize>,
+    ) -> PyResult<(usize, usize, isize)> {
+        let (s, e) = self.slice_locs(start, end, step)?;
+        Ok((s, e, step.unwrap_or(1)))
+    }
+
+    #[pyo3(signature = (level=0))]
+    pub fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
+        let _ = level;
+        Ok(PyIndex {
+            inner: self.inner.to_index(),
+        })
+    }
+
+    #[pyo3(signature = (level=0))]
+    pub fn get_level_values(&self, level: usize) -> PyResult<Self> {
+        let _ = level;
+        Ok(self.clone())
+    }
+
+    pub fn to_flat_index(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (index=None, name=None))]
+    pub fn to_series(
+        &self,
+        index: Option<&Bound<'_, PyAny>>,
+        name: Option<&str>,
+    ) -> PyResult<PySeries> {
+        let idx = self.inner.to_index();
+        let series_name = name.or_else(|| self.inner.name()).unwrap_or("");
+        let final_idx = if let Some(i_obj) = index {
+            if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
+                py_idx.inner.clone()
+            } else {
+                idx.clone()
+            }
+        } else {
+            idx.clone()
+        };
+        let col = Column::from_values(
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect(),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let s = Series::new(series_name, final_idx, col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (index=true, name=None))]
+    pub fn to_frame(&self, index: bool, name: Option<&str>) -> PyResult<PyDataFrame> {
+        let col_name = name.or_else(|| self.inner.name()).unwrap_or("0");
+        let idx = self.inner.to_index();
+        let final_idx = if index {
+            idx.clone()
+        } else {
+            Index::from_range(0, self.inner.len() as i64, 1)
+        };
+        let col = Column::from_values(
+            idx.labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect(),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let mut col_map = BTreeMap::new();
+        col_map.insert(col_name.to_string(), col);
+        let df = DataFrame::new_with_column_order(final_idx, col_map, vec![col_name.to_string()])
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: df })
+    }
+
+    #[pyo3(signature = (normalize=false, sort=true, ascending=false, dropna=true))]
+    pub fn value_counts(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> PyResult<PySeries> {
+        let idx = self.inner.to_index();
+        let counts = idx.value_counts_with_options(normalize, sort, ascending, dropna);
+        let mut idx_labels = Vec::with_capacity(counts.len());
+        let mut vals = Vec::with_capacity(counts.len());
+        for (lbl, sc) in counts {
+            idx_labels.push(lbl);
+            vals.push(sc);
+        }
+        let col = Column::from_values(vals)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let s = Series::new("count", Index::new(idx_labels), col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (ascending=true, na_position="last"))]
+    pub fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PyIndex> {
+        let _ = na_position;
+        let idx = self.inner.to_index();
+        let mut sorted = idx.sort_values();
+        if !ascending {
+            let mut rev_labels = sorted.labels().to_vec();
+            rev_labels.reverse();
+            sorted = Index::new(rev_labels);
+            if let Some(n) = self.inner.name() {
+                sorted = sorted.rename_index(Some(n));
+            }
+        }
+        Ok(PyIndex { inner: sorted })
+    }
+
+    pub fn sort(&self) -> PyResult<PyIndex> {
+        self.sort_values(true, "last")
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    pub fn T(&self) -> Self {
+        self.clone()
+    }
+
+    pub fn drop(&self, labels: Vec<Bound<'_, PyAny>>) -> PyResult<PyIndex> {
+        let mut to_drop = Vec::with_capacity(labels.len());
+        for l in labels {
+            to_drop.push(py_to_index_label(&l)?);
+        }
+        Ok(PyIndex {
+            inner: self.inner.to_index().drop_labels(&to_drop),
+        })
+    }
+
+    #[pyo3(signature = (how="any"))]
+    pub fn dropna(&self, how: &str) -> Self {
+        let _ = how;
+        self.clone()
+    }
+
+    pub fn fillna(&self, value: &Bound<'_, PyAny>) -> Self {
+        let _ = value;
+        self.clone()
     }
 }
 
@@ -4981,7 +5878,10 @@ impl PySeries {
     #[pyo3(signature = (percentiles=None))]
     fn describe(&self, percentiles: Option<Vec<f64>>) -> PyResult<PySeries> {
         let s = match percentiles {
-            Some(p) => self.inner.describe_with_percentiles(&p).map_err(frame_error_to_py)?,
+            Some(p) => self
+                .inner
+                .describe_with_percentiles(&p)
+                .map_err(frame_error_to_py)?,
             None => self.inner.describe().map_err(frame_error_to_py)?,
         };
         Ok(PySeries { inner: s })
@@ -5039,16 +5939,14 @@ impl PySeries {
         args: &Bound<'py, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if let Ok(tup) = func.cast::<pyo3::types::PyTuple>() {
-            if tup.len() == 2 {
-                let f = tup.get_item(0)?;
-                let kw_name = tup.get_item(1)?.extract::<String>()?;
-                let kw = kwargs
-                    .map(|d| d.clone())
-                    .unwrap_or_else(|| PyDict::new(py));
-                kw.set_item(kw_name, self.clone())?;
-                return f.call(args, Some(&kw));
-            }
+        if let Ok(tup) = func.cast::<pyo3::types::PyTuple>()
+            && tup.len() == 2
+        {
+            let f = tup.get_item(0)?;
+            let kw_name = tup.get_item(1)?.extract::<String>()?;
+            let kw = kwargs.cloned().unwrap_or_else(|| PyDict::new(py));
+            kw.set_item(kw_name, self.clone())?;
+            return f.call(args, Some(&kw));
         }
         let mut full_args = Vec::with_capacity(args.len() + 1);
         full_args.push(Py::new(py, self.clone())?.into_any());
@@ -5108,7 +6006,9 @@ impl PySeries {
             let values = self.inner.column().values();
             for (lbl, val) in labels.iter().zip(values.iter()) {
                 let lbl_str = lbl.to_string();
-                let is_match = re_mod.call_method1("search", (pat, &lbl_str))?.is_truthy()?;
+                let is_match = re_mod
+                    .call_method1("search", (pat, &lbl_str))?
+                    .is_truthy()?;
                 if is_match {
                     matched_labels.push(lbl.clone());
                     matched_values.push(val.clone());
@@ -5133,11 +6033,11 @@ impl PySeries {
             Ok(l) => l,
             Err(_) => return Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py))),
         };
-        if let Some(pos) = self.inner.index().get_loc(&label) {
-            if let Ok(val) = self.inner.iat(pos as i64) {
-                let py_val = scalar_to_py(py, &val)?;
-                return Ok(py_val.into_bound(py));
-            }
+        if let Some(pos) = self.inner.index().get_loc(&label)
+            && let Ok(val) = self.inner.iat(pos as i64)
+        {
+            let py_val = scalar_to_py(py, &val)?;
+            return Ok(py_val.into_bound(py));
         }
         Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)))
     }
@@ -7557,16 +8457,14 @@ impl PyDataFrame {
         args: &Bound<'py, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if let Ok(tup) = func.cast::<pyo3::types::PyTuple>() {
-            if tup.len() == 2 {
-                let f = tup.get_item(0)?;
-                let kw_name = tup.get_item(1)?.extract::<String>()?;
-                let kw = kwargs
-                    .map(|d| d.clone())
-                    .unwrap_or_else(|| PyDict::new(py));
-                kw.set_item(kw_name, self.clone())?;
-                return f.call(args, Some(&kw));
-            }
+        if let Ok(tup) = func.cast::<pyo3::types::PyTuple>()
+            && tup.len() == 2
+        {
+            let f = tup.get_item(0)?;
+            let kw_name = tup.get_item(1)?.extract::<String>()?;
+            let kw = kwargs.cloned().unwrap_or_else(|| PyDict::new(py));
+            kw.set_item(kw_name, self.clone())?;
+            return f.call(args, Some(&kw));
         }
         let mut full_args = Vec::with_capacity(args.len() + 1);
         full_args.push(Py::new(py, self.clone())?.into_any());
@@ -7586,8 +8484,9 @@ impl PyDataFrame {
         axis: Option<usize>,
     ) -> PyResult<PyDataFrame> {
         let ax = axis.unwrap_or(1);
-        let items_refs: Option<Vec<&str>> =
-            items.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        let items_refs: Option<Vec<&str>> = items
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
         let df = self
             .inner
             .filter_axis(items_refs.as_deref(), like, regex, ax)
@@ -7602,13 +8501,13 @@ impl PyDataFrame {
         key: &Bound<'py, PyAny>,
         default: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if let Ok(col_name) = key.extract::<String>() {
-            if let Some(col) = self.inner.column(&col_name) {
-                let s = Series::new(col_name, self.inner.index().clone(), col.clone())
-                    .map_err(frame_error_to_py)?;
-                let py_s = Py::new(py, PySeries { inner: s })?;
-                return Ok(py_s.into_bound(py).into_any());
-            }
+        if let Ok(col_name) = key.extract::<String>()
+            && let Some(col) = self.inner.column(&col_name)
+        {
+            let s = Series::new(col_name, self.inner.index().clone(), col.clone())
+                .map_err(frame_error_to_py)?;
+            let py_s = Py::new(py, PySeries { inner: s })?;
+            return Ok(py_s.into_bound(py).into_any());
         }
         Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)))
     }
@@ -7634,13 +8533,10 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         let _ = kwargs;
         let mut res = self.inner.clone();
-        let target_index = index.or(labels.and_then(|l| {
-            if axis.is_none() || axis.and_then(|a| a.extract::<i64>().ok()) == Some(0) {
-                Some(l)
-            } else {
-                None
-            }
-        }));
+        let target_index = index.or_else(|| {
+            labels
+                .filter(|_| axis.is_none() || axis.and_then(|a| a.extract::<i64>().ok()) == Some(0))
+        });
         if let Some(idx_obj) = target_index {
             let row_labels = if let Ok(py_idx) = idx_obj.extract::<PyRef<'_, PyIndex>>() {
                 py_idx.inner.labels().to_vec()
@@ -7657,13 +8553,8 @@ impl PyDataFrame {
             };
             res = res.reindex(row_labels).map_err(frame_error_to_py)?;
         }
-        let target_columns = columns.or(labels.and_then(|l| {
-            if axis.and_then(|a| a.extract::<i64>().ok()) == Some(1) {
-                Some(l)
-            } else {
-                None
-            }
-        }));
+        let target_columns = columns
+            .or_else(|| labels.filter(|_| axis.and_then(|a| a.extract::<i64>().ok()) == Some(1)));
         if let Some(col_obj) = target_columns {
             let col_names: Vec<String> = if let Ok(list) = col_obj.cast::<PyList>() {
                 let mut cols = Vec::with_capacity(list.len());
@@ -7762,8 +8653,12 @@ impl PyDataFrame {
             let col_name = os.inner.name();
             let mut map = BTreeMap::new();
             map.insert(col_name.to_string(), os.inner.column().clone());
-            DataFrame::new_with_column_order(os.inner.index().clone(), map, vec![col_name.to_string()])
-                .map_err(frame_error_to_py)?
+            DataFrame::new_with_column_order(
+                os.inner.index().clone(),
+                map,
+                vec![col_name.to_string()],
+            )
+            .map_err(frame_error_to_py)?
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "join expects DataFrame or Series",
@@ -7777,7 +8672,7 @@ impl PyDataFrame {
             _ => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "unknown how={how:?}; expected inner/left/right/outer"
-                )))
+                )));
             }
         };
         let options = fp_join::MergeExecutionOptions {
@@ -7787,8 +8682,16 @@ impl PyDataFrame {
                 None
             } else {
                 Some([
-                    if lsuffix.is_empty() { None } else { Some(lsuffix.to_string()) },
-                    if rsuffix.is_empty() { None } else { Some(rsuffix.to_string()) },
+                    if lsuffix.is_empty() {
+                        None
+                    } else {
+                        Some(lsuffix.to_string())
+                    },
+                    if rsuffix.is_empty() {
+                        None
+                    } else {
+                        Some(rsuffix.to_string())
+                    },
                 ])
             },
             sort,
@@ -7803,8 +8706,9 @@ impl PyDataFrame {
                 options,
             )
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            let df = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-                .map_err(frame_error_to_py)?;
+            let df =
+                DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+                    .map_err(frame_error_to_py)?;
             Ok(PyDataFrame { inner: df })
         } else {
             let make_indexed_df = |df: &DataFrame| -> PyResult<DataFrame> {
@@ -7848,12 +8752,8 @@ impl PyDataFrame {
                 .into_iter()
                 .filter(|c| !c.starts_with("__fp_join_idx__"))
                 .collect();
-            let df = DataFrame::new_with_column_order(
-                merged.index,
-                final_cols,
-                final_order,
-            )
-            .map_err(frame_error_to_py)?;
+            let df = DataFrame::new_with_column_order(merged.index, final_cols, final_order)
+                .map_err(frame_error_to_py)?;
             Ok(PyDataFrame { inner: df })
         }
     }
@@ -7888,7 +8788,10 @@ impl PyDataFrame {
 
     #[pyo3(signature = (level=0))]
     fn droplevel(&self, level: usize) -> PyResult<PyDataFrame> {
-        let df = self.inner.droplevel_level(level).map_err(frame_error_to_py)?;
+        let df = self
+            .inner
+            .droplevel_level(level)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
