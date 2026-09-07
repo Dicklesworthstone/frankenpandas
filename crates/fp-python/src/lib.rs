@@ -280,34 +280,46 @@ pub struct PySeries {
     inner: Series,
 }
 
-fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PyErrorKind {
+    Index,
+    Type,
+    Value,
+}
+
+fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
     use fp_columnar::ColumnError;
     use fp_frame::FrameError;
     use fp_index::IndexError;
 
     match err {
-        FrameError::Index(IndexError::OutOfBounds { position, length }) => {
-            PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                "position {position} out of bounds for length {length}"
-            ))
-        }
-        FrameError::Column(ColumnError::Type(e)) => {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(e.to_string())
-        }
-        FrameError::Column(ColumnError::InvalidMaskType { dtype }) => {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                "mask must be Bool dtype; found {dtype:?}"
-            ))
-        }
-        FrameError::Column(ColumnError::DTypeMismatch { left, right }) => {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                "column dtype mismatch: left={left:?}, right={right:?}"
-            ))
-        }
-        FrameError::CompatibilityRejected(msg) => PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        FrameError::Index(IndexError::OutOfBounds { position, length }) => (
+            PyErrorKind::Index,
+            format!("position {position} out of bounds for length {length}"),
+        ),
+        FrameError::Column(ColumnError::Type(e)) => (PyErrorKind::Type, e.to_string()),
+        FrameError::Column(ColumnError::InvalidMaskType { dtype }) => (
+            PyErrorKind::Type,
+            format!("mask must be Bool dtype; found {dtype:?}"),
+        ),
+        FrameError::Column(ColumnError::DTypeMismatch { left, right }) => (
+            PyErrorKind::Type,
+            format!("column dtype mismatch: left={left:?}, right={right:?}"),
+        ),
+        FrameError::CompatibilityRejected(msg) => (
+            PyErrorKind::Value,
             format!("compatibility gate rejected operation: {msg}"),
         ),
-        other => PyErr::new::<pyo3::exceptions::PyValueError, _>(other.to_string()),
+        other => (PyErrorKind::Value, other.to_string()),
+    }
+}
+
+fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
+    let (kind, msg) = classify_frame_error(&err);
+    match kind {
+        PyErrorKind::Index => PyErr::new::<pyo3::exceptions::PyIndexError, _>(msg),
+        PyErrorKind::Type => PyErr::new::<pyo3::exceptions::PyTypeError, _>(msg),
+        PyErrorKind::Value => PyErr::new::<pyo3::exceptions::PyValueError, _>(msg),
     }
 }
 
@@ -3162,27 +3174,27 @@ mod tests {
         use fp_frame::FrameError;
         use fp_index::IndexError;
 
-        Python::initialize();
-        Python::with_gil(|py| {
-            let out_of_bounds = FrameError::Index(IndexError::OutOfBounds {
-                position: 5,
-                length: 3,
-            });
-            let py_err = frame_error_to_py(out_of_bounds);
-            assert!(py_err.is_instance_of::<pyo3::exceptions::PyIndexError>(py));
-
-            let type_err = FrameError::Column(ColumnError::InvalidMaskType {
-                dtype: fp_types::DType::Int64,
-            });
-            let py_err = frame_error_to_py(type_err);
-            assert!(py_err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
-
-            let len_err = FrameError::LengthMismatch {
-                index_len: 2,
-                column_len: 3,
-            };
-            let py_err = frame_error_to_py(len_err);
-            assert!(py_err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        let out_of_bounds = FrameError::Index(IndexError::OutOfBounds {
+            position: 5,
+            length: 3,
         });
+        let (kind, msg) = classify_frame_error(&out_of_bounds);
+        assert_eq!(kind, PyErrorKind::Index);
+        assert!(msg.contains("out of bounds"));
+
+        let type_err = FrameError::Column(ColumnError::InvalidMaskType {
+            dtype: fp_types::DType::Int64,
+        });
+        let (kind, msg) = classify_frame_error(&type_err);
+        assert_eq!(kind, PyErrorKind::Type);
+        assert!(msg.contains("mask must be Bool dtype"));
+
+        let len_err = FrameError::LengthMismatch {
+            index_len: 2,
+            column_len: 3,
+        };
+        let (kind, msg) = classify_frame_error(&len_err);
+        assert_eq!(kind, PyErrorKind::Value);
+        assert!(msg.contains("index length"));
     }
 }
