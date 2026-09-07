@@ -32101,10 +32101,10 @@ fn resample_build_groups_with_options(
                 ResampleClosed::Left => resample_month_end_key(cursor - bucket_months),
                 ResampleClosed::Right => resample_month_end_key(cursor),
             };
-            if let Some(lk) = lat_key {
-                if let Some(ns) = resample_label_to_ns(&IndexLabel::Utf8(lk.clone())) {
-                    lattice.push((lk, ns));
-                }
+            if let Some(lk) = lat_key
+                && let Some(ns) = resample_label_to_ns(&IndexLabel::Utf8(lk.clone()))
+            {
+                lattice.push((lk, ns));
             }
 
             let Some(next) = cursor.checked_add(bucket_months) else {
@@ -32282,10 +32282,10 @@ fn resample_build_groups_with_options(
                 ResampleClosed::Left => bs,
                 ResampleClosed::Right => be,
             };
-            if let Some(lk) = key_of(lat_ord) {
-                if let Some(ns) = resample_label_to_ns(&IndexLabel::Utf8(lk.clone())) {
-                    lattice.push((lk, ns));
-                }
+            if let Some(lk) = key_of(lat_ord)
+                && let Some(ns) = resample_label_to_ns(&IndexLabel::Utf8(lk.clone()))
+            {
+                lattice.push((lk, ns));
             }
         }
         return ResampleGrouping {
@@ -32490,28 +32490,27 @@ fn validate_resample_options(
     label: Option<&str>,
     origin: Option<&str>,
 ) -> Result<(), FrameError> {
-    if let Some(closed) = closed {
-        if !matches!(closed, "left" | "right") {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "Unsupported value {closed} for `closed`"
-            )));
-        }
+    if let Some(closed) = closed
+        && !matches!(closed, "left" | "right")
+    {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "Unsupported value {closed} for `closed`"
+        )));
     }
-    if let Some(label) = label {
-        if !matches!(label, "left" | "right") {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "Unsupported value {label} for `label`"
-            )));
-        }
+    if let Some(label) = label
+        && !matches!(label, "left" | "right")
+    {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "Unsupported value {label} for `label`"
+        )));
     }
-    if let Some(origin) = origin {
-        if !matches!(origin, "epoch" | "start" | "start_day" | "end" | "end_day")
-            && resample_label_to_ns(&IndexLabel::Utf8(origin.to_string())).is_none()
-        {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "Unsupported value {origin} for `origin`"
-            )));
-        }
+    if let Some(origin) = origin
+        && !matches!(origin, "epoch" | "start" | "start_day" | "end" | "end_day")
+        && resample_label_to_ns(&IndexLabel::Utf8(origin.to_string())).is_none()
+    {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "Unsupported value {origin} for `origin`"
+        )));
     }
     // Per gauntlet CONF-RC2 + bead 2.5: accept integer-multiplied frequency aliases
     // Calendar units: Y, A, M, Q (and multiples like 2M, 2Q, 2Y)

@@ -98,6 +98,181 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
     }
 }
 
+/// Convert a Python value to an IndexLabel.
+fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
+    if let Ok(b) = obj.extract::<bool>() {
+        Ok(IndexLabel::Bool(b))
+    } else if let Ok(i) = obj.extract::<i64>() {
+        Ok(IndexLabel::Int64(i))
+    } else if let Ok(s) = obj.extract::<String>() {
+        Ok(IndexLabel::Utf8(s))
+    } else if let Ok(f) = obj.extract::<f64>() {
+        Ok(IndexLabel::Float64(fp_index::OrderedF64(f)))
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Cannot convert {} to IndexLabel",
+            obj.get_type().name()?
+        )))
+    }
+}
+
+/// Convert an IndexLabel to a Python object.
+fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> {
+    match label {
+        IndexLabel::Int64(i) => i.into_py_any(py),
+        IndexLabel::Utf8(s) => s.into_py_any(py),
+        IndexLabel::Timedelta64(ns) => ns.into_py_any(py),
+        IndexLabel::Datetime64(ns) => ns.into_py_any(py),
+        IndexLabel::Float64(f) => f.0.into_py_any(py),
+        IndexLabel::Bool(b) => b.into_py_any(py),
+        IndexLabel::Null(_) => Ok(py.None()),
+    }
+}
+
+/// Python wrapper for FrankenPandas Index.
+#[pyclass(name = "Index", from_py_object)]
+#[derive(Clone)]
+pub struct PyIndex {
+    pub(crate) inner: Index,
+}
+
+#[pymethods]
+impl PyIndex {
+    #[new]
+    #[pyo3(signature = (data=None, name=None))]
+    fn new(data: Option<&Bound<'_, PyAny>>, name: Option<&str>) -> PyResult<Self> {
+        let mut labels: Vec<IndexLabel> = Vec::new();
+        if let Some(d) = data {
+            if let Ok(idx) = d.extract::<PyRef<'_, PyIndex>>() {
+                let mut inner = idx.inner.clone();
+                if let Some(n) = name {
+                    inner = inner.set_name(n);
+                }
+                return Ok(PyIndex { inner });
+            } else if let Ok(s) = d.extract::<PyRef<'_, PySeries>>() {
+                labels = s.inner.index().labels().to_vec();
+            } else if let Ok(list) = d.extract::<Vec<i64>>() {
+                labels = list.into_iter().map(IndexLabel::Int64).collect();
+            } else if let Ok(list) = d.extract::<Vec<String>>() {
+                labels = list.into_iter().map(IndexLabel::Utf8).collect();
+            } else if let Ok(seq) = d.cast::<pyo3::types::PySequence>() {
+                let len = seq.len()?;
+                labels.reserve(len);
+                for i in 0..len {
+                    let item = seq.get_item(i)?;
+                    labels.push(py_to_index_label(&item)?);
+                }
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Index data must be sequence of labels or Index/Series",
+                ));
+            }
+        }
+        let mut inner = Index::new(labels);
+        if let Some(n) = name {
+            inner = inner.set_name(n);
+        }
+        Ok(PyIndex { inner })
+    }
+
+    #[getter]
+    fn name(&self) -> Option<String> {
+        self.inner.name().map(String::from)
+    }
+
+    #[setter]
+    fn set_name(&mut self, name: Option<&str>) {
+        self.inner = self.inner.set_names(name);
+    }
+
+    fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let items = self
+            .inner
+            .labels()
+            .iter()
+            .map(|l| index_label_to_py(py, l))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, items)?.unbind())
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __repr__(&self) -> String {
+        let labels_str: Vec<String> = self
+            .inner
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Utf8(s) => format!("'{s}'"),
+                other => format!("{other}"),
+            })
+            .collect();
+        let name_str = match self.inner.name() {
+            Some(n) => format!(", name='{n}'"),
+            None => String::new(),
+        };
+        format!("Index([{}]{name_str})", labels_str.join(", "))
+    }
+
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(idx) = key.extract::<i64>() {
+            let pos = if idx < 0 {
+                (self.inner.len() as i64 + idx) as usize
+            } else {
+                idx as usize
+            };
+            if pos >= self.inner.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "index out of bounds",
+                ));
+            }
+            return index_label_to_py(py, &self.inner.labels()[pos]);
+        }
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+            let s_idx = slice.indices(self.inner.len() as isize)?;
+            let mut sliced = Vec::new();
+            let mut i = s_idx.start;
+            if s_idx.step > 0 {
+                while i < s_idx.stop {
+                    sliced.push(self.inner.labels()[i as usize].clone());
+                    i += s_idx.step;
+                }
+            } else if s_idx.step < 0 {
+                while i > s_idx.stop {
+                    sliced.push(self.inner.labels()[i as usize].clone());
+                    i += s_idx.step;
+                }
+            }
+            let mut out = Index::new(sliced);
+            if let Some(n) = self.inner.name() {
+                out = out.set_name(n);
+            }
+            return Ok(Py::new(py, PyIndex { inner: out })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Index indices must be integers or slices",
+        ))
+    }
+
+    fn is_unique(&self) -> bool {
+        self.inner.is_unique()
+    }
+
+    fn equals(&self, other: &PyIndex) -> bool {
+        self.inner == other.inner
+    }
+}
+
 /// Python wrapper for FrankenPandas Series.
 #[pyclass(name = "Series", from_py_object)]
 #[derive(Clone)]
@@ -108,6 +283,12 @@ pub struct PySeries {
 fn wrap_series(result: Result<Series, fp_frame::FrameError>) -> PyResult<PySeries> {
     result
         .map(|inner| PySeries { inner })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+fn wrap_frame(result: Result<DataFrame, fp_frame::FrameError>) -> PyResult<PyDataFrame> {
+    result
+        .map(|inner| PyDataFrame { inner })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
 }
 
@@ -140,7 +321,7 @@ impl PySeries {
     fn new(
         py: Python<'_>,
         data: &Bound<'_, PyList>,
-        index: Option<&Bound<'_, PyList>>,
+        index: Option<&Bound<'_, PyAny>>,
         name: Option<&str>,
     ) -> PyResult<Self> {
         let scalars: Vec<Scalar> = data
@@ -148,24 +329,32 @@ impl PySeries {
             .map(|v| py_to_scalar(py, &v))
             .collect::<PyResult<Vec<_>>>()?;
 
-        let labels: Vec<IndexLabel> = match index {
-            Some(index) => index
-                .iter()
-                .map(|label| {
-                    if let Ok(value) = label.extract::<i64>() {
-                        Ok(IndexLabel::Int64(value))
-                    } else if let Ok(value) = label.extract::<String>() {
-                        Ok(IndexLabel::Utf8(value))
-                    } else {
-                        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                            "Series: index labels must be ints or strings",
-                        ))
-                    }
-                })
-                .collect::<PyResult<Vec<_>>>()?,
-            None => (0..scalars.len())
+        let labels: Vec<IndexLabel> = if let Some(index) = index {
+            if let Ok(py_idx) = index.extract::<PyRef<'_, PyIndex>>() {
+                py_idx.inner.labels().to_vec()
+            } else if let Ok(list) = index.cast::<PyList>() {
+                list.iter()
+                    .map(|label| {
+                        if let Ok(value) = label.extract::<i64>() {
+                            Ok(IndexLabel::Int64(value))
+                        } else if let Ok(value) = label.extract::<String>() {
+                            Ok(IndexLabel::Utf8(value))
+                        } else {
+                            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "Series: index labels must be ints or strings",
+                            ))
+                        }
+                    })
+                    .collect::<PyResult<Vec<_>>>()?
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Series: index must be a list or Index",
+                ));
+            }
+        } else {
+            (0..scalars.len())
                 .map(|i| IndexLabel::Int64(i as i64))
-                .collect(),
+                .collect()
         };
         if labels.len() != scalars.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -187,6 +376,14 @@ impl PySeries {
         self.inner.name()
     }
 
+    /// Return the index of the Series.
+    #[getter]
+    fn index(&self) -> PyIndex {
+        PyIndex {
+            inner: self.inner.index().clone(),
+        }
+    }
+
     /// Return the length of the Series.
     fn __len__(&self) -> usize {
         self.inner.len()
@@ -197,8 +394,85 @@ impl PySeries {
         format!("{}", self.inner)
     }
 
-    /// `s[i]` (position) or `s["label"]` (label), returning a Python scalar.
+    /// Purely integer-location based indexing for selection by position.
+    #[getter]
+    fn iloc(&self) -> PySeriesILoc {
+        PySeriesILoc {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Access a group of rows and columns by label(s) or a boolean array.
+    #[getter]
+    fn loc(&self) -> PySeriesLoc {
+        PySeriesLoc {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Access a single value for a row/column pair by integer position.
+    #[getter]
+    fn iat(&self) -> PySeriesIAt {
+        PySeriesIAt {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Access a single value for a row/column label pair.
+    #[getter]
+    fn at(&self) -> PySeriesAt {
+        PySeriesAt {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// `s[i]` (position), `s["label"]` (label), `s[slice]`, `s[mask]`, or `s[list]`.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+            let idx = slice.indices(self.inner.len() as isize)?;
+            let s = self
+                .inner
+                .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(idx) = key.extract::<PyRef<'_, PyIndex>>() {
+            let labels = idx.inner.labels().to_vec();
+            let s = self
+                .inner
+                .loc(&labels)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
+            let s = self
+                .inner
+                .iloc_bool_series(&series_mask.inner)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(mask) = key.extract::<Vec<bool>>() {
+            let s = self
+                .inner
+                .iloc_bool(&mask)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(positions) = key.extract::<Vec<i64>>() {
+            let s = self
+                .inner
+                .iloc(&positions)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(labels) = key.extract::<Vec<String>>() {
+            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Utf8).collect();
+            let s = self
+                .inner
+                .loc(&idx_labels)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
         let scalar = if let Ok(position) = key.extract::<i64>() {
             self.inner
                 .iat(position)
@@ -209,7 +483,7 @@ impl PySeries {
                 .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(label))?
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Series index must be an int position or a str label",
+                "Series index must be an int, str, slice, list, or boolean Series",
             ));
         };
         scalar_to_py(py, &scalar)
@@ -647,6 +921,140 @@ impl PySeries {
     }
 }
 
+/// Helper indexer classes for PySeries.
+#[pyclass(name = "_SeriesILoc")]
+pub struct PySeriesILoc {
+    inner: Series,
+}
+
+#[pymethods]
+impl PySeriesILoc {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(pos) = key.extract::<i64>() {
+            let scalar = self
+                .inner
+                .iat(pos)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return scalar_to_py(py, &scalar);
+        }
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+            let idx = slice.indices(self.inner.len() as isize)?;
+            let s = self
+                .inner
+                .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
+            let s = self
+                .inner
+                .iloc_bool_series(&series_mask.inner)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(mask) = key.extract::<Vec<bool>>() {
+            let s = self
+                .inner
+                .iloc_bool(&mask)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(positions) = key.extract::<Vec<i64>>() {
+            let s = self
+                .inner
+                .iloc(&positions)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "iloc requires integer, integer slice, list of integers, or boolean mask",
+        ))
+    }
+}
+
+#[pyclass(name = "_SeriesLoc")]
+pub struct PySeriesLoc {
+    inner: Series,
+}
+
+#[pymethods]
+impl PySeriesLoc {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
+            let s = self
+                .inner
+                .loc_bool_series(&series_mask.inner)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(mask) = key.extract::<Vec<bool>>() {
+            let s = self
+                .inner
+                .loc_bool(&mask)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(labels) = key.extract::<Vec<String>>() {
+            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Utf8).collect();
+            let s = self
+                .inner
+                .loc(&idx_labels)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(labels) = key.extract::<Vec<i64>>() {
+            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Int64).collect();
+            let s = self
+                .inner
+                .loc(&idx_labels)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        if let Ok(label) = py_to_index_label(key) {
+            match self.inner.at(&label) {
+                Ok(scalar) => return scalar_to_py(py, &scalar),
+                Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())),
+            }
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "loc requires label, list of labels, or boolean mask",
+        ))
+    }
+}
+
+#[pyclass(name = "_SeriesIAt")]
+pub struct PySeriesIAt {
+    inner: Series,
+}
+
+#[pymethods]
+impl PySeriesIAt {
+    fn __getitem__(&self, py: Python<'_>, key: i64) -> PyResult<Py<PyAny>> {
+        let scalar = self
+            .inner
+            .iat(key)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+        scalar_to_py(py, &scalar)
+    }
+}
+
+#[pyclass(name = "_SeriesAt")]
+pub struct PySeriesAt {
+    inner: Series,
+}
+
+#[pymethods]
+impl PySeriesAt {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let label = py_to_index_label(key)?;
+        let scalar = self
+            .inner
+            .at(&label)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+        scalar_to_py(py, &scalar)
+    }
+}
+
 /// Python wrapper for FrankenPandas DataFrame.
 #[pyclass(name = "DataFrame", from_py_object)]
 #[derive(Clone)]
@@ -670,42 +1078,85 @@ impl PyDataFrame {
 
 #[pymethods]
 impl PyDataFrame {
-    /// Create a new DataFrame from a dictionary of column name -> values.
+    /// Create a new DataFrame from a dictionary of column name -> values, with optional index and columns.
     #[new]
-    #[pyo3(signature = (data))]
-    fn new(py: Python<'_>, data: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let mut columns = BTreeMap::new();
+    #[pyo3(signature = (data=None, index=None, columns=None))]
+    fn new(
+        py: Python<'_>,
+        data: Option<&Bound<'_, PyAny>>,
+        index: Option<&Bound<'_, PyAny>>,
+        columns: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let mut col_map = BTreeMap::new();
         let mut column_order = Vec::new();
         let mut n_rows = 0usize;
 
-        for (key, value) in data.iter() {
-            let col_name: String = key.extract()?;
-            let values: &Bound<'_, PyList> = value.cast()?;
+        if let Some(data) = data
+            && let Ok(dict) = data.cast::<PyDict>()
+        {
+            for (key, value) in dict.iter() {
+                let col_name: String = key.extract()?;
+                let values: &Bound<'_, PyList> = value.cast()?;
 
-            let scalars: Vec<Scalar> = values
-                .iter()
-                .map(|v| py_to_scalar(py, &v))
-                .collect::<PyResult<Vec<_>>>()?;
+                let scalars: Vec<Scalar> = values
+                    .iter()
+                    .map(|v| py_to_scalar(py, &v))
+                    .collect::<PyResult<Vec<_>>>()?;
 
-            if n_rows == 0 {
-                n_rows = scalars.len();
-            } else if scalars.len() != n_rows {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "All columns must have the same length",
-                ));
+                if n_rows == 0 {
+                    n_rows = scalars.len();
+                } else if scalars.len() != n_rows {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "All columns must have the same length",
+                    ));
+                }
+
+                let column = Column::from_values(scalars)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+                column_order.push(col_name.clone());
+                col_map.insert(col_name, column);
             }
-
-            let column = Column::from_values(scalars)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-            column_order.push(col_name.clone());
-            columns.insert(col_name, column);
         }
 
-        let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
-        let index = Index::new(labels);
+        if let Some(explicit_cols) = columns {
+            column_order = explicit_cols;
+        }
 
-        let df = DataFrame::new_with_column_order(index, columns, column_order)
+        let labels: Vec<IndexLabel> = if let Some(index) = index {
+            if let Ok(py_idx) = index.extract::<PyRef<'_, PyIndex>>() {
+                py_idx.inner.labels().to_vec()
+            } else if let Ok(list) = index.cast::<PyList>() {
+                list.iter()
+                    .map(|label| {
+                        if let Ok(value) = label.extract::<i64>() {
+                            Ok(IndexLabel::Int64(value))
+                        } else if let Ok(value) = label.extract::<String>() {
+                            Ok(IndexLabel::Utf8(value))
+                        } else {
+                            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "DataFrame: index labels must be ints or strings",
+                            ))
+                        }
+                    })
+                    .collect::<PyResult<Vec<_>>>()?
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "DataFrame: index must be a list or Index",
+                ));
+            }
+        } else {
+            (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect()
+        };
+
+        if n_rows > 0 && labels.len() != n_rows {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of values ({n_rows}) does not match length of index ({})",
+                labels.len()
+            )));
+        }
+
+        let df = DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         Ok(PyDataFrame { inner: df })
@@ -739,6 +1190,14 @@ impl PyDataFrame {
             .collect()
     }
 
+    /// Return the index of the DataFrame.
+    #[getter]
+    fn index(&self) -> PyIndex {
+        PyIndex {
+            inner: self.inner.index().clone(),
+        }
+    }
+
     /// Return the number of rows.
     fn __len__(&self) -> usize {
         self.inner.len()
@@ -768,6 +1227,38 @@ impl PyDataFrame {
             .tail(n)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PyDataFrame { inner: result })
+    }
+
+    /// Purely integer-location based indexing for selection by position.
+    #[getter]
+    fn iloc(&self) -> PyDataFrameILoc {
+        PyDataFrameILoc {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Access a group of rows and columns by label(s) or a boolean array.
+    #[getter]
+    fn loc(&self) -> PyDataFrameLoc {
+        PyDataFrameLoc {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Access a single value for a row/column pair by integer position.
+    #[getter]
+    fn iat(&self) -> PyDataFrameIAt {
+        PyDataFrameIAt {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Access a single value for a row/column label pair.
+    #[getter]
+    fn at(&self) -> PyDataFrameAt {
+        PyDataFrameAt {
+            inner: self.inner.clone(),
+        }
     }
 
     /// Return a column as a Series. A missing column is a `KeyError`, as in
@@ -800,47 +1291,335 @@ impl PyDataFrame {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
+        // `df[slice]` -> sliced rows
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+            let idx = slice.indices(self.inner.len() as isize)?;
+            let frame = self
+                .inner
+                .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        // `df[mask]` with a boolean list -> filtered rows
+        if let Ok(mask) = key.extract::<Vec<bool>>() {
+            let frame = self
+                .inner
+                .iloc_bool(&mask)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        // `df[index]` with an Index -> select columns
+        if let Ok(idx) = key.extract::<PyRef<'_, PyIndex>>() {
+            let cols: Vec<String> = idx
+                .inner
+                .labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Utf8(s) => s.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            for col in &cols {
+                if self.inner.column(col).is_none() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.clone()));
+                }
+            }
+            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+            let frame = self
+                .inner
+                .select_columns(&refs)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "DataFrame key must be a column name, a list of column names, or a boolean Series",
+            "DataFrame key must be a column name, a list of column names, a slice, an Index, or a boolean Series",
         ))
     }
 
-    /// `df["c"] = series | list | scalar`, as in pandas (adds or replaces).
+    /// `df["c"] = series | list | scalar`, or `df[mask] = scalar`.
     fn __setitem__(
         &mut self,
         py: Python<'_>,
-        name: &str,
+        key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let n = self.inner.len();
-        let values: Vec<Scalar> = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
-            if series.inner.len() != n {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Length of values ({}) does not match length of index ({n})",
-                    series.inner.len()
-                )));
+        if let Ok(name) = key.extract::<String>() {
+            let n = self.inner.len();
+            let values: Vec<Scalar> = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
+                if series.inner.len() != n {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Length of values ({}) does not match length of index ({n})",
+                        series.inner.len()
+                    )));
+                }
+                series.inner.column().values().to_vec()
+            } else if let Ok(list) = value.cast::<PyList>() {
+                let values = list
+                    .iter()
+                    .map(|v| py_to_scalar(py, &v))
+                    .collect::<PyResult<Vec<_>>>()?;
+                if values.len() != n {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Length of values ({}) does not match length of index ({n})",
+                        values.len()
+                    )));
+                }
+                values
+            } else {
+                vec![py_to_scalar(py, value)?; n]
+            };
+            self.inner = self
+                .inner
+                .assign_column(&name, values)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(());
+        }
+        if let Ok(mask) = key.extract::<PyRef<'_, PySeries>>() {
+            let scalar = py_to_scalar(py, value)?;
+            for col in self.columns() {
+                let col_series = self.column_series(&col)?;
+                let mut vals = col_series.inner.column().values().to_vec();
+                for (i, m) in mask.inner.values().iter().enumerate() {
+                    if let Scalar::Bool(true) = m
+                        && i < vals.len()
+                    {
+                        vals[i] = scalar.clone();
+                    }
+                }
+                self.inner = self
+                    .inner
+                    .assign_column(&col, vals)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             }
-            series.inner.column().values().to_vec()
-        } else if let Ok(list) = value.cast::<PyList>() {
-            let values = list
-                .iter()
-                .map(|v| py_to_scalar(py, &v))
-                .collect::<PyResult<Vec<_>>>()?;
-            if values.len() != n {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Length of values ({}) does not match length of index ({n})",
-                    values.len()
-                )));
-            }
-            values
+            return Ok(());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "DataFrame key must be a column name or a boolean Series",
+        ))
+    }
+
+    fn __add__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.add(&other_df.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.add_scalar(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.add_scalar(val as f64))
         } else {
-            vec![py_to_scalar(py, value)?; n]
-        };
-        self.inner = self
-            .inner
-            .assign_column(name, values)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(())
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for +",
+            ))
+        }
+    }
+    fn __radd__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__add__(_py, other)
+    }
+    fn __sub__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.sub(&other_df.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.sub_scalar(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.sub_scalar(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for -",
+            ))
+        }
+    }
+    fn __rsub__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(other_df.inner.sub(&self.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.rsub(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.rsub(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for -",
+            ))
+        }
+    }
+    fn __mul__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.mul(&other_df.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.mul_scalar(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.mul_scalar(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for *",
+            ))
+        }
+    }
+    fn __rmul__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__mul__(_py, other)
+    }
+    fn __truediv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.div(&other_df.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.div_scalar(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.div_scalar(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for /",
+            ))
+        }
+    }
+    fn __rtruediv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(other_df.inner.div(&self.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.rdiv(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.rdiv(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for /",
+            ))
+        }
+    }
+    fn __floordiv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.floordiv(&other_df.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.floordiv(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.floordiv(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for //",
+            ))
+        }
+    }
+    fn __rfloordiv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(other_df.inner.floordiv(&self.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.rfloordiv(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.rfloordiv(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for //",
+            ))
+        }
+    }
+    fn __mod__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.r#mod(&other_df.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.mod_scalar(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.mod_scalar(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for %",
+            ))
+        }
+    }
+    fn __rmod__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(other_df.inner.r#mod(&self.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.rmod(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.rmod(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for %",
+            ))
+        }
+    }
+    fn __pow__(
+        &self,
+        _py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.pow(&other_df.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.pow_scalar(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.pow_scalar(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for **",
+            ))
+        }
+    }
+    fn __rpow__(
+        &self,
+        _py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(other_df.inner.pow(&self.inner))
+        } else if let Ok(val) = other.extract::<f64>() {
+            wrap_frame(self.inner.rpow(val))
+        } else if let Ok(val) = other.extract::<i64>() {
+            wrap_frame(self.inner.rpow(val as f64))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported operand type for **",
+            ))
+        }
+    }
+    fn __neg__(&self) -> PyResult<PyDataFrame> {
+        wrap_frame(self.inner.neg())
+    }
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.eq(&other_df.inner))
+        } else {
+            let scalar = py_to_scalar(py, other)?;
+            wrap_frame(self.inner.eq(scalar))
+        }
+    }
+    fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.ne(&other_df.inner))
+        } else {
+            let scalar = py_to_scalar(py, other)?;
+            wrap_frame(self.inner.ne(scalar))
+        }
+    }
+    fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.lt(&other_df.inner))
+        } else {
+            let scalar = py_to_scalar(py, other)?;
+            wrap_frame(self.inner.lt(scalar))
+        }
+    }
+    fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.le(&other_df.inner))
+        } else {
+            let scalar = py_to_scalar(py, other)?;
+            wrap_frame(self.inner.le(scalar))
+        }
+    }
+    fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.gt(&other_df.inner))
+        } else {
+            let scalar = py_to_scalar(py, other)?;
+            wrap_frame(self.inner.gt(scalar))
+        }
+    }
+    fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            wrap_frame(self.inner.ge(&other_df.inner))
+        } else {
+            let scalar = py_to_scalar(py, other)?;
+            wrap_frame(self.inner.ge(scalar))
+        }
     }
 
     /// `"a" in df` checks the column labels, as in pandas.
@@ -1224,6 +2003,434 @@ impl PyDataFrame {
     }
 }
 
+/// Helper indexer classes for PyDataFrame.
+#[pyclass(name = "_DataFrameILoc")]
+pub struct PyDataFrameILoc {
+    inner: DataFrame,
+}
+
+#[pymethods]
+impl PyDataFrameILoc {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // Case 1: Tuple (row_indexer, col_indexer)
+        if let Ok(tuple) = key.cast::<pyo3::types::PyTuple>() {
+            if tuple.len() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "Too many indexers; DataFrame iloc takes at most 2",
+                ));
+            }
+            let row_key = tuple.get_item(0)?;
+            let col_key = tuple.get_item(1)?;
+
+            // Both are integers: df.iloc[r, c] -> scalar
+            if let (Ok(r), Ok(c)) = (row_key.extract::<i64>(), col_key.extract::<i64>()) {
+                let scalar = self
+                    .inner
+                    .iat(r, c)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+                return scalar_to_py(py, &scalar);
+            }
+
+            // Row is integer, col is slice or list: df.iloc[r, :] or df.iloc[r, [0, 1]]
+            if let Ok(r) = row_key.extract::<i64>() {
+                let row_series = self
+                    .inner
+                    .iloc_row(r)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+                if let Ok(col_slice) = col_key.cast::<pyo3::types::PySlice>() {
+                    let c_idx = col_slice.indices(self.inner.num_columns() as isize)?;
+                    let sub = row_series
+                        .iloc_slice(Some(c_idx.start as i64), Some(c_idx.stop as i64))
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                } else if let Ok(col_positions) = col_key.extract::<Vec<i64>>() {
+                    let sub = row_series.iloc(&col_positions).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
+                    })?;
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                }
+            }
+
+            // Col is integer, row is slice / list / mask: df.iloc[:, c] -> Series
+            if let Ok(c) = col_key.extract::<i64>() {
+                let width = self.inner.num_columns() as i64;
+                let c_norm = if c < 0 { width + c } else { c };
+                if c_norm < 0 || c_norm >= width {
+                    return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                        "column index out of bounds",
+                    ));
+                }
+                let col_name = self.inner.column_name_at(c_norm as usize).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>("column index out of bounds")
+                })?;
+                let col = self.inner.column(&col_name).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(col_name.clone())
+                })?;
+                let col_series = Series::new(&col_name, self.inner.index().clone(), col.clone())
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+                if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
+                    let r_idx = row_slice.indices(self.inner.len() as isize)?;
+                    let sub = col_series
+                        .iloc_slice(Some(r_idx.start as i64), Some(r_idx.stop as i64))
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                } else if let Ok(row_positions) = row_key.extract::<Vec<i64>>() {
+                    let sub = col_series.iloc(&row_positions).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
+                    })?;
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                } else if let Ok(mask) = row_key.extract::<Vec<bool>>() {
+                    let sub = col_series.iloc_bool(&mask).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
+                    })?;
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                } else if let Ok(series_mask) = row_key.extract::<PyRef<'_, PySeries>>() {
+                    let sub = col_series
+                        .iloc_bool_series(&series_mask.inner)
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
+                        })?;
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                }
+            }
+
+            // Both row and col are slices or lists: df.iloc[:, :] -> DataFrame
+            let col_names: Vec<String> =
+                if let Ok(col_slice) = col_key.cast::<pyo3::types::PySlice>() {
+                    let c_idx = col_slice.indices(self.inner.num_columns() as isize)?;
+                    let mut cols = Vec::new();
+                    let mut i = c_idx.start;
+                    if c_idx.step > 0 {
+                        while i < c_idx.stop {
+                            if let Some(name) = self.inner.column_name_at(i as usize) {
+                                cols.push(name);
+                            }
+                            i += c_idx.step;
+                        }
+                    }
+                    cols
+                } else if let Ok(col_positions) = col_key.extract::<Vec<i64>>() {
+                    let width = self.inner.num_columns() as i64;
+                    let mut cols = Vec::new();
+                    for pos in col_positions {
+                        let norm = if pos < 0 { width + pos } else { pos };
+                        if norm < 0 || norm >= width {
+                            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                                "column index out of bounds",
+                            ));
+                        }
+                        if let Some(name) = self.inner.column_name_at(norm as usize) {
+                            cols.push(name);
+                        }
+                    }
+                    cols
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Invalid column indexer for iloc",
+                    ));
+                };
+
+            let row_positions: Vec<i64> =
+                if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
+                    let r_idx = row_slice.indices(self.inner.len() as isize)?;
+                    let mut rows = Vec::new();
+                    let mut i = r_idx.start;
+                    if r_idx.step > 0 {
+                        while i < r_idx.stop {
+                            rows.push(i as i64);
+                            i += r_idx.step;
+                        }
+                    }
+                    rows
+                } else if let Ok(rows) = row_key.extract::<Vec<i64>>() {
+                    rows
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Invalid row indexer for iloc",
+                    ));
+                };
+
+            let res = self
+                .inner
+                .iloc_with_columns(&row_positions, Some(&col_names))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+
+        // Case 2: Single indexer (rows)
+        if let Ok(pos) = key.extract::<i64>() {
+            let row = self
+                .inner
+                .iloc_row(pos)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: row })?.into_any());
+        }
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+            let idx = slice.indices(self.inner.len() as isize)?;
+            let frame = self
+                .inner
+                .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        if let Ok(positions) = key.extract::<Vec<i64>>() {
+            let frame = self
+                .inner
+                .iloc(&positions)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        if let Ok(mask) = key.extract::<Vec<bool>>() {
+            let frame = self
+                .inner
+                .iloc_bool(&mask)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
+            let frame = self
+                .inner
+                .iloc_bool_series(&series_mask.inner)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "iloc indexer must be integer, slice, list of integers, or boolean mask",
+        ))
+    }
+}
+
+#[pyclass(name = "_DataFrameLoc")]
+pub struct PyDataFrameLoc {
+    inner: DataFrame,
+}
+
+#[pymethods]
+impl PyDataFrameLoc {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // Case 1: Tuple (row_indexer, col_indexer)
+        if let Ok(tuple) = key.cast::<pyo3::types::PyTuple>() {
+            if tuple.len() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "Too many indexers; DataFrame loc takes at most 2",
+                ));
+            }
+            let row_key = tuple.get_item(0)?;
+            let col_key = tuple.get_item(1)?;
+
+            // Row is single label, col is single str: df.loc['r', 'c'] -> scalar
+            if let Ok(col_name) = col_key.extract::<String>() {
+                if let Ok(label) = py_to_index_label(&row_key)
+                    && let Ok(scalar) = self.inner.at(&label, &col_name)
+                {
+                    return scalar_to_py(py, &scalar);
+                }
+                // Col is single str, row is list or slice or mask: df.loc[:, 'c'] -> Series
+                let col = self.inner.column(&col_name).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(col_name.clone())
+                })?;
+                let col_series = Series::new(&col_name, self.inner.index().clone(), col.clone())
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+                if let Ok(labels) = row_key.extract::<Vec<String>>() {
+                    let idx_labels: Vec<IndexLabel> =
+                        labels.into_iter().map(IndexLabel::Utf8).collect();
+                    let s = col_series.loc(&idx_labels).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
+                    })?;
+                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+                } else if let Ok(labels) = row_key.extract::<Vec<i64>>() {
+                    let idx_labels: Vec<IndexLabel> =
+                        labels.into_iter().map(IndexLabel::Int64).collect();
+                    let s = col_series.loc(&idx_labels).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
+                    })?;
+                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+                } else if let Ok(slice) = row_key.cast::<pyo3::types::PySlice>() {
+                    let idx = slice.indices(self.inner.len() as isize)?;
+                    let s = col_series
+                        .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+                } else if let Ok(mask) = row_key.extract::<Vec<bool>>() {
+                    let s = col_series.iloc_bool(&mask).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+                } else if let Ok(series_mask) = row_key.extract::<PyRef<'_, PySeries>>() {
+                    let s = col_series
+                        .iloc_bool_series(&series_mask.inner)
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+                }
+            }
+
+            // Col is list of str: df.loc[..., ['c1', 'c2']]
+            if let Ok(col_names) = col_key.extract::<Vec<String>>() {
+                if let Ok(label) = py_to_index_label(&row_key) {
+                    let row_series = self.inner.loc_row(&label).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
+                    })?;
+                    let col_labels: Vec<IndexLabel> =
+                        col_names.into_iter().map(IndexLabel::Utf8).collect();
+                    let sub = row_series.loc(&col_labels).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
+                    })?;
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                }
+                if let Ok(labels) = row_key.extract::<Vec<String>>() {
+                    let idx_labels: Vec<IndexLabel> =
+                        labels.into_iter().map(IndexLabel::Utf8).collect();
+                    let res = self
+                        .inner
+                        .loc_with_columns(&idx_labels, Some(&col_names))
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
+                        })?;
+                    return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+                }
+                if let Ok(labels) = row_key.extract::<Vec<i64>>() {
+                    let idx_labels: Vec<IndexLabel> =
+                        labels.into_iter().map(IndexLabel::Int64).collect();
+                    let res = self
+                        .inner
+                        .loc_with_columns(&idx_labels, Some(&col_names))
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
+                        })?;
+                    return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+                }
+                if let Ok(slice) = row_key.cast::<pyo3::types::PySlice>() {
+                    let idx = slice.indices(self.inner.len() as isize)?;
+                    let sliced = self
+                        .inner
+                        .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                    let res = sliced
+                        .select_columns(&col_names.iter().map(String::as_str).collect::<Vec<_>>())
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                    return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+                }
+            }
+
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unsupported indexer combination for loc",
+            ));
+        }
+
+        // Case 2: Single indexer
+        if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
+            let frame = self
+                .inner
+                .loc_bool_series(&series_mask.inner)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        if let Ok(mask) = key.extract::<Vec<bool>>() {
+            let frame = self
+                .inner
+                .loc_bool(&mask)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        if let Ok(labels) = key.extract::<Vec<String>>() {
+            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Utf8).collect();
+            let frame = self
+                .inner
+                .loc(&idx_labels)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        if let Ok(labels) = key.extract::<Vec<i64>>() {
+            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Int64).collect();
+            let frame = self
+                .inner
+                .loc(&idx_labels)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        if let Ok(label) = py_to_index_label(key) {
+            let row = self
+                .inner
+                .loc_row(&label)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            return Ok(Py::new(py, PySeries { inner: row })?.into_any());
+        }
+
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "loc indexer must be label, list of labels, or boolean mask",
+        ))
+    }
+}
+
+#[pyclass(name = "_DataFrameIAt")]
+pub struct PyDataFrameIAt {
+    inner: DataFrame,
+}
+
+#[pymethods]
+impl PyDataFrameIAt {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let tuple = key.cast::<pyo3::types::PyTuple>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("iat requires (row, col) tuple")
+        })?;
+        if tuple.len() != 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "iat requires exactly 2 integer positions: (row, column)",
+            ));
+        }
+        let r = tuple.get_item(0)?.extract::<i64>()?;
+        let c = tuple.get_item(1)?.extract::<i64>()?;
+        let scalar = self
+            .inner
+            .iat(r, c)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+        scalar_to_py(py, &scalar)
+    }
+}
+
+#[pyclass(name = "_DataFrameAt")]
+pub struct PyDataFrameAt {
+    inner: DataFrame,
+}
+
+#[pymethods]
+impl PyDataFrameAt {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let tuple = key.cast::<pyo3::types::PyTuple>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("at requires (row, col) tuple")
+        })?;
+        if tuple.len() != 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "at requires exactly 2 keys: (row, column)",
+            ));
+        }
+        let row_key = tuple.get_item(0)?;
+        let col_key = tuple.get_item(1)?;
+        let col_name = col_key.extract::<String>()?;
+        let label = py_to_index_label(&row_key)?;
+        let scalar = self
+            .inner
+            .at(&label, &col_name)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+        scalar_to_py(py, &scalar)
+    }
+}
+
 /// Recorded Styler directive, replayed onto a fresh `StyledDataFrame` at
 /// render time (the Rust Styler borrows its DataFrame, so the Python wrapper
 /// owns a clone and replays the chain instead of holding the borrow).
@@ -1520,6 +2727,149 @@ fn read_parquet(path: &str) -> PyResult<PyDataFrame> {
     Ok(PyDataFrame { inner: df })
 }
 
+/// Merge two DataFrames (pandas `merge`).
+#[pyfunction]
+#[pyo3(signature = (left, right, on=None, how="inner", left_on=None, right_on=None))]
+fn merge(
+    left: &PyDataFrame,
+    right: &PyDataFrame,
+    on: Option<&Bound<'_, PyAny>>,
+    how: &str,
+    left_on: Option<&Bound<'_, PyAny>>,
+    right_on: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyDataFrame> {
+    if let Some(on_val) = on {
+        left.merge(right, on_val, how)
+    } else if let (Some(l_on), Some(r_on)) = (left_on, right_on) {
+        let l_cols: Vec<String> = if let Ok(s) = l_on.extract::<String>() {
+            vec![s]
+        } else {
+            l_on.extract::<Vec<String>>()?
+        };
+        let r_cols: Vec<String> = if let Ok(s) = r_on.extract::<String>() {
+            vec![s]
+        } else {
+            r_on.extract::<Vec<String>>()?
+        };
+        let join_type = match how {
+            "inner" => fp_join::JoinType::Inner,
+            "left" => fp_join::JoinType::Left,
+            "right" => fp_join::JoinType::Right,
+            "outer" => fp_join::JoinType::Outer,
+            "cross" => fp_join::JoinType::Cross,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "unknown how={other:?}; expected inner/left/right/outer/cross"
+                )));
+            }
+        };
+        let l_refs: Vec<&str> = l_cols.iter().map(String::as_str).collect();
+        let r_refs: Vec<&str> = r_cols.iter().map(String::as_str).collect();
+        let merged = fp_join::merge_dataframes_on_with(
+            &left.inner,
+            &right.inner,
+            &l_refs,
+            &r_refs,
+            join_type,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let frame =
+            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: frame })
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "merge requires `on` or both `left_on` and `right_on`",
+        ))
+    }
+}
+
+/// Convert argument to numeric type (pandas `to_numeric`).
+#[pyfunction]
+#[pyo3(signature = (arg, errors="raise"))]
+fn to_numeric(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> PyResult<Py<PyAny>> {
+    let err_policy = match errors {
+        "raise" => fp_frame::ToNumericErrors::Raise,
+        "coerce" => fp_frame::ToNumericErrors::Coerce,
+        "ignore" => fp_frame::ToNumericErrors::Ignore,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid error value {other:?}; must be one of 'raise', 'coerce', 'ignore'"
+            )));
+        }
+    };
+    let opts = fp_frame::ToNumericOptions { errors: err_policy };
+
+    if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
+        let res = fp_frame::to_numeric_with_options(&s.inner, opts)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+    }
+    if let Ok(list) = arg.cast::<PyList>() {
+        let values: Vec<Scalar> = list
+            .iter()
+            .map(|v| py_to_scalar(py, &v))
+            .collect::<PyResult<Vec<_>>>()?;
+        let temp_series = Series::from_values(
+            "",
+            (0..values.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect(),
+            values,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let res = fp_frame::to_numeric_with_options(&temp_series, opts)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        "arg must be a Series or list",
+    ))
+}
+
+/// Convert argument to datetime (pandas `to_datetime`).
+#[pyfunction]
+#[pyo3(signature = (arg, format=None, unit=None, utc=false))]
+fn to_datetime(
+    py: Python<'_>,
+    arg: &Bound<'_, PyAny>,
+    format: Option<&str>,
+    unit: Option<&str>,
+    utc: bool,
+) -> PyResult<Py<PyAny>> {
+    let opts = fp_frame::ToDatetimeOptions {
+        format,
+        unit,
+        utc,
+        ..Default::default()
+    };
+    if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
+        let res = fp_frame::to_datetime_with_options(&s.inner, opts)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+    }
+    if let Ok(list) = arg.cast::<PyList>() {
+        let values: Vec<Scalar> = list
+            .iter()
+            .map(|v| py_to_scalar(py, &v))
+            .collect::<PyResult<Vec<_>>>()?;
+        let temp_series = Series::from_values(
+            "",
+            (0..values.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect(),
+            values,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let res = fp_frame::to_datetime_with_options(&temp_series, opts)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        "arg must be a Series or list",
+    ))
+}
+
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1527,21 +2877,35 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyGroupBy>()?;
     m.add_class::<PyStyler>()?;
+    m.add_class::<PyIndex>()?;
+    m.add_class::<PySeriesILoc>()?;
+    m.add_class::<PySeriesLoc>()?;
+    m.add_class::<PySeriesIAt>()?;
+    m.add_class::<PySeriesAt>()?;
+    m.add_class::<PyDataFrameILoc>()?;
+    m.add_class::<PyDataFrameLoc>()?;
+    m.add_class::<PyDataFrameIAt>()?;
+    m.add_class::<PyDataFrameAt>()?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(read_json, m)?)?;
     m.add_function(wrap_pyfunction!(read_jsonl, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(concat, m)?)?;
+    m.add_function(wrap_pyfunction!(merge, m)?)?;
+    m.add_function(wrap_pyfunction!(to_numeric, m)?)?;
+    m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
     Ok(())
 }
 
-#[cfg(all(test, feature = "lazy-transpose-view"))]
+#[cfg(test)]
 mod tests {
-    use fp_frame::DataFrame;
+    use fp_frame::{DataFrame, Series};
+    use fp_index::IndexLabel;
     use fp_types::Scalar;
 
-    use super::PyDataFrame;
+    use super::*;
 
+    #[cfg(feature = "lazy-transpose-view")]
     #[test]
     fn dataframe_observers_preserve_lazy_transpose_storage() {
         let source = DataFrame::from_dict(
@@ -1573,5 +2937,191 @@ mod tests {
             &[Scalar::Int64(20), Scalar::Int64(50)]
         );
         assert!(dataframe.inner.is_lazy_transpose_storage());
+    }
+
+    #[test]
+    fn test_py_index() {
+        let labels = vec![
+            IndexLabel::Int64(10),
+            IndexLabel::Int64(20),
+            IndexLabel::Int64(30),
+        ];
+        let mut idx = PyIndex {
+            inner: Index::new(labels).set_name("my_idx"),
+        };
+        assert_eq!(idx.len(), 3);
+        assert_eq!(idx.name(), Some("my_idx".to_string()));
+        assert!(idx.is_unique());
+        assert_eq!(idx.__repr__(), "Index([10, 20, 30], name='my_idx')");
+
+        idx.set_name(Some("renamed"));
+        assert_eq!(idx.name(), Some("renamed".to_string()));
+
+        let other = PyIndex {
+            inner: Index::new(vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(30),
+            ])
+            .set_name("renamed"),
+        };
+        assert!(idx.equals(&other));
+
+        let non_matching = PyIndex {
+            inner: Index::new(vec![
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]),
+        };
+        assert!(!idx.equals(&non_matching));
+    }
+
+    #[test]
+    fn test_py_series_and_indexers() {
+        let labels = vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+        ];
+        let values = vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)];
+        let series = Series::from_values("test_s", labels.clone(), values).expect("valid series"); // ubs:ignore — test fixture
+        let py_s = PySeries { inner: series };
+
+        // Index getter
+        let idx = py_s.index();
+        assert_eq!(idx.len(), 3);
+        assert_eq!(idx.inner.labels(), &labels);
+
+        // iloc proxy
+        let iloc = py_s.iloc();
+        assert_eq!(iloc.inner.len(), 3);
+        assert_eq!(iloc.inner.iat(0).expect("iat 0"), Scalar::Int64(100)); // ubs:ignore — test fixture
+
+        // loc proxy
+        let loc = py_s.loc();
+        assert_eq!(loc.inner.len(), 3);
+        let loc_val = loc
+            .inner
+            .loc(&[IndexLabel::Utf8("b".into())])
+            .expect("loc b"); // ubs:ignore — test fixture
+        assert_eq!(loc_val.values(), &[Scalar::Int64(200)]);
+
+        // iat proxy
+        let iat = py_s.iat();
+        assert_eq!(iat.inner.len(), 3);
+
+        // at proxy
+        let at = py_s.at();
+        assert_eq!(at.inner.len(), 3);
+    }
+
+    #[test]
+    fn test_py_dataframe_indexers_and_dunders() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                (
+                    "x",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+                (
+                    "y",
+                    vec![Scalar::Int64(40), Scalar::Int64(50), Scalar::Int64(60)],
+                ),
+            ],
+        )
+        .expect("dataframe"); // ubs:ignore — test fixture
+        let py_df = PyDataFrame { inner: df };
+
+        // Shape and index
+        assert_eq!(py_df.shape(), (3, 2));
+        let idx = py_df.index();
+        assert_eq!(idx.len(), 3);
+
+        // Arithmetic: __neg__
+        let neg = py_df.__neg__().expect("negate"); // ubs:ignore — test fixture
+        let col_x = neg.column_series("x").expect("col x"); // ubs:ignore — test fixture
+        assert_eq!(
+            col_x.inner.values(),
+            &[Scalar::Int64(-10), Scalar::Int64(-20), Scalar::Int64(-30)]
+        );
+
+        // iloc proxy
+        let iloc = py_df.iloc();
+        assert_eq!(iloc.inner.shape(), (3, 2));
+        let row0 = iloc.inner.iloc_row(0).expect("row 0"); // ubs:ignore — test fixture
+        assert_eq!(row0.len(), 2);
+
+        // loc proxy
+        let loc = py_df.loc();
+        assert_eq!(loc.inner.shape(), (3, 2));
+
+        // iat proxy
+        let iat = py_df.iat();
+        assert_eq!(iat.inner.shape(), (3, 2));
+
+        // at proxy
+        let at = py_df.at();
+        assert_eq!(at.inner.shape(), (3, 2));
+    }
+
+    #[test]
+    fn test_py_merge_to_numeric_to_datetime_backends() {
+        // Test merge logic via inner DataFrame
+        let df1 = DataFrame::from_dict(
+            &["id", "v1"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("v1", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .expect("df1"); // ubs:ignore — test fixture
+        let df2 = DataFrame::from_dict(
+            &["id", "v2"],
+            vec![
+                ("id", vec![Scalar::Int64(2), Scalar::Int64(3)]),
+                ("v2", vec![Scalar::Int64(200), Scalar::Int64(300)]),
+            ],
+        )
+        .expect("df2"); // ubs:ignore — test fixture
+
+        let merged = fp_join::merge_dataframes_on_with(
+            &df1,
+            &df2,
+            &["id"],
+            &["id"],
+            fp_join::JoinType::Inner,
+        )
+        .expect("merge"); // ubs:ignore — test fixture
+        assert_eq!(merged.index.len(), 1);
+
+        // Test to_numeric logic on Series
+        let s_text = Series::from_values(
+            "nums",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Utf8("123".into()), Scalar::Utf8("456".into())],
+        )
+        .expect("s_text"); // ubs:ignore — test fixture
+        let s_num = fp_frame::to_numeric_with_options(
+            &s_text,
+            fp_frame::ToNumericOptions {
+                errors: fp_frame::ToNumericErrors::Raise,
+            },
+        )
+        .expect("to_numeric"); // ubs:ignore — test fixture
+        assert_eq!(s_num.values(), &[Scalar::Int64(123), Scalar::Int64(456)]);
+
+        // Test to_datetime logic on Series
+        let s_dates = Series::from_values(
+            "dates",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8("2023-01-01".into())],
+        )
+        .expect("s_dates"); // ubs:ignore — test fixture
+        let s_dt =
+            fp_frame::to_datetime_with_options(&s_dates, fp_frame::ToDatetimeOptions::default())
+                .expect("to_datetime"); // ubs:ignore — test fixture
+        assert_eq!(s_dt.len(), 1);
     }
 }

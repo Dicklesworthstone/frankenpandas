@@ -13,7 +13,7 @@ categories.workspace = true
 
 [lib]
 name = "frankenpandas"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 # The Python extension module must be named `frankenpandas`, which collides
 # with the frankenpandas crate's lib in `cargo doc --workspace` output paths.
 # The cdylib carries no public Rust API worth documenting, so skip rustdoc.
