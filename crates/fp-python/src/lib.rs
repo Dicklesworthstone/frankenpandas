@@ -2107,6 +2107,541 @@ impl PyDatetimeIndex {
         let _ = value;
         self.clone()
     }
+
+    fn as_py_index(&self) -> PyIndex {
+        PyIndex {
+            inner: self.inner.as_index().clone(),
+        }
+    }
+
+    fn all(&self) -> bool {
+        self.as_py_index().all()
+    }
+
+    fn any(&self) -> bool {
+        self.as_py_index().any()
+    }
+
+    fn append(&self, others: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
+        let mut combined = self.inner.asi8();
+        for other in others {
+            if let Ok(dti) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
+                combined.extend(dti.inner.asi8());
+            } else if let Ok(list) = other.extract::<Vec<i64>>() {
+                combined.extend(list);
+            }
+        }
+        let mut out = DatetimeIndex::new(combined);
+        if let Some(n) = self.inner.name() {
+            out = out.set_name(n);
+        }
+        Ok(Self { inner: out })
+    }
+
+    fn argmax(&self) -> PyResult<usize> {
+        self.as_py_index().argmax()
+    }
+
+    fn argmin(&self) -> PyResult<usize> {
+        self.as_py_index().argmin()
+    }
+
+    fn argsort(&self) -> Vec<usize> {
+        self.as_py_index().argsort()
+    }
+
+    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        self.as_py_index().array(py)
+    }
+
+    fn as_unit(&self, unit: &str) -> Self {
+        let _ = unit;
+        self.clone()
+    }
+
+    fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().asof(py, label)
+    }
+
+    #[pyo3(signature = (where_, mask=None))]
+    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+        self.as_py_index().asof_locs(where_, mask)
+    }
+
+    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
+        self.as_py_index().astype(dtype)
+    }
+
+    fn date(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let dt_mod = py.import("datetime")?;
+        let date_cls = dt_mod.getattr("date")?;
+        let mut out = Vec::with_capacity(self.inner.len());
+        let years = self.inner.year();
+        let months = self.inner.month();
+        let days = self.inner.day();
+        for i in 0..self.inner.len() {
+            if let (Some(y), Some(m), Some(d)) = (years[i], months[i], days[i]) {
+                let py_d = date_cls.call1((y, m, d))?;
+                out.push(py_d.into_any().unbind());
+            } else {
+                out.push(py.None());
+            }
+        }
+        Ok(PyList::new(py, out)?.unbind())
+    }
+
+    #[getter]
+    fn day_of_week(&self) -> Vec<Option<u32>> {
+        self.inner.day_of_week()
+    }
+
+    #[getter]
+    fn day_of_year(&self) -> Vec<Option<u32>> {
+        self.inner.day_of_year()
+    }
+
+    #[getter]
+    fn dayofyear(&self) -> Vec<Option<u32>> {
+        self.inner.dayofyear()
+    }
+
+    #[getter]
+    fn daysinmonth(&self) -> Vec<Option<u32>> {
+        self.inner.daysinmonth()
+    }
+
+    fn delete(&self, loc: usize) -> PyResult<Self> {
+        let new_idx = self.as_py_index().delete(loc)?;
+        let mut vals = Vec::with_capacity(new_idx.inner.len());
+        for l in new_idx.inner.labels() {
+            match l {
+                IndexLabel::Datetime64(ns) => vals.push(*ns),
+                _ => vals.push(i64::MIN),
+            }
+        }
+        let mut out = DatetimeIndex::new(vals);
+        if let Some(n) = new_idx.inner.name() {
+            out = out.set_name(n);
+        }
+        Ok(Self { inner: out })
+    }
+
+    #[pyo3(signature = (sort=false, use_na_sentinel=true))]
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+        self.as_py_index().factorize(sort, use_na_sentinel)
+    }
+
+    fn format(&self) -> Vec<String> {
+        self.as_py_index().format()
+    }
+
+    #[getter]
+    fn freq(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn freqstr(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn inferred_freq(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn unit(&self) -> &'static str {
+        "ns"
+    }
+
+    #[getter]
+    fn resolution(&self) -> &'static str {
+        "nano"
+    }
+
+    fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+        self.as_py_index().get_indexer_for(target)
+    }
+
+    fn get_indexer_non_unique(
+        &self,
+        target: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<isize>, Vec<usize>)> {
+        self.as_py_index().get_indexer_non_unique(target)
+    }
+
+    fn get_slice_bound(&self, label: &Bound<'_, PyAny>, side: &str) -> PyResult<usize> {
+        self.as_py_index().get_slice_bound(label, side)
+    }
+
+    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
+        self.as_py_index().groupby(py, by)
+    }
+
+    fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(dti) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            self.inner.equals(&dti.inner) && self.inner.name() == dti.inner.name()
+        } else {
+            false
+        }
+    }
+
+    fn indexer_at_time(&self, time: &str) -> PyResult<Vec<usize>> {
+        self.inner.indexer_at_time(time).map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (start_time, end_time, include_start=true, include_end=true))]
+    fn indexer_between_time(
+        &self,
+        start_time: &str,
+        end_time: &str,
+        include_start: bool,
+        include_end: bool,
+    ) -> PyResult<Vec<usize>> {
+        self.inner
+            .indexer_between_time(start_time, end_time, include_start, include_end)
+            .map_err(index_error_to_py)
+    }
+
+    fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
+    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().insert(loc, item)
+    }
+
+    fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(dti) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            self.inner.equals(&dti.inner) && self.inner.name() == dti.inner.name()
+        } else {
+            false
+        }
+    }
+
+    #[getter]
+    fn is_month_end(&self) -> Vec<Option<bool>> {
+        self.inner.is_month_end()
+    }
+
+    #[getter]
+    fn is_month_start(&self) -> Vec<Option<bool>> {
+        self.inner.is_month_start()
+    }
+
+    #[getter]
+    fn is_normalized(&self) -> bool {
+        self.inner.is_normalized()
+    }
+
+    #[getter]
+    fn is_quarter_end(&self) -> Vec<Option<bool>> {
+        self.inner.is_quarter_end()
+    }
+
+    #[getter]
+    fn is_quarter_start(&self) -> Vec<Option<bool>> {
+        self.inner.is_quarter_start()
+    }
+
+    #[getter]
+    fn is_year_end(&self) -> Vec<Option<bool>> {
+        self.inner.is_year_end()
+    }
+
+    #[getter]
+    fn is_year_start(&self) -> Vec<Option<bool>> {
+        self.inner.is_year_start()
+    }
+
+    fn isocalendar(&self) -> PyResult<PyDataFrame> {
+        let cal = self.inner.isocalendar();
+        let mut years = Vec::with_capacity(cal.len());
+        let mut weeks = Vec::with_capacity(cal.len());
+        let mut days = Vec::with_capacity(cal.len());
+        for item in cal {
+            match item {
+                Some((y, w, d)) => {
+                    years.push(Scalar::Int64(y as i64));
+                    weeks.push(Scalar::Int64(w as i64));
+                    days.push(Scalar::Int64(d as i64));
+                }
+                None => {
+                    years.push(Scalar::Null(NullKind::NaN));
+                    weeks.push(Scalar::Null(NullKind::NaN));
+                    days.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+        }
+        let cols = vec![("year", years), ("week", weeks), ("day", days)];
+        let df = DataFrame::from_dict(&["year", "week", "day"], cols).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: df })
+    }
+
+    fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().item(py)
+    }
+
+    #[pyo3(signature = (other, how="left", level=None, return_indexers=false, sort=false))]
+    fn join(
+        &self,
+        other: &Bound<'_, PyAny>,
+        how: &str,
+        level: Option<usize>,
+        return_indexers: bool,
+        sort: bool,
+    ) -> PyResult<PyIndex> {
+        self.as_py_index()
+            .join(other, how, level, return_indexers, sort)
+    }
+
+    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().map(py, mapper)
+    }
+
+    fn normalize(&self) -> Self {
+        Self {
+            inner: self.inner.normalize(),
+        }
+    }
+
+    fn putmask(&self, mask: Vec<bool>, value: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().putmask(mask, value)
+    }
+
+    #[getter]
+    fn quarter(&self) -> Vec<Option<u32>> {
+        self.inner.quarter()
+    }
+
+    fn ravel(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (target, method=None, level=None, limit=None, tolerance=None))]
+    fn reindex(
+        &self,
+        target: &Bound<'_, PyAny>,
+        method: Option<&str>,
+        level: Option<usize>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(PyIndex, Vec<i64>)> {
+        self.as_py_index()
+            .reindex(target, method, level, limit, tolerance)
+    }
+
+    fn repeat(&self, repeats: usize) -> Self {
+        let mut out = Vec::with_capacity(self.inner.len() * repeats);
+        for &v in &self.inner.asi8() {
+            for _ in 0..repeats {
+                out.push(v);
+            }
+        }
+        let mut res = DatetimeIndex::new(out);
+        if let Some(n) = self.inner.name() {
+            res = res.set_name(n);
+        }
+        Self { inner: res }
+    }
+
+    #[pyo3(signature = (value, side="left", sorter=None))]
+    fn searchsorted(
+        &self,
+        value: &Bound<'_, PyAny>,
+        side: &str,
+        sorter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<usize> {
+        self.as_py_index().searchsorted(value, side, sorter)
+    }
+
+    fn set_names(&self, names: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let name = if let Ok(s) = names.extract::<String>() {
+            Some(s)
+        } else if let Ok(list) = names.extract::<Vec<Option<String>>>() {
+            list.into_iter().next().flatten()
+        } else {
+            None
+        };
+        let mut res = self.inner.clone();
+        if let Some(n) = name {
+            res = res.set_name(&n);
+        }
+        Ok(Self { inner: res })
+    }
+
+    fn snap(&self, freq: Option<&str>) -> Self {
+        let _ = freq;
+        self.clone()
+    }
+
+    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    fn sortlevel(
+        &self,
+        level: Option<usize>,
+        ascending: bool,
+        sort_remaining: Option<bool>,
+    ) -> PyResult<(Self, Vec<usize>)> {
+        let _ = (level, ascending, sort_remaining);
+        Ok((self.clone(), (0..self.inner.len()).collect()))
+    }
+
+    #[getter]
+    fn r#str(&self) -> PyIndexStringMethods {
+        PyIndexStringMethods {
+            inner: self.inner.as_index().clone(),
+        }
+    }
+
+    fn take(&self, indices: Vec<i64>) -> Self {
+        let vals = self.inner.asi8();
+        let len = vals.len() as i64;
+        let mut out = Vec::with_capacity(indices.len());
+        for idx in indices {
+            let pos = if idx < 0 { len + idx } else { idx };
+            if pos >= 0 && pos < len {
+                out.push(vals[pos as usize]);
+            } else {
+                out.push(i64::MIN);
+            }
+        }
+        let mut res = DatetimeIndex::new(out);
+        if let Some(n) = self.inner.name() {
+            res = res.set_name(n);
+        }
+        Self { inner: res }
+    }
+
+    fn time(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let dt_mod = py.import("datetime")?;
+        let time_cls = dt_mod.getattr("time")?;
+        let mut out = Vec::with_capacity(self.inner.len());
+        let hours = self.inner.hour();
+        let minutes = self.inner.minute();
+        let seconds = self.inner.second();
+        let microseconds = self.inner.microsecond();
+        for i in 0..self.inner.len() {
+            if let (Some(h), Some(m), Some(s), Some(us)) =
+                (hours[i], minutes[i], seconds[i], microseconds[i])
+            {
+                let py_t = time_cls.call1((h, m, s, us))?;
+                out.push(py_t.into_any().unbind());
+            } else {
+                out.push(py.None());
+            }
+        }
+        Ok(PyList::new(py, out)?.unbind())
+    }
+
+    fn timetz(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        self.time(py)
+    }
+
+    fn to_julian_date(&self) -> Vec<Option<f64>> {
+        self.inner
+            .asi8()
+            .iter()
+            .map(|&ns| {
+                if ns == i64::MIN {
+                    None
+                } else {
+                    Some((ns as f64) / 86_400_000_000_000.0 + 2440587.5)
+                }
+            })
+            .collect()
+    }
+
+    #[pyo3(signature = (freq="D"))]
+    fn to_period(&self, freq: &str) -> PyResult<PyPeriodIndex> {
+        let p_freq = PeriodFreq::parse(freq).unwrap_or(PeriodFreq::Daily);
+        let periods = self
+            .inner
+            .asi8()
+            .iter()
+            .map(|&ns| {
+                let days = if ns == i64::MIN {
+                    0
+                } else {
+                    ns / (86_400 * 1_000_000_000)
+                };
+                Period::new(days, p_freq)
+            })
+            .collect();
+        let mut out = PeriodIndex::new(periods);
+        if let Some(n) = self.inner.name() {
+            out = out.set_name(n);
+        }
+        Ok(PyPeriodIndex { inner: out })
+    }
+
+    fn to_pydatetime(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let dt_mod = py.import("datetime")?;
+        let dt_cls = dt_mod.getattr("datetime")?;
+        let mut out = Vec::with_capacity(self.inner.len());
+        let years = self.inner.year();
+        let months = self.inner.month();
+        let days = self.inner.day();
+        let hours = self.inner.hour();
+        let minutes = self.inner.minute();
+        let seconds = self.inner.second();
+        let microseconds = self.inner.microsecond();
+        for i in 0..self.inner.len() {
+            if let (Some(y), Some(mo), Some(d), Some(h), Some(mi), Some(s), Some(us)) = (
+                years[i],
+                months[i],
+                days[i],
+                hours[i],
+                minutes[i],
+                seconds[i],
+                microseconds[i],
+            ) {
+                let py_dt = dt_cls.call1((y, mo, d, h, mi, s, us))?;
+                out.push(py_dt.into_any().unbind());
+            } else {
+                out.push(py.None());
+            }
+        }
+        Ok(PyList::new(py, out)?.unbind())
+    }
+
+    fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    #[getter]
+    fn tz(&self) -> Option<String> {
+        None
+    }
+
+    fn tz_convert(&self, tz: Option<&str>) -> Self {
+        let _ = tz;
+        self.clone()
+    }
+
+    fn tz_localize(&self, tz: Option<&str>) -> Self {
+        let _ = tz;
+        self.clone()
+    }
+
+    #[getter]
+    fn tzinfo(&self) -> Option<String> {
+        None
+    }
+
+    fn view(&self) -> Self {
+        self.clone()
+    }
+
+    #[getter]
+    fn weekday(&self) -> Vec<Option<u32>> {
+        self.inner.weekday()
+    }
+
+    #[pyo3(signature = (cond, other=None))]
+    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<PyIndex> {
+        self.as_py_index().r#where(cond, other)
+    }
 }
 
 /// Python wrapper for FrankenPandas MultiIndex.
@@ -3969,6 +4504,403 @@ impl PyTimedeltaIndex {
         let _ = value;
         self.clone()
     }
+
+    fn as_py_index(&self) -> PyIndex {
+        PyIndex {
+            inner: self.inner.as_index().clone(),
+        }
+    }
+
+    fn all(&self) -> bool {
+        self.as_py_index().all()
+    }
+
+    fn any(&self) -> bool {
+        self.as_py_index().any()
+    }
+
+    fn append(&self, others: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
+        let mut combined = self.inner.asi8();
+        for other in others {
+            if let Ok(tdi) = other.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+                combined.extend(tdi.inner.asi8());
+            } else if let Ok(list) = other.extract::<Vec<i64>>() {
+                combined.extend(list);
+            }
+        }
+        let mut out = TimedeltaIndex::new(combined);
+        if let Some(n) = self.inner.name() {
+            out = out.set_name(n);
+        }
+        Ok(Self { inner: out })
+    }
+
+    fn argsort(&self) -> Vec<usize> {
+        self.as_py_index().argsort()
+    }
+
+    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        self.as_py_index().array(py)
+    }
+
+    fn as_unit(&self, unit: &str) -> Self {
+        let _ = unit;
+        self.clone()
+    }
+
+    fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().asof(py, label)
+    }
+
+    #[pyo3(signature = (where_, mask=None))]
+    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+        self.as_py_index().asof_locs(where_, mask)
+    }
+
+    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
+        self.as_py_index().astype(dtype)
+    }
+
+    fn components(&self) -> PyResult<PyDataFrame> {
+        let nanos_per_sec: i64 = 1_000_000_000;
+        let nanos_per_min: i64 = 60 * nanos_per_sec;
+        let nanos_per_hour: i64 = 60 * nanos_per_min;
+        let nanos_per_day: i64 = 24 * nanos_per_hour;
+
+        let mut days = Vec::with_capacity(self.inner.len());
+        let mut hours = Vec::with_capacity(self.inner.len());
+        let mut minutes = Vec::with_capacity(self.inner.len());
+        let mut seconds = Vec::with_capacity(self.inner.len());
+        let mut milliseconds = Vec::with_capacity(self.inner.len());
+        let mut microseconds = Vec::with_capacity(self.inner.len());
+        let mut nanoseconds = Vec::with_capacity(self.inner.len());
+
+        for &ns in &self.inner.asi8() {
+            if ns == Timedelta::NAT {
+                days.push(Scalar::Null(NullKind::NaN));
+                hours.push(Scalar::Null(NullKind::NaN));
+                minutes.push(Scalar::Null(NullKind::NaN));
+                seconds.push(Scalar::Null(NullKind::NaN));
+                milliseconds.push(Scalar::Null(NullKind::NaN));
+                microseconds.push(Scalar::Null(NullKind::NaN));
+                nanoseconds.push(Scalar::Null(NullKind::NaN));
+            } else {
+                let sign = if ns < 0 { -1 } else { 1 };
+                let abs_ns = ns.abs();
+                let d = abs_ns / nanos_per_day;
+                let rem_d = abs_ns % nanos_per_day;
+                let h = rem_d / nanos_per_hour;
+                let rem_h = rem_d % nanos_per_hour;
+                let m = rem_h / nanos_per_min;
+                let rem_m = rem_h % nanos_per_min;
+                let s = rem_m / nanos_per_sec;
+                let rem_s = rem_m % nanos_per_sec;
+                let ms = rem_s / 1_000_000;
+                let rem_ms = rem_s % 1_000_000;
+                let us = rem_ms / 1_000;
+                let ns_part = rem_ms % 1_000;
+
+                days.push(Scalar::Int64(sign * d));
+                hours.push(Scalar::Int64(sign * h));
+                minutes.push(Scalar::Int64(sign * m));
+                seconds.push(Scalar::Int64(sign * s));
+                milliseconds.push(Scalar::Int64(sign * ms));
+                microseconds.push(Scalar::Int64(sign * us));
+                nanoseconds.push(Scalar::Int64(sign * ns_part));
+            }
+        }
+        let cols = vec![
+            ("days", days),
+            ("hours", hours),
+            ("minutes", minutes),
+            ("seconds", seconds),
+            ("milliseconds", milliseconds),
+            ("microseconds", microseconds),
+            ("nanoseconds", nanoseconds),
+        ];
+        let df = DataFrame::from_dict(
+            &[
+                "days",
+                "hours",
+                "minutes",
+                "seconds",
+                "milliseconds",
+                "microseconds",
+                "nanoseconds",
+            ],
+            cols,
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: df })
+    }
+
+    fn delete(&self, loc: usize) -> PyResult<Self> {
+        let new_idx = self.as_py_index().delete(loc)?;
+        let mut vals = Vec::with_capacity(new_idx.inner.len());
+        for l in new_idx.inner.labels() {
+            match l {
+                IndexLabel::Timedelta64(ns) => vals.push(*ns),
+                _ => vals.push(Timedelta::NAT),
+            }
+        }
+        let mut out = TimedeltaIndex::new(vals);
+        if let Some(n) = new_idx.inner.name() {
+            out = out.set_name(n);
+        }
+        Ok(Self { inner: out })
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn diff(&self, periods: i64) -> Self {
+        let vals = self.inner.asi8();
+        let len = vals.len();
+        let mut out = vec![Timedelta::NAT; len];
+        let p = periods as usize;
+        if periods > 0 && p < len {
+            for i in p..len {
+                if vals[i] != Timedelta::NAT && vals[i - p] != Timedelta::NAT {
+                    out[i] = vals[i] - vals[i - p];
+                }
+            }
+        }
+        let mut res = TimedeltaIndex::new(out);
+        if let Some(n) = self.inner.name() {
+            res = res.set_name(n);
+        }
+        Self { inner: res }
+    }
+
+    #[pyo3(signature = (sort=false, use_na_sentinel=true))]
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+        self.as_py_index().factorize(sort, use_na_sentinel)
+    }
+
+    fn format(&self) -> Vec<String> {
+        self.as_py_index().format()
+    }
+
+    #[getter]
+    fn freq(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn freqstr(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn inferred_freq(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn unit(&self) -> &'static str {
+        "ns"
+    }
+
+    #[getter]
+    fn resolution(&self) -> &'static str {
+        "nano"
+    }
+
+    fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+        self.as_py_index().get_indexer_for(target)
+    }
+
+    fn get_indexer_non_unique(
+        &self,
+        target: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<isize>, Vec<usize>)> {
+        self.as_py_index().get_indexer_non_unique(target)
+    }
+
+    fn get_slice_bound(&self, label: &Bound<'_, PyAny>, side: &str) -> PyResult<usize> {
+        self.as_py_index().get_slice_bound(label, side)
+    }
+
+    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
+        self.as_py_index().groupby(py, by)
+    }
+
+    fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(td) = other.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+            self.inner.equals(&td.inner) && self.inner.name() == td.inner.name()
+        } else {
+            false
+        }
+    }
+
+    fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
+    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().insert(loc, item)
+    }
+
+    fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(td) = other.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+            self.inner.equals(&td.inner) && self.inner.name() == td.inner.name()
+        } else {
+            false
+        }
+    }
+
+    fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().item(py)
+    }
+
+    #[pyo3(signature = (other, how="left", level=None, return_indexers=false, sort=false))]
+    fn join(
+        &self,
+        other: &Bound<'_, PyAny>,
+        how: &str,
+        level: Option<usize>,
+        return_indexers: bool,
+        sort: bool,
+    ) -> PyResult<PyIndex> {
+        self.as_py_index()
+            .join(other, how, level, return_indexers, sort)
+    }
+
+    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().map(py, mapper)
+    }
+
+    fn putmask(&self, mask: Vec<bool>, value: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().putmask(mask, value)
+    }
+
+    fn ravel(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (target, method=None, level=None, limit=None, tolerance=None))]
+    fn reindex(
+        &self,
+        target: &Bound<'_, PyAny>,
+        method: Option<&str>,
+        level: Option<usize>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(PyIndex, Vec<i64>)> {
+        self.as_py_index()
+            .reindex(target, method, level, limit, tolerance)
+    }
+
+    fn repeat(&self, repeats: usize) -> Self {
+        let mut out = Vec::with_capacity(self.inner.len() * repeats);
+        for &v in &self.inner.asi8() {
+            for _ in 0..repeats {
+                out.push(v);
+            }
+        }
+        let mut res = TimedeltaIndex::new(out);
+        if let Some(n) = self.inner.name() {
+            res = res.set_name(n);
+        }
+        Self { inner: res }
+    }
+
+    #[pyo3(signature = (value, side="left", sorter=None))]
+    fn searchsorted(
+        &self,
+        value: &Bound<'_, PyAny>,
+        side: &str,
+        sorter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<usize> {
+        self.as_py_index().searchsorted(value, side, sorter)
+    }
+
+    fn set_names(&self, names: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let name = if let Ok(s) = names.extract::<String>() {
+            Some(s)
+        } else if let Ok(list) = names.extract::<Vec<Option<String>>>() {
+            list.into_iter().next().flatten()
+        } else {
+            None
+        };
+        let mut res = self.inner.clone();
+        if let Some(n) = name {
+            res = res.set_name(&n);
+        }
+        Ok(Self { inner: res })
+    }
+
+    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    fn sortlevel(
+        &self,
+        level: Option<usize>,
+        ascending: bool,
+        sort_remaining: Option<bool>,
+    ) -> PyResult<(Self, Vec<usize>)> {
+        let _ = (level, ascending, sort_remaining);
+        Ok((self.clone(), (0..self.inner.len()).collect()))
+    }
+
+    #[getter]
+    fn r#str(&self) -> PyIndexStringMethods {
+        PyIndexStringMethods {
+            inner: self.inner.as_index().clone(),
+        }
+    }
+
+    fn sum(&self) -> i64 {
+        self.inner
+            .asi8()
+            .iter()
+            .filter(|&&x| x != Timedelta::NAT)
+            .sum()
+    }
+
+    fn take(&self, indices: Vec<i64>) -> Self {
+        let vals = self.inner.asi8();
+        let len = vals.len() as i64;
+        let mut out = Vec::with_capacity(indices.len());
+        for idx in indices {
+            let pos = if idx < 0 { len + idx } else { idx };
+            if pos >= 0 && pos < len {
+                out.push(vals[pos as usize]);
+            } else {
+                out.push(Timedelta::NAT);
+            }
+        }
+        let mut res = TimedeltaIndex::new(out);
+        if let Some(n) = self.inner.name() {
+            res = res.set_name(n);
+        }
+        Self { inner: res }
+    }
+
+    fn to_pytimedelta(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let datetime_mod = py.import("datetime")?;
+        let td_cls = datetime_mod.getattr("timedelta")?;
+        let mut list = Vec::with_capacity(self.inner.len());
+        for &ns in &self.inner.asi8() {
+            if ns == Timedelta::NAT {
+                list.push(py.None());
+            } else {
+                let microseconds = ns / 1_000;
+                let py_td = td_cls.call1((0, 0, microseconds))?;
+                list.push(py_td.into_any().unbind());
+            }
+        }
+        Ok(PyList::new(py, list)?.into_any().unbind())
+    }
+
+    fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    fn view(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (cond, other=None))]
+    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<PyIndex> {
+        self.as_py_index().r#where(cond, other)
+    }
 }
 
 /// Python wrapper for FrankenPandas RangeIndex.
@@ -5368,6 +6300,472 @@ impl PyPeriodIndex {
         let _ = value;
         self.clone()
     }
+
+    fn as_py_index(&self) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index(),
+        }
+    }
+
+    fn all(&self) -> bool {
+        self.as_py_index().all()
+    }
+
+    fn any(&self) -> bool {
+        self.as_py_index().any()
+    }
+
+    fn append(&self, others: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
+        let mut combined = self.inner.values().to_vec();
+        for other in others {
+            if let Ok(pi) = other.extract::<PyRef<'_, PyPeriodIndex>>() {
+                combined.extend(pi.inner.values().iter().copied());
+            }
+        }
+        let mut out = PeriodIndex::new(combined);
+        if let Some(n) = self.inner.name() {
+            out = out.set_name(n);
+        }
+        Ok(Self { inner: out })
+    }
+
+    fn argmax(&self) -> PyResult<usize> {
+        self.as_py_index().argmax()
+    }
+
+    fn argmin(&self) -> PyResult<usize> {
+        self.as_py_index().argmin()
+    }
+
+    fn argsort(&self) -> Vec<usize> {
+        self.as_py_index().argsort()
+    }
+
+    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        self.as_py_index().array(py)
+    }
+
+    #[getter]
+    fn asi8(&self) -> Vec<i64> {
+        self.inner.values().iter().map(|p| p.ordinal).collect()
+    }
+
+    fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().asof(py, label)
+    }
+
+    #[pyo3(signature = (where_, mask=None))]
+    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+        self.as_py_index().asof_locs(where_, mask)
+    }
+
+    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
+        self.as_py_index().astype(dtype)
+    }
+
+    #[getter]
+    fn day_of_week(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.day_of_week().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn day_of_year(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.day_of_year().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn dayofweek(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.dayofweek().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn dayofyear(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.dayofyear().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn days_in_month(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.days_in_month().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn daysinmonth(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.daysinmonth().map_err(index_error_to_py)
+    }
+
+    fn delete(&self, loc: usize) -> PyResult<Self> {
+        if loc >= self.inner.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "index out of bounds",
+            ));
+        }
+        let mut vals = self.inner.values().to_vec();
+        vals.remove(loc);
+        let mut out = PeriodIndex::new(vals);
+        if let Some(n) = self.inner.name() {
+            out = out.set_name(n);
+        }
+        Ok(Self { inner: out })
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn diff(&self, periods: i64) -> Vec<Option<i64>> {
+        self.inner.diff(periods)
+    }
+
+    fn drop_duplicates(&self) -> Self {
+        Self {
+            inner: self.inner.drop_duplicates(),
+        }
+    }
+
+    #[pyo3(signature = (keep=None))]
+    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<bool>> {
+        let k = parse_duplicate_keep(keep)?;
+        Ok(self.inner.duplicated(k))
+    }
+
+    #[getter]
+    fn end_time(&self) -> PyResult<PyDatetimeIndex> {
+        self.inner
+            .end_time()
+            .map(|inner| PyDatetimeIndex { inner })
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (sort=false, use_na_sentinel=true))]
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+        self.as_py_index().factorize(sort, use_na_sentinel)
+    }
+
+    fn format(&self) -> Vec<String> {
+        self.as_py_index().format()
+    }
+
+    #[getter]
+    fn freq(&self) -> Option<String> {
+        self.inner.values().first().map(|p| p.freq.to_string())
+    }
+
+    #[getter]
+    fn freqstr(&self) -> Option<&'static str> {
+        self.inner.values().first().map(|p| p.freq.alias())
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (fields))]
+    fn from_fields(fields: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let _ = fields;
+        Ok(Self {
+            inner: PeriodIndex::new(vec![]),
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (ordinals, freq="D"))]
+    fn from_ordinals(ordinals: Vec<i64>, freq: &str) -> PyResult<Self> {
+        let p_freq = PeriodFreq::parse(freq).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("unsupported freq {freq}"))
+        })?;
+        Ok(Self {
+            inner: PeriodIndex::from_ordinals(&ordinals, p_freq),
+        })
+    }
+
+    fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+        self.as_py_index().get_indexer_for(target)
+    }
+
+    fn get_indexer_non_unique(
+        &self,
+        target: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<isize>, Vec<usize>)> {
+        self.as_py_index().get_indexer_non_unique(target)
+    }
+
+    fn get_slice_bound(&self, label: &Bound<'_, PyAny>, side: &str) -> PyResult<usize> {
+        self.as_py_index().get_slice_bound(label, side)
+    }
+
+    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
+        self.as_py_index().groupby(py, by)
+    }
+
+    fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(pi) = other.extract::<PyRef<'_, PyPeriodIndex>>() {
+            self.inner == pi.inner
+        } else {
+            false
+        }
+    }
+
+    fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
+    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().insert(loc, item)
+    }
+
+    fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(pi) = other.extract::<PyRef<'_, PyPeriodIndex>>() {
+            self.inner == pi.inner
+        } else {
+            false
+        }
+    }
+
+    #[getter]
+    fn is_full(&self) -> bool {
+        let vals = self.inner.values();
+        if vals.len() <= 1 {
+            return true;
+        }
+        for i in 1..vals.len() {
+            if vals[i].ordinal != vals[i - 1].ordinal + 1 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[getter]
+    fn is_leap_year(&self) -> PyResult<Vec<Option<bool>>> {
+        self.inner.is_leap_year().map_err(index_error_to_py)
+    }
+
+    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+        self.as_py_index().isin(values)
+    }
+
+    fn isna(&self) -> Vec<bool> {
+        self.inner.isna()
+    }
+
+    fn isnull(&self) -> Vec<bool> {
+        self.inner.isnull()
+    }
+
+    fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().item(py)
+    }
+
+    #[pyo3(signature = (other, how="left", level=None, return_indexers=false, sort=false))]
+    fn join(
+        &self,
+        other: &Bound<'_, PyAny>,
+        how: &str,
+        level: Option<usize>,
+        return_indexers: bool,
+        sort: bool,
+    ) -> PyResult<PyIndex> {
+        self.as_py_index()
+            .join(other, how, level, return_indexers, sort)
+    }
+
+    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().map(py, mapper)
+    }
+
+    fn max(&self) -> Option<String> {
+        self.inner
+            .values()
+            .iter()
+            .max_by_key(|p| p.ordinal)
+            .map(|p| p.to_string())
+    }
+
+    fn mean(&self) -> Option<String> {
+        if self.inner.is_empty() {
+            return None;
+        }
+        let sum: i64 = self.inner.values().iter().map(|p| p.ordinal).sum();
+        let avg = sum / self.inner.len() as i64;
+        let p = Period::new(avg, self.inner.values()[0].freq);
+        Some(p.to_string())
+    }
+
+    fn min(&self) -> Option<String> {
+        self.inner
+            .values()
+            .iter()
+            .min_by_key(|p| p.ordinal)
+            .map(|p| p.to_string())
+    }
+
+    fn notna(&self) -> Vec<bool> {
+        self.inner.notna()
+    }
+
+    fn notnull(&self) -> Vec<bool> {
+        self.inner.notnull()
+    }
+
+    fn nunique(&self) -> usize {
+        self.inner.unique().len()
+    }
+
+    fn putmask(&self, mask: Vec<bool>, value: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().putmask(mask, value)
+    }
+
+    #[getter]
+    fn quarter(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.quarter().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn qyear(&self) -> PyResult<Vec<i32>> {
+        self.inner.qyear().map_err(index_error_to_py)
+    }
+
+    fn ravel(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (target, method=None, level=None, limit=None, tolerance=None))]
+    fn reindex(
+        &self,
+        target: &Bound<'_, PyAny>,
+        method: Option<&str>,
+        level: Option<usize>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(PyIndex, Vec<i64>)> {
+        self.as_py_index()
+            .reindex(target, method, level, limit, tolerance)
+    }
+
+    fn repeat(&self, repeats: usize) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().repeat(repeats),
+        }
+    }
+
+    #[getter]
+    fn resolution(&self) -> Option<&'static str> {
+        self.inner.resolution()
+    }
+
+    fn round(&self, freq: &str) -> PyResult<Self> {
+        self.inner
+            .asfreq(freq)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (value, side="left", sorter=None))]
+    fn searchsorted(
+        &self,
+        value: &Bound<'_, PyAny>,
+        side: &str,
+        sorter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<usize> {
+        self.as_py_index().searchsorted(value, side, sorter)
+    }
+
+    fn set_names(&self, names: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let name = if let Ok(s) = names.extract::<String>() {
+            Some(s)
+        } else if let Ok(list) = names.extract::<Vec<Option<String>>>() {
+            list.into_iter().next().flatten()
+        } else {
+            None
+        };
+        Ok(Self {
+            inner: self.inner.set_names(name.as_deref()),
+        })
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn shift(&self, periods: i64) -> Self {
+        let vals: Vec<Period> = self
+            .inner
+            .values()
+            .iter()
+            .map(|p| Period::new(p.ordinal + periods, p.freq))
+            .collect();
+        let mut out = PeriodIndex::new(vals);
+        if let Some(n) = self.inner.name() {
+            out = out.set_name(n);
+        }
+        Self { inner: out }
+    }
+
+    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    fn sortlevel(
+        &self,
+        level: Option<usize>,
+        ascending: bool,
+        sort_remaining: Option<bool>,
+    ) -> PyResult<(Self, Vec<usize>)> {
+        let _ = (level, ascending, sort_remaining);
+        Ok((self.clone(), (0..self.inner.len()).collect()))
+    }
+
+    #[getter]
+    fn start_time(&self) -> PyResult<PyDatetimeIndex> {
+        self.inner
+            .start_time()
+            .map(|inner| PyDatetimeIndex { inner })
+            .map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn r#str(&self) -> PyIndexStringMethods {
+        PyIndexStringMethods {
+            inner: self.inner.to_index(),
+        }
+    }
+
+    fn strftime(&self, fmt: &str) -> PyResult<Vec<Option<String>>> {
+        self.inner.strftime(fmt).map_err(index_error_to_py)
+    }
+
+    fn take(&self, indices: Vec<usize>) -> PyResult<Self> {
+        self.inner
+            .take(&indices)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    fn to_numpy(&self) -> Vec<String> {
+        self.inner.values().iter().map(|p| p.to_string()).collect()
+    }
+
+    fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    fn unique(&self) -> Self {
+        Self {
+            inner: self.inner.unique(),
+        }
+    }
+
+    fn view(&self) -> Self {
+        self.clone()
+    }
+
+    #[getter]
+    fn week(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.week().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn weekday(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.weekday().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    fn weekofyear(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.weekofyear().map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (cond, other=None))]
+    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<PyIndex> {
+        self.as_py_index().r#where(cond, other)
+    }
 }
 
 /// Python wrapper for FrankenPandas CategoricalIndex.
@@ -5850,6 +7248,375 @@ impl PyCategoricalIndex {
     pub fn fillna(&self, value: &Bound<'_, PyAny>) -> Self {
         let _ = value;
         self.clone()
+    }
+
+    fn as_py_index(&self) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index(),
+        }
+    }
+
+    fn add_categories(&self, new: Vec<String>) -> PyResult<Self> {
+        self.inner
+            .add_categories(new)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    fn all(&self) -> bool {
+        self.as_py_index().all()
+    }
+
+    fn any(&self) -> bool {
+        self.as_py_index().any()
+    }
+
+    fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        let other_idx = if let Ok(ci) = other.extract::<PyRef<'_, PyCategoricalIndex>>() {
+            ci.inner.to_index()
+        } else if let Ok(idx) = other.extract::<PyRef<'_, PyIndex>>() {
+            idx.inner.clone()
+        } else {
+            PyIndex::new(Some(other), None)?.inner
+        };
+        Ok(PyIndex {
+            inner: self.inner.to_index().append(&other_idx),
+        })
+    }
+
+    fn argmax(&self) -> PyResult<usize> {
+        self.as_py_index().argmax()
+    }
+
+    fn argmin(&self) -> PyResult<usize> {
+        self.as_py_index().argmin()
+    }
+
+    fn argsort(&self) -> Vec<usize> {
+        self.as_py_index().argsort()
+    }
+
+    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        self.as_py_index().array(py)
+    }
+
+    fn as_ordered(&self) -> Self {
+        Self {
+            inner: self.inner.as_ordered(),
+        }
+    }
+
+    fn as_unordered(&self) -> Self {
+        Self {
+            inner: self.inner.as_unordered(),
+        }
+    }
+
+    fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().asof(py, label)
+    }
+
+    #[pyo3(signature = (where_, mask=None))]
+    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+        self.as_py_index().asof_locs(where_, mask)
+    }
+
+    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
+        self.as_py_index().astype(dtype)
+    }
+
+    fn delete(&self, loc: usize) -> PyResult<PyIndex> {
+        self.as_py_index().delete(loc)
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn diff(&self, periods: i64) -> PyResult<PyIndex> {
+        let _ = periods;
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "cannot perform diff on CategoricalIndex",
+        ))
+    }
+
+    fn drop_duplicates(&self) -> Self {
+        Self {
+            inner: self.inner.unique(),
+        }
+    }
+
+    #[pyo3(signature = (keep=None))]
+    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<bool>> {
+        let k = parse_duplicate_keep(keep)?;
+        Ok(self.inner.duplicated(k))
+    }
+
+    #[pyo3(signature = (sort=false, use_na_sentinel=true))]
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+        self.as_py_index().factorize(sort, use_na_sentinel)
+    }
+
+    fn format(&self) -> Vec<String> {
+        self.as_py_index().format()
+    }
+
+    fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+        self.as_py_index().get_indexer_for(target)
+    }
+
+    fn get_indexer_non_unique(
+        &self,
+        target: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<isize>, Vec<usize>)> {
+        self.as_py_index().get_indexer_non_unique(target)
+    }
+
+    fn get_slice_bound(&self, label: &Bound<'_, PyAny>, side: &str) -> PyResult<usize> {
+        self.as_py_index().get_slice_bound(label, side)
+    }
+
+    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
+        self.as_py_index().groupby(py, by)
+    }
+
+    fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(ci) = other.extract::<PyRef<'_, PyCategoricalIndex>>() {
+            self.inner == ci.inner
+        } else {
+            false
+        }
+    }
+
+    fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
+    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().insert(loc, item)
+    }
+
+    fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(ci) = other.extract::<PyRef<'_, PyCategoricalIndex>>() {
+            self.inner == ci.inner
+        } else {
+            false
+        }
+    }
+
+    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+        self.as_py_index().isin(values)
+    }
+
+    fn isna(&self) -> Vec<bool> {
+        self.inner.isna()
+    }
+
+    fn isnull(&self) -> Vec<bool> {
+        self.inner.isna()
+    }
+
+    fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().item(py)
+    }
+
+    #[pyo3(signature = (other, how="left", level=None, return_indexers=false, sort=false))]
+    fn join(
+        &self,
+        other: &Bound<'_, PyAny>,
+        how: &str,
+        level: Option<usize>,
+        return_indexers: bool,
+        sort: bool,
+    ) -> PyResult<PyIndex> {
+        self.as_py_index()
+            .join(other, how, level, return_indexers, sort)
+    }
+
+    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().map(py, mapper)
+    }
+
+    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().max(py)
+    }
+
+    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.as_py_index().min(py)
+    }
+
+    fn notna(&self) -> Vec<bool> {
+        self.inner.notna()
+    }
+
+    fn notnull(&self) -> Vec<bool> {
+        self.inner.notna()
+    }
+
+    fn nunique(&self) -> usize {
+        self.inner.nunique()
+    }
+
+    fn putmask(&self, mask: Vec<bool>, value: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().putmask(mask, value)
+    }
+
+    fn ravel(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (target, method=None, level=None, limit=None, tolerance=None))]
+    fn reindex(
+        &self,
+        target: &Bound<'_, PyAny>,
+        method: Option<&str>,
+        level: Option<usize>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(PyIndex, Vec<i64>)> {
+        self.as_py_index()
+            .reindex(target, method, level, limit, tolerance)
+    }
+
+    fn remove_categories(&self, removals: Vec<String>) -> PyResult<Self> {
+        self.inner
+            .remove_categories(&removals)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    fn remove_unused_categories(&self) -> Self {
+        Self {
+            inner: self.inner.remove_unused_categories(),
+        }
+    }
+
+    fn rename_categories(&self, new: Vec<String>) -> PyResult<Self> {
+        self.inner
+            .rename_categories(new)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (new, ordered=false))]
+    fn reorder_categories(&self, new: Vec<String>, ordered: bool) -> PyResult<Self> {
+        self.inner
+            .reorder_categories(new, ordered)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    fn repeat(&self, repeats: usize) -> PyIndex {
+        PyIndex {
+            inner: self.inner.to_index().repeat(repeats),
+        }
+    }
+
+    #[pyo3(signature = (decimals=0))]
+    fn round(&self, decimals: i32) -> Self {
+        let _ = decimals;
+        self.clone()
+    }
+
+    #[pyo3(signature = (value, side="left", sorter=None))]
+    fn searchsorted(
+        &self,
+        value: &Bound<'_, PyAny>,
+        side: &str,
+        sorter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<usize> {
+        self.as_py_index().searchsorted(value, side, sorter)
+    }
+
+    fn set_categories(&self, new_categories: Vec<String>) -> PyResult<Self> {
+        self.inner
+            .set_categories(new_categories)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (names, level=None))]
+    fn set_names(&self, names: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Self> {
+        let _ = level;
+        let name_opt = if let Ok(s) = names.extract::<String>() {
+            Some(s)
+        } else if let Ok(seq) = names.cast::<pyo3::types::PySequence>() {
+            if seq.len()? > 0 {
+                Some(seq.get_item(0)?.extract::<String>()?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            inner: self.inner.set_names(name_opt.as_deref()),
+        })
+    }
+
+    #[pyo3(signature = (periods=1, freq=None))]
+    fn shift(&self, periods: i64, freq: Option<&str>) -> PyResult<Self> {
+        let _ = (periods, freq);
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex; Got type CategoricalIndex",
+        ))
+    }
+
+    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    fn sortlevel(
+        &self,
+        level: Option<usize>,
+        ascending: bool,
+        sort_remaining: Option<bool>,
+    ) -> PyResult<(Self, Vec<usize>)> {
+        let _ = (level, ascending, sort_remaining);
+        Ok((self.clone(), (0..self.inner.len()).collect()))
+    }
+
+    #[getter]
+    fn r#str(&self) -> PyIndexStringMethods {
+        PyIndexStringMethods {
+            inner: self.inner.to_index(),
+        }
+    }
+
+    fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
+        let len = self.inner.len() as i64;
+        let mut u_indices = Vec::with_capacity(indices.len());
+        for idx in indices {
+            let pos = if idx < 0 { len + idx } else { idx };
+            if pos >= 0 && pos < len {
+                u_indices.push(pos as usize);
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "index out of range",
+                ));
+            }
+        }
+        self.inner
+            .take(&u_indices)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+
+    fn to_numpy(&self) -> Vec<String> {
+        self.inner.labels().to_vec()
+    }
+
+    fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    fn unique(&self) -> Self {
+        Self {
+            inner: self.inner.unique(),
+        }
+    }
+
+    fn view(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (cond, other=None))]
+    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<PyIndex> {
+        self.as_py_index().r#where(cond, other)
     }
 }
 
