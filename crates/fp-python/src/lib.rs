@@ -570,6 +570,7 @@ impl PyIndex {
         }
     }
 
+    #[getter]
     fn is_unique(&self) -> bool {
         self.inner.is_unique()
     }
@@ -788,21 +789,6 @@ impl PyIndex {
     }
 
     #[getter]
-    fn is_unique(&self) -> bool {
-        self.inner.is_unique()
-    }
-
-    #[getter]
-    fn is_monotonic_increasing(&self) -> bool {
-        self.inner.is_monotonic_increasing()
-    }
-
-    #[getter]
-    fn is_monotonic_decreasing(&self) -> bool {
-        self.inner.is_monotonic_decreasing()
-    }
-
-    #[getter]
     fn hasnans(&self) -> bool {
         self.inner.hasnans()
     }
@@ -867,35 +853,10 @@ impl PyIndex {
         self.inner.holds_integer()
     }
 
-    fn union(&self, other: &PyIndex) -> Self {
-        PyIndex {
-            inner: self.inner.union(&other.inner),
-        }
-    }
-
-    fn intersection(&self, other: &PyIndex) -> Self {
-        PyIndex {
-            inner: self.inner.intersection(&other.inner),
-        }
-    }
-
-    fn difference(&self, other: &PyIndex) -> Self {
-        PyIndex {
-            inner: self.inner.difference(&other.inner),
-        }
-    }
-
     fn symmetric_difference(&self, other: &PyIndex) -> Self {
         PyIndex {
             inner: self.inner.symmetric_difference(&other.inner),
         }
-    }
-
-    fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let label = py_to_index_label(key)?;
-        self.inner.get_loc(&label).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}"))
-        })
     }
 
     fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
@@ -1013,7 +974,7 @@ impl PyIndex {
         let idx = if index {
             self.inner.clone()
         } else {
-            Index::from_range(0, self.inner.len() as i64)
+            Index::from_range(0, self.inner.len() as i64, 1)
         };
         let col = Column::from_values(
             self.inner
