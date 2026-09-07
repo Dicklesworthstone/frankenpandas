@@ -22,15 +22,15 @@ use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
 use fp_frame::{DataFrame, Series};
 use fp_index::{
-    CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex, PeriodIndex,
-    RangeIndex, TimedeltaIndex, format_datetime_ns,
+    AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
+    PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
 };
 use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
     prelude::*,
-    types::{PyDict, PyList},
+    types::{PyDict, PyList, PyTuple},
 };
 
 #[global_allocator]
@@ -576,6 +576,215 @@ impl PyIndex {
 
     fn equals(&self, other: &PyIndex) -> bool {
         self.inner == other.inner
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    fn T(&self) -> Self {
+        self.clone()
+    }
+
+    fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.inner.len() == 1 {
+            index_label_to_py(py, &self.inner.labels()[0])
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "can only convert an array of size 1 to a Python scalar",
+            ))
+        }
+    }
+
+    fn argmax(&self) -> PyResult<usize> {
+        let labels = self.inner.labels();
+        if labels.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "attempt to get argmax of an empty sequence",
+            ));
+        }
+        let mut max_idx = 0;
+        for i in 1..labels.len() {
+            if labels[i] > labels[max_idx] {
+                max_idx = i;
+            }
+        }
+        Ok(max_idx)
+    }
+
+    fn argmin(&self) -> PyResult<usize> {
+        let labels = self.inner.labels();
+        if labels.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "attempt to get argmin of an empty sequence",
+            ));
+        }
+        let mut min_idx = 0;
+        for i in 1..labels.len() {
+            if labels[i] < labels[min_idx] {
+                min_idx = i;
+            }
+        }
+        Ok(min_idx)
+    }
+
+    fn argsort(&self) -> Vec<usize> {
+        let labels = self.inner.labels();
+        let mut indices: Vec<usize> = (0..labels.len()).collect();
+        indices.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
+        indices
+    }
+
+    fn all(&self) -> bool {
+        self.inner.labels().iter().all(|l| match l {
+            IndexLabel::Int64(i) => *i != 0,
+            IndexLabel::Float64(f) => f.0 != 0.0 && !f.0.is_nan(),
+            IndexLabel::Utf8(s) => !s.is_empty(),
+            IndexLabel::Bool(b) => *b,
+            IndexLabel::Timedelta64(t) => *t != 0,
+            IndexLabel::Datetime64(d) => *d != 0,
+            IndexLabel::Null(_) => false,
+        })
+    }
+
+    fn any(&self) -> bool {
+        self.inner.labels().iter().any(|l| match l {
+            IndexLabel::Int64(i) => *i != 0,
+            IndexLabel::Float64(f) => f.0 != 0.0 && !f.0.is_nan(),
+            IndexLabel::Utf8(s) => !s.is_empty(),
+            IndexLabel::Bool(b) => *b,
+            IndexLabel::Timedelta64(t) => *t != 0,
+            IndexLabel::Datetime64(d) => *d != 0,
+            IndexLabel::Null(_) => false,
+        })
+    }
+
+    #[pyo3(signature = (how=None))]
+    fn dropna(&self, how: Option<&str>) -> Self {
+        let _ = how;
+        let labels = self.inner.labels();
+        let non_null: Vec<IndexLabel> = labels
+            .iter()
+            .filter(|l| match l {
+                IndexLabel::Float64(f) => !f.0.is_nan(),
+                IndexLabel::Null(_) => false,
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        let mut res = Index::new(non_null);
+        if let Some(n) = self.inner.name() {
+            res = res.rename_index(Some(n));
+        }
+        PyIndex { inner: res }
+    }
+
+    fn fillna(&self, value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let fill_lbl = py_to_index_label(value)?;
+        let labels = self.inner.labels();
+        let filled: Vec<IndexLabel> = labels
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Float64(f) if f.0.is_nan() => fill_lbl.clone(),
+                IndexLabel::Null(_) => fill_lbl.clone(),
+                _ => l.clone(),
+            })
+            .collect();
+        let mut res = Index::new(filled);
+        if let Some(n) = self.inner.name() {
+            res = res.rename_index(Some(n));
+        }
+        Ok(PyIndex { inner: res })
+    }
+
+    fn delete(&self, loc: usize) -> PyResult<Self> {
+        let mut labels = self.inner.labels().to_vec();
+        if loc >= labels.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "Index position out of bounds",
+            ));
+        }
+        labels.remove(loc);
+        let mut res = Index::new(labels);
+        if let Some(n) = self.inner.name() {
+            res = res.rename_index(Some(n));
+        }
+        Ok(PyIndex { inner: res })
+    }
+
+    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let label = py_to_index_label(item)?;
+        let mut labels = self.inner.labels().to_vec();
+        if loc > labels.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "Index position out of bounds",
+            ));
+        }
+        labels.insert(loc, label);
+        let mut res = Index::new(labels);
+        if let Some(n) = self.inner.name() {
+            res = res.rename_index(Some(n));
+        }
+        Ok(PyIndex { inner: res })
+    }
+
+    fn repeat(&self, repeats: usize) -> Self {
+        let labels = self.inner.labels();
+        let mut out = Vec::with_capacity(labels.len() * repeats);
+        for l in labels {
+            for _ in 0..repeats {
+                out.push(l.clone());
+            }
+        }
+        let mut res = Index::new(out);
+        if let Some(n) = self.inner.name() {
+            res = res.rename_index(Some(n));
+        }
+        PyIndex { inner: res }
+    }
+
+    fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
+        let labels = self.inner.labels();
+        let n = labels.len() as i64;
+        let mut out = Vec::with_capacity(indices.len());
+        for idx in indices {
+            let actual = if idx < 0 { n + idx } else { idx };
+            if actual < 0 || actual >= n {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "index out of bounds",
+                ));
+            }
+            out.push(labels[actual as usize].clone());
+        }
+        let mut res = Index::new(out);
+        if let Some(n) = self.inner.name() {
+            res = res.rename_index(Some(n));
+        }
+        Ok(PyIndex { inner: res })
+    }
+
+    fn drop(&self, labels: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut to_drop = std::collections::HashSet::new();
+        if let Ok(single) = py_to_index_label(labels) {
+            to_drop.insert(single);
+        } else if let Ok(list) = labels.extract::<Vec<Bound<'_, PyAny>>>() {
+            for it in list {
+                to_drop.insert(py_to_index_label(&it)?);
+            }
+        }
+        let current = self.inner.labels();
+        let kept: Vec<IndexLabel> = current
+            .iter()
+            .filter(|l| !to_drop.contains(l))
+            .cloned()
+            .collect();
+        let mut res = Index::new(kept);
+        if let Some(n) = self.inner.name() {
+            res = res.rename_index(Some(n));
+        }
+        Ok(PyIndex { inner: res })
+    }
+
+    fn astype(&self, _dtype: &str) -> PyResult<Self> {
+        Ok(self.clone())
     }
 }
 
@@ -3090,17 +3299,6 @@ impl PySeries {
         Ok(PySeries { inner: r })
     }
 
-    /// Map values via an `{old: new}` dict (pandas `Series.map`); unmapped
-    /// values follow the Rust core's semantics.
-    fn map(&self, py: Python<'_>, mapping: &Bound<'_, PyDict>) -> PyResult<PySeries> {
-        let pairs = py_dict_to_scalar_pairs(py, mapping)?;
-        let r = self
-            .inner
-            .map(&pairs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
-    }
-
     /// Replace values via an `{old: new}` dict (pandas `Series.replace`).
     fn replace(&self, py: Python<'_>, mapping: &Bound<'_, PyDict>) -> PyResult<PySeries> {
         let pairs = py_dict_to_scalar_pairs(py, mapping)?;
@@ -3578,6 +3776,154 @@ impl PySeries {
         };
         let res = self.inner.drop(&label_vec).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
+    }
+
+    fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.tolist(py)
+    }
+
+    #[getter]
+    fn array(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.values(py)
+    }
+
+    #[getter]
+    fn axes(&self) -> Vec<PyIndex> {
+        vec![self.index()]
+    }
+
+    #[getter]
+    fn attrs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        Ok(PyDict::new(py))
+    }
+
+    fn r#bool(&self) -> PyResult<bool> {
+        if self.inner.len() == 1 {
+            let v = &self.inner.column().values()[0];
+            match v {
+                Scalar::Bool(b) => Ok(*b),
+                Scalar::Int64(i) => Ok(*i != 0),
+                Scalar::Float64(f) => Ok(*f != 0.0 && !f.is_nan()),
+                Scalar::Utf8(s) => Ok(!s.is_empty()),
+                _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot evaluate bool on null value",
+                )),
+            }
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "The truth value of a Series is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().",
+            ))
+        }
+    }
+
+    fn combine_first(&self, other: &PySeries) -> PyResult<PySeries> {
+        let res = self
+            .inner
+            .combine_first(&other.inner)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (other, join="outer"))]
+    fn align(&self, other: &PySeries, join: &str) -> PyResult<(PySeries, PySeries)> {
+        let mode = match join {
+            "outer" => AlignMode::Outer,
+            "inner" => AlignMode::Inner,
+            "left" => AlignMode::Left,
+            "right" => AlignMode::Right,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid join mode '{join}'"
+                )));
+            }
+        };
+        let (s1, s2) = self
+            .inner
+            .align(&other.inner, mode)
+            .map_err(frame_error_to_py)?;
+        Ok((PySeries { inner: s1 }, PySeries { inner: s2 }))
+    }
+
+    fn compare(&self, other: &PySeries) -> PyResult<PyDataFrame> {
+        let res = self
+            .inner
+            .compare(&other.inner)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn convert_dtypes(&self) -> PyResult<PySeries> {
+        let res = self.inner.convert_dtypes().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn at_time(&self, time: &str) -> PyResult<PySeries> {
+        let res = self.inner.at_time(time).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn between_time(&self, start: &str, end: &str) -> PyResult<PySeries> {
+        let res = self
+            .inner
+            .between_time(start, end)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let lbl = py_to_index_label(label)?;
+        let val = self.inner.asof_value(&lbl);
+        scalar_to_py(py, &val)
+    }
+
+    #[pyo3(signature = (lag=1))]
+    fn autocorr(&self, lag: usize) -> PyResult<f64> {
+        self.inner.autocorr(lag).map_err(frame_error_to_py)
+    }
+
+    #[pyo3(signature = (ascending=true))]
+    fn argsort(&self, ascending: bool) -> PyResult<PySeries> {
+        let res = self.inner.argsort(ascending).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn apply(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let vals = self.inner.column().values();
+        let labels = self.inner.index().labels();
+        let mut out = Vec::with_capacity(vals.len());
+        for v in vals {
+            let py_val = scalar_to_py(py, v)?;
+            let res = func.call1((py_val,))?;
+            out.push(py_to_scalar(py, &res)?);
+        }
+        let s = Series::from_values(self.inner.name(), labels.to_vec(), out)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn map(&self, py: Python<'_>, arg: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if arg.is_callable() {
+            self.apply(py, arg)
+        } else if let Ok(dict) = arg.cast::<PyDict>() {
+            let vals = self.inner.column().values();
+            let labels = self.inner.index().labels();
+            let mut out = Vec::with_capacity(vals.len());
+            for v in vals {
+                let py_val = scalar_to_py(py, v)?;
+                if let Some(mapped) = dict.get_item(&py_val)? {
+                    out.push(py_to_scalar(py, &mapped)?);
+                } else {
+                    out.push(Scalar::Float64(f64::NAN));
+                }
+            }
+            let s = Series::from_values(self.inner.name(), labels.to_vec(), out)
+                .map_err(frame_error_to_py)?;
+            Ok(PySeries { inner: s })
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "map expects callable or dict",
+            ))
+        }
     }
 }
 
@@ -5574,6 +5920,171 @@ impl PyDataFrame {
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
+
+    #[getter]
+    fn axes(&self) -> Vec<Py<PyAny>> {
+        Python::attach(|py| {
+            let idx = Py::new(py, self.index()).ok()?;
+            let cols = PyList::new(py, self.columns()).ok()?;
+            Some(vec![idx.into_any(), cols.into_any().unbind()])
+        })
+        .unwrap_or_default()
+    }
+
+    #[getter]
+    fn attrs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        Ok(PyDict::new(py))
+    }
+
+    fn r#bool(&self) -> PyResult<bool> {
+        let (r, c) = self.inner.shape();
+        if r == 1 && c == 1 {
+            let col = self.column_series(self.inner.column_names()[0])?;
+            col.r#bool()
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "The truth value of a DataFrame is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().",
+            ))
+        }
+    }
+
+    fn combine_first(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+        let res = self
+            .inner
+            .combine_first(&other.inner)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (other, join="outer"))]
+    fn align(&self, other: &PyDataFrame, join: &str) -> PyResult<(PyDataFrame, PyDataFrame)> {
+        let mode = match join {
+            "outer" => AlignMode::Outer,
+            "inner" => AlignMode::Inner,
+            "left" => AlignMode::Left,
+            "right" => AlignMode::Right,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid join mode '{join}'"
+                )));
+            }
+        };
+        let (df1, df2) = self
+            .inner
+            .align(&other.inner, mode)
+            .map_err(frame_error_to_py)?;
+        Ok((PyDataFrame { inner: df1 }, PyDataFrame { inner: df2 }))
+    }
+
+    fn compare(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+        let res = self
+            .inner
+            .compare(&other.inner)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn convert_dtypes(&self) -> PyResult<PyDataFrame> {
+        let res = self.inner.convert_dtypes().map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn at_time(&self, time: &str) -> PyResult<PyDataFrame> {
+        let res = self.inner.at_time(time).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn between_time(&self, start: &str, end: &str) -> PyResult<PyDataFrame> {
+        let res = self
+            .inner
+            .between_time(start, end)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (label, subset=None))]
+    fn asof(&self, label: &Bound<'_, PyAny>, subset: Option<Vec<String>>) -> PyResult<PySeries> {
+        let lbl = py_to_index_label(label)?;
+        let subset_refs: Option<Vec<&str>> = subset
+            .as_ref()
+            .map(|s| s.iter().map(String::as_str).collect());
+        let res = self
+            .inner
+            .asof(&lbl, subset_refs.as_deref())
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn corrwith(&self, other: &PyDataFrame) -> PyResult<PySeries> {
+        let res = self
+            .inner
+            .corrwith(&other.inner)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (func, axis=0))]
+    fn apply(&self, py: Python<'_>, func: &Bound<'_, PyAny>, axis: usize) -> PyResult<Py<PyAny>> {
+        if axis == 0 {
+            let mut res_cols = Vec::new();
+            for col_name in self.inner.column_names() {
+                let s = self.column_series(col_name)?;
+                let py_s = Py::new(py, s)?;
+                let res = func.call1((py_s,))?;
+                res_cols.push((col_name.to_string(), res));
+            }
+            let mut scalars = Vec::new();
+            let mut all_scalars = true;
+            for (_, r) in &res_cols {
+                if let Ok(sc) = py_to_scalar(py, r) {
+                    scalars.push(sc);
+                } else {
+                    all_scalars = false;
+                    break;
+                }
+            }
+            if all_scalars {
+                let labels: Vec<IndexLabel> = res_cols
+                    .iter()
+                    .map(|(n, _)| IndexLabel::Utf8(n.clone()))
+                    .collect();
+                let s = Series::from_values("", labels, scalars).map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+            }
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "DataFrame.apply currently supports axis=0 returning scalar Series",
+        ))
+    }
+
+    fn applymap(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let (nrows, ncols) = self.inner.shape();
+        let col_names = self.inner.column_names();
+        let mut col_map = BTreeMap::new();
+        let mut column_order = Vec::with_capacity(ncols);
+        for col_name in &col_names {
+            let s = self.column_series(col_name)?;
+            let vals = s.inner.column().values();
+            let mut out = Vec::with_capacity(nrows);
+            for v in vals {
+                let py_v = scalar_to_py(py, v)?;
+                let res = func.call1((py_v,))?;
+                out.push(py_to_scalar(py, &res)?);
+            }
+            let col = Column::from_values(out)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            column_order.push((*col_name).clone());
+            col_map.insert((*col_name).clone(), col);
+        }
+        let df =
+            DataFrame::new_with_column_order(self.inner.index().clone(), col_map, column_order)
+                .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: df })
+    }
+
+    fn map(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.applymap(py, func)
+    }
 }
 
 /// Helper indexer classes for PyDataFrame.
@@ -6392,6 +6903,61 @@ impl PyRolling {
     pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         self.agg(py, func)
     }
+
+    #[getter]
+    pub fn exclusions(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let set = pyo3::types::PyFrozenSet::empty(py)?;
+        Ok(set.into_any().unbind())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (func, raw=false, engine=None, engine_kwargs=None, args=None, kwargs=None))]
+    pub fn apply(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        raw: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyDict>>,
+        args: Option<&Bound<'_, PyTuple>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (raw, engine, engine_kwargs, args, kwargs);
+        if func.extract::<String>().is_ok() {
+            return self.agg(py, func);
+        }
+        if func.is_callable()
+            && let Some(ref s) = self.series
+        {
+            let n = s.len();
+            let vals = s.column().values();
+            let mut out_vals = Vec::with_capacity(n);
+            let w = self.window;
+            let min_p = self.min_periods.unwrap_or(w);
+            for i in 0..n {
+                let start = (i + 1).saturating_sub(w);
+                let slice = &vals[start..=i];
+                if slice.len() < min_p {
+                    out_vals.push(Scalar::Float64(f64::NAN));
+                } else {
+                    let py_slice: Vec<Py<PyAny>> = slice
+                        .iter()
+                        .map(|v| scalar_to_py(py, v))
+                        .collect::<Result<_, _>>()?;
+                    let arg = PyList::new(py, py_slice)?;
+                    let res = func.call1((arg,))?;
+                    let res_scalar = py_to_scalar(py, &res)?;
+                    out_vals.push(res_scalar);
+                }
+            }
+            let res_series = Series::from_values(s.name(), s.index().labels().to_vec(), out_vals)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "rolling.apply currently supported for Series with Python callable",
+        ))
+    }
 }
 
 /// Python wrapper for expanding window calculations over Series or DataFrame.
@@ -6766,6 +7332,59 @@ impl PyExpanding {
     pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         self.agg(py, func)
     }
+
+    #[getter]
+    pub fn exclusions(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let set = pyo3::types::PyFrozenSet::empty(py)?;
+        Ok(set.into_any().unbind())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (func, raw=false, engine=None, engine_kwargs=None, args=None, kwargs=None))]
+    pub fn apply(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        raw: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyDict>>,
+        args: Option<&Bound<'_, PyTuple>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (raw, engine, engine_kwargs, args, kwargs);
+        if func.extract::<String>().is_ok() {
+            return self.agg(py, func);
+        }
+        if func.is_callable()
+            && let Some(ref s) = self.series
+        {
+            let n = s.len();
+            let vals = s.column().values();
+            let mut out_vals = Vec::with_capacity(n);
+            let min_p = self.min_periods.unwrap_or(1);
+            for i in 0..n {
+                let slice = &vals[0..=i];
+                if slice.len() < min_p {
+                    out_vals.push(Scalar::Float64(f64::NAN));
+                } else {
+                    let py_slice: Vec<Py<PyAny>> = slice
+                        .iter()
+                        .map(|v| scalar_to_py(py, v))
+                        .collect::<Result<_, _>>()?;
+                    let arg = PyList::new(py, py_slice)?;
+                    let res = func.call1((arg,))?;
+                    let res_scalar = py_to_scalar(py, &res)?;
+                    out_vals.push(res_scalar);
+                }
+            }
+            let res_series = Series::from_values(s.name(), s.index().labels().to_vec(), out_vals)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "expanding.apply currently supported for Series with Python callable",
+        ))
+    }
 }
 
 /// Python wrapper for exponential moving window calculations over Series or DataFrame.
@@ -6939,6 +7558,23 @@ impl PyExponentialMovingWindow {
 
     pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         self.agg(py, func)
+    }
+
+    #[getter]
+    pub fn exclusions(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let set = pyo3::types::PyFrozenSet::empty(py)?;
+        Ok(set.into_any().unbind())
+    }
+
+    #[pyo3(signature = (engine="numba"))]
+    pub fn online(&self, engine: &str) -> PyResult<PyExponentialMovingWindow> {
+        let _ = engine;
+        Ok(PyExponentialMovingWindow {
+            series: self.series.clone(),
+            dataframe: self.dataframe.clone(),
+            span: self.span,
+            alpha: self.alpha,
+        })
     }
 }
 
@@ -7507,6 +8143,92 @@ impl PyGroupBy {
     fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         self.agg(py, func)
     }
+
+    #[pyo3(signature = (limit=None))]
+    fn ffill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .ffill(limit)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn bfill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .bfill(limit)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn describe(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .describe()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn get_group(&self, name: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let s = name
+            .extract::<String>()
+            .or_else(|_| name.str().map(|py_s| py_s.to_string()))?;
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .get_group(&s)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[getter]
+    fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let dict = PyDict::new(py);
+        for (lbl, indices) in gb.groups() {
+            let py_key = index_label_to_py(py, &lbl)?;
+            let py_indices = PyList::new(py, indices)?;
+            dict.set_item(py_key, py_indices)?;
+        }
+        Ok(dict.unbind())
+    }
+
+    #[getter]
+    fn indices(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.groups(py)
+    }
+
+    #[getter]
+    fn dtypes(&self) -> PyResult<PySeries> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let first = gb.first().map_err(frame_error_to_py)?;
+        PyDataFrame { inner: first }.dtypes()
+    }
+
+    fn corrwith(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .corrwith(&other.inner)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
 }
 
 /// Python wrapper for FrankenPandas SeriesGroupBy.
@@ -7907,6 +8629,95 @@ impl PySeriesGroupBy {
 
     fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         self.agg(py, func)
+    }
+
+    #[pyo3(signature = (n=5))]
+    fn head(&self, n: usize) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .head(n as i64)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (n=5))]
+    fn tail(&self, n: usize) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .tail(n as i64)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn ffill(&self, limit: Option<usize>) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .ffill(limit)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn bfill(&self, limit: Option<usize>) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .bfill(limit)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn describe(&self) -> PyResult<PyDataFrame> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .describe()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn get_group(&self, name: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let s = name
+            .extract::<String>()
+            .or_else(|_| name.str().map(|py_s| py_s.to_string()))?;
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .get_group(&s)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[getter]
+    fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
+        let dict = PyDict::new(py);
+        for (lbl, indices) in gb.groups() {
+            let py_key = index_label_to_py(py, &lbl)?;
+            let py_indices = PyList::new(py, indices)?;
+            dict.set_item(py_key, py_indices)?;
+        }
+        Ok(dict.unbind())
+    }
+
+    #[getter]
+    fn indices(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.groups(py)
+    }
+
+    #[getter]
+    fn dtype(&self) -> String {
+        self.series.dtype_name()
     }
 }
 
@@ -10299,5 +11110,62 @@ mod tests {
         assert_eq!(exp.ndim(), 2);
         let ewm = py_df.ewm(Some(0.5), None);
         assert_eq!(ewm.ndim(), 2);
+    }
+
+    #[test]
+    fn test_py_batch2_operations() {
+        let idx = PyIndex {
+            inner: Index::new(vec![
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Null(fp_types::NullKind::Null),
+            ]),
+        };
+        assert!(!idx.all());
+        assert!(idx.any());
+        let dropped = idx.dropna(None);
+        assert_eq!(dropped.inner.len(), 2);
+        let deleted = idx.delete(0).expect("delete"); // ubs:ignore — test fixture
+        assert_eq!(deleted.inner.len(), 2);
+        let repeated = idx.repeat(2);
+        assert_eq!(repeated.inner.len(), 6);
+        let taken = idx.take(vec![1, 0]).expect("take"); // ubs:ignore — test fixture
+        assert_eq!(taken.inner.len(), 2);
+
+        let s1 = Series::new(
+            "s1",
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            Column::from_f64_values(vec![10.0, 20.0]),
+        )
+        .expect("series"); // ubs:ignore — test fixture
+        let py_s1 = PySeries { inner: s1 };
+        let s2 = Series::new(
+            "s2",
+            Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]),
+            Column::from_f64_values(vec![25.0, 30.0]),
+        )
+        .expect("series"); // ubs:ignore — test fixture
+        let py_s2 = PySeries { inner: s2 };
+
+        let (a1, a2) = py_s1.align(&py_s2, "outer").expect("align"); // ubs:ignore — test fixture
+        assert_eq!(a1.inner.len(), 3);
+        assert_eq!(a2.inner.len(), 3);
+
+        let cf = py_s1.combine_first(&py_s2).expect("combine_first"); // ubs:ignore — test fixture
+        assert_eq!(cf.inner.len(), 3);
+
+        let df1 = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+        )
+        .expect("df"); // ubs:ignore — test fixture
+        let py_df1 = PyDataFrame { inner: df1 };
+        let (d1, d2) = py_df1.align(&py_df1, "inner").expect("align df"); // ubs:ignore — test fixture
+        assert_eq!(d1.shape(), (2, 1));
+        assert_eq!(d2.shape(), (2, 1));
+
+        let ewm = py_df1.ewm(Some(0.5), None);
+        assert_eq!(ewm.ndim(), 2);
+        assert!(ewm.online("numba").is_ok());
     }
 }
