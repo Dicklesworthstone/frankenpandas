@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
-use fp_frame::{DataFrame, Series};
+use fp_frame::{DataFrame, Series, concat_dataframes, concat_series};
 use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
@@ -13733,7 +13733,8 @@ impl PyStyler {
 }
 
 /// Python wrapper for FrankenPandas GroupBy.
-#[pyclass(name = "DataFrameGroupBy")]
+#[derive(Clone)]
+#[pyclass(name = "DataFrameGroupBy", from_py_object)]
 pub struct PyGroupBy {
     df: DataFrame,
     by: Vec<String>,
@@ -14266,10 +14267,418 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
+
+    #[pyo3(signature = (func, *args, include_groups=false, **kwargs))]
+    fn apply(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        include_groups: Option<bool>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, include_groups, kwargs);
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let groups = gb.groups();
+        let mut keys: Vec<_> = groups.keys().cloned().collect();
+        keys.sort();
+        let mut out_dfs = Vec::new();
+        let mut out_series = Vec::new();
+        let mut out_scalars = Vec::new();
+        for k in &keys {
+            let k_str = match k {
+                IndexLabel::Utf8(s) => s.clone(),
+                IndexLabel::Int64(i) => i.to_string(),
+                _ => format!("{k:?}"),
+            };
+            if let Ok(group_df) = gb.get_group(&k_str) {
+                let py_df = PyDataFrame { inner: group_df };
+                let res = func.call1((py_df,))?;
+                if let Ok(df_res) = res.extract::<PyDataFrame>() {
+                    out_dfs.push(df_res.inner);
+                } else if let Ok(s_res) = res.extract::<PySeries>() {
+                    out_series.push(s_res.inner);
+                } else if let Ok(sc) = py_to_scalar(py, &res) {
+                    out_scalars.push((k.clone(), sc));
+                }
+            }
+        }
+        if !out_dfs.is_empty() {
+            let refs: Vec<&DataFrame> = out_dfs.iter().collect();
+            let combined = concat_dataframes(&refs).map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PyDataFrame { inner: combined })?.into_any())
+        } else if !out_series.is_empty() {
+            let refs: Vec<&Series> = out_series.iter().collect();
+            let combined = concat_series(&refs).map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PySeries { inner: combined })?.into_any())
+        } else if !out_scalars.is_empty() {
+            let labels: Vec<IndexLabel> = out_scalars.iter().map(|(lbl, _)| lbl.clone()).collect();
+            let values: Vec<Scalar> = out_scalars.into_iter().map(|(_, v)| v).collect();
+            let s = Series::from_values("", labels, values).map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PySeries { inner: s })?.into_any())
+        } else {
+            let first = gb.first().map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PyDataFrame { inner: first })?.into_any())
+        }
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn boxplot(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let _ = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .boxplot()
+            .map_err(frame_error_to_py)?;
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn hist(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let _ = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .hist()
+            .map_err(frame_error_to_py)?;
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn plot(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let _ = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .plot()
+            .map_err(frame_error_to_py)?;
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (span=None, alpha=None))]
+    fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> PyResult<PyExponentialMovingWindow> {
+        Ok(PyExponentialMovingWindow {
+            series: None,
+            dataframe: Some(self.df.clone()),
+            span,
+            alpha,
+        })
+    }
+
+    #[pyo3(signature = (min_periods=None))]
+    fn expanding(&self, min_periods: Option<usize>) -> PyResult<PyExpanding> {
+        Ok(PyExpanding {
+            series: None,
+            dataframe: Some(self.df.clone()),
+            min_periods,
+        })
+    }
+
+    #[pyo3(signature = (window, min_periods=None, center=false))]
+    fn rolling(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: Option<bool>,
+    ) -> PyResult<PyRolling> {
+        Ok(PyRolling {
+            series: None,
+            dataframe: Some(self.df.clone()),
+            window,
+            min_periods,
+            center: center.unwrap_or(false),
+        })
+    }
+
+    #[pyo3(signature = (rule, closed=None, label=None, origin=None))]
+    fn resample(
+        &self,
+        rule: String,
+        closed: Option<String>,
+        label: Option<String>,
+        origin: Option<String>,
+    ) -> PyResult<PyResampler> {
+        Ok(PyResampler {
+            target: ResampleTarget::DataFrame(self.df.clone()),
+            freq: rule,
+            closed,
+            label,
+            origin,
+        })
+    }
+
+    fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let sc = py_to_scalar(py, value)?;
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .fillna(&sc)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (func, dropna=true))]
+    fn filter(&self, func: &Bound<'_, PyAny>, dropna: Option<bool>) -> PyResult<PyDataFrame> {
+        let _ = dropna;
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let groups = gb.groups();
+        let mut keys: Vec<_> = groups.keys().cloned().collect();
+        keys.sort();
+        let mut kept_dfs = Vec::new();
+        for k in &keys {
+            let k_str = match k {
+                IndexLabel::Utf8(s) => s.clone(),
+                IndexLabel::Int64(i) => i.to_string(),
+                _ => format!("{k:?}"),
+            };
+            if let Ok(group_df) = gb.get_group(&k_str) {
+                let py_df = PyDataFrame {
+                    inner: group_df.clone(),
+                };
+                let res = func.call1((py_df,))?;
+                if res.is_truthy()? {
+                    kept_dfs.push(group_df);
+                }
+            }
+        }
+        if !kept_dfs.is_empty() {
+            let refs: Vec<&DataFrame> = kept_dfs.iter().collect();
+            let combined = concat_dataframes(&refs).map_err(frame_error_to_py)?;
+            Ok(PyDataFrame { inner: combined })
+        } else {
+            let empty = self.df.head(0).map_err(frame_error_to_py)?;
+            Ok(PyDataFrame { inner: empty })
+        }
+    }
+
+    #[getter]
+    fn grouper(&self) -> Vec<String> {
+        self.by.clone()
+    }
+
+    #[getter]
+    fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.by.len() == 1 {
+            Ok(pyo3::types::PyString::new(py, &self.by[0])
+                .into_any()
+                .unbind())
+        } else {
+            let list = PyList::new(py, &self.by)?;
+            Ok(list.into_any().unbind())
+        }
+    }
+
+    #[getter]
+    fn level(&self) -> Option<usize> {
+        None
+    }
+
+    #[pyo3(signature = (ascending=true))]
+    fn ngroup(&self, ascending: Option<bool>) -> PyResult<PySeries> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .ngroup_with_ascending(ascending.unwrap_or(true))
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (n, dropna=None))]
+    fn nth(&self, n: i64, dropna: Option<&str>) -> PyResult<PyDataFrame> {
+        let _ = dropna;
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .nth(n)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn pipe<'py>(
+        &self,
+        py: Python<'py>,
+        func: &Bound<'py, PyAny>,
+        args: &Bound<'py, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if let Ok(tup) = func.cast::<pyo3::types::PyTuple>()
+            && tup.len() == 2
+        {
+            let f = tup.get_item(0)?;
+            let kw_name = tup.get_item(1)?.extract::<String>()?;
+            let kw = kwargs.cloned().unwrap_or_else(|| PyDict::new(py));
+            kw.set_item(kw_name, self.clone())?;
+            return f.call(args, Some(&kw));
+        }
+        let mut full_args = Vec::with_capacity(args.len() + 1);
+        full_args.push(Py::new(py, self.clone())?.into_any());
+        for item in args.iter() {
+            full_args.push(item.unbind());
+        }
+        let full_tuple = pyo3::types::PyTuple::new(py, full_args)?;
+        func.call(&full_tuple, kwargs)
+    }
+
+    #[pyo3(signature = (axis=0, skipna=true, numeric_only=false))]
+    fn idxmax(
+        &self,
+        axis: Option<usize>,
+        skipna: Option<bool>,
+        numeric_only: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (axis, skipna, numeric_only);
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .idxmax()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (axis=0, skipna=true, numeric_only=false))]
+    fn idxmin(
+        &self,
+        axis: Option<usize>,
+        skipna: Option<bool>,
+        numeric_only: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (axis, skipna, numeric_only);
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .idxmin()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (n=None, frac=None, replace=false, weights=None, random_state=None))]
+    fn sample(
+        &self,
+        n: Option<usize>,
+        frac: Option<f64>,
+        replace: Option<bool>,
+        weights: Option<&Bound<'_, PyAny>>,
+        random_state: Option<u64>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = weights;
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .sample(n, frac, replace.unwrap_or(false), random_state)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (periods=1, freq=None, axis=None, fill_value=None, suffix=None))]
+    fn shift(
+        &self,
+        periods: Option<i64>,
+        freq: Option<&str>,
+        axis: Option<usize>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        suffix: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (freq, axis, fill_value, suffix);
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .shift(periods.unwrap_or(1))
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (indices, axis=None))]
+    fn take(&self, indices: Vec<i64>, axis: Option<usize>) -> PyResult<PyDataFrame> {
+        let _ = axis;
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .take(&indices)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn transform(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        if let Ok(func_str) = func.extract::<String>() {
+            let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        self.apply(py, func, args, None, kwargs)
+    }
+
+    #[pyo3(signature = (subset=None, normalize=false, sort=true, ascending=false, dropna=true))]
+    fn value_counts(
+        &self,
+        subset: Option<Vec<String>>,
+        normalize: Option<bool>,
+        sort: Option<bool>,
+        ascending: Option<bool>,
+        dropna: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (subset, normalize, sort, ascending, dropna);
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let res = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .value_counts()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
 }
 
 /// Python wrapper for FrankenPandas SeriesGroupBy.
-#[pyclass(name = "SeriesGroupBy")]
+#[derive(Clone)]
+#[pyclass(name = "SeriesGroupBy", from_py_object)]
 pub struct PySeriesGroupBy {
     series: Series,
     by: Series,
@@ -14755,6 +15164,414 @@ impl PySeriesGroupBy {
     #[getter]
     fn dtype(&self) -> String {
         self.series.dtype_name()
+    }
+
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn apply(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
+        let groups = gb.groups();
+        let mut keys: Vec<_> = groups.keys().cloned().collect();
+        keys.sort();
+        let mut out_series = Vec::new();
+        let mut out_scalars = Vec::new();
+        for k in &keys {
+            let k_str = match k {
+                IndexLabel::Utf8(s) => s.clone(),
+                IndexLabel::Int64(i) => i.to_string(),
+                _ => format!("{k:?}"),
+            };
+            if let Ok(group_s) = gb.get_group(&k_str) {
+                let py_s = PySeries { inner: group_s };
+                let res = func.call1((py_s,))?;
+                if let Ok(s_res) = res.extract::<PySeries>() {
+                    out_series.push(s_res.inner);
+                } else if let Ok(sc) = py_to_scalar(py, &res) {
+                    out_scalars.push((k.clone(), sc));
+                }
+            }
+        }
+        if !out_series.is_empty() {
+            let refs: Vec<&Series> = out_series.iter().collect();
+            let combined = concat_series(&refs).map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PySeries { inner: combined })?.into_any())
+        } else if !out_scalars.is_empty() {
+            let labels: Vec<IndexLabel> = out_scalars.iter().map(|(lbl, _)| lbl.clone()).collect();
+            let values: Vec<Scalar> = out_scalars.into_iter().map(|(_, v)| v).collect();
+            let s = Series::from_values("", labels, values).map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PySeries { inner: s })?.into_any())
+        } else {
+            let first = gb.first().map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PySeries { inner: first })?.into_any())
+        }
+    }
+
+    #[pyo3(signature = (other, method=None, min_periods=None))]
+    fn corr(
+        &self,
+        other: &PySeries,
+        method: Option<&str>,
+        min_periods: Option<usize>,
+    ) -> PyResult<PySeries> {
+        let _ = (method, min_periods);
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .corr(&other.inner)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (other, min_periods=None, ddof=None))]
+    fn cov(
+        &self,
+        other: &PySeries,
+        min_periods: Option<usize>,
+        ddof: Option<usize>,
+    ) -> PyResult<PySeries> {
+        let _ = (min_periods, ddof);
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .cov(&other.inner)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (span=None, alpha=None))]
+    fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> PyResult<PyExponentialMovingWindow> {
+        Ok(PyExponentialMovingWindow {
+            series: Some(self.series.clone()),
+            dataframe: None,
+            span,
+            alpha,
+        })
+    }
+
+    #[pyo3(signature = (min_periods=None))]
+    fn expanding(&self, min_periods: Option<usize>) -> PyResult<PyExpanding> {
+        Ok(PyExpanding {
+            series: Some(self.series.clone()),
+            dataframe: None,
+            min_periods,
+        })
+    }
+
+    #[pyo3(signature = (window, min_periods=None, center=false))]
+    fn rolling(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: Option<bool>,
+    ) -> PyResult<PyRolling> {
+        Ok(PyRolling {
+            series: Some(self.series.clone()),
+            dataframe: None,
+            window,
+            min_periods,
+            center: center.unwrap_or(false),
+        })
+    }
+
+    #[pyo3(signature = (rule, closed=None, label=None, origin=None))]
+    fn resample(
+        &self,
+        rule: String,
+        closed: Option<String>,
+        label: Option<String>,
+        origin: Option<String>,
+    ) -> PyResult<PyResampler> {
+        Ok(PyResampler {
+            target: ResampleTarget::Series(self.series.clone()),
+            freq: rule,
+            closed,
+            label,
+            origin,
+        })
+    }
+
+    fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let sc = py_to_scalar(py, value)?;
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .fillna(&sc)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (func, dropna=true))]
+    fn filter(&self, func: &Bound<'_, PyAny>, dropna: Option<bool>) -> PyResult<PySeries> {
+        let _ = dropna;
+        let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
+        let groups = gb.groups();
+        let mut keys: Vec<_> = groups.keys().cloned().collect();
+        keys.sort();
+        let mut kept_series = Vec::new();
+        for k in &keys {
+            let k_str = match k {
+                IndexLabel::Utf8(s) => s.clone(),
+                IndexLabel::Int64(i) => i.to_string(),
+                _ => format!("{k:?}"),
+            };
+            if let Ok(group_s) = gb.get_group(&k_str) {
+                let py_s = PySeries {
+                    inner: group_s.clone(),
+                };
+                let res = func.call1((py_s,))?;
+                if res.is_truthy()? {
+                    kept_series.push(group_s);
+                }
+            }
+        }
+        if !kept_series.is_empty() {
+            let refs: Vec<&Series> = kept_series.iter().collect();
+            let combined = concat_series(&refs).map_err(frame_error_to_py)?;
+            Ok(PySeries { inner: combined })
+        } else {
+            let empty = self.series.head(0).map_err(frame_error_to_py)?;
+            Ok(PySeries { inner: empty })
+        }
+    }
+
+    #[getter]
+    fn grouper(&self) -> String {
+        self.by.name().to_string()
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn hist(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        let _ = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .hist()
+            .map_err(frame_error_to_py)?;
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (axis=0, skipna=true))]
+    fn idxmax(&self, axis: Option<usize>, skipna: Option<bool>) -> PyResult<PySeries> {
+        let _ = (axis, skipna);
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .idxmax()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (axis=0, skipna=true))]
+    fn idxmin(&self, axis: Option<usize>, skipna: Option<bool>) -> PyResult<PySeries> {
+        let _ = (axis, skipna);
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .idxmin()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[getter]
+    fn is_monotonic_decreasing(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .is_monotonic_decreasing()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[getter]
+    fn is_monotonic_increasing(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .is_monotonic_increasing()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[getter]
+    fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(pyo3::types::PyString::new(py, self.by.name())
+            .into_any()
+            .unbind())
+    }
+
+    #[getter]
+    fn level(&self) -> Option<usize> {
+        None
+    }
+
+    #[pyo3(signature = (ascending=true))]
+    fn ngroup(&self, ascending: Option<bool>) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .ngroup_with_ascending(ascending.unwrap_or(true))
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (n, dropna=None))]
+    fn nth(&self, n: i64, dropna: Option<&str>) -> PyResult<PySeries> {
+        let _ = dropna;
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .nth(n)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn ohlc(&self) -> PyResult<PyDataFrame> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .ohlc()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (periods=1, fill_method=None, limit=None, freq=None))]
+    fn pct_change(
+        &self,
+        periods: Option<i64>,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+        freq: Option<&str>,
+    ) -> PyResult<PySeries> {
+        let _ = (fill_method, limit, freq);
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .pct_change(periods.unwrap_or(1))
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn pipe<'py>(
+        &self,
+        py: Python<'py>,
+        func: &Bound<'py, PyAny>,
+        args: &Bound<'py, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if let Ok(tup) = func.cast::<pyo3::types::PyTuple>()
+            && tup.len() == 2
+        {
+            let f = tup.get_item(0)?;
+            let kw_name = tup.get_item(1)?.extract::<String>()?;
+            let kw = kwargs.cloned().unwrap_or_else(|| PyDict::new(py));
+            kw.set_item(kw_name, self.clone())?;
+            return f.call(args, Some(&kw));
+        }
+        let mut full_args = Vec::with_capacity(args.len() + 1);
+        full_args.push(Py::new(py, self.clone())?.into_any());
+        for item in args.iter() {
+            full_args.push(item.unbind());
+        }
+        let full_tuple = pyo3::types::PyTuple::new(py, full_args)?;
+        func.call(&full_tuple, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn plot(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        let _ = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .plot()
+            .map_err(frame_error_to_py)?;
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (n=None, frac=None, replace=false, weights=None, random_state=None))]
+    fn sample(
+        &self,
+        n: Option<usize>,
+        frac: Option<f64>,
+        replace: Option<bool>,
+        weights: Option<&Bound<'_, PyAny>>,
+        random_state: Option<u64>,
+    ) -> PyResult<PySeries> {
+        let _ = weights;
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .sample(n, frac, replace.unwrap_or(false), random_state)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (indices, axis=None))]
+    fn take(&self, indices: Vec<i64>, axis: Option<usize>) -> PyResult<PySeries> {
+        let _ = axis;
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .take(&indices)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn transform(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
+        if let Ok(func_str) = func.extract::<String>() {
+            let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        self.apply(py, func, args, kwargs)
+    }
+
+    fn unique(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .unique()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
     }
 }
 
