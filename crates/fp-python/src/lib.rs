@@ -21,8 +21,11 @@ use std::collections::BTreeMap;
 use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
 use fp_frame::{DataFrame, Series};
-use fp_index::{DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex, format_datetime_ns};
-use fp_types::Scalar;
+use fp_index::{
+    CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex, PeriodIndex,
+    RangeIndex, TimedeltaIndex, format_datetime_ns,
+};
+use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
@@ -1231,6 +1234,1021 @@ impl PyMultiIndex {
     }
 }
 
+/// Python wrapper for FrankenPandas TimedeltaIndex.
+#[pyclass(name = "TimedeltaIndex", from_py_object)]
+#[derive(Clone)]
+pub struct PyTimedeltaIndex {
+    pub(crate) inner: TimedeltaIndex,
+}
+
+#[pymethods]
+impl PyTimedeltaIndex {
+    #[new]
+    #[pyo3(signature = (data=None, unit=None, freq=None, name=None))]
+    pub fn new(
+        data: Option<&Bound<'_, PyAny>>,
+        unit: Option<&str>,
+        freq: Option<&str>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let mut nanos = Vec::new();
+        if let Some(obj) = data {
+            if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+                let mut inner = tdi.inner.clone();
+                if let Some(n) = name {
+                    inner = inner.set_name(n);
+                }
+                return Ok(Self { inner });
+            }
+            if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+                for v in s.inner.values() {
+                    match v {
+                        Scalar::Timedelta64(ns) => nanos.push(*ns),
+                        Scalar::Int64(i) => {
+                            let factor = match unit.unwrap_or("ns") {
+                                "s" => Timedelta::NANOS_PER_SEC,
+                                "ms" => Timedelta::NANOS_PER_MILLI,
+                                "us" => Timedelta::NANOS_PER_MICRO,
+                                "m" | "min" => Timedelta::NANOS_PER_MIN,
+                                "h" => Timedelta::NANOS_PER_HOUR,
+                                "d" | "D" => Timedelta::NANOS_PER_DAY,
+                                "w" | "W" => Timedelta::NANOS_PER_WEEK,
+                                _ => 1,
+                            };
+                            nanos.push(i.saturating_mul(factor));
+                        }
+                        Scalar::Utf8(txt) => {
+                            let parsed = Timedelta::parse(txt).unwrap_or(Timedelta::NAT);
+                            nanos.push(parsed);
+                        }
+                        Scalar::Null(_) => nanos.push(Timedelta::NAT),
+                        _ => nanos.push(Timedelta::NAT),
+                    }
+                }
+            } else if let Ok(list) = obj.extract::<Vec<Bound<'_, PyAny>>>() {
+                for item in list {
+                    if item.is_none() {
+                        nanos.push(Timedelta::NAT);
+                    } else if let Ok(i) = item.extract::<i64>() {
+                        let factor = match unit.unwrap_or("ns") {
+                            "s" => Timedelta::NANOS_PER_SEC,
+                            "ms" => Timedelta::NANOS_PER_MILLI,
+                            "us" => Timedelta::NANOS_PER_MICRO,
+                            "m" | "min" => Timedelta::NANOS_PER_MIN,
+                            "h" => Timedelta::NANOS_PER_HOUR,
+                            "d" | "D" => Timedelta::NANOS_PER_DAY,
+                            "w" | "W" => Timedelta::NANOS_PER_WEEK,
+                            _ => 1,
+                        };
+                        nanos.push(i.saturating_mul(factor));
+                    } else if let Ok(f) = item.extract::<f64>() {
+                        if f.is_nan() {
+                            nanos.push(Timedelta::NAT);
+                        } else {
+                            let factor = match unit.unwrap_or("ns") {
+                                "s" => Timedelta::NANOS_PER_SEC as f64,
+                                "ms" => Timedelta::NANOS_PER_MILLI as f64,
+                                "us" => Timedelta::NANOS_PER_MICRO as f64,
+                                "m" | "min" => Timedelta::NANOS_PER_MIN as f64,
+                                "h" => Timedelta::NANOS_PER_HOUR as f64,
+                                "d" | "D" => Timedelta::NANOS_PER_DAY as f64,
+                                "w" | "W" => Timedelta::NANOS_PER_WEEK as f64,
+                                _ => 1.0,
+                            };
+                            nanos.push((f * factor) as i64);
+                        }
+                    } else if let Ok(txt) = item.extract::<String>() {
+                        let parsed = Timedelta::parse(&txt).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Failed to parse timedelta '{txt}': {e}"
+                            ))
+                        })?;
+                        nanos.push(parsed);
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "Unsupported element in TimedeltaIndex data",
+                        ));
+                    }
+                }
+            }
+        }
+        let mut inner = TimedeltaIndex::new(nanos);
+        if let Some(n) = name {
+            inner = inner.set_name(n);
+        }
+        let _ = freq;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    pub fn days(&self) -> Vec<Option<i64>> {
+        self.inner.days()
+    }
+
+    #[getter]
+    pub fn seconds(&self) -> Vec<Option<i64>> {
+        self.inner.seconds()
+    }
+
+    #[getter]
+    pub fn microseconds(&self) -> Vec<Option<i64>> {
+        self.inner.microseconds()
+    }
+
+    #[getter]
+    pub fn nanoseconds(&self) -> Vec<Option<i64>> {
+        self.inner.nanoseconds()
+    }
+
+    pub fn total_seconds(&self) -> Vec<Option<f64>> {
+        self.inner.total_seconds()
+    }
+
+    #[getter]
+    pub fn asi8(&self) -> Vec<i64> {
+        self.inner.asi8()
+    }
+
+    #[getter]
+    pub fn shape(&self) -> (usize,) {
+        self.inner.shape()
+    }
+
+    #[getter]
+    pub fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    #[getter]
+    pub fn ndim(&self) -> usize {
+        self.inner.ndim()
+    }
+
+    #[getter]
+    pub fn empty(&self) -> bool {
+        self.inner.empty()
+    }
+
+    #[getter]
+    pub fn dtype(&self) -> &'static str {
+        self.inner.dtype()
+    }
+
+    #[getter]
+    pub fn name(&self) -> Option<String> {
+        self.inner.name().map(str::to_owned)
+    }
+
+    #[getter]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        self.inner.is_monotonic_increasing()
+    }
+
+    #[getter]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        self.inner.is_monotonic_decreasing()
+    }
+
+    #[getter]
+    pub fn has_duplicates(&self) -> bool {
+        self.inner.has_duplicates()
+    }
+
+    pub fn min(&self) -> Option<i64> {
+        self.inner.min().filter(|&x| x != Timedelta::NAT)
+    }
+
+    pub fn max(&self) -> Option<i64> {
+        self.inner.max().filter(|&x| x != Timedelta::NAT)
+    }
+
+    pub fn mean(&self) -> Option<i64> {
+        self.inner.mean().filter(|&x| x != Timedelta::NAT)
+    }
+
+    pub fn median(&self) -> Option<i64> {
+        self.inner.median().filter(|&x| x != Timedelta::NAT)
+    }
+
+    pub fn std(&self) -> Option<i64> {
+        self.inner.std()
+    }
+
+    pub fn var(&self) -> Option<f64> {
+        self.inner.var()
+    }
+
+    pub fn argmax(&self) -> PyResult<usize> {
+        self.inner
+            .argmax()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    pub fn argmin(&self) -> PyResult<usize> {
+        self.inner
+            .argmin()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    pub fn isna(&self) -> Vec<bool> {
+        self.inner.isna()
+    }
+
+    pub fn isnull(&self) -> Vec<bool> {
+        self.inner.isna()
+    }
+
+    pub fn notna(&self) -> Vec<bool> {
+        self.inner.notna()
+    }
+
+    pub fn notnull(&self) -> Vec<bool> {
+        self.inner.notna()
+    }
+
+    pub fn unique(&self) -> PyResult<Self> {
+        let u = self.inner.unique().map_err(index_error_to_py)?;
+        Ok(Self { inner: u })
+    }
+
+    pub fn nunique(&self) -> usize {
+        self.inner.nunique()
+    }
+
+    pub fn drop_duplicates(&self) -> PyResult<Self> {
+        let d = self.inner.drop_duplicates().map_err(index_error_to_py)?;
+        Ok(Self { inner: d })
+    }
+
+    pub fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<bool>> {
+        let k = parse_duplicate_keep(keep)?;
+        Ok(self.inner.duplicated(k))
+    }
+
+    pub fn isin(&self, values: Vec<i64>) -> Vec<bool> {
+        self.inner.isin(&values)
+    }
+
+    pub fn tolist(&self) -> Vec<Option<i64>> {
+        self.inner.tolist()
+    }
+
+    pub fn to_list(&self) -> Vec<Option<i64>> {
+        self.inner.tolist()
+    }
+
+    pub fn values(&self) -> Vec<Option<i64>> {
+        self.inner.values()
+    }
+
+    pub fn to_numpy(&self) -> Vec<Option<i64>> {
+        self.inner.to_numpy()
+    }
+
+    pub fn copy(&self) -> Self {
+        Self {
+            inner: self.inner.copy(),
+        }
+    }
+
+    pub fn rename(&self, name: Option<&str>) -> Self {
+        Self {
+            inner: self.inner.rename_index(name),
+        }
+    }
+
+    pub fn equals(&self, other: &Self) -> bool {
+        self.inner.equals(&other.inner)
+    }
+
+    pub fn round(&self, freq: &str) -> PyResult<Self> {
+        self.inner
+            .round(freq)
+            .map(|i| Self { inner: i })
+            .map_err(index_error_to_py)
+    }
+
+    pub fn floor(&self, freq: &str) -> PyResult<Self> {
+        self.inner
+            .floor(freq)
+            .map(|i| Self { inner: i })
+            .map_err(index_error_to_py)
+    }
+
+    pub fn ceil(&self, freq: &str) -> PyResult<Self> {
+        self.inner
+            .ceil(freq)
+            .map(|i| Self { inner: i })
+            .map_err(index_error_to_py)
+    }
+
+    #[pyo3(signature = (periods, freq="D"))]
+    pub fn shift(&self, periods: i64, freq: &str) -> PyResult<Self> {
+        let freq_nanos = parse_freq_to_nanos(freq)?;
+        Ok(Self {
+            inner: self.inner.shift(periods, freq_nanos),
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "TimedeltaIndex({:?}, dtype='timedelta64[ns]')",
+            self.inner.tolist()
+        )
+    }
+
+    pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(idx) = item.extract::<i64>() {
+            let len = self.inner.len() as i64;
+            let pos = if idx < 0 { len + idx } else { idx };
+            if pos < 0 || pos >= len {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "index out of bounds",
+                ));
+            }
+            let label = &self.inner.as_index().labels()[pos as usize];
+            return index_label_to_py(py, label);
+        }
+        if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
+            let indices = slice.indices(self.inner.len() as isize)?;
+            let mut sliced = Vec::new();
+            let mut i = indices.start;
+            if indices.step > 0 {
+                while i < indices.stop {
+                    if let IndexLabel::Timedelta64(ns) = self.inner.as_index().labels()[i as usize]
+                    {
+                        sliced.push(ns);
+                    }
+                    i += indices.step;
+                }
+            } else {
+                while i > indices.stop {
+                    if let IndexLabel::Timedelta64(ns) = self.inner.as_index().labels()[i as usize]
+                    {
+                        sliced.push(ns);
+                    }
+                    i += indices.step;
+                }
+            }
+            let mut out = TimedeltaIndex::new(sliced);
+            if let Some(n) = self.inner.name() {
+                out = out.set_name(n);
+            }
+            return Py::new(py, PyTimedeltaIndex { inner: out })?
+                .into_any()
+                .into_py_any(py);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "TimedeltaIndex indices must be integers or slices",
+        ))
+    }
+}
+
+/// Python wrapper for FrankenPandas RangeIndex.
+#[pyclass(name = "RangeIndex", from_py_object)]
+#[derive(Clone)]
+pub struct PyRangeIndex {
+    pub(crate) inner: RangeIndex,
+}
+
+#[pymethods]
+impl PyRangeIndex {
+    #[new]
+    #[pyo3(signature = (start=None, stop=None, step=None, name=None))]
+    pub fn new(
+        start: Option<i64>,
+        stop: Option<i64>,
+        step: Option<i64>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let (st, sp, step_val) = match (start, stop) {
+            (Some(val), None) => (0, val, step.unwrap_or(1)),
+            (Some(st), Some(sp)) => (st, sp, step.unwrap_or(1)),
+            (None, None) => (0, 0, step.unwrap_or(1)),
+            (None, Some(sp)) => (0, sp, step.unwrap_or(1)),
+        };
+        let mut inner = RangeIndex::new(st, sp, step_val)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        if let Some(n) = name {
+            inner = inner.set_name(n);
+        }
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    pub fn start(&self) -> i64 {
+        self.inner.start()
+    }
+
+    #[getter]
+    pub fn stop(&self) -> i64 {
+        self.inner.stop()
+    }
+
+    #[getter]
+    pub fn step(&self) -> i64 {
+        self.inner.step()
+    }
+
+    #[getter]
+    pub fn name(&self) -> Option<String> {
+        self.inner.name().map(str::to_owned)
+    }
+
+    #[getter]
+    pub fn shape(&self) -> (usize,) {
+        self.inner.shape()
+    }
+
+    #[getter]
+    pub fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    #[getter]
+    pub fn ndim(&self) -> usize {
+        self.inner.ndim()
+    }
+
+    #[getter]
+    pub fn empty(&self) -> bool {
+        self.inner.empty()
+    }
+
+    #[getter]
+    pub fn dtype(&self) -> &'static str {
+        self.inner.dtype()
+    }
+
+    #[getter]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        self.inner.is_monotonic_increasing()
+    }
+
+    #[getter]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        self.inner.is_monotonic_decreasing()
+    }
+
+    #[getter]
+    pub fn is_unique(&self) -> bool {
+        self.inner.is_unique()
+    }
+
+    #[getter]
+    pub fn has_duplicates(&self) -> bool {
+        self.inner.has_duplicates()
+    }
+
+    pub fn min(&self) -> Option<i64> {
+        self.inner.min()
+    }
+
+    pub fn max(&self) -> Option<i64> {
+        self.inner.max()
+    }
+
+    pub fn tolist(&self) -> Vec<i64> {
+        self.inner.values().iter().collect()
+    }
+
+    pub fn to_list(&self) -> Vec<i64> {
+        self.tolist()
+    }
+
+    pub fn values(&self) -> Vec<i64> {
+        self.tolist()
+    }
+
+    pub fn to_numpy(&self) -> Vec<i64> {
+        self.tolist()
+    }
+
+    pub fn copy(&self) -> Self {
+        Self {
+            inner: self.inner.copy(),
+        }
+    }
+
+    pub fn rename(&self, name: Option<&str>) -> Self {
+        Self {
+            inner: self.inner.rename_index(name),
+        }
+    }
+
+    pub fn equals(&self, other: &Self) -> bool {
+        self.inner.equals(&other.inner)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "RangeIndex(start={}, stop={}, step={})",
+            self.inner.start(),
+            self.inner.stop(),
+            self.inner.step()
+        )
+    }
+
+    pub fn __contains__(&self, item: i64) -> bool {
+        let start = self.inner.start();
+        let stop = self.inner.stop();
+        let step = self.inner.step();
+        if step > 0 {
+            item >= start && item < stop && (item - start) % step == 0
+        } else {
+            item <= start && item > stop && (start - item) % (-step) == 0
+        }
+    }
+
+    pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(idx) = item.extract::<i64>() {
+            let len = self.inner.len() as i64;
+            let pos = if idx < 0 { len + idx } else { idx };
+            if pos < 0 || pos >= len {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "index out of bounds",
+                ));
+            }
+            let val = self.inner.start() + (pos * self.inner.step());
+            return val.into_py_any(py);
+        }
+        if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
+            let indices = slice.indices(self.inner.len() as isize)?;
+            let new_start = self.inner.start() + (indices.start as i64) * self.inner.step();
+            let new_step = self.inner.step() * (indices.step as i64);
+            let new_stop = self.inner.start() + (indices.stop as i64) * self.inner.step();
+            let sub = RangeIndex::new(new_start, new_stop, new_step)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Py::new(py, PyRangeIndex { inner: sub })?
+                .into_any()
+                .into_py_any(py);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "RangeIndex indices must be integers or slices",
+        ))
+    }
+}
+
+/// Python wrapper for FrankenPandas PeriodIndex.
+#[pyclass(name = "PeriodIndex", from_py_object)]
+#[derive(Clone)]
+pub struct PyPeriodIndex {
+    pub(crate) inner: PeriodIndex,
+}
+
+#[pymethods]
+impl PyPeriodIndex {
+    #[new]
+    #[pyo3(signature = (data=None, freq=None, name=None))]
+    pub fn new(
+        data: Option<&Bound<'_, PyAny>>,
+        freq: Option<&str>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let period_freq = match freq {
+            Some(f) => PeriodFreq::parse(f).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "unsupported frequency '{f}'"
+                ))
+            })?,
+            None => PeriodFreq::Daily,
+        };
+        let mut inner = if let Some(d) = data {
+            if let Ok(pi) = d.extract::<PyRef<'_, PyPeriodIndex>>() {
+                pi.inner.clone()
+            } else if let Ok(list) = d.extract::<Vec<Bound<'_, PyAny>>>() {
+                let mut periods = Vec::with_capacity(list.len());
+                for item in list {
+                    if let Ok(s) = item.extract::<String>() {
+                        let p = Period::parse(&s).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}"))
+                        })?;
+                        periods.push(p);
+                    } else if let Ok(ord) = item.extract::<i64>() {
+                        periods.push(Period::new(ord, period_freq));
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "Unsupported element in PeriodIndex data",
+                        ));
+                    }
+                }
+                PeriodIndex::new(periods)
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "PeriodIndex requires iterable data or another PeriodIndex",
+                ));
+            }
+        } else {
+            PeriodIndex::new(Vec::new())
+        };
+        if let Some(n) = name {
+            inner = inner.set_name(n);
+        }
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    pub fn year(&self) -> PyResult<Vec<Option<i32>>> {
+        self.inner.year().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    pub fn month(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.month().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    pub fn day(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.day().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    pub fn hour(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.hour().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    pub fn minute(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.minute().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    pub fn second(&self) -> PyResult<Vec<Option<u32>>> {
+        self.inner.second().map_err(index_error_to_py)
+    }
+
+    #[getter]
+    pub fn shape(&self) -> (usize,) {
+        self.inner.shape()
+    }
+
+    #[getter]
+    pub fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    #[getter]
+    pub fn ndim(&self) -> usize {
+        self.inner.ndim()
+    }
+
+    #[getter]
+    pub fn empty(&self) -> bool {
+        self.inner.empty()
+    }
+
+    #[getter]
+    pub fn dtype(&self) -> String {
+        self.inner.dtype()
+    }
+
+    #[getter]
+    pub fn name(&self) -> Option<String> {
+        self.inner.name().map(str::to_owned)
+    }
+
+    #[getter]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        self.inner.is_monotonic_increasing()
+    }
+
+    #[getter]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        self.inner.is_monotonic_decreasing()
+    }
+
+    #[getter]
+    pub fn is_unique(&self) -> bool {
+        self.inner.is_unique()
+    }
+
+    #[getter]
+    pub fn has_duplicates(&self) -> bool {
+        self.inner.has_duplicates()
+    }
+
+    pub fn tolist(&self) -> Vec<String> {
+        self.inner
+            .values()
+            .iter()
+            .map(|p| format!("{}", p.ordinal))
+            .collect()
+    }
+
+    pub fn to_list(&self) -> Vec<String> {
+        self.tolist()
+    }
+
+    pub fn values(&self) -> Vec<String> {
+        self.tolist()
+    }
+
+    pub fn copy(&self) -> Self {
+        Self {
+            inner: self.inner.copy(),
+        }
+    }
+
+    pub fn rename(&self, name: Option<&str>) -> Self {
+        Self {
+            inner: self.inner.rename_index(name),
+        }
+    }
+
+    pub fn equals(&self, other: &Self) -> bool {
+        self.inner.equals(&other.inner)
+    }
+
+    #[pyo3(signature = (how="start"))]
+    pub fn to_timestamp(&self, how: &str) -> PyResult<PyDatetimeIndex> {
+        let dt_idx = self
+            .inner
+            .to_timestamp(how)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDatetimeIndex { inner: dt_idx })
+    }
+
+    #[pyo3(signature = (freq, how="end"))]
+    pub fn asfreq(&self, freq: &str, how: &str) -> PyResult<Self> {
+        let res = self
+            .inner
+            .asfreq_with_how(freq, how)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(Self { inner: res })
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "PeriodIndex(len={}, dtype='{}')",
+            self.inner.len(),
+            self.inner.dtype()
+        )
+    }
+
+    pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(idx) = item.extract::<i64>() {
+            let len = self.inner.len() as i64;
+            let pos = if idx < 0 { len + idx } else { idx };
+            if pos < 0 || pos >= len {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "index out of bounds",
+                ));
+            }
+            let p = &self.inner.values()[pos as usize];
+            return format!("{}", p.ordinal).into_py_any(py);
+        }
+        if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
+            let indices = slice.indices(self.inner.len() as isize)?;
+            let mut sliced = Vec::new();
+            let mut i = indices.start;
+            if indices.step > 0 {
+                while i < indices.stop {
+                    sliced.push(self.inner.values()[i as usize]);
+                    i += indices.step;
+                }
+            } else {
+                while i > indices.stop {
+                    sliced.push(self.inner.values()[i as usize]);
+                    i += indices.step;
+                }
+            }
+            let mut out = PeriodIndex::new(sliced);
+            if let Some(n) = self.inner.name() {
+                out = out.set_name(n);
+            }
+            return Py::new(py, PyPeriodIndex { inner: out })?
+                .into_any()
+                .into_py_any(py);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "PeriodIndex indices must be integers or slices",
+        ))
+    }
+}
+
+/// Python wrapper for FrankenPandas CategoricalIndex.
+#[pyclass(name = "CategoricalIndex", from_py_object)]
+#[derive(Clone)]
+pub struct PyCategoricalIndex {
+    pub(crate) inner: CategoricalIndex,
+}
+
+#[pymethods]
+impl PyCategoricalIndex {
+    #[new]
+    #[pyo3(signature = (data=None, categories=None, ordered=false, name=None))]
+    pub fn new(
+        data: Option<&Bound<'_, PyAny>>,
+        categories: Option<Vec<String>>,
+        ordered: bool,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let labels: Vec<String> = if let Some(d) = data {
+            if let Ok(ci) = d.extract::<PyRef<'_, PyCategoricalIndex>>() {
+                let mut inner = ci.inner.clone();
+                if let Some(n) = name {
+                    inner = inner.set_name(n);
+                }
+                return Ok(Self { inner });
+            } else if let Ok(list) = d.extract::<Vec<String>>() {
+                list
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "CategoricalIndex requires list of string labels",
+                ));
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mut inner = if let Some(cats) = categories {
+            CategoricalIndex::with_categories(labels, cats, ordered)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        } else {
+            CategoricalIndex::from_values(labels, ordered)
+        };
+        if let Some(n) = name {
+            inner = inner.set_name(n);
+        }
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    pub fn categories(&self) -> Vec<String> {
+        self.inner.categories().to_vec()
+    }
+
+    #[getter]
+    pub fn ordered(&self) -> bool {
+        self.inner.ordered()
+    }
+
+    #[getter]
+    pub fn codes(&self) -> Vec<Option<usize>> {
+        self.inner.codes()
+    }
+
+    #[getter]
+    pub fn name(&self) -> Option<String> {
+        self.inner.name().map(str::to_owned)
+    }
+
+    #[getter]
+    pub fn shape(&self) -> (usize,) {
+        self.inner.shape()
+    }
+
+    #[getter]
+    pub fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    #[getter]
+    pub fn ndim(&self) -> usize {
+        self.inner.ndim()
+    }
+
+    #[getter]
+    pub fn empty(&self) -> bool {
+        self.inner.empty()
+    }
+
+    #[getter]
+    pub fn dtype(&self) -> &'static str {
+        self.inner.dtype()
+    }
+
+    pub fn tolist(&self) -> Vec<String> {
+        self.inner.labels().to_vec()
+    }
+
+    pub fn to_list(&self) -> Vec<String> {
+        self.tolist()
+    }
+
+    pub fn values(&self) -> Vec<String> {
+        self.tolist()
+    }
+
+    pub fn copy(&self) -> Self {
+        Self {
+            inner: self.inner.copy(),
+        }
+    }
+
+    pub fn rename(&self, name: Option<&str>) -> Self {
+        Self {
+            inner: self.inner.rename_index(name),
+        }
+    }
+
+    pub fn equals(&self, other: &Self) -> bool {
+        self.inner.equals(&other.inner)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "CategoricalIndex({:?}, categories={:?}, ordered={}, dtype='category')",
+            self.inner.labels(),
+            self.inner.categories(),
+            self.inner.ordered()
+        )
+    }
+
+    pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(idx) = item.extract::<i64>() {
+            let len = self.inner.len() as i64;
+            let pos = if idx < 0 { len + idx } else { idx };
+            if pos < 0 || pos >= len {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "index out of bounds",
+                ));
+            }
+            return self.inner.labels()[pos as usize].clone().into_py_any(py);
+        }
+        if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
+            let indices = slice.indices(self.inner.len() as isize)?;
+            let mut sliced = Vec::new();
+            let mut i = indices.start;
+            if indices.step > 0 {
+                while i < indices.stop {
+                    sliced.push(self.inner.labels()[i as usize].clone());
+                    i += indices.step;
+                }
+            } else {
+                while i > indices.stop {
+                    sliced.push(self.inner.labels()[i as usize].clone());
+                    i += indices.step;
+                }
+            }
+            let out = CategoricalIndex::with_categories(
+                sliced,
+                self.inner.categories().to_vec(),
+                self.inner.ordered(),
+            )
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Py::new(py, PyCategoricalIndex { inner: out })?
+                .into_any()
+                .into_py_any(py);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "CategoricalIndex indices must be integers or slices",
+        ))
+    }
+}
+
 /// Python wrapper for FrankenPandas Series.
 #[pyclass(name = "Series", from_py_object)]
 #[derive(Clone)]
@@ -1270,6 +2288,10 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
         ),
         other => (PyErrorKind::Value, other.to_string()),
     }
+}
+
+fn index_error_to_py(err: fp_index::IndexError) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(err.to_string())
 }
 
 fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
@@ -2078,6 +3100,71 @@ impl PySeries {
             dict.set_item(k, v)?;
         }
         Ok(dict.into_any().unbind())
+    }
+
+    #[pyo3(signature = (window, min_periods=None, center=false))]
+    fn rolling(&self, window: usize, min_periods: Option<usize>, center: bool) -> PyRolling {
+        PyRolling {
+            series: Some(self.inner.clone()),
+            dataframe: None,
+            window,
+            min_periods,
+            center,
+        }
+    }
+
+    #[pyo3(signature = (min_periods=None))]
+    fn expanding(&self, min_periods: Option<usize>) -> PyExpanding {
+        PyExpanding {
+            series: Some(self.inner.clone()),
+            dataframe: None,
+            min_periods,
+        }
+    }
+
+    #[pyo3(signature = (span=None, alpha=None))]
+    fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> PyExponentialMovingWindow {
+        PyExponentialMovingWindow {
+            series: Some(self.inner.clone()),
+            dataframe: None,
+            span,
+            alpha,
+        }
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn ffill(&self, limit: Option<usize>) -> PyResult<PySeries> {
+        let res = self.inner.ffill(limit).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn bfill(&self, limit: Option<usize>) -> PyResult<PySeries> {
+        let res = self.inner.bfill(limit).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn corr(&self, other: &PySeries) -> PyResult<f64> {
+        self.inner.corr(&other.inner).map_err(frame_error_to_py)
+    }
+
+    fn cov(&self, other: &PySeries) -> PyResult<f64> {
+        self.inner.cov(&other.inner).map_err(frame_error_to_py)
+    }
+
+    #[pyo3(signature = (n=None, frac=None, replace=false, random_state=None))]
+    fn sample(
+        &self,
+        n: Option<usize>,
+        frac: Option<f64>,
+        replace: bool,
+        random_state: Option<u64>,
+    ) -> PyResult<PySeries> {
+        let res = self
+            .inner
+            .sample(n, frac, replace, random_state)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
     }
 }
 
@@ -3574,6 +4661,118 @@ impl PyDataFrame {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(Py::new(py, PySeries { inner: evaluated })?.into_any())
     }
+
+    #[pyo3(signature = (window, min_periods=None, center=false))]
+    fn rolling(&self, window: usize, min_periods: Option<usize>, center: bool) -> PyRolling {
+        let _ = center;
+        PyRolling {
+            series: None,
+            dataframe: Some(self.inner.clone()),
+            window,
+            min_periods,
+            center,
+        }
+    }
+
+    #[pyo3(signature = (min_periods=None))]
+    fn expanding(&self, min_periods: Option<usize>) -> PyExpanding {
+        PyExpanding {
+            series: None,
+            dataframe: Some(self.inner.clone()),
+            min_periods,
+        }
+    }
+
+    #[pyo3(signature = (span=None, alpha=None))]
+    fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> PyExponentialMovingWindow {
+        PyExponentialMovingWindow {
+            series: None,
+            dataframe: Some(self.inner.clone()),
+            span,
+            alpha,
+        }
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn ffill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
+        let res = self.inner.ffill(limit).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn bfill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
+        let res = self.inner.bfill(limit).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn cov(&self) -> PyResult<PyDataFrame> {
+        let res = self.inner.cov().map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    fn T(&self) -> PyResult<PyDataFrame> {
+        self.transpose()
+    }
+
+    #[pyo3(signature = (id_vars=None, value_vars=None, var_name=None, value_name=None))]
+    fn melt(
+        &self,
+        id_vars: Option<Vec<String>>,
+        value_vars: Option<Vec<String>>,
+        var_name: Option<&str>,
+        value_name: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let id_strings = id_vars.unwrap_or_default();
+        let val_strings = value_vars.unwrap_or_default();
+        let id_refs: Vec<&str> = id_strings.iter().map(String::as_str).collect();
+        let val_refs: Vec<&str> = val_strings.iter().map(String::as_str).collect();
+        let res = self
+            .inner
+            .melt(&id_refs, &val_refs, var_name, value_name)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (index, columns, values))]
+    fn pivot(&self, index: &str, columns: &str, values: &str) -> PyResult<PyDataFrame> {
+        let res = self
+            .inner
+            .pivot(index, columns, values)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (values, index, columns, aggfunc="mean"))]
+    fn pivot_table(
+        &self,
+        values: &str,
+        index: &str,
+        columns: &str,
+        aggfunc: &str,
+    ) -> PyResult<PyDataFrame> {
+        let res = self
+            .inner
+            .pivot_table(values, index, columns, aggfunc)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    #[pyo3(signature = (n=None, frac=None, replace=false, random_state=None))]
+    fn sample(
+        &self,
+        n: Option<usize>,
+        frac: Option<f64>,
+        replace: bool,
+        random_state: Option<u64>,
+    ) -> PyResult<PyDataFrame> {
+        let res = self
+            .inner
+            .sample(n, frac, replace, random_state)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
 }
 
 /// Helper indexer classes for PyDataFrame.
@@ -4001,6 +5200,462 @@ impl PyDataFrameAt {
             .at(&label, &col_name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
         scalar_to_py(py, &scalar)
+    }
+}
+
+/// Python wrapper for rolling window calculations over Series or DataFrame.
+#[pyclass(name = "Rolling")]
+pub struct PyRolling {
+    series: Option<Series>,
+    dataframe: Option<DataFrame>,
+    window: usize,
+    min_periods: Option<usize>,
+    center: bool,
+}
+
+#[pymethods]
+impl PyRolling {
+    pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .sum()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .sum()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .mean()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .mean()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .min()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .min()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .max()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .max()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .std()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .std()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .var()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .var()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .count()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .count()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .median()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .median()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .quantile(q)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .quantile(q)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+}
+
+/// Python wrapper for expanding window calculations over Series or DataFrame.
+#[pyclass(name = "Expanding")]
+pub struct PyExpanding {
+    series: Option<Series>,
+    dataframe: Option<DataFrame>,
+    min_periods: Option<usize>,
+}
+
+#[pymethods]
+impl PyExpanding {
+    pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .sum()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .sum()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .mean()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .mean()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .min()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .min()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .max()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .max()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .std()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .std()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .var()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .var()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .count()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .count()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .median()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .median()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .quantile(q)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .quantile(q)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+}
+
+/// Python wrapper for exponential moving window calculations over Series or DataFrame.
+#[pyclass(name = "ExponentialMovingWindow")]
+pub struct PyExponentialMovingWindow {
+    series: Option<Series>,
+    dataframe: Option<DataFrame>,
+    span: Option<f64>,
+    alpha: Option<f64>,
+}
+
+#[pymethods]
+impl PyExponentialMovingWindow {
+    pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .ewm(self.span, self.alpha)
+                .mean()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .ewm(self.span, self.alpha)
+                .mean()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty ewm object",
+        ))
+    }
+
+    pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .ewm(self.span, self.alpha)
+                .std()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .ewm(self.span, self.alpha)
+                .std()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty ewm object",
+        ))
+    }
+
+    pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .ewm(self.span, self.alpha)
+                .var()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .ewm(self.span, self.alpha)
+                .var()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty ewm object",
+        ))
     }
 }
 
@@ -4546,6 +6201,30 @@ fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let mask = dti.isna();
         return Ok(PyList::new(py, mask)?.into_any().unbind());
     }
+    if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+        let mask = tdi.isna();
+        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    }
+    if let Ok(ri) = obj.extract::<PyRef<'_, PyRangeIndex>>() {
+        let mask = vec![false; ri.inner.len()];
+        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    }
+    if let Ok(pi) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
+        let mask: Vec<bool> = (0..pi.inner.len())
+            .map(|i| {
+                pi.inner
+                    .values()
+                    .get(i)
+                    .is_some_and(|p| p.ordinal() == i64::MIN)
+            })
+            .collect();
+        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    }
+    if let Ok(ci) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
+        let codes = ci.inner.codes();
+        let mask: Vec<bool> = codes.iter().map(Option::is_none).collect();
+        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    }
     if let Ok(list) = obj.cast::<PyList>() {
         let mut out = Vec::with_capacity(list.len());
         for item in list.iter() {
@@ -4602,6 +6281,30 @@ fn notna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let mask = dti.notna();
         return Ok(PyList::new(py, mask)?.into_any().unbind());
     }
+    if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+        let mask = tdi.notna();
+        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    }
+    if let Ok(ri) = obj.extract::<PyRef<'_, PyRangeIndex>>() {
+        let mask = vec![true; ri.inner.len()];
+        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    }
+    if let Ok(pi) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
+        let mask: Vec<bool> = (0..pi.inner.len())
+            .map(|i| {
+                pi.inner
+                    .values()
+                    .get(i)
+                    .is_none_or(|p| p.ordinal() != i64::MIN)
+            })
+            .collect();
+        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    }
+    if let Ok(ci) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
+        let codes = ci.inner.codes();
+        let mask: Vec<bool> = codes.iter().map(Option::is_some).collect();
+        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    }
     if let Ok(list) = obj.cast::<PyList>() {
         let mut out = Vec::with_capacity(list.len());
         for item in list.iter() {
@@ -4639,6 +6342,458 @@ fn notnull(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     notna(py, obj)
 }
 
+/// Convert argument to timedelta (pandas `to_timedelta`).
+#[pyfunction]
+#[pyo3(signature = (arg, unit=None, errors="raise"))]
+fn to_timedelta(
+    py: Python<'_>,
+    arg: &Bound<'_, PyAny>,
+    unit: Option<&str>,
+    errors: &str,
+) -> PyResult<Py<PyAny>> {
+    let err_policy = match errors {
+        "raise" => fp_frame::ToTimedeltaErrors::Raise,
+        "coerce" => fp_frame::ToTimedeltaErrors::Coerce,
+        "ignore" => fp_frame::ToTimedeltaErrors::Ignore,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid error value {other:?}; must be one of 'raise', 'coerce', 'ignore'"
+            )));
+        }
+    };
+    let opts = fp_frame::ToTimedeltaOptions {
+        unit,
+        errors: err_policy,
+    };
+
+    if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
+        let res = fp_frame::to_timedelta_with_options(&s.inner, opts).map_err(frame_error_to_py)?;
+        return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+    }
+    if let Ok(tdi) = arg.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+        return Ok(Py::new(
+            py,
+            PyTimedeltaIndex {
+                inner: tdi.inner.clone(),
+            },
+        )?
+        .into_any());
+    }
+    if let Ok(idx) = arg.extract::<PyRef<'_, PyIndex>>() {
+        let values: Vec<Scalar> = idx
+            .inner
+            .labels()
+            .iter()
+            .map(index_label_to_scalar)
+            .collect();
+        let temp_series = Series::from_values(
+            "",
+            (0..values.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect(),
+            values,
+        )
+        .map_err(frame_error_to_py)?;
+        let res =
+            fp_frame::to_timedelta_with_options(&temp_series, opts).map_err(frame_error_to_py)?;
+        let nanos: Vec<i64> = res
+            .values()
+            .iter()
+            .map(|s| match s {
+                Scalar::Timedelta64(ns) => *ns,
+                _ => 0,
+            })
+            .collect();
+        return Ok(Py::new(
+            py,
+            PyTimedeltaIndex {
+                inner: TimedeltaIndex::new(nanos),
+            },
+        )?
+        .into_any());
+    }
+    if let Ok(list) = arg.cast::<PyList>() {
+        let values: Vec<Scalar> = list
+            .iter()
+            .map(|v| py_to_scalar(py, &v))
+            .collect::<PyResult<Vec<_>>>()?;
+        let temp_series = Series::from_values(
+            "",
+            (0..values.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect(),
+            values,
+        )
+        .map_err(frame_error_to_py)?;
+        let res =
+            fp_frame::to_timedelta_with_options(&temp_series, opts).map_err(frame_error_to_py)?;
+        let nanos: Vec<i64> = res
+            .values()
+            .iter()
+            .map(|s| match s {
+                Scalar::Timedelta64(ns) => *ns,
+                _ => 0,
+            })
+            .collect();
+        return Ok(Py::new(
+            py,
+            PyTimedeltaIndex {
+                inner: TimedeltaIndex::new(nanos),
+            },
+        )?
+        .into_any());
+    }
+    if let Ok(s) = py_to_scalar(py, arg) {
+        let temp_series = Series::from_values("", vec![IndexLabel::Int64(0)], vec![s])
+            .map_err(frame_error_to_py)?;
+        let res =
+            fp_frame::to_timedelta_with_options(&temp_series, opts).map_err(frame_error_to_py)?;
+        if let Some(val) = res.values().first() {
+            return scalar_to_py(py, val);
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        "arg must be a Series, Index, list, or duration-like scalar",
+    ))
+}
+
+/// Return a fixed frequency TimedeltaIndex (pandas `timedelta_range`).
+#[pyfunction]
+#[pyo3(signature = (start=None, end=None, periods=None, freq="D", name=None))]
+fn timedelta_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    periods: Option<usize>,
+    freq: &str,
+    name: Option<&str>,
+) -> PyResult<PyTimedeltaIndex> {
+    let freq_nanos = parse_freq_to_nanos(freq)?;
+
+    let parse_td_arg = |arg: Option<&str>| -> PyResult<Option<i64>> {
+        match arg {
+            None => Ok(None),
+            Some(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else if let Ok(ns) = trimmed.parse::<i64>() {
+                    Ok(Some(ns))
+                } else {
+                    let ns = fp_types::Timedelta::parse(trimmed).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    Ok(Some(ns))
+                }
+            }
+        }
+    };
+
+    let start_ns = parse_td_arg(start)?;
+    let end_ns = parse_td_arg(end)?;
+
+    let idx = fp_index::timedelta_range(start_ns, end_ns, periods, freq_nanos, name)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let tdi = TimedeltaIndex::from_index(idx)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(PyTimedeltaIndex { inner: tdi })
+}
+
+/// Return a fixed frequency PeriodIndex (pandas `period_range`).
+#[pyfunction]
+#[pyo3(signature = (start=None, end=None, periods=None, freq=None, name=None))]
+fn period_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    periods: Option<usize>,
+    freq: Option<&str>,
+    name: Option<&str>,
+) -> PyResult<PyPeriodIndex> {
+    let target_freq = match freq {
+        Some(f) => PeriodFreq::parse(f).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("unsupported frequency '{f}'"))
+        })?,
+        None => PeriodFreq::Daily,
+    };
+
+    let (start_period, count) = match (start, end, periods) {
+        (Some(s), _, Some(p)) => {
+            let parsed = Period::parse(s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let p_start = if freq.is_some() {
+                Period::new(parsed.ordinal(), target_freq)
+            } else {
+                parsed
+            };
+            (p_start, p)
+        }
+        (Some(s), Some(e), None) => {
+            let parsed_s = Period::parse(s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let parsed_e = Period::parse(e)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let p_start = if freq.is_some() {
+                Period::new(parsed_s.ordinal(), target_freq)
+            } else {
+                parsed_s
+            };
+            let p_end = if freq.is_some() {
+                Period::new(parsed_e.ordinal(), target_freq)
+            } else {
+                parsed_e
+            };
+            let diff = p_end.ordinal() - p_start.ordinal();
+            if diff < 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "start must be <= end",
+                ));
+            }
+            (p_start, (diff + 1) as usize)
+        }
+        (None, Some(e), Some(p)) => {
+            let parsed_e = Period::parse(e)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let p_end = if freq.is_some() {
+                Period::new(parsed_e.ordinal(), target_freq)
+            } else {
+                parsed_e
+            };
+            let shift_amt = p.saturating_sub(1) as i64;
+            let p_start = p_end.shift(-shift_amt);
+            (p_start, p)
+        }
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "must specify at least two of: start, end, periods",
+            ));
+        }
+    };
+
+    let values = fp_types::period_range(start_period, count);
+    let mut inner = PeriodIndex::new(values);
+    if let Some(n) = name {
+        inner = inner.set_name(n);
+    }
+    Ok(PyPeriodIndex { inner })
+}
+
+/// Return a fixed frequency DatetimeIndex with business day frequency (pandas `bdate_range`).
+#[pyfunction]
+#[pyo3(signature = (start=None, end=None, periods=None, freq=None, name=None))]
+fn bdate_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    periods: Option<usize>,
+    freq: Option<&str>,
+    name: Option<&str>,
+) -> PyResult<PyDatetimeIndex> {
+    let freq_str = freq.unwrap_or("B");
+    if freq_str.eq_ignore_ascii_case("b") {
+        let idx = fp_index::bdate_range(start, end, periods, name)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let dti = DatetimeIndex::from_index(idx)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDatetimeIndex { inner: dti })
+    } else {
+        date_range(start, end, periods, Some(freq_str), name)
+    }
+}
+
+/// Unpivot a DataFrame from wide to long format (pandas `melt`).
+#[pyfunction]
+#[pyo3(signature = (frame, id_vars=None, value_vars=None, var_name=None, value_name=None))]
+fn melt(
+    frame: &PyDataFrame,
+    id_vars: Option<Vec<String>>,
+    value_vars: Option<Vec<String>>,
+    var_name: Option<&str>,
+    value_name: Option<&str>,
+) -> PyResult<PyDataFrame> {
+    frame.melt(id_vars, value_vars, var_name, value_name)
+}
+
+/// Reshape data based on column values (pandas `pivot`).
+#[pyfunction]
+#[pyo3(signature = (data, index, columns, values))]
+fn pivot(data: &PyDataFrame, index: &str, columns: &str, values: &str) -> PyResult<PyDataFrame> {
+    data.pivot(index, columns, values)
+}
+
+/// Create a spreadsheet-style pivot table as a DataFrame (pandas `pivot_table`).
+#[pyfunction]
+#[pyo3(signature = (data, values, index, columns, aggfunc="mean"))]
+fn pivot_table(
+    data: &PyDataFrame,
+    values: &str,
+    index: &str,
+    columns: &str,
+    aggfunc: &str,
+) -> PyResult<PyDataFrame> {
+    data.pivot_table(values, index, columns, aggfunc)
+}
+
+/// Bin values into discrete intervals (pandas `cut`).
+#[pyfunction]
+#[pyo3(signature = (x, bins, right=true, labels=None, precision=3, include_lowest=false))]
+fn cut(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    bins: &Bound<'_, PyAny>,
+    right: bool,
+    labels: Option<Vec<String>>,
+    precision: usize,
+    include_lowest: bool,
+) -> PyResult<PySeries> {
+    let _ = precision;
+    let series = if let Ok(s) = x.extract::<PyRef<'_, PySeries>>() {
+        s.inner.clone()
+    } else if let Ok(list) = x.cast::<PyList>() {
+        let values: Vec<Scalar> = list
+            .iter()
+            .map(|v| py_to_scalar(py, &v))
+            .collect::<PyResult<Vec<_>>>()?;
+        Series::from_values(
+            "",
+            (0..values.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect(),
+            values,
+        )
+        .map_err(frame_error_to_py)?
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "x must be a Series or list of numbers",
+        ));
+    };
+
+    let label_strings = labels.unwrap_or_default();
+    let label_refs: Option<Vec<&str>> = if label_strings.is_empty() {
+        None
+    } else {
+        Some(label_strings.iter().map(String::as_str).collect())
+    };
+
+    let res = if let Ok(n_bins) = bins.extract::<usize>() {
+        if label_refs.is_some() || !right || include_lowest {
+            let mut min_v = f64::INFINITY;
+            let mut max_v = f64::NEG_INFINITY;
+            for v in series.values() {
+                if let Ok(f) = v.to_f64() {
+                    if f < min_v {
+                        min_v = f;
+                    }
+                    if f > max_v {
+                        max_v = f;
+                    }
+                }
+            }
+            if min_v.is_infinite() || max_v.is_infinite() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot cut empty or all-null series",
+                ));
+            }
+            if (min_v - max_v).abs() < f64::EPSILON {
+                min_v -= 0.001 * min_v.abs().max(1.0);
+                max_v += 0.001 * max_v.abs().max(1.0);
+            }
+            let step = (max_v - min_v) / n_bins as f64;
+            let edges: Vec<Scalar> = (0..=n_bins)
+                .map(|i| Scalar::Float64(min_v + i as f64 * step))
+                .collect();
+            fp_frame::cut_bins(
+                &series,
+                &edges,
+                right,
+                label_refs.as_deref(),
+                include_lowest,
+            )
+            .map_err(frame_error_to_py)?
+        } else {
+            fp_frame::cut(&series, n_bins).map_err(frame_error_to_py)?
+        }
+    } else if let Ok(edges_list) = bins.cast::<PyList>() {
+        let edges: Vec<Scalar> = edges_list
+            .iter()
+            .map(|v| py_to_scalar(py, &v))
+            .collect::<PyResult<Vec<_>>>()?;
+        fp_frame::cut_bins(
+            &series,
+            &edges,
+            right,
+            label_refs.as_deref(),
+            include_lowest,
+        )
+        .map_err(frame_error_to_py)?
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "bins must be an integer or a list of bin edges",
+        ));
+    };
+
+    Ok(PySeries { inner: res })
+}
+
+/// Discretize variable into equal-sized buckets based on rank or sample quantiles (pandas `qcut`).
+#[pyfunction]
+#[pyo3(signature = (x, q, labels=None, precision=3))]
+fn qcut(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    q: &Bound<'_, PyAny>,
+    labels: Option<Vec<String>>,
+    precision: usize,
+) -> PyResult<PySeries> {
+    let _ = precision;
+    let series = if let Ok(s) = x.extract::<PyRef<'_, PySeries>>() {
+        s.inner.clone()
+    } else if let Ok(list) = x.cast::<PyList>() {
+        let values: Vec<Scalar> = list
+            .iter()
+            .map(|v| py_to_scalar(py, &v))
+            .collect::<PyResult<Vec<_>>>()?;
+        Series::from_values(
+            "",
+            (0..values.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect(),
+            values,
+        )
+        .map_err(frame_error_to_py)?
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "x must be a Series or list of numbers",
+        ));
+    };
+
+    let label_strings = labels.unwrap_or_default();
+    let label_refs: Option<Vec<&str>> = if label_strings.is_empty() {
+        None
+    } else {
+        Some(label_strings.iter().map(String::as_str).collect())
+    };
+
+    let res = if let Ok(n_q) = q.extract::<usize>() {
+        if let Some(lbls) = label_refs {
+            let probs: Vec<f64> = (0..=n_q).map(|i| i as f64 / n_q as f64).collect();
+            fp_frame::qcut_at_quantiles(&series, &probs, Some(&lbls)).map_err(frame_error_to_py)?
+        } else {
+            fp_frame::qcut(&series, n_q).map_err(frame_error_to_py)?
+        }
+    } else if let Ok(q_list) = q.cast::<PyList>() {
+        let quantiles: Vec<f64> = q_list
+            .iter()
+            .map(|v| v.extract::<f64>())
+            .collect::<PyResult<Vec<_>>>()?;
+        fp_frame::qcut_at_quantiles(&series, &quantiles, label_refs.as_deref())
+            .map_err(frame_error_to_py)?
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "q must be an integer or a list of quantiles [0.0..1.0]",
+        ));
+    };
+
+    Ok(PySeries { inner: res })
+}
+
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -4648,7 +6803,14 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStyler>()?;
     m.add_class::<PyIndex>()?;
     m.add_class::<PyDatetimeIndex>()?;
+    m.add_class::<PyTimedeltaIndex>()?;
+    m.add_class::<PyRangeIndex>()?;
+    m.add_class::<PyPeriodIndex>()?;
+    m.add_class::<PyCategoricalIndex>()?;
     m.add_class::<PyMultiIndex>()?;
+    m.add_class::<PyRolling>()?;
+    m.add_class::<PyExpanding>()?;
+    m.add_class::<PyExponentialMovingWindow>()?;
     m.add_class::<PySeriesILoc>()?;
     m.add_class::<PySeriesLoc>()?;
     m.add_class::<PySeriesIAt>()?;
@@ -4663,9 +6825,18 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(concat, m)?)?;
     m.add_function(wrap_pyfunction!(merge, m)?)?;
+    m.add_function(wrap_pyfunction!(melt, m)?)?;
+    m.add_function(wrap_pyfunction!(pivot, m)?)?;
+    m.add_function(wrap_pyfunction!(pivot_table, m)?)?;
+    m.add_function(wrap_pyfunction!(cut, m)?)?;
+    m.add_function(wrap_pyfunction!(qcut, m)?)?;
     m.add_function(wrap_pyfunction!(to_numeric, m)?)?;
     m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
+    m.add_function(wrap_pyfunction!(to_timedelta, m)?)?;
     m.add_function(wrap_pyfunction!(date_range, m)?)?;
+    m.add_function(wrap_pyfunction!(bdate_range, m)?)?;
+    m.add_function(wrap_pyfunction!(timedelta_range, m)?)?;
+    m.add_function(wrap_pyfunction!(period_range, m)?)?;
     m.add_function(wrap_pyfunction!(isna, m)?)?;
     m.add_function(wrap_pyfunction!(isnull, m)?)?;
     m.add_function(wrap_pyfunction!(notna, m)?)?;
@@ -5210,5 +7381,163 @@ mod tests {
             .drop_duplicates(None, None, false)
             .expect("drop_duplicates"); // ubs:ignore — test fixture
         assert_eq!(dedup.shape(), (3, 2));
+    }
+
+    #[test]
+    fn test_py_timedelta_index_and_range() {
+        let tdi = timedelta_range(Some("0D"), None, Some(4), "1D", Some("td_idx"))
+            .expect("timedelta_range"); // ubs:ignore — test fixture
+        assert_eq!(tdi.len(), 4);
+        assert_eq!(tdi.name().as_deref(), Some("td_idx"));
+        assert_eq!(tdi.ndim(), 1);
+        assert!(!tdi.empty());
+        assert_eq!(tdi.shape(), (4,));
+        assert_eq!(tdi.size(), 4);
+        let days = tdi.days();
+        assert_eq!(days, vec![Some(0), Some(1), Some(2), Some(3)]);
+
+        let shifted = tdi.shift(1, "D").expect("shift"); // ubs:ignore — test fixture
+        assert_eq!(shifted.len(), 4);
+    }
+
+    #[test]
+    fn test_py_range_index() {
+        let ri =
+            PyRangeIndex::new(Some(0), Some(10), Some(2), Some("my_range")).expect("range_index"); // ubs:ignore — test fixture
+        assert_eq!(ri.len(), 5);
+        assert_eq!(ri.start(), 0);
+        assert_eq!(ri.stop(), 10);
+        assert_eq!(ri.step(), 2);
+        assert_eq!(ri.name().as_deref(), Some("my_range"));
+        assert!(ri.__contains__(4));
+        assert!(!ri.__contains__(5));
+        let vals = ri.tolist();
+        assert_eq!(vals, vec![0, 2, 4, 6, 8]);
+    }
+
+    #[test]
+    fn test_py_period_index_and_range() {
+        let pi = period_range(Some("2024-01"), None, Some(3), Some("M"), Some("monthly"))
+            .expect("period_range"); // ubs:ignore — test fixture
+        assert_eq!(pi.len(), 3);
+        assert_eq!(pi.name().as_deref(), Some("monthly"));
+        let years = pi.year().expect("year"); // ubs:ignore — test fixture
+        assert_eq!(years, vec![Some(2024), Some(2024), Some(2024)]);
+        let months = pi.month().expect("month"); // ubs:ignore — test fixture
+        assert_eq!(months, vec![Some(1), Some(2), Some(3)]);
+    }
+
+    #[test]
+    fn test_py_categorical_index() {
+        let ci = CategoricalIndex::with_categories(
+            vec![
+                "cat".to_string(),
+                "dog".to_string(),
+                "cat".to_string(),
+                "dog".to_string(),
+            ],
+            vec!["cat".to_string(), "dog".to_string()],
+            false,
+        )
+        .expect("categorical index"); // ubs:ignore — test fixture
+        let py_ci = PyCategoricalIndex { inner: ci };
+        assert_eq!(py_ci.len(), 4);
+        assert_eq!(py_ci.name().as_deref(), None);
+        assert_eq!(py_ci.categories(), vec!["cat", "dog"]);
+        assert_eq!(py_ci.codes(), vec![Some(0), Some(1), Some(0), Some(1)]);
+        assert!(!py_ci.ordered());
+    }
+
+    #[test]
+    fn test_py_windowing_and_series_math() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .expect("series"); // ubs:ignore — test fixture
+        let py_s = PySeries { inner: s };
+
+        let roll = py_s.rolling(2, None, false);
+        assert_eq!(roll.window, 2);
+        assert!(!roll.center);
+
+        let exp = py_s.expanding(None);
+        assert_eq!(exp.min_periods, None);
+
+        let ewm = py_s.ewm(Some(0.5), None);
+        assert_eq!(ewm.span, Some(0.5));
+
+        let s2 = py_s.clone();
+        let c = py_s.corr(&s2).expect("corr"); // ubs:ignore — test fixture
+        assert!((c - 1.0).abs() < 1e-6);
+
+        let ffilled = py_s.ffill(None).expect("ffill"); // ubs:ignore — test fixture
+        assert_eq!(ffilled.inner.len(), 4);
+    }
+
+    #[test]
+    fn test_py_dataframe_windowing_and_transformations() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                    ],
+                ),
+            ],
+        )
+        .expect("df"); // ubs:ignore — test fixture
+        let py_df = PyDataFrame { inner: df };
+
+        let roll = py_df.rolling(2, None, false);
+        assert_eq!(roll.window, 2);
+        assert!(!roll.center);
+
+        let tr = py_df.transpose().expect("transpose"); // ubs:ignore — test fixture
+        assert_eq!(tr.shape(), (2, 3));
+        let t_prop = py_df.T().expect("T property"); // ubs:ignore — test fixture
+        assert_eq!(t_prop.shape(), (2, 3));
+
+        let melted = py_df
+            .melt(Some(vec!["a".to_string()]), None, None, None)
+            .expect("melt"); // ubs:ignore — test fixture
+        assert_eq!(melted.shape(), (3, 3));
+
+        let abs_df = py_df.abs().expect("abs"); // ubs:ignore — test fixture
+        assert_eq!(abs_df.shape(), (3, 2));
+
+        let clip_df = py_df.clip(Some(2.0), Some(5.0)).expect("clip"); // ubs:ignore — test fixture
+        assert_eq!(clip_df.shape(), (3, 2));
+    }
+
+    #[test]
+    fn test_bdate_range_helper() {
+        let bdr = bdate_range(Some("2024-01-01"), None, Some(5), None, Some("bday"))
+            .expect("bdate_range"); // ubs:ignore — test fixture
+        assert_eq!(bdr.len(), 5);
+        assert_eq!(bdr.name().as_deref(), Some("bday"));
     }
 }
