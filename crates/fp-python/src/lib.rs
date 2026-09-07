@@ -280,16 +280,47 @@ pub struct PySeries {
     inner: Series,
 }
 
+fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
+    use fp_columnar::ColumnError;
+    use fp_frame::FrameError;
+    use fp_index::IndexError;
+
+    match err {
+        FrameError::Index(IndexError::OutOfBounds { position, length }) => {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "position {position} out of bounds for length {length}"
+            ))
+        }
+        FrameError::Column(ColumnError::Type(e)) => {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(e.to_string())
+        }
+        FrameError::Column(ColumnError::InvalidMaskType { dtype }) => {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "mask must be Bool dtype; found {dtype:?}"
+            ))
+        }
+        FrameError::Column(ColumnError::DTypeMismatch { left, right }) => {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "column dtype mismatch: left={left:?}, right={right:?}"
+            ))
+        }
+        FrameError::CompatibilityRejected(msg) => PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("compatibility gate rejected operation: {msg}"),
+        ),
+        other => PyErr::new::<pyo3::exceptions::PyValueError, _>(other.to_string()),
+    }
+}
+
 fn wrap_series(result: Result<Series, fp_frame::FrameError>) -> PyResult<PySeries> {
     result
         .map(|inner| PySeries { inner })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        .map_err(frame_error_to_py)
 }
 
 fn wrap_frame(result: Result<DataFrame, fp_frame::FrameError>) -> PyResult<PyDataFrame> {
     result
         .map(|inner| PyDataFrame { inner })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        .map_err(frame_error_to_py)
 }
 
 /// The right-hand side of a Series dunder: another Series as-is, or a Python
@@ -3123,5 +3154,35 @@ mod tests {
             fp_frame::to_datetime_with_options(&s_dates, fp_frame::ToDatetimeOptions::default())
                 .expect("to_datetime"); // ubs:ignore — test fixture
         assert_eq!(s_dt.len(), 1);
+    }
+
+    #[test]
+    fn test_frame_error_to_py_mapping() {
+        use fp_columnar::ColumnError;
+        use fp_frame::FrameError;
+        use fp_index::IndexError;
+
+        Python::initialize();
+        Python::with_gil(|py| {
+            let out_of_bounds = FrameError::Index(IndexError::OutOfBounds {
+                position: 5,
+                length: 3,
+            });
+            let py_err = frame_error_to_py(out_of_bounds);
+            assert!(py_err.is_instance_of::<pyo3::exceptions::PyIndexError>(py));
+
+            let type_err = FrameError::Column(ColumnError::InvalidMaskType {
+                dtype: fp_types::DType::Int64,
+            });
+            let py_err = frame_error_to_py(type_err);
+            assert!(py_err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+
+            let len_err = FrameError::LengthMismatch {
+                index_len: 2,
+                column_len: 3,
+            };
+            let py_err = frame_error_to_py(len_err);
+            assert!(py_err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
     }
 }
