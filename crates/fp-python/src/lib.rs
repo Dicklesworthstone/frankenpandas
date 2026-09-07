@@ -7632,6 +7632,8 @@ enum PyErrorKind {
     Index,
     Type,
     Value,
+    Key,
+    NotImplemented,
 }
 
 fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
@@ -7653,16 +7655,38 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
             PyErrorKind::Type,
             format!("column dtype mismatch: left={left:?}, right={right:?}"),
         ),
-        FrameError::CompatibilityRejected(msg) => (
-            PyErrorKind::Value,
-            format!("compatibility gate rejected operation: {msg}"),
-        ),
+        FrameError::CompatibilityRejected(msg) => {
+            let lower = msg.to_lowercase();
+            if lower.contains("not implemented") || lower.contains("unimplemented") {
+                (
+                    PyErrorKind::NotImplemented,
+                    format!("compatibility gate rejected operation: {msg}"),
+                )
+            } else if lower.contains("column not found") || lower.contains("key not found") {
+                (
+                    PyErrorKind::Key,
+                    format!("compatibility gate rejected operation: {msg}"),
+                )
+            } else {
+                (
+                    PyErrorKind::Value,
+                    format!("compatibility gate rejected operation: {msg}"),
+                )
+            }
+        }
         other => (PyErrorKind::Value, other.to_string()),
     }
 }
 
 fn index_error_to_py(err: fp_index::IndexError) -> PyErr {
-    PyErr::new::<pyo3::exceptions::PyValueError, _>(err.to_string())
+    match err {
+        fp_index::IndexError::OutOfBounds { position, length } => {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "position {position} out of bounds for length {length}"
+            ))
+        }
+        other => PyErr::new::<pyo3::exceptions::PyValueError, _>(other.to_string()),
+    }
 }
 
 fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
@@ -7671,6 +7695,10 @@ fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
         PyErrorKind::Index => PyErr::new::<pyo3::exceptions::PyIndexError, _>(msg),
         PyErrorKind::Type => PyErr::new::<pyo3::exceptions::PyTypeError, _>(msg),
         PyErrorKind::Value => PyErr::new::<pyo3::exceptions::PyValueError, _>(msg),
+        PyErrorKind::Key => PyErr::new::<pyo3::exceptions::PyKeyError, _>(msg),
+        PyErrorKind::NotImplemented => {
+            PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(msg)
+        }
     }
 }
 
@@ -18437,6 +18465,16 @@ mod tests {
         let (kind, msg) = classify_frame_error(&len_err);
         assert_eq!(kind, PyErrorKind::Value);
         assert!(msg.contains("index length"));
+
+        let not_impl_err = FrameError::CompatibilityRejected("feature not implemented yet".into());
+        let (kind, msg) = classify_frame_error(&not_impl_err);
+        assert_eq!(kind, PyErrorKind::NotImplemented);
+        assert!(msg.contains("not implemented"));
+
+        let key_err = FrameError::CompatibilityRejected("column not found: missing".into());
+        let (kind, msg) = classify_frame_error(&key_err);
+        assert_eq!(kind, PyErrorKind::Key);
+        assert!(msg.contains("column not found"));
     }
 
     #[test]
