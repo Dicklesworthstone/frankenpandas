@@ -2616,6 +2616,40 @@ impl PySeries {
         let lhs = series_operand(py, other, &self.inner)?;
         wrap_series(lhs.div(&self.inner))
     }
+    fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.floordiv(&rhs))
+    }
+    fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let lhs = series_operand(py, other, &self.inner)?;
+        wrap_series(lhs.floordiv(&self.inner))
+    }
+    fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.remainder(&rhs))
+    }
+    fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let lhs = series_operand(py, other, &self.inner)?;
+        wrap_series(lhs.remainder(&self.inner))
+    }
+    fn __pow__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let rhs = series_operand(py, other, &self.inner)?;
+        wrap_series(self.inner.power(&rhs))
+    }
+    fn __rpow__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let lhs = series_operand(py, other, &self.inner)?;
+        wrap_series(lhs.power(&self.inner))
+    }
     fn __neg__(&self) -> PyResult<PySeries> {
         wrap_series(self.inner.neg())
     }
@@ -2642,6 +2676,82 @@ impl PySeries {
     fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.ne(&rhs))
+    }
+
+    fn add(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__add__(py, other)
+    }
+    fn radd(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__radd__(py, other)
+    }
+    fn sub(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__sub__(py, other)
+    }
+    fn subtract(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__sub__(py, other)
+    }
+    fn rsub(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__rsub__(py, other)
+    }
+    fn mul(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__mul__(py, other)
+    }
+    fn multiply(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__mul__(py, other)
+    }
+    fn rmul(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__rmul__(py, other)
+    }
+    fn div(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__truediv__(py, other)
+    }
+    fn divide(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__truediv__(py, other)
+    }
+    fn truediv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__truediv__(py, other)
+    }
+    fn rtruediv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__rtruediv__(py, other)
+    }
+    fn rdiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__rtruediv__(py, other)
+    }
+    fn floordiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__floordiv__(py, other)
+    }
+    fn rfloordiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__rfloordiv__(py, other)
+    }
+    fn r#mod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__mod__(py, other)
+    }
+    fn rmod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__rmod__(py, other)
+    }
+    fn pow(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__pow__(py, other, None)
+    }
+    fn rpow(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__rpow__(py, other, None)
+    }
+    fn eq(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__eq__(py, other)
+    }
+    fn ne(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__ne__(py, other)
+    }
+    fn lt(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__lt__(py, other)
+    }
+    fn le(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__le__(py, other)
+    }
+    fn gt(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__gt__(py, other)
+    }
+    fn ge(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.__ge__(py, other)
     }
 
     /// Return the sum of the Series.
@@ -3234,6 +3344,240 @@ impl PySeries {
             .asfreq_with_options(freq, method, None)
             .map_err(frame_error_to_py)?;
         Ok(Self { inner: res })
+    }
+
+    #[getter]
+    fn hasnans(&self) -> bool {
+        self.inner.hasnans()
+    }
+
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.inner.nbytes()
+    }
+
+    #[getter]
+    fn t(&self) -> PySeries {
+        PySeries {
+            inner: self.inner.clone(),
+        }
+    }
+
+    #[getter]
+    #[allow(non_snake_case)]
+    fn T(&self) -> PySeries {
+        self.t()
+    }
+
+    fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let s = self.inner.item().map_err(frame_error_to_py)?;
+        scalar_to_py(py, &s)
+    }
+
+    fn any(&self) -> PyResult<bool> {
+        self.inner.any().map_err(frame_error_to_py)
+    }
+
+    fn all(&self) -> PyResult<bool> {
+        self.inner.all().map_err(frame_error_to_py)
+    }
+
+    fn sem(&self) -> PyResult<f64> {
+        self.inner.sem().map_err(frame_error_to_py)
+    }
+
+    fn kurtosis(&self) -> PyResult<f64> {
+        self.kurt()
+    }
+
+    fn product(&self) -> PyResult<Py<PyAny>> {
+        self.prod()
+    }
+
+    fn mode(&self) -> PyResult<PySeries> {
+        let res = self.inner.mode().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (before=None, after=None))]
+    fn truncate(
+        &self,
+        before: Option<&Bound<'_, PyAny>>,
+        after: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let b = match before {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        let a = match after {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        let res = self
+            .inner
+            .truncate(b.as_ref(), a.as_ref())
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn add_prefix(&self, prefix: &str) -> PyResult<PySeries> {
+        let res = self.inner.add_prefix(prefix).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn add_suffix(&self, suffix: &str) -> PyResult<PySeries> {
+        let res = self.inner.add_suffix(suffix).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn first_valid_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.inner.first_valid_index() {
+            Some(l) => index_label_to_py(py, &l),
+            None => Ok(py.None()),
+        }
+    }
+
+    fn last_valid_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.inner.last_valid_index() {
+            Some(l) => index_label_to_py(py, &l),
+            None => Ok(py.None()),
+        }
+    }
+
+    fn equals(&self, other: &PySeries) -> bool {
+        self.inner.equals(&other.inner)
+    }
+
+    fn pop(&mut self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let label = py_to_index_label(item)?;
+        let (scalar, remaining) = self.inner.pop(&label).map_err(frame_error_to_py)?;
+        self.inner = remaining;
+        scalar_to_py(py, &scalar)
+    }
+
+    fn squeeze(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.inner.len() == 1 {
+            let s = self.inner.column().values()[0].clone();
+            scalar_to_py(py, &s)
+        } else {
+            Ok(Py::new(
+                py,
+                PySeries {
+                    inner: self.inner.clone(),
+                },
+            )?
+            .into_any())
+        }
+    }
+
+    fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let labels = self.inner.index().labels();
+        let values = self.inner.column().values();
+        let mut list = Vec::with_capacity(labels.len());
+        for (l, v) in labels.iter().zip(values.iter()) {
+            let py_l = index_label_to_py(py, l)?;
+            let py_v = scalar_to_py(py, v)?;
+            list.push(pyo3::types::PyTuple::new(py, &[py_l, py_v])?);
+        }
+        Ok(PyList::new(py, list)?.into_any().unbind())
+    }
+
+    fn keys(&self) -> PyIndex {
+        PyIndex {
+            inner: self.inner.index().clone(),
+        }
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn pad(&self, limit: Option<usize>) -> PyResult<PySeries> {
+        self.ffill(limit)
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn backfill(&self, limit: Option<usize>) -> PyResult<PySeries> {
+        self.bfill(limit)
+    }
+
+    fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(name) = func.extract::<String>() {
+            match name.as_str() {
+                "sum" => self.sum(),
+                "mean" => self.mean(),
+                "min" => self.min(),
+                "max" => self.max(),
+                "std" => self.std(),
+                "var" => self.var(),
+                "count" => Ok(self.count().into_pyobject(py)?.into_any().unbind()),
+                "median" => self.median(),
+                "prod" | "product" => self.prod(),
+                "sem" => Ok(self.sem()?.into_pyobject(py)?.into_any().unbind()),
+                "skew" => Ok(self.skew()?.into_pyobject(py)?.into_any().unbind()),
+                "kurt" | "kurtosis" => Ok(self.kurt()?.into_pyobject(py)?.into_any().unbind()),
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported agg function '{other}'"
+                ))),
+            }
+        } else if let Ok(list) = func.extract::<Vec<String>>() {
+            let refs: Vec<&str> = list.iter().map(String::as_str).collect();
+            let res = self.inner.agg(&refs).map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PySeries { inner: res })?.into_any())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "func must be a string or list of strings",
+            ))
+        }
+    }
+
+    fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.agg(py, func)
+    }
+
+    fn repeat(&self, repeats: usize) -> PyResult<PySeries> {
+        let res = self.inner.repeat(repeats).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (value, side=None))]
+    fn searchsorted(
+        &self,
+        py: Python<'_>,
+        value: &Bound<'_, PyAny>,
+        side: Option<&str>,
+    ) -> PyResult<usize> {
+        let s = py_to_scalar(py, value)?;
+        let s_side = side.unwrap_or("left");
+        self.inner
+            .searchsorted(&s, s_side)
+            .map_err(frame_error_to_py)
+    }
+
+    #[pyo3(signature = (index=true))]
+    fn memory_usage(&self, index: bool) -> usize {
+        if index {
+            self.inner.memory_usage()
+        } else {
+            self.inner.nbytes()
+        }
+    }
+
+    fn drop(&self, _py: Python<'_>, labels: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let label_vec: Vec<IndexLabel> = if let Ok(s) = labels.extract::<String>() {
+            vec![IndexLabel::Utf8(s)]
+        } else if let Ok(i) = labels.extract::<i64>() {
+            vec![IndexLabel::Int64(i)]
+        } else if let Ok(list) = labels.extract::<Vec<Bound<'_, PyAny>>>() {
+            let mut v = Vec::with_capacity(list.len());
+            for item in list {
+                v.push(py_to_index_label(&item)?);
+            }
+            v
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "labels must be a label or list of labels",
+            ));
+        };
+        let res = self.inner.drop(&label_vec).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
     }
 }
 
@@ -3991,6 +4335,82 @@ impl PyDataFrame {
         }
     }
 
+    fn add(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__add__(py, other)
+    }
+    fn radd(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__radd__(py, other)
+    }
+    fn sub(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__sub__(py, other)
+    }
+    fn subtract(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__sub__(py, other)
+    }
+    fn rsub(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__rsub__(py, other)
+    }
+    fn mul(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__mul__(py, other)
+    }
+    fn multiply(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__mul__(py, other)
+    }
+    fn rmul(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__rmul__(py, other)
+    }
+    fn div(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__truediv__(py, other)
+    }
+    fn divide(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__truediv__(py, other)
+    }
+    fn truediv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__truediv__(py, other)
+    }
+    fn rtruediv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__rtruediv__(py, other)
+    }
+    fn rdiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__rtruediv__(py, other)
+    }
+    fn floordiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__floordiv__(py, other)
+    }
+    fn rfloordiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__rfloordiv__(py, other)
+    }
+    fn r#mod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__mod__(py, other)
+    }
+    fn rmod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__rmod__(py, other)
+    }
+    fn pow(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__pow__(py, other, None)
+    }
+    fn rpow(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__rpow__(py, other, None)
+    }
+    fn eq(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__eq__(py, other)
+    }
+    fn ne(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__ne__(py, other)
+    }
+    fn lt(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__lt__(py, other)
+    }
+    fn le(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__le__(py, other)
+    }
+    fn gt(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__gt__(py, other)
+    }
+    fn ge(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.__ge__(py, other)
+    }
+
     /// `"a" in df` checks the column labels, as in pandas.
     fn __contains__(&self, name: &str) -> bool {
         self.inner.column(name).is_some()
@@ -4134,32 +4554,71 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Drop the named columns, returning a new DataFrame (pandas
-    /// `DataFrame.drop(columns=...)`).
-    fn drop(&self, columns: Vec<String>) -> PyResult<PyDataFrame> {
-        let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
-        let result = self
-            .inner
-            .drop_columns(&refs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// Drop specified labels from rows or columns.
+    #[pyo3(signature = (labels=None, axis=None, columns=None))]
+    fn drop(
+        &self,
+        labels: Option<&Bound<'_, PyAny>>,
+        axis: Option<usize>,
+        columns: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        if let Some(cols) = columns {
+            let col_names: Vec<String> = if let Ok(s) = cols.extract::<String>() {
+                vec![s]
+            } else if let Ok(list) = cols.extract::<Vec<String>>() {
+                list
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "columns must be a string or list of strings",
+                ));
+            };
+            let str_refs: Vec<&str> = col_names.iter().map(String::as_str).collect();
+            let res = self.inner.drop(&str_refs, 1).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: res });
+        }
+        let ax = axis.unwrap_or(0);
+        if let Some(lbls) = labels {
+            let names: Vec<String> = if let Ok(s) = lbls.extract::<String>() {
+                vec![s]
+            } else if let Ok(list) = lbls.extract::<Vec<String>>() {
+                list
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "labels must be a string or list of strings",
+                ));
+            };
+            let str_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            let res = self.inner.drop(&str_refs, ax).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: res });
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Need either labels or columns to drop",
+        ))
     }
 
-    /// Rename columns via an `{old: new}` mapping, returning a new DataFrame.
-    fn rename(&self, mapping: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
-        let mut pairs: Vec<(String, String)> = Vec::with_capacity(mapping.len());
-        for (k, v) in mapping.iter() {
-            pairs.push((k.extract::<String>()?, v.extract::<String>()?));
+    /// Rename columns or index via a mapping or keyword arguments.
+    #[pyo3(signature = (mapping=None, columns=None))]
+    fn rename(
+        &self,
+        mapping: Option<&Bound<'_, PyDict>>,
+        columns: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        let target = columns.or(mapping);
+        if let Some(dict) = target {
+            let mut pairs = Vec::with_capacity(dict.len());
+            for (k, v) in dict.iter() {
+                pairs.push((k.extract::<String>()?, v.extract::<String>()?));
+            }
+            let str_pairs: Vec<(&str, &str)> = pairs
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect();
+            let res = self.inner.rename(&str_pairs).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: res });
         }
-        let refs: Vec<(&str, &str)> = pairs
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let result = self
-            .inner
-            .rename(&refs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+        Ok(PyDataFrame {
+            inner: self.inner.clone(),
+        })
     }
 
     /// Merge with another DataFrame on key column(s) (pandas `DataFrame.merge`).
@@ -4868,6 +5327,253 @@ impl PyDataFrame {
             .map_err(frame_error_to_py)?;
         Ok(Self { inner: res })
     }
+
+    #[pyo3(signature = (axis=None))]
+    fn any(&self, axis: Option<usize>) -> PyResult<PySeries> {
+        let res = if axis == Some(1) {
+            self.inner.any_axis1().map_err(frame_error_to_py)?
+        } else {
+            self.inner.any().map_err(frame_error_to_py)?
+        };
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (axis=None))]
+    fn all(&self, axis: Option<usize>) -> PyResult<PySeries> {
+        let res = if axis == Some(1) {
+            self.inner.all_axis1().map_err(frame_error_to_py)?
+        } else {
+            self.inner.all().map_err(frame_error_to_py)?
+        };
+        Ok(PySeries { inner: res })
+    }
+
+    fn mode(&self) -> PyResult<PyDataFrame> {
+        let res = self.inner.mode().map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn prod(&self) -> PyResult<PySeries> {
+        let res = self.inner.prod().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn product(&self) -> PyResult<PySeries> {
+        self.prod()
+    }
+
+    #[pyo3(signature = (q=0.5))]
+    fn quantile(&self, q: f64) -> PyResult<PySeries> {
+        let res = self.inner.quantile(q).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    fn rank(
+        &self,
+        method: Option<&str>,
+        ascending: Option<bool>,
+        na_option: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let m = method.unwrap_or("average");
+        let asc = ascending.unwrap_or(true);
+        let na = na_option.unwrap_or("keep");
+        let res = self.inner.rank(m, asc, na).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn sem(&self) -> PyResult<PySeries> {
+        let res = self.inner.sem().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn skew(&self) -> PyResult<PySeries> {
+        let res = self.inner.skew().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn kurt(&self) -> PyResult<PySeries> {
+        let res = self.inner.kurtosis().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn kurtosis(&self) -> PyResult<PySeries> {
+        self.kurt()
+    }
+
+    #[pyo3(signature = (before=None, after=None))]
+    fn truncate(
+        &self,
+        before: Option<&Bound<'_, PyAny>>,
+        after: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let b = match before {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        let a = match after {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        let res = self
+            .inner
+            .truncate(b.as_ref(), a.as_ref())
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn add_prefix(&self, prefix: &str) -> PyResult<PyDataFrame> {
+        let res = self.inner.add_prefix(prefix).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn add_suffix(&self, suffix: &str) -> PyResult<PyDataFrame> {
+        let res = self.inner.add_suffix(suffix).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: res })
+    }
+
+    fn first_valid_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.inner.first_valid_index() {
+            Some(l) => index_label_to_py(py, &l),
+            None => Ok(py.None()),
+        }
+    }
+
+    fn last_valid_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.inner.last_valid_index() {
+            Some(l) => index_label_to_py(py, &l),
+            None => Ok(py.None()),
+        }
+    }
+
+    fn equals(&self, other: &PyDataFrame) -> bool {
+        self.inner.equals(&other.inner)
+    }
+
+    fn pop(&mut self, item: &str) -> PyResult<PySeries> {
+        let (series, remaining) = self.inner.pop(item).map_err(frame_error_to_py)?;
+        self.inner = remaining;
+        Ok(PySeries { inner: series })
+    }
+
+    fn squeeze(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.inner.column_names().len() == 1 {
+            let col = self.column_series(self.inner.column_names()[0])?;
+            if col.inner.len() == 1 {
+                let s = col.inner.column().values()[0].clone();
+                scalar_to_py(py, &s)
+            } else {
+                Ok(Py::new(py, col)?.into_any())
+            }
+        } else {
+            Ok(Py::new(
+                py,
+                PyDataFrame {
+                    inner: self.inner.clone(),
+                },
+            )?
+            .into_any())
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.columns()
+    }
+
+    fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let mut list = Vec::with_capacity(self.inner.column_names().len());
+        for col_name in self.inner.column_names() {
+            let s = self.column_series(col_name)?;
+            let py_s = Py::new(py, s)?;
+            list.push((col_name.as_str(), py_s).into_pyobject(py)?);
+        }
+        Ok(PyList::new(py, list)?.into_any().unbind())
+    }
+
+    fn iterrows(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let rows = self.inner.iterrows();
+        let mut list = Vec::with_capacity(rows.len());
+        for (label, row_data) in rows {
+            let py_label = index_label_to_py(py, &label)?;
+            let mut col_items = Vec::with_capacity(row_data.len());
+            let mut col_labels = Vec::with_capacity(row_data.len());
+            for (col_name, val) in row_data {
+                col_labels.push(IndexLabel::Utf8(col_name.to_string()));
+                col_items.push(val);
+            }
+            let s = Series::from_values(label.to_string(), col_labels, col_items)
+                .map_err(frame_error_to_py)?;
+            let py_s = Py::new(py, PySeries { inner: s })?;
+            list.push(pyo3::types::PyTuple::new(py, &[py_label, py_s.into_any()])?);
+        }
+        Ok(PyList::new(py, list)?.into_any().unbind())
+    }
+
+    fn itertuples(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let tuples = self.inner.itertuples();
+        let mut list = Vec::with_capacity(tuples.len());
+        for (label, vals) in tuples {
+            let mut py_vals = Vec::with_capacity(vals.len() + 1);
+            py_vals.push(index_label_to_py(py, &label)?);
+            for v in &vals {
+                py_vals.push(scalar_to_py(py, v)?);
+            }
+            list.push(pyo3::types::PyTuple::new(py, &py_vals)?);
+        }
+        Ok(PyList::new(py, list)?.into_any().unbind())
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn pad(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
+        self.ffill(limit)
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn backfill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
+        self.bfill(limit)
+    }
+
+    fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(name) = func.extract::<String>() {
+            match name.as_str() {
+                "sum" => Ok(Py::new(py, self.sum()?)?.into_any()),
+                "mean" => Ok(Py::new(py, self.mean()?)?.into_any()),
+                "min" => Ok(Py::new(py, self.min()?)?.into_any()),
+                "max" => Ok(Py::new(py, self.max()?)?.into_any()),
+                "std" => Ok(Py::new(py, self.std()?)?.into_any()),
+                "var" => Ok(Py::new(py, self.var()?)?.into_any()),
+                "count" => Ok(Py::new(py, self.count()?)?.into_any()),
+                "median" => Ok(Py::new(py, self.median()?)?.into_any()),
+                "prod" | "product" => Ok(Py::new(py, self.prod()?)?.into_any()),
+                "sem" => Ok(Py::new(py, self.sem()?)?.into_any()),
+                "skew" => Ok(Py::new(py, self.skew()?)?.into_any()),
+                "kurt" | "kurtosis" => Ok(Py::new(py, self.kurt()?)?.into_any()),
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported agg function '{other}'"
+                ))),
+            }
+        } else if let Ok(dict) = func.extract::<std::collections::HashMap<String, Vec<String>>>() {
+            let res = self.inner.agg(&dict).map_err(frame_error_to_py)?;
+            Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "func must be a string or dict of column -> list of functions",
+            ))
+        }
+    }
+
+    fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.agg(py, func)
+    }
+
+    #[pyo3(signature = (index=true))]
+    fn memory_usage(&self, index: bool) -> PyResult<PySeries> {
+        let res = self
+            .inner
+            .memory_usage_with_options(index, false)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
 }
 
 /// Helper indexer classes for PyDataFrame.
@@ -5489,6 +6195,203 @@ impl PyRolling {
             "Empty rolling object",
         ))
     }
+
+    #[getter]
+    pub fn ndim(&self) -> usize {
+        if self.series.is_some() { 1 } else { 2 }
+    }
+
+    pub fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .sem()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .sem()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .skew()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .skew()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling_with_center(self.window, self.min_periods, self.center)
+                .kurt()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .kurt()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn kurtosis(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.kurt(py)
+    }
+
+    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    pub fn rank(
+        &self,
+        py: Python<'_>,
+        method: Option<&str>,
+        ascending: Option<bool>,
+        na_option: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let m = method.unwrap_or("average");
+        let asc = ascending.unwrap_or(true);
+        let na = na_option.unwrap_or("keep");
+        if let Some(ref s) = self.series {
+            let res = s
+                .rolling(self.window, self.min_periods)
+                .rank(m, asc, na)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .rank(m, asc, na)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    #[pyo3(signature = (other=None))]
+    pub fn corr(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let other_series = match other {
+                Some(o) => &o.inner,
+                None => s,
+            };
+            let res = s
+                .rolling(self.window, self.min_periods)
+                .corr(other_series)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .corr()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    #[pyo3(signature = (other=None))]
+    pub fn cov(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let other_series = match other {
+                Some(o) => &o.inner,
+                None => s,
+            };
+            let res = s
+                .rolling(self.window, self.min_periods)
+                .cov(other_series)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .rolling(self.window, self.min_periods)
+                .cov()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(func_name) = func.extract::<String>() {
+            match func_name.as_str() {
+                "sum" => self.sum(py),
+                "mean" => self.mean(py),
+                "min" => self.min(py),
+                "max" => self.max(py),
+                "std" => self.std(py),
+                "var" => self.var(py),
+                "median" => self.median(py),
+                "count" => self.count(py),
+                "sem" => self.sem(py),
+                "skew" => self.skew(py),
+                "kurt" | "kurtosis" => self.kurt(py),
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported rolling agg function '{other}'"
+                ))),
+            }
+        } else if let Ok(list) = func.extract::<Vec<String>>() {
+            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
+            if let Some(ref s) = self.series {
+                let res = s
+                    .rolling(self.window, self.min_periods)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            if let Some(ref df) = self.dataframe {
+                let res = df
+                    .rolling(self.window, self.min_periods)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Empty rolling object",
+            ))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "func must be a string or list of strings",
+            ))
+        }
+    }
+
+    pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.agg(py, func)
+    }
 }
 
 /// Python wrapper for expanding window calculations over Series or DataFrame.
@@ -5680,6 +6583,189 @@ impl PyExpanding {
             "Empty expanding object",
         ))
     }
+
+    #[getter]
+    pub fn ndim(&self) -> usize {
+        if self.series.is_some() { 1 } else { 2 }
+    }
+
+    pub fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .sem()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .sem()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .skew()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .skew()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .kurt()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .kurt()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    pub fn kurtosis(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.kurt(py)
+    }
+
+    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    pub fn rank(
+        &self,
+        py: Python<'_>,
+        method: Option<&str>,
+        ascending: Option<bool>,
+        na_option: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let m = method.unwrap_or("average");
+        let asc = ascending.unwrap_or(true);
+        let na = na_option.unwrap_or("keep");
+        if let Some(ref s) = self.series {
+            let res = s
+                .expanding(self.min_periods)
+                .rank(m, asc, na)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .expanding(self.min_periods)
+                .rank(m, asc, na)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    #[pyo3(signature = (other=None))]
+    pub fn corr(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let other_series = match other {
+                Some(o) => &o.inner,
+                None => s,
+            };
+            let res = s
+                .expanding(self.min_periods)
+                .corr(other_series)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "DataFrame expanding corr not implemented",
+        ))
+    }
+
+    #[pyo3(signature = (other=None))]
+    pub fn cov(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let other_series = match other {
+                Some(o) => &o.inner,
+                None => s,
+            };
+            let res = s
+                .expanding(self.min_periods)
+                .cov(other_series)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "DataFrame expanding cov not implemented",
+        ))
+    }
+
+    pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(func_name) = func.extract::<String>() {
+            match func_name.as_str() {
+                "sum" => self.sum(py),
+                "mean" => self.mean(py),
+                "min" => self.min(py),
+                "max" => self.max(py),
+                "std" => self.std(py),
+                "var" => self.var(py),
+                "median" => self.median(py),
+                "count" => self.count(py),
+                "sem" => self.sem(py),
+                "skew" => self.skew(py),
+                "kurt" | "kurtosis" => self.kurt(py),
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported expanding agg function '{other}'"
+                ))),
+            }
+        } else if let Ok(list) = func.extract::<Vec<String>>() {
+            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
+            if let Some(ref s) = self.series {
+                let res = s
+                    .expanding(self.min_periods)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            if let Some(ref df) = self.dataframe {
+                let res = df
+                    .expanding(self.min_periods)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Empty expanding object",
+            ))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "func must be a string or list of strings",
+            ))
+        }
+    }
+
+    pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.agg(py, func)
+    }
 }
 
 /// Python wrapper for exponential moving window calculations over Series or DataFrame.
@@ -5693,6 +6779,11 @@ pub struct PyExponentialMovingWindow {
 
 #[pymethods]
 impl PyExponentialMovingWindow {
+    #[getter]
+    pub fn ndim(&self) -> usize {
+        if self.series.is_some() { 1 } else { 2 }
+    }
+
     pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = s
@@ -5751,6 +6842,103 @@ impl PyExponentialMovingWindow {
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty ewm object",
         ))
+    }
+
+    pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let res = s
+                .ewm(self.span, self.alpha)
+                .sum()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let res = df
+                .ewm(self.span, self.alpha)
+                .sum()
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty ewm object",
+        ))
+    }
+
+    #[pyo3(signature = (other=None))]
+    pub fn corr(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let other_series = match other {
+                Some(o) => &o.inner,
+                None => s,
+            };
+            let res = s
+                .ewm(self.span, self.alpha)
+                .corr(other_series)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "DataFrame EWM corr not supported",
+        ))
+    }
+
+    #[pyo3(signature = (other=None))]
+    pub fn cov(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
+        if let Some(ref s) = self.series {
+            let other_series = match other {
+                Some(o) => &o.inner,
+                None => s,
+            };
+            let res = s
+                .ewm(self.span, self.alpha)
+                .cov(other_series)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "DataFrame EWM cov not supported",
+        ))
+    }
+
+    pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(func_name) = func.extract::<String>() {
+            match func_name.as_str() {
+                "mean" => self.mean(py),
+                "std" => self.std(py),
+                "var" => self.var(py),
+                "sum" => self.sum(py),
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported ewm agg function '{other}'"
+                ))),
+            }
+        } else if let Ok(list) = func.extract::<Vec<String>>() {
+            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
+            if let Some(ref s) = self.series {
+                let res = s
+                    .ewm(self.span, self.alpha)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            if let Some(ref df) = self.dataframe {
+                let res = df
+                    .ewm(self.span, self.alpha)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Empty ewm object",
+            ))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "func must be a string or list of strings",
+            ))
+        }
+    }
+
+    pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.agg(py, func)
     }
 }
 
@@ -6183,6 +7371,95 @@ impl PyGroupBy {
             .ngroups())
     }
 
+    #[getter]
+    fn ndim(&self) -> usize {
+        2
+    }
+
+    fn product(&self) -> PyResult<PyDataFrame> {
+        self.prod()
+    }
+
+    fn quantile(&self, q: f64) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .quantile(q)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn sem(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .sem()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn skew(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .skew()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn kurt(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .kurtosis()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn kurtosis(&self) -> PyResult<PyDataFrame> {
+        self.kurt()
+    }
+
+    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    fn rank(
+        &self,
+        method: Option<&str>,
+        ascending: Option<bool>,
+        na_option: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let m = method.unwrap_or("average");
+        let asc = ascending.unwrap_or(true);
+        let na = na_option.unwrap_or("keep");
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .rank(m, asc, na)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    #[pyo3(signature = (ascending=true))]
+    fn cumcount(&self, ascending: bool) -> PyResult<PySeries> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .cumcount_with_ascending(ascending)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: result })
+    }
+
     fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(name) = func.extract::<String>() {
             let res = match name.as_str() {
@@ -6499,6 +7776,89 @@ impl PySeriesGroupBy {
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .ngroups())
+    }
+
+    #[getter]
+    fn ndim(&self) -> usize {
+        1
+    }
+
+    fn product(&self) -> PyResult<PySeries> {
+        self.prod()
+    }
+
+    fn quantile(&self, q: f64) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .quantile(q)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn sem(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .sem()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn skew(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .skew()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn kurt(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .kurtosis()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn kurtosis(&self) -> PyResult<PySeries> {
+        self.kurt()
+    }
+
+    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    fn rank(
+        &self,
+        method: Option<&str>,
+        ascending: Option<bool>,
+        na_option: Option<&str>,
+    ) -> PyResult<PySeries> {
+        let m = method.unwrap_or("average");
+        let asc = ascending.unwrap_or(true);
+        let na = na_option.unwrap_or("keep");
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .rank(m, asc, na)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (ascending=true))]
+    fn cumcount(&self, ascending: bool) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .cumcount_with_ascending(ascending)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
     }
 
     fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -6949,6 +8309,163 @@ impl PyResampler {
         }
     }
 
+    #[getter]
+    fn ndim(&self) -> usize {
+        match &self.target {
+            ResampleTarget::Series(_) => 1,
+            ResampleTarget::DataFrame(_) => 2,
+        }
+    }
+
+    fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .quantile(q)
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .quantile(q)
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .sem()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .sem()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .skew()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .skew()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .kurt()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .kurt()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn kurtosis(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.kurt(py)
+    }
+
+    fn nearest(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .nearest()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .nearest()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
     fn agg(&self, py: Python<'_>, func: &str) -> PyResult<Py<PyAny>> {
         match func {
             "sum" => self.sum(py),
@@ -6964,6 +8481,10 @@ impl PyResampler {
             "prod" => self.prod(py),
             "size" => self.size(py),
             "ohlc" => self.ohlc(py),
+            "sem" => self.sem(py),
+            "skew" => self.skew(py),
+            "kurt" | "kurtosis" => self.kurt(py),
+            "nearest" => self.nearest(py),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "unsupported resampler aggregation '{func}'"
             ))),
@@ -8734,5 +10255,49 @@ mod tests {
 
         let resampler_s = py_s.resample("1D", None, None, None);
         assert_eq!(resampler_s.freq, "1D");
+    }
+
+    #[test]
+    fn test_py_series_and_dataframe_operations() {
+        let s = Series::new(
+            "s",
+            Index::new(vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ]),
+            Column::from_f64_values(vec![10.0, 20.0, 30.0]),
+        )
+        .expect("series"); // ubs:ignore — test fixture
+        let py_s = PySeries { inner: s };
+
+        let t_s = py_s.T();
+        assert_eq!(t_s.inner.len(), 3);
+        let keys_s = py_s.keys();
+        assert_eq!(keys_s.inner.len(), 3);
+        let pad_s = py_s.pad(None).expect("pad"); // ubs:ignore — test fixture
+        assert_eq!(pad_s.inner.len(), 3);
+        let backfill_s = py_s.backfill(None).expect("backfill"); // ubs:ignore — test fixture
+        assert_eq!(backfill_s.inner.len(), 3);
+
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        )
+        .expect("df"); // ubs:ignore — test fixture
+        let py_df = PyDataFrame { inner: df };
+        assert_eq!(py_df.keys(), vec!["a".to_string(), "b".to_string()]);
+        let t_df = py_df.T().expect("T"); // ubs:ignore — test fixture
+        assert_eq!(t_df.shape(), (2, 2));
+
+        let roll = py_df.rolling(2, None, false);
+        assert_eq!(roll.ndim(), 2);
+        let exp = py_df.expanding(None);
+        assert_eq!(exp.ndim(), 2);
+        let ewm = py_df.ewm(Some(0.5), None);
+        assert_eq!(ewm.ndim(), 2);
     }
 }
