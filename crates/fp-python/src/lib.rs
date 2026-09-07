@@ -2330,6 +2330,41 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
 }
 
+fn extract_or_build_series(
+    py: Python<'_>,
+    by: &Bound<'_, PyAny>,
+    like: &Series,
+) -> PyResult<Series> {
+    if let Ok(series) = by.extract::<PyRef<'_, PySeries>>() {
+        return Ok(series.inner.clone());
+    }
+    if let Ok(py_idx) = by.extract::<PyRef<'_, PyIndex>>() {
+        let vals: Vec<Scalar> = py_idx
+            .inner
+            .labels()
+            .iter()
+            .map(index_label_to_scalar)
+            .collect();
+        return Series::from_values("group", like.index().labels().to_vec(), vals)
+            .map_err(frame_error_to_py);
+    }
+    if let Ok(list) = by.cast::<PyList>() {
+        let scalars: Vec<Scalar> = list
+            .iter()
+            .map(|v| py_to_scalar(py, &v))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Series::from_values("group", like.index().labels().to_vec(), scalars)
+            .map_err(frame_error_to_py);
+    }
+    let scalar = py_to_scalar(py, by)?;
+    Series::from_values(
+        "group",
+        like.index().labels().to_vec(),
+        vec![scalar; like.len()],
+    )
+    .map_err(frame_error_to_py)
+}
+
 #[pymethods]
 impl PySeries {
     /// Create a new Series from a name and list of values.
@@ -3165,6 +3200,40 @@ impl PySeries {
             .sample(n, frac, replace, random_state)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
+    }
+
+    pub fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<PySeriesGroupBy> {
+        let by_series = extract_or_build_series(py, by, &self.inner)?;
+        Ok(PySeriesGroupBy {
+            series: self.inner.clone(),
+            by: by_series,
+        })
+    }
+
+    #[pyo3(signature = (freq, closed=None, label=None, origin=None))]
+    pub fn resample(
+        &self,
+        freq: &str,
+        closed: Option<&str>,
+        label: Option<&str>,
+        origin: Option<&str>,
+    ) -> PyResampler {
+        PyResampler {
+            target: ResampleTarget::Series(self.inner.clone()),
+            freq: freq.to_string(),
+            closed: closed.map(str::to_string),
+            label: label.map(str::to_string),
+            origin: origin.map(str::to_string),
+        }
+    }
+
+    #[pyo3(signature = (freq, method=None))]
+    pub fn asfreq(&self, freq: &str, method: Option<&str>) -> PyResult<Self> {
+        let res = self
+            .inner
+            .asfreq_with_options(freq, method, None)
+            .map_err(frame_error_to_py)?;
+        Ok(Self { inner: res })
     }
 }
 
@@ -4773,6 +4842,32 @@ impl PyDataFrame {
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
+
+    #[pyo3(signature = (freq, closed=None, label=None, origin=None))]
+    pub fn resample(
+        &self,
+        freq: &str,
+        closed: Option<&str>,
+        label: Option<&str>,
+        origin: Option<&str>,
+    ) -> PyResampler {
+        PyResampler {
+            target: ResampleTarget::DataFrame(self.inner.clone()),
+            freq: freq.to_string(),
+            closed: closed.map(str::to_string),
+            label: label.map(str::to_string),
+            origin: origin.map(str::to_string),
+        }
+    }
+
+    #[pyo3(signature = (freq, method=None))]
+    pub fn asfreq(&self, freq: &str, method: Option<&str>) -> PyResult<Self> {
+        let res = self
+            .inner
+            .asfreq_with_options(freq, method, None)
+            .map_err(frame_error_to_py)?;
+        Ok(Self { inner: res })
+    }
 }
 
 /// Helper indexer classes for PyDataFrame.
@@ -5887,6 +5982,997 @@ impl PyGroupBy {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PyDataFrame { inner: result })
     }
+
+    fn first(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .first()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn last(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .last()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn size(&self) -> PyResult<PySeries> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .size()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: result })
+    }
+
+    fn nunique(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .nunique()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn any(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .any()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn all(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .all()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn cumsum(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .cumsum()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn cumprod(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .cumprod()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn cummin(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .cummin()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn cummax(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .cummax()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn diff(&self, periods: usize) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .diff(periods)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn pct_change(&self, periods: i64) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .pct_change(periods)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    #[pyo3(signature = (n=5))]
+    fn head(&self, n: i64) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .head(n)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    #[pyo3(signature = (n=5))]
+    fn tail(&self, n: i64) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .tail(n)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn corr(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .corr()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn cov(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .cov()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn ohlc(&self) -> PyResult<PyDataFrame> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        let result = self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .ohlc()
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: result })
+    }
+
+    fn ngroups(&self) -> PyResult<usize> {
+        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+        Ok(self
+            .df
+            .groupby(&by_refs)
+            .map_err(frame_error_to_py)?
+            .ngroups())
+    }
+
+    fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(name) = func.extract::<String>() {
+            let res = match name.as_str() {
+                "sum" => self.sum()?,
+                "mean" => self.mean()?,
+                "count" => self.count()?,
+                "min" => self.min()?,
+                "max" => self.max()?,
+                "var" => self.var()?,
+                "std" => self.std()?,
+                "median" => self.median()?,
+                "prod" => self.prod()?,
+                "first" => self.first()?,
+                "last" => self.last()?,
+                "nunique" => self.nunique()?,
+                "any" => self.any()?,
+                "all" => self.all()?,
+                "cumsum" => self.cumsum()?,
+                "cumprod" => self.cumprod()?,
+                "cummin" => self.cummin()?,
+                "cummax" => self.cummax()?,
+                "ohlc" => self.ohlc()?,
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "unsupported groupby aggregation '{name}'"
+                    )));
+                }
+            };
+            return Ok(Py::new(py, res)?.into_any());
+        } else if let Ok(dict) = func.extract::<std::collections::HashMap<String, String>>() {
+            let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+            let res = self
+                .df
+                .groupby(&by_refs)
+                .map_err(frame_error_to_py)?
+                .agg(&dict)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "agg expects a string function name or dict of column -> func",
+        ))
+    }
+
+    fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.agg(py, func)
+    }
+}
+
+/// Python wrapper for FrankenPandas SeriesGroupBy.
+#[pyclass(name = "SeriesGroupBy")]
+pub struct PySeriesGroupBy {
+    series: Series,
+    by: Series,
+}
+
+#[pymethods]
+impl PySeriesGroupBy {
+    fn __repr__(&self) -> String {
+        format!(
+            "SeriesGroupBy(series={}, by={})",
+            self.series.name(),
+            self.by.name()
+        )
+    }
+
+    fn sum(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .sum()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn mean(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .mean()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn std(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .std()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn var(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .var()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn min(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .min()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn max(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .max()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn count(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .count()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn first(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .first()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn last(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .last()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn median(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .median()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn prod(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .prod()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn size(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .size()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn nunique(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .nunique()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn any(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .any()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn all(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .all()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn value_counts(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .value_counts()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (n=5))]
+    fn nlargest(&self, n: usize) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .nlargest(n)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (n=5))]
+    fn nsmallest(&self, n: usize) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .nsmallest(n)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn diff(&self, periods: usize) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .diff(periods)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    #[pyo3(signature = (periods=1))]
+    fn shift(&self, periods: i64) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .shift(periods)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn cumsum(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .cumsum()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn cumprod(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .cumprod()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn cummin(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .cummin()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn cummax(&self) -> PyResult<PySeries> {
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .cummax()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res })
+    }
+
+    fn ngroups(&self) -> PyResult<usize> {
+        Ok(self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .ngroups())
+    }
+
+    fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(name) = func.extract::<String>() {
+            let res = match name.as_str() {
+                "sum" => self.sum()?,
+                "mean" => self.mean()?,
+                "min" => self.min()?,
+                "max" => self.max()?,
+                "std" => self.std()?,
+                "var" => self.var()?,
+                "count" => self.count()?,
+                "first" => self.first()?,
+                "last" => self.last()?,
+                "median" => self.median()?,
+                "prod" => self.prod()?,
+                "size" => self.size()?,
+                "nunique" => self.nunique()?,
+                "any" => self.any()?,
+                "all" => self.all()?,
+                "cumsum" => self.cumsum()?,
+                "cumprod" => self.cumprod()?,
+                "cummin" => self.cummin()?,
+                "cummax" => self.cummax()?,
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "unsupported aggregation '{name}'"
+                    )));
+                }
+            };
+            return Ok(Py::new(py, res)?.into_any());
+        } else if let Ok(list) = func.extract::<Vec<String>>() {
+            let refs: Vec<&str> = list.iter().map(String::as_str).collect();
+            let df = self
+                .series
+                .groupby(&self.by)
+                .map_err(frame_error_to_py)?
+                .agg(&refs)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "agg expects a string or list of function names",
+        ))
+    }
+
+    fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.agg(py, func)
+    }
+}
+
+#[derive(Clone)]
+enum ResampleTarget {
+    Series(Series),
+    DataFrame(DataFrame),
+}
+
+/// Python wrapper for FrankenPandas Resampler.
+#[pyclass(name = "Resampler")]
+pub struct PyResampler {
+    target: ResampleTarget,
+    freq: String,
+    closed: Option<String>,
+    label: Option<String>,
+    origin: Option<String>,
+}
+
+#[pymethods]
+impl PyResampler {
+    fn __repr__(&self) -> String {
+        format!("Resampler(freq='{}')", self.freq)
+    }
+
+    fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .sum()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .sum()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .mean()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .mean()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .min()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .min()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .max()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .max()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .count()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .count()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn first(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .first()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .first()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn last(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .last()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .last()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .std()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .std()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .var()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .var()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .median()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .median()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn prod(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .prod()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .prod()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn size(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .size()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .size()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn ohlc(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .ohlc()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .ohlc()
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    fn agg(&self, py: Python<'_>, func: &str) -> PyResult<Py<PyAny>> {
+        match func {
+            "sum" => self.sum(py),
+            "mean" => self.mean(py),
+            "min" => self.min(py),
+            "max" => self.max(py),
+            "count" => self.count(py),
+            "first" => self.first(py),
+            "last" => self.last(py),
+            "std" => self.std(py),
+            "var" => self.var(py),
+            "median" => self.median(py),
+            "prod" => self.prod(py),
+            "size" => self.size(py),
+            "ohlc" => self.ohlc(py),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "unsupported resampler aggregation '{func}'"
+            ))),
+        }
+    }
+
+    fn aggregate(&self, py: Python<'_>, func: &str) -> PyResult<Py<PyAny>> {
+        self.agg(py, func)
+    }
 }
 
 /// Read a CSV file into a DataFrame.
@@ -6800,6 +7886,8 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySeries>()?;
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyGroupBy>()?;
+    m.add_class::<PySeriesGroupBy>()?;
+    m.add_class::<PyResampler>()?;
     m.add_class::<PyStyler>()?;
     m.add_class::<PyIndex>()?;
     m.add_class::<PyDatetimeIndex>()?;
@@ -7539,5 +8627,112 @@ mod tests {
             .expect("bdate_range"); // ubs:ignore — test fixture
         assert_eq!(bdr.len(), 5);
         assert_eq!(bdr.name().as_deref(), Some("bday"));
+    }
+
+    #[test]
+    fn test_py_groupby_and_resampler() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .expect("series"); // ubs:ignore — test fixture
+        let py_s = PySeries { inner: s };
+
+        let by_s = Series::from_values(
+            "k",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ],
+            vec![
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ],
+        )
+        .expect("by_series"); // ubs:ignore — test fixture
+
+        let sgb = PySeriesGroupBy {
+            series: py_s.inner.clone(),
+            by: by_s,
+        };
+
+        let sum_s = sgb.sum().expect("sum"); // ubs:ignore — test fixture
+        assert_eq!(sum_s.inner.len(), 2);
+        let mean_s = sgb.mean().expect("mean"); // ubs:ignore — test fixture
+        assert_eq!(mean_s.inner.len(), 2);
+        let count_s = sgb.count().expect("count"); // ubs:ignore — test fixture
+        assert_eq!(count_s.inner.len(), 2);
+        let min_s = sgb.min().expect("min"); // ubs:ignore — test fixture
+        assert_eq!(min_s.inner.len(), 2);
+        let max_s = sgb.max().expect("max"); // ubs:ignore — test fixture
+        assert_eq!(max_s.inner.len(), 2);
+        let first_s = sgb.first().expect("first"); // ubs:ignore — test fixture
+        assert_eq!(first_s.inner.len(), 2);
+        let last_s = sgb.last().expect("last"); // ubs:ignore — test fixture
+        assert_eq!(last_s.inner.len(), 2);
+        let size_s = sgb.size().expect("size"); // ubs:ignore — test fixture
+        assert_eq!(size_s.inner.len(), 2);
+        let nq = sgb.nunique().expect("nunique"); // ubs:ignore — test fixture
+        assert_eq!(nq.inner.len(), 2);
+        assert_eq!(sgb.ngroups().expect("ngroups"), 2); // ubs:ignore — test fixture
+
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("x".to_string()),
+                        Scalar::Utf8("x".to_string()),
+                        Scalar::Utf8("y".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+            ],
+        )
+        .expect("df"); // ubs:ignore — test fixture
+        let py_df = PyDataFrame { inner: df };
+
+        let gb = PyGroupBy {
+            df: py_df.inner.clone(),
+            by: vec!["grp".to_string()],
+        };
+        let gb_first = gb.first().expect("first"); // ubs:ignore — test fixture
+        assert_eq!(gb_first.shape(), (2, 1));
+        let gb_last = gb.last().expect("last"); // ubs:ignore — test fixture
+        assert_eq!(gb_last.shape(), (2, 1));
+        let gb_size = gb.size().expect("size"); // ubs:ignore — test fixture
+        assert_eq!(gb_size.inner.len(), 2);
+        let gb_nq = gb.nunique().expect("nunique"); // ubs:ignore — test fixture
+        assert_eq!(gb_nq.shape(), (2, 1));
+        assert_eq!(gb.ngroups().expect("ngroups"), 2); // ubs:ignore — test fixture
+
+        let resampler_df = py_df.resample("1D", None, None, None);
+        assert_eq!(resampler_df.freq, "1D");
+
+        let resampler_s = py_s.resample("1D", None, None, None);
+        assert_eq!(resampler_s.freq, "1D");
     }
 }
