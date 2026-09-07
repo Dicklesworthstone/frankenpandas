@@ -16307,21 +16307,45 @@ fn execute_series_window_fixture_operation(
                 .resample_freq
                 .as_deref()
                 .ok_or("resample_freq required for series_resample_sum")?;
-            series.resample(freq).sum().map_err(|err| err.to_string())
+            series
+                .resample_ext(
+                    freq,
+                    fixture.resample_closed.as_deref(),
+                    fixture.resample_label.as_deref(),
+                    fixture.resample_origin.as_deref(),
+                )
+                .sum()
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesResampleMean => {
             let freq = fixture
                 .resample_freq
                 .as_deref()
                 .ok_or("resample_freq required for series_resample_mean")?;
-            series.resample(freq).mean().map_err(|err| err.to_string())
+            series
+                .resample_ext(
+                    freq,
+                    fixture.resample_closed.as_deref(),
+                    fixture.resample_label.as_deref(),
+                    fixture.resample_origin.as_deref(),
+                )
+                .mean()
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesResampleCount => {
             let freq = fixture
                 .resample_freq
                 .as_deref()
                 .ok_or("resample_freq required for series_resample_count")?;
-            series.resample(freq).count().map_err(|err| err.to_string())
+            series
+                .resample_ext(
+                    freq,
+                    fixture.resample_closed.as_deref(),
+                    fixture.resample_label.as_deref(),
+                    fixture.resample_origin.as_deref(),
+                )
+                .count()
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesResampleAsfreq => {
             let freq = fixture
@@ -16329,7 +16353,12 @@ fn execute_series_window_fixture_operation(
                 .as_deref()
                 .ok_or("resample_freq required for series_resample_asfreq")?;
             series
-                .resample(freq)
+                .resample_ext(
+                    freq,
+                    fixture.resample_closed.as_deref(),
+                    fixture.resample_label.as_deref(),
+                    fixture.resample_origin.as_deref(),
+                )
                 .asfreq()
                 .map_err(|err| err.to_string())
         }
@@ -16339,7 +16368,12 @@ fn execute_series_window_fixture_operation(
                 .as_deref()
                 .ok_or("resample_freq required for series_resample_ffill")?;
             series
-                .resample(freq)
+                .resample_ext(
+                    freq,
+                    fixture.resample_closed.as_deref(),
+                    fixture.resample_label.as_deref(),
+                    fixture.resample_origin.as_deref(),
+                )
                 .ffill(fixture.resample_limit)
                 .map_err(|err| err.to_string())
         }
@@ -16349,7 +16383,12 @@ fn execute_series_window_fixture_operation(
                 .as_deref()
                 .ok_or("resample_freq required for series_resample_bfill")?;
             series
-                .resample(freq)
+                .resample_ext(
+                    freq,
+                    fixture.resample_closed.as_deref(),
+                    fixture.resample_label.as_deref(),
+                    fixture.resample_origin.as_deref(),
+                )
                 .bfill(fixture.resample_limit)
                 .map_err(|err| err.to_string())
         }
@@ -16380,14 +16419,30 @@ fn execute_dataframe_window_fixture_operation(
                 .resample_freq
                 .as_deref()
                 .ok_or("resample_freq required for dataframe_resample_sum")?;
-            frame.resample(freq).sum().map_err(|err| err.to_string())
+            frame
+                .resample_ext(
+                    freq,
+                    fixture.resample_closed.as_deref(),
+                    fixture.resample_label.as_deref(),
+                    fixture.resample_origin.as_deref(),
+                )
+                .sum()
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameResampleMean => {
             let freq = fixture
                 .resample_freq
                 .as_deref()
                 .ok_or("resample_freq required for dataframe_resample_mean")?;
-            frame.resample(freq).mean().map_err(|err| err.to_string())
+            frame
+                .resample_ext(
+                    freq,
+                    fixture.resample_closed.as_deref(),
+                    fixture.resample_label.as_deref(),
+                    fixture.resample_origin.as_deref(),
+                )
+                .mean()
+                .map_err(|err| err.to_string())
         }
         _ => Err(format!(
             "unsupported dataframe window operation: {:?}",

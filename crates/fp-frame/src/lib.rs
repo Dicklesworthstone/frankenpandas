@@ -32442,9 +32442,9 @@ fn resample_build_groups_with_options(
 
         let mut lattice = Vec::with_capacity(num_bins);
         for b in 0..num_bins {
-            let (k, ns) = match closed {
-                ResampleClosed::Left => (edge_keys[b].clone(), fresult + (b as i64) * step_ns),
-                ResampleClosed::Right => (edge_keys[b + 1].clone(), fresult + ((b + 1) as i64) * step_ns),
+            let (k, ns) = match label {
+                ResampleLabel::Left => (edge_keys[b].clone(), fresult + (b as i64) * step_ns),
+                ResampleLabel::Right => (edge_keys[b + 1].clone(), fresult + ((b + 1) as i64) * step_ns),
             };
             lattice.push((k, ns));
         }
@@ -35308,6 +35308,7 @@ impl<'a> DataFrameResample<'a> {
     /// Matches `df.resample(freq).agg(['sum', 'mean'])`. Each numeric column
     /// gets one output column per function, named `{col}_{func}`.
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.validate()?;
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
         let mut result_index: Option<Index> = None;
@@ -35320,7 +35321,7 @@ impl<'a> DataFrameResample<'a> {
             }
 
             let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
-            let resample = series.resample(&self.freq);
+            let resample = self.series_resample(&series);
 
             for &func in funcs {
                 let agg_result = match func {
@@ -35449,6 +35450,7 @@ impl<'a> DataFrameResample<'a> {
 
     /// Return all source rows for one resample bucket.
     pub fn get_group(&self, name: &str) -> Result<DataFrame, FrameError> {
+        self.validate()?;
         let (_, groups) = self.build_groups();
         let positions = groups.get(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("resample group '{name}' not found"))
@@ -35498,6 +35500,7 @@ impl<'a> DataFrameResample<'a> {
 
     /// Count source rows in each resample bucket.
     pub fn size(&self) -> Result<Series, FrameError> {
+        self.validate()?;
         let (order, groups) = self.build_groups();
         let labels: Vec<IndexLabel> = order.iter().cloned().map(IndexLabel::Utf8).collect();
         let values: Vec<Scalar> = order
@@ -35534,6 +35537,7 @@ impl<'a> DataFrameResample<'a> {
 
     /// Open-high-low-close per bucket for each numeric column.
     pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
+        self.validate()?;
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
         let mut result_index: Option<Index> = None;
@@ -35542,7 +35546,7 @@ impl<'a> DataFrameResample<'a> {
         for col_name in &numeric_cols {
             let col = &self.df.columns[col_name];
             let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
-            let result = series.resample(&self.freq).ohlc()?;
+            let result = self.series_resample(&series).ohlc()?;
             if result_index.is_none() {
                 result_index = Some(result.index().clone());
             }
@@ -35571,13 +35575,14 @@ impl<'a> DataFrameResample<'a> {
 
     /// Broadcast a named bucket reduction back to the original DataFrame shape.
     pub fn transform(&self, func: &str) -> Result<DataFrame, FrameError> {
+        self.validate()?;
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
 
         for col_name in self.numeric_column_names() {
             let col = &self.df.columns[&col_name];
             let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
-            let transformed = series.resample(&self.freq).transform(func)?;
+            let transformed = self.series_resample(&series).transform(func)?;
             result_cols.insert(col_name.clone(), transformed.column().clone());
             col_order.push(col_name);
         }
@@ -75437,6 +75442,22 @@ impl DataFrame {
             closed: None,
             label: None,
             origin: None,
+        }
+    }
+
+    pub fn resample_ext(
+        &self,
+        freq: &str,
+        closed: Option<&str>,
+        label: Option<&str>,
+        origin: Option<&str>,
+    ) -> DataFrameResample<'_> {
+        DataFrameResample {
+            df: self,
+            freq: freq.to_string(),
+            closed: closed.map(str::to_string),
+            label: label.map(str::to_string),
+            origin: origin.map(str::to_string),
         }
     }
 
