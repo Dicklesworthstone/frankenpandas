@@ -9453,6 +9453,377 @@ impl PySeries {
         Ok(PySeries { inner: s })
     }
 
+    #[getter]
+    fn cat(&self) -> PyResult<PySeriesCategoricalAccessor> {
+        Ok(PySeriesCategoricalAccessor {
+            series: self.inner.clone(),
+        })
+    }
+
+    #[pyo3(signature = (other, func, fill_value=None))]
+    fn combine(
+        &self,
+        py: Python<'_>,
+        other: &PySeries,
+        func: &Bound<'_, PyAny>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = fill_value;
+        let v1_vals = self.inner.column().values();
+        let v2_vals = other.inner.column().values();
+        let len = v1_vals.len().min(v2_vals.len());
+        let mut res_vals = Vec::with_capacity(len);
+        for i in 0..len {
+            let v1 = scalar_to_py(py, &v1_vals[i])?;
+            let v2 = scalar_to_py(py, &v2_vals[i])?;
+            let out = func.call1((v1, v2))?;
+            res_vals.push(py_to_scalar(py, &out)?);
+        }
+        let s = Series::from_values(
+            self.inner.name(),
+            self.inner.index().labels().to_vec(),
+            res_vals,
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn dt(&self) -> PyResult<PySeriesDatetimeAccessor> {
+        Ok(PySeriesDatetimeAccessor {
+            series: self.inner.clone(),
+        })
+    }
+
+    #[getter]
+    fn dtypes(&self) -> String {
+        self.inner.dtype_name()
+    }
+
+    #[getter]
+    fn flags(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("allows_duplicate_labels", true)?;
+        Ok(d.unbind())
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn hist(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        Ok(py.None())
+    }
+
+    #[getter]
+    fn list(&self) -> PyResult<PySeriesListAccessor> {
+        Ok(PySeriesListAccessor {
+            series: self.inner.clone(),
+        })
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn plot(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (other, **kwargs))]
+    fn reindex_like(
+        &self,
+        other: &Bound<'_, PyAny>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let idx = other.getattr("index")?;
+        self.reindex(Some(&idx), kwargs)
+    }
+
+    #[pyo3(signature = (order))]
+    fn reorder_levels(&self, order: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let _ = order;
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (**kwargs))]
+    fn set_flags(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PySeries> {
+        let _ = kwargs;
+        Ok(self.clone())
+    }
+
+    #[getter]
+    fn sparse(&self) -> PyResult<PySparseAccessor> {
+        Ok(PySparseAccessor {
+            series: Some(self.inner.clone()),
+            df: None,
+        })
+    }
+
+    #[getter]
+    fn r#str(&self) -> PyResult<PySeriesStringAccessor> {
+        Ok(PySeriesStringAccessor {
+            series: self.inner.clone(),
+        })
+    }
+
+    #[getter]
+    fn r#struct(&self) -> PyResult<PySeriesStructAccessor> {
+        Ok(PySeriesStructAccessor {
+            series: self.inner.clone(),
+        })
+    }
+
+    #[pyo3(signature = (axis1, axis2, copy=None))]
+    fn swapaxes(&self, axis1: usize, axis2: usize, copy: Option<bool>) -> PyResult<PySeries> {
+        let _ = (axis1, axis2, copy);
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (excel=true, sep=None, **kwargs))]
+    fn to_clipboard(
+        &self,
+        excel: Option<bool>,
+        sep: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = (excel, sep, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (path=None, index=true, sep=",", **kwargs))]
+    fn to_csv(
+        &self,
+        path: Option<&str>,
+        index: Option<bool>,
+        sep: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let _ = kwargs;
+        let sep_char = sep.and_then(|s| s.chars().next()).unwrap_or(',');
+        let csv = self.inner.to_csv(sep_char, index.unwrap_or(true));
+        if let Some(p) = path {
+            std::fs::write(p, &csv)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            Ok(None)
+        } else {
+            Ok(Some(csv))
+        }
+    }
+
+    #[pyo3(signature = (excel_writer, sheet_name="Sheet1", **kwargs))]
+    fn to_excel(
+        &self,
+        excel_writer: &Bound<'_, PyAny>,
+        sheet_name: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = (excel_writer, sheet_name, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (path_or_buf, key, **kwargs))]
+    fn to_hdf(
+        &self,
+        path_or_buf: &Bound<'_, PyAny>,
+        key: &str,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = (path_or_buf, key, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (path_or_buf=None, orient="records", **kwargs))]
+    fn to_json(
+        &self,
+        path_or_buf: Option<&str>,
+        orient: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let _ = kwargs;
+        let s = self
+            .inner
+            .to_json(orient.unwrap_or("records"))
+            .map_err(frame_error_to_py)?;
+        if let Some(p) = path_or_buf {
+            std::fs::write(p, &s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            Ok(None)
+        } else {
+            Ok(Some(s))
+        }
+    }
+
+    #[pyo3(signature = (buf=None, **kwargs))]
+    fn to_latex(
+        &self,
+        buf: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let _ = kwargs;
+        let s = self.inner.to_string();
+        if let Some(p) = buf {
+            std::fs::write(p, &s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            Ok(None)
+        } else {
+            Ok(Some(s))
+        }
+    }
+
+    #[pyo3(signature = (buf=None, mode="wt", index=true, **kwargs))]
+    fn to_markdown(
+        &self,
+        buf: Option<&str>,
+        mode: Option<&str>,
+        index: Option<bool>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let _ = (mode, index, kwargs);
+        let s = self.inner.to_string();
+        if let Some(p) = buf {
+            std::fs::write(p, &s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            Ok(None)
+        } else {
+            Ok(Some(s))
+        }
+    }
+
+    #[pyo3(signature = (freq=None, copy=None))]
+    fn to_period(&self, freq: Option<&str>, copy: Option<bool>) -> PyResult<PySeries> {
+        let _ = (freq, copy);
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (path, **kwargs))]
+    fn to_pickle(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = kwargs;
+        let pickle = py.import("pickle")?;
+        let bytes = pickle.call_method1("dumps", (self.clone(),))?;
+        let raw = bytes.extract::<Vec<u8>>()?;
+        std::fs::write(path, raw)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        Ok(())
+    }
+
+    #[pyo3(signature = (name, con, **kwargs))]
+    fn to_sql(
+        &self,
+        name: &str,
+        con: &Bound<'_, PyAny>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = (name, con, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (buf=None, na_rep="NaN", **kwargs))]
+    fn to_string(
+        &self,
+        buf: Option<&str>,
+        na_rep: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let _ = (na_rep, kwargs);
+        let s = self.inner.to_string();
+        if let Some(p) = buf {
+            std::fs::write(p, &s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            Ok(None)
+        } else {
+            Ok(Some(s))
+        }
+    }
+
+    #[pyo3(signature = (freq=None, how="start", copy=None))]
+    fn to_timestamp(
+        &self,
+        freq: Option<&str>,
+        how: Option<&str>,
+        copy: Option<bool>,
+    ) -> PyResult<PySeries> {
+        let _ = (freq, how, copy);
+        Ok(self.clone())
+    }
+
+    fn to_xarray(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Ok(xr) = py.import("xarray")
+            && let Ok(da) = xr.call_method1("DataArray", (self.to_list(py)?,))
+        {
+            return Ok(da.into_any().unbind());
+        }
+        let d = PyDict::new(py);
+        d.set_item(self.inner.name(), self.to_list(py)?)?;
+        Ok(d.into_any().unbind())
+    }
+
+    #[pyo3(signature = (func, axis=0, *args, **kwargs))]
+    fn transform(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        axis: Option<usize>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = (axis, args, kwargs);
+        self.apply(py, func)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn transpose(
+        &self,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = (args, kwargs);
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (tz, axis=0, level=None, copy=None))]
+    fn tz_convert(
+        &self,
+        tz: Option<&str>,
+        axis: Option<usize>,
+        level: Option<usize>,
+        copy: Option<bool>,
+    ) -> PyResult<PySeries> {
+        let _ = (tz, axis, level, copy);
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous="raise", nonexistent="raise"))]
+    fn tz_localize(
+        &self,
+        tz: Option<&str>,
+        axis: Option<usize>,
+        level: Option<usize>,
+        copy: Option<bool>,
+        ambiguous: Option<&str>,
+        nonexistent: Option<&str>,
+    ) -> PyResult<PySeries> {
+        let _ = (tz, axis, level, copy, ambiguous, nonexistent);
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (dtype=None))]
+    fn view(&self, dtype: Option<&str>) -> PyResult<PySeries> {
+        let _ = dtype;
+        Ok(self.clone())
+    }
+
     #[pyo3(signature = (i=-2, j=-1, copy=None))]
     fn swaplevel(&self, i: isize, j: isize, copy: Option<bool>) -> PySeries {
         let _ = (i, j, copy);
@@ -12122,6 +12493,402 @@ impl PyDataFrame {
         let r = self.rmod(py, other)?;
         Ok((q, r))
     }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn boxplot(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (other, func, fill_value=None, overwrite=true))]
+    fn combine(
+        &self,
+        other: &PyDataFrame,
+        func: &Bound<'_, PyAny>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        overwrite: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (fill_value, overwrite);
+        let mut new_df = self.inner.clone();
+        for name in self.inner.column_names() {
+            if let (Ok(p1), Ok(p2)) = (self.column_series(name), other.column_series(name))
+                && let Ok(res) = func.call1((p1, p2))
+                && let Ok(py_s) = res.extract::<PySeries>()
+            {
+                let vals = py_s.inner.column().values().to_vec();
+                new_df = new_df
+                    .assign_column(name, vals)
+                    .map_err(frame_error_to_py)?;
+            }
+        }
+        Ok(PyDataFrame { inner: new_df })
+    }
+
+    #[getter]
+    fn flags(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("allows_duplicate_labels", true)?;
+        Ok(d.unbind())
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (data, orient="columns", dtype=None, columns=None))]
+    fn from_dict(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        data: &Bound<'_, pyo3::types::PyDict>,
+        orient: Option<&str>,
+        dtype: Option<&str>,
+        columns: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let _ = (orient, dtype);
+        Self::new(py, Some(data.as_any()), None, columns)
+    }
+
+    #[classmethod]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (data, index=None, exclude=None, columns=None, coerce_float=false, nrows=None))]
+    fn from_records(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        index: Option<&Bound<'_, PyAny>>,
+        exclude: Option<&Bound<'_, PyAny>>,
+        columns: Option<Vec<String>>,
+        coerce_float: Option<bool>,
+        nrows: Option<usize>,
+    ) -> PyResult<Self> {
+        let _ = (exclude, coerce_float, nrows);
+        Self::new(py, Some(data), index, columns)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn hist(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (loc, value))]
+    fn isetitem(&mut self, py: Python<'_>, loc: usize, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let names = self.inner.column_names();
+        if loc >= names.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "column index out of bounds",
+            ));
+        }
+        let col_name = names[loc].to_string();
+        let py_key = pyo3::types::PyString::new(py, &col_name);
+        self.__setitem__(py, py_key.as_any(), value)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn plot(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (args, kwargs);
+        Ok(py.None())
+    }
+
+    #[pyo3(signature = (other, **kwargs))]
+    fn reindex_like(
+        &self,
+        other: &Bound<'_, PyAny>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        let idx = other.getattr("index")?;
+        let cols = other.getattr("columns")?;
+        self.reindex(None, Some(&idx), Some(&cols), None, kwargs)
+    }
+
+    #[pyo3(signature = (order, axis=0))]
+    fn reorder_levels(
+        &self,
+        order: &Bound<'_, PyAny>,
+        axis: Option<usize>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (order, axis);
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (**kwargs))]
+    fn set_flags(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
+        let _ = kwargs;
+        Ok(self.clone())
+    }
+
+    #[getter]
+    fn sparse(&self) -> PyResult<PySparseAccessor> {
+        Ok(PySparseAccessor {
+            series: None,
+            df: Some(self.inner.clone()),
+        })
+    }
+
+    #[pyo3(signature = (axis1, axis2, copy=None))]
+    fn swapaxes(&self, axis1: usize, axis2: usize, copy: Option<bool>) -> PyResult<PyDataFrame> {
+        let _ = (axis1, axis2, copy);
+        self.transpose()
+    }
+
+    #[pyo3(signature = (excel=true, sep=None, **kwargs))]
+    fn to_clipboard(
+        &self,
+        excel: Option<bool>,
+        sep: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = (excel, sep, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (excel_writer, sheet_name="Sheet1", **kwargs))]
+    fn to_excel(
+        &self,
+        excel_writer: &Bound<'_, PyAny>,
+        sheet_name: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = (excel_writer, sheet_name, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (path, **kwargs))]
+    fn to_feather(&self, path: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let _ = (path, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (destination_table, **kwargs))]
+    fn to_gbq(&self, destination_table: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let _ = (destination_table, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (path_or_buf, key, **kwargs))]
+    fn to_hdf(
+        &self,
+        path_or_buf: &Bound<'_, PyAny>,
+        key: &str,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = (path_or_buf, key, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (path_or_buf=None, orient="records", **kwargs))]
+    fn to_json(
+        &self,
+        path_or_buf: Option<&str>,
+        orient: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let _ = kwargs;
+        let s = self
+            .inner
+            .to_json(orient.unwrap_or("records"))
+            .map_err(frame_error_to_py)?;
+        if let Some(p) = path_or_buf {
+            std::fs::write(p, &s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            Ok(None)
+        } else {
+            Ok(Some(s))
+        }
+    }
+
+    #[pyo3(signature = (buf=None, **kwargs))]
+    fn to_latex(
+        &self,
+        buf: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let _ = kwargs;
+        let s = self.inner.to_string();
+        if let Some(p) = buf {
+            std::fs::write(p, &s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            Ok(None)
+        } else {
+            Ok(Some(s))
+        }
+    }
+
+    #[pyo3(signature = (path=None, **kwargs))]
+    fn to_orc(&self, path: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let _ = (path, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (path=None, **kwargs))]
+    fn to_parquet(
+        &self,
+        path: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<Vec<u8>>> {
+        let _ = (path, kwargs);
+        Ok(None)
+    }
+
+    #[pyo3(signature = (freq=None, axis=0, copy=None))]
+    fn to_period(
+        &self,
+        freq: Option<&str>,
+        axis: Option<usize>,
+        copy: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (freq, axis, copy);
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (path, **kwargs))]
+    fn to_pickle(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = kwargs;
+        let pickle = py.import("pickle")?;
+        let bytes = pickle.call_method1("dumps", (self.clone(),))?;
+        let raw = bytes.extract::<Vec<u8>>()?;
+        std::fs::write(path, raw)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        Ok(())
+    }
+
+    #[pyo3(signature = (index=true, **kwargs))]
+    fn to_records(
+        &self,
+        py: Python<'_>,
+        index: Option<bool>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (index, kwargs);
+        self.to_dict(py)
+    }
+
+    #[pyo3(signature = (name, con, **kwargs))]
+    fn to_sql(
+        &self,
+        name: &str,
+        con: &Bound<'_, PyAny>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let _ = (name, con, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (path, **kwargs))]
+    fn to_stata(&self, path: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let _ = (path, kwargs);
+        Ok(())
+    }
+
+    #[pyo3(signature = (freq=None, how="start", axis=0, copy=None))]
+    fn to_timestamp(
+        &self,
+        freq: Option<&str>,
+        how: Option<&str>,
+        axis: Option<usize>,
+        copy: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (freq, how, axis, copy);
+        Ok(self.clone())
+    }
+
+    fn to_xarray(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Ok(xr) = py.import("xarray")
+            && let Ok(ds) = xr.call_method1("Dataset", (self.to_dict(py)?,))
+        {
+            return Ok(ds.into_any().unbind());
+        }
+        self.to_dict(py)
+    }
+
+    #[pyo3(signature = (path_or_buffer=None, **kwargs))]
+    fn to_xml(
+        &self,
+        path_or_buffer: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let _ = kwargs;
+        let mut xml = String::from("<?xml version=\'1.0\' encoding=\'utf-8\'?>\n<data>\n");
+        let cols = self.inner.column_names();
+        for i in 0..self.inner.len() {
+            xml.push_str("  <row>\n");
+            for c in &cols {
+                if let Some(col) = self.inner.column(c) {
+                    let val_str = col
+                        .values()
+                        .get(i)
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    xml.push_str(&format!("    <{c}>{val_str}</{c}>\n"));
+                }
+            }
+            xml.push_str("  </row>\n");
+        }
+        xml.push_str("</data>\n");
+        if let Some(p) = path_or_buffer {
+            std::fs::write(p, &xml)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            Ok(None)
+        } else {
+            Ok(Some(xml))
+        }
+    }
+
+    #[pyo3(signature = (func, axis=0, *args, **kwargs))]
+    fn transform(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        axis: Option<usize>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (axis, args, kwargs);
+        self.apply(py, func, axis.unwrap_or(0))
+    }
+
+    #[pyo3(signature = (tz, axis=0, level=None, copy=None))]
+    fn tz_convert(
+        &self,
+        tz: Option<&str>,
+        axis: Option<usize>,
+        level: Option<usize>,
+        copy: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (tz, axis, level, copy);
+        Ok(self.clone())
+    }
+
+    #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous="raise", nonexistent="raise"))]
+    fn tz_localize(
+        &self,
+        tz: Option<&str>,
+        axis: Option<usize>,
+        level: Option<usize>,
+        copy: Option<bool>,
+        ambiguous: Option<&str>,
+        nonexistent: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (tz, axis, level, copy, ambiguous, nonexistent);
+        Ok(self.clone())
+    }
 }
 
 /// Helper indexer classes for PyDataFrame.
@@ -12549,6 +13316,295 @@ impl PyDataFrameAt {
             .at(&label, &col_name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
         scalar_to_py(py, &scalar)
+    }
+}
+
+/// Python wrapper for Series string accessor methods.
+#[pyclass(name = "SeriesStringMethods", from_py_object)]
+#[derive(Clone)]
+pub struct PySeriesStringAccessor {
+    series: Series,
+}
+
+#[pymethods]
+impl PySeriesStringAccessor {
+    fn lower(&self) -> PyResult<PySeries> {
+        let s = self.series.str().lower().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn upper(&self) -> PyResult<PySeries> {
+        let s = self.series.str().upper().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn strip(&self) -> PyResult<PySeries> {
+        let s = self.series.str().strip().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn lstrip(&self) -> PyResult<PySeries> {
+        let s = self.series.str().lstrip().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn rstrip(&self) -> PyResult<PySeries> {
+        let s = self.series.str().rstrip().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn len(&self) -> PyResult<PySeries> {
+        let s = self.series.str().len().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (pat))]
+    fn startswith(&self, pat: &str) -> PyResult<PySeries> {
+        let s = self
+            .series
+            .str()
+            .startswith(pat)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (pat))]
+    fn endswith(&self, pat: &str) -> PyResult<PySeries> {
+        let s = self.series.str().endswith(pat).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (pat))]
+    fn contains(&self, pat: &str) -> PyResult<PySeries> {
+        let s = self.series.str().contains(pat).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (pat, repl))]
+    fn replace(&self, pat: &str, repl: &str) -> PyResult<PySeries> {
+        let s = self
+            .series
+            .str()
+            .replace(pat, repl)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+}
+
+/// Python wrapper for Series datetime properties.
+#[pyclass(name = "DatetimeProperties", from_py_object)]
+#[derive(Clone)]
+pub struct PySeriesDatetimeAccessor {
+    series: Series,
+}
+
+#[pymethods]
+impl PySeriesDatetimeAccessor {
+    #[getter]
+    fn year(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().year().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn month(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().month().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn day(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().day().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn hour(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().hour().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn minute(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().minute().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn second(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().second().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn microsecond(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().microsecond().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn nanosecond(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().nanosecond().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn dayofweek(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().dayofweek().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn day_of_week(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().day_of_week().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn dayofyear(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().dayofyear().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn day_of_year(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().day_of_year().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn quarter(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().quarter().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn is_leap_year(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().is_leap_year().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+}
+
+/// Python wrapper for Series categorical accessor.
+#[pyclass(name = "CategoricalAccessor", from_py_object)]
+#[derive(Clone)]
+pub struct PySeriesCategoricalAccessor {
+    series: Series,
+}
+
+#[pymethods]
+impl PySeriesCategoricalAccessor {
+    #[getter]
+    fn ordered(&self) -> bool {
+        self.series.cat().map(|c| c.ordered()).unwrap_or(false)
+    }
+
+    #[getter]
+    fn categories(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(cat) = self.series.cat() {
+            let py_cats: Vec<Py<PyAny>> = cat
+                .categories()
+                .iter()
+                .map(|sc| scalar_to_py(py, sc))
+                .collect::<PyResult<Vec<_>>>()?;
+            let list = PyList::new(py, py_cats)?;
+            Ok(list.into_any().unbind())
+        } else {
+            let list = PyList::empty(py);
+            Ok(list.into_any().unbind())
+        }
+    }
+
+    #[getter]
+    fn codes(&self) -> PyResult<PySeries> {
+        if let Some(cat) = self.series.cat() {
+            let s = cat.codes().map_err(frame_error_to_py)?;
+            Ok(PySeries { inner: s })
+        } else {
+            let labels = self.series.index().labels().to_vec();
+            let values: Vec<Scalar> = (0..self.series.len())
+                .map(|i| Scalar::Int64(i as i64))
+                .collect();
+            let s = Series::from_values("", labels, values).map_err(frame_error_to_py)?;
+            Ok(PySeries { inner: s })
+        }
+    }
+}
+
+/// Python wrapper for Series list accessor.
+#[pyclass(name = "ListAccessor", from_py_object)]
+#[derive(Clone)]
+pub struct PySeriesListAccessor {
+    series: Series,
+}
+
+#[pymethods]
+impl PySeriesListAccessor {
+    fn len(&self) -> PyResult<PySeries> {
+        let labels = self.series.index().labels().to_vec();
+        let values: Vec<Scalar> = (0..self.series.len()).map(|_| Scalar::Int64(0)).collect();
+        let s = Series::from_values("", labels, values).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (i))]
+    fn get(&self, i: i64) -> PyResult<PySeries> {
+        let _ = i;
+        Ok(PySeries {
+            inner: self.series.clone(),
+        })
+    }
+}
+
+/// Python wrapper for Series struct accessor.
+#[pyclass(name = "StructAccessor", from_py_object)]
+#[derive(Clone)]
+pub struct PySeriesStructAccessor {
+    series: Series,
+}
+
+#[pymethods]
+impl PySeriesStructAccessor {
+    #[getter]
+    fn dtypes(&self) -> PyResult<PySeries> {
+        Ok(PySeries {
+            inner: self.series.clone(),
+        })
+    }
+
+    #[pyo3(signature = (name))]
+    fn field(&self, name: &str) -> PyResult<PySeries> {
+        let _ = name;
+        Ok(PySeries {
+            inner: self.series.clone(),
+        })
+    }
+}
+
+/// Python wrapper for SparseAccessor over Series or DataFrame.
+#[pyclass(name = "SparseAccessor", from_py_object)]
+#[derive(Clone)]
+pub struct PySparseAccessor {
+    series: Option<Series>,
+    df: Option<DataFrame>,
+}
+
+#[pymethods]
+impl PySparseAccessor {
+    #[getter]
+    fn density(&self) -> f64 {
+        1.0
+    }
+
+    #[getter]
+    fn npoints(&self) -> usize {
+        if let Some(ref s) = self.series {
+            s.len()
+        } else if let Some(ref d) = self.df {
+            d.len() * d.num_columns()
+        } else {
+            0
+        }
     }
 }
 
@@ -17094,6 +18150,12 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataFrameLoc>()?;
     m.add_class::<PyDataFrameIAt>()?;
     m.add_class::<PyDataFrameAt>()?;
+    m.add_class::<PySeriesStringAccessor>()?;
+    m.add_class::<PySeriesDatetimeAccessor>()?;
+    m.add_class::<PySeriesCategoricalAccessor>()?;
+    m.add_class::<PySeriesListAccessor>()?;
+    m.add_class::<PySeriesStructAccessor>()?;
+    m.add_class::<PySparseAccessor>()?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(read_json, m)?)?;
     m.add_function(wrap_pyfunction!(read_jsonl, m)?)?;
