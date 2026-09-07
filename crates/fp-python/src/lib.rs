@@ -786,6 +786,280 @@ impl PyIndex {
     fn astype(&self, _dtype: &str) -> PyResult<Self> {
         Ok(self.clone())
     }
+
+    #[getter]
+    fn is_unique(&self) -> bool {
+        self.inner.is_unique()
+    }
+
+    #[getter]
+    fn is_monotonic_increasing(&self) -> bool {
+        self.inner.is_monotonic_increasing()
+    }
+
+    #[getter]
+    fn is_monotonic_decreasing(&self) -> bool {
+        self.inner.is_monotonic_decreasing()
+    }
+
+    #[getter]
+    fn hasnans(&self) -> bool {
+        self.inner.hasnans()
+    }
+
+    #[getter]
+    fn nlevels(&self) -> usize {
+        1
+    }
+
+    #[getter]
+    fn names(&self) -> Vec<Option<String>> {
+        vec![self.inner.name().map(str::to_string)]
+    }
+
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.inner.nbytes()
+    }
+
+    #[pyo3(signature = (deep=false))]
+    fn memory_usage(&self, deep: bool) -> usize {
+        self.inner.memory_usage(deep)
+    }
+
+    fn identical(&self, other: &PyIndex) -> bool {
+        self.inner.identical(&other.inner)
+    }
+
+    fn inferred_type(&self) -> &'static str {
+        self.inner.inferred_type()
+    }
+
+    fn is_numeric(&self) -> bool {
+        self.inner.is_numeric()
+    }
+
+    fn is_boolean(&self) -> bool {
+        self.inner.is_boolean()
+    }
+
+    fn is_floating(&self) -> bool {
+        self.inner.is_floating()
+    }
+
+    fn is_integer(&self) -> bool {
+        self.inner.is_integer()
+    }
+
+    fn is_categorical(&self) -> bool {
+        self.inner.is_categorical()
+    }
+
+    fn is_object(&self) -> bool {
+        self.inner.is_object()
+    }
+
+    fn is_interval(&self) -> bool {
+        false
+    }
+
+    fn holds_integer(&self) -> bool {
+        self.inner.holds_integer()
+    }
+
+    fn union(&self, other: &PyIndex) -> Self {
+        PyIndex {
+            inner: self.inner.union(&other.inner),
+        }
+    }
+
+    fn intersection(&self, other: &PyIndex) -> Self {
+        PyIndex {
+            inner: self.inner.intersection(&other.inner),
+        }
+    }
+
+    fn difference(&self, other: &PyIndex) -> Self {
+        PyIndex {
+            inner: self.inner.difference(&other.inner),
+        }
+    }
+
+    fn symmetric_difference(&self, other: &PyIndex) -> Self {
+        PyIndex {
+            inner: self.inner.symmetric_difference(&other.inner),
+        }
+    }
+
+    fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let label = py_to_index_label(key)?;
+        self.inner.get_loc(&label).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}"))
+        })
+    }
+
+    fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+        self.inner
+            .get_indexer(&target.inner)
+            .into_iter()
+            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
+            .collect()
+    }
+
+    #[pyo3(signature = (start=None, end=None, step=None))]
+    fn slice_locs(
+        &self,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: Option<isize>,
+    ) -> PyResult<(usize, usize)> {
+        let _ = step;
+        let s_lbl = match start {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        let e_lbl = match end {
+            Some(obj) => Some(py_to_index_label(obj)?),
+            None => None,
+        };
+        self.inner
+            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))
+    }
+
+    #[pyo3(signature = (start=None, end=None, step=None))]
+    fn slice_indexer(
+        &self,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: Option<isize>,
+    ) -> PyResult<(usize, usize)> {
+        self.slice_locs(start, end, step)
+    }
+
+    #[pyo3(signature = (ascending=true))]
+    fn sort_values(&self, ascending: bool) -> Self {
+        let mut sorted = self.inner.sort_values();
+        if !ascending {
+            let mut rev_labels = sorted.labels().to_vec();
+            rev_labels.reverse();
+            sorted = Index::new(rev_labels);
+            if let Some(n) = self.inner.name() {
+                sorted = sorted.rename_index(Some(n));
+            }
+        }
+        PyIndex { inner: sorted }
+    }
+
+    fn sort(&self) -> Self {
+        self.sort_values(true)
+    }
+
+    #[pyo3(signature = (level=None))]
+    fn droplevel(&self, level: Option<usize>) -> PyResult<Self> {
+        if let Some(l) = level {
+            if l != 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "Index has only 1 level; cannot drop level > 0",
+                ));
+            }
+        }
+        Ok(self.clone())
+    }
+
+    fn get_level_values(&self, level: usize) -> PyResult<Self> {
+        if level != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "Index has only 1 level; cannot get level > 0",
+            ));
+        }
+        Ok(self.clone())
+    }
+
+    fn to_flat_index(&self) -> Self {
+        self.clone()
+    }
+
+    #[pyo3(signature = (index=None, name=None))]
+    fn to_series(&self, index: Option<&PyIndex>, name: Option<&str>) -> PyResult<PySeries> {
+        let idx = match index {
+            Some(i) => i.inner.clone(),
+            None => self.inner.clone(),
+        };
+        let series_name = name.or_else(|| self.inner.name()).unwrap_or("");
+        let col = Column::from_values(
+            self.inner
+                .labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(i) => Scalar::Int64(*i),
+                    IndexLabel::Float64(f) => Scalar::Float64(f.0),
+                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                    IndexLabel::Bool(b) => Scalar::Bool(*b),
+                    IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
+                    IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
+                    IndexLabel::Null(k) => Scalar::Null(*k),
+                })
+                .collect(),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let s = Series::new(series_name, idx, col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[pyo3(signature = (index=true, name=None))]
+    fn to_frame(&self, index: bool, name: Option<&str>) -> PyResult<PyDataFrame> {
+        let col_name = name.or_else(|| self.inner.name()).unwrap_or("0");
+        let idx = if index {
+            self.inner.clone()
+        } else {
+            Index::from_range(0, self.inner.len() as i64)
+        };
+        let col = Column::from_values(
+            self.inner
+                .labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(i) => Scalar::Int64(*i),
+                    IndexLabel::Float64(f) => Scalar::Float64(f.0),
+                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                    IndexLabel::Bool(b) => Scalar::Bool(*b),
+                    IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
+                    IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
+                    IndexLabel::Null(k) => Scalar::Null(*k),
+                })
+                .collect(),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let mut col_map = BTreeMap::new();
+        col_map.insert(col_name.to_string(), col);
+        let df = DataFrame::new_with_column_order(idx, col_map, vec![col_name.to_string()])
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: df })
+    }
+
+    #[pyo3(signature = (normalize=false, sort=true, ascending=false, dropna=true))]
+    fn value_counts(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> PyResult<PySeries> {
+        let counts = self
+            .inner
+            .value_counts_with_options(normalize, sort, ascending, dropna);
+        let mut idx_labels = Vec::with_capacity(counts.len());
+        let mut vals = Vec::with_capacity(counts.len());
+        for (lbl, sc) in counts {
+            idx_labels.push(lbl);
+            vals.push(sc);
+        }
+        let col = Column::from_values(vals)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let s = Series::new("count", Index::new(idx_labels), col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
 }
 
 /// Python wrapper for FrankenPandas DatetimeIndex.
