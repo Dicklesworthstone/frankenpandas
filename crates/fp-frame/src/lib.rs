@@ -32126,7 +32126,11 @@ fn resample_build_groups_with_options(
                 groups.insert(k, std::mem::take(&mut dense[bidx]));
             }
         }
-        return ResampleGrouping { order, groups, lattice };
+        return ResampleGrouping {
+            order,
+            groups,
+            lattice,
+        };
     }
 
     // Business day (B, mult 1):
@@ -32193,7 +32197,11 @@ fn resample_build_groups_with_options(
                 }
             }
         }
-        return ResampleGrouping { order, groups, lattice };
+        return ResampleGrouping {
+            order,
+            groups,
+            lattice,
+        };
     }
 
     // Weekly (W / W-SUN):
@@ -32280,7 +32288,11 @@ fn resample_build_groups_with_options(
                 }
             }
         }
-        return ResampleGrouping { order, groups, lattice };
+        return ResampleGrouping {
+            order,
+            groups,
+            lattice,
+        };
     }
 
     // Tick and Daily units (D with mult, H, min, s, ms, us, ns):
@@ -32324,22 +32336,31 @@ fn resample_build_groups_with_options(
             Some("start") => first,
             Some("end") => {
                 let sub_freq_times = (last - first).div_euclid(step_ns);
-                let sub = if closed == ResampleClosed::Left { sub_freq_times + 1 } else { sub_freq_times };
+                let sub = if closed == ResampleClosed::Left {
+                    sub_freq_times + 1
+                } else {
+                    sub_freq_times
+                };
                 last - sub * step_ns
             }
             Some("end_day") => {
-                let last_day = (last.div_euclid(Timedelta::NANOS_PER_DAY) + 1) * Timedelta::NANOS_PER_DAY;
+                let last_day =
+                    (last.div_euclid(Timedelta::NANOS_PER_DAY) + 1) * Timedelta::NANOS_PER_DAY;
                 let sub_freq_times = (last_day - first).div_euclid(step_ns);
-                let sub = if closed == ResampleClosed::Left { sub_freq_times + 1 } else { sub_freq_times };
+                let sub = if closed == ResampleClosed::Left {
+                    sub_freq_times + 1
+                } else {
+                    sub_freq_times
+                };
                 last_day - sub * step_ns
             }
             Some("start_day") | None => {
                 first.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY
             }
-            Some(custom) => {
-                resample_label_to_ns(&IndexLabel::Utf8(custom.to_string()))
-                    .unwrap_or_else(|| first.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY)
-            }
+            Some(custom) => resample_label_to_ns(&IndexLabel::Utf8(custom.to_string()))
+                .unwrap_or_else(|| {
+                    first.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY
+                }),
         };
 
         let foffset = (first - origin_ns).rem_euclid(step_ns);
@@ -32444,24 +32465,23 @@ fn resample_build_groups_with_options(
         for b in 0..num_bins {
             let (k, ns) = match label {
                 ResampleLabel::Left => (edge_keys[b].clone(), fresult + (b as i64) * step_ns),
-                ResampleLabel::Right => (edge_keys[b + 1].clone(), fresult + ((b + 1) as i64) * step_ns),
+                ResampleLabel::Right => (
+                    edge_keys[b + 1].clone(),
+                    fresult + ((b + 1) as i64) * step_ns,
+                ),
             };
             lattice.push((k, ns));
         }
 
-        return ResampleGrouping { order, groups, lattice };
+        return ResampleGrouping {
+            order,
+            groups,
+            lattice,
+        };
     }
 
     // Fallback: unknown frequency, return empty
     ResampleGrouping::empty()
-}
-
-fn resample_build_groups(
-    labels: &[IndexLabel],
-    freq: &str,
-) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
-    let g = resample_build_groups_with_options(labels, freq, None, None, None);
-    (g.order, g.groups)
 }
 
 fn validate_resample_options(
