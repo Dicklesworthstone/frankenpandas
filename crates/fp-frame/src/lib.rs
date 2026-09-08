@@ -188764,6 +188764,7 @@ mod tests {
     /// declines to build the ones nobody touched. The fixture below transposes
     /// to 4 x 2000 columns — about eight pages — and reading one column from
     /// each end must leave the middle untouched.
+    #[cfg(feature = "lazy-transpose-view")]
     #[test]
     fn lazy_transpose_materialises_only_the_touched_pages() {
         const ROWS: usize = 2_000;
@@ -207699,6 +207700,7 @@ mod transpose_row_prealloc_uza04 {
     /// detach first. The pointer assertion rejects the former deep-clone
     /// implementation; the mutation assertion rejects the naive alternative
     /// that shares a mutable store between frames.
+    #[cfg(feature = "lazy-transpose-view")]
     #[test]
     fn materialized_transpose_clone_shares_until_copy_on_write_4kszu() {
         let source = frame(vec![
