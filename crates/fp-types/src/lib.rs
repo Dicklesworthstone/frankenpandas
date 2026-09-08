@@ -7261,7 +7261,7 @@ mod tests {
                         "cast(missing {dt:?} -> Utf8) yields a string, got {cast:?}"
                     );
                 } else if matches!(dt, DType::Timedelta64 | DType::Datetime64 { .. })
-                    && (target.is_bool() || target.is_integer())
+                    && matches!(target, DType::Bool | DType::Int64)
                 {
                     // ⚠️ TWO MORE PLACES pandas BREAKS this invariant, and both
                     // are the same underlying fact: NaT is not a separate
