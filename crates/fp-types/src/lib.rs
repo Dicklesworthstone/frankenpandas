@@ -506,7 +506,7 @@ impl SparseDType {
     ///   SparseDtype(object,    nan)   -> Sparse[object, nan]
     /// ```
     ///
-    /// The fill is rendered by [`scalar_to_string_for_astype`], which already
+    /// The fill is rendered by `scalar_to_string_for_astype`, which already
     /// spells every one of those cases the way pandas does in this position:
     /// `True`/`False` capitalised, integers bare, lowercase `nan`, and the
     /// trailing `.0` preserved on whole floats. Deliberately reusing it rather

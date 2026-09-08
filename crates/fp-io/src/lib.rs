@@ -10773,6 +10773,33 @@ pub fn write_ipc_stream_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
 pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     use arrow::ipc::reader::StreamReader;
 
+    if data.len() >= 4 {
+        let prefix = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let (meta_len, header_overhead) = if prefix == 0xFFFF_FFFF {
+            if data.len() < 8 {
+                return Err(IoError::Arrow(
+                    "truncated IPC stream: missing metadata length after continuation marker"
+                        .to_string(),
+                ));
+            }
+            let len = i32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+            (len, 8usize)
+        } else {
+            (prefix as i32, 4usize)
+        };
+        if meta_len < 0 {
+            return Err(IoError::Arrow(format!(
+                "invalid negative IPC message length: {meta_len}"
+            )));
+        }
+        if (meta_len as usize) > data.len().saturating_sub(header_overhead) {
+            return Err(IoError::Arrow(format!(
+                "truncated IPC stream: message length {meta_len} exceeds input size {}",
+                data.len().saturating_sub(header_overhead)
+            )));
+        }
+    }
+
     let cursor = std::io::Cursor::new(data);
     let reader = StreamReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
 

@@ -26,31 +26,44 @@ fn labels(i: &Index) -> Vec<String> {
 }
 
 fn oracle_union(a: &[&str], b: &[&str]) -> Vec<String> {
-    let mut counts: std::collections::HashMap<&str, (usize, usize)> =
-        std::collections::HashMap::new();
-    let mut order = Vec::new();
-    for &s in a {
-        let entry = counts.entry(s).or_insert((0, 0));
-        if entry.0 == 0 && entry.1 == 0 {
-            order.push(s);
+    let mut b_seen = HashSet::new();
+    let b_is_unique = b.iter().all(|&s| b_seen.insert(s));
+    if b_is_unique {
+        let a_set: HashSet<&str> = a.iter().copied().collect();
+        let mut out: Vec<String> = a.iter().map(|&s| s.to_string()).collect();
+        for &s in b {
+            if !a_set.contains(s) {
+                out.push(s.to_string());
+            }
         }
-        entry.0 += 1;
-    }
-    for &s in b {
-        let entry = counts.entry(s).or_insert((0, 0));
-        if entry.0 == 0 && entry.1 == 0 {
-            order.push(s);
+        out
+    } else {
+        let mut counts: std::collections::HashMap<&str, (usize, usize)> =
+            std::collections::HashMap::new();
+        let mut order = Vec::new();
+        for &s in a {
+            let entry = counts.entry(s).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(s);
+            }
+            entry.0 += 1;
         }
-        entry.1 += 1;
-    }
-    let mut out = Vec::new();
-    for s in order {
-        let (ca, cb) = counts[s];
-        for _ in 0..ca.max(cb) {
-            out.push(s.to_string());
+        for &s in b {
+            let entry = counts.entry(s).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(s);
+            }
+            entry.1 += 1;
         }
+        let mut out = Vec::new();
+        for s in order {
+            let (ca, cb) = counts.get(s).copied().unwrap_or((0, 0));
+            for _ in 0..ca.max(cb) {
+                out.push(s.to_string());
+            }
+        }
+        out
     }
-    out
 }
 fn oracle_difference(a: &[&str], b: &[&str]) -> Vec<String> {
     let bset: HashSet<&str> = b.iter().copied().collect();

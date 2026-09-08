@@ -415,7 +415,7 @@ macro_rules! elementwise_f64_kernel {
         #[doc = $doc]
         ///
         /// Returns whether any output element was NaN. See
-        /// [`elementwise_f64_kernel`] for the width/witness rationale and the
+        /// `elementwise_f64_kernel` for the width/witness rationale and the
         /// bit-identity argument.
         ///
         /// # Panics

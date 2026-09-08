@@ -12824,7 +12824,7 @@ impl Column {
     /// share ONE gathered buffer, with each column a window into it.
     ///
     /// The caller guarantees the window is all-valid and NaN-free, exactly as
-    /// [`Self::from_f64_all_valid_with_finite_opt`] requires; the window bounds
+    /// `Self::from_f64_all_valid_with_finite_opt` requires; the window bounds
     /// are debug-asserted by the underlying `ScalarValues` constructor.
     #[must_use]
     pub fn from_f64_shared_window(data: Arc<[f64]>, start: usize, len: usize) -> Self {
@@ -13654,7 +13654,7 @@ impl Column {
     /// parallel across columns.
     ///
     /// br-frankenpandas-1hjgz. See
-    /// [`ScalarValues::materialize_dot_columns_parallel`] for why the
+    /// `ScalarValues::materialize_dot_columns_parallel` for why the
     /// parallelism is across columns rather than inside one, and why this is
     /// bit-identical rather than a new kernel. Columns that are not dot results,
     /// or whose result is already computed, are skipped — so calling this on an
@@ -13666,7 +13666,7 @@ impl Column {
 
     /// As [`Self::materialize_dot_columns_parallel`], but with the serial/parallel
     /// choice passed IN. See
-    /// [`ScalarValues::materialize_dot_columns_with_mode`] for why the
+    /// `ScalarValues::materialize_dot_columns_with_mode` for why the
     /// environment toggle cannot serve a test.
     pub fn materialize_dot_columns_with_mode(columns: &[&Self], serial: bool) {
         let values: Vec<&ScalarValues> = columns.iter().map(|column| &column.values).collect();
@@ -13674,7 +13674,7 @@ impl Column {
     }
 
     /// As [`Self::materialize_dot_columns_with_mode`], but with the worker cap
-    /// passed IN. See [`ScalarValues::materialize_dot_columns_with_workers`].
+    /// passed IN. See `ScalarValues::materialize_dot_columns_with_workers`.
     pub fn materialize_dot_columns_with_workers(
         columns: &[&Self],
         serial: bool,
@@ -13686,7 +13686,7 @@ impl Column {
 
     /// As [`Self::materialize_dot_columns_with_workers`], but with the
     /// work-per-worker threshold passed IN. See
-    /// [`ScalarValues::materialize_dot_columns_with_policy`].
+    /// `ScalarValues::materialize_dot_columns_with_policy`.
     ///
     /// br-frankenpandas-oarkz. A test fixture is thousands of times smaller than
     /// a benchmark frame, so under the shipped threshold every fixture would size

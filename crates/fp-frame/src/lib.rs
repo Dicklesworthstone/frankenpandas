@@ -98494,8 +98494,8 @@ impl GroupByResample<'_> {
     /// six wrappers close that gap; each declares the dtype domain its pandas
     /// counterpart accepts.
     ///
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), grp=[a,a,a,b,b,b],
-    /// v=[1,3,5,2,4,8], buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), `grp=[a,a,a,b,b,b]`,
+    /// `v=[1,3,5,2,4,8]`, buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
     /// ```text
     ///   median  [2.0, 5.0, 2.0, 6.0]
     ///   var     [2.0, NaN, NaN, 8.0]      single-element buckets are NaN

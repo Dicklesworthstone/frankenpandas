@@ -12,7 +12,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-chrono = { workspace = true }
 arrow = { workspace = true }
 bytes = { workspace = true }
 calamine = { workspace = true }

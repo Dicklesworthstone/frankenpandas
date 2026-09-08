@@ -58,6 +58,9 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 targets = ["x86_64-unknown-linux-gnu"]
 
+[package.metadata.cargo-machete]
+ignored = ["tracing"]
+
 [dev-dependencies]
 mimalloc = "0.1"
 sha2 = "0.11.0"

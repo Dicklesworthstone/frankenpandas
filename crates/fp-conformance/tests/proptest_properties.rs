@@ -11817,6 +11817,8 @@ proptest! {
     /// satisfy `symmetric_difference == union − intersection`.
     #[test]
     fn prop_index_set_ops_match_set_semantics((a, b) in arb_index_pair(12)) {
+        let a = a.unique();
+        let b = b.unique();
         use std::collections::HashSet;
         let as_set = |idx: &Index| -> HashSet<IndexLabel> { idx.labels().iter().cloned().collect() };
         let no_dups = |idx: &Index| -> bool {

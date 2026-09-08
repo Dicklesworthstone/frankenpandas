@@ -5631,7 +5631,7 @@ impl Index {
     /// unique, otherwise `get_indexer_non_unique(target)[0]`, so the result can be
     /// LONGER than `target`.
     ///
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), index [10,20,20,30]:
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), index `[10, 20, 20, 30]`:
     /// ```text
     ///   target [20, 99, 10]
     ///   get_indexer_for -> [1, 2, -1, 0]     FOUR entries for a THREE-entry target
