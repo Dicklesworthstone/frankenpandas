@@ -81,7 +81,7 @@ fn multikey_dense_matches_generic_and_pandas() {
             .collect();
         assert_eq!(
             idx,
-            vec!["a, x", "b, x", "b, y", "c, x"],
+            vec!["a|x", "b|x", "b|y", "c|x"],
             "{op}: sorted MultiIndex"
         );
     }

@@ -84,7 +84,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 | **Fail closed** | Unknown features, incompatible dtypes, and ambiguous coercions produce errors, not silent corruption. Strict mode rejects; hardened mode logs and recovers under a Bayesian expected-loss decision rule. |
 | **Zero unsafe** | Every crate uses `#![forbid(unsafe_code)]`. Memory safety comes from the type system, not audits. |
 | **Test everything differentially** | Conformance packets run FrankenPandas operations and compare against the pandas oracle. 1,387 packet JSON files + live pandas oracle in CI on every commit. |
-| **Document every divergence** | 26 numbered divergence entries (15 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible test packets. No silent disagreement. |
+| **Document every divergence** | 27 numbered divergence entries (16 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible test packets. No silent disagreement. |
 
 ## What's In The Box
 
@@ -101,7 +101,7 @@ The 2026-09-03 capability surface (~507k lines of Rust under `src/` across 15 cr
 | **IO** | 14+ formats: CSV (with full pandas option matrix incl. `usecols`/`nrows`/`skiprows`/`dtype`/`parse_dates`/`comment`/`on_bad_lines`/`decimal`/`thousands`/`true_values`/`false_values`/`skipfooter`/`lineterminator`/`index_label`/`quote`/`escape`), TSV (`read_table`), Fixed-width (`read_fwf` with colspec inference), JSON (5 orients + Table Schema), JSONL (blank-line tolerant, key-union detection, row-cap protection), Parquet (Arrow RecordBatch), Excel (`.xlsx`/`.xls`/`.xlsb`/`.ods` with full option parity), Feather, Arrow IPC stream, SQL (generic `SqlConnection` trait + `SqlInspector` for SQLAlchemy-shaped introspection), HTML (read + write), XML (read + write + `to_xml` alias), LaTeX (file + string), Markdown (`tablefmt` accepts `"github"` / `"pipe"` / `"grid"` / `"plain"` / `"simple"`), Pickle (round-trip), Stata (round-trip), HDF5 (snapshot, optional feature-gated backend). ORC APIs fail closed until a Tokio-free backend lands. Clipboard IO (`read_clipboard` / `to_clipboard` via OS subprocess backends) and SAS (`read_sas`: sas7bdat and XPORT) are implemented. Deferred surfaces: ORC backend, `to_gbq`, SPSS reader. |
 | **Type system** | `Scalar`, `DType`, `NullKind` (Null / NaN / NaT). `Timestamp`, `Timedelta`, `Period`, `Interval`, `PeriodFreq`, `IntervalClosed` as proper value types. `SparseDType` scaffolded. Coercion via `common_dtype()` / `cast_scalar()` matches pandas' Null < Bool < Int64 < Float64 hierarchy. Identity-cast fast path (AG-03) skips clone when source dtype already matches target. |
 | **Runtime** | Bayesian `RuntimePolicy` (Strict / Hardened). `EvidenceLedger` with full decision trace per materialization. `ConformalGuard` for distribution-shift detection. `RaptorQEnvelope` for repair-symbol-protected durable state (conformance fixtures, benchmark baselines, migration manifests). |
-| **Conformance** | 1,387 packet JSON files, 26 numbered entries in `DISCREPANCIES.md` (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED, each with root-cause analysis), pinned live pandas 2.2.3 oracle (`.venv-oracle`) in CI and on any local checkout that has the venv. The full live-oracle pass matches the vast majority of fixtures. The live-oracle unit suite has open failures tracked as beads; they are not hidden behind skips any more. |
+| **Conformance** | 1,387 packet JSON files, 27 numbered entries in `DISCREPANCIES.md` (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED, each with root-cause analysis), pinned live pandas 2.2.3 oracle (`.venv-oracle`) in CI and on any local checkout that has the venv. The full live-oracle pass matches the vast majority of fixtures. The live-oracle unit suite has open failures tracked as beads; they are not hidden behind skips any more. |
 
 ## Architecture
 
@@ -1127,7 +1127,7 @@ All error types are re-exported through the `frankenpandas` facade crate.
 
 Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. **1,387 packet JSON files spanning 1,400 fixture files** cover alignment, join, groupby, concat, filter, CSV, dtype, null semantics, resample, rolling, groupby rolling/resample, datetime accessors, string accessors, MultiIndex, IO round-trip, and more. The live pandas oracle runs in CI on every PR (with system-pandas fallback). The drift history ledger (`artifacts/phase2c/drift_history.jsonl`) tracks parity trends over time.
 
-**26 documented divergence entries** (DISC-001 through DISC-026) in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md), labeled ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED. Each carries full root-cause analysis, status, affected test cases, and a review date so users hitting these failures find the explanation without having to re-derive the divergence.
+**27 documented divergence entries** (DISC-001 through DISC-027) in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md), labeled ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED. Each carries full root-cause analysis, status, affected test cases, and a review date so users hitting these failures find the explanation without having to re-derive the divergence.
 
 ## Missing Data Handling
 
@@ -1790,7 +1790,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 ## FAQ
 
 **Q: How compatible is this with pandas?**
-A: We target absolute API parity. The same method names, same parameter names, same edge-case behavior. Differential conformance tests verify against a pinned live pandas oracle in CI and on any checkout with `.venv-oracle`. **1,387 packet JSON files, of which 1,323 matched live pandas in the full pass**, is the current evidence. 26 divergence entries are documented in `DISCREPANCIES.md`, every one with root-cause analysis, affected tests, and a reproducible packet.
+A: We target absolute API parity. The same method names, same parameter names, same edge-case behavior. Differential conformance tests verify against a pinned live pandas oracle in CI and on any checkout with `.venv-oracle`. **1,387 packet JSON files, of which 1,323 matched live pandas in the full pass**, is the current evidence. 27 divergence entries are documented in `DISCREPANCIES.md`, every one with root-cause analysis, affected tests, and a reproducible packet.
 
 **Q: Why not just use Polars?**
 A: Polars is excellent but has a different API (lazy evaluation, no index alignment, different method names). FrankenPandas targets users who need drop-in pandas semantics (index alignment, identical method names, identical edge-case behavior) both in safe Rust and directly in Python via `import frankenpandas as pd`.
@@ -1861,7 +1861,7 @@ A: As of 2026-09-02 the tracker holds about 4,000 beads, of which roughly 80 are
 | `docs/planning/PANIC_CONTRACT_COVERAGE.md` | Per-API `# Panics` contract enforcement |
 | `docs/planning/ERROR_CONFORMANCE.md` | Pandas error catalog and FrankenPandas error parity status |
 | `docs/planning/DIFFERENTIAL_FUZZ_DESIGN.md` | Differential fuzz design notes |
-| `crates/fp-conformance/DISCREPANCIES.md` | 26 numbered divergence entries from pandas (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED) |
+| `crates/fp-conformance/DISCREPANCIES.md` | 27 numbered divergence entries from pandas (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED) |
 | `artifacts/perf/` | Optimization round baselines, opportunity matrices, proofs |
 | `artifacts/phase2c/` | Conformance packet artifacts, drift history, compat-closure attestation packs |
 

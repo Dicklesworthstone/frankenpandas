@@ -9521,8 +9521,10 @@ const PAR_MAP_VEC_DEFAULT_PAR_MIN: usize = 200_000;
 /// MEASURED, live pandas 2.2.3, 100k, one ELF (`b4bd5459cae71966`), via the
 /// `_nullable` h2h lane added in 6e810390d:
 ///
-///     cos            fp  492.93us   ratio 1.9754   <- threaded, opted in at 65_536
-///     cos_nullable   fp 1503.53us   ratio 0.5543   <- serial, stuck on 200_000
+/// ```text
+/// cos            fp  492.93us   ratio 1.9754   <- threaded, opted in at 65_536
+/// cos_nullable   fp 1503.53us   ratio 0.5543   <- serial, stuck on 200_000
+/// ```
 ///
 /// A ~2x win against the incumbent became a ~0.55x loss, 3.05x apart, on one op.
 /// And `FP_ELEMENTWISE_PAR_MIN` could not reach it — 1386.87us against 1382.47us,

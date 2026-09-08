@@ -167,7 +167,7 @@ fn mixed_int_utf8_dense_matches_generic_and_pandas() {
         assert_eq!(cells(&dense), want, "{op}: mixed vs pandas");
         assert_eq!(
             idx_labels(&dense),
-            vec!["1, x", "2, x", "2, y", "3, x"],
+            vec!["1|x", "2|x", "2|y", "3|x"],
             "{op}: numeric k1 sort"
         );
     }
@@ -197,10 +197,10 @@ fn size_dense_matches_generic_and_pandas() {
     assert_eq!(
         dense,
         vec![
-            ("a, x".to_string(), 2),
-            ("b, x".to_string(), 1),
-            ("b, y".to_string(), 1),
-            ("c, x".to_string(), 1),
+            ("a|x".to_string(), 2),
+            ("b|x".to_string(), 1),
+            ("b|y".to_string(), 1),
+            ("c|x".to_string(), 1),
         ],
         "size vs pandas"
     );
@@ -262,7 +262,7 @@ fn bool_reduce_dense_matches_generic_and_pandas() {
             "{op}: flag vs pandas"
         );
         assert_eq!(bool_cells(&dense, "num"), want_num, "{op}: num vs pandas");
-        assert_eq!(idx_labels(&dense), vec!["a, x", "b, x", "b, y", "c, x"]);
+        assert_eq!(idx_labels(&dense), vec!["a|x", "b|x", "b|y", "c|x"]);
     }
 }
 
@@ -277,7 +277,7 @@ fn nunique_i64_dense_matches_generic_and_pandas() {
     assert_eq!(cells(&dense), cells(&generic), "nunique dense vs generic");
     assert_eq!(idx_labels(&dense), idx_labels(&generic));
     assert_eq!(cells(&dense), vec!["2", "1"], "nunique vs pandas");
-    assert_eq!(idx_labels(&dense), vec!["a, x", "b, x"]);
+    assert_eq!(idx_labels(&dense), vec!["a|x", "b|x"]);
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn dense_matches_generic_and_pandas() {
         assert_eq!(&vals(&dense), want, "{op}: vs pandas values");
         assert_eq!(
             idx_labels(&dense),
-            vec!["a, x", "b, x", "b, y", "c, x"],
+            vec!["a|x", "b|x", "b|y", "c|x"],
             "{op}: sorted group order"
         );
     }

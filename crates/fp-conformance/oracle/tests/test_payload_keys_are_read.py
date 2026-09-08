@@ -164,7 +164,7 @@ def test_list_like_constructor_forwards_explicit_copy(oracle, monkeypatch):
             captured["kwargs"] = kwargs
             return "recorded-frame"
 
-    monkeypatch.setattr(oracle, "dataframe_to_json", lambda frame: {"frame": frame})
+    monkeypatch.setattr(oracle, "dataframe_to_json", lambda frame, **kwargs: {"frame": frame})
     result = oracle.op_dataframe_constructor_list_like(
         RecordingPandas(),
         {

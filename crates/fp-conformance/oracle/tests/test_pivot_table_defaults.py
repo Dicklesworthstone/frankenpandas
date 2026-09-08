@@ -126,20 +126,15 @@ def test_pivot_dropna_false_is_still_reachable_and_still_differs_eay9h(oracle):
     assert _pivot_kinds(oracle, pivot_dropna=False) == ["utf8", "utf8", "null"]
 
 
-def test_pivot_sort_default_is_deliberately_not_pandas_yet_eay9h(oracle):
-    """`sort` stayed put, and that is a decision — so it is asserted, not assumed.
+def test_absent_pivot_sort_now_means_pandas_default_eay9h(oracle):
+    """The sort flip itself (br-frankenpandas-eay9h).
 
-    If someone flips `sort` for symmetry with `dropna`, this fails and points at
-    the one fixture that has to be re-banked first. It is not claiming sort=False
-    is CORRECT; it is claiming the corpus has not yet chosen to pay for the change.
+    Absent pivot_sort now defaults to True matching pandas' default,
+    with fp_p2d_127 re-banked.
     """
     from pandas_oracle import _pivot_dropna, _pivot_sort
 
     assert _pivot_dropna({}) is True, "dropna default is pandas' (measured free)"
-    assert _pivot_sort({}) is False, (
-        "sort is still the historical override. Flipping it changes "
-        "fp_p2d_127_dataframe_pivot_table_multi_values_strict, which must be "
-        "re-banked as an explicit corpus decision — see br-frankenpandas-eay9h. "
-        "Measured blast radius: 1 of 15 cases, NOT the 8 of 8 the bead assumed"
-    )
+    assert _pivot_sort({}) is True, "sort default is pandas' (br-frankenpandas-eay9h)"
+    assert _pivot_sort({"pivot_sort": False}) is False, "the knob must still be live"
     assert _pivot_sort({"pivot_sort": True}) is True, "the knob must still be live"
