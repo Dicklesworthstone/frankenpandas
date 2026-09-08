@@ -25,7 +25,7 @@ use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
 };
-use fp_types::{NullKind, Period, PeriodFreq, Scalar, Timedelta};
+use fp_types::{NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp};
 use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
@@ -103,10 +103,1283 @@ fn py_dict_to_scalar_pairs(
     Ok(pairs)
 }
 
+fn days_from_ymd(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Missing value sentinel `NAType` (pandas `pd.NA`).
+#[pyclass(name = "NAType", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyNAType;
+
+#[pymethods]
+impl PyNAType {
+    #[new]
+    fn new() -> Self {
+        PyNAType
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "<NA>"
+    }
+
+    fn __str__(&self) -> &'static str {
+        "<NA>"
+    }
+
+    fn __bool__(&self) -> PyResult<bool> {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "boolean value of NA is ambiguous",
+        ))
+    }
+
+    fn __hash__(&self) -> isize {
+        133742
+    }
+
+    fn __richcmp__<'py>(
+        &self,
+        py: Python<'py>,
+        _other: &Bound<'py, PyAny>,
+        _op: pyo3::class::basic::CompareOp,
+    ) -> PyResult<Py<PyAny>> {
+        PyNAType.into_py_any(py)
+    }
+}
+
+/// Temporal missing value sentinel `NaTType` (pandas `pd.NaT`).
+#[pyclass(name = "NaTType", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyNaTType;
+
+#[pymethods]
+impl PyNaTType {
+    #[new]
+    fn new() -> Self {
+        PyNaTType
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "NaT"
+    }
+
+    fn __str__(&self) -> &'static str {
+        "NaT"
+    }
+
+    fn __bool__(&self) -> bool {
+        true
+    }
+
+    fn __hash__(&self) -> isize {
+        i64::MIN as isize
+    }
+
+    fn __richcmp__(&self, _other: &Bound<'_, PyAny>, op: pyo3::class::basic::CompareOp) -> bool {
+        match op {
+            pyo3::class::basic::CompareOp::Eq => false,
+            pyo3::class::basic::CompareOp::Ne => true,
+            _ => false,
+        }
+    }
+
+    #[getter]
+    fn value(&self) -> i64 {
+        i64::MIN
+    }
+
+    #[getter]
+    fn year(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn month(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn day(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn hour(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn minute(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn second(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn microsecond(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn nanosecond(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn days(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn seconds(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn microseconds(&self) -> Option<i64> {
+        None
+    }
+    #[getter]
+    fn nanoseconds(&self) -> Option<i64> {
+        None
+    }
+
+    fn isoformat(&self) -> &'static str {
+        "NaT"
+    }
+
+    fn total_seconds(&self) -> f64 {
+        f64::NAN
+    }
+}
+
+/// Components breakdown for `Timedelta` (pandas `Timedelta.components`).
+#[pyclass(name = "TimedeltaComponents", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyTimedeltaComponents {
+    #[pyo3(get)]
+    pub days: i64,
+    #[pyo3(get)]
+    pub hours: i64,
+    #[pyo3(get)]
+    pub minutes: i64,
+    #[pyo3(get)]
+    pub seconds: i64,
+    #[pyo3(get)]
+    pub milliseconds: i64,
+    #[pyo3(get)]
+    pub microseconds: i64,
+    #[pyo3(get)]
+    pub nanoseconds: i64,
+}
+
+#[pymethods]
+impl PyTimedeltaComponents {
+    fn __repr__(&self) -> String {
+        format!(
+            "Components(days={}, hours={}, minutes={}, seconds={}, milliseconds={}, microseconds={}, nanoseconds={})",
+            self.days,
+            self.hours,
+            self.minutes,
+            self.seconds,
+            self.milliseconds,
+            self.microseconds,
+            self.nanoseconds
+        )
+    }
+}
+
+/// Duration representation (pandas `pd.Timedelta`).
+#[pyclass(name = "Timedelta", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyTimedelta {
+    pub(crate) nanos: i64,
+}
+
+#[pymethods]
+impl PyTimedelta {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        if args.len() == 1 {
+            let arg = args.get_item(0)?;
+            if let Ok(td) = arg.extract::<PyRef<'_, PyTimedelta>>() {
+                return Ok(PyTimedelta { nanos: td.nanos });
+            }
+            if let Ok(s) = arg.extract::<String>() {
+                let nanos = Timedelta::parse(&s)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyTimedelta { nanos });
+            }
+            if let Ok(val) = arg.extract::<i64>() {
+                let unit = kwargs
+                    .and_then(|kw| kw.get_item("unit").ok().flatten())
+                    .and_then(|u| u.extract::<String>().ok());
+                let mult = match unit.as_deref() {
+                    Some("D" | "d" | "days" | "day") => 86_400_000_000_000_i64,
+                    Some("h" | "H" | "hours" | "hour") => 3_600_000_000_000_i64,
+                    Some("m" | "min" | "minutes" | "minute") => 60_000_000_000_i64,
+                    Some("s" | "S" | "seconds" | "second") => 1_000_000_000_i64,
+                    Some("ms" | "L" | "milliseconds" | "millisecond") => 1_000_000_i64,
+                    Some("us" | "U" | "microseconds" | "microsecond") => 1_000_i64,
+                    Some("ns" | "N" | "nanoseconds" | "nanosecond") | None => 1_i64,
+                    Some(other) => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Invalid unit: {other}"
+                        )));
+                    }
+                };
+                return Ok(PyTimedelta { nanos: val * mult });
+            }
+        }
+        if let Some(kw) = kwargs {
+            let mut total_nanos = 0_i64;
+            if let Some(v) = kw.get_item("days")? {
+                total_nanos += v.extract::<i64>()? * 86_400_000_000_000;
+            }
+            if let Some(v) = kw.get_item("weeks")? {
+                total_nanos += v.extract::<i64>()? * 7 * 86_400_000_000_000;
+            }
+            if let Some(v) = kw.get_item("hours")? {
+                total_nanos += v.extract::<i64>()? * 3_600_000_000_000;
+            }
+            if let Some(v) = kw.get_item("minutes")? {
+                total_nanos += v.extract::<i64>()? * 60_000_000_000;
+            }
+            if let Some(v) = kw.get_item("seconds")? {
+                total_nanos += v.extract::<i64>()? * 1_000_000_000;
+            }
+            if let Some(v) = kw.get_item("milliseconds")? {
+                total_nanos += v.extract::<i64>()? * 1_000_000;
+            }
+            if let Some(v) = kw.get_item("microseconds")? {
+                total_nanos += v.extract::<i64>()? * 1_000;
+            }
+            if let Some(v) = kw.get_item("nanoseconds")? {
+                total_nanos += v.extract::<i64>()?;
+            }
+            return Ok(PyTimedelta { nanos: total_nanos });
+        }
+        Ok(PyTimedelta { nanos: 0 })
+    }
+
+    #[getter]
+    fn value(&self) -> i64 {
+        self.nanos
+    }
+
+    #[getter]
+    fn days(&self) -> i64 {
+        Timedelta::components(self.nanos).days
+    }
+
+    #[getter]
+    fn seconds(&self) -> i64 {
+        let c = Timedelta::components(self.nanos);
+        c.hours * 3600 + c.minutes * 60 + c.seconds
+    }
+
+    #[getter]
+    fn microseconds(&self) -> i64 {
+        let c = Timedelta::components(self.nanos);
+        c.milliseconds * 1000 + c.microseconds
+    }
+
+    #[getter]
+    fn nanoseconds(&self) -> i64 {
+        Timedelta::components(self.nanos).nanoseconds
+    }
+
+    #[getter]
+    fn components(&self) -> PyTimedeltaComponents {
+        let c = Timedelta::components(self.nanos);
+        PyTimedeltaComponents {
+            days: c.days,
+            hours: c.hours,
+            minutes: c.minutes,
+            seconds: c.seconds,
+            milliseconds: c.milliseconds,
+            microseconds: c.microseconds,
+            nanoseconds: c.nanoseconds,
+        }
+    }
+
+    fn total_seconds(&self) -> f64 {
+        self.nanos as f64 / 1_000_000_000.0
+    }
+
+    fn isoformat(&self) -> String {
+        if self.nanos == Timedelta::NAT {
+            "NaT".to_string()
+        } else {
+            Timedelta::format(self.nanos)
+        }
+    }
+
+    #[classattr]
+    fn max() -> Self {
+        PyTimedelta { nanos: i64::MAX }
+    }
+
+    #[classattr]
+    fn min() -> Self {
+        PyTimedelta {
+            nanos: i64::MIN + 1,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        if self.nanos == Timedelta::NAT {
+            "NaT".to_string()
+        } else {
+            format!("Timedelta('{}')", Timedelta::format(self.nanos))
+        }
+    }
+
+    fn __str__(&self) -> String {
+        if self.nanos == Timedelta::NAT {
+            "NaT".to_string()
+        } else {
+            Timedelta::format(self.nanos)
+        }
+    }
+
+    fn __hash__(&self) -> isize {
+        self.nanos as isize
+    }
+
+    fn __richcmp__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::class::basic::CompareOp,
+    ) -> PyResult<bool> {
+        let other_nanos = if let Ok(other_td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+            other_td.nanos
+        } else if other.is_instance_of::<PyNaTType>() {
+            match op {
+                pyo3::class::basic::CompareOp::Eq => return Ok(false),
+                pyo3::class::basic::CompareOp::Ne => return Ok(true),
+                _ => return Ok(false),
+            }
+        } else if let Ok(s) = other.extract::<String>() {
+            Timedelta::parse(&s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot compare Timedelta with non-timedelta value",
+            ));
+        };
+
+        if self.nanos == Timedelta::NAT || other_nanos == Timedelta::NAT {
+            match op {
+                pyo3::class::basic::CompareOp::Eq => Ok(false),
+                pyo3::class::basic::CompareOp::Ne => Ok(true),
+                _ => Ok(false),
+            }
+        } else {
+            Ok(match op {
+                pyo3::class::basic::CompareOp::Eq => self.nanos == other_nanos,
+                pyo3::class::basic::CompareOp::Ne => self.nanos != other_nanos,
+                pyo3::class::basic::CompareOp::Lt => self.nanos < other_nanos,
+                pyo3::class::basic::CompareOp::Le => self.nanos <= other_nanos,
+                pyo3::class::basic::CompareOp::Gt => self.nanos > other_nanos,
+                pyo3::class::basic::CompareOp::Ge => self.nanos >= other_nanos,
+            })
+        }
+    }
+
+    fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+            PyTimedelta {
+                nanos: self.nanos.saturating_add(td.nanos),
+            }
+            .into_py_any(py)
+        } else if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            let res = ts.inner.add_timedelta(self.nanos);
+            PyTimestamp { inner: res }.into_py_any(py)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only add Timedelta or Timestamp to Timedelta",
+            ))
+        }
+    }
+
+    fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+            PyTimedelta {
+                nanos: self.nanos.saturating_sub(td.nanos),
+            }
+            .into_py_any(py)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only subtract Timedelta from Timedelta",
+            ))
+        }
+    }
+
+    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTimedelta> {
+        if let Ok(i) = other.extract::<i64>() {
+            Ok(PyTimedelta {
+                nanos: self.nanos.saturating_mul(i),
+            })
+        } else if let Ok(f) = other.extract::<f64>() {
+            Ok(PyTimedelta {
+                nanos: (self.nanos as f64 * f) as i64,
+            })
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot multiply Timedelta by non-numeric",
+            ))
+        }
+    }
+
+    fn __truediv__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+            let ratio = self.nanos as f64 / td.nanos as f64;
+            ratio.into_py_any(py)
+        } else if let Ok(i) = other.extract::<i64>() {
+            PyTimedelta {
+                nanos: self.nanos / i,
+            }
+            .into_py_any(py)
+        } else if let Ok(f) = other.extract::<f64>() {
+            PyTimedelta {
+                nanos: (self.nanos as f64 / f) as i64,
+            }
+            .into_py_any(py)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot divide Timedelta by non-numeric/non-timedelta",
+            ))
+        }
+    }
+}
+
+/// Instant representation (pandas `pd.Timestamp`).
+#[pyclass(name = "Timestamp", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyTimestamp {
+    pub(crate) inner: Timestamp,
+}
+
+#[pymethods]
+impl PyTimestamp {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        if args.len() >= 3 {
+            let year = args.get_item(0)?.extract::<i64>()?;
+            let month = args.get_item(1)?.extract::<i64>()?;
+            let day = args.get_item(2)?.extract::<i64>()?;
+            let hour = if args.len() > 3 {
+                args.get_item(3)?.extract::<i64>()?
+            } else {
+                0
+            };
+            let minute = if args.len() > 4 {
+                args.get_item(4)?.extract::<i64>()?
+            } else {
+                0
+            };
+            let second = if args.len() > 5 {
+                args.get_item(5)?.extract::<i64>()?
+            } else {
+                0
+            };
+            let us = if args.len() > 6 {
+                args.get_item(6)?.extract::<i64>()?
+            } else {
+                0
+            };
+            let days = days_from_ymd(year, month, day);
+            let nanos = days * 86_400_000_000_000
+                + hour * 3_600_000_000_000
+                + minute * 60_000_000_000
+                + second * 1_000_000_000
+                + us * 1_000;
+            return Ok(PyTimestamp {
+                inner: Timestamp::from_nanos(nanos),
+            });
+        }
+        if args.len() == 1 {
+            let arg = args.get_item(0)?;
+            if let Ok(ts) = arg.extract::<PyRef<'_, PyTimestamp>>() {
+                return Ok(PyTimestamp {
+                    inner: ts.inner.clone(),
+                });
+            }
+            if let Ok(s) = arg.extract::<String>() {
+                if s == "now" {
+                    return Ok(PyTimestamp {
+                        inner: Timestamp::now(),
+                    });
+                }
+                if s == "today" {
+                    return Ok(PyTimestamp {
+                        inner: Timestamp::today(),
+                    });
+                }
+                let ts = Timestamp::parse(&s)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyTimestamp { inner: ts });
+            }
+            if let Ok(val) = arg.extract::<i64>() {
+                let unit = kwargs
+                    .and_then(|kw| kw.get_item("unit").ok().flatten())
+                    .and_then(|u| u.extract::<String>().ok());
+                let nanos = match unit.as_deref() {
+                    Some("s" | "second" | "seconds") => val * 1_000_000_000,
+                    Some("ms" | "millisecond" | "milliseconds") => val * 1_000_000,
+                    Some("us" | "microsecond" | "microseconds") => val * 1_000,
+                    Some("ns" | "nanosecond" | "nanoseconds") => val,
+                    _ => {
+                        if val < 100_000_000_000 {
+                            val * 1_000_000_000
+                        } else {
+                            val
+                        }
+                    }
+                };
+                return Ok(PyTimestamp {
+                    inner: Timestamp::from_nanos(nanos),
+                });
+            }
+        }
+        if let Some(kw) = kwargs {
+            if let Some(ts_val) = kw.get_item("ts_input")?.or(kw.get_item("value")?) {
+                let s = ts_val.extract::<String>()?;
+                let ts = Timestamp::parse(&s)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyTimestamp { inner: ts });
+            }
+            if let Some(y) = kw.get_item("year")? {
+                let year = y.extract::<i64>()?;
+                let month = kw
+                    .get_item("month")?
+                    .map_or(Ok(1), |v| v.extract::<i64>())?;
+                let day = kw.get_item("day")?.map_or(Ok(1), |v| v.extract::<i64>())?;
+                let hour = kw.get_item("hour")?.map_or(Ok(0), |v| v.extract::<i64>())?;
+                let minute = kw
+                    .get_item("minute")?
+                    .map_or(Ok(0), |v| v.extract::<i64>())?;
+                let second = kw
+                    .get_item("second")?
+                    .map_or(Ok(0), |v| v.extract::<i64>())?;
+                let us = kw
+                    .get_item("microsecond")?
+                    .map_or(Ok(0), |v| v.extract::<i64>())?;
+                let days = days_from_ymd(year, month, day);
+                let nanos = days * 86_400_000_000_000
+                    + hour * 3_600_000_000_000
+                    + minute * 60_000_000_000
+                    + second * 1_000_000_000
+                    + us * 1_000;
+                return Ok(PyTimestamp {
+                    inner: Timestamp::from_nanos(nanos),
+                });
+            }
+        }
+        Ok(PyTimestamp {
+            inner: Timestamp::now(),
+        })
+    }
+
+    #[getter]
+    fn value(&self) -> i64 {
+        self.inner.value()
+    }
+
+    #[getter]
+    fn year(&self) -> Option<i64> {
+        self.inner.year()
+    }
+
+    #[getter]
+    fn month(&self) -> Option<i64> {
+        self.inner.month()
+    }
+
+    #[getter]
+    fn day(&self) -> Option<i64> {
+        self.inner.day()
+    }
+
+    #[getter]
+    fn hour(&self) -> Option<i64> {
+        self.inner.hour()
+    }
+
+    #[getter]
+    fn minute(&self) -> Option<i64> {
+        self.inner.minute()
+    }
+
+    #[getter]
+    fn second(&self) -> Option<i64> {
+        self.inner.second()
+    }
+
+    #[getter]
+    fn microsecond(&self) -> Option<i64> {
+        self.inner.microsecond()
+    }
+
+    #[getter]
+    fn nanosecond(&self) -> Option<i64> {
+        self.inner.nanosecond()
+    }
+
+    #[getter]
+    fn dayofweek(&self) -> Option<i64> {
+        self.inner.dayofweek()
+    }
+
+    #[getter]
+    fn day_of_week(&self) -> Option<i64> {
+        self.inner.day_of_week()
+    }
+
+    #[getter]
+    fn weekday(&self) -> Option<i64> {
+        self.inner.weekday()
+    }
+
+    #[getter]
+    fn dayofyear(&self) -> Option<i64> {
+        self.inner.dayofyear()
+    }
+
+    #[getter]
+    fn day_of_year(&self) -> Option<i64> {
+        self.inner.day_of_year()
+    }
+
+    #[getter]
+    fn quarter(&self) -> Option<i64> {
+        self.inner.quarter()
+    }
+
+    #[getter]
+    fn is_leap_year(&self) -> Option<bool> {
+        self.inner.is_leap_year()
+    }
+
+    #[getter]
+    fn days_in_month(&self) -> Option<i64> {
+        self.inner.days_in_month()
+    }
+
+    #[getter]
+    fn daysinmonth(&self) -> Option<i64> {
+        self.inner.daysinmonth()
+    }
+
+    #[getter]
+    fn tz(&self) -> Option<String> {
+        self.inner.tz.clone()
+    }
+
+    #[getter]
+    fn unit(&self) -> Option<&'static str> {
+        self.inner.unit()
+    }
+
+    #[staticmethod]
+    fn now() -> Self {
+        PyTimestamp {
+            inner: Timestamp::now(),
+        }
+    }
+
+    #[staticmethod]
+    fn utcnow() -> Self {
+        PyTimestamp {
+            inner: Timestamp::utcnow(),
+        }
+    }
+
+    #[staticmethod]
+    fn today() -> Self {
+        PyTimestamp {
+            inner: Timestamp::today(),
+        }
+    }
+
+    #[classattr]
+    fn max() -> Self {
+        PyTimestamp {
+            inner: Timestamp::from_nanos(i64::MAX),
+        }
+    }
+
+    #[classattr]
+    fn min() -> Self {
+        PyTimestamp {
+            inner: Timestamp::from_nanos(i64::MIN + 1),
+        }
+    }
+
+    fn isoformat(&self) -> String {
+        self.inner.isoformat()
+    }
+
+    fn strftime(&self, fmt: &str) -> String {
+        self.inner.strftime(fmt)
+    }
+
+    fn day_name(&self) -> Option<&'static str> {
+        match self.day_of_week()? {
+            0 => Some("Monday"),
+            1 => Some("Tuesday"),
+            2 => Some("Wednesday"),
+            3 => Some("Thursday"),
+            4 => Some("Friday"),
+            5 => Some("Saturday"),
+            6 => Some("Sunday"),
+            _ => None,
+        }
+    }
+
+    fn month_name(&self) -> Option<&'static str> {
+        match self.month()? {
+            1 => Some("January"),
+            2 => Some("February"),
+            3 => Some("March"),
+            4 => Some("April"),
+            5 => Some("May"),
+            6 => Some("June"),
+            7 => Some("July"),
+            8 => Some("August"),
+            9 => Some("September"),
+            10 => Some("October"),
+            11 => Some("November"),
+            12 => Some("December"),
+            _ => None,
+        }
+    }
+
+    fn timestamp(&self) -> PyResult<f64> {
+        self.inner
+            .timestamp()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    fn floor(&self, freq: &str) -> Self {
+        PyTimestamp {
+            inner: self.inner.floor_to_unit(freq),
+        }
+    }
+
+    fn ceil(&self, freq: &str) -> Self {
+        PyTimestamp {
+            inner: self.inner.ceil_to_unit(freq),
+        }
+    }
+
+    fn round(&self, freq: &str) -> Self {
+        PyTimestamp {
+            inner: self.inner.round_to_unit(freq),
+        }
+    }
+
+    fn normalize(&self) -> Self {
+        PyTimestamp {
+            inner: self.inner.normalize(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        if self.inner.is_nat() {
+            "NaT".to_string()
+        } else {
+            format!("Timestamp('{}')", self.inner.isoformat().replace('T', " "))
+        }
+    }
+
+    fn __str__(&self) -> String {
+        if self.inner.is_nat() {
+            "NaT".to_string()
+        } else {
+            self.inner.isoformat().replace('T', " ")
+        }
+    }
+
+    fn __hash__(&self) -> isize {
+        self.inner.nanos as isize
+    }
+
+    fn __richcmp__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::class::basic::CompareOp,
+    ) -> PyResult<bool> {
+        let other_nanos = if let Ok(other_ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            other_ts.inner.nanos
+        } else if other.is_instance_of::<PyNaTType>() {
+            match op {
+                pyo3::class::basic::CompareOp::Eq => return Ok(false),
+                pyo3::class::basic::CompareOp::Ne => return Ok(true),
+                _ => return Ok(false),
+            }
+        } else if let Ok(s) = other.extract::<String>() {
+            if s.eq_ignore_ascii_case("nat") {
+                match op {
+                    pyo3::class::basic::CompareOp::Eq => return Ok(false),
+                    pyo3::class::basic::CompareOp::Ne => return Ok(true),
+                    _ => return Ok(false),
+                }
+            } else {
+                Timestamp::parse(&s)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+                    .nanos
+            }
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot compare Timestamp with non-temporal value",
+            ));
+        };
+
+        if self.inner.is_nat() || other_nanos == Timestamp::NAT {
+            match op {
+                pyo3::class::basic::CompareOp::Eq => Ok(false),
+                pyo3::class::basic::CompareOp::Ne => Ok(true),
+                _ => Ok(false),
+            }
+        } else {
+            Ok(match op {
+                pyo3::class::basic::CompareOp::Eq => self.inner.nanos == other_nanos,
+                pyo3::class::basic::CompareOp::Ne => self.inner.nanos != other_nanos,
+                pyo3::class::basic::CompareOp::Lt => self.inner.nanos < other_nanos,
+                pyo3::class::basic::CompareOp::Le => self.inner.nanos <= other_nanos,
+                pyo3::class::basic::CompareOp::Gt => self.inner.nanos > other_nanos,
+                pyo3::class::basic::CompareOp::Ge => self.inner.nanos >= other_nanos,
+            })
+        }
+    }
+
+    fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+            let res = self.inner.add_timedelta(td.nanos);
+            PyTimestamp { inner: res }.into_py_any(py)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only add Timedelta to Timestamp",
+            ))
+        }
+    }
+
+    fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+            let res = self.inner.sub_timedelta(td.nanos);
+            PyTimestamp { inner: res }.into_py_any(py)
+        } else if let Ok(other_ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            let diff_nanos = self.inner.sub_timestamp(&other_ts.inner);
+            PyTimedelta { nanos: diff_nanos }.into_py_any(py)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only subtract Timestamp or Timedelta from Timestamp",
+            ))
+        }
+    }
+}
+
+fn convert_period_freq(p: Period, target_freq: &str, how: &str) -> PyResult<Period> {
+    if p.ordinal == i64::MIN {
+        return Ok(p);
+    }
+    let pidx = fp_index::PeriodIndex::new(vec![p]);
+    let res = pidx
+        .asfreq_with_how(target_freq, how)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(res.values().first().copied().unwrap_or(p))
+}
+
+/// Period representation (pandas `pd.Period`).
+#[pyclass(name = "Period", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyPeriod {
+    pub(crate) inner: Period,
+}
+
+#[pymethods]
+impl PyPeriod {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut value_arg: Option<Bound<'_, PyAny>> = args.get_item(0).ok();
+        let mut freq_arg: Option<String> = args
+            .get_item(1)
+            .ok()
+            .and_then(|a1| a1.extract::<String>().ok());
+
+        if let Some(kw) = kwargs {
+            if value_arg.is_none() {
+                value_arg = kw.get_item("value")?;
+            }
+            if freq_arg.is_none() {
+                freq_arg = kw
+                    .get_item("freq")?
+                    .and_then(|f| f.extract::<String>().ok());
+            }
+            if value_arg.is_none() {
+                let year_item = kw.get_item("year")?;
+                if let Some(y) = year_item {
+                    let year = y.extract::<i64>()?;
+                    let freq_str = freq_arg.as_deref().unwrap_or("Y");
+                    let inner = match freq_str.to_ascii_uppercase().as_str() {
+                        "M" => {
+                            let month = kw
+                                .get_item("month")?
+                                .map_or(Ok(1), |v| v.extract::<i64>())?;
+                            let ord = (year - 1970) * 12 + month - 1;
+                            Period::new(ord, PeriodFreq::Monthly)
+                        }
+                        "Q" | "Q-DEC" => {
+                            let quarter = kw
+                                .get_item("quarter")?
+                                .map_or(Ok(1), |v| v.extract::<i64>())?;
+                            let ord = (year - 1970) * 4 + quarter - 1;
+                            Period::new(ord, PeriodFreq::Quarterly)
+                        }
+                        "D" => {
+                            let month = kw
+                                .get_item("month")?
+                                .map_or(Ok(1), |v| v.extract::<i64>())?;
+                            let day = kw.get_item("day")?.map_or(Ok(1), |v| v.extract::<i64>())?;
+                            let ord = days_from_ymd(year, month, day);
+                            Period::new(ord, PeriodFreq::Daily)
+                        }
+                        _ => {
+                            let ord = year - 1970;
+                            Period::new(ord, PeriodFreq::Annual)
+                        }
+                    };
+                    return Ok(PyPeriod { inner });
+                }
+            }
+        }
+
+        if let Some(val) = value_arg {
+            if let Ok(p) = val.extract::<PyRef<'_, PyPeriod>>() {
+                let mut inner = p.inner;
+                if let Some(target_freq) = freq_arg.as_deref() {
+                    inner = convert_period_freq(inner, target_freq, "start")?;
+                }
+                return Ok(PyPeriod { inner });
+            }
+            if let Ok(yr) = val.extract::<i64>() {
+                let mut p = Period::new(yr - 1970, PeriodFreq::Annual);
+                if let Some(target_freq) = freq_arg.as_deref() {
+                    p = convert_period_freq(p, target_freq, "start")?;
+                }
+                return Ok(PyPeriod { inner: p });
+            }
+            if let Ok(s) = val.extract::<String>() {
+                let mut p = Period::parse(&s)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                if let Some(target_freq) = freq_arg.as_deref() {
+                    p = convert_period_freq(p, target_freq, "start")?;
+                }
+                return Ok(PyPeriod { inner: p });
+            }
+        }
+
+        Ok(PyPeriod {
+            inner: Period::new(0, PeriodFreq::Annual),
+        })
+    }
+
+    #[getter]
+    fn ordinal(&self) -> i64 {
+        self.inner.ordinal()
+    }
+
+    #[getter]
+    fn freqstr(&self) -> &'static str {
+        self.inner.freqstr()
+    }
+
+    #[getter]
+    fn freq(&self) -> &'static str {
+        self.inner.freqstr()
+    }
+
+    #[getter]
+    fn year(&self) -> Option<i64> {
+        if self.inner.ordinal == i64::MIN {
+            return None;
+        }
+        match self.inner.freq {
+            PeriodFreq::Annual => Some(1970 + self.inner.ordinal),
+            PeriodFreq::Quarterly => Some(1970 + self.inner.ordinal.div_euclid(4)),
+            PeriodFreq::Monthly => Some(1970 + self.inner.ordinal.div_euclid(12)),
+            PeriodFreq::Daily => {
+                let ts = Timestamp::from_nanos(self.inner.ordinal * 86_400_000_000_000);
+                ts.year()
+            }
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn month(&self) -> Option<i64> {
+        if self.inner.ordinal == i64::MIN {
+            return None;
+        }
+        match self.inner.freq {
+            PeriodFreq::Annual => Some(12),
+            PeriodFreq::Quarterly => Some((self.inner.ordinal.rem_euclid(4) + 1) * 3),
+            PeriodFreq::Monthly => Some(self.inner.ordinal.rem_euclid(12) + 1),
+            PeriodFreq::Daily => {
+                let ts = Timestamp::from_nanos(self.inner.ordinal * 86_400_000_000_000);
+                ts.month()
+            }
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn day(&self) -> Option<i64> {
+        if self.inner.ordinal == i64::MIN {
+            return None;
+        }
+        match self.inner.freq {
+            PeriodFreq::Annual => Some(31),
+            PeriodFreq::Quarterly => {
+                let ts = self.end_time();
+                ts.day()
+            }
+            PeriodFreq::Monthly => {
+                let ts = self.end_time();
+                ts.day()
+            }
+            PeriodFreq::Daily => {
+                let ts = Timestamp::from_nanos(self.inner.ordinal * 86_400_000_000_000);
+                ts.day()
+            }
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn quarter(&self) -> Option<i64> {
+        if self.inner.ordinal == i64::MIN {
+            return None;
+        }
+        match self.inner.freq {
+            PeriodFreq::Quarterly => Some(self.inner.ordinal.rem_euclid(4) + 1),
+            _ => {
+                let m = self.month()?;
+                Some((m - 1) / 3 + 1)
+            }
+        }
+    }
+
+    #[getter]
+    fn day_of_week(&self) -> Option<i64> {
+        if self.inner.ordinal == i64::MIN {
+            return None;
+        }
+        let ts = self.start_time();
+        ts.day_of_week()
+    }
+
+    #[getter]
+    fn dayofweek(&self) -> Option<i64> {
+        self.day_of_week()
+    }
+
+    #[getter]
+    fn start_time(&self) -> PyTimestamp {
+        if self.inner.ordinal == i64::MIN {
+            return PyTimestamp {
+                inner: Timestamp::nat(),
+            };
+        }
+        let nanos = match self.inner.freq {
+            PeriodFreq::Daily => self.inner.ordinal * 86_400_000_000_000,
+            PeriodFreq::Monthly => {
+                let year = 1970 + self.inner.ordinal.div_euclid(12);
+                let month = self.inner.ordinal.rem_euclid(12) + 1;
+                days_from_ymd(year, month, 1) * 86_400_000_000_000
+            }
+            PeriodFreq::Quarterly => {
+                let year = 1970 + self.inner.ordinal.div_euclid(4);
+                let quarter = self.inner.ordinal.rem_euclid(4) + 1;
+                let start_month = (quarter - 1) * 3 + 1;
+                days_from_ymd(year, start_month, 1) * 86_400_000_000_000
+            }
+            PeriodFreq::Annual => {
+                let year = 1970 + self.inner.ordinal;
+                days_from_ymd(year, 1, 1) * 86_400_000_000_000
+            }
+            _ => self.inner.ordinal * 86_400_000_000_000,
+        };
+        PyTimestamp {
+            inner: Timestamp::from_nanos(nanos),
+        }
+    }
+
+    #[getter]
+    fn end_time(&self) -> PyTimestamp {
+        if self.inner.ordinal == i64::MIN {
+            return PyTimestamp {
+                inner: Timestamp::nat(),
+            };
+        }
+        let nanos = match self.inner.freq {
+            PeriodFreq::Daily => (self.inner.ordinal + 1) * 86_400_000_000_000 - 1,
+            PeriodFreq::Monthly => {
+                let year = 1970 + self.inner.ordinal.div_euclid(12);
+                let month = self.inner.ordinal.rem_euclid(12) + 1;
+                let next_year = if month == 12 { year + 1 } else { year };
+                let next_month = if month == 12 { 1 } else { month + 1 };
+                days_from_ymd(next_year, next_month, 1) * 86_400_000_000_000 - 1
+            }
+            PeriodFreq::Quarterly => {
+                let year = 1970 + self.inner.ordinal.div_euclid(4);
+                let quarter = self.inner.ordinal.rem_euclid(4) + 1;
+                let start_month = (quarter - 1) * 3 + 1;
+                let next_year = if start_month + 3 > 12 { year + 1 } else { year };
+                let next_month = if start_month + 3 > 12 {
+                    1
+                } else {
+                    start_month + 3
+                };
+                days_from_ymd(next_year, next_month, 1) * 86_400_000_000_000 - 1
+            }
+            PeriodFreq::Annual => {
+                let year = 1970 + self.inner.ordinal;
+                days_from_ymd(year + 1, 1, 1) * 86_400_000_000_000 - 1
+            }
+            _ => (self.inner.ordinal + 1) * 86_400_000_000_000 - 1,
+        };
+        PyTimestamp {
+            inner: Timestamp::from_nanos(nanos),
+        }
+    }
+
+    #[pyo3(signature = (freq, how="end"))]
+    fn asfreq(&self, freq: &str, how: &str) -> PyResult<Self> {
+        let p = convert_period_freq(self.inner, freq, how)?;
+        Ok(Self { inner: p })
+    }
+
+    fn to_timestamp(&self) -> PyTimestamp {
+        self.start_time()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Period('{}', '{}')",
+            self.inner.calendar_string(),
+            self.inner.freqstr()
+        )
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.calendar_string()
+    }
+
+    fn __hash__(&self) -> isize {
+        self.inner.ordinal as isize
+    }
+
+    fn __richcmp__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::class::basic::CompareOp,
+    ) -> PyResult<bool> {
+        if let Ok(other_p) = other.extract::<PyRef<'_, PyPeriod>>() {
+            if self.inner.ordinal == i64::MIN || other_p.inner.ordinal == i64::MIN {
+                match op {
+                    pyo3::class::basic::CompareOp::Eq => Ok(false),
+                    pyo3::class::basic::CompareOp::Ne => Ok(true),
+                    _ => Ok(false),
+                }
+            } else if self.inner.freq != other_p.inner.freq {
+                match op {
+                    pyo3::class::basic::CompareOp::Eq => Ok(false),
+                    pyo3::class::basic::CompareOp::Ne => Ok(true),
+                    _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Cannot compare Periods with different frequencies",
+                    )),
+                }
+            } else {
+                Ok(match op {
+                    pyo3::class::basic::CompareOp::Eq => {
+                        self.inner.ordinal == other_p.inner.ordinal
+                    }
+                    pyo3::class::basic::CompareOp::Ne => {
+                        self.inner.ordinal != other_p.inner.ordinal
+                    }
+                    pyo3::class::basic::CompareOp::Lt => self.inner.ordinal < other_p.inner.ordinal,
+                    pyo3::class::basic::CompareOp::Le => {
+                        self.inner.ordinal <= other_p.inner.ordinal
+                    }
+                    pyo3::class::basic::CompareOp::Gt => self.inner.ordinal > other_p.inner.ordinal,
+                    pyo3::class::basic::CompareOp::Ge => {
+                        self.inner.ordinal >= other_p.inner.ordinal
+                    }
+                })
+            }
+        } else {
+            match op {
+                pyo3::class::basic::CompareOp::Eq => Ok(false),
+                pyo3::class::basic::CompareOp::Ne => Ok(true),
+                _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Cannot compare Period with non-Period",
+                )),
+            }
+        }
+    }
+
+    fn __add__(&self, other: i64) -> PyPeriod {
+        PyPeriod {
+            inner: self.inner.shift(other),
+        }
+    }
+
+    fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(i) = other.extract::<i64>() {
+            PyPeriod {
+                inner: self.inner.shift(-i),
+            }
+            .into_py_any(py)
+        } else if let Ok(other_p) = other.extract::<PyRef<'_, PyPeriod>>() {
+            if let Some(diff) = self.inner.diff(&other_p.inner) {
+                diff.into_py_any(py)
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Cannot compute difference between Periods with different frequencies",
+                ))
+            }
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only subtract int or Period from Period",
+            ))
+        }
+    }
+}
+
 /// Convert a Python value to a FrankenPandas Scalar.
-fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+#[allow(clippy::only_used_in_recursion)]
+fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if obj.is_none() {
         return Ok(Scalar::Null(fp_types::NullKind::Null));
+    }
+    if obj.is_instance_of::<PyNAType>() {
+        return Ok(Scalar::Null(fp_types::NullKind::Null));
+    }
+    if obj.is_instance_of::<PyNaTType>() {
+        return Ok(Scalar::Null(fp_types::NullKind::NaT));
+    }
+    if let Ok(ts) = obj.extract::<PyRef<'_, PyTimestamp>>() {
+        return Ok(Scalar::Datetime64(ts.inner.nanos));
+    }
+    if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
+        return Ok(Scalar::Timedelta64(td.nanos));
+    }
+    if let Ok(p) = obj.extract::<PyRef<'_, PyPeriod>>() {
+        return Ok(Scalar::Period(p.inner));
     }
     if let Ok(b) = obj.extract::<bool>() {
         return Ok(Scalar::Bool(b));
@@ -115,10 +1388,18 @@ fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
         return Ok(Scalar::Int64(i));
     }
     if let Ok(f) = obj.extract::<f64>() {
+        if f.is_nan() {
+            return Ok(Scalar::Null(fp_types::NullKind::NaN));
+        }
         return Ok(Scalar::Float64(f));
     }
     if let Ok(s) = obj.extract::<String>() {
         return Ok(Scalar::Utf8(s));
+    }
+    if let Ok(item_fn) = obj.getattr("item")
+        && let Ok(val) = item_fn.call0()
+    {
+        return py_to_scalar(py, &val);
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
         "Cannot convert {} to Scalar",
@@ -129,14 +1410,31 @@ fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 /// Convert a FrankenPandas Scalar to a Python object.
 fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
     match scalar {
-        Scalar::Null(_) => Ok(py.None()),
+        Scalar::Null(NullKind::NaT) => PyNaTType.into_py_any(py),
+        Scalar::Null(NullKind::NaN) => f64::NAN.into_py_any(py),
+        Scalar::Null(NullKind::Null) => Ok(py.None()),
         Scalar::Bool(b) => b.into_py_any(py),
         Scalar::Int64(i) => i.into_py_any(py),
         Scalar::Float64(f) => f.into_py_any(py),
         Scalar::Utf8(s) => s.into_py_any(py),
-        Scalar::Datetime64(ns) => ns.into_py_any(py),
-        Scalar::Timedelta64(ns) => ns.into_py_any(py),
-        Scalar::Period(p) => p.ordinal.into_py_any(py),
+        Scalar::Datetime64(ns) => {
+            if *ns == Timestamp::NAT {
+                PyNaTType.into_py_any(py)
+            } else {
+                PyTimestamp {
+                    inner: Timestamp::from_nanos(*ns),
+                }
+                .into_py_any(py)
+            }
+        }
+        Scalar::Timedelta64(ns) => {
+            if *ns == Timedelta::NAT {
+                PyNaTType.into_py_any(py)
+            } else {
+                PyTimedelta { nanos: *ns }.into_py_any(py)
+            }
+        }
+        Scalar::Period(p) => PyPeriod { inner: *p }.into_py_any(py),
         Scalar::Interval(_) => Ok(py.None()),
     }
 }
@@ -229,14 +1527,44 @@ fn py_value_to_column(
 
 /// Convert a Python value to an IndexLabel.
 fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
+    if obj.is_none() {
+        return Ok(IndexLabel::Null(NullKind::Null));
+    }
+    if obj.is_instance_of::<PyNAType>() {
+        return Ok(IndexLabel::Null(NullKind::Null));
+    }
+    if obj.is_instance_of::<PyNaTType>() {
+        return Ok(IndexLabel::Null(NullKind::NaT));
+    }
+    if let Ok(ts) = obj.extract::<PyRef<'_, PyTimestamp>>() {
+        return Ok(IndexLabel::Datetime64(ts.inner.nanos));
+    }
+    if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
+        return Ok(IndexLabel::Timedelta64(td.nanos));
+    }
     if let Ok(b) = obj.extract::<bool>() {
         Ok(IndexLabel::Bool(b))
     } else if let Ok(i) = obj.extract::<i64>() {
         Ok(IndexLabel::Int64(i))
+    } else if let Ok(f) = obj.extract::<f64>() {
+        if f.is_nan() {
+            Ok(IndexLabel::Null(NullKind::NaN))
+        } else {
+            Ok(IndexLabel::Float64(fp_index::OrderedF64(f)))
+        }
     } else if let Ok(s) = obj.extract::<String>() {
         Ok(IndexLabel::Utf8(s))
-    } else if let Ok(f) = obj.extract::<f64>() {
-        Ok(IndexLabel::Float64(fp_index::OrderedF64(f)))
+    } else if let Ok(item_fn) = obj.getattr("item") {
+        if let Ok(val) = item_fn.call0() {
+            py_to_index_label(&val)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Cannot convert {} to IndexLabel",
+                obj.get_type().name()?
+            )))
+        }
+    } else if let Ok(s) = obj.str() {
+        Ok(IndexLabel::Utf8(s.to_str()?.to_string()))
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "Cannot convert {} to IndexLabel",
@@ -250,12 +1578,127 @@ fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> 
     match label {
         IndexLabel::Int64(i) => i.into_py_any(py),
         IndexLabel::Utf8(s) => s.into_py_any(py),
-        IndexLabel::Timedelta64(ns) => ns.into_py_any(py),
-        IndexLabel::Datetime64(ns) => ns.into_py_any(py),
-        IndexLabel::Float64(f) => f.0.into_py_any(py),
+        IndexLabel::Timedelta64(ns) => {
+            if *ns == Timedelta::NAT {
+                PyNaTType.into_py_any(py)
+            } else {
+                PyTimedelta { nanos: *ns }.into_py_any(py)
+            }
+        }
+        IndexLabel::Datetime64(ns) => {
+            if *ns == Timestamp::NAT {
+                PyNaTType.into_py_any(py)
+            } else {
+                PyTimestamp {
+                    inner: Timestamp::from_nanos(*ns),
+                }
+                .into_py_any(py)
+            }
+        }
+        IndexLabel::Float64(f) => {
+            if f.0.is_nan() {
+                f64::NAN.into_py_any(py)
+            } else {
+                f.0.into_py_any(py)
+            }
+        }
         IndexLabel::Bool(b) => b.into_py_any(py),
-        IndexLabel::Null(_) => Ok(py.None()),
+        IndexLabel::Null(NullKind::NaT) => PyNaTType.into_py_any(py),
+        IndexLabel::Null(NullKind::NaN) => f64::NAN.into_py_any(py),
+        IndexLabel::Null(NullKind::Null) => Ok(py.None()),
     }
+}
+
+/// Extract index labels from an optional Python object (Index, list, tuple, sequence, or None).
+fn extract_index_labels(
+    index: Option<&Bound<'_, PyAny>>,
+    default_len: usize,
+) -> PyResult<Vec<IndexLabel>> {
+    if let Some(index) = index {
+        if let Ok(py_idx) = index.extract::<PyRef<'_, PyIndex>>() {
+            Ok(py_idx.inner.labels().to_vec())
+        } else if let Ok(dti) = index.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            Ok(dti.inner.clone().into_index().labels().to_vec())
+        } else if let Ok(tdi) = index.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+            Ok(tdi.inner.clone().into_index().labels().to_vec())
+        } else if let Ok(ri) = index.extract::<PyRef<'_, PyRangeIndex>>() {
+            Ok(ri.inner.to_index().labels().to_vec())
+        } else if let Ok(ci) = index.extract::<PyRef<'_, PyCategoricalIndex>>() {
+            Ok(ci.inner.to_index().labels().to_vec())
+        } else if let Ok(pi) = index.extract::<PyRef<'_, PyPeriodIndex>>() {
+            Ok(pi.inner.to_index().labels().to_vec())
+        } else if let Ok(mi) = index.extract::<PyRef<'_, PyMultiIndex>>() {
+            Ok(mi.inner.to_flat_index(", ").labels().to_vec())
+        } else if let Ok(s) = index.extract::<PyRef<'_, PySeries>>() {
+            Ok(s.inner.index().labels().to_vec())
+        } else if let Ok(list) = index.cast::<PyList>() {
+            list.iter().map(|item| py_to_index_label(&item)).collect()
+        } else if let Ok(tuple) = index.cast::<PyTuple>() {
+            tuple.iter().map(|item| py_to_index_label(&item)).collect()
+        } else if let Ok(iter) = index.try_iter() {
+            let mut labels = Vec::new();
+            for item in iter {
+                labels.push(py_to_index_label(&item?)?);
+            }
+            Ok(labels)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Index must be a sequence or Index",
+            ))
+        }
+    } else {
+        Ok((0..default_len)
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect())
+    }
+}
+
+/// Extract column names from an optional Python object (Index, list, tuple, sequence, or None).
+fn extract_columns_names(columns: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<String>>> {
+    let Some(cols) = columns else {
+        return Ok(None);
+    };
+    if let Ok(idx) = cols.extract::<PyRef<'_, PyIndex>>() {
+        let names = idx.inner.labels().iter().map(|l| l.to_string()).collect();
+        return Ok(Some(names));
+    }
+    if let Ok(list) = cols.cast::<PyList>() {
+        let mut names = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            if let Ok(s) = item.extract::<String>() {
+                names.push(s);
+            } else {
+                names.push(item.str()?.to_str()?.to_string());
+            }
+        }
+        return Ok(Some(names));
+    }
+    if let Ok(tuple) = cols.cast::<PyTuple>() {
+        let mut names = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            if let Ok(s) = item.extract::<String>() {
+                names.push(s);
+            } else {
+                names.push(item.str()?.to_str()?.to_string());
+            }
+        }
+        return Ok(Some(names));
+    }
+    if let Ok(iter) = cols.try_iter() {
+        let mut names = Vec::new();
+        for item in iter {
+            let item = item?;
+            if let Ok(s) = item.extract::<String>() {
+                names.push(s);
+            } else {
+                names.push(item.str()?.to_str()?.to_string());
+            }
+        }
+        return Ok(Some(names));
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        "columns must be an iterable",
+    ))
 }
 
 /// Convert an IndexLabel to a Scalar.
@@ -7773,65 +9216,158 @@ fn extract_or_build_series(
 
 #[pymethods]
 impl PySeries {
-    /// Create a new Series from a name and list of values.
+    /// Create a new Series from various data structures (list, tuple, dict, Series, Index, scalar).
     #[new]
-    /// `Series(data, index=None, name=None)`, in pandas' argument order.
-    ///
-    /// The binding used to take `(name, values)`, so `fp.Series([1, 2, 3])`,
-    /// the first thing anyone types, was a TypeError. `index` accepts a list of
-    /// ints or strings; `name` defaults to the empty string because the Rust
-    /// `Series` always carries one.
-    #[pyo3(signature = (data, index=None, name=None))]
+    #[pyo3(signature = (data=None, index=None, name=None))]
     fn new(
         py: Python<'_>,
-        data: &Bound<'_, PyList>,
+        data: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
         name: Option<&str>,
     ) -> PyResult<Self> {
-        let scalars: Vec<Scalar> = data
-            .iter()
-            .map(|v| py_to_scalar(py, &v))
-            .collect::<PyResult<Vec<_>>>()?;
+        let series_name = name.unwrap_or("");
 
-        let labels: Vec<IndexLabel> = if let Some(index) = index {
-            if let Ok(py_idx) = index.extract::<PyRef<'_, PyIndex>>() {
-                py_idx.inner.labels().to_vec()
-            } else if let Ok(list) = index.cast::<PyList>() {
-                list.iter()
-                    .map(|label| {
-                        if let Ok(value) = label.extract::<i64>() {
-                            Ok(IndexLabel::Int64(value))
-                        } else if let Ok(value) = label.extract::<String>() {
-                            Ok(IndexLabel::Utf8(value))
-                        } else {
-                            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "Series: index labels must be ints or strings",
-                            ))
-                        }
-                    })
-                    .collect::<PyResult<Vec<_>>>()?
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Series: index must be a list or Index",
-                ));
-            }
-        } else {
-            (0..scalars.len())
-                .map(|i| IndexLabel::Int64(i as i64))
-                .collect()
+        let Some(data) = data else {
+            let labels = extract_index_labels(index, 0)?;
+            let n = labels.len();
+            let scalars = vec![Scalar::Null(NullKind::NaN); n];
+            let series = Series::from_values(series_name, labels, scalars)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PySeries { inner: series });
         };
-        if labels.len() != scalars.len() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Length of values ({}) does not match length of index ({})",
-                scalars.len(),
-                labels.len()
-            )));
+
+        if let Ok(s) = data.extract::<PyRef<'_, PySeries>>() {
+            let s_name = name.unwrap_or_else(|| s.inner.name());
+            if let Some(idx_arg) = index {
+                let labels = extract_index_labels(Some(idx_arg), s.inner.len())?;
+                let reindexed = s
+                    .inner
+                    .reindex(labels)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                let renamed = reindexed.rename(s_name).map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner: renamed });
+            } else {
+                let renamed = s.inner.rename(s_name).map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner: renamed });
+            }
         }
 
-        let series = Series::from_values(name.unwrap_or(""), labels, scalars)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        if let Ok(idx) = data.extract::<PyRef<'_, PyIndex>>() {
+            let labels = extract_index_labels(index, idx.inner.len())?;
+            let scalars: Vec<Scalar> = idx
+                .inner
+                .labels()
+                .iter()
+                .map(index_label_to_scalar)
+                .collect();
+            if labels.len() != scalars.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length of values ({}) does not match length of index ({})",
+                    scalars.len(),
+                    labels.len()
+                )));
+            }
+            let series = Series::from_values(series_name, labels, scalars)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PySeries { inner: series });
+        }
 
-        Ok(PySeries { inner: series })
+        if let Ok(dict) = data.cast::<PyDict>() {
+            let mut dict_keys = Vec::with_capacity(dict.len());
+            let mut dict_vals = Vec::with_capacity(dict.len());
+            for (k, v) in dict.iter() {
+                dict_keys.push(py_to_index_label(&k)?);
+                dict_vals.push(py_to_scalar(py, &v)?);
+            }
+            if let Some(idx_arg) = index {
+                let target_labels = extract_index_labels(Some(idx_arg), 0)?;
+                let mut reindexed_vals = Vec::with_capacity(target_labels.len());
+                for target_lbl in &target_labels {
+                    if let Some(pos) = dict_keys.iter().position(|k| k == target_lbl) {
+                        reindexed_vals.push(dict_vals[pos].clone());
+                    } else {
+                        reindexed_vals.push(Scalar::Null(NullKind::NaN));
+                    }
+                }
+                let series = Series::from_values(series_name, target_labels, reindexed_vals)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PySeries { inner: series });
+            } else {
+                let series = Series::from_values(series_name, dict_keys, dict_vals)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PySeries { inner: series });
+            }
+        }
+
+        if let Ok(list) = data.cast::<PyList>() {
+            let scalars: Vec<Scalar> = list
+                .iter()
+                .map(|v| py_to_scalar(py, &v))
+                .collect::<PyResult<Vec<_>>>()?;
+            let labels = extract_index_labels(index, scalars.len())?;
+            if labels.len() != scalars.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length of values ({}) does not match length of index ({})",
+                    scalars.len(),
+                    labels.len()
+                )));
+            }
+            let series = Series::from_values(series_name, labels, scalars)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PySeries { inner: series });
+        }
+
+        if let Ok(tuple) = data.cast::<PyTuple>() {
+            let scalars: Vec<Scalar> = tuple
+                .iter()
+                .map(|v| py_to_scalar(py, &v))
+                .collect::<PyResult<Vec<_>>>()?;
+            let labels = extract_index_labels(index, scalars.len())?;
+            if labels.len() != scalars.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length of values ({}) does not match length of index ({})",
+                    scalars.len(),
+                    labels.len()
+                )));
+            }
+            let series = Series::from_values(series_name, labels, scalars)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PySeries { inner: series });
+        }
+
+        if !data.is_instance_of::<pyo3::types::PyString>()
+            && let Ok(iter) = data.try_iter()
+        {
+            let mut scalars = Vec::new();
+            for item in iter {
+                scalars.push(py_to_scalar(py, &item?)?);
+            }
+            let labels = extract_index_labels(index, scalars.len())?;
+            if labels.len() != scalars.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length of values ({}) does not match length of index ({})",
+                    scalars.len(),
+                    labels.len()
+                )));
+            }
+            let series = Series::from_values(series_name, labels, scalars)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PySeries { inner: series });
+        }
+
+        let scalar = py_to_scalar(py, data)?;
+        if let Some(idx_arg) = index {
+            let labels = extract_index_labels(Some(idx_arg), 0)?;
+            let scalars = vec![scalar; labels.len()];
+            let series = Series::from_values(series_name, labels, scalars)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            Ok(PySeries { inner: series })
+        } else {
+            let labels = vec![IndexLabel::Int64(0)];
+            let series = Series::from_values(series_name, labels, vec![scalar])
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            Ok(PySeries { inner: series })
+        }
     }
 
     /// Return the name of the Series.
@@ -9781,15 +11317,29 @@ impl PySeries {
         Ok(())
     }
 
-    #[pyo3(signature = (name, con, **kwargs))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, con, if_exists="fail", index=true, index_label=None, **kwargs))]
     fn to_sql(
         &self,
+        py: Python<'_>,
         name: &str,
         con: &Bound<'_, PyAny>,
+        if_exists: &str,
+        index: bool,
+        index_label: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _ = (name, con, kwargs);
-        Ok(())
+        let col_name = if self.inner.name().is_empty() {
+            name
+        } else {
+            self.inner.name()
+        };
+        let df = self
+            .inner
+            .to_frame(Some(col_name))
+            .map_err(frame_error_to_py)?;
+        let py_df = PyDataFrame { inner: df };
+        py_df.to_sql(py, name, con, if_exists, index, index_label, kwargs)
     }
 
     #[pyo3(signature = (buf=None, na_rep="NaN", **kwargs))]
@@ -10051,90 +11601,378 @@ impl PyDataFrame {
     }
 }
 
+fn empty_dataframe() -> DataFrame {
+    DataFrame::new(
+        Index::new(Vec::<IndexLabel>::new()),
+        BTreeMap::<String, Column>::new(),
+    )
+    .unwrap()
+}
+
 #[pymethods]
 impl PyDataFrame {
-    /// Create a new DataFrame from a dictionary of column name -> values, with optional index and columns.
+    /// Create a new DataFrame from various data structures (dict, list of dicts, 2D matrix, 1D list, Series, DataFrame, scalar).
     #[new]
     #[pyo3(signature = (data=None, index=None, columns=None))]
     fn new(
         py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
-        columns: Option<Vec<String>>,
+        columns: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let mut col_map = BTreeMap::new();
-        let mut column_order = Vec::new();
-        let mut n_rows = 0usize;
+        let explicit_cols = extract_columns_names(columns)?;
 
-        if let Some(data) = data
-            && let Ok(dict) = data.cast::<PyDict>()
-        {
-            for (key, value) in dict.iter() {
-                let col_name: String = key.extract()?;
-                let values: &Bound<'_, PyList> = value.cast()?;
-
-                let scalars: Vec<Scalar> = values
-                    .iter()
-                    .map(|v| py_to_scalar(py, &v))
-                    .collect::<PyResult<Vec<_>>>()?;
-
-                if n_rows == 0 {
-                    n_rows = scalars.len();
-                } else if scalars.len() != n_rows {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "All columns must have the same length",
-                    ));
+        let Some(data) = data else {
+            if let Some(cols) = explicit_cols {
+                let labels = extract_index_labels(index, 0)?;
+                let mut col_map = BTreeMap::new();
+                for c in &cols {
+                    let scalars = vec![Scalar::Null(NullKind::NaN); labels.len()];
+                    let col = Column::from_values(scalars).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    col_map.insert(c.clone(), col);
                 }
-
-                let column = Column::from_values(scalars)
+                let df = DataFrame::new_with_column_order(Index::new(labels), col_map, cols)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-                column_order.push(col_name.clone());
-                col_map.insert(col_name, column);
-            }
-        }
-
-        if let Some(explicit_cols) = columns {
-            column_order = explicit_cols;
-        }
-
-        let labels: Vec<IndexLabel> = if let Some(index) = index {
-            if let Ok(py_idx) = index.extract::<PyRef<'_, PyIndex>>() {
-                py_idx.inner.labels().to_vec()
-            } else if let Ok(list) = index.cast::<PyList>() {
-                list.iter()
-                    .map(|label| {
-                        if let Ok(value) = label.extract::<i64>() {
-                            Ok(IndexLabel::Int64(value))
-                        } else if let Ok(value) = label.extract::<String>() {
-                            Ok(IndexLabel::Utf8(value))
-                        } else {
-                            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "DataFrame: index labels must be ints or strings",
-                            ))
-                        }
-                    })
-                    .collect::<PyResult<Vec<_>>>()?
+                return Ok(PyDataFrame { inner: df });
+            } else if let Some(idx_arg) = index {
+                let labels = extract_index_labels(Some(idx_arg), 0)?;
+                let col_map = BTreeMap::new();
+                let cols: Vec<String> = Vec::new();
+                let df = DataFrame::new_with_column_order(Index::new(labels), col_map, cols)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: df });
             } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "DataFrame: index must be a list or Index",
-                ));
+                return Ok(PyDataFrame {
+                    inner: empty_dataframe(),
+                });
             }
-        } else {
-            (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect()
         };
 
-        if n_rows > 0 && labels.len() != n_rows {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Length of values ({n_rows}) does not match length of index ({})",
-                labels.len()
-            )));
+        if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
+            let mut res = df.inner.clone();
+            if let Some(cols) = explicit_cols {
+                let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+                res = res.select_columns(&col_refs).map_err(frame_error_to_py)?;
+            }
+            if let Some(idx) = index {
+                let labels = extract_index_labels(Some(idx), res.len())?;
+                res = res
+                    .reindex(labels)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            }
+            return Ok(PyDataFrame { inner: res });
         }
 
-        let df = DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        if let Ok(s) = data.extract::<PyRef<'_, PySeries>>() {
+            let col_name = explicit_cols
+                .as_ref()
+                .and_then(|c| c.first().cloned())
+                .unwrap_or_else(|| {
+                    if s.inner.name().is_empty() {
+                        "0".to_string()
+                    } else {
+                        s.inner.name().to_string()
+                    }
+                });
+            let mut df = s
+                .inner
+                .to_frame(Some(&col_name))
+                .map_err(frame_error_to_py)?;
+            if let Some(idx) = index {
+                let labels = extract_index_labels(Some(idx), df.len())?;
+                df = df
+                    .reindex(labels)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            }
+            return Ok(PyDataFrame { inner: df });
+        }
 
-        Ok(PyDataFrame { inner: df })
+        if let Ok(dict) = data.cast::<PyDict>() {
+            let mut col_map = BTreeMap::new();
+            let mut detected_order = Vec::new();
+            let mut detected_nrows: Option<usize> = None;
+
+            // Check for any PySeries in dict to align indices
+            let mut series_indices: Vec<Index> = Vec::new();
+            for (_k, v) in dict.iter() {
+                if let Ok(s) = v.extract::<PyRef<'_, PySeries>>() {
+                    series_indices.push(s.inner.index().clone());
+                }
+            }
+
+            let common_labels = if let Some(idx_arg) = index {
+                Some(extract_index_labels(Some(idx_arg), 0)?)
+            } else if !series_indices.is_empty() {
+                let mut union_labels = series_indices[0].labels().to_vec();
+                for idx in &series_indices[1..] {
+                    for lbl in idx.labels() {
+                        if !union_labels.contains(lbl) {
+                            union_labels.push(lbl.clone());
+                        }
+                    }
+                }
+                Some(union_labels)
+            } else {
+                None
+            };
+
+            for (key, value) in dict.iter() {
+                let col_name: String = if let Ok(s) = key.extract::<String>() {
+                    s
+                } else {
+                    key.str()?.to_str()?.to_string()
+                };
+
+                let col = if let Ok(s) = value.extract::<PyRef<'_, PySeries>>() {
+                    if let Some(target_labels) = &common_labels {
+                        let reindexed = s.inner.reindex(target_labels.clone()).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                        reindexed.column().clone()
+                    } else {
+                        s.inner.column().clone()
+                    }
+                } else if let Ok(list) = value.cast::<PyList>() {
+                    let scalars: Vec<Scalar> = list
+                        .iter()
+                        .map(|v| py_to_scalar(py, &v))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    if let Some(nr) = detected_nrows {
+                        if scalars.len() != nr {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "All columns must have the same length",
+                            ));
+                        }
+                    } else {
+                        detected_nrows = Some(scalars.len());
+                    }
+                    Column::from_values(scalars).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?
+                } else if let Ok(tuple) = value.cast::<PyTuple>() {
+                    let scalars: Vec<Scalar> = tuple
+                        .iter()
+                        .map(|v| py_to_scalar(py, &v))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    if let Some(nr) = detected_nrows {
+                        if scalars.len() != nr {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "All columns must have the same length",
+                            ));
+                        }
+                    } else {
+                        detected_nrows = Some(scalars.len());
+                    }
+                    Column::from_values(scalars).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?
+                } else {
+                    let scalar = py_to_scalar(py, &value)?;
+                    let nr = common_labels
+                        .as_ref()
+                        .map(|l| l.len())
+                        .or(detected_nrows)
+                        .unwrap_or(1);
+                    Column::from_values(vec![scalar; nr]).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?
+                };
+
+                detected_order.push(col_name.clone());
+                col_map.insert(col_name, col);
+            }
+
+            let column_order = explicit_cols.unwrap_or(detected_order);
+            let n_rows = col_map.values().next().map(|c| c.len()).unwrap_or(0);
+            let labels = if let Some(cl) = common_labels {
+                cl
+            } else {
+                extract_index_labels(index, n_rows)?
+            };
+
+            // If explicit columns contains extra columns not in dict, add NaN columns
+            for c in &column_order {
+                if !col_map.contains_key(c) {
+                    let scalars = vec![Scalar::Null(NullKind::NaN); labels.len()];
+                    let col = Column::from_values(scalars).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    col_map.insert(c.clone(), col);
+                }
+            }
+            // Retain only columns in column_order
+            col_map.retain(|k, _| column_order.contains(k));
+
+            let df = DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PyDataFrame { inner: df });
+        }
+
+        // List / Sequence forms
+        if let Ok(seq) = data.cast::<pyo3::types::PySequence>() {
+            let len = seq.len()?;
+            if len == 0 {
+                let labels = extract_index_labels(index, 0)?;
+                let column_order = explicit_cols.unwrap_or_default();
+                let mut col_map = BTreeMap::new();
+                for c in &column_order {
+                    col_map.insert(
+                        c.clone(),
+                        Column::from_values(Vec::<Scalar>::new()).unwrap(),
+                    );
+                }
+                let df =
+                    DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                return Ok(PyDataFrame { inner: df });
+            }
+
+            let first_item = seq.get_item(0)?;
+
+            // Case A: List of dicts (records)
+            if let Ok(_first_dict) = first_item.cast::<PyDict>() {
+                let mut col_order = explicit_cols.unwrap_or_default();
+                if col_order.is_empty() {
+                    for i in 0..len {
+                        let item = seq.get_item(i)?;
+                        let row_dict = item.cast::<PyDict>()?;
+                        for (k, _) in row_dict.iter() {
+                            let col_name: String = if let Ok(s) = k.extract::<String>() {
+                                s
+                            } else {
+                                k.str()?.to_str()?.to_string()
+                            };
+                            if !col_order.contains(&col_name) {
+                                col_order.push(col_name);
+                            }
+                        }
+                    }
+                }
+
+                let mut col_scalars: Vec<Vec<Scalar>> =
+                    vec![Vec::with_capacity(len); col_order.len()];
+                for i in 0..len {
+                    let item = seq.get_item(i)?;
+                    let row_dict = item.cast::<PyDict>()?;
+                    for (c_idx, col_name) in col_order.iter().enumerate() {
+                        let val = row_dict.get_item(col_name)?;
+                        let scalar = match val {
+                            Some(v) => py_to_scalar(py, &v)?,
+                            None => Scalar::Null(NullKind::NaN),
+                        };
+                        col_scalars[c_idx].push(scalar);
+                    }
+                }
+
+                let mut col_map = BTreeMap::new();
+                for (i, name) in col_order.iter().enumerate() {
+                    let col = Column::from_values(col_scalars[i].clone()).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    col_map.insert(name.clone(), col);
+                }
+
+                let labels = extract_index_labels(index, len)?;
+                let df = DataFrame::new_with_column_order(Index::new(labels), col_map, col_order)
+                    .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                })?;
+                return Ok(PyDataFrame { inner: df });
+            }
+
+            // Case B: 2D Matrix (list of lists/tuples/iterables)
+            if let Ok(first_row_seq) = first_item.cast::<pyo3::types::PySequence>() {
+                let num_cols = first_row_seq.len()?;
+                if let Some(ref explicit) = explicit_cols
+                    && explicit.len() != num_cols
+                {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Shape of passed values is ({len}, {num_cols}), indices imply ({len}, {})",
+                        explicit.len()
+                    )));
+                }
+                let col_order =
+                    explicit_cols.unwrap_or_else(|| (0..num_cols).map(|i| i.to_string()).collect());
+
+                let mut col_scalars: Vec<Vec<Scalar>> = vec![Vec::with_capacity(len); num_cols];
+                #[allow(clippy::needless_range_loop)]
+                for r in 0..len {
+                    let row_item = seq.get_item(r)?;
+                    let row = row_item.cast::<pyo3::types::PySequence>()?;
+                    for c in 0..num_cols {
+                        let val = row.get_item(c)?;
+                        col_scalars[c].push(py_to_scalar(py, &val)?);
+                    }
+                }
+
+                let mut col_map = BTreeMap::new();
+                for (i, name) in col_order.iter().enumerate() {
+                    let col = Column::from_values(col_scalars[i].clone()).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    col_map.insert(name.clone(), col);
+                }
+
+                let labels = extract_index_labels(index, len)?;
+                let df = DataFrame::new_with_column_order(Index::new(labels), col_map, col_order)
+                    .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                })?;
+                return Ok(PyDataFrame { inner: df });
+            }
+
+            // Case C: 1D list of scalars
+            if let Some(ref cols) = explicit_cols
+                && cols.len() != 1
+            {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Shape of passed values is ({len}, 1), indices imply ({len}, {})",
+                    cols.len()
+                )));
+            }
+            let mut scalars = Vec::with_capacity(len);
+            for i in 0..len {
+                let item = seq.get_item(i)?;
+                scalars.push(py_to_scalar(py, &item)?);
+            }
+            let col_name = explicit_cols
+                .as_ref()
+                .and_then(|c| c.first().cloned())
+                .unwrap_or_else(|| "0".to_string());
+            let column_order = vec![col_name.clone()];
+            let mut col_map = BTreeMap::new();
+            let col = Column::from_values(scalars)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            col_map.insert(col_name, col);
+
+            let labels = extract_index_labels(index, len)?;
+            let df = DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PyDataFrame { inner: df });
+        }
+
+        // Case D: scalar broadcast
+        if let Ok(scalar) = py_to_scalar(py, data) {
+            let labels = extract_index_labels(index, 1)?;
+            let col_order = explicit_cols.unwrap_or_else(|| vec!["0".to_string()]);
+            let mut col_map = BTreeMap::new();
+            for c in &col_order {
+                let col = Column::from_values(vec![scalar.clone(); labels.len()])
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                col_map.insert(c.clone(), col);
+            }
+            let df = DataFrame::new_with_column_order(Index::new(labels), col_map, col_order)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PyDataFrame { inner: df });
+        }
+
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "DataFrame data format not recognized",
+        ))
     }
 
     /// Return the shape of the DataFrame as (rows, cols).
@@ -12608,7 +14446,7 @@ impl PyDataFrame {
         data: &Bound<'_, pyo3::types::PyDict>,
         orient: Option<&str>,
         dtype: Option<&str>,
-        columns: Option<Vec<String>>,
+        columns: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let _ = (orient, dtype);
         Self::new(py, Some(data.as_any()), None, columns)
@@ -12623,7 +14461,7 @@ impl PyDataFrame {
         data: &Bound<'_, PyAny>,
         index: Option<&Bound<'_, PyAny>>,
         exclude: Option<&Bound<'_, PyAny>>,
-        columns: Option<Vec<String>>,
+        columns: Option<&Bound<'_, PyAny>>,
         coerce_float: Option<bool>,
         nrows: Option<usize>,
     ) -> PyResult<Self> {
@@ -12844,14 +14682,135 @@ impl PyDataFrame {
         self.to_dict(py)
     }
 
-    #[pyo3(signature = (name, con, **kwargs))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, con, if_exists="fail", index=true, index_label=None, **kwargs))]
     fn to_sql(
         &self,
+        py: Python<'_>,
         name: &str,
         con: &Bound<'_, PyAny>,
+        if_exists: &str,
+        index: bool,
+        index_label: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _ = (name, con, kwargs);
+        let _ = kwargs;
+        let db_conn = if let Ok(s) = con.extract::<String>() {
+            let path = if let Some(rest) = s.strip_prefix("sqlite:///") {
+                rest
+            } else if let Some(rest) = s.strip_prefix("sqlite://") {
+                rest
+            } else {
+                s.as_str()
+            };
+            let sqlite3 = py.import("sqlite3")?;
+            sqlite3.call_method1("connect", (path,))?
+        } else {
+            con.clone()
+        };
+
+        let cursor = db_conn.call_method0("cursor")?;
+
+        let check_sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
+        let check_res = cursor.call_method1("execute", (check_sql, (name,)))?;
+        let existing = check_res.call_method0("fetchone")?;
+        let table_exists = !existing.is_none();
+
+        if table_exists {
+            match if_exists {
+                "fail" => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Table '{name}' already exists."
+                    )));
+                }
+                "replace" => {
+                    cursor.call_method1("execute", (format!("DROP TABLE \"{name}\""),))?;
+                }
+                "append" => {}
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Unknown if_exists option: '{other}'. Valid options: 'fail', 'replace', 'append'."
+                    )));
+                }
+            }
+        }
+
+        let mut columns_to_write = Vec::new();
+        let mut col_type_defs = Vec::new();
+
+        let idx_col_name = if index {
+            let name = index_label.unwrap_or_else(|| self.inner.index().name().unwrap_or("index"));
+            columns_to_write.push(name.to_string());
+            col_type_defs.push(format!("\"{name}\" TEXT"));
+            Some(name)
+        } else {
+            None
+        };
+
+        let data_columns = self.columns();
+        for col_name in &data_columns {
+            columns_to_write.push(col_name.clone());
+            let col = self.inner.column(col_name).unwrap();
+            let sql_type = match col.dtype() {
+                fp_types::DType::Int64 => "INTEGER",
+                fp_types::DType::Float64 => "REAL",
+                fp_types::DType::Bool => "INTEGER",
+                _ => "TEXT",
+            };
+            col_type_defs.push(format!("\"{col_name}\" {sql_type}"));
+        }
+
+        if !table_exists || if_exists == "replace" {
+            let create_sql = format!("CREATE TABLE \"{name}\" ({});", col_type_defs.join(", "));
+            cursor.call_method1("execute", (create_sql,))?;
+        }
+
+        let num_rows = self.inner.len();
+        if num_rows > 0 {
+            let placeholders = vec!["?"; columns_to_write.len()].join(", ");
+            let quoted_cols: Vec<String> = columns_to_write
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect();
+            let insert_sql = format!(
+                "INSERT INTO \"{name}\" ({}) VALUES ({})",
+                quoted_cols.join(", "),
+                placeholders
+            );
+
+            let py_rows = PyList::empty(py);
+            for row_idx in 0..num_rows {
+                let row_tuple = PyTuple::new(
+                    py,
+                    (0..columns_to_write.len())
+                        .map(|c_idx| {
+                            if idx_col_name.is_some() && c_idx == 0 {
+                                let label = &self.inner.index().labels()[row_idx];
+                                index_label_to_py(py, label)
+                            } else {
+                                let data_col_idx = if idx_col_name.is_some() {
+                                    c_idx - 1
+                                } else {
+                                    c_idx
+                                };
+                                let col_name = &data_columns[data_col_idx];
+                                let col = self.inner.column(col_name).unwrap();
+                                let scalar = &col.values()[row_idx];
+                                scalar_to_py(py, scalar)
+                            }
+                        })
+                        .collect::<PyResult<Vec<_>>>()?,
+                )?;
+                py_rows.append(row_tuple)?;
+            }
+
+            cursor.call_method1("executemany", (insert_sql, py_rows))?;
+        }
+
+        if let Ok(commit) = db_conn.getattr("commit") {
+            commit.call0()?;
+        }
+
         Ok(())
     }
 
@@ -17632,8 +19591,17 @@ fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(list) = obj.cast::<PyList>() {
         let mut out = Vec::with_capacity(list.len());
         for item in list.iter() {
-            if item.is_none() {
+            if item.is_none()
+                || item.is_instance_of::<PyNAType>()
+                || item.is_instance_of::<PyNaTType>()
+            {
                 out.push(true);
+            } else if let Ok(ts) = item.extract::<PyRef<'_, PyTimestamp>>() {
+                out.push(ts.inner.is_nat());
+            } else if let Ok(td) = item.extract::<PyRef<'_, PyTimedelta>>() {
+                out.push(td.nanos == Timedelta::NAT);
+            } else if let Ok(p) = item.extract::<PyRef<'_, PyPeriod>>() {
+                out.push(p.inner.ordinal() == i64::MIN);
             } else if let Ok(f) = item.extract::<f64>() {
                 out.push(f.is_nan());
             } else {
@@ -17642,8 +19610,26 @@ fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         }
         return Ok(PyList::new(py, out)?.into_any().unbind());
     }
-    if obj.is_none() {
+    if obj.is_none() || obj.is_instance_of::<PyNAType>() || obj.is_instance_of::<PyNaTType>() {
         return Ok(pyo3::types::PyBool::new(py, true)
+            .to_owned()
+            .into_any()
+            .unbind());
+    }
+    if let Ok(ts) = obj.extract::<PyRef<'_, PyTimestamp>>() {
+        return Ok(pyo3::types::PyBool::new(py, ts.inner.is_nat())
+            .to_owned()
+            .into_any()
+            .unbind());
+    }
+    if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
+        return Ok(pyo3::types::PyBool::new(py, td.nanos == Timedelta::NAT)
+            .to_owned()
+            .into_any()
+            .unbind());
+    }
+    if let Ok(p) = obj.extract::<PyRef<'_, PyPeriod>>() {
+        return Ok(pyo3::types::PyBool::new(py, p.inner.ordinal() == i64::MIN)
             .to_owned()
             .into_any()
             .unbind());
@@ -17669,67 +19655,22 @@ fn isnull(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
 /// Detect non-missing values for an array-like object or scalar (pandas `notna`).
 #[pyfunction]
 fn notna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    if let Ok(df) = obj.extract::<PyRef<'_, PyDataFrame>>() {
-        let res = df.notna()?;
-        return Ok(Py::new(py, res)?.into_any());
+    let isna_val = isna(py, obj)?;
+    let bound = isna_val.bind(py);
+    if let Ok(df) = bound.extract::<PyRef<'_, PyDataFrame>>() {
+        let inv = df.notna()?;
+        return Ok(Py::new(py, inv)?.into_any());
     }
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        let res = s.notna()?;
-        return Ok(Py::new(py, res)?.into_any());
+    if let Ok(s) = bound.extract::<PyRef<'_, PySeries>>() {
+        let inv = s.notna()?;
+        return Ok(Py::new(py, inv)?.into_any());
     }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        let mask = idx.notna();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
+    if let Ok(list) = bound.extract::<Vec<bool>>() {
+        let inv: Vec<bool> = list.into_iter().map(|b| !b).collect();
+        return Ok(PyList::new(py, inv)?.into_any().unbind());
     }
-    if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        let mask = dti.notna();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
-    }
-    if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
-        let mask = tdi.notna();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
-    }
-    if let Ok(ri) = obj.extract::<PyRef<'_, PyRangeIndex>>() {
-        let mask = vec![true; ri.inner.len()];
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
-    }
-    if let Ok(pi) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
-        let mask: Vec<bool> = (0..pi.inner.len())
-            .map(|i| {
-                pi.inner
-                    .values()
-                    .get(i)
-                    .is_none_or(|p| p.ordinal() != i64::MIN)
-            })
-            .collect();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
-    }
-    if let Ok(ci) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
-        let codes = ci.inner.codes();
-        let mask: Vec<bool> = codes.iter().map(Option::is_some).collect();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
-    }
-    if let Ok(list) = obj.cast::<PyList>() {
-        let mut out = Vec::with_capacity(list.len());
-        for item in list.iter() {
-            if item.is_none() {
-                out.push(false);
-            } else if let Ok(f) = item.extract::<f64>() {
-                out.push(!f.is_nan());
-            } else {
-                out.push(true);
-            }
-        }
-        return Ok(PyList::new(py, out)?.into_any().unbind());
-    }
-    if obj.is_none() {
-        return Ok(pyo3::types::PyBool::new(py, false)
-            .to_owned()
-            .into_any()
-            .unbind());
-    }
-    if let Ok(f) = obj.extract::<f64>() {
-        return Ok(pyo3::types::PyBool::new(py, !f.is_nan())
+    if let Ok(b) = bound.extract::<bool>() {
+        return Ok(pyo3::types::PyBool::new(py, !b)
             .to_owned()
             .into_any()
             .unbind());
@@ -18198,6 +20139,311 @@ fn qcut(
     Ok(PySeries { inner: res })
 }
 
+/// Read SQL query or database table into a DataFrame.
+#[pyfunction]
+#[pyo3(signature = (sql, con, index_col=None, **kwargs))]
+fn read_sql(
+    py: Python<'_>,
+    sql: &str,
+    con: &Bound<'_, PyAny>,
+    index_col: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let _ = kwargs;
+    let db_conn = if let Ok(s) = con.extract::<String>() {
+        let path = if let Some(rest) = s.strip_prefix("sqlite:///") {
+            rest
+        } else if let Some(rest) = s.strip_prefix("sqlite://") {
+            rest
+        } else {
+            s.as_str()
+        };
+        let sqlite3 = py.import("sqlite3")?;
+        sqlite3.call_method1("connect", (path,))?
+    } else {
+        con.clone()
+    };
+
+    let cursor = db_conn.call_method0("cursor")?;
+    cursor.call_method1("execute", (sql,))?;
+    let desc = cursor.getattr("description")?;
+    if desc.is_none() {
+        return Ok(PyDataFrame {
+            inner: empty_dataframe(),
+        });
+    }
+    let desc_seq = desc.cast::<pyo3::types::PySequence>()?;
+    let num_cols = desc_seq.len()?;
+    let mut col_names = Vec::with_capacity(num_cols);
+    for i in 0..num_cols {
+        let item = desc_seq.get_item(i)?;
+        let name: String = item.get_item(0)?.extract()?;
+        col_names.push(name);
+    }
+
+    let rows = cursor.call_method0("fetchall")?;
+    let rows_seq = rows.cast::<pyo3::types::PySequence>()?;
+    let num_rows = rows_seq.len()?;
+
+    let mut col_scalars: Vec<Vec<Scalar>> = vec![Vec::with_capacity(num_rows); num_cols];
+    #[allow(clippy::needless_range_loop)]
+    for r in 0..num_rows {
+        let row = rows_seq.get_item(r)?;
+        for c in 0..num_cols {
+            let val = row.get_item(c)?;
+            col_scalars[c].push(py_to_scalar(py, &val)?);
+        }
+    }
+
+    let mut col_map = BTreeMap::new();
+    for (i, name) in col_names.iter().enumerate() {
+        let col = Column::from_values(col_scalars[i].clone())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        col_map.insert(name.clone(), col);
+    }
+
+    let labels: Vec<IndexLabel> = (0..num_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let df = DataFrame::new_with_column_order(Index::new(labels), col_map, col_names.clone())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    if let Some(idx_col) = index_col {
+        let py_df = PyDataFrame { inner: df };
+        return py_df.set_index(idx_col, true);
+    }
+
+    Ok(PyDataFrame { inner: df })
+}
+
+/// Read SQL query into a DataFrame.
+#[pyfunction]
+#[pyo3(signature = (sql, con, index_col=None, **kwargs))]
+fn read_sql_query(
+    py: Python<'_>,
+    sql: &str,
+    con: &Bound<'_, PyAny>,
+    index_col: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    read_sql(py, sql, con, index_col, kwargs)
+}
+
+/// Read SQL database table into a DataFrame.
+#[pyfunction]
+#[pyo3(signature = (table_name, con, index_col=None, **kwargs))]
+fn read_sql_table(
+    py: Python<'_>,
+    table_name: &str,
+    con: &Bound<'_, PyAny>,
+    index_col: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let sql = format!("SELECT * FROM \"{table_name}\"");
+    read_sql(py, &sql, con, index_col, kwargs)
+}
+
+/// Assert that two DataFrames are equal.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (left, right, check_dtype=true, check_index_type="equiv", check_column_type="equiv", check_frame_type=true, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+fn assert_frame_equal(
+    _py: Python<'_>,
+    left: &Bound<'_, PyAny>,
+    right: &Bound<'_, PyAny>,
+    check_dtype: bool,
+    check_index_type: &str,
+    check_column_type: &str,
+    check_frame_type: bool,
+    check_names: bool,
+    check_exact: bool,
+    rtol: f64,
+    atol: f64,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let _ = (
+        check_dtype,
+        check_index_type,
+        check_column_type,
+        check_frame_type,
+        check_names,
+        kwargs,
+    );
+    let l_df = left.extract::<PyRef<'_, PyDataFrame>>()?;
+    let r_df = right.extract::<PyRef<'_, PyDataFrame>>()?;
+
+    if l_df.inner.shape() != r_df.inner.shape() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            format!(
+                "DataFrame shape mismatch: left {:?}, right {:?}",
+                l_df.inner.shape(),
+                r_df.inner.shape()
+            ),
+        ));
+    }
+    let l_cols = l_df.columns();
+    let r_cols = r_df.columns();
+    if l_cols != r_cols {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            format!(
+                "DataFrame columns mismatch: left {:?}, right {:?}",
+                l_cols, r_cols
+            ),
+        ));
+    }
+    if l_df.inner.index().labels() != r_df.inner.index().labels() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            "DataFrame index labels mismatch",
+        ));
+    }
+    for col in &l_cols {
+        let lc = l_df.inner.column(col).unwrap();
+        let rc = r_df.inner.column(col).unwrap();
+        for row in 0..lc.len() {
+            let ls = &lc.values()[row];
+            let rs = &rc.values()[row];
+            match (ls, rs) {
+                (Scalar::Float64(f1), Scalar::Float64(f2)) => {
+                    if f1.is_nan() && f2.is_nan() {
+                        continue;
+                    }
+                    if check_exact {
+                        if f1 != f2 {
+                            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                                format!("Values differ at column '{col}', row {row}: {f1} != {f2}"),
+                            ));
+                        }
+                    } else {
+                        let diff = (f1 - f2).abs();
+                        if diff > atol + rtol * f2.abs() {
+                            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                                format!(
+                                    "Values differ at column '{col}', row {row}: {f1} != {f2} (diff {diff})"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                (Scalar::Null(_), Scalar::Null(_)) => continue,
+                (a, b) => {
+                    if a != b {
+                        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            format!("Values differ at column '{col}', row {row}: {a:?} != {b:?}"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Assert that two Series are equal.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (left, right, check_dtype=true, check_index_type="equiv", check_series_type=true, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+fn assert_series_equal(
+    _py: Python<'_>,
+    left: &Bound<'_, PyAny>,
+    right: &Bound<'_, PyAny>,
+    check_dtype: bool,
+    check_index_type: &str,
+    check_series_type: bool,
+    check_names: bool,
+    check_exact: bool,
+    rtol: f64,
+    atol: f64,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let _ = (
+        check_dtype,
+        check_index_type,
+        check_series_type,
+        check_names,
+        kwargs,
+    );
+    let l_s = left.extract::<PyRef<'_, PySeries>>()?;
+    let r_s = right.extract::<PyRef<'_, PySeries>>()?;
+
+    if l_s.inner.len() != r_s.inner.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            format!(
+                "Series length mismatch: left {}, right {}",
+                l_s.inner.len(),
+                r_s.inner.len()
+            ),
+        ));
+    }
+    if l_s.inner.index().labels() != r_s.inner.index().labels() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            "Series index labels mismatch",
+        ));
+    }
+    let lc = l_s.inner.column();
+    let rc = r_s.inner.column();
+    for row in 0..lc.len() {
+        let ls = &lc.values()[row];
+        let rs = &rc.values()[row];
+        match (ls, rs) {
+            (Scalar::Float64(f1), Scalar::Float64(f2)) => {
+                if f1.is_nan() && f2.is_nan() {
+                    continue;
+                }
+                if check_exact {
+                    if f1 != f2 {
+                        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            format!("Series values differ at row {row}: {f1} != {f2}"),
+                        ));
+                    }
+                } else {
+                    let diff = (f1 - f2).abs();
+                    if diff > atol + rtol * f2.abs() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            format!(
+                                "Series values differ at row {row}: {f1} != {f2} (diff {diff})"
+                            ),
+                        ));
+                    }
+                }
+            }
+            (Scalar::Null(_), Scalar::Null(_)) => continue,
+            (a, b) => {
+                if a != b {
+                    return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        format!("Series values differ at row {row}: {a:?} != {b:?}"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Assert that two Indexes are equal.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (left, right, exact="equiv", check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+fn assert_index_equal(
+    _py: Python<'_>,
+    left: &Bound<'_, PyAny>,
+    right: &Bound<'_, PyAny>,
+    exact: &str,
+    check_names: bool,
+    check_exact: bool,
+    rtol: f64,
+    atol: f64,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let _ = (exact, check_names, check_exact, rtol, atol, kwargs);
+    let l_idx = left.extract::<PyRef<'_, PyIndex>>()?;
+    let r_idx = right.extract::<PyRef<'_, PyIndex>>()?;
+
+    if l_idx.inner.labels() != r_idx.inner.labels() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            "Index labels mismatch",
+        ));
+    }
+    Ok(())
+}
+
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -18232,10 +20478,21 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySeriesListAccessor>()?;
     m.add_class::<PySeriesStructAccessor>()?;
     m.add_class::<PySparseAccessor>()?;
+    m.add_class::<PyTimestamp>()?;
+    m.add_class::<PyTimedelta>()?;
+    m.add_class::<PyTimedeltaComponents>()?;
+    m.add_class::<PyPeriod>()?;
+    m.add_class::<PyNAType>()?;
+    m.add_class::<PyNaTType>()?;
+    m.add("NA", PyNAType)?;
+    m.add("NaT", PyNaTType)?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(read_json, m)?)?;
     m.add_function(wrap_pyfunction!(read_jsonl, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
+    m.add_function(wrap_pyfunction!(read_sql, m)?)?;
+    m.add_function(wrap_pyfunction!(read_sql_query, m)?)?;
+    m.add_function(wrap_pyfunction!(read_sql_table, m)?)?;
     m.add_function(wrap_pyfunction!(concat, m)?)?;
     m.add_function(wrap_pyfunction!(merge, m)?)?;
     m.add_function(wrap_pyfunction!(melt, m)?)?;
@@ -18254,6 +20511,17 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isnull, m)?)?;
     m.add_function(wrap_pyfunction!(notna, m)?)?;
     m.add_function(wrap_pyfunction!(notnull, m)?)?;
+
+    let testing = PyModule::new(m.py(), "testing")?;
+    testing.add_function(wrap_pyfunction!(assert_frame_equal, &testing)?)?;
+    testing.add_function(wrap_pyfunction!(assert_series_equal, &testing)?)?;
+    testing.add_function(wrap_pyfunction!(assert_index_equal, &testing)?)?;
+    m.add_submodule(&testing)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.testing", &testing)?;
+
     Ok(())
 }
 
@@ -19171,5 +21439,59 @@ mod tests {
         let ewm = py_df1.ewm(Some(0.5), None);
         assert_eq!(ewm.ndim(), 2);
         assert!(ewm.online("numba").is_ok());
+    }
+
+    #[test]
+    fn test_py_temporal_and_scalar_types() {
+        assert_eq!(days_from_ymd(1970, 1, 1), 0);
+        assert_eq!(days_from_ymd(1970, 1, 2), 1);
+        assert_eq!(days_from_ymd(1971, 1, 1), 365);
+        assert_eq!(days_from_ymd(2024, 2, 29), 19782);
+
+        let na = PyNAType;
+        assert_eq!(na.__repr__(), "<NA>");
+
+        let nat = PyNaTType;
+        assert_eq!(nat.__repr__(), "NaT");
+        assert!(nat.__bool__());
+        assert_eq!(nat.value(), i64::MIN);
+
+        // 2024-01-15 12:30:45 UTC
+        let ts_nanos = 1_705_321_845_000_000_000_i64;
+        let ts = PyTimestamp {
+            inner: Timestamp::from_nanos(ts_nanos),
+        };
+        assert_eq!(ts.year(), Some(2024));
+        assert_eq!(ts.month(), Some(1));
+        assert_eq!(ts.day(), Some(15));
+        assert_eq!(ts.hour(), Some(12));
+        assert_eq!(ts.minute(), Some(30));
+        assert_eq!(ts.second(), Some(45));
+        assert_eq!(ts.days_in_month(), Some(31));
+        assert_eq!(ts.is_leap_year(), Some(true));
+        assert_eq!(ts.quarter(), Some(1));
+
+        let td = PyTimedelta {
+            nanos: 90_061_000_000_000_i64, // 1 day, 1 hour, 1 minute, 1 second
+        };
+        assert_eq!(td.days(), 1);
+        assert_eq!(td.seconds(), 3661);
+        let comp = td.components();
+        assert_eq!(comp.days, 1);
+        assert_eq!(comp.hours, 1);
+        assert_eq!(comp.minutes, 1);
+        assert_eq!(comp.seconds, 1);
+
+        let period = PyPeriod {
+            inner: Period {
+                ordinal: 54, // 2024 for Annual
+                freq: PeriodFreq::Annual,
+            },
+        };
+        assert_eq!(period.year(), Some(2024));
+        assert_eq!(period.freqstr(), "Y-DEC");
+
+        let empty = empty_dataframe();
+        assert_eq!(empty.shape(), (0, 0));
     }
 }

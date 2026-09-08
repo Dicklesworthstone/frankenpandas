@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+import sqlite3
 
 try:
     import frankenpandas as fpd
@@ -300,4 +301,287 @@ def test_exception_mapping_differential() -> None:
         _ = s_pd.astype("completely_invalid_dtype_xyz")
     with pytest.raises(TypeError):
         _ = s_fpd.astype("completely_invalid_dtype_xyz")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_scalar_and_na_differential() -> None:
+    # pd.NA vs fpd.NA
+    assert repr(fpd.NA) == repr(pd.NA)
+    assert str(fpd.NA) == str(pd.NA)
+    assert fpd.isna(fpd.NA) is True
+    assert fpd.isnull(fpd.NA) is True
+    assert fpd.notna(fpd.NA) is False
+    assert fpd.notnull(fpd.NA) is False
+    with pytest.raises(TypeError):
+        bool(fpd.NA)
+
+    # pd.NaT vs fpd.NaT
+    assert repr(fpd.NaT) == repr(pd.NaT)
+    assert fpd.isna(fpd.NaT) is True
+    assert fpd.isnull(fpd.NaT) is True
+    assert fpd.notna(fpd.NaT) is False
+    assert fpd.notnull(fpd.NaT) is False
+    assert fpd.NaT.value == pd.NaT.value
+
+    # Array of NA / NaT
+    s_pd = pd.Series([1, pd.NA, 3])
+    s_fpd = fpd.Series([1, fpd.NA, 3])
+    assert list(s_fpd.isna()) == list(s_pd.isna())
+    assert list(s_fpd.notna()) == list(s_pd.notna())
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_timestamp_differential() -> None:
+    iso = "2024-03-15 14:30:45"
+    ts_pd = pd.Timestamp(iso)
+    ts_fpd = fpd.Timestamp(iso)
+
+    assert ts_fpd.year == ts_pd.year == 2024
+    assert ts_fpd.month == ts_pd.month == 3
+    assert ts_fpd.day == ts_pd.day == 15
+    assert ts_fpd.hour == ts_pd.hour == 14
+    assert ts_fpd.minute == ts_pd.minute == 30
+    assert ts_fpd.second == ts_pd.second == 45
+    assert ts_fpd.quarter == ts_pd.quarter == 1
+    assert ts_fpd.day_of_week == ts_pd.day_of_week
+    assert ts_fpd.day_name() == ts_pd.day_name() == "Friday"
+    assert ts_fpd.month_name() == ts_pd.month_name() == "March"
+    assert ts_fpd.days_in_month == ts_pd.days_in_month == 31
+    assert ts_fpd.is_leap_year == ts_pd.is_leap_year is True
+    assert ts_fpd.isoformat() == ts_pd.isoformat()
+
+    # kwargs constructor
+    ts_kw_pd = pd.Timestamp(year=2024, month=7, day=4, hour=12, minute=0, second=0)
+    ts_kw_fpd = fpd.Timestamp(year=2024, month=7, day=4, hour=12, minute=0, second=0)
+    assert ts_kw_fpd.month == ts_kw_pd.month == 7
+    assert ts_kw_fpd.day == ts_kw_pd.day == 4
+
+    # Arithmetic with Timedelta
+    td_pd = pd.Timedelta(days=2, hours=3)
+    td_fpd = fpd.Timedelta(days=2, hours=3)
+    add_pd = ts_pd + td_pd
+    add_fpd = ts_fpd + td_fpd
+    assert add_fpd.day == add_pd.day
+    assert add_fpd.hour == add_pd.hour
+
+    sub_pd = ts_pd - td_pd
+    sub_fpd = ts_fpd - td_fpd
+    assert sub_fpd.day == sub_pd.day
+    assert sub_fpd.hour == sub_pd.hour
+
+    # Diff between timestamps
+    diff_pd = add_pd - ts_pd
+    diff_fpd = add_fpd - ts_fpd
+    assert diff_fpd.total_seconds() == diff_pd.total_seconds()
+
+    # Comparison
+    assert (ts_fpd < add_fpd) == (ts_pd < add_pd) is True
+    assert (ts_fpd == ts_fpd) == (ts_pd == ts_pd) is True
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_timedelta_differential() -> None:
+    td_pd = pd.Timedelta(days=3, hours=5, minutes=12, seconds=42)
+    td_fpd = fpd.Timedelta(days=3, hours=5, minutes=12, seconds=42)
+
+    assert td_fpd.days == td_pd.days == 3
+    assert td_fpd.seconds == td_pd.seconds
+    assert td_fpd.total_seconds() == td_pd.total_seconds()
+
+    comp_pd = td_pd.components
+    comp_fpd = td_fpd.components
+    assert comp_fpd.days == comp_pd.days == 3
+    assert comp_fpd.hours == comp_pd.hours == 5
+    assert comp_fpd.minutes == comp_pd.minutes == 12
+    assert comp_fpd.seconds == comp_pd.seconds == 42
+
+    # Arithmetic
+    td2_pd = pd.Timedelta(days=1, hours=2)
+    td2_fpd = fpd.Timedelta(days=1, hours=2)
+    assert (td_fpd + td2_fpd).total_seconds() == (td_pd + td2_pd).total_seconds()
+    assert (td_fpd - td2_fpd).total_seconds() == (td_pd - td2_pd).total_seconds()
+    assert (td_fpd * 2).total_seconds() == (td_pd * 2).total_seconds()
+    assert (td_fpd / 2).total_seconds() == (td_pd / 2).total_seconds()
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_period_differential() -> None:
+    p_pd = pd.Period("2024-03", "M")
+    p_fpd = fpd.Period("2024-03", "M")
+
+    assert p_fpd.year == p_pd.year == 2024
+    assert p_fpd.month == p_pd.month == 3
+    assert p_fpd.quarter == p_pd.quarter == 1
+    assert p_fpd.ordinal == p_pd.ordinal
+    assert p_fpd.freqstr == p_pd.freqstr == "M"
+
+    # asfreq conversion
+    p_d_pd = p_pd.asfreq("D", "end")
+    p_d_fpd = p_fpd.asfreq("D", "end")
+    assert p_d_fpd.day == p_d_pd.day == 31
+
+    p_ds_pd = p_pd.asfreq("D", "start")
+    p_ds_fpd = p_fpd.asfreq("D", "start")
+    assert p_ds_fpd.day == p_ds_pd.day == 1
+
+    # Arithmetic
+    p_next_pd = p_pd + 1
+    p_next_fpd = p_fpd + 1
+    assert p_next_fpd.month == p_next_pd.month == 4
+
+    p_prev_pd = p_pd - 2
+    p_prev_fpd = p_fpd - 2
+    assert p_prev_fpd.month == p_prev_pd.month == 1
+
+    assert (p_next_fpd - p_fpd) == (p_next_pd - p_pd).n == 1
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_flexible_series_constructors_differential() -> None:
+    # Empty
+    s_empty_pd = pd.Series()
+    s_empty_fpd = fpd.Series()
+    assert len(s_empty_fpd) == len(s_empty_pd) == 0
+
+    # From dict
+    d = {"apple": 5, "banana": 12, "cherry": 7}
+    s_dict_pd = pd.Series(d)
+    s_dict_fpd = fpd.Series(d)
+    assert len(s_dict_fpd) == len(s_dict_pd) == 3
+    assert list(s_dict_fpd.index) == list(s_dict_pd.index)
+    assert list(s_dict_fpd.values) == list(s_dict_pd.values)
+
+    # From dict with specific index
+    idx = ["cherry", "apple", "banana"]
+    s_reidx_pd = pd.Series(d, index=idx)
+    s_reidx_fpd = fpd.Series(d, index=idx)
+    assert list(s_reidx_fpd.index) == list(s_reidx_pd.index)
+    assert list(s_reidx_fpd.values) == list(s_reidx_pd.values)
+
+    # Scalar broadcast
+    s_broad_pd = pd.Series(99, index=["x", "y", "z"])
+    s_broad_fpd = fpd.Series(99, index=["x", "y", "z"])
+    assert list(s_broad_fpd.index) == list(s_broad_pd.index)
+    assert list(s_broad_fpd.values) == list(s_broad_pd.values)
+
+    # From another Series
+    s_copy_pd = pd.Series(s_dict_pd)
+    s_copy_fpd = fpd.Series(s_dict_fpd)
+    assert list(s_copy_fpd.values) == list(s_copy_pd.values)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_flexible_dataframe_constructors_differential() -> None:
+    # Empty
+    df_empty_pd = pd.DataFrame()
+    df_empty_fpd = fpd.DataFrame()
+    assert df_empty_fpd.shape == df_empty_pd.shape == (0, 0)
+
+    # Dict of lists
+    data_dict = {"a": [1, 2, 3], "b": ["x", "y", "z"]}
+    df_dict_pd = pd.DataFrame(data_dict)
+    df_dict_fpd = fpd.DataFrame(data_dict)
+    assert df_dict_fpd.shape == df_dict_pd.shape == (3, 2)
+    assert list(df_dict_fpd.columns) == list(df_dict_pd.columns)
+
+    # Records (list of dicts)
+    records = [{"col1": 10, "col2": 20.5}, {"col1": 30, "col2": 40.5}]
+    df_recs_pd = pd.DataFrame(records)
+    df_recs_fpd = fpd.DataFrame(records)
+    assert df_recs_fpd.shape == df_recs_pd.shape == (2, 2)
+    assert list(df_recs_fpd.columns) == list(df_recs_pd.columns)
+
+    # 2D list of lists
+    matrix = [[1, 2], [3, 4], [5, 6]]
+    df_mat_pd = pd.DataFrame(matrix, columns=["c1", "c2"], index=["r1", "r2", "r3"])
+    df_mat_fpd = fpd.DataFrame(matrix, columns=["c1", "c2"], index=["r1", "r2", "r3"])
+    assert df_mat_fpd.shape == df_mat_pd.shape == (3, 2)
+    assert list(df_mat_fpd.columns) == list(df_mat_pd.columns)
+    assert list(df_mat_fpd.index) == list(df_mat_pd.index)
+
+    # Dict of Series with index alignment
+    s1_pd = pd.Series([10, 20], index=["a", "b"])
+    s2_pd = pd.Series([30, 40], index=["b", "c"])
+    s1_fpd = fpd.Series([10, 20], index=["a", "b"])
+    s2_fpd = fpd.Series([30, 40], index=["b", "c"])
+    df_s_pd = pd.DataFrame({"s1": s1_pd, "s2": s2_pd})
+    df_s_fpd = fpd.DataFrame({"s1": s1_fpd, "s2": s2_fpd})
+    assert df_s_fpd.shape == df_s_pd.shape == (3, 2)
+
+    # Scalar broadcast
+    df_sb_pd = pd.DataFrame(0, index=["i1", "i2"], columns=["c1", "c2"])
+    df_sb_fpd = fpd.DataFrame(0, index=["i1", "i2"], columns=["c1", "c2"])
+    assert df_sb_fpd.shape == df_sb_pd.shape == (2, 2)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_sqlite_io_differential() -> None:
+    conn = sqlite3.connect(":memory:")
+
+    df_pd = pd.DataFrame({"id": [1, 2, 3], "val": [10.5, 20.0, 31.5]})
+    df_fpd = fpd.DataFrame({"id": [1, 2, 3], "val": [10.5, 20.0, 31.5]})
+
+    # to_sql index=False
+    df_fpd.to_sql("data_table", conn, index=False)
+
+    # read_sql
+    read_pd = pd.read_sql("SELECT * FROM data_table", conn)
+    read_fpd = fpd.read_sql("SELECT * FROM data_table", conn)
+    assert read_fpd.shape == read_pd.shape == (3, 2)
+    assert list(read_fpd.columns) == list(read_pd.columns) == ["id", "val"]
+
+    # read_sql_query
+    q_pd = pd.read_sql_query("SELECT id FROM data_table WHERE val > 15.0", conn)
+    q_fpd = fpd.read_sql_query("SELECT id FROM data_table WHERE val > 15.0", conn)
+    assert q_fpd.shape == q_pd.shape == (2, 1)
+
+    # read_sql_table
+    t_fpd = fpd.read_sql_table("data_table", conn)
+    assert t_fpd.shape == (3, 2)
+
+    # to_sql append
+    df_append = fpd.DataFrame({"id": [4], "val": [42.0]})
+    df_append.to_sql("data_table", conn, if_exists="append", index=False)
+    read_appended = fpd.read_sql("SELECT * FROM data_table", conn)
+    assert read_appended.shape == (4, 2)
+
+    # to_sql with index=True
+    df_fpd.to_sql("indexed_table", conn, index=True, index_label="row_idx")
+    read_idx = fpd.read_sql("SELECT * FROM indexed_table", conn)
+    assert "row_idx" in list(read_idx.columns)
+
+    # Series to_sql
+    s = fpd.Series([100, 200], name="metric")
+    s.to_sql("series_table", conn, index=False)
+    s_read = fpd.read_sql("SELECT * FROM series_table", conn)
+    assert s_read.shape == (2, 1)
+    assert list(s_read.columns) == ["metric"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_testing_assertions_differential() -> None:
+    df1 = fpd.DataFrame({"a": [1, 2], "b": [3.0, 4.0]})
+    df2 = fpd.DataFrame({"a": [1, 2], "b": [3.0, 4.0]})
+    df3 = fpd.DataFrame({"a": [1, 2], "b": [3.0, 5.0]})
+
+    fpd.testing.assert_frame_equal(df1, df2)
+    with pytest.raises(AssertionError):
+        fpd.testing.assert_frame_equal(df1, df3)
+
+    s1 = fpd.Series([10, 20], name="x")
+    s2 = fpd.Series([10, 20], name="x")
+    s3 = fpd.Series([10, 30], name="x")
+
+    fpd.testing.assert_series_equal(s1, s2)
+    with pytest.raises(AssertionError):
+        fpd.testing.assert_series_equal(s1, s3)
+
+    idx1 = fpd.Index(["a", "b", "c"])
+    idx2 = fpd.Index(["a", "b", "c"])
+    idx3 = fpd.Index(["a", "b", "d"])
+
+    fpd.testing.assert_index_equal(idx1, idx2)
+    with pytest.raises(AssertionError):
+        fpd.testing.assert_index_equal(idx1, idx3)
+
 
