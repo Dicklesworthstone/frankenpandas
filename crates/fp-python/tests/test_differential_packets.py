@@ -712,4 +712,251 @@ def test_top_level_missing_functions_differential() -> None:
         assert [str(x) for x in jn_fpd[col].values] == [str(x) for x in jn_pd[col].values]
 
 
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_extension_dtypes_differential() -> None:
+    # 18 extension dtypes
+    dtypes = [
+        ("BooleanDtype", {}),
+        ("Int8Dtype", {}),
+        ("Int16Dtype", {}),
+        ("Int32Dtype", {}),
+        ("Int64Dtype", {}),
+        ("UInt8Dtype", {}),
+        ("UInt16Dtype", {}),
+        ("UInt32Dtype", {}),
+        ("UInt64Dtype", {}),
+        ("Float32Dtype", {}),
+        ("Float64Dtype", {}),
+        ("StringDtype", {}),
+        ("CategoricalDtype", {}),
+        ("DatetimeTZDtype", {"unit": "ns", "tz": "UTC"}),
+        ("PeriodDtype", {"freq": "D"}),
+        ("IntervalDtype", {"subtype": "float64", "closed": "right"}),
+    ]
+
+    for dt_name, kwargs in dtypes:
+        assert hasattr(fpd, dt_name), f"fpd missing {dt_name}"
+        assert hasattr(pd, dt_name), f"pd missing {dt_name}"
+        fp_cls = getattr(fpd, dt_name)
+        pd_cls = getattr(pd, dt_name)
+        fp_inst = fp_cls(**kwargs)
+        pd_inst = pd_cls(**kwargs)
+        assert fp_inst.name == pd_inst.name, f"{dt_name} name mismatch: {fp_inst.name} vs {pd_inst.name}"
+        assert fp_inst.kind == pd_inst.kind, f"{dt_name} kind mismatch: {fp_inst.kind} vs {pd_inst.kind}"
+        assert str(fp_inst) == str(pd_inst)
+        assert repr(fp_inst) == repr(pd_inst)
+        assert fp_inst == fp_cls(**kwargs)
+
+    # SparseDtype
+    assert hasattr(fpd, "SparseDtype")
+    assert hasattr(pd, "SparseDtype")
+    fp_sp = fpd.SparseDtype("float64", fill_value=0.0)
+    pd_sp = pd.SparseDtype("float64", fill_value=0.0)
+    assert fp_sp.name == pd_sp.name
+    assert fp_sp.kind == pd_sp.kind
+    assert fp_sp == fpd.SparseDtype("float64", fill_value=0.0)
+
+    # ArrowDtype
+    assert hasattr(fpd, "ArrowDtype")
+    assert hasattr(pd, "ArrowDtype")
+    fp_arr = fpd.ArrowDtype("int64")
+    pd_arr = pd.ArrowDtype(pa.int64()) if "pa" in globals() else None
+    assert fp_arr.name == "int64[pyarrow]"
+    assert fp_arr.kind == "i"
+
+    # Type checkers
+    assert fpd.api.types.is_extension_array_dtype(fpd.Int64Dtype()) is True
+    assert fpd.api.types.is_extension_array_dtype(fpd.BooleanDtype()) is True
+    assert fpd.api.types.is_categorical_dtype(fpd.CategoricalDtype()) is True
+    assert fpd.api.types.is_interval_dtype(fpd.IntervalDtype()) is True
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_options_system_differential() -> None:
+    # dot access
+    assert hasattr(fpd, "options")
+    default_max_rows = fpd.options.display.max_rows
+    assert isinstance(default_max_rows, int)
+
+    # set via dot access
+    fpd.options.display.max_rows = 42
+    assert fpd.options.display.max_rows == 42
+    assert fpd.get_option("display.max_rows") == 42
+
+    # reset
+    fpd.reset_option("display.max_rows")
+    assert fpd.options.display.max_rows == default_max_rows
+
+    # dict access
+    fpd.options["display.max_columns"] = 55
+    assert fpd.options["display.max_columns"] == 55
+    assert fpd.get_option("display.max_columns") == 55
+    fpd.reset_option("display.max_columns")
+
+    # get_option / set_option
+    fpd.set_option("mode.sim_interactive", True)
+    assert fpd.get_option("mode.sim_interactive") is True
+    fpd.reset_option("mode.sim_interactive")
+    assert fpd.get_option("mode.sim_interactive") is False
+
+    # describe_option
+    desc = fpd.describe_option("display.max_rows", _print_desc=False)
+    assert isinstance(desc, str)
+    assert "display.max_rows" in desc
+
+    # option_context
+    with fpd.option_context("display.max_rows", 999):
+        assert fpd.get_option("display.max_rows") == 999
+        assert fpd.options.display.max_rows == 999
+    assert fpd.get_option("display.max_rows") == default_max_rows
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_pickle_differential(tmp_path: Path) -> None:
+    # Series pickle
+    s_orig = fpd.Series([10, 20, 30], name="test_s")
+    pkl_path = tmp_path / "series.pkl"
+    fpd.to_pickle(s_orig, str(pkl_path))
+    s_loaded = fpd.read_pickle(str(pkl_path))
+    assert list(s_loaded.values) == [10, 20, 30]
+    assert s_loaded.name == "test_s"
+
+    # Series.to_pickle
+    pkl_path2 = tmp_path / "series2.pkl"
+    s_orig.to_pickle(str(pkl_path2))
+    s_loaded2 = fpd.read_pickle(str(pkl_path2))
+    assert list(s_loaded2.values) == [10, 20, 30]
+
+    # DataFrame pickle
+    df_orig = fpd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+    df_pkl_path = tmp_path / "df.pkl"
+    fpd.to_pickle(df_orig, str(df_pkl_path))
+    df_loaded = fpd.read_pickle(str(df_pkl_path))
+    assert list(df_loaded.columns) == ["a", "b"]
+    assert [int(x) for x in df_loaded["a"].values] == [1, 2, 3]
+    assert [str(x) for x in df_loaded["b"].values] == ["x", "y", "z"]
+
+    # DataFrame.to_pickle
+    df_pkl_path2 = tmp_path / "df2.pkl"
+    df_orig.to_pickle(str(df_pkl_path2))
+    df_loaded2 = fpd.read_pickle(str(df_pkl_path2))
+    assert list(df_loaded2.columns) == ["a", "b"]
+
+    # Index pickle
+    idx_orig = fpd.Index([100, 200, 300], name="test_idx")
+    idx_pkl_path = tmp_path / "idx.pkl"
+    fpd.to_pickle(idx_orig, str(idx_pkl_path))
+    idx_loaded = fpd.read_pickle(str(idx_pkl_path))
+    assert list(idx_loaded) == [100, 200, 300]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_milestone_i_types_and_functions_differential(tmp_path: Path) -> None:
+    # read_table
+    tsv_file = tmp_path / "test.tsv"
+    tsv_file.write_text("colA\tcolB\n1\t2\n3\t4\n")
+    df_pd = pd.read_table(str(tsv_file))
+    df_fpd = fpd.read_table(str(tsv_file))
+    assert list(df_fpd.columns) == list(df_pd.columns)
+    assert [int(x) for x in df_fpd["colA"].values] == [int(x) for x in df_pd["colA"].values]
+    assert [int(x) for x in df_fpd["colB"].values] == [int(x) for x in df_pd["colB"].values]
+
+    # from_dummies
+    df_dummies = pd.DataFrame({"prefix_a": [1, 0, 1], "prefix_b": [0, 1, 0]})
+    df_dummies_fpd = fpd.DataFrame({"prefix_a": [1, 0, 1], "prefix_b": [0, 1, 0]})
+    rec_pd = pd.from_dummies(df_dummies, sep="_")
+    rec_fpd = fpd.from_dummies(df_dummies_fpd, sep="_")
+    assert list(rec_fpd.columns) == list(rec_pd.columns)
+    assert list(rec_fpd["prefix"].values) == list(rec_pd["prefix"].values)
+
+    # eval
+    assert fpd.eval("1 + 2 * 3") == pd.eval("1 + 2 * 3")
+    assert fpd.eval("x + y", local_dict={"x": 10, "y": 25}) == pd.eval("x + y", local_dict={"x": 10, "y": 25})
+
+    # array
+    arr_pd = pd.array([1, 2, 3])
+    arr_fpd = fpd.array([1, 2, 3])
+    assert len(arr_fpd) == len(arr_pd)
+    assert list(arr_fpd) == list(arr_pd)
+
+    # show_versions
+    import io
+    from contextlib import redirect_stdout
+    f = io.StringIO()
+    with redirect_stdout(f):
+        fpd.show_versions(as_json=True)
+    out = f.getvalue()
+    assert "frankenpandas" in out and "system" in out
+
+    # test
+    assert callable(fpd.test)
+
+    # IndexSlice
+    assert fpd.IndexSlice[0:5] == pd.IndexSlice[0:5]
+
+    # NamedAgg
+    na_pd = pd.NamedAgg(column="val", aggfunc="sum")
+    na_fpd = fpd.NamedAgg(column="val", aggfunc="sum")
+    assert na_fpd.column == na_pd.column
+    assert na_fpd.aggfunc == na_pd.aggfunc
+
+    # Grouper
+    g_pd = pd.Grouper(key="k", freq="D")
+    g_fpd = fpd.Grouper(key="k", freq="D")
+    assert g_fpd.key == g_pd.key
+    assert g_fpd.freq == g_pd.freq
+
+    # Interval & IntervalIndex
+    iv_pd = pd.Interval(1.0, 4.0, closed="right")
+    iv_fpd = fpd.Interval(1.0, 4.0, closed="right")
+    assert iv_fpd.left == iv_pd.left
+    assert iv_fpd.right == iv_pd.right
+    assert iv_fpd.closed == iv_pd.closed
+    assert iv_fpd.mid == iv_pd.mid
+    assert iv_fpd.length == iv_pd.length
+    assert 1.0 not in iv_fpd and 1.0 not in iv_pd
+    assert 4.0 in iv_fpd and 4.0 in iv_pd
+    assert 2.5 in iv_fpd and 2.5 in iv_pd
+
+    ii_pd = pd.IntervalIndex.from_breaks([0, 1, 2, 3])
+    ii_fpd = fpd.IntervalIndex.from_breaks([0, 1, 2, 3])
+    assert len(ii_fpd) == len(ii_pd)
+    assert list(ii_fpd.left) == list(ii_pd.left)
+    assert list(ii_fpd.right) == list(ii_pd.right)
+
+    ir_pd = pd.interval_range(start=0, end=4, periods=4)
+    ir_fpd = fpd.interval_range(start=0, end=4, periods=4)
+    assert len(ir_fpd) == len(ir_pd)
+    assert list(ir_fpd.left) == list(ir_pd.left)
+    assert list(ir_fpd.right) == list(ir_pd.right)
+
+    # Categorical
+    c_pd = pd.Categorical(["a", "b", "c", "a"])
+    c_fpd = fpd.Categorical(["a", "b", "c", "a"])
+    assert list(c_fpd.codes) == list(c_pd.codes)
+    assert list(c_fpd.categories) == list(c_pd.categories)
+    assert c_fpd.ordered == c_pd.ordered
+
+    # DateOffset & offsets
+    do_pd = pd.DateOffset(days=3)
+    do_fpd = fpd.DateOffset(days=3)
+    ts_pd = pd.Timestamp("2024-01-01")
+    ts_fpd = fpd.Timestamp("2024-01-01")
+    assert str(ts_fpd + do_fpd)[:10] == str(ts_pd + do_pd)[:10]
+    assert str(ts_fpd - do_fpd)[:10] == str(ts_pd - do_pd)[:10]
+
+    d_pd = pd.offsets.Day(2)
+    d_fpd = fpd.offsets.Day(2)
+    assert str(ts_fpd + d_fpd)[:10] == str(ts_pd + d_pd)[:10]
+
+    assert hasattr(fpd.offsets, "Hour")
+    assert hasattr(fpd.offsets, "Minute")
+    assert hasattr(fpd.offsets, "Second")
+    assert hasattr(fpd.offsets, "Week")
+    assert hasattr(fpd.offsets, "MonthEnd")
+    assert hasattr(fpd.offsets, "YearEnd")
+    assert fpd.tseries.offsets.Day is fpd.offsets.Day
+
+
+
 

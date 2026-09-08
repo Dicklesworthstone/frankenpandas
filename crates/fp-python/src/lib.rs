@@ -16,7 +16,10 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{LazyLock, Mutex},
+};
 
 use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
@@ -959,9 +962,12 @@ impl PyTimestamp {
         if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
             let res = self.inner.add_timedelta(td.nanos);
             PyTimestamp { inner: res }.into_py_any(py)
+        } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
+            let res = self.inner.add_timedelta(offset.nanos());
+            PyTimestamp { inner: res }.into_py_any(py)
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Can only add Timedelta to Timestamp",
+                "Can only add Timedelta or DateOffset to Timestamp",
             ))
         }
     }
@@ -970,12 +976,15 @@ impl PyTimestamp {
         if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
             let res = self.inner.sub_timedelta(td.nanos);
             PyTimestamp { inner: res }.into_py_any(py)
+        } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
+            let res = self.inner.sub_timedelta(offset.nanos());
+            PyTimestamp { inner: res }.into_py_any(py)
         } else if let Ok(other_ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
             let diff_nanos = self.inner.sub_timestamp(&other_ts.inner);
             PyTimedelta { nanos: diff_nanos }.into_py_any(py)
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Can only subtract Timestamp or Timedelta from Timestamp",
+                "Can only subtract Timestamp, Timedelta, or DateOffset from Timestamp",
             ))
         }
     }
@@ -1833,7 +1842,7 @@ impl PyIndexStringMethods {
 }
 
 /// Python wrapper for FrankenPandas Index.
-#[pyclass(name = "Index", from_py_object)]
+#[pyclass(name = "Index", module = "frankenpandas", from_py_object)]
 #[derive(Clone)]
 pub struct PyIndex {
     pub(crate) inner: Index,
@@ -1925,6 +1934,23 @@ impl PyIndex {
             None => String::new(),
         };
         format!("Index([{}]{name_str})", labels_str.join(", "))
+    }
+
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let constructor = py.get_type::<PyIndex>().into_any();
+        let idx_labels: Vec<Py<PyAny>> = self
+            .inner
+            .labels()
+            .iter()
+            .map(|lbl| index_label_to_py(py, lbl))
+            .collect::<PyResult<Vec<_>>>()?;
+        let idx_list = PyList::new(py, &idx_labels)?;
+        let name = self.inner.name().into_bound_py_any(py)?;
+        let args = PyTuple::new(py, [idx_list.as_any(), &name])?;
+        Ok((constructor, args))
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -9071,7 +9097,7 @@ impl PyCategoricalIndex {
 }
 
 /// Python wrapper for FrankenPandas Series.
-#[pyclass(name = "Series", from_py_object)]
+#[pyclass(name = "Series", module = "frankenpandas", from_py_object)]
 #[derive(Clone)]
 pub struct PySeries {
     inner: Series,
@@ -9425,6 +9451,32 @@ impl PySeries {
     /// Return a string representation (renders values, like pandas).
     fn __repr__(&self) -> String {
         format!("{}", self.inner)
+    }
+
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let constructor = py.get_type::<PySeries>().into_any();
+        let vals: Vec<Py<PyAny>> = self
+            .inner
+            .column()
+            .values()
+            .iter()
+            .map(|s| scalar_to_py(py, s))
+            .collect::<PyResult<Vec<_>>>()?;
+        let vals_list = PyList::new(py, &vals)?;
+        let idx_labels: Vec<Py<PyAny>> = self
+            .inner
+            .index()
+            .labels()
+            .iter()
+            .map(|lbl| index_label_to_py(py, lbl))
+            .collect::<PyResult<Vec<_>>>()?;
+        let idx_list = PyList::new(py, &idx_labels)?;
+        let name = self.name().into_bound_py_any(py)?;
+        let args = PyTuple::new(py, [vals_list.as_any(), idx_list.as_any(), &name])?;
+        Ok((constructor, args))
     }
 
     /// Purely integer-location based indexing for selection by position.
@@ -11305,16 +11357,11 @@ impl PySeries {
     fn to_pickle(
         &self,
         py: Python<'_>,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let _ = kwargs;
-        let pickle = py.import("pickle")?;
-        let bytes = pickle.call_method1("dumps", (self.clone(),))?;
-        let raw = bytes.extract::<Vec<u8>>()?;
-        std::fs::write(path, raw)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-        Ok(())
+        to_pickle(py, &self.clone().into_bound_py_any(py)?, path, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -11581,7 +11628,7 @@ impl PySeriesAt {
 }
 
 /// Python wrapper for FrankenPandas DataFrame.
-#[pyclass(name = "DataFrame", from_py_object)]
+#[pyclass(name = "DataFrame", module = "frankenpandas", from_py_object)]
 #[derive(Clone)]
 pub struct PyDataFrame {
     inner: DataFrame,
@@ -12074,6 +12121,36 @@ impl PyDataFrame {
     /// the underlying Display truncates to 60 rows).
     fn __repr__(&self) -> String {
         format!("{}", self.inner)
+    }
+
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let constructor = py.get_type::<PyDataFrame>().into_any();
+        let dict = PyDict::new(py);
+        let col_names = self.columns();
+        for col_name in &col_names {
+            if let Some(col) = self.inner.column(col_name) {
+                let vals: Vec<Py<PyAny>> = col
+                    .values()
+                    .iter()
+                    .map(|s| scalar_to_py(py, s))
+                    .collect::<PyResult<Vec<_>>>()?;
+                dict.set_item(col_name, PyList::new(py, &vals)?)?;
+            }
+        }
+        let idx_labels: Vec<Py<PyAny>> = self
+            .inner
+            .index()
+            .labels()
+            .iter()
+            .map(|lbl| index_label_to_py(py, lbl))
+            .collect::<PyResult<Vec<_>>>()?;
+        let idx_list = PyList::new(py, &idx_labels)?;
+        let cols_list = PyList::new(py, &col_names)?;
+        let args = PyTuple::new(py, [dict.as_any(), idx_list.as_any(), cols_list.as_any()])?;
+        Ok((constructor, args))
     }
 
     /// Return the first n rows.
@@ -14659,16 +14736,11 @@ impl PyDataFrame {
     fn to_pickle(
         &self,
         py: Python<'_>,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let _ = kwargs;
-        let pickle = py.import("pickle")?;
-        let bytes = pickle.call_method1("dumps", (self.clone(),))?;
-        let raw = bytes.extract::<Vec<u8>>()?;
-        std::fs::write(path, raw)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-        Ok(())
+        to_pickle(py, &self.clone().into_bound_py_any(py)?, path, None)
     }
 
     #[pyo3(signature = (index=true, **kwargs))]
@@ -20662,6 +20734,16 @@ fn is_categorical_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<String>() {
         return s == "category" || s == "categorical";
     }
+    if let Ok(name) = obj.getattr("name")
+        && let Ok(s) = name.extract::<String>()
+    {
+        return s == "category" || s == "categorical";
+    }
+    if let Ok(name) = obj.getattr("__name__")
+        && let Ok(s) = name.extract::<String>()
+    {
+        return s == "CategoricalDtype" || s == "Categorical";
+    }
     false
 }
 
@@ -20842,11 +20924,30 @@ fn api_is_interval_dtype(dtype: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = dtype.extract::<String>() {
         return s.starts_with("interval") || s.starts_with("Interval");
     }
+    if let Ok(name) = dtype.getattr("name")
+        && let Ok(s) = name.extract::<String>()
+    {
+        return s.starts_with("interval") || s.starts_with("Interval");
+    }
+    if let Ok(name) = dtype.getattr("__name__")
+        && let Ok(s) = name.extract::<String>()
+    {
+        return s.starts_with("Interval");
+    }
     false
 }
 
 #[pyfunction(name = "is_extension_array_dtype")]
-fn api_is_extension_array_dtype(_dtype: &Bound<'_, PyAny>) -> bool {
+fn api_is_extension_array_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    if dtype.hasattr("kind").unwrap_or(false) && dtype.hasattr("name").unwrap_or(false) {
+        return true;
+    }
+    if let Ok(name) = dtype.getattr("__name__")
+        && let Ok(s) = name.extract::<String>()
+        && s.ends_with("Dtype")
+    {
+        return true;
+    }
     false
 }
 
@@ -21413,6 +21514,1751 @@ fn json_normalize(
     Ok(PyDataFrame { inner: df })
 }
 
+// ============================================================================
+// MILESTONE I: Extension Dtypes, Options System, Interval, Serialization
+// ============================================================================
+
+macro_rules! define_simple_dtype {
+    ($struct_name:ident, $class_name:literal, $dtype_name:literal, $kind:literal) => {
+        #[pyclass(name = $class_name, from_py_object)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub struct $struct_name;
+
+        #[pymethods]
+        impl $struct_name {
+            #[new]
+            fn new() -> Self {
+                Self
+            }
+
+            #[getter]
+            fn name(&self) -> &'static str {
+                $dtype_name
+            }
+
+            #[getter]
+            fn kind(&self) -> &'static str {
+                $kind
+            }
+
+            fn __repr__(&self) -> String {
+                if $dtype_name == "boolean" {
+                    "BooleanDtype".to_string()
+                } else if $dtype_name == "string" {
+                    "string[python]".to_string()
+                } else {
+                    format!("{}()", $class_name)
+                }
+            }
+
+            fn __str__(&self) -> &'static str {
+                $dtype_name
+            }
+
+            fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+                if let Ok(other_self) = other.extract::<Self>() {
+                    return *self == other_self;
+                }
+                if let Ok(s) = other.extract::<String>() {
+                    return s == $dtype_name || s.to_lowercase() == $dtype_name.to_lowercase();
+                }
+                false
+            }
+        }
+    };
+}
+
+define_simple_dtype!(PyBooleanDtype, "BooleanDtype", "boolean", "b");
+define_simple_dtype!(PyInt8Dtype, "Int8Dtype", "Int8", "i");
+define_simple_dtype!(PyInt16Dtype, "Int16Dtype", "Int16", "i");
+define_simple_dtype!(PyInt32Dtype, "Int32Dtype", "Int32", "i");
+define_simple_dtype!(PyInt64Dtype, "Int64Dtype", "Int64", "i");
+define_simple_dtype!(PyUInt8Dtype, "UInt8Dtype", "UInt8", "u");
+define_simple_dtype!(PyUInt16Dtype, "UInt16Dtype", "UInt16", "u");
+define_simple_dtype!(PyUInt32Dtype, "UInt32Dtype", "UInt32", "u");
+define_simple_dtype!(PyUInt64Dtype, "UInt64Dtype", "UInt64", "u");
+define_simple_dtype!(PyFloat32Dtype, "Float32Dtype", "Float32", "f");
+define_simple_dtype!(PyFloat64Dtype, "Float64Dtype", "Float64", "f");
+define_simple_dtype!(PyStringDtype, "StringDtype", "string", "O");
+
+#[pyclass(name = "CategoricalDtype", from_py_object)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PyCategoricalDtype {
+    #[pyo3(get)]
+    pub categories: Option<Vec<String>>,
+    #[pyo3(get)]
+    pub ordered: bool,
+}
+
+#[pymethods]
+impl PyCategoricalDtype {
+    #[new]
+    #[pyo3(signature = (categories=None, ordered=false))]
+    fn new(categories: Option<Vec<String>>, ordered: Option<bool>) -> Self {
+        Self {
+            categories,
+            ordered: ordered.unwrap_or(false),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> &'static str {
+        "category"
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        "O"
+    }
+
+    fn __repr__(&self) -> String {
+        let ord_str = if self.ordered { "True" } else { "False" };
+        match &self.categories {
+            Some(cats) => format!(
+                "CategoricalDtype(categories={:?}, ordered={}, categories_dtype=object)",
+                cats, ord_str
+            ),
+            None => format!(
+                "CategoricalDtype(categories=None, ordered={}, categories_dtype=None)",
+                ord_str
+            ),
+        }
+    }
+
+    fn __str__(&self) -> &'static str {
+        "category"
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other_cat) = other.extract::<Self>() {
+            return *self == other_cat;
+        }
+        if let Ok(s) = other.extract::<String>() {
+            return s == "category";
+        }
+        false
+    }
+}
+
+#[pyclass(name = "DatetimeTZDtype", from_py_object)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PyDatetimeTZDtype {
+    #[pyo3(get)]
+    pub unit: String,
+    #[pyo3(get)]
+    pub tz: String,
+}
+
+#[pymethods]
+impl PyDatetimeTZDtype {
+    #[new]
+    #[pyo3(signature = (unit="ns", tz="UTC"))]
+    fn new(unit: Option<&str>, tz: Option<&str>) -> Self {
+        Self {
+            unit: unit.unwrap_or("ns").to_string(),
+            tz: tz.unwrap_or("UTC").to_string(),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        format!("datetime64[{}, {}]", self.unit, self.tz)
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        "M"
+    }
+
+    fn __repr__(&self) -> String {
+        format!("datetime64[{}, {}]", self.unit, self.tz)
+    }
+
+    fn __str__(&self) -> String {
+        self.name()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other_dt) = other.extract::<Self>() {
+            return *self == other_dt;
+        }
+        if let Ok(s) = other.extract::<String>() {
+            return s == self.name();
+        }
+        false
+    }
+}
+
+#[pyclass(name = "PeriodDtype", from_py_object)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PyPeriodDtype {
+    #[pyo3(get)]
+    pub freq: String,
+}
+
+#[pymethods]
+impl PyPeriodDtype {
+    #[new]
+    #[pyo3(signature = (freq="D"))]
+    fn new(freq: Option<&str>) -> Self {
+        Self {
+            freq: freq.unwrap_or("D").to_string(),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        format!("period[{}]", self.freq)
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        "O"
+    }
+
+    fn __repr__(&self) -> String {
+        format!("period[{}]", self.freq)
+    }
+
+    fn __str__(&self) -> String {
+        self.name()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other_dt) = other.extract::<Self>() {
+            return *self == other_dt;
+        }
+        if let Ok(s) = other.extract::<String>() {
+            return s == self.name() || s == "period";
+        }
+        false
+    }
+}
+
+#[pyclass(name = "IntervalDtype", from_py_object)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PyIntervalDtype {
+    #[pyo3(get)]
+    pub subtype: Option<String>,
+    #[pyo3(get)]
+    pub closed: Option<String>,
+}
+
+#[pymethods]
+impl PyIntervalDtype {
+    #[new]
+    #[pyo3(signature = (subtype=None, closed=None))]
+    fn new(subtype: Option<&str>, closed: Option<&str>) -> Self {
+        Self {
+            subtype: subtype.map(str::to_string),
+            closed: closed.map(str::to_string),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> &'static str {
+        "interval"
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        "O"
+    }
+
+    fn __repr__(&self) -> String {
+        match (&self.subtype, &self.closed) {
+            (Some(st), Some(cl)) => format!("interval[{}, {}]", st, cl),
+            (Some(st), None) => format!("interval[{}]", st),
+            _ => "interval".to_string(),
+        }
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other_dt) = other.extract::<Self>() {
+            return *self == other_dt;
+        }
+        if let Ok(s) = other.extract::<String>() {
+            return s == "interval";
+        }
+        false
+    }
+}
+
+#[pyclass(name = "SparseDtype", from_py_object)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PySparseDtype {
+    #[pyo3(get)]
+    pub dtype: String,
+    #[pyo3(get)]
+    pub fill_value: String,
+}
+
+#[pymethods]
+impl PySparseDtype {
+    #[new]
+    #[pyo3(signature = (dtype="float64", fill_value=None))]
+    fn new(dtype: Option<&str>, fill_value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let fv_str = match fill_value {
+            Some(v) => {
+                if v.is_none() {
+                    "nan".to_string()
+                } else {
+                    v.str()?.to_str()?.to_string()
+                }
+            }
+            None => "nan".to_string(),
+        };
+        Ok(Self {
+            dtype: dtype.unwrap_or("float64").to_string(),
+            fill_value: fv_str,
+        })
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        format!("Sparse[{}, {}]", self.dtype, self.fill_value)
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        "f"
+    }
+
+    fn __repr__(&self) -> String {
+        self.name()
+    }
+
+    fn __str__(&self) -> String {
+        self.name()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other_dt) = other.extract::<Self>() {
+            return *self == other_dt;
+        }
+        if let Ok(s) = other.extract::<String>() {
+            return s == self.name() || s == "Sparse";
+        }
+        false
+    }
+}
+
+#[pyclass(name = "ArrowDtype", from_py_object)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PyArrowDtype {
+    #[pyo3(get)]
+    pub pyarrow_dtype: String,
+}
+
+#[pymethods]
+impl PyArrowDtype {
+    #[new]
+    #[pyo3(signature = (pyarrow_dtype=None))]
+    fn new(pyarrow_dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let dt_str = match pyarrow_dtype {
+            Some(v) => {
+                if let Ok(s) = v.extract::<String>() {
+                    s
+                } else {
+                    v.str()?.to_str()?.to_string()
+                }
+            }
+            None => "null".to_string(),
+        };
+        Ok(Self {
+            pyarrow_dtype: dt_str,
+        })
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        format!("{}[pyarrow]", self.pyarrow_dtype)
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        if self.pyarrow_dtype.starts_with("uint") {
+            "u"
+        } else if self.pyarrow_dtype.starts_with("int") {
+            "i"
+        } else if self.pyarrow_dtype.starts_with("float")
+            || self.pyarrow_dtype.starts_with("double")
+        {
+            "f"
+        } else if self.pyarrow_dtype.starts_with("bool") {
+            "b"
+        } else if self.pyarrow_dtype.starts_with("timestamp")
+            || self.pyarrow_dtype.starts_with("date")
+        {
+            "M"
+        } else if self.pyarrow_dtype.starts_with("duration")
+            || self.pyarrow_dtype.starts_with("time")
+        {
+            "m"
+        } else {
+            "O"
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        self.name()
+    }
+
+    fn __str__(&self) -> String {
+        self.name()
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other_dt) = other.extract::<Self>() {
+            return *self == other_dt;
+        }
+        if let Ok(s) = other.extract::<String>() {
+            return s == self.name();
+        }
+        false
+    }
+}
+
+// 2. Options System
+#[derive(Clone, Debug, PartialEq)]
+enum OptionValue {
+    None,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+impl OptionValue {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match self {
+            Self::None => Ok(py.None().into_bound(py)),
+            Self::Int(i) => i.into_bound_py_any(py),
+            Self::Float(f) => f.into_bound_py_any(py),
+            Self::Bool(b) => b.into_bound_py_any(py),
+            Self::Str(s) => s.into_bound_py_any(py),
+        }
+    }
+
+    fn from_py(val: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if val.is_none() {
+            Ok(Self::None)
+        } else if val.is_instance_of::<pyo3::types::PyBool>() {
+            Ok(Self::Bool(val.extract::<bool>()?))
+        } else if let Ok(i) = val.extract::<i64>() {
+            Ok(Self::Int(i))
+        } else if let Ok(f) = val.extract::<f64>() {
+            Ok(Self::Float(f))
+        } else if let Ok(s) = val.extract::<String>() {
+            Ok(Self::Str(s))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Option value must be None, int, float, bool, or str",
+            ))
+        }
+    }
+}
+
+fn default_options_map() -> HashMap<String, OptionValue> {
+    let mut m = HashMap::new();
+    m.insert("display.max_rows".to_string(), OptionValue::Int(60));
+    m.insert("display.min_rows".to_string(), OptionValue::Int(10));
+    m.insert("display.max_columns".to_string(), OptionValue::Int(0));
+    m.insert("display.width".to_string(), OptionValue::Int(80));
+    m.insert("display.precision".to_string(), OptionValue::Int(6));
+    m.insert("display.max_colwidth".to_string(), OptionValue::Int(50));
+    m.insert(
+        "display.show_dimensions".to_string(),
+        OptionValue::Bool(true),
+    );
+    m.insert("mode.sim_interactive".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "mode.chained_assignment".to_string(),
+        OptionValue::Str("warn".to_string()),
+    );
+    m.insert("mode.use_inf_as_na".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "compute.use_bottleneck".to_string(),
+        OptionValue::Bool(true),
+    );
+    m.insert("compute.use_numba".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "io.excel.zip.reader".to_string(),
+        OptionValue::Str("zipfile".to_string()),
+    );
+    m
+}
+
+static GLOBAL_OPTIONS: LazyLock<Mutex<HashMap<String, OptionValue>>> =
+    LazyLock::new(|| Mutex::new(default_options_map()));
+
+fn resolve_option_key(pat: &str, map: &HashMap<String, OptionValue>) -> PyResult<String> {
+    if map.contains_key(pat) {
+        return Ok(pat.to_string());
+    }
+    let matches: Vec<&String> = map
+        .keys()
+        .filter(|k| k.ends_with(pat) || k.contains(pat))
+        .collect();
+    if matches.len() == 1 {
+        Ok(matches[0].clone())
+    } else if matches.is_empty() {
+        Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+            "No such option: '{pat}'"
+        )))
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Option pattern '{pat}' matches multiple options: {matches:?}"
+        )))
+    }
+}
+
+#[pyfunction]
+pub fn get_option<'py>(py: Python<'py>, pat: &str) -> PyResult<Bound<'py, PyAny>> {
+    let map = GLOBAL_OPTIONS
+        .lock()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let key = resolve_option_key(pat, &map)?;
+    map.get(&key).expect("key exists").to_py(py)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args))]
+pub fn set_option(args: &Bound<'_, PyTuple>) -> PyResult<()> {
+    if args.len() < 2 || args.len() % 2 != 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "set_option takes an even number of arguments (key, value pairs)",
+        ));
+    }
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let mut i = 0;
+    while i < args.len() {
+        let key_item = args.get_item(i)?;
+        let val_item = args.get_item(i + 1)?;
+        let pat = key_item.extract::<String>()?;
+        let key = resolve_option_key(&pat, &map)?;
+        let val = OptionValue::from_py(&val_item)?;
+        map.insert(key, val);
+        i += 2;
+    }
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (pat="all"))]
+pub fn reset_option(pat: Option<&str>) -> PyResult<()> {
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let defaults = default_options_map();
+    let p = pat.unwrap_or("all");
+    if p == "all" {
+        *map = defaults;
+        return Ok(());
+    }
+    let key = resolve_option_key(p, &defaults)?;
+    if let Some(def_val) = defaults.get(&key) {
+        map.insert(key, def_val.clone());
+    }
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (pat=None, _print_desc=true))]
+pub fn describe_option<'py>(
+    py: Python<'py>,
+    pat: Option<&str>,
+    _print_desc: Option<bool>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let map = GLOBAL_OPTIONS
+        .lock()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let mut lines = Vec::new();
+    for (k, v) in map.iter() {
+        if let Some(p) = pat
+            && !k.contains(p)
+        {
+            continue;
+        }
+        lines.push(format!("{k} : [currently: {v:?}]"));
+    }
+    lines.sort();
+    let text = lines.join("\n");
+    if _print_desc.unwrap_or(true) {
+        let builtins = py.import("builtins")?;
+        builtins.call_method1("print", (&text,))?;
+        Ok(py.None().into_bound(py))
+    } else {
+        text.into_bound_py_any(py)
+    }
+}
+
+#[pyclass(name = "_OptionContext")]
+pub struct PyOptionContext {
+    saved: Mutex<Vec<(String, OptionValue)>>,
+    new_values: Vec<(String, OptionValue)>,
+}
+
+#[pymethods]
+impl PyOptionContext {
+    fn __enter__(&self) -> PyResult<()> {
+        let mut map = GLOBAL_OPTIONS
+            .lock()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let mut saved = self
+            .saved
+            .lock()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        for (k, v) in &self.new_values {
+            if let Some(old) = map.get(k) {
+                saved.push((k.clone(), old.clone()));
+            }
+            map.insert(k.clone(), v.clone());
+        }
+        Ok(())
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&self, _args: &Bound<'_, PyTuple>) -> PyResult<()> {
+        let mut map = GLOBAL_OPTIONS
+            .lock()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let saved = self
+            .saved
+            .lock()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        for (k, old) in saved.iter() {
+            map.insert(k.clone(), old.clone());
+        }
+        Ok(())
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args))]
+pub fn option_context(args: &Bound<'_, PyTuple>) -> PyResult<PyOptionContext> {
+    if args.len() % 2 != 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "option_context takes an even number of arguments (key, value pairs)",
+        ));
+    }
+    let map = GLOBAL_OPTIONS
+        .lock()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let mut new_values = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let key_item = args.get_item(i)?;
+        let val_item = args.get_item(i + 1)?;
+        let pat = key_item.extract::<String>()?;
+        let key = resolve_option_key(&pat, &map)?;
+        let val = OptionValue::from_py(&val_item)?;
+        new_values.push((key, val));
+        i += 2;
+    }
+    Ok(PyOptionContext {
+        saved: Mutex::new(Vec::new()),
+        new_values,
+    })
+}
+
+#[pyclass(name = "_OptionsWrapper", from_py_object)]
+#[derive(Clone)]
+pub struct PyOptionsWrapper {
+    prefix: String,
+}
+
+#[pymethods]
+impl PyOptionsWrapper {
+    fn __getattr__<'py>(&self, py: Python<'py>, attr: &str) -> PyResult<Bound<'py, PyAny>> {
+        let full_key = if self.prefix.is_empty() {
+            attr.to_string()
+        } else {
+            format!("{}.{}", self.prefix, attr)
+        };
+        let map = GLOBAL_OPTIONS
+            .lock()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        if map.contains_key(&full_key) {
+            return map.get(&full_key).expect("exists").to_py(py);
+        }
+        let is_prefix = map.keys().any(|k| k.starts_with(&format!("{full_key}.")));
+        if is_prefix {
+            return PyOptionsWrapper { prefix: full_key }.into_bound_py_any(py);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            format!("No such option: '{full_key}'"),
+        ))
+    }
+
+    fn __setattr__(&self, attr: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let full_key = if self.prefix.is_empty() {
+            attr.to_string()
+        } else {
+            format!("{}.{}", self.prefix, attr)
+        };
+        let mut map = GLOBAL_OPTIONS
+            .lock()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let key = resolve_option_key(&full_key, &map)?;
+        let val = OptionValue::from_py(value)?;
+        map.insert(key, val);
+        Ok(())
+    }
+
+    fn __getitem__<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+        self.__getattr__(py, key)
+    }
+
+    fn __setitem__(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.__setattr__(key, value)
+    }
+}
+
+// 3. IndexSlice, Grouper, Interval, IntervalIndex, Categorical, DateOffset
+#[pyclass(name = "_IndexSlice", from_py_object)]
+#[derive(Clone)]
+pub struct PyIndexSlice;
+
+#[pymethods]
+impl PyIndexSlice {
+    #[new]
+    fn new() -> Self {
+        Self
+    }
+
+    fn __getitem__<'py>(&self, _py: Python<'py>, item: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        item
+    }
+}
+
+#[pyclass(name = "Grouper", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyGrouper {
+    #[pyo3(get)]
+    pub key: Option<String>,
+    #[pyo3(get)]
+    pub level: Option<String>,
+    #[pyo3(get)]
+    pub freq: Option<String>,
+    #[pyo3(get)]
+    pub axis: i64,
+    #[pyo3(get)]
+    pub sort: bool,
+    #[pyo3(get)]
+    pub dropna: bool,
+}
+
+#[pymethods]
+impl PyGrouper {
+    #[new]
+    #[pyo3(signature = (key=None, level=None, freq=None, axis=0, sort=false, dropna=true))]
+    fn new(
+        key: Option<String>,
+        level: Option<String>,
+        freq: Option<String>,
+        axis: Option<i64>,
+        sort: Option<bool>,
+        dropna: Option<bool>,
+    ) -> Self {
+        Self {
+            key,
+            level,
+            freq,
+            axis: axis.unwrap_or(0),
+            sort: sort.unwrap_or(false),
+            dropna: dropna.unwrap_or(true),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Grouper(key={:?}, freq={:?}, axis={}, sort={})",
+            self.key, self.freq, self.axis, self.sort
+        )
+    }
+}
+
+#[pyclass(name = "Interval", from_py_object)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PyInterval {
+    #[pyo3(get)]
+    pub left: f64,
+    #[pyo3(get)]
+    pub right: f64,
+    #[pyo3(get)]
+    pub closed: String,
+}
+
+#[pymethods]
+impl PyInterval {
+    #[new]
+    #[pyo3(signature = (left, right, closed="right"))]
+    fn new(left: f64, right: f64, closed: Option<&str>) -> PyResult<Self> {
+        let closed_str = closed.unwrap_or("right");
+        if !["right", "left", "both", "neither"].contains(&closed_str) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "closed must be one of 'right', 'left', 'both', 'neither'",
+            ));
+        }
+        Ok(Self {
+            left,
+            right,
+            closed: closed_str.to_string(),
+        })
+    }
+
+    #[getter]
+    fn length(&self) -> f64 {
+        self.right - self.left
+    }
+
+    #[getter]
+    fn mid(&self) -> f64 {
+        (self.left + self.right) / 2.0
+    }
+
+    fn __contains__(&self, val: f64) -> bool {
+        match self.closed.as_str() {
+            "right" => val > self.left && val <= self.right,
+            "left" => val >= self.left && val < self.right,
+            "both" => val >= self.left && val <= self.right,
+            "neither" => val > self.left && val < self.right,
+            _ => false,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Interval({}, {}, closed='{}')",
+            self.left, self.right, self.closed
+        )
+    }
+
+    fn __str__(&self) -> String {
+        let (l_bracket, r_bracket) = match self.closed.as_str() {
+            "right" => ('(', ']'),
+            "left" => ('[', ')'),
+            "both" => ('[', ']'),
+            _ => ('(', ')'),
+        };
+        format!("{}{}, {}{}", l_bracket, self.left, self.right, r_bracket)
+    }
+}
+
+#[pyclass(name = "IntervalIndex", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyIntervalIndex {
+    pub intervals: Vec<PyInterval>,
+    pub name: Option<String>,
+}
+
+#[pymethods]
+impl PyIntervalIndex {
+    #[new]
+    #[pyo3(signature = (data=None, name=None))]
+    fn new(data: Option<&Bound<'_, PyAny>>, name: Option<&str>) -> PyResult<Self> {
+        let mut intervals = Vec::new();
+        if let Some(d) = data {
+            if let Ok(list) = d.extract::<Vec<PyInterval>>() {
+                intervals = list;
+            } else if let Ok(seq) = d.cast::<pyo3::types::PySequence>() {
+                let len = seq.len()?;
+                for i in 0..len {
+                    let item = seq.get_item(i)?;
+                    if let Ok(iv) = item.extract::<PyInterval>() {
+                        intervals.push(iv);
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            intervals,
+            name: name.map(str::to_string),
+        })
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (breaks, closed="right", name=None))]
+    fn from_breaks(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        breaks: Vec<f64>,
+        closed: Option<&str>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let closed_str = closed.unwrap_or("right");
+        if breaks.len() < 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "breaks must have at least 2 elements",
+            ));
+        }
+        let mut intervals = Vec::with_capacity(breaks.len() - 1);
+        for i in 0..(breaks.len() - 1) {
+            intervals.push(PyInterval::new(breaks[i], breaks[i + 1], Some(closed_str))?);
+        }
+        Ok(Self {
+            intervals,
+            name: name.map(str::to_string),
+        })
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (data, closed="right", name=None))]
+    fn from_tuples(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        data: Vec<(f64, f64)>,
+        closed: Option<&str>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let closed_str = closed.unwrap_or("right");
+        let mut intervals = Vec::with_capacity(data.len());
+        for (left, right) in data {
+            intervals.push(PyInterval::new(left, right, Some(closed_str))?);
+        }
+        Ok(Self {
+            intervals,
+            name: name.map(str::to_string),
+        })
+    }
+
+    #[getter]
+    fn name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    #[getter]
+    fn length(&self) -> usize {
+        self.intervals.len()
+    }
+
+    fn __len__(&self) -> usize {
+        self.intervals.len()
+    }
+
+    fn __getitem__(&self, idx: isize) -> PyResult<PyInterval> {
+        let len = self.intervals.len() as isize;
+        let pos = if idx < 0 { idx + len } else { idx };
+        if pos < 0 || pos >= len {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "index out of range",
+            ));
+        }
+        Ok(self.intervals[pos as usize].clone())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("IntervalIndex({:?})", self.intervals)
+    }
+
+    #[getter]
+    fn left(&self) -> PyIndex {
+        let labels = self
+            .intervals
+            .iter()
+            .map(|iv| IndexLabel::Float64(fp_index::OrderedF64(iv.left)))
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+
+    #[getter]
+    fn right(&self) -> PyIndex {
+        let labels = self
+            .intervals
+            .iter()
+            .map(|iv| IndexLabel::Float64(fp_index::OrderedF64(iv.right)))
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+
+    #[getter]
+    fn mid(&self) -> PyIndex {
+        let labels = self
+            .intervals
+            .iter()
+            .map(|iv| IndexLabel::Float64(fp_index::OrderedF64(iv.mid())))
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+}
+
+#[pyclass(name = "Categorical", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyCategorical {
+    pub categories_list: Vec<String>,
+    #[pyo3(get)]
+    pub codes: Vec<i64>,
+    #[pyo3(get)]
+    pub ordered: bool,
+}
+
+#[pymethods]
+impl PyCategorical {
+    #[new]
+    #[pyo3(signature = (values, categories=None, ordered=false))]
+    fn new(
+        values: &Bound<'_, PyAny>,
+        categories: Option<Vec<String>>,
+        ordered: Option<bool>,
+    ) -> PyResult<Self> {
+        let ordered = ordered.unwrap_or(false);
+        let seq = values.cast::<pyo3::types::PySequence>()?;
+        let len = seq.len()?;
+        let mut raw_vals = Vec::with_capacity(len);
+        for i in 0..len {
+            let item = seq.get_item(i)?;
+            raw_vals.push(item.str()?.to_str()?.to_string());
+        }
+        let cats = if let Some(c) = categories {
+            c
+        } else {
+            let mut set = HashSet::new();
+            let mut unique_cats = Vec::new();
+            for v in &raw_vals {
+                if set.insert(v.clone()) {
+                    unique_cats.push(v.clone());
+                }
+            }
+            unique_cats.sort();
+            unique_cats
+        };
+        let cat_map: HashMap<&str, i64> = cats
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), i as i64))
+            .collect();
+        let codes: Vec<i64> = raw_vals
+            .iter()
+            .map(|v| cat_map.get(v.as_str()).copied().unwrap_or(-1))
+            .collect();
+
+        Ok(Self {
+            categories_list: cats,
+            codes,
+            ordered,
+        })
+    }
+
+    #[getter]
+    fn categories(&self) -> PyIndex {
+        let labels = self
+            .categories_list
+            .iter()
+            .map(|s| IndexLabel::Utf8(s.clone()))
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
+    }
+
+    #[getter]
+    fn dtype(&self) -> PyCategoricalDtype {
+        PyCategoricalDtype {
+            categories: Some(self.categories_list.clone()),
+            ordered: self.ordered,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Categorical(categories={:?}, ordered={}, length={})",
+            self.categories_list,
+            self.ordered,
+            self.codes.len()
+        )
+    }
+
+    fn __len__(&self) -> usize {
+        self.codes.len()
+    }
+}
+
+#[pyclass(name = "DateOffset", from_py_object)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PyDateOffset {
+    #[pyo3(get)]
+    pub n: i64,
+    #[pyo3(get)]
+    pub years: i64,
+    #[pyo3(get)]
+    pub months: i64,
+    #[pyo3(get)]
+    pub weeks: i64,
+    #[pyo3(get)]
+    pub days: i64,
+    #[pyo3(get)]
+    pub hours: i64,
+    #[pyo3(get)]
+    pub minutes: i64,
+    #[pyo3(get)]
+    pub seconds: i64,
+    #[pyo3(get)]
+    pub microseconds: i64,
+    #[pyo3(get)]
+    pub nanoseconds: i64,
+}
+
+impl Default for PyDateOffset {
+    fn default() -> Self {
+        Self {
+            n: 1,
+            years: 0,
+            months: 0,
+            weeks: 0,
+            days: 0,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+            microseconds: 0,
+            nanoseconds: 0,
+        }
+    }
+}
+
+#[pymethods]
+impl PyDateOffset {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (n=1, years=0, months=0, weeks=0, days=0, hours=0, minutes=0, seconds=0, microseconds=0, nanoseconds=0))]
+    fn new(
+        n: Option<i64>,
+        years: Option<i64>,
+        months: Option<i64>,
+        weeks: Option<i64>,
+        days: Option<i64>,
+        hours: Option<i64>,
+        minutes: Option<i64>,
+        seconds: Option<i64>,
+        microseconds: Option<i64>,
+        nanoseconds: Option<i64>,
+    ) -> Self {
+        Self {
+            n: n.unwrap_or(1),
+            years: years.unwrap_or(0),
+            months: months.unwrap_or(0),
+            weeks: weeks.unwrap_or(0),
+            days: days.unwrap_or(0),
+            hours: hours.unwrap_or(0),
+            minutes: minutes.unwrap_or(0),
+            seconds: seconds.unwrap_or(0),
+            microseconds: microseconds.unwrap_or(0),
+            nanoseconds: nanoseconds.unwrap_or(0),
+        }
+    }
+
+    fn nanos(&self) -> i64 {
+        let mut total_nanos = self.nanoseconds;
+        total_nanos += self.microseconds * 1_000;
+        total_nanos += self.seconds * 1_000_000_000;
+        total_nanos += self.minutes * 60 * 1_000_000_000;
+        total_nanos += self.hours * 3600 * 1_000_000_000;
+        total_nanos += self.days * 86400 * 1_000_000_000;
+        total_nanos += self.weeks * 7 * 86400 * 1_000_000_000;
+        total_nanos += self.months * 30 * 86400 * 1_000_000_000;
+        total_nanos += self.years * 365 * 86400 * 1_000_000_000;
+        total_nanos * self.n
+    }
+
+    fn __repr__(&self) -> String {
+        if self.years == 0
+            && self.months == 0
+            && self.weeks == 0
+            && self.hours == 0
+            && self.minutes == 0
+            && self.seconds == 0
+            && self.microseconds == 0
+            && self.nanoseconds == 0
+            && self.days == 1
+        {
+            if self.n == 1 {
+                return "<Day>".to_string();
+            }
+            return format!("<{} * Days>", self.n);
+        }
+        if self.years == 0
+            && self.months == 0
+            && self.weeks == 0
+            && self.days == 0
+            && self.minutes == 0
+            && self.seconds == 0
+            && self.microseconds == 0
+            && self.nanoseconds == 0
+            && self.hours == 1
+        {
+            if self.n == 1 {
+                return "<Hour>".to_string();
+            }
+            return format!("<{} * Hours>", self.n);
+        }
+        if self.years == 0
+            && self.months == 0
+            && self.weeks == 0
+            && self.days == 0
+            && self.hours == 0
+            && self.seconds == 0
+            && self.microseconds == 0
+            && self.nanoseconds == 0
+            && self.minutes == 1
+        {
+            if self.n == 1 {
+                return "<Minute>".to_string();
+            }
+            return format!("<{} * Minutes>", self.n);
+        }
+        if self.years == 0
+            && self.months == 0
+            && self.weeks == 0
+            && self.days == 0
+            && self.hours == 0
+            && self.minutes == 0
+            && self.microseconds == 0
+            && self.nanoseconds == 0
+            && self.seconds == 1
+        {
+            if self.n == 1 {
+                return "<Second>".to_string();
+            }
+            return format!("<{} * Seconds>", self.n);
+        }
+        if self.years == 0
+            && self.months == 0
+            && self.days == 0
+            && self.hours == 0
+            && self.minutes == 0
+            && self.seconds == 0
+            && self.microseconds == 0
+            && self.nanoseconds == 0
+            && self.weeks == 1
+        {
+            if self.n == 1 {
+                return "<Week>".to_string();
+            }
+            return format!("<{} * Weeks>", self.n);
+        }
+        if self.years == 0
+            && self.weeks == 0
+            && self.days == 0
+            && self.hours == 0
+            && self.minutes == 0
+            && self.seconds == 0
+            && self.microseconds == 0
+            && self.nanoseconds == 0
+            && self.months == 1
+        {
+            if self.n == 1 {
+                return "<MonthEnd>".to_string();
+            }
+            return format!("<{} * MonthEnds>", self.n);
+        }
+        if self.months == 0
+            && self.weeks == 0
+            && self.days == 0
+            && self.hours == 0
+            && self.minutes == 0
+            && self.seconds == 0
+            && self.microseconds == 0
+            && self.nanoseconds == 0
+            && self.years == 1
+        {
+            if self.n == 1 {
+                return "<YearEnd: month=12>".to_string();
+            }
+            return format!("<{} * YearEnds: month=12>", self.n);
+        }
+
+        let mut parts = Vec::new();
+        if self.years != 0 {
+            parts.push(format!("years={}", self.years));
+        }
+        if self.months != 0 {
+            parts.push(format!("months={}", self.months));
+        }
+        if self.weeks != 0 {
+            parts.push(format!("weeks={}", self.weeks));
+        }
+        if self.days != 0 {
+            parts.push(format!("days={}", self.days));
+        }
+        if self.hours != 0 {
+            parts.push(format!("hours={}", self.hours));
+        }
+        if self.minutes != 0 {
+            parts.push(format!("minutes={}", self.minutes));
+        }
+        if self.seconds != 0 {
+            parts.push(format!("seconds={}", self.seconds));
+        }
+        if self.microseconds != 0 {
+            parts.push(format!("microseconds={}", self.microseconds));
+        }
+        if self.nanoseconds != 0 {
+            parts.push(format!("nanoseconds={}", self.nanoseconds));
+        }
+        if parts.is_empty() {
+            "<DateOffset>".to_string()
+        } else {
+            format!("<DateOffset: {}>", parts.join(", "))
+        }
+    }
+
+    fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            let res = ts.inner.add_timedelta(self.nanos());
+            PyTimestamp { inner: res }.into_py_any(py)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only add DateOffset to Timestamp",
+            ))
+        }
+    }
+
+    fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        self.__add__(py, other)
+    }
+}
+
+// Helper factory functions for offsets
+#[pyfunction(name = "Day")]
+#[pyo3(signature = (n=1))]
+fn offset_day(n: Option<i64>) -> PyDateOffset {
+    PyDateOffset {
+        n: n.unwrap_or(1),
+        days: 1,
+        ..Default::default()
+    }
+}
+
+#[pyfunction(name = "Hour")]
+#[pyo3(signature = (n=1))]
+fn offset_hour(n: Option<i64>) -> PyDateOffset {
+    PyDateOffset {
+        n: n.unwrap_or(1),
+        hours: 1,
+        ..Default::default()
+    }
+}
+
+#[pyfunction(name = "Minute")]
+#[pyo3(signature = (n=1))]
+fn offset_minute(n: Option<i64>) -> PyDateOffset {
+    PyDateOffset {
+        n: n.unwrap_or(1),
+        minutes: 1,
+        ..Default::default()
+    }
+}
+
+#[pyfunction(name = "Second")]
+#[pyo3(signature = (n=1))]
+fn offset_second(n: Option<i64>) -> PyDateOffset {
+    PyDateOffset {
+        n: n.unwrap_or(1),
+        seconds: 1,
+        ..Default::default()
+    }
+}
+
+#[pyfunction(name = "Week")]
+#[pyo3(signature = (n=1))]
+fn offset_week(n: Option<i64>) -> PyDateOffset {
+    PyDateOffset {
+        n: n.unwrap_or(1),
+        weeks: 1,
+        ..Default::default()
+    }
+}
+
+#[pyfunction(name = "MonthEnd")]
+#[pyo3(signature = (n=1))]
+fn offset_month_end(n: Option<i64>) -> PyDateOffset {
+    PyDateOffset {
+        n: n.unwrap_or(1),
+        months: 1,
+        ..Default::default()
+    }
+}
+
+#[pyfunction(name = "YearEnd")]
+#[pyo3(signature = (n=1))]
+fn offset_year_end(n: Option<i64>) -> PyDateOffset {
+    PyDateOffset {
+        n: n.unwrap_or(1),
+        years: 1,
+        ..Default::default()
+    }
+}
+
+// 4. Top-level functions
+#[pyfunction]
+#[pyo3(signature = (path))]
+pub fn read_table(path: &str) -> PyResult<PyDataFrame> {
+    let opts = fp_io::CsvReadOptions {
+        delimiter: b'\t',
+        ..Default::default()
+    };
+    let df = fp_io::read_csv_with_options_path(std::path::Path::new(path), &opts)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    Ok(PyDataFrame { inner: df })
+}
+
+#[pyfunction]
+#[pyo3(signature = (obj, filepath_or_buffer, protocol=5))]
+pub fn to_pickle(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    filepath_or_buffer: &Bound<'_, PyAny>,
+    protocol: Option<i32>,
+) -> PyResult<()> {
+    let pickle = py.import("pickle")?;
+    let protocol = protocol.unwrap_or(5);
+    if let Ok(path_str) = filepath_or_buffer.extract::<String>() {
+        let builtins = py.import("builtins")?;
+        let file = builtins.call_method1("open", (path_str, "wb"))?;
+        let res = pickle.call_method1("dump", (obj, &file, protocol));
+        let _ = file.call_method0("close");
+        res?;
+    } else {
+        pickle.call_method1("dump", (obj, filepath_or_buffer, protocol))?;
+    }
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (filepath_or_buffer))]
+pub fn read_pickle(py: Python<'_>, filepath_or_buffer: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let pickle = py.import("pickle")?;
+    if let Ok(path_str) = filepath_or_buffer.extract::<String>() {
+        let builtins = py.import("builtins")?;
+        let file = builtins.call_method1("open", (path_str, "rb"))?;
+        let res = pickle.call_method1("load", (&file,));
+        let _ = file.call_method0("close");
+        Ok(res?.unbind())
+    } else {
+        let res = pickle.call_method1("load", (filepath_or_buffer,))?;
+        Ok(res.unbind())
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, sep=None, default_category=None))]
+pub fn from_dummies(
+    data: &Bound<'_, PyAny>,
+    sep: Option<&str>,
+    default_category: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyDataFrame> {
+    let df_obj = if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
+        df.clone()
+    } else {
+        PyDataFrame::new(data.py(), Some(data), None, None)?
+    };
+    let col_names = df_obj.columns();
+    let num_rows = df_obj.inner.len();
+
+    let def_cat_str = if let Some(dc) = default_category {
+        Some(dc.str()?.to_str()?.to_string())
+    } else {
+        None
+    };
+
+    if let Some(s) = sep {
+        let mut prefixes: Vec<String> = Vec::new();
+        let mut prefix_map: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for col_name in &col_names {
+            if let Some((pfx, cat)) = col_name.split_once(s) {
+                if !prefix_map.contains_key(pfx) {
+                    prefixes.push(pfx.to_string());
+                }
+                prefix_map
+                    .entry(pfx.to_string())
+                    .or_default()
+                    .push((cat.to_string(), col_name.clone()));
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Dummy column '{col_name}' does not contain separator '{s}'"
+                )));
+            }
+        }
+
+        let mut res_col_map = BTreeMap::new();
+        let mut res_col_order = Vec::new();
+
+        for pfx in &prefixes {
+            let cat_cols = prefix_map.get(pfx).expect("prefix exists");
+            let mut result_cats = Vec::with_capacity(num_rows);
+            for row_idx in 0..num_rows {
+                let mut matched_cat: Option<String> = None;
+                for (cat_name, col_name) in cat_cols {
+                    if let Some(col) = df_obj.inner.column(col_name) {
+                        let is_one = match &col.values()[row_idx] {
+                            Scalar::Int64(1) => true,
+                            Scalar::Float64(f) => (*f - 1.0).abs() < 1e-6,
+                            Scalar::Bool(true) => true,
+                            _ => false,
+                        };
+                        if is_one {
+                            if matched_cat.is_some() {
+                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                    "Dummy DataFrame contains rows with multiple 1s",
+                                ));
+                            }
+                            matched_cat = Some(cat_name.clone());
+                        }
+                    }
+                }
+                match matched_cat {
+                    Some(c) => result_cats.push(Scalar::Utf8(c)),
+                    None => {
+                        if let Some(ref dc) = def_cat_str {
+                            result_cats.push(Scalar::Utf8(dc.clone()));
+                        } else {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "Dummy DataFrame contains rows with no 1s",
+                            ));
+                        }
+                    }
+                }
+            }
+            let col = Column::from_values(result_cats)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            res_col_map.insert(pfx.clone(), col);
+            res_col_order.push(pfx.clone());
+        }
+
+        let new_df = DataFrame::new_with_column_order(
+            df_obj.inner.index().clone(),
+            res_col_map,
+            res_col_order,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: new_df })
+    } else {
+        let mut result_cats = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let mut matched_cat: Option<String> = None;
+            for col_name in &col_names {
+                if let Some(col) = df_obj.inner.column(col_name) {
+                    let is_one = match &col.values()[row_idx] {
+                        Scalar::Int64(1) => true,
+                        Scalar::Float64(f) => (*f - 1.0).abs() < 1e-6,
+                        Scalar::Bool(true) => true,
+                        _ => false,
+                    };
+                    if is_one {
+                        if matched_cat.is_some() {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "Dummy DataFrame contains rows with multiple 1s",
+                            ));
+                        }
+                        matched_cat = Some(col_name.to_string());
+                    }
+                }
+            }
+            match matched_cat {
+                Some(c) => result_cats.push(Scalar::Utf8(c)),
+                None => {
+                    if let Some(ref dc) = def_cat_str {
+                        result_cats.push(Scalar::Utf8(dc.clone()));
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "Dummy DataFrame contains rows with no 1s",
+                        ));
+                    }
+                }
+            }
+        }
+        let col = Column::from_values(result_cats)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let mut res_col_map = BTreeMap::new();
+        let res_col_order = vec!["".to_string()];
+        res_col_map.insert("".to_string(), col);
+        let new_df = DataFrame::new_with_column_order(
+            df_obj.inner.index().clone(),
+            res_col_map,
+            res_col_order,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: new_df })
+    }
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (expr, parser=None, engine=None, truediv=true, local_dict=None, global_dict=None, resolvers=None, level=0, target=None, inplace=false))]
+pub fn eval<'py>(
+    py: Python<'py>,
+    expr: &str,
+    parser: Option<&str>,
+    engine: Option<&str>,
+    truediv: Option<bool>,
+    local_dict: Option<&Bound<'py, PyAny>>,
+    global_dict: Option<&Bound<'py, PyAny>>,
+    resolvers: Option<&Bound<'py, PyAny>>,
+    level: Option<usize>,
+    target: Option<&Bound<'py, PyAny>>,
+    inplace: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (parser, engine, truediv, resolvers, target, inplace);
+    let builtins = py.import("builtins")?;
+    let sys = py.import("sys")?;
+
+    let (g_dict, l_dict) = match (global_dict, local_dict) {
+        (Some(g), Some(l)) => (g.clone(), l.clone()),
+        (Some(g), None) => {
+            let lvl = level.unwrap_or(0) + 1;
+            let get_frame = sys.getattr("_getframe")?;
+            let frame = get_frame.call1((lvl,))?;
+            let frame_locals = frame.getattr("f_locals")?;
+            (g.clone(), frame_locals)
+        }
+        (None, Some(l)) => {
+            let lvl = level.unwrap_or(0) + 1;
+            let get_frame = sys.getattr("_getframe")?;
+            let frame = get_frame.call1((lvl,))?;
+            let frame_globals = frame.getattr("f_globals")?;
+            (frame_globals, l.clone())
+        }
+        (None, None) => {
+            let lvl = level.unwrap_or(0) + 1;
+            let get_frame = sys.getattr("_getframe")?;
+            let frame = get_frame.call1((lvl,))?;
+            let frame_globals = frame.getattr("f_globals")?;
+            let frame_locals = frame.getattr("f_locals")?;
+            (frame_globals, frame_locals)
+        }
+    };
+
+    let res = builtins.call_method1("eval", (expr, g_dict, l_dict))?;
+    Ok(res.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (as_json=None))]
+pub fn show_versions(py: Python<'_>, as_json: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    let sys = py.import("sys")?;
+    let platform = py.import("platform")?;
+    let builtins = py.import("builtins")?;
+    let py_ver: String = sys.getattr("version")?.extract()?;
+    let os_name: String = platform.call_method0("system")?.extract()?;
+    let os_release: String = platform.call_method0("release")?.extract()?;
+    let machine: String = platform.call_method0("machine")?.extract()?;
+
+    let mut is_json = false;
+    let mut file_path: Option<String> = None;
+
+    if let Some(arg) = as_json {
+        if let Ok(b) = arg.extract::<bool>() {
+            is_json = b;
+        } else if let Ok(s) = arg.extract::<String>() {
+            is_json = true;
+            file_path = Some(s);
+        }
+    }
+
+    if is_json {
+        let json_mod = py.import("json")?;
+        let dict = PyDict::new(py);
+        let sys_info = PyDict::new(py);
+        sys_info.set_item("python", &py_ver)?;
+        sys_info.set_item("OS", &os_name)?;
+        sys_info.set_item("OS-release", &os_release)?;
+        sys_info.set_item("machine", &machine)?;
+        dict.set_item("system", sys_info)?;
+        let fpd_info = PyDict::new(py);
+        fpd_info.set_item("frankenpandas", "0.2.0")?;
+        dict.set_item("dependencies", fpd_info)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("indent", 2)?;
+        let json_str: String = json_mod
+            .call_method("dumps", (dict,), Some(&kwargs))?
+            .extract()?;
+        if let Some(path) = file_path {
+            let f = builtins.call_method1("open", (path, "w"))?;
+            f.call_method1("write", (json_str,))?;
+            f.call_method0("close")?;
+        } else {
+            builtins.call_method1("print", (json_str,))?;
+        }
+    } else {
+        let header = "\nINSTALLED VERSIONS\n------------------";
+        let msg = format!(
+            "{header}\npython                : {py_ver}\nOS                    : {os_name}\nOS-release            : {os_release}\nmachine               : {machine}\nfrankenpandas         : 0.2.0"
+        );
+        builtins.call_method1("print", (msg,))?;
+    }
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, dtype=None))]
+pub fn array(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PySeries> {
+    let s = PySeries::new(py, Some(data), None, None)?;
+    if let Some(dt) = dtype {
+        let dt_str = dt.str()?.to_str()?.to_string();
+        s.astype(&dt_str)
+    } else {
+        Ok(s)
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (start=None, end=None, periods=None, freq=None, closed="right", name=None))]
+pub fn interval_range(
+    start: Option<f64>,
+    end: Option<f64>,
+    periods: Option<usize>,
+    freq: Option<f64>,
+    closed: Option<&str>,
+    name: Option<&str>,
+) -> PyResult<PyIntervalIndex> {
+    let closed_str = closed.unwrap_or("right");
+    let step = freq.unwrap_or(1.0);
+    let mut intervals = Vec::new();
+
+    if let (Some(s), Some(p)) = (start, periods) {
+        let mut cur = s;
+        for _ in 0..p {
+            intervals.push(PyInterval::new(cur, cur + step, Some(closed_str))?);
+            cur += step;
+        }
+    } else if let (Some(s), Some(e)) = (start, end) {
+        let mut cur = s;
+        while cur + step <= e + 1e-9 {
+            intervals.push(PyInterval::new(cur, cur + step, Some(closed_str))?);
+            cur += step;
+        }
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Must specify either (start, periods) or (start, end)",
+        ));
+    }
+    Ok(PyIntervalIndex {
+        intervals,
+        name: name.map(str::to_string),
+    })
+}
+
+#[pyfunction]
+pub fn test(py: Python<'_>) -> PyResult<()> {
+    let pytest = py.import("pytest")?;
+    let _ = pytest.call_method1("main", (vec!["-q"],))?;
+    Ok(())
+}
+
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -21456,6 +23302,44 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNaTType>()?;
     m.add("NA", PyNAType)?;
     m.add("NaT", PyNaTType)?;
+    m.add_class::<PyBooleanDtype>()?;
+    m.add_class::<PyInt8Dtype>()?;
+    m.add_class::<PyInt16Dtype>()?;
+    m.add_class::<PyInt32Dtype>()?;
+    m.add_class::<PyInt64Dtype>()?;
+    m.add_class::<PyUInt8Dtype>()?;
+    m.add_class::<PyUInt16Dtype>()?;
+    m.add_class::<PyUInt32Dtype>()?;
+    m.add_class::<PyUInt64Dtype>()?;
+    m.add_class::<PyFloat32Dtype>()?;
+    m.add_class::<PyFloat64Dtype>()?;
+    m.add_class::<PyStringDtype>()?;
+    m.add_class::<PyCategoricalDtype>()?;
+    m.add_class::<PyDatetimeTZDtype>()?;
+    m.add_class::<PyPeriodDtype>()?;
+    m.add_class::<PyIntervalDtype>()?;
+    m.add_class::<PySparseDtype>()?;
+    m.add_class::<PyArrowDtype>()?;
+    m.add_class::<PyIndexSlice>()?;
+    m.add("IndexSlice", PyIndexSlice::new())?;
+    m.add_class::<PyGrouper>()?;
+    m.add_class::<PyInterval>()?;
+    m.add_class::<PyIntervalIndex>()?;
+    m.add_class::<PyCategorical>()?;
+    m.add_class::<PyDateOffset>()?;
+    m.add_class::<PyOptionContext>()?;
+    m.add_class::<PyOptionsWrapper>()?;
+    m.add(
+        "options",
+        PyOptionsWrapper {
+            prefix: String::new(),
+        },
+    )?;
+
+    let collections = m.py().import("collections")?;
+    let named_agg =
+        collections.call_method1("namedtuple", ("NamedAgg", vec!["column", "aggfunc"]))?;
+    m.add("NamedAgg", &named_agg)?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(read_json, m)?)?;
     m.add_function(wrap_pyfunction!(read_jsonl, m)?)?;
@@ -21487,6 +23371,20 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_dummies, m)?)?;
     m.add_function(wrap_pyfunction!(crosstab, m)?)?;
     m.add_function(wrap_pyfunction!(json_normalize, m)?)?;
+    m.add_function(wrap_pyfunction!(get_option, m)?)?;
+    m.add_function(wrap_pyfunction!(set_option, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_option, m)?)?;
+    m.add_function(wrap_pyfunction!(describe_option, m)?)?;
+    m.add_function(wrap_pyfunction!(option_context, m)?)?;
+    m.add_function(wrap_pyfunction!(read_table, m)?)?;
+    m.add_function(wrap_pyfunction!(to_pickle, m)?)?;
+    m.add_function(wrap_pyfunction!(read_pickle, m)?)?;
+    m.add_function(wrap_pyfunction!(from_dummies, m)?)?;
+    m.add_function(wrap_pyfunction!(eval, m)?)?;
+    m.add_function(wrap_pyfunction!(show_versions, m)?)?;
+    m.add_function(wrap_pyfunction!(array, m)?)?;
+    m.add_function(wrap_pyfunction!(interval_range, m)?)?;
+    m.add_function(wrap_pyfunction!(test, m)?)?;
 
     let testing = PyModule::new(m.py(), "testing")?;
     testing.add_function(wrap_pyfunction!(assert_frame_equal, &testing)?)?;
@@ -21628,6 +23526,34 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .import("sys")?
         .getattr("modules")?
         .set_item("frankenpandas.api.types", &types_mod)?;
+
+    let offsets_mod = PyModule::new(m.py(), "offsets")?;
+    offsets_mod.add("DateOffset", m.py().get_type::<PyDateOffset>())?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_day, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_hour, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_minute, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_second, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_week, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_month_end, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_year_end, &offsets_mod)?)?;
+    m.add_submodule(&offsets_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.offsets", &offsets_mod)?;
+
+    let tseries_mod = PyModule::new(m.py(), "tseries")?;
+    tseries_mod.add_submodule(&offsets_mod)?;
+    tseries_mod.add("offsets", &offsets_mod)?;
+    m.add_submodule(&tseries_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.tseries", &tseries_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.tseries.offsets", &offsets_mod)?;
 
     Ok(())
 }
