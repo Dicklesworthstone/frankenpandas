@@ -43918,3 +43918,67 @@ not the lane name. The `csv_read_uncached` LANE's rows are the `..._bytesio_{100
 files. I named the earlier pair before the lane existed.
 
 ---
+
+### 2026-09-08 (br-frankenpandas-qnkah) — the honest pipeline CSV read and whole-job ETL ratio: 2.53x at 1M, byte-identical output (04bae1d7), and the 7.23x cached lane was a 2.86x artifact of fp_io's 32 MiB parse cache
+
+**Settles br-frankenpandas-qnkah** (filed 2026-09-01 by BlackThrush). That bead noted from source
+and byte arithmetic that `pipeline/etl_job` times `fp_io::read_csv` on `sales.csv` (13.93 MiB at 1M)
+and `stores.csv` (0.13 MiB at 1M) inside the timed closure. Because both fit the 32 MiB ceiling and
+`CSV_PARSE_CACHE_MAX_ENTRIES = 2`, every sample after sample 1 on our side hit the content cache,
+cloning an in-memory frame rather than parsing CSV text from disk, while pandas re-parsed every sample.
+
+**Campaign result class:** incumbent-win
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=cafbe9267c899cdb4974a52056cf07bc1d85856d8a81aa3a219adf0b429bc9f5
+(89257440 bytes) /data/tmp/cargo-target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae
+invocation_id=vs-pandas-20260908T194014.275132Z-pid924544 measured_ratio=2.526x
+
+**A/A null control (same invocation):** on the headline 1M row the FrankenPandas null median
+ratio is 1.002369 and the pandas null median ratio is 1.019189, both inside the 2% band.
+
+**Median-CI decision:** the 1M effect median ratio is 2.526x with a 95% CI of
+[2.46812286, 2.66321406], cleared against required threshold log effect of 0.094459
+with claim log effect 0.92649396, and the CI excludes unity. All three clauses TRUE;
+best-vs-best 2.4767x (FP min 58581.46 us, pandas min 145089.88 us), direction agreeing with the median.
+
+**CV role:** provenance only; CV had no vote. Dispersion is recorded for provenance alone:
+1M FrankenPandas 3.01% / pandas 5.67%. The three-clause median-CI decision above is what admitted the row.
+
+**MEASUREMENT 1: Direct pricing of the hit vs miss on 1M pipeline data (`probe_pipeline_csv_cache.rs`):**
+Using exact pipeline constants (PIPELINE_SEED 20260730, ROWS_PER_STORE 200, TICK 0.25, TICK_LOW/HIGH -3000/7000):
+
+| Stage / Condition | FP p50 (ms) | Notes |
+|---|---|---|
+| `read_csv(sales.csv)` Warm HIT | **4.201 ms** | memcmp + frame clone |
+| `read_csv(sales_copy.csv)` Different-path HIT | **2.853 ms** | Proves content-addressing; path is ignored |
+| `read_csv` True MISS (3-way round-robin) | **39.289 ms** | Guaranteed eviction, true file read + CSV parse |
+| **Parser divergence** | **9.35x** | True parse is 9.35x slower than cache hit |
+
+Pandas `read_csv(sales.csv)` on the same machine: **109.258 ms** (76.8% of pandas' whole job).
+- Contaminated CSV read ratio (vs cache hit): 109.26 / 4.20 = **26.01x**
+- Honest CSV read ratio (vs true parse): 109.26 / 39.29 = **2.78x**
+
+**MEASUREMENT 2: Side-by-side whole-job pipeline runs at 1M rows (balanced-square ABBAABBA, 9 rounds):**
+
+| Workload | FP p50 (ms) | Pandas p50 (ms) | Ratio | Verdict | Decidable | Output Match |
+|---|---|---|---|---|---|---|
+| `etl_job` (cached load) | **22.74 ms** | **163.68 ms** | **7.227x** | NULL_UNDECIDABLE | False (null 1.021 > 2%) | byte_identical |
+| `etl_job_uncached` (honest parse) | **63.13 ms** | **160.02 ms** | **2.526x** | **FASTER (2.53x)** | **True** (all 3 clauses TRUE) | **byte_identical** |
+
+**Cross-engine output equivalence:**
+Output CSV is **100% byte-identical** (211,304 bytes, SHA-256 `04bae1d757c33c5e2eae36ccb00c3bfb3732e4d10632b499b0ebf845c63f35ce`).
+Permuting input rows across the K=3 variants leaves the grouped, inner-joined, stably-sorted rollup completely byte-identical across both engines.
+
+**THE FINDING:**
+1. The 7.23x ratio on `etl_job` was **65% an artifact of the 32 MiB content cache**.
+2. When both engines perform the honest, user-facing file read and CSV parse, FrankenPandas is **2.53x faster** end-to-end on the 1M whole-job star-schema rollup.
+3. The load delta (63.13 ms - 22.74 ms = 40.39 ms) accounts for virtually 100% of the whole-job execution difference.
+
+**Artifacts:**
+- Uncached 1M certified run: `artifacts/bench/qnkah_pipeline_etl_job_uncached_1M.json`
+- Cached 1M comparative run: `artifacts/bench/qnkah_pipeline_etl_job_cached_1M_undecidable.json`
+- Hit-vs-miss standalone probe: `crates/fp-bench/examples/probe_pipeline_csv_cache.rs`

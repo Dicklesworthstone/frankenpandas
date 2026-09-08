@@ -1105,11 +1105,7 @@ where
 /// and the byte diff cannot fail on tied `amount` sums alone — pandas'
 /// default `quicksort` is not stable, so ties would otherwise be free to
 /// disagree without either engine being wrong.
-fn execute_pipeline_stages(
-    sales: DataFrame,
-    stores: DataFrame,
-    out_path: &Path,
-) -> DataFrame {
+fn execute_pipeline_stages(sales: DataFrame, stores: DataFrame, out_path: &Path) -> DataFrame {
     // 2. filter -- sales[sales["amount"] > 0.0]
     let keep = sales
         .get_column("amount")
