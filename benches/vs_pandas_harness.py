@@ -1672,6 +1672,31 @@ def bench_csv_read_uncached_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     return time_operation(read_next)
 
 
+def bench_csv_read_file_uncached_pandas(df: pd.DataFrame, tmp_path: Path) -> PairedSamples:
+    """Cache-missing file-vs-file twin of csv_read: K distinct CSV files on disk, read round-robin.
+
+    Addresses br-frankenpandas-jzokm: measuring user-facing pd.read_csv(file) vs
+    fp_io::read_csv(file) where neither arm benefits from fp_io's in-memory content
+    cache. Cycling K=3 distinct files on disk forces each sample to perform a true
+    file read and full CSV parse on both engines.
+    """
+    file_paths = []
+    for seed in range(CSV_UNCACHED_DISTINCT_INPUTS):
+        sample_df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+        file_path = tmp_path / f"pd_bench_uncached_{seed}.csv"
+        sample_df.to_csv(file_path, index=False)
+        file_paths.append(file_path)
+
+    cursor = [0]
+
+    def read_next():
+        p = file_paths[cursor[0] % CSV_UNCACHED_DISTINCT_INPUTS]
+        cursor[0] += 1
+        return pd.read_csv(p)
+
+    return time_operation(read_next)
+
+
 def bench_csv_read_block_view_pandas(df: pd.DataFrame, tmp_path: Path) -> float:
     """Read a homogeneous Float64 CSV and take pandas' no-copy array view."""
     csv_path = tmp_path / "bench.csv"
@@ -3351,6 +3376,7 @@ PANDAS_WORKLOADS = {
     "io": {
         "csv_read": bench_csv_read_pandas,
         "csv_read_uncached": bench_csv_read_uncached_pandas,
+        "csv_read_file_uncached": bench_csv_read_file_uncached_pandas,
         "csv_read_block_view": bench_csv_read_block_view_pandas,
         "csv_write": bench_csv_write_pandas,
         "json_read_records": bench_json_read_records_pandas,
@@ -4398,7 +4424,7 @@ def run_balanced_square_cell(
                     workload,
                     size,
                     dtype,
-                    tmp_path if category == "pipeline" else None,
+                    tmp_path if category in ("pipeline", "io") else None,
                     fp_binary,
                 )
                 fp_slots.append(result)
@@ -5563,7 +5589,7 @@ def run_category(category: str, sizes: list[str], dtypes: list[str],
                             workload,
                             size,
                             dtype,
-                            tmp_path if category == "pipeline" else None,
+                            tmp_path if category in ("pipeline", "io") else None,
                             arm_binary,
                         ),
                     )

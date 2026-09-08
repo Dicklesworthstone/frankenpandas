@@ -3658,6 +3658,34 @@ fn run(
                 let _ = fp_io::read_csv_str(csv).expect("read_csv");
             })
         }
+        //
+        // Cache-missing file-vs-file lane (br-frankenpandas-jzokm).
+        // Times `fp_io::read_csv(&path)` — reading a CSV file from disk via
+        // `std::fs::read_to_string` and parsing it — against pandas `pd.read_csv(file)`.
+        // Like `csv_read_uncached`, this cycles K=3 distinct files on disk to defeat
+        // `fp_io`'s 2-entry, 32 MiB content cache between samples, ensuring every sample
+        // incurs a genuine file read and full parse.
+        //
+        ("io", "csv_read_file_uncached") => {
+            let csvs = build_distinct_f64_csvs(rows, cols, CSV_UNCACHED_DISTINCT_INPUTS);
+            let dir = data_dir
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join(format!("fp_bench_io_csv_{}_{}", rows, std::process::id())));
+            let _ = std::fs::create_dir_all(&dir);
+            let paths: Vec<PathBuf> = (0..CSV_UNCACHED_DISTINCT_INPUTS)
+                .map(|i| {
+                    let path = dir.join(format!("fp_bench_input_{i}.csv"));
+                    std::fs::write(&path, &csvs[i]).expect("write distinct csv file");
+                    path
+                })
+                .collect();
+            let mut next = 0usize;
+            time_us(move || {
+                let path = &paths[next % CSV_UNCACHED_DISTINCT_INPUTS];
+                next += 1;
+                let _ = fp_io::read_csv(path).expect("read_csv");
+            })
+        }
         #[cfg(feature = "block-storage")]
         ("io", "csv_read_block_view") => {
             // pandas: pd.read_csv(...).to_numpy(copy=False). The Float64 CSV
