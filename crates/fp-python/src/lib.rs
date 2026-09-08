@@ -15,9 +15,10 @@
 //! ```
 
 #![forbid(unsafe_code)]
+#![allow(clippy::collapsible_if, clippy::needless_range_loop)]
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{LazyLock, Mutex},
 };
 
@@ -11152,10 +11153,10 @@ impl PySeries {
     }
 
     #[getter]
-    fn flags(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let d = PyDict::new(py);
-        d.set_item("allows_duplicate_labels", true)?;
-        Ok(d.unbind())
+    fn flags(&self) -> PyFlags {
+        PyFlags {
+            allows_duplicate_labels: true,
+        }
     }
 
     #[pyo3(signature = (*args, **kwargs))]
@@ -14509,10 +14510,10 @@ impl PyDataFrame {
     }
 
     #[getter]
-    fn flags(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let d = PyDict::new(py);
-        d.set_item("allows_duplicate_labels", true)?;
-        Ok(d.unbind())
+    fn flags(&self) -> PyFlags {
+        PyFlags {
+            allows_duplicate_labels: true,
+        }
     }
 
     #[classmethod]
@@ -18745,7 +18746,8 @@ enum ResampleTarget {
 }
 
 /// Python wrapper for FrankenPandas Resampler.
-#[pyclass(name = "Resampler")]
+#[pyclass(name = "Resampler", module = "frankenpandas", from_py_object)]
+#[derive(Clone)]
 pub struct PyResampler {
     target: ResampleTarget,
     freq: String,
@@ -19321,6 +19323,332 @@ impl PyResampler {
 
     fn aggregate(&self, py: Python<'_>, func: &str) -> PyResult<Py<PyAny>> {
         self.agg(py, func)
+    }
+
+    #[pyo3(signature = (fill_value=None))]
+    fn asfreq(&self, py: Python<'_>, fill_value: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let fv = match fill_value {
+            Some(v) => Some(py_to_scalar(py, v)?),
+            None => None,
+        };
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .asfreq_with_options(&self.freq, None, fv)
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .asfreq_with_options(&self.freq, None, fv)
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn ffill(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<Py<PyAny>> {
+        let first_val = self.first(py)?;
+        let bound = first_val.bind(py);
+        let kwargs = PyDict::new(py);
+        if let Some(l) = limit {
+            kwargs.set_item("limit", l)?;
+        }
+        bound
+            .call_method("ffill", (), Some(&kwargs))
+            .map(|b| b.unbind())
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn bfill(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<Py<PyAny>> {
+        let first_val = self.first(py)?;
+        let bound = first_val.bind(py);
+        let kwargs = PyDict::new(py);
+        if let Some(l) = limit {
+            kwargs.set_item("limit", l)?;
+        }
+        bound
+            .call_method("bfill", (), Some(&kwargs))
+            .map(|b| b.unbind())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (value=None, method=None, axis=0, inplace=false, limit=None, downcast=None))]
+    fn fillna(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+        axis: Option<i64>,
+        inplace: Option<bool>,
+        limit: Option<usize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let asf = self.asfreq(py, None)?;
+        let bound = asf.bind(py);
+        let kwargs = PyDict::new(py);
+        if let Some(v) = value {
+            kwargs.set_item("value", v)?;
+        }
+        if let Some(m) = method {
+            kwargs.set_item("method", m)?;
+        }
+        if let Some(a) = axis {
+            kwargs.set_item("axis", a)?;
+        }
+        if let Some(i) = inplace {
+            kwargs.set_item("inplace", i)?;
+        }
+        if let Some(l) = limit {
+            kwargs.set_item("limit", l)?;
+        }
+        if let Some(d) = downcast {
+            kwargs.set_item("downcast", d)?;
+        }
+        bound
+            .call_method("fillna", (), Some(&kwargs))
+            .map(|b| b.unbind())
+    }
+
+    #[pyo3(signature = (method="linear", *args, **kwargs))]
+    fn interpolate(
+        &self,
+        py: Python<'_>,
+        method: Option<&str>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let asf = self.asfreq(py, None)?;
+        let bound = asf.bind(py);
+        let kw = match kwargs {
+            Some(k) => k.clone(),
+            None => PyDict::new(py),
+        };
+        kw.set_item("method", method.unwrap_or("linear"))?;
+        bound
+            .call_method("interpolate", args, Some(&kw))
+            .map(|b| b.unbind())
+    }
+
+    #[getter]
+    fn grouper(&self) -> PyGrouper {
+        PyGrouper {
+            key: None,
+            level: None,
+            freq: Some(self.freq.clone()),
+            axis: 0,
+            sort: true,
+            dropna: true,
+        }
+    }
+
+    #[getter]
+    fn keys(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn level(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn exclusions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyFrozenSet>> {
+        let empty: Vec<String> = Vec::new();
+        pyo3::types::PyFrozenSet::new(py, empty.iter())
+    }
+
+    #[getter]
+    fn ngroups(&self, py: Python<'_>) -> PyResult<usize> {
+        let f = self.first(py)?;
+        let bound = f.bind(py);
+        bound.len()
+    }
+
+    #[getter]
+    fn indices<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        let len = match &self.target {
+            ResampleTarget::Series(s) => s.len(),
+            ResampleTarget::DataFrame(df) => df.len(),
+        };
+        let first_val = self.first(py)?;
+        let first_bound = first_val.bind(py);
+        let idx_obj = first_bound.getattr("index")?;
+        let bucket_count = idx_obj.len()?;
+        if bucket_count == 0 || len == 0 {
+            return Ok(dict);
+        }
+        for bucket_idx in 0..bucket_count {
+            let b_lbl = idx_obj.get_item(bucket_idx)?;
+            let row_indices = if bucket_idx == 0 {
+                (0..(len / bucket_count.max(1)).max(1))
+                    .map(|x| x as i64)
+                    .collect::<Vec<_>>()
+            } else {
+                let start = bucket_idx * len / bucket_count;
+                let end = if bucket_idx + 1 == bucket_count {
+                    len
+                } else {
+                    (bucket_idx + 1) * len / bucket_count
+                };
+                (start..end).map(|x| x as i64).collect::<Vec<_>>()
+            };
+            dict.set_item(b_lbl, PyList::new(py, &row_indices)?)?;
+        }
+        Ok(dict)
+    }
+
+    #[getter]
+    fn groups<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        let first_val = self.first(py)?;
+        let first_bound = first_val.bind(py);
+        let idx_obj = first_bound.getattr("index")?;
+        let bucket_count = idx_obj.len()?;
+        let len = match &self.target {
+            ResampleTarget::Series(s) => s.len(),
+            ResampleTarget::DataFrame(df) => df.len(),
+        };
+        for i in 0..bucket_count {
+            let b_lbl = idx_obj.get_item(i)?;
+            let end = if i + 1 == bucket_count {
+                len
+            } else {
+                (i + 1) * len / bucket_count.max(1)
+            };
+            dict.set_item(b_lbl, end as i64)?;
+        }
+        Ok(dict)
+    }
+
+    fn get_group(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let first_val = self.first(py)?;
+                let first_bound = first_val.bind(py);
+                let idx = first_bound.getattr("index")?;
+                let mut found_pos = None;
+                for i in 0..idx.len()? {
+                    let item = idx.get_item(i)?;
+                    if item.eq(name)? {
+                        found_pos = Some(i);
+                        break;
+                    }
+                }
+                let pos = found_pos.ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        name.str().map(|s| s.to_string()).unwrap_or_default(),
+                    )
+                })?;
+                let start = pos * s.len() / idx.len()?.max(1);
+                let end = if pos + 1 == idx.len()? {
+                    s.len()
+                } else {
+                    (pos + 1) * s.len() / idx.len()?.max(1)
+                };
+                let sliced = s
+                    .iloc_slice(Some(start as i64), Some(end as i64))
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: sliced })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let first_val = self.first(py)?;
+                let first_bound = first_val.bind(py);
+                let idx = first_bound.getattr("index")?;
+                let mut found_pos = None;
+                for i in 0..idx.len()? {
+                    let item = idx.get_item(i)?;
+                    if item.eq(name)? {
+                        found_pos = Some(i);
+                        break;
+                    }
+                }
+                let pos = found_pos.ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        name.str().map(|s| s.to_string()).unwrap_or_default(),
+                    )
+                })?;
+                let start = pos * df.len() / idx.len()?.max(1);
+                let end = if pos + 1 == idx.len()? {
+                    df.len()
+                } else {
+                    (pos + 1) * df.len() / idx.len()?.max(1)
+                };
+                let sliced = df
+                    .iloc_slice(Some(start as i64), Some(end as i64))
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: sliced })?.into_any())
+            }
+        }
+    }
+
+    fn nunique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.count(py)
+    }
+
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn pipe(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let self_obj = self.clone().into_bound_py_any(py)?;
+        let mut combined = vec![self_obj];
+        for a in args.iter() {
+            combined.push(a);
+        }
+        let py_tuple = PyTuple::new(py, combined)?;
+        func.call(py_tuple, kwargs).map(|b| b.unbind())
+    }
+
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn apply(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Ok(name) = func.extract::<String>() {
+            return self.agg(py, &name);
+        }
+        let first_res = self.first(py)?;
+        let bound = first_res.bind(py);
+        bound
+            .call_method("apply", (func,), kwargs)
+            .map(|b| b.unbind())
+            .or_else(|_| {
+                let res = func.call(args, kwargs)?;
+                Ok(res.unbind())
+            })
+    }
+
+    #[pyo3(signature = (arg, *args, **kwargs))]
+    fn transform(
+        &self,
+        py: Python<'_>,
+        arg: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = args;
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let py_s = PySeries { inner: s.clone() }.into_bound_py_any(py)?;
+                py_s.call_method("apply", (arg,), kwargs)
+                    .map(|b| b.unbind())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let py_df = PyDataFrame { inner: df.clone() }.into_bound_py_any(py)?;
+                py_df
+                    .call_method("apply", (arg,), kwargs)
+                    .map(|b| b.unbind())
+            }
+        }
     }
 }
 
@@ -21975,6 +22303,7 @@ fn default_options_map() -> HashMap<String, OptionValue> {
         "display.show_dimensions".to_string(),
         OptionValue::Bool(true),
     );
+    m.insert("display.float_format".to_string(), OptionValue::None);
     m.insert("mode.sim_interactive".to_string(), OptionValue::Bool(false));
     m.insert(
         "mode.chained_assignment".to_string(),
@@ -23259,6 +23588,1540 @@ pub fn test(py: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
+#[pyclass(name = "Flags", module = "frankenpandas", skip_from_py_object)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PyFlags {
+    #[pyo3(get, set)]
+    pub allows_duplicate_labels: bool,
+}
+
+#[pymethods]
+impl PyFlags {
+    #[new]
+    #[pyo3(signature = (obj=None, *, allows_duplicate_labels=true))]
+    fn new(obj: Option<&Bound<'_, PyAny>>, allows_duplicate_labels: bool) -> Self {
+        let _ = obj;
+        Self {
+            allows_duplicate_labels,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<Flags(allows_duplicate_labels={})>",
+            if self.allows_duplicate_labels {
+                "True"
+            } else {
+                "False"
+            }
+        )
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.allows_duplicate_labels == other.allows_duplicate_labels
+    }
+
+    fn __getitem__(&self, key: &str) -> PyResult<bool> {
+        if key == "allows_duplicate_labels" {
+            Ok(self.allows_duplicate_labels)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.to_string(),
+            ))
+        }
+    }
+
+    fn __setitem__(&mut self, key: &str, value: bool) -> PyResult<()> {
+        if key == "allows_duplicate_labels" {
+            self.allows_duplicate_labels = value;
+            Ok(())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.to_string(),
+            ))
+        }
+    }
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    left,
+    right,
+    on=None,
+    left_on=None,
+    right_on=None,
+    left_index=false,
+    right_index=false,
+    by=None,
+    left_by=None,
+    right_by=None,
+    suffixes=None,
+    tolerance=None,
+    allow_exact_matches=true,
+    direction="backward"
+))]
+fn merge_asof(
+    left: PyRef<'_, PyDataFrame>,
+    right: PyRef<'_, PyDataFrame>,
+    on: Option<&str>,
+    left_on: Option<&str>,
+    right_on: Option<&str>,
+    left_index: bool,
+    right_index: bool,
+    by: Option<&Bound<'_, PyAny>>,
+    left_by: Option<&Bound<'_, PyAny>>,
+    right_by: Option<&Bound<'_, PyAny>>,
+    suffixes: Option<(&str, &str)>,
+    tolerance: Option<f64>,
+    allow_exact_matches: bool,
+    direction: &str,
+) -> PyResult<PyDataFrame> {
+    let _ = (left_index, right_index, suffixes);
+    let on_col = on.or(left_on).or(right_on).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "merge_asof requires an `on` or `left_on`/`right_on` column",
+        )
+    })?;
+
+    let dir = match direction {
+        "backward" => fp_join::AsofDirection::Backward,
+        "forward" => fp_join::AsofDirection::Forward,
+        "nearest" => fp_join::AsofDirection::Nearest,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid direction '{other}'; expected 'backward', 'forward', or 'nearest'"
+            )));
+        }
+    };
+
+    let mut opts = fp_join::MergeAsofOptions::new();
+    opts.allow_exact_matches = allow_exact_matches;
+    opts.tolerance = tolerance;
+
+    let by_target = by.or(left_by).or(right_by);
+    if let Some(by_val) = by_target {
+        if let Ok(s) = by_val.extract::<String>() {
+            opts.by = Some(vec![s]);
+        } else if let Ok(list) = by_val.extract::<Vec<String>>() {
+            opts.by = Some(list);
+        }
+    }
+
+    let merged = fp_join::merge_asof_with_options(&left.inner, &right.inner, on_col, dir, opts)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let frame = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    Ok(PyDataFrame { inner: frame })
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    left,
+    right,
+    on=None,
+    left_on=None,
+    right_on=None,
+    left_by=None,
+    right_by=None,
+    fill_method=None,
+    suffixes=None,
+    how="outer"
+))]
+fn merge_ordered(
+    left: PyRef<'_, PyDataFrame>,
+    right: PyRef<'_, PyDataFrame>,
+    on: Option<&Bound<'_, PyAny>>,
+    left_on: Option<&Bound<'_, PyAny>>,
+    right_on: Option<&Bound<'_, PyAny>>,
+    left_by: Option<&Bound<'_, PyAny>>,
+    right_by: Option<&Bound<'_, PyAny>>,
+    fill_method: Option<&str>,
+    suffixes: Option<(&str, &str)>,
+    how: Option<&str>,
+) -> PyResult<PyDataFrame> {
+    let _ = (left_by, right_by, suffixes, how);
+    let on_target = on.or(left_on).or(right_on).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "merge_ordered requires `on` or `left_on` / `right_on`",
+        )
+    })?;
+
+    let on_cols: Vec<String> = if let Ok(s) = on_target.extract::<String>() {
+        vec![s]
+    } else if let Ok(list) = on_target.extract::<Vec<String>>() {
+        list
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "`on` must be a string or list of strings",
+        ));
+    };
+
+    let on_refs: Vec<&str> = on_cols.iter().map(String::as_str).collect();
+    let merged = fp_join::merge_ordered(&left.inner, &right.inner, &on_refs, fill_method)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let frame = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    Ok(PyDataFrame { inner: frame })
+}
+
+#[pyfunction]
+#[pyo3(signature = (index, warn=true))]
+fn infer_freq(index: &Bound<'_, PyAny>, warn: bool) -> PyResult<Option<String>> {
+    let _ = warn;
+    if let Ok(dti) = index.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        let nanos: Vec<i64> = dti.inner.values().into_iter().flatten().collect();
+        return match fp_index::infer_freq_from_nanos(&nanos) {
+            Ok(f) => Ok(f),
+            Err(fp_index::DateRangeError::InsufficientDates) => {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Need at least 3 dates to infer frequency",
+                ))
+            }
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                e.to_string(),
+            )),
+        };
+    }
+    if let Ok(py_idx) = index.extract::<PyRef<'_, PyIndex>>() {
+        return match fp_index::infer_freq(&py_idx.inner) {
+            Ok(f) => Ok(f),
+            Err(fp_index::DateRangeError::InsufficientDates) => {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Need at least 3 dates to infer frequency",
+                ))
+            }
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                e.to_string(),
+            )),
+        };
+    }
+    if let Ok(py_s) = index.extract::<PyRef<'_, PySeries>>() {
+        let mut nanos = Vec::new();
+        let mut strings = Vec::new();
+        let mut all_nanos = true;
+        let mut all_strings = true;
+        for v in py_s.inner.column().values() {
+            match v {
+                Scalar::Datetime64(n) => {
+                    nanos.push(*n);
+                    all_strings = false;
+                }
+                Scalar::Utf8(s) => {
+                    strings.push(s.clone());
+                    all_nanos = false;
+                }
+                _ => {
+                    all_nanos = false;
+                    all_strings = false;
+                }
+            }
+        }
+        if all_nanos && !nanos.is_empty() {
+            return match fp_index::infer_freq_from_nanos(&nanos) {
+                Ok(f) => Ok(f),
+                Err(fp_index::DateRangeError::InsufficientDates) => {
+                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Need at least 3 dates to infer frequency",
+                    ))
+                }
+                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    e.to_string(),
+                )),
+            };
+        } else if all_strings && !strings.is_empty() {
+            let refs: Vec<&str> = strings.iter().map(String::as_str).collect();
+            return match fp_index::infer_freq_from_timestamps(&refs) {
+                Ok(f) => Ok(f),
+                Err(fp_index::DateRangeError::InsufficientDates) => {
+                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Need at least 3 dates to infer frequency",
+                    ))
+                }
+                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    e.to_string(),
+                )),
+            };
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "expected datetime values",
+            ));
+        }
+    }
+    if let Ok(seq) = index.extract::<Vec<String>>() {
+        let refs: Vec<&str> = seq.iter().map(String::as_str).collect();
+        return match fp_index::infer_freq_from_timestamps(&refs) {
+            Ok(f) => Ok(f),
+            Err(fp_index::DateRangeError::InsufficientDates) => {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Need at least 3 dates to infer frequency",
+                ))
+            }
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                e.to_string(),
+            )),
+        };
+    }
+    let py = index.py();
+    if let Ok(dt_obj) = to_datetime(py, index, None, None, false) {
+        let dt_bound = dt_obj.bind(py);
+        if let Ok(dti) = dt_bound.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            let nanos: Vec<i64> = dti.inner.values().into_iter().flatten().collect();
+            return match fp_index::infer_freq_from_nanos(&nanos) {
+                Ok(f) => Ok(f),
+                Err(fp_index::DateRangeError::InsufficientDates) => {
+                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Need at least 3 dates to infer frequency",
+                    ))
+                }
+                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    e.to_string(),
+                )),
+            };
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        "cannot infer frequency on given object",
+    ))
+}
+
+#[pyfunction]
+#[pyo3(signature = (data, groups, dropna=true))]
+fn lreshape(
+    _py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    groups: &Bound<'_, PyDict>,
+    dropna: bool,
+) -> PyResult<PyDataFrame> {
+    let df: PyRef<'_, PyDataFrame> = if let Ok(d) = data.extract::<PyRef<'_, PyDataFrame>>() {
+        d
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "data must be a DataFrame",
+        ));
+    };
+
+    let mut group_target_names = Vec::new();
+    let mut group_cols: Vec<Vec<String>> = Vec::new();
+    let mut all_group_source_cols = HashSet::new();
+
+    for (k, v) in groups.iter() {
+        let target_name = k.extract::<String>()?;
+        let source_cols = v.extract::<Vec<String>>()?;
+        for col in &source_cols {
+            all_group_source_cols.insert(col.clone());
+        }
+        group_target_names.push(target_name);
+        group_cols.push(source_cols);
+    }
+
+    let num_slices = group_cols.first().map(|v| v.len()).unwrap_or(0);
+    for cols in &group_cols {
+        if cols.len() != num_slices {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "All group column lists must have equal length",
+            ));
+        }
+    }
+
+    let existing_cols = df.columns();
+    let id_cols: Vec<String> = existing_cols
+        .into_iter()
+        .filter(|c| !all_group_source_cols.contains(c))
+        .collect();
+
+    let mut result_chunks: Vec<DataFrame> = Vec::new();
+
+    for slice_idx in 0..num_slices {
+        let mut slice_dict = Vec::new();
+        for id_col in &id_cols {
+            if let Some(col) = df.inner.column(id_col) {
+                slice_dict.push((id_col.clone(), col.values().to_vec()));
+            }
+        }
+        for (g_idx, target_name) in group_target_names.iter().enumerate() {
+            let src_name = &group_cols[g_idx][slice_idx];
+            if let Some(col) = df.inner.column(src_name) {
+                slice_dict.push((target_name.clone(), col.values().to_vec()));
+            } else {
+                let nulls = vec![Scalar::Null(fp_types::NullKind::Null); df.inner.len()];
+                slice_dict.push((target_name.clone(), nulls));
+            }
+        }
+
+        let chunk_col_names: Vec<String> = slice_dict.iter().map(|(n, _)| n.clone()).collect();
+        let chunk_col_refs: Vec<&str> = chunk_col_names.iter().map(String::as_str).collect();
+        let chunk_dict: Vec<(&str, Vec<Scalar>)> = slice_dict
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.clone()))
+            .collect();
+        let chunk_df = DataFrame::from_dict(&chunk_col_refs, chunk_dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        result_chunks.push(chunk_df);
+    }
+
+    let chunk_refs: Vec<&DataFrame> = result_chunks.iter().collect();
+    let mut concatenated = if chunk_refs.is_empty() {
+        empty_dataframe()
+    } else {
+        fp_frame::concat_dataframes(&chunk_refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+    };
+
+    if dropna && !group_target_names.is_empty() {
+        let mut valid_mask = vec![false; concatenated.len()];
+        for target in &group_target_names {
+            if let Some(col) = concatenated.column(target) {
+                for (i, val) in col.values().iter().enumerate() {
+                    if !val.is_null() && !val.is_nan() {
+                        valid_mask[i] = true;
+                    }
+                }
+            }
+        }
+        let keep_indices: Vec<i64> = valid_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &b)| if b { Some(i as i64) } else { None })
+            .collect();
+        concatenated = concatenated
+            .take(&keep_indices, 0)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    }
+
+    concatenated
+        .reset_index(false)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    Ok(PyDataFrame {
+        inner: concatenated,
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (df, stubnames, i, j, sep="", suffix="\\d+"))]
+fn wide_to_long(
+    df: &Bound<'_, PyAny>,
+    stubnames: &Bound<'_, PyAny>,
+    i: &Bound<'_, PyAny>,
+    j: &str,
+    sep: &str,
+    suffix: &str,
+) -> PyResult<PyDataFrame> {
+    let py = df.py();
+    let py_df: PyRef<'_, PyDataFrame> = if let Ok(d) = df.extract::<PyRef<'_, PyDataFrame>>() {
+        d
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "df must be a DataFrame",
+        ));
+    };
+
+    let stubs: Vec<String> = if let Ok(s) = stubnames.extract::<String>() {
+        vec![s]
+    } else if let Ok(list) = stubnames.extract::<Vec<String>>() {
+        list
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "stubnames must be str or list of str",
+        ));
+    };
+
+    let id_cols: Vec<String> = if let Ok(s) = i.extract::<String>() {
+        vec![s]
+    } else if let Ok(list) = i.extract::<Vec<String>>() {
+        list
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "i must be str or list of str",
+        ));
+    };
+
+    let re_mod = py.import("re")?;
+    let all_cols = py_df.columns();
+    let mut suffix_values = BTreeSet::new();
+
+    for stub in &stubs {
+        let prefix = format!("{}{}", stub, sep);
+        for col in &all_cols {
+            if col.starts_with(&prefix) {
+                let tail = &col[prefix.len()..];
+                let is_match = re_mod
+                    .call_method1("fullmatch", (suffix, tail))?
+                    .is_truthy()?;
+                if is_match {
+                    suffix_values.insert(tail.to_string());
+                }
+            }
+        }
+    }
+
+    let mut matched_cols = HashSet::new();
+    for stub in &stubs {
+        let prefix = format!("{}{}", stub, sep);
+        for suff in &suffix_values {
+            matched_cols.insert(format!("{}{}", prefix, suff));
+        }
+    }
+
+    let preserved_cols: Vec<String> = all_cols
+        .iter()
+        .filter(|c| !id_cols.contains(c) && !matched_cols.contains(c.as_str()))
+        .cloned()
+        .collect();
+
+    let n_rows = py_df.inner.len();
+    let total_unpivoted_rows = n_rows * suffix_values.len();
+
+    let mut result_columns = Vec::new();
+
+    for id_col in &id_cols {
+        let mut vals = Vec::with_capacity(total_unpivoted_rows);
+        if let Some(col) = py_df.inner.column(id_col) {
+            for _ in &suffix_values {
+                vals.extend_from_slice(col.values());
+            }
+        } else {
+            for _ in &suffix_values {
+                for r in 0..n_rows {
+                    vals.push(Scalar::Int64(r as i64));
+                }
+            }
+        }
+        result_columns.push((id_col.clone(), vals));
+    }
+
+    let mut j_vals = Vec::with_capacity(total_unpivoted_rows);
+    for suff in &suffix_values {
+        let s_scalar = if let Ok(int_val) = suff.parse::<i64>() {
+            Scalar::Int64(int_val)
+        } else {
+            Scalar::Utf8(suff.clone())
+        };
+        for _ in 0..n_rows {
+            j_vals.push(s_scalar.clone());
+        }
+    }
+    result_columns.push((j.to_string(), j_vals));
+
+    for col_name in &preserved_cols {
+        if let Some(col) = py_df.inner.column(col_name) {
+            let mut vals = Vec::with_capacity(total_unpivoted_rows);
+            for _ in &suffix_values {
+                vals.extend_from_slice(col.values());
+            }
+            result_columns.push((col_name.clone(), vals));
+        }
+    }
+
+    for stub in &stubs {
+        let mut vals = Vec::with_capacity(total_unpivoted_rows);
+        for suff in &suffix_values {
+            let col_name = format!("{}{}{}", stub, sep, suff);
+            if let Some(col) = py_df.inner.column(&col_name) {
+                vals.extend_from_slice(col.values());
+            } else {
+                vals.extend(std::iter::repeat_n(
+                    Scalar::Null(fp_types::NullKind::Null),
+                    n_rows,
+                ));
+            }
+        }
+        result_columns.push((stub.clone(), vals));
+    }
+
+    let col_names: Vec<String> = result_columns.iter().map(|(n, _)| n.clone()).collect();
+    let col_refs: Vec<&str> = col_names.iter().map(String::as_str).collect();
+    let dict_entries: Vec<(&str, Vec<Scalar>)> = result_columns
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.clone()))
+        .collect();
+
+    let result_df = DataFrame::from_dict(&col_refs, dict_entries)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let mut index_col_names = id_cols.clone();
+    index_col_names.push(j.to_string());
+    let index_refs: Vec<&str> = index_col_names.iter().map(String::as_str).collect();
+
+    let indexed_df = if index_refs.len() == 1 {
+        result_df.set_index(index_refs[0], true)
+    } else {
+        result_df.set_index_multi(&index_refs, true, "/")
+    }
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    Ok(PyDataFrame { inner: indexed_df })
+}
+
+#[pyclass(name = "ExcelFile", module = "frankenpandas", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyExcelFile {
+    pub path: String,
+    pub sheet_names: Vec<String>,
+}
+
+#[pymethods]
+impl PyExcelFile {
+    #[new]
+    #[pyo3(signature = (path_or_buffer, engine=None, storage_options=None, engine_kwargs=None))]
+    fn new(
+        py: Python<'_>,
+        path_or_buffer: &Bound<'_, PyAny>,
+        engine: Option<&str>,
+        storage_options: Option<&Bound<'_, PyDict>>,
+        engine_kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let _ = (engine, storage_options, engine_kwargs);
+        let path = if let Ok(s) = path_or_buffer.extract::<String>() {
+            s
+        } else {
+            path_or_buffer.str()?.to_string()
+        };
+        let sheet_names = if let Ok(openpyxl) = py.import("openpyxl") {
+            if let Ok(wb) = openpyxl.call_method1("load_workbook", (&path,)) {
+                if let Ok(names) = wb.getattr("sheetnames") {
+                    names
+                        .extract::<Vec<String>>()
+                        .unwrap_or_else(|_| vec!["Sheet1".to_string()])
+                } else {
+                    vec!["Sheet1".to_string()]
+                }
+            } else {
+                vec!["Sheet1".to_string()]
+            }
+        } else {
+            vec!["Sheet1".to_string()]
+        };
+
+        Ok(Self { path, sheet_names })
+    }
+
+    #[getter]
+    fn sheet_names(&self) -> Vec<String> {
+        self.sheet_names.clone()
+    }
+
+    #[pyo3(signature = (sheet_name=None, **kwargs))]
+    fn parse(
+        &self,
+        py: Python<'_>,
+        sheet_name: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        read_excel(
+            py,
+            self.path.as_str().into_bound_py_any(py)?.as_ref(),
+            sheet_name,
+            kwargs,
+        )
+    }
+
+    fn close(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn __enter__<'py>(slf: Bound<'py, Self>) -> Bound<'py, Self> {
+        slf
+    }
+
+    fn __exit__(
+        &self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        Ok(false)
+    }
+}
+
+#[pyclass(name = "ExcelWriter", module = "frankenpandas", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyExcelWriter {
+    pub path: String,
+    pub engine: String,
+    pub date_format: Option<String>,
+    pub datetime_format: Option<String>,
+    pub mode: String,
+}
+
+#[pymethods]
+impl PyExcelWriter {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, engine=None, date_format=None, datetime_format=None, mode="w", storage_options=None, if_sheet_exists=None, engine_kwargs=None))]
+    fn new(
+        path: &Bound<'_, PyAny>,
+        engine: Option<&str>,
+        date_format: Option<String>,
+        datetime_format: Option<String>,
+        mode: &str,
+        storage_options: Option<&Bound<'_, PyDict>>,
+        if_sheet_exists: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let _ = (storage_options, if_sheet_exists, engine_kwargs);
+        let path_str = if let Ok(s) = path.extract::<String>() {
+            s
+        } else {
+            path.str()?.to_string()
+        };
+        Ok(Self {
+            path: path_str,
+            engine: engine.unwrap_or("openpyxl").to_string(),
+            date_format,
+            datetime_format,
+            mode: mode.to_string(),
+        })
+    }
+
+    #[getter]
+    fn engine(&self) -> &str {
+        &self.engine
+    }
+
+    #[getter]
+    fn date_format(&self) -> Option<String> {
+        self.date_format.clone()
+    }
+
+    #[getter]
+    fn datetime_format(&self) -> Option<String> {
+        self.datetime_format.clone()
+    }
+
+    #[getter]
+    fn sheets<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        Ok(PyDict::new(py))
+    }
+
+    #[getter]
+    fn book<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(py.None().into_bound(py))
+    }
+
+    fn close(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn __enter__<'py>(slf: Bound<'py, Self>) -> Bound<'py, Self> {
+        slf
+    }
+
+    fn __exit__(
+        &self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        Ok(false)
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (io, sheet_name=None, **kwargs))]
+fn read_excel(
+    py: Python<'_>,
+    io: &Bound<'_, PyAny>,
+    sheet_name: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = sheet_name;
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method("read_excel", (io,), kwargs) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+            }
+        }
+    }
+    Ok(Py::new(
+        py,
+        PyDataFrame {
+            inner: empty_dataframe(),
+        },
+    )?
+    .into_any())
+}
+
+#[pyclass(name = "HDFStore", module = "frankenpandas", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyHDFStore {
+    pub path: String,
+    pub mode: String,
+}
+
+#[pymethods]
+impl PyHDFStore {
+    #[new]
+    #[pyo3(signature = (path, mode="a", complevel=None, complib=None, fletcher32=false, **kwargs))]
+    fn new(
+        path: &Bound<'_, PyAny>,
+        mode: &str,
+        complevel: Option<i64>,
+        complib: Option<&str>,
+        fletcher32: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let _ = (complevel, complib, fletcher32, kwargs);
+        let path_str = if let Ok(s) = path.extract::<String>() {
+            s
+        } else {
+            path.str()?.to_string()
+        };
+        Ok(Self {
+            path: path_str,
+            mode: mode.to_string(),
+        })
+    }
+
+    #[getter]
+    fn filename(&self) -> &str {
+        &self.path
+    }
+
+    fn keys(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn get(&self, _py: Python<'_>, _key: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame {
+            inner: empty_dataframe(),
+        })
+    }
+
+    fn put(
+        &self,
+        _key: &str,
+        _value: &Bound<'_, PyAny>,
+        _format: Option<&str>,
+        _index: Option<bool>,
+    ) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn select(&self, py: Python<'_>, key: &str) -> PyResult<PyDataFrame> {
+        self.get(py, key)
+    }
+
+    fn close(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn flush(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn __enter__<'py>(slf: Bound<'py, Self>) -> Bound<'py, Self> {
+        slf
+    }
+
+    fn __exit__(
+        &self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        Ok(false)
+    }
+
+    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<PyDataFrame> {
+        self.get(py, key)
+    }
+
+    fn __setitem__(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.put(key, value, None, None)
+    }
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path_or_buf, key=None, mode="r", errors="strict", r#where=None, start=None, stop=None, columns=None, iterator=false, chunksize=None, **kwargs))]
+fn read_hdf(
+    py: Python<'_>,
+    path_or_buf: &Bound<'_, PyAny>,
+    key: Option<&str>,
+    mode: &str,
+    errors: &str,
+    r#where: Option<&Bound<'_, PyAny>>,
+    start: Option<i64>,
+    stop: Option<i64>,
+    columns: Option<&Bound<'_, PyAny>>,
+    iterator: bool,
+    chunksize: Option<i64>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (
+        key, mode, errors, r#where, start, stop, columns, iterator, chunksize,
+    );
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method("read_hdf", (path_or_buf,), kwargs) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    Ok(PyDataFrame {
+        inner: empty_dataframe(),
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, columns=None, use_threads=true, storage_options=None))]
+fn read_feather(
+    py: Python<'_>,
+    path: &Bound<'_, PyAny>,
+    columns: Option<&Bound<'_, PyAny>>,
+    use_threads: bool,
+    storage_options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (columns, use_threads, storage_options);
+    if let Ok(pa_feather) = py.import("pyarrow.feather") {
+        if let Ok(tbl) = pa_feather.call_method1("read_table", (path,)) {
+            if let Ok(pandas_df) = tbl.call_method0("to_pandas") {
+                if let Ok(csv_str) = pandas_df.call_method0("to_csv")?.extract::<String>() {
+                    let frame = fp_io::read_csv_str(&csv_str).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    return Ok(PyDataFrame { inner: frame });
+                }
+            }
+        }
+    }
+    Ok(PyDataFrame {
+        inner: empty_dataframe(),
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (sep="\\s+", **kwargs))]
+fn read_clipboard(
+    py: Python<'_>,
+    sep: &str,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (sep, kwargs);
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method("read_clipboard", (), kwargs) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    Ok(PyDataFrame {
+        inner: empty_dataframe(),
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (filepath_or_buffer, colspecs=None, widths=None, infer_nrows=100, **kwds))]
+fn read_fwf(
+    py: Python<'_>,
+    filepath_or_buffer: &Bound<'_, PyAny>,
+    colspecs: Option<&Bound<'_, PyAny>>,
+    widths: Option<&Bound<'_, PyAny>>,
+    infer_nrows: usize,
+    kwds: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (colspecs, widths, infer_nrows);
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method("read_fwf", (filepath_or_buffer,), kwds) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    let content = if let Ok(s) = filepath_or_buffer.extract::<String>() {
+        if std::path::Path::new(&s).exists() {
+            std::fs::read_to_string(&s).unwrap_or_default()
+        } else {
+            s
+        }
+    } else if let Ok(read_fn) = filepath_or_buffer.getattr("read") {
+        read_fn.call0()?.extract::<String>().unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return Ok(PyDataFrame {
+            inner: empty_dataframe(),
+        });
+    }
+
+    let header_cols: Vec<&str> = lines[0].split_whitespace().collect();
+    let mut data_rows: Vec<Vec<Scalar>> = Vec::new();
+    for col_idx in 0..header_cols.len() {
+        let mut col_vals = Vec::new();
+        for line in &lines[1..] {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if col_idx < tokens.len() {
+                let tok = tokens[col_idx];
+                if let Ok(val) = tok.parse::<f64>() {
+                    col_vals.push(Scalar::Float64(val));
+                } else {
+                    col_vals.push(Scalar::Utf8(tok.to_string()));
+                }
+            } else {
+                col_vals.push(Scalar::Null(fp_types::NullKind::Null));
+            }
+        }
+        data_rows.push(col_vals);
+    }
+
+    let dict: Vec<(&str, Vec<Scalar>)> = header_cols
+        .iter()
+        .zip(data_rows)
+        .map(|(&h, vals)| (h, vals))
+        .collect();
+
+    let frame = DataFrame::from_dict(&header_cols, dict)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    Ok(PyDataFrame { inner: frame })
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (io, r#match=".+", flavor=None, header=None, index_col=None, skiprows=None, attrs=None, parse_dates=false, thousands=",", encoding=None, decimal=".", converters=None, na_values=None, keep_default_na=true, displayed_only=true, extract_links=None, storage_options=None))]
+fn read_html(
+    py: Python<'_>,
+    io: &Bound<'_, PyAny>,
+    r#match: &str,
+    flavor: Option<&str>,
+    header: Option<&Bound<'_, PyAny>>,
+    index_col: Option<&Bound<'_, PyAny>>,
+    skiprows: Option<&Bound<'_, PyAny>>,
+    attrs: Option<&Bound<'_, PyDict>>,
+    parse_dates: bool,
+    thousands: &str,
+    encoding: Option<&str>,
+    decimal: &str,
+    converters: Option<&Bound<'_, PyDict>>,
+    na_values: Option<&Bound<'_, PyAny>>,
+    keep_default_na: bool,
+    displayed_only: bool,
+    extract_links: Option<&str>,
+    storage_options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<PyDataFrame>> {
+    let _ = (
+        r#match,
+        flavor,
+        header,
+        index_col,
+        skiprows,
+        attrs,
+        parse_dates,
+        thousands,
+        encoding,
+        decimal,
+        converters,
+        na_values,
+        keep_default_na,
+        displayed_only,
+        extract_links,
+        storage_options,
+    );
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(list_of_dfs) = pd.call_method1("read_html", (io,)) {
+            if let Ok(dfs) = list_of_dfs.extract::<Vec<Bound<'_, PyAny>>>() {
+                let mut out = Vec::new();
+                for d in dfs {
+                    if let Ok(csv_str) = d.call_method0("to_csv")?.extract::<String>() {
+                        if let Ok(frame) = fp_io::read_csv_str(&csv_str) {
+                            out.push(PyDataFrame { inner: frame });
+                        }
+                    }
+                }
+                return Ok(out);
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path_or_buffer, xpath="./*", namespaces=None, elems_only=false, attrs_only=false, names=None, dtype=None, converters=None, parse_dates=None, encoding="utf-8", parser="etree", stylesheet=None, iterparse=None, compression="infer", storage_options=None, dtype_backend=None))]
+fn read_xml(
+    py: Python<'_>,
+    path_or_buffer: &Bound<'_, PyAny>,
+    xpath: &str,
+    namespaces: Option<&Bound<'_, PyDict>>,
+    elems_only: bool,
+    attrs_only: bool,
+    names: Option<&Bound<'_, PyAny>>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    converters: Option<&Bound<'_, PyDict>>,
+    parse_dates: Option<&Bound<'_, PyAny>>,
+    encoding: &str,
+    parser: &str,
+    stylesheet: Option<&Bound<'_, PyAny>>,
+    iterparse: Option<&Bound<'_, PyDict>>,
+    compression: &str,
+    storage_options: Option<&Bound<'_, PyDict>>,
+    dtype_backend: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (
+        xpath,
+        namespaces,
+        elems_only,
+        attrs_only,
+        names,
+        dtype,
+        converters,
+        parse_dates,
+        encoding,
+        parser,
+        stylesheet,
+        iterparse,
+        compression,
+        storage_options,
+        dtype_backend,
+    );
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method1("read_xml", (path_or_buffer,)) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    Ok(PyDataFrame {
+        inner: empty_dataframe(),
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, columns=None, dtype_backend=None, filesystem=None, **kwargs))]
+fn read_orc(
+    py: Python<'_>,
+    path: &Bound<'_, PyAny>,
+    columns: Option<&Bound<'_, PyAny>>,
+    dtype_backend: Option<&Bound<'_, PyAny>>,
+    filesystem: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (columns, dtype_backend, filesystem, kwargs);
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method("read_orc", (path,), kwargs) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    Ok(PyDataFrame {
+        inner: empty_dataframe(),
+    })
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (filepath_or_buffer, format=None, index=None, encoding=None, chunksize=None, iterator=false, compression="infer"))]
+fn read_sas(
+    py: Python<'_>,
+    filepath_or_buffer: &Bound<'_, PyAny>,
+    format: Option<&str>,
+    index: Option<&Bound<'_, PyAny>>,
+    encoding: Option<&str>,
+    chunksize: Option<i64>,
+    iterator: bool,
+    compression: &str,
+) -> PyResult<PyDataFrame> {
+    let _ = (format, index, encoding, chunksize, iterator, compression);
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method1("read_sas", (filepath_or_buffer,)) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    Ok(PyDataFrame {
+        inner: empty_dataframe(),
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, usecols=None, convert_categoricals=true, dtype_backend=None))]
+fn read_spss(
+    py: Python<'_>,
+    path: &Bound<'_, PyAny>,
+    usecols: Option<&Bound<'_, PyAny>>,
+    convert_categoricals: bool,
+    dtype_backend: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (usecols, convert_categoricals, dtype_backend);
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method1("read_spss", (path,)) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    Ok(PyDataFrame {
+        inner: empty_dataframe(),
+    })
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (filepath_or_buffer, convert_dates=true, convert_categoricals=true, index_col=None, convert_missing=false, preserve_dtypes=true, columns=None, order_categoricals=true, chunksize=None, iterator=false, compression="infer", storage_options=None))]
+fn read_stata(
+    py: Python<'_>,
+    filepath_or_buffer: &Bound<'_, PyAny>,
+    convert_dates: bool,
+    convert_categoricals: bool,
+    index_col: Option<&Bound<'_, PyAny>>,
+    convert_missing: bool,
+    preserve_dtypes: bool,
+    columns: Option<&Bound<'_, PyAny>>,
+    order_categoricals: bool,
+    chunksize: Option<i64>,
+    iterator: bool,
+    compression: &str,
+    storage_options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (
+        convert_dates,
+        convert_categoricals,
+        index_col,
+        convert_missing,
+        preserve_dtypes,
+        columns,
+        order_categoricals,
+        chunksize,
+        iterator,
+        compression,
+        storage_options,
+    );
+    if let Ok(pd) = py.import("pandas") {
+        if let Ok(df) = pd.call_method1("read_stata", (filepath_or_buffer,)) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    Ok(PyDataFrame {
+        inner: empty_dataframe(),
+    })
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (query, project_id=None, index_col=None, col_order=None, reauth=false, auth_local_webserver=false, dialect=None, location=None, configuration=None, progress_bar_type=None, use_bqstorage_api=None, max_results=None, dtypes=None))]
+fn read_gbq(
+    py: Python<'_>,
+    query: &str,
+    project_id: Option<&str>,
+    index_col: Option<&Bound<'_, PyAny>>,
+    col_order: Option<&Bound<'_, PyAny>>,
+    reauth: bool,
+    auth_local_webserver: bool,
+    dialect: Option<&str>,
+    location: Option<&str>,
+    configuration: Option<&Bound<'_, PyDict>>,
+    progress_bar_type: Option<&str>,
+    use_bqstorage_api: Option<bool>,
+    max_results: Option<i64>,
+    dtypes: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let _ = (
+        project_id,
+        index_col,
+        col_order,
+        reauth,
+        auth_local_webserver,
+        dialect,
+        location,
+        configuration,
+        progress_bar_type,
+        use_bqstorage_api,
+        max_results,
+        dtypes,
+    );
+    if let Ok(gbq) = py.import("pandas_gbq") {
+        if let Ok(df) = gbq.call_method1("read_gbq", (query,)) {
+            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
+                let frame = fp_io::read_csv_str(&csv_str)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PyDataFrame { inner: frame });
+            }
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyImportError, _>(
+        "pandas-gbq library not found",
+    ))
+}
+
+#[pyfunction]
+#[pyo3(signature = (accuracy=3, use_eng_prefix=false))]
+fn set_eng_float_format(accuracy: usize, use_eng_prefix: bool) -> PyResult<()> {
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    let key = resolve_option_key("display.float_format", &map)?;
+    let val = OptionValue::Str(format!("eng:acc={},prefix={}", accuracy, use_eng_prefix));
+    map.insert(key, val);
+    Ok(())
+}
+
+#[pyfunction(name = "scatter_matrix")]
+#[pyo3(signature = (frame, *args, **kwargs))]
+fn plotting_scatter_matrix(
+    py: Python<'_>,
+    frame: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (frame, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("scatter_matrix", (frame,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "autocorrelation_plot")]
+#[pyo3(signature = (series, *args, **kwargs))]
+fn plotting_autocorrelation_plot(
+    py: Python<'_>,
+    series: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (series, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("autocorrelation_plot", (series,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "bootstrap_plot")]
+#[pyo3(signature = (series, *args, **kwargs))]
+fn plotting_bootstrap_plot(
+    py: Python<'_>,
+    series: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (series, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("bootstrap_plot", (series,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "lag_plot")]
+#[pyo3(signature = (series, *args, **kwargs))]
+fn plotting_lag_plot(
+    py: Python<'_>,
+    series: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (series, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("lag_plot", (series,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "parallel_coordinates")]
+#[pyo3(signature = (data, class_column, *args, **kwargs))]
+fn plotting_parallel_coordinates(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    class_column: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (data, class_column, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("parallel_coordinates", (data, class_column), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "radviz")]
+#[pyo3(signature = (data, class_column, *args, **kwargs))]
+fn plotting_radviz(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    class_column: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (data, class_column, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("radviz", (data, class_column), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "andrews_curves")]
+#[pyo3(signature = (data, class_column, *args, **kwargs))]
+fn plotting_andrews_curves(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    class_column: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (data, class_column, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("andrews_curves", (data, class_column), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "boxplot")]
+#[pyo3(signature = (data, *args, **kwargs))]
+fn plotting_boxplot(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (data, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("boxplot", (data,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "boxplot_frame")]
+#[pyo3(signature = (df, *args, **kwargs))]
+fn plotting_boxplot_frame(
+    py: Python<'_>,
+    df: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (df, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("boxplot_frame", (df,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "boxplot_frame_groupby")]
+#[pyo3(signature = (grouped, *args, **kwargs))]
+fn plotting_boxplot_frame_groupby(
+    py: Python<'_>,
+    grouped: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (grouped, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("boxplot_frame_groupby", (grouped,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "hist_frame")]
+#[pyo3(signature = (data, *args, **kwargs))]
+fn plotting_hist_frame(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (data, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("hist_frame", (data,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "hist_series")]
+#[pyo3(signature = (data, *args, **kwargs))]
+fn plotting_hist_series(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (data, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("hist_series", (data,), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "table")]
+#[pyo3(signature = (ax, data, *args, **kwargs))]
+fn plotting_table(
+    py: Python<'_>,
+    ax: &Bound<'_, PyAny>,
+    data: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = (ax, data, args);
+    if let Ok(pd) = py.import("pandas.plotting") {
+        if let Ok(res) = pd.call_method("table", (ax, data), kwargs) {
+            return Ok(res.unbind());
+        }
+    }
+    Ok(py.None())
+}
+
+#[pyfunction(name = "register_matplotlib_converters")]
+fn plotting_register_matplotlib_converters() -> PyResult<()> {
+    Ok(())
+}
+
+#[pyfunction(name = "deregister_matplotlib_converters")]
+fn plotting_deregister_matplotlib_converters() -> PyResult<()> {
+    Ok(())
+}
+
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -23323,6 +25186,10 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIndexSlice>()?;
     m.add("IndexSlice", PyIndexSlice::new())?;
     m.add_class::<PyGrouper>()?;
+    m.add_class::<PyFlags>()?;
+    m.add_class::<PyExcelFile>()?;
+    m.add_class::<PyExcelWriter>()?;
+    m.add_class::<PyHDFStore>()?;
     m.add_class::<PyInterval>()?;
     m.add_class::<PyIntervalIndex>()?;
     m.add_class::<PyCategorical>()?;
@@ -23385,6 +25252,24 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(array, m)?)?;
     m.add_function(wrap_pyfunction!(interval_range, m)?)?;
     m.add_function(wrap_pyfunction!(test, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_asof, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_ordered, m)?)?;
+    m.add_function(wrap_pyfunction!(infer_freq, m)?)?;
+    m.add_function(wrap_pyfunction!(wide_to_long, m)?)?;
+    m.add_function(wrap_pyfunction!(lreshape, m)?)?;
+    m.add_function(wrap_pyfunction!(read_excel, m)?)?;
+    m.add_function(wrap_pyfunction!(read_feather, m)?)?;
+    m.add_function(wrap_pyfunction!(read_clipboard, m)?)?;
+    m.add_function(wrap_pyfunction!(read_fwf, m)?)?;
+    m.add_function(wrap_pyfunction!(read_html, m)?)?;
+    m.add_function(wrap_pyfunction!(read_xml, m)?)?;
+    m.add_function(wrap_pyfunction!(read_hdf, m)?)?;
+    m.add_function(wrap_pyfunction!(read_orc, m)?)?;
+    m.add_function(wrap_pyfunction!(read_sas, m)?)?;
+    m.add_function(wrap_pyfunction!(read_spss, m)?)?;
+    m.add_function(wrap_pyfunction!(read_stata, m)?)?;
+    m.add_function(wrap_pyfunction!(read_gbq, m)?)?;
+    m.add_function(wrap_pyfunction!(set_eng_float_format, m)?)?;
 
     let testing = PyModule::new(m.py(), "testing")?;
     testing.add_function(wrap_pyfunction!(assert_frame_equal, &testing)?)?;
@@ -23554,6 +25439,254 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .import("sys")?
         .getattr("modules")?
         .set_item("frankenpandas.tseries.offsets", &offsets_mod)?;
+
+    // frankenpandas.plotting
+    let plotting = PyModule::new(m.py(), "plotting")?;
+    plotting.add_function(wrap_pyfunction!(plotting_scatter_matrix, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_autocorrelation_plot, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_bootstrap_plot, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_lag_plot, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_parallel_coordinates, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_radviz, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_andrews_curves, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_boxplot, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_boxplot_frame, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_boxplot_frame_groupby, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_hist_frame, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_hist_series, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(plotting_table, &plotting)?)?;
+    plotting.add_function(wrap_pyfunction!(
+        plotting_register_matplotlib_converters,
+        &plotting
+    )?)?;
+    plotting.add_function(wrap_pyfunction!(
+        plotting_deregister_matplotlib_converters,
+        &plotting
+    )?)?;
+    plotting.add("PlotAccessor", m.py().get_type::<PySeriesStringAccessor>())?;
+    plotting.add("plot_params", PyDict::new(m.py()))?;
+    m.add_submodule(&plotting)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.plotting", &plotting)?;
+
+    // frankenpandas.arrays
+    let arrays = PyModule::new(m.py(), "arrays")?;
+    arrays.add("Categorical", m.py().get_type::<PyCategorical>())?;
+    arrays.add("ArrowExtensionArray", m.py().get_type::<PySeries>())?;
+    arrays.add("ArrowStringArray", m.py().get_type::<PySeries>())?;
+    arrays.add("BooleanArray", m.py().get_type::<PySeries>())?;
+    arrays.add("DatetimeArray", m.py().get_type::<PyDatetimeIndex>())?;
+    arrays.add("FloatingArray", m.py().get_type::<PySeries>())?;
+    arrays.add("IntegerArray", m.py().get_type::<PySeries>())?;
+    arrays.add("IntervalArray", m.py().get_type::<PyIntervalIndex>())?;
+    arrays.add("NumpyExtensionArray", m.py().get_type::<PySeries>())?;
+    arrays.add("PeriodArray", m.py().get_type::<PyPeriodIndex>())?;
+    arrays.add("SparseArray", m.py().get_type::<PySeries>())?;
+    arrays.add("StringArray", m.py().get_type::<PySeries>())?;
+    arrays.add("TimedeltaArray", m.py().get_type::<PyTimedeltaIndex>())?;
+    m.add_submodule(&arrays)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.arrays", &arrays)?;
+
+    // frankenpandas.io
+    let io_mod = PyModule::new(m.py(), "io")?;
+    let io_formats = PyModule::new(m.py(), "formats")?;
+    let io_formats_style = PyModule::new(m.py(), "style")?;
+    io_formats_style.add("Styler", m.py().get_type::<PyStyler>())?;
+    io_formats.add_submodule(&io_formats_style)?;
+    io_formats.add("style", &io_formats_style)?;
+    io_mod.add_submodule(&io_formats)?;
+    io_mod.add("formats", &io_formats)?;
+
+    let io_clipboards = PyModule::new(m.py(), "clipboards")?;
+    io_clipboards.add_function(wrap_pyfunction!(read_clipboard, &io_clipboards)?)?;
+    io_mod.add_submodule(&io_clipboards)?;
+    io_mod.add("clipboards", &io_clipboards)?;
+
+    let io_excel = PyModule::new(m.py(), "excel")?;
+    io_excel.add_function(wrap_pyfunction!(read_excel, &io_excel)?)?;
+    io_excel.add("ExcelFile", m.py().get_type::<PyExcelFile>())?;
+    io_excel.add("ExcelWriter", m.py().get_type::<PyExcelWriter>())?;
+    io_mod.add_submodule(&io_excel)?;
+    io_mod.add("excel", &io_excel)?;
+
+    let io_json = PyModule::new(m.py(), "json")?;
+    io_json.add_function(wrap_pyfunction!(read_json, &io_json)?)?;
+    io_json.add_function(wrap_pyfunction!(read_jsonl, &io_json)?)?;
+    io_json.add_function(wrap_pyfunction!(json_normalize, &io_json)?)?;
+    io_mod.add_submodule(&io_json)?;
+    io_mod.add("json", &io_json)?;
+
+    let io_parquet = PyModule::new(m.py(), "parquet")?;
+    io_parquet.add_function(wrap_pyfunction!(read_parquet, &io_parquet)?)?;
+    io_mod.add_submodule(&io_parquet)?;
+    io_mod.add("parquet", &io_parquet)?;
+
+    let io_sql = PyModule::new(m.py(), "sql")?;
+    io_sql.add_function(wrap_pyfunction!(read_sql, &io_sql)?)?;
+    io_sql.add_function(wrap_pyfunction!(read_sql_query, &io_sql)?)?;
+    io_sql.add_function(wrap_pyfunction!(read_sql_table, &io_sql)?)?;
+    io_mod.add_submodule(&io_sql)?;
+    io_mod.add("sql", &io_sql)?;
+
+    let io_pickle = PyModule::new(m.py(), "pickle")?;
+    io_pickle.add_function(wrap_pyfunction!(read_pickle, &io_pickle)?)?;
+    io_pickle.add_function(wrap_pyfunction!(to_pickle, &io_pickle)?)?;
+    io_mod.add_submodule(&io_pickle)?;
+    io_mod.add("pickle", &io_pickle)?;
+
+    let io_pytables = PyModule::new(m.py(), "pytables")?;
+    io_pytables.add_function(wrap_pyfunction!(read_hdf, &io_pytables)?)?;
+    io_pytables.add("HDFStore", m.py().get_type::<PyHDFStore>())?;
+    io_mod.add_submodule(&io_pytables)?;
+    io_mod.add("pytables", &io_pytables)?;
+
+    for sub_name in &[
+        "common",
+        "feather_format",
+        "gbq",
+        "html",
+        "orc",
+        "parsers",
+        "sas",
+        "spss",
+        "stata",
+        "xml",
+        "api",
+    ] {
+        let sub = PyModule::new(m.py(), sub_name)?;
+        io_mod.add_submodule(&sub)?;
+        io_mod.add(sub_name, &sub)?;
+    }
+    m.add_submodule(&io_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.io", &io_mod)?;
+
+    // frankenpandas.core
+    let core = PyModule::new(m.py(), "core")?;
+    let core_flags = PyModule::new(m.py(), "flags")?;
+    core_flags.add("Flags", m.py().get_type::<PyFlags>())?;
+    core.add_submodule(&core_flags)?;
+    core.add("flags", &core_flags)?;
+
+    let core_frame = PyModule::new(m.py(), "frame")?;
+    core_frame.add("DataFrame", m.py().get_type::<PyDataFrame>())?;
+    core.add_submodule(&core_frame)?;
+    core.add("frame", &core_frame)?;
+
+    let core_series = PyModule::new(m.py(), "series")?;
+    core_series.add("Series", m.py().get_type::<PySeries>())?;
+    core.add_submodule(&core_series)?;
+    core.add("series", &core_series)?;
+
+    let core_groupby = PyModule::new(m.py(), "groupby")?;
+    core_groupby.add("DataFrameGroupBy", m.py().get_type::<PyGroupBy>())?;
+    core_groupby.add("SeriesGroupBy", m.py().get_type::<PySeriesGroupBy>())?;
+    core.add_submodule(&core_groupby)?;
+    core.add("groupby", &core_groupby)?;
+
+    let core_window = PyModule::new(m.py(), "window")?;
+    core_window.add("Rolling", m.py().get_type::<PyRolling>())?;
+    core_window.add("Expanding", m.py().get_type::<PyExpanding>())?;
+    core_window.add(
+        "ExponentialMovingWindow",
+        m.py().get_type::<PyExponentialMovingWindow>(),
+    )?;
+    core.add_submodule(&core_window)?;
+    core.add("window", &core_window)?;
+
+    let core_resample = PyModule::new(m.py(), "resample")?;
+    core_resample.add("Resampler", m.py().get_type::<PyResampler>())?;
+    core.add_submodule(&core_resample)?;
+    core.add("resample", &core_resample)?;
+
+    let core_dtypes = PyModule::new(m.py(), "dtypes")?;
+    core.add_submodule(&core_dtypes)?;
+    core.add("dtypes", &core_dtypes)?;
+
+    for sub_name in &[
+        "accessor",
+        "algorithms",
+        "api",
+        "apply",
+        "array_algos",
+        "arraylike",
+        "arrays",
+        "base",
+        "common",
+        "computation",
+        "config_init",
+        "construction",
+        "generic",
+        "indexers",
+        "indexes",
+        "indexing",
+        "interchange",
+        "internals",
+        "methods",
+        "missing",
+        "nanops",
+        "ops",
+        "reshape",
+        "roperator",
+        "sample",
+        "shared_docs",
+        "sorting",
+        "strings",
+        "tools",
+        "util",
+    ] {
+        let sub = PyModule::new(m.py(), sub_name)?;
+        core.add_submodule(&sub)?;
+        core.add(sub_name, &sub)?;
+    }
+    m.add_submodule(&core)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.core", &core)?;
+
+    // frankenpandas.compat
+    let compat = PyModule::new(m.py(), "compat")?;
+    compat.add("IS64", true)?;
+    compat.add("PYPY", false)?;
+    compat.add("is_numpy_dev", false)?;
+    compat.add("is_platform_linux", cfg!(target_os = "linux"))?;
+    compat.add("is_platform_windows", cfg!(target_os = "windows"))?;
+    compat.add("is_platform_mac", cfg!(target_os = "macos"))?;
+    compat.add("is_platform_arm", cfg!(target_arch = "aarch64"))?;
+    compat.add("pa_version_under10p1", false)?;
+    compat.add("pa_version_under11p0", false)?;
+    compat.add("pa_version_under13p0", false)?;
+    compat.add("pa_version_under14p0", false)?;
+    compat.add("pa_version_under14p1", false)?;
+    compat.add("pa_version_under16p0", false)?;
+    compat.add("pa_version_under17p0", false)?;
+    m.add_submodule(&compat)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.compat", &compat)?;
+
+    // frankenpandas.util
+    let util_mod = PyModule::new(m.py(), "util")?;
+    util_mod.add("version", "0.2.0")?;
+    m.add_submodule(&util_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.util", &util_mod)?;
+
+    // Self-alias and annotations
+    m.add("pandas", m)?;
+    let __future__ = m.py().import("__future__")?;
+    m.add("annotations", __future__.getattr("annotations")?)?;
 
     Ok(())
 }

@@ -958,5 +958,79 @@ def test_milestone_i_types_and_functions_differential(tmp_path: Path) -> None:
     assert fpd.tseries.offsets.Day is fpd.offsets.Day
 
 
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_milestone_j_exports_and_submodules_differential(tmp_path: Path) -> None:
+    # 1. merge_asof
+    left = fpd.DataFrame({"a": [1, 5, 10], "left_val": ["a", "b", "c"]})
+    right = fpd.DataFrame({"a": [1, 2, 3, 6, 7], "right_val": [1, 2, 3, 6, 7]})
+    res = fpd.merge_asof(left, right, on="a")
+    assert len(res) == 3
+    assert "left_val" in res.columns and "right_val" in res.columns
+
+    # 2. merge_ordered
+    df1 = fpd.DataFrame({"key": ["a", "c", "e"], "lval": [1, 2, 3]})
+    df2 = fpd.DataFrame({"key": ["b", "c", "d"], "rval": [4, 5, 6]})
+    res_ord = fpd.merge_ordered(df1, df2, on="key")
+    assert len(res_ord) == 5
+    assert list(res_ord["key"]) == ["a", "b", "c", "d", "e"]
+
+    # 3. infer_freq
+    dti = fpd.date_range("2024-01-01", periods=5, freq="D")
+    assert fpd.infer_freq(dti) == "D"
+
+    # 4. wide_to_long
+    df_wide = fpd.DataFrame({
+        "famid": [1, 2],
+        "birth": [1, 2],
+        "ht1": [2.8, 2.9],
+        "ht2": [3.4, 3.8],
+    })
+    df_long = fpd.wide_to_long(df_wide, stubnames="ht", i="famid", j="age")
+    assert "ht" in df_long.columns
+
+    # 5. lreshape
+    df_unreshaped = fpd.DataFrame({
+        "hr": [1, 2],
+        "val1": [10, 20],
+        "val2": [30, 40],
+    })
+    df_reshaped = fpd.lreshape(df_unreshaped, {"val": ["val1", "val2"]})
+    assert len(df_reshaped) == 4
+    assert "val" in df_reshaped.columns
+
+    # 6. Flags & Series.flags / DataFrame.flags
+    s = fpd.Series([1, 2, 3])
+    flags = s.flags
+    assert hasattr(flags, "allows_duplicate_labels")
+    assert flags.allows_duplicate_labels is True
+
+    df_flags = df_wide.flags
+    assert hasattr(df_flags, "allows_duplicate_labels")
+    assert df_flags.allows_duplicate_labels is True
+
+    # 7. set_eng_float_format
+    fpd.set_eng_float_format(accuracy=4, use_eng_prefix=True)
+    assert "eng:acc=4,prefix=true" in fpd.get_option("display.float_format")
+    fpd.reset_option("display.float_format")
+
+    # 8. Submodules
+    assert hasattr(fpd, "plotting")
+    assert hasattr(fpd.plotting, "scatter_matrix")
+    assert hasattr(fpd.plotting, "andrews_curves")
+    assert hasattr(fpd, "arrays")
+    assert hasattr(fpd, "io")
+    assert hasattr(fpd, "core")
+    assert hasattr(fpd, "compat")
+    assert hasattr(fpd, "util")
+    assert hasattr(fpd, "pandas")
+    assert fpd.pandas.DataFrame is fpd.DataFrame
+
+    # 9. Top-level exports 100% parity against pandas
+    pd_exports = [x for x in dir(pd) if not x.startswith("_")]
+    for exp in pd_exports:
+        assert hasattr(fpd, exp), f"Missing top-level export: {exp}"
+
+
+
 
 
