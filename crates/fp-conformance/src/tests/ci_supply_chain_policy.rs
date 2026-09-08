@@ -363,11 +363,11 @@ fn readme_documented_numbers_match_the_tree() {
         .map(|head| head.matches("\n### DISC-").count())
         .unwrap_or(0);
     assert_eq!(
-        total, 26,
+        total, 27,
         "DISCREPANCIES entry count changed; update README + this gate"
     );
     assert_eq!(
-        active, 15,
+        active, 16,
         "DISCREPANCIES active-section count changed; update README + this gate"
     );
     assert!(

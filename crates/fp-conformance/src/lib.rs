@@ -217,7 +217,12 @@ impl HarnessConfig {
                 if trimmed.is_empty() {
                     None
                 } else {
-                    Some(trimmed.to_owned())
+                    let path = std::path::Path::new(trimmed);
+                    if path.is_relative() && repo_root.join(path).is_file() {
+                        Some(repo_root.join(path).display().to_string())
+                    } else {
+                        Some(trimmed.to_owned())
+                    }
                 }
             })
             .or_else(|| {
