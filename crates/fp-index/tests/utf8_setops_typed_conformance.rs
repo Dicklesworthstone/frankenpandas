@@ -26,10 +26,27 @@ fn labels(i: &Index) -> Vec<String> {
 }
 
 fn oracle_union(a: &[&str], b: &[&str]) -> Vec<String> {
-    let mut seen = HashSet::new();
+    let mut counts: std::collections::HashMap<&str, (usize, usize)> =
+        std::collections::HashMap::new();
+    let mut order = Vec::new();
+    for &s in a {
+        let entry = counts.entry(s).or_insert((0, 0));
+        if entry.0 == 0 && entry.1 == 0 {
+            order.push(s);
+        }
+        entry.0 += 1;
+    }
+    for &s in b {
+        let entry = counts.entry(s).or_insert((0, 0));
+        if entry.0 == 0 && entry.1 == 0 {
+            order.push(s);
+        }
+        entry.1 += 1;
+    }
     let mut out = Vec::new();
-    for &s in a.iter().chain(b.iter()) {
-        if seen.insert(s) {
+    for s in order {
+        let (ca, cb) = counts[s];
+        for _ in 0..ca.max(cb) {
             out.push(s.to_string());
         }
     }
