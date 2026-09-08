@@ -85,8 +85,8 @@ fn parse_dtype(name: &str) -> PyResult<fp_types::DType> {
         "bool" | "boolean" => Ok(DType::Bool),
         "datetime64" | "datetime64[ns]" | "datetime" => Ok(DType::datetime64_naive()),
         "timedelta64" | "timedelta64[ns]" | "timedelta" => Ok(DType::Timedelta64),
-        other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "unsupported dtype {other:?}"
+        other => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "data type {other:?} not understood"
         ))),
     }
 }
@@ -568,6 +568,7 @@ impl PyIndex {
         self.to_list(py)
     }
 
+    #[getter]
     fn values(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         self.to_list(py)
     }
@@ -1633,6 +1634,7 @@ impl PyDatetimeIndex {
         self.to_list()
     }
 
+    #[getter]
     fn values(&self) -> Vec<Option<i64>> {
         self.inner.values()
     }
@@ -2955,6 +2957,7 @@ impl PyMultiIndex {
         false
     }
 
+    #[getter]
     fn values(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         self.to_list(py)
     }
@@ -4098,6 +4101,7 @@ impl PyTimedeltaIndex {
         self.inner.tolist()
     }
 
+    #[getter]
     pub fn values(&self) -> Vec<Option<i64>> {
         self.inner.values()
     }
@@ -5015,6 +5019,7 @@ impl PyRangeIndex {
         self.tolist()
     }
 
+    #[getter]
     pub fn values(&self) -> Vec<i64> {
         self.tolist()
     }
@@ -5923,6 +5928,7 @@ impl PyPeriodIndex {
         self.tolist()
     }
 
+    #[getter]
     pub fn values(&self) -> Vec<String> {
         self.tolist()
     }
@@ -6868,6 +6874,7 @@ impl PyCategoricalIndex {
         self.tolist()
     }
 
+    #[getter]
     pub fn values(&self) -> Vec<String> {
         self.tolist()
     }
@@ -8509,6 +8516,7 @@ impl PySeries {
         Ok(PySeries { inner: r })
     }
 
+    #[getter]
     fn values(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.tolist(py)
     }
@@ -8700,12 +8708,39 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    pub fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<PySeriesGroupBy> {
+    #[pyo3(signature = (by, sort=true))]
+    pub fn groupby(
+        &self,
+        py: Python<'_>,
+        by: &Bound<'_, PyAny>,
+        sort: Option<bool>,
+    ) -> PyResult<PySeriesGroupBy> {
+        let sort = sort.unwrap_or(true);
         let by_series = extract_or_build_series(py, by, &self.inner)?;
-        Ok(PySeriesGroupBy {
-            series: self.inner.clone(),
-            by: by_series,
-        })
+        let (series, by) = if self.inner.index() != by_series.index()
+            && !self.inner.index().has_duplicates()
+            && !by_series.index().has_duplicates()
+        {
+            let common_labels: Vec<IndexLabel> = self
+                .inner
+                .index()
+                .labels()
+                .iter()
+                .filter(|lbl| by_series.index().labels().contains(lbl))
+                .cloned()
+                .collect();
+            let aligned_self = self
+                .inner
+                .reindex(common_labels.clone())
+                .map_err(frame_error_to_py)?;
+            let aligned_by = by_series
+                .reindex(common_labels)
+                .map_err(frame_error_to_py)?;
+            (aligned_self, aligned_by)
+        } else {
+            (self.inner.clone(), by_series)
+        };
+        Ok(PySeriesGroupBy { series, by, sort })
     }
 
     #[pyo3(signature = (freq, closed=None, label=None, origin=None))]
@@ -10187,6 +10222,7 @@ impl PyDataFrame {
         Ok(PyList::new(py, rows)?.unbind())
     }
 
+    #[getter]
     fn values(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         self.to_numpy(py)
     }
@@ -15766,6 +15802,18 @@ impl PyGroupBy {
 pub struct PySeriesGroupBy {
     series: Series,
     by: Series,
+    sort: bool,
+}
+
+impl PySeriesGroupBy {
+    fn wrap_result(&self, s: Series) -> PyResult<PySeries> {
+        let res = if self.sort {
+            s.sort_index(true).map_err(frame_error_to_py)?
+        } else {
+            s
+        };
+        Ok(PySeries { inner: res })
+    }
 }
 
 #[pymethods]
@@ -15785,7 +15833,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .sum()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn mean(&self) -> PyResult<PySeries> {
@@ -15795,7 +15843,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .mean()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn std(&self) -> PyResult<PySeries> {
@@ -15805,7 +15853,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .std()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn var(&self) -> PyResult<PySeries> {
@@ -15815,7 +15863,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .var()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn min(&self) -> PyResult<PySeries> {
@@ -15825,7 +15873,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .min()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn max(&self) -> PyResult<PySeries> {
@@ -15835,7 +15883,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .max()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn count(&self) -> PyResult<PySeries> {
@@ -15845,7 +15893,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .count()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn first(&self) -> PyResult<PySeries> {
@@ -15855,7 +15903,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .first()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn last(&self) -> PyResult<PySeries> {
@@ -15865,7 +15913,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .last()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn median(&self) -> PyResult<PySeries> {
@@ -15875,7 +15923,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .median()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn prod(&self) -> PyResult<PySeries> {
@@ -15885,7 +15933,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .prod()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn size(&self) -> PyResult<PySeries> {
@@ -15895,7 +15943,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .size()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn nunique(&self) -> PyResult<PySeries> {
@@ -15905,7 +15953,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .nunique()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn any(&self) -> PyResult<PySeries> {
@@ -15915,7 +15963,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .any()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn all(&self) -> PyResult<PySeries> {
@@ -15925,7 +15973,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .all()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     fn value_counts(&self) -> PyResult<PySeries> {
@@ -15935,7 +15983,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .value_counts()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
     #[pyo3(signature = (n=5))]
@@ -18956,6 +19004,7 @@ mod tests {
         let sgb = PySeriesGroupBy {
             series: py_s.inner.clone(),
             by: by_s,
+            sort: true,
         };
 
         let sum_s = sgb.sum().expect("sum"); // ubs:ignore — test fixture
