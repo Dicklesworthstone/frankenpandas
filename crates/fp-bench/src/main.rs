@@ -1105,8 +1105,49 @@ where
 /// and the byte diff cannot fail on tied `amount` sums alone — pandas'
 /// default `quicksort` is not stable, so ties would otherwise be free to
 /// disagree without either engine being wrong.
+fn execute_pipeline_stages(
+    sales: DataFrame,
+    stores: DataFrame,
+    out_path: &Path,
+) -> DataFrame {
+    // 2. filter -- sales[sales["amount"] > 0.0]
+    let keep = sales
+        .get_column("amount")
+        .gt_scalar(&Scalar::Float64(0.0))
+        .expect("pipeline: amount > 0");
+    let mask = keep
+        .column()
+        .as_bool_slice()
+        .expect("pipeline: filter mask is an all-valid Bool column");
+    let kept = sales.loc_bool(mask).expect("pipeline: filter");
+
+    // 3. groupby -- kept.groupby("store_id", as_index=False).sum()
+    let agg = kept
+        .groupby_with_as_index(&["store_id"], false)
+        .expect("pipeline: groupby store_id")
+        .sum()
+        .expect("pipeline: sum");
+
+    // 4. join -- agg.merge(stores, on="store_id", how="inner")
+    let merged =
+        merge_dataframes_on_with(&agg, &stores, &["store_id"], &["store_id"], JoinType::Inner)
+            .expect("pipeline: merge stores");
+    let joined =
+        DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+            .expect("pipeline: materialize merge");
+
+    // 5. sort -- descending revenue, store_id tiebreak
+    let ranked = joined
+        .sort_values_multi(&["amount", "store_id"], &[false, true], "last")
+        .expect("pipeline: rank");
+
+    // 6. write
+    fp_io::write_csv(&ranked, out_path).expect("pipeline: write output");
+    ranked
+}
+
 fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples> {
-    if !matches!(workload, "etl_job" | "etl_job_parquet") {
+    if !matches!(workload, "etl_job" | "etl_job_parquet" | "etl_job_uncached") {
         return None;
     }
     // `etl_job` at 1M is 82.3% read_csv on the pandas side (measured; see
@@ -1117,11 +1158,50 @@ fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples
     // `etl_job_parquet` runs the identical six stages off Parquet, where load
     // is cheap, so the compute stages carry real weight. Same job, same
     // outputs, different input format: the pair brackets the answer.
+    //
+    // `etl_job_uncached` cycles K=3 distinct permutations of sales/stores CSVs
+    // to defeat fp_io's 2-entry, 32 MiB-ceiling parse cache, ensuring an honest
+    // parse on every timed sample (br-frankenpandas-qnkah).
     let parquet = workload == "etl_job_parquet";
+    let uncached = workload == "etl_job_uncached";
     let dir = data_dir.expect(
-        "pipeline/etl_job requires --data-dir; the Python driver materializes \
-         sales.csv and stores.csv there before either arm is timed",
+        "pipeline workloads require --data-dir; the Python driver materializes \
+         inputs there before either arm is timed",
     );
+
+    if uncached {
+        let sales_paths: Vec<PathBuf> = (0..CSV_UNCACHED_DISTINCT_INPUTS)
+            .map(|i| dir.join(format!("sales_{i}.csv")))
+            .collect();
+        let stores_paths: Vec<PathBuf> = (0..CSV_UNCACHED_DISTINCT_INPUTS)
+            .map(|i| dir.join(format!("stores_{i}.csv")))
+            .collect();
+        let out_path = dir.join("out_frankenpandas_uncached.csv");
+        for p in &sales_paths {
+            assert!(
+                p.is_file(),
+                "pipeline: missing uncached input {}",
+                p.display()
+            );
+        }
+        for p in &stores_paths {
+            assert!(
+                p.is_file(),
+                "pipeline: missing uncached input {}",
+                p.display()
+            );
+        }
+        let mut next = 0usize;
+        return Some(time_us(move || {
+            let sales_p = &sales_paths[next % CSV_UNCACHED_DISTINCT_INPUTS];
+            let stores_p = &stores_paths[next % CSV_UNCACHED_DISTINCT_INPUTS];
+            next += 1;
+            let sales = fp_io::read_csv(sales_p).expect("pipeline: read sales.csv");
+            let stores = fp_io::read_csv(stores_p).expect("pipeline: read stores.csv");
+            execute_pipeline_stages(sales, stores, &out_path)
+        }));
+    }
+
     let (sales_path, stores_path, out_path) = if parquet {
         (
             dir.join("sales.parquet"),
@@ -1159,41 +1239,7 @@ fn run_pipeline(workload: &str, data_dir: Option<&Path>) -> Option<PairedSamples
                 fp_io::read_csv(&stores_path).expect("pipeline: read stores.csv"),
             )
         };
-
-        // 2. filter -- sales[sales["amount"] > 0.0]
-        let keep = sales
-            .get_column("amount")
-            .gt_scalar(&Scalar::Float64(0.0))
-            .expect("pipeline: amount > 0");
-        let mask = keep
-            .column()
-            .as_bool_slice()
-            .expect("pipeline: filter mask is an all-valid Bool column");
-        let kept = sales.loc_bool(mask).expect("pipeline: filter");
-
-        // 3. groupby -- kept.groupby("store_id", as_index=False).sum()
-        let agg = kept
-            .groupby_with_as_index(&["store_id"], false)
-            .expect("pipeline: groupby store_id")
-            .sum()
-            .expect("pipeline: sum");
-
-        // 4. join -- agg.merge(stores, on="store_id", how="inner")
-        let merged =
-            merge_dataframes_on_with(&agg, &stores, &["store_id"], &["store_id"], JoinType::Inner)
-                .expect("pipeline: merge stores");
-        let joined =
-            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-                .expect("pipeline: materialize merge");
-
-        // 5. sort -- descending revenue, store_id tiebreak
-        let ranked = joined
-            .sort_values_multi(&["amount", "store_id"], &[false, true], "last")
-            .expect("pipeline: rank");
-
-        // 6. write
-        fp_io::write_csv(&ranked, &out_path).expect("pipeline: write output");
-        ranked
+        execute_pipeline_stages(sales, stores, &out_path)
     }))
 }
 

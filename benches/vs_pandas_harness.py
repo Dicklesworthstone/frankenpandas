@@ -1815,6 +1815,61 @@ def materialize_pipeline_inputs_parquet(
     return sales_pq, stores_pq
 
 
+def materialize_pipeline_inputs_uncached(
+    rows: int, tmp_path: Path
+) -> tuple[list[Path], list[Path]]:
+    """Write K distinct sets of sales and stores CSVs outside every timed window.
+
+    Each variant carries the same rows permuted, so CSV bytes differ (defeating
+    the 2-entry content cache on every sample) while the aggregated star-schema
+    rollup produces 100% byte-identical output across all variants.
+    br-frankenpandas-qnkah.
+    """
+    sales_paths = [
+        tmp_path / f"sales_{i}.csv" for i in range(CSV_UNCACHED_DISTINCT_INPUTS)
+    ]
+    stores_paths = [
+        tmp_path / f"stores_{i}.csv" for i in range(CSV_UNCACHED_DISTINCT_INPUTS)
+    ]
+    if all(p.is_file() for p in sales_paths) and all(
+        p.is_file() for p in stores_paths
+    ):
+        return sales_paths, stores_paths
+
+    n_stores = max(1, rows // PIPELINE_ROWS_PER_STORE)
+    rng = np.random.default_rng(PIPELINE_SEED)
+    ticks = rng.integers(
+        PIPELINE_TICK_LOW, PIPELINE_TICK_HIGH, size=rows, dtype=np.int64
+    )
+    sales_df = pd.DataFrame(
+        {
+            "store_id": rng.integers(0, n_stores, size=rows, dtype=np.int64),
+            "units": rng.integers(1, 50, size=rows, dtype=np.int64),
+            "amount": ticks * PIPELINE_AMOUNT_TICK,
+        }
+    )
+    store_ids = np.arange(n_stores, dtype=np.int64)
+    stores_df = pd.DataFrame(
+        {
+            "store_id": store_ids,
+            "store_name": [f"store_{i:06d}" for i in store_ids],
+            "region": [f"region_{i % PIPELINE_REGIONS:02d}" for i in store_ids],
+        }
+    )
+    for i in range(CSV_UNCACHED_DISTINCT_INPUTS):
+        sp = sales_paths[i]
+        stp = stores_paths[i]
+        if i == 0:
+            sales_df.to_csv(sp, index=False)
+            stores_df.to_csv(stp, index=False)
+        else:
+            p_sales = np.random.default_rng(1000 + i).permutation(rows)
+            p_stores = np.random.default_rng(2000 + i).permutation(n_stores)
+            sales_df.iloc[p_sales].to_csv(sp, index=False)
+            stores_df.iloc[p_stores].to_csv(stp, index=False)
+    return sales_paths, stores_paths
+
+
 def _pipeline_job_pandas(sales_path: Path, stores_path: Path, out_path: Path):
     """The six stages, in idiomatic pandas 2.2.3."""
     sales = pd.read_csv(sales_path)                                   # 1. load
@@ -1866,6 +1921,23 @@ def bench_pipeline_etl_job_parquet_pandas(
     )
 
 
+def bench_pipeline_etl_job_uncached_pandas(
+    df: pd.DataFrame, tmp_path: Path
+) -> PairedSamples:
+    rows = len(df)
+    sales_paths, stores_paths = materialize_pipeline_inputs_uncached(rows, tmp_path)
+    out_path = tmp_path / "out_pandas_uncached.csv"
+    step = 0
+
+    def op():
+        nonlocal step
+        idx = step % CSV_UNCACHED_DISTINCT_INPUTS
+        step += 1
+        return _pipeline_job_pandas(sales_paths[idx], stores_paths[idx], out_path)
+
+    return time_operation(op)
+
+
 def _pipeline_columns_equal(left: pd.Series, right: pd.Series) -> bool:
     """Same values, ignoring how each engine chose to render them."""
     if is_numeric_dtype(left) and is_numeric_dtype(right):
@@ -1893,6 +1965,9 @@ def compare_pipeline_outputs(tmp_path: Path,
     if workload == "etl_job_parquet":
         fp_path = tmp_path / "out_frankenpandas_parquet.csv"
         pd_path = tmp_path / "out_pandas_parquet.csv"
+    elif workload == "etl_job_uncached":
+        fp_path = tmp_path / "out_frankenpandas_uncached.csv"
+        pd_path = tmp_path / "out_pandas_uncached.csv"
     else:
         fp_path = tmp_path / "out_frankenpandas.csv"
         pd_path = tmp_path / "out_pandas.csv"
@@ -3289,6 +3364,7 @@ PANDAS_WORKLOADS = {
     "pipeline": {
         "etl_job": bench_pipeline_etl_job_pandas,
         "etl_job_parquet": bench_pipeline_etl_job_parquet_pandas,
+        "etl_job_uncached": bench_pipeline_etl_job_uncached_pandas,
     },
     "math_unary": {
         "floor": bench_math_floor_pandas,
