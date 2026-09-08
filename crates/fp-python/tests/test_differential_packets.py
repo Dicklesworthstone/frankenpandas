@@ -585,3 +585,131 @@ def test_testing_assertions_differential() -> None:
         fpd.testing.assert_index_equal(idx1, idx3)
 
 
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_errors_hierarchy_differential() -> None:
+    assert hasattr(fpd, "errors")
+    error_names = [
+        "EmptyDataError", "ParserError", "MergeError", "NullFrequencyError",
+        "OutOfBoundsDatetime", "OutOfBoundsTimedelta", "DataError", "DatabaseError",
+        "DuplicateLabelError", "IndexingError", "IntCastingNaNError", "InvalidIndexError",
+        "UnsortedIndexError", "SettingWithCopyError", "SpecificationError",
+        "UndefinedVariableError", "UnsupportedFunctionCall", "AbstractMethodError",
+        "DtypeWarning", "SettingWithCopyWarning", "PerformanceWarning", "ParserWarning",
+        "IncompatibilityWarning", "AttributeConflictWarning", "CategoricalConversionWarning",
+        "ChainedAssignmentError",
+    ]
+    for name in error_names:
+        assert hasattr(fpd.errors, name), f"Missing error: {name}"
+        fpd_cls = getattr(fpd.errors, name)
+        assert issubclass(fpd_cls, Exception) or issubclass(fpd_cls, Warning)
+        with pytest.raises(fpd_cls):
+            raise fpd_cls("test error message")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_api_types_differential() -> None:
+    import frankenpandas.api.types as fp_types
+    import pandas.api.types as pd_types
+
+    # is_bool_dtype
+    assert fp_types.is_bool_dtype(bool) == pd_types.is_bool_dtype(bool)
+    assert fp_types.is_bool_dtype("bool") == pd_types.is_bool_dtype("bool")
+    assert fp_types.is_bool_dtype(int) == pd_types.is_bool_dtype(int)
+
+    # is_numeric_dtype
+    assert fp_types.is_numeric_dtype(int) == pd_types.is_numeric_dtype(int)
+    assert fp_types.is_numeric_dtype(float) == pd_types.is_numeric_dtype(float)
+    assert fp_types.is_numeric_dtype(str) == pd_types.is_numeric_dtype(str)
+    assert fp_types.is_numeric_dtype("int64") == pd_types.is_numeric_dtype("int64")
+
+    # is_integer_dtype / is_float_dtype
+    assert fp_types.is_integer_dtype(int) == pd_types.is_integer_dtype(int)
+    assert fp_types.is_integer_dtype(float) == pd_types.is_integer_dtype(float)
+    assert fp_types.is_float_dtype(float) == pd_types.is_float_dtype(float)
+    assert fp_types.is_float_dtype(int) == pd_types.is_float_dtype(int)
+
+    # is_string_dtype
+    assert fp_types.is_string_dtype(str) == pd_types.is_string_dtype(str)
+    assert fp_types.is_string_dtype(int) == pd_types.is_string_dtype(int)
+
+    # is_list_like
+    for obj in [[1, 2], (1, 2), {1, 2}, {"a": 1}]:
+        assert fp_types.is_list_like(obj) == pd_types.is_list_like(obj)
+    for obj in ["abc", b"xyz", 123, 3.14, True, None]:
+        assert fp_types.is_list_like(obj) == pd_types.is_list_like(obj)
+
+    # is_dict_like
+    assert fp_types.is_dict_like({"a": 1}) == pd_types.is_dict_like({"a": 1})
+    assert fp_types.is_dict_like([1, 2]) == pd_types.is_dict_like([1, 2])
+
+    # is_scalar
+    for obj in [1, 3.14, "abc", True, None]:
+        assert fp_types.is_scalar(obj) == pd_types.is_scalar(obj)
+    for obj in [[1, 2], (1, 2), {"a": 1}]:
+        assert fp_types.is_scalar(obj) == pd_types.is_scalar(obj)
+
+    # infer_dtype
+    assert fp_types.infer_dtype([1, 2, 3]) == pd_types.infer_dtype([1, 2, 3])
+    assert fp_types.infer_dtype([1.0, 2.5, 3.0]) == pd_types.infer_dtype([1.0, 2.5, 3.0])
+    assert fp_types.infer_dtype(["a", "b", "c"]) == pd_types.infer_dtype(["a", "b", "c"])
+    assert fp_types.infer_dtype([True, False]) == pd_types.infer_dtype([True, False])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_top_level_missing_functions_differential() -> None:
+    # __version__
+    assert hasattr(fpd, "__version__")
+    assert fpd.__version__ == "0.2.0"
+
+    # unique
+    u_pd = list(pd.unique([3, 1, 2, 1, 3]))
+    u_fpd = list(fpd.unique([3, 1, 2, 1, 3]))
+    assert u_fpd == u_pd
+
+    # value_counts
+    vc_pd = pd.value_counts(["a", "b", "a", "c", "a", "b"])
+    vc_fpd = fpd.value_counts(["a", "b", "a", "c", "a", "b"])
+    assert list(vc_fpd.index) == list(vc_pd.index)
+    assert [int(x) for x in vc_fpd.values] == [int(x) for x in vc_pd.values]
+
+    # factorize
+    codes_pd, uniques_pd = pd.factorize(["b", "b", "a", "c", "b"])
+    codes_fpd, uniques_fpd = fpd.factorize(["b", "b", "a", "c", "b"])
+    assert list(codes_fpd) == list(codes_pd)
+    assert list(uniques_fpd) == list(uniques_pd)
+
+    # get_dummies on Series
+    gd_pd = pd.get_dummies(["a", "b", "a", "c"], dtype=int)
+    gd_fpd = fpd.get_dummies(["a", "b", "a", "c"], dtype="int")
+    assert gd_fpd.shape == gd_pd.shape
+    assert list(gd_fpd.columns) == list(gd_pd.columns)
+    for col in gd_pd.columns:
+        assert [int(x) for x in gd_fpd[col].values] == [int(x) for x in gd_pd[col].values]
+
+    # get_dummies on DataFrame
+    df_src_pd = pd.DataFrame({"cat": ["x", "y", "x"], "num": [10, 20, 30]})
+    df_src_fpd = fpd.DataFrame({"cat": ["x", "y", "x"], "num": [10, 20, 30]})
+    gd_df_pd = pd.get_dummies(df_src_pd, columns=["cat"], dtype=int)
+    gd_df_fpd = fpd.get_dummies(df_src_fpd, columns=["cat"], dtype="int")
+    assert list(gd_df_fpd.columns) == list(gd_df_pd.columns)
+
+    # crosstab
+    ct_pd = pd.crosstab(["a", "a", "b", "b"], ["x", "y", "x", "y"])
+    ct_fpd = fpd.crosstab(["a", "a", "b", "b"], ["x", "y", "x", "y"])
+    assert ct_fpd.shape == ct_pd.shape
+    assert sorted(list(ct_fpd.columns)) == sorted(list(ct_pd.columns))
+
+    # json_normalize
+    data = [
+        {"id": 1, "name": "alice", "info": {"age": 30}},
+        {"id": 2, "name": "bob", "info": {"age": 25}},
+    ]
+    jn_pd = pd.json_normalize(data)
+    jn_fpd = fpd.json_normalize(data)
+    assert jn_fpd.shape == jn_pd.shape
+    assert sorted(list(jn_fpd.columns)) == sorted(list(jn_pd.columns))
+    for col in jn_pd.columns:
+        assert [str(x) for x in jn_fpd[col].values] == [str(x) for x in jn_pd[col].values]
+
+
+

@@ -16,7 +16,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
@@ -20444,9 +20444,979 @@ fn assert_index_equal(
     Ok(())
 }
 
+pyo3::create_exception!(errors, EmptyDataError, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, ParserError, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, MergeError, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, NullFrequencyError, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, OutOfBoundsDatetime, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, OutOfBoundsTimedelta, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, DataError, pyo3::exceptions::PyException);
+pyo3::create_exception!(errors, DatabaseError, pyo3::exceptions::PyOSError);
+pyo3::create_exception!(errors, DuplicateLabelError, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, IndexingError, pyo3::exceptions::PyException);
+pyo3::create_exception!(errors, IntCastingNaNError, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, InvalidIndexError, pyo3::exceptions::PyException);
+pyo3::create_exception!(errors, UnsortedIndexError, pyo3::exceptions::PyKeyError);
+pyo3::create_exception!(errors, SettingWithCopyError, pyo3::exceptions::PyValueError);
+pyo3::create_exception!(errors, SpecificationError, pyo3::exceptions::PyException);
+pyo3::create_exception!(
+    errors,
+    UndefinedVariableError,
+    pyo3::exceptions::PyNameError
+);
+pyo3::create_exception!(
+    errors,
+    UnsupportedFunctionCall,
+    pyo3::exceptions::PyValueError
+);
+pyo3::create_exception!(
+    errors,
+    AbstractMethodError,
+    pyo3::exceptions::PyNotImplementedError
+);
+pyo3::create_exception!(errors, DtypeWarning, pyo3::exceptions::PyUserWarning);
+pyo3::create_exception!(
+    errors,
+    SettingWithCopyWarning,
+    pyo3::exceptions::PyUserWarning
+);
+pyo3::create_exception!(errors, PerformanceWarning, pyo3::exceptions::PyUserWarning);
+pyo3::create_exception!(errors, ParserWarning, pyo3::exceptions::PyUserWarning);
+pyo3::create_exception!(
+    errors,
+    IncompatibilityWarning,
+    pyo3::exceptions::PyUserWarning
+);
+pyo3::create_exception!(
+    errors,
+    AttributeConflictWarning,
+    pyo3::exceptions::PyUserWarning
+);
+pyo3::create_exception!(
+    errors,
+    CategoricalConversionWarning,
+    pyo3::exceptions::PyUserWarning
+);
+pyo3::create_exception!(
+    errors,
+    ChainedAssignmentError,
+    pyo3::exceptions::PyUserWarning
+);
+
+fn is_bool_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(b) = obj.extract::<bool>() {
+        return b;
+    }
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return s.dtype() == "bool" || s.dtype() == "boolean";
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+        return idx.dtype() == "bool" || idx.dtype() == "boolean";
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s == "bool" || s == "boolean";
+    }
+    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
+        return name == "bool";
+    }
+    false
+}
+
+fn is_integer_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return s.dtype().contains("int");
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+        return idx.dtype().contains("int");
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s.contains("int");
+    }
+    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
+        return name == "int" || name.starts_with("int") || name.starts_with("uint");
+    }
+    false
+}
+
+fn is_unsigned_integer_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return s.dtype().contains("uint");
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+        return idx.dtype().contains("uint");
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s.contains("uint");
+    }
+    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
+        return name.starts_with("uint");
+    }
+    false
+}
+
+fn is_float_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return s.dtype().contains("float");
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+        return idx.dtype().contains("float");
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s.contains("float");
+    }
+    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
+        return name == "float" || name.starts_with("float");
+    }
+    false
+}
+
+fn is_numeric_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if is_bool_dtype_impl(obj) || is_integer_dtype_impl(obj) || is_float_dtype_impl(obj) {
+        return true;
+    }
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        let dt = s.dtype();
+        return dt.contains("int") || dt.contains("float") || dt == "bool";
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+        let dt = idx.dtype();
+        return dt.contains("int") || dt.contains("float") || dt == "bool";
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s.contains("int") || s.contains("float") || s == "number" || s == "numeric";
+    }
+    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
+        return name == "int" || name == "float" || name == "complex" || name == "number";
+    }
+    false
+}
+
+fn is_string_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        let dt = s.dtype();
+        return dt == "string" || dt == "object" || dt == "utf8";
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+        let dt = idx.dtype();
+        return dt == "string" || dt == "object" || dt == "utf8";
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s == "str" || s == "string" || s == "object" || s == "utf8";
+    }
+    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
+        return name == "str" || name == "String";
+    }
+    false
+}
+
+fn is_datetime_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return s.dtype().contains("datetime");
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        let _ = idx;
+        return true;
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s.contains("datetime");
+    }
+    false
+}
+
+fn is_timedelta_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return s.dtype().contains("timedelta");
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+        let _ = idx;
+        return true;
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s.contains("timedelta");
+    }
+    false
+}
+
+fn is_period_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return s.dtype().contains("period") || s.dtype().contains("Period");
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
+        let _ = idx;
+        return true;
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s.starts_with("period") || s.starts_with("Period");
+    }
+    false
+}
+
+fn is_categorical_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return s.dtype().contains("category") || s.dtype().contains("categorical");
+    }
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
+        let _ = idx;
+        return true;
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return s == "category" || s == "categorical";
+    }
+    false
+}
+
+fn is_list_like_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if obj.is_instance_of::<pyo3::types::PyString>() || obj.is_instance_of::<pyo3::types::PyBytes>()
+    {
+        return false;
+    }
+    obj.hasattr("__iter__").unwrap_or(false) || obj.hasattr("__len__").unwrap_or(false)
+}
+
+fn is_dict_like_impl(obj: &Bound<'_, PyAny>) -> bool {
+    obj.hasattr("keys").unwrap_or(false) && obj.hasattr("__getitem__").unwrap_or(false)
+}
+
+fn is_array_like_impl(obj: &Bound<'_, PyAny>) -> bool {
+    if obj.is_instance_of::<pyo3::types::PyString>() || obj.is_instance_of::<pyo3::types::PyBytes>()
+    {
+        return false;
+    }
+    obj.hasattr("shape").unwrap_or(false) && obj.hasattr("dtype").unwrap_or(false)
+}
+
+fn is_scalar_impl(obj: &Bound<'_, PyAny>) -> bool {
+    !is_list_like_impl(obj)
+}
+
+fn is_hashable_impl(obj: &Bound<'_, PyAny>) -> bool {
+    obj.hash().is_ok()
+}
+
+fn infer_dtype_impl(obj: &Bound<'_, PyAny>, skipna: bool) -> PyResult<&'static str> {
+    if !is_list_like_impl(obj) {
+        return Ok("unknown");
+    }
+    let seq = obj.try_iter()?;
+    let mut has_int = false;
+    let mut has_float = false;
+    let mut has_bool = false;
+    let mut has_str = false;
+    let mut has_ts = false;
+    let mut has_td = false;
+    let mut has_period = false;
+    let mut count = 0;
+
+    for item_res in seq {
+        let item = item_res?;
+        if item.is_none() || item.is_instance_of::<PyNAType>() || item.is_instance_of::<PyNaTType>()
+        {
+            if !skipna {
+                return Ok("mixed");
+            }
+            continue;
+        }
+        count += 1;
+        if item.is_instance_of::<pyo3::types::PyBool>() {
+            has_bool = true;
+        } else if item.is_instance_of::<pyo3::types::PyInt>() {
+            has_int = true;
+        } else if item.is_instance_of::<pyo3::types::PyFloat>() {
+            has_float = true;
+        } else if item.is_instance_of::<pyo3::types::PyString>() {
+            has_str = true;
+        } else if item.is_instance_of::<PyTimestamp>() {
+            has_ts = true;
+        } else if item.is_instance_of::<PyTimedelta>() {
+            has_td = true;
+        } else if item.is_instance_of::<PyPeriod>() {
+            has_period = true;
+        }
+    }
+
+    if count == 0 {
+        return Ok("empty");
+    }
+    if has_bool && !has_int && !has_float && !has_str && !has_ts && !has_td && !has_period {
+        return Ok("boolean");
+    }
+    if has_int && !has_float && !has_bool && !has_str && !has_ts && !has_td && !has_period {
+        return Ok("integer");
+    }
+    if (has_float || (has_int && has_float))
+        && !has_bool
+        && !has_str
+        && !has_ts
+        && !has_td
+        && !has_period
+    {
+        return Ok("floating");
+    }
+    if has_str && !has_int && !has_float && !has_bool && !has_ts && !has_td && !has_period {
+        return Ok("string");
+    }
+    if has_ts && !has_int && !has_float && !has_bool && !has_str && !has_td && !has_period {
+        return Ok("datetime64");
+    }
+    if has_td && !has_int && !has_float && !has_bool && !has_str && !has_ts && !has_period {
+        return Ok("timedelta64");
+    }
+    if has_period && !has_int && !has_float && !has_bool && !has_str && !has_ts && !has_td {
+        return Ok("period");
+    }
+    Ok("mixed")
+}
+
+#[pyfunction(name = "is_bool_dtype")]
+fn api_is_bool_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_bool_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_numeric_dtype")]
+fn api_is_numeric_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_numeric_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_integer_dtype")]
+fn api_is_integer_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_integer_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_signed_integer_dtype")]
+fn api_is_signed_integer_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_integer_dtype_impl(dtype) && !is_unsigned_integer_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_unsigned_integer_dtype")]
+fn api_is_unsigned_integer_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_unsigned_integer_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_float_dtype")]
+fn api_is_float_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_float_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_string_dtype")]
+fn api_is_string_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_string_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_datetime64_any_dtype")]
+fn api_is_datetime64_any_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_datetime_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_datetime64_dtype")]
+fn api_is_datetime64_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_datetime_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_datetime64_ns_dtype")]
+fn api_is_datetime64_ns_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_datetime_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_timedelta64_dtype")]
+fn api_is_timedelta64_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_timedelta_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_timedelta64_ns_dtype")]
+fn api_is_timedelta64_ns_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_timedelta_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_period_dtype")]
+fn api_is_period_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_period_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_categorical_dtype")]
+fn api_is_categorical_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_categorical_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_interval_dtype")]
+fn api_is_interval_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    if let Ok(s) = dtype.extract::<String>() {
+        return s.starts_with("interval") || s.starts_with("Interval");
+    }
+    false
+}
+
+#[pyfunction(name = "is_extension_array_dtype")]
+fn api_is_extension_array_dtype(_dtype: &Bound<'_, PyAny>) -> bool {
+    false
+}
+
+#[pyfunction(name = "is_object_dtype")]
+fn api_is_object_dtype(dtype: &Bound<'_, PyAny>) -> bool {
+    is_string_dtype_impl(dtype)
+}
+
+#[pyfunction(name = "is_list_like")]
+fn api_is_list_like(obj: &Bound<'_, PyAny>) -> bool {
+    is_list_like_impl(obj)
+}
+
+#[pyfunction(name = "is_dict_like")]
+fn api_is_dict_like(obj: &Bound<'_, PyAny>) -> bool {
+    is_dict_like_impl(obj)
+}
+
+#[pyfunction(name = "is_named_tuple")]
+fn api_is_named_tuple(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<pyo3::types::PyTuple>() && obj.hasattr("_fields").unwrap_or(false)
+}
+
+#[pyfunction(name = "is_iterator")]
+fn api_is_iterator(obj: &Bound<'_, PyAny>) -> bool {
+    obj.hasattr("__iter__").unwrap_or(false) && obj.hasattr("__next__").unwrap_or(false)
+}
+
+#[pyfunction(name = "is_file_like")]
+fn api_is_file_like(obj: &Bound<'_, PyAny>) -> bool {
+    obj.hasattr("read").unwrap_or(false) || obj.hasattr("write").unwrap_or(false)
+}
+
+#[pyfunction(name = "is_re")]
+fn api_is_re(obj: &Bound<'_, PyAny>) -> bool {
+    obj.hasattr("pattern").unwrap_or(false)
+}
+
+#[pyfunction(name = "is_re_compilable")]
+fn api_is_re_compilable(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<pyo3::types::PyString>() || obj.hasattr("pattern").unwrap_or(false)
+}
+
+#[pyfunction(name = "is_array_like")]
+fn api_is_array_like(obj: &Bound<'_, PyAny>) -> bool {
+    is_array_like_impl(obj)
+}
+
+#[pyfunction(name = "is_scalar")]
+fn api_is_scalar(obj: &Bound<'_, PyAny>) -> bool {
+    is_scalar_impl(obj)
+}
+
+#[pyfunction(name = "is_hashable")]
+fn api_is_hashable(obj: &Bound<'_, PyAny>) -> bool {
+    is_hashable_impl(obj)
+}
+
+#[pyfunction(name = "is_number")]
+fn api_is_number(obj: &Bound<'_, PyAny>) -> bool {
+    !obj.is_instance_of::<pyo3::types::PyBool>()
+        && (obj.is_instance_of::<pyo3::types::PyInt>()
+            || obj.is_instance_of::<pyo3::types::PyFloat>())
+}
+
+#[pyfunction(name = "is_integer")]
+fn api_is_integer(obj: &Bound<'_, PyAny>) -> bool {
+    !obj.is_instance_of::<pyo3::types::PyBool>() && obj.is_instance_of::<pyo3::types::PyInt>()
+}
+
+#[pyfunction(name = "is_float")]
+fn api_is_float(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<pyo3::types::PyFloat>()
+}
+
+#[pyfunction(name = "is_bool")]
+fn api_is_bool(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<pyo3::types::PyBool>()
+}
+
+#[pyfunction(name = "is_dtype_equal")]
+fn api_is_dtype_equal(source: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> bool {
+    if source.is(target) {
+        return true;
+    }
+    if let (Ok(s1), Ok(s2)) = (source.extract::<String>(), target.extract::<String>()) {
+        return s1 == s2;
+    }
+    false
+}
+
+#[pyfunction(name = "infer_dtype", signature = (value, skipna=true))]
+fn api_infer_dtype(value: &Bound<'_, PyAny>, skipna: bool) -> PyResult<&'static str> {
+    infer_dtype_impl(value, skipna)
+}
+
+#[pyfunction(name = "pandas_dtype")]
+fn api_pandas_dtype(dtype: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    Ok(dtype.clone().into_any().unbind())
+}
+
+fn scalar_to_label_str(s: &Scalar) -> String {
+    s.to_string()
+}
+
+fn scalar_to_index_label_converter(s: &Scalar) -> IndexLabel {
+    match s {
+        Scalar::Int64(v) => IndexLabel::Int64(*v),
+        Scalar::Float64(f) => IndexLabel::Float64(fp_index::OrderedF64(*f)),
+        Scalar::Utf8(s) => IndexLabel::Utf8(s.clone()),
+        Scalar::Bool(b) => IndexLabel::Bool(*b),
+        Scalar::Datetime64(d) => IndexLabel::Datetime64(*d),
+        Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
+        Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
+        Scalar::Interval(inv) => IndexLabel::Utf8(format!("{inv:?}")),
+        Scalar::Null(k) => IndexLabel::Null(*k),
+    }
+}
+
+#[pyfunction]
+fn unique(py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Ok(s) = values.extract::<PyRef<'_, PySeries>>() {
+        return s.unique(py);
+    }
+    if let Ok(idx) = values.extract::<PyRef<'_, PyIndex>>() {
+        let u = idx.unique();
+        let list: Vec<Py<PyAny>> = u
+            .inner
+            .labels()
+            .iter()
+            .map(|l| index_label_to_py(py, l))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(PyList::new(py, list)?.into_any().unbind());
+    }
+    let s = PySeries::new(py, Some(values), None, None)?;
+    s.unique(py)
+}
+
+#[pyfunction]
+#[pyo3(signature = (values, sort=true, ascending=false, normalize=false, dropna=true))]
+fn value_counts(
+    py: Python<'_>,
+    values: &Bound<'_, PyAny>,
+    sort: bool,
+    ascending: bool,
+    normalize: bool,
+    dropna: bool,
+) -> PyResult<PySeries> {
+    let series = if let Ok(s) = values.extract::<PyRef<'_, PySeries>>() {
+        s.inner.clone()
+    } else {
+        PySeries::new(py, Some(values), None, None)?.inner
+    };
+    let r = series
+        .value_counts_with_options(normalize, sort, ascending, dropna)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(PySeries { inner: r })
+}
+
+#[pyfunction]
+#[pyo3(signature = (values, sort=false, use_na_sentinel=true))]
+fn factorize(
+    py: Python<'_>,
+    values: &Bound<'_, PyAny>,
+    sort: bool,
+    use_na_sentinel: bool,
+) -> PyResult<(Py<PyAny>, PyIndex)> {
+    let s = PySeries::new(py, Some(values), None, None)?;
+    let col_vals = s.inner.column().values();
+
+    let mut cat_to_code: HashMap<String, i64> = HashMap::new();
+    let mut uniques_labels: Vec<IndexLabel> = Vec::new();
+    let mut codes: Vec<i64> = Vec::with_capacity(col_vals.len());
+
+    for v in col_vals {
+        if v.is_null() {
+            if use_na_sentinel {
+                codes.push(-1);
+            } else {
+                let null_key = "__NULL__".to_string();
+                let code = match cat_to_code.get(&null_key) {
+                    Some(&c) => c,
+                    None => {
+                        let next_code = uniques_labels.len() as i64;
+                        uniques_labels.push(IndexLabel::Null(NullKind::NaN));
+                        cat_to_code.insert(null_key, next_code);
+                        next_code
+                    }
+                };
+                codes.push(code);
+            }
+        } else {
+            let key = scalar_to_label_str(v);
+            let code = match cat_to_code.get(&key) {
+                Some(&c) => c,
+                None => {
+                    let next_code = uniques_labels.len() as i64;
+                    uniques_labels.push(scalar_to_index_label_converter(v));
+                    cat_to_code.insert(key, next_code);
+                    next_code
+                }
+            };
+            codes.push(code);
+        }
+    }
+
+    if sort && !uniques_labels.is_empty() {
+        let mut sorted_pairs: Vec<(usize, IndexLabel)> =
+            uniques_labels.into_iter().enumerate().collect();
+        sorted_pairs.sort_by(|(_, a), (_, b)| a.cmp(b));
+        let mut old_to_new = vec![0i64; sorted_pairs.len()];
+        let mut new_uniques = Vec::with_capacity(sorted_pairs.len());
+        for (new_idx, (old_idx, val)) in sorted_pairs.into_iter().enumerate() {
+            old_to_new[old_idx] = new_idx as i64;
+            new_uniques.push(val);
+        }
+        for code in &mut codes {
+            if *code >= 0 && (*code as usize) < old_to_new.len() {
+                *code = old_to_new[*code as usize];
+            }
+        }
+        uniques_labels = new_uniques;
+    }
+
+    let py_codes = PyList::new(py, codes)?.into_any().unbind();
+    let py_uniques = PyIndex {
+        inner: Index::new(uniques_labels),
+    };
+    Ok((py_codes, py_uniques))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (data, prefix=None, prefix_sep="_", dummy_na=false, columns=None, drop_first=false, dtype=None))]
+fn get_dummies(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    prefix: Option<&str>,
+    prefix_sep: &str,
+    dummy_na: bool,
+    columns: Option<Vec<String>>,
+    drop_first: bool,
+    dtype: Option<&str>,
+) -> PyResult<PyDataFrame> {
+    if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
+        let all_df_cols = df.columns();
+        let target_cols: Vec<String> = columns.unwrap_or_else(|| {
+            all_df_cols
+                .iter()
+                .filter(|c| {
+                    if let Some(col) = df.inner.column(c) {
+                        let dt = col.dtype();
+                        dt == fp_types::DType::Utf8 || dt == fp_types::DType::Bool
+                    } else {
+                        false
+                    }
+                })
+                .cloned()
+                .collect()
+        });
+
+        let mut result_col_map = BTreeMap::new();
+        let mut result_col_order = Vec::new();
+
+        // 1. Non-target columns first (matches pandas behavior)
+        for c_name in &all_df_cols {
+            if !target_cols.contains(c_name) {
+                let col_obj = df.inner.column(c_name).unwrap().clone();
+                result_col_map.insert(c_name.clone(), col_obj);
+                result_col_order.push(c_name.clone());
+            }
+        }
+
+        // 2. Dummy columns for each target column
+        for c_name in &target_cols {
+            if let Some(col) = df.inner.column(c_name) {
+                let vals = col.values();
+                let mut distinct_cats = Vec::new();
+                let mut cat_set = HashSet::new();
+                for v in vals {
+                    if v.is_null() {
+                        if dummy_na && cat_set.insert("nan".to_string()) {
+                            distinct_cats.push(Scalar::Null(NullKind::NaN));
+                        }
+                    } else {
+                        let s = scalar_to_label_str(v);
+                        if cat_set.insert(s) {
+                            distinct_cats.push(v.clone());
+                        }
+                    }
+                }
+                distinct_cats.sort_by_key(scalar_to_label_str);
+                let start_idx = if drop_first && !distinct_cats.is_empty() {
+                    1
+                } else {
+                    0
+                };
+                for cat in distinct_cats.iter().skip(start_idx) {
+                    let dummy_name = if cat.is_null() {
+                        format!("{c_name}{prefix_sep}nan")
+                    } else {
+                        let cat_str = scalar_to_label_str(cat);
+                        format!("{c_name}{prefix_sep}{cat_str}")
+                    };
+                    let bool_vals: Vec<Scalar> = vals
+                        .iter()
+                        .map(|v| {
+                            let matches = if cat.is_null() { v.is_null() } else { v == cat };
+                            if let Some("int") | Some("int64") = dtype {
+                                Scalar::Int64(if matches { 1 } else { 0 })
+                            } else {
+                                Scalar::Bool(matches)
+                            }
+                        })
+                        .collect();
+                    let col_obj = Column::from_values(bool_vals).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    result_col_map.insert(dummy_name.clone(), col_obj);
+                    result_col_order.push(dummy_name);
+                }
+            }
+        }
+        let new_df = DataFrame::new_with_column_order(
+            df.inner.index().clone(),
+            result_col_map,
+            result_col_order,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        return Ok(PyDataFrame { inner: new_df });
+    }
+
+    let s = PySeries::new(py, Some(data), None, None)?;
+    let vals = s.inner.column().values();
+    let mut distinct_cats = Vec::new();
+    let mut cat_set = HashSet::new();
+    for v in vals {
+        if v.is_null() {
+            if dummy_na && cat_set.insert("nan".to_string()) {
+                distinct_cats.push(Scalar::Null(NullKind::NaN));
+            }
+        } else {
+            let str_val = scalar_to_label_str(v);
+            if cat_set.insert(str_val) {
+                distinct_cats.push(v.clone());
+            }
+        }
+    }
+    distinct_cats.sort_by_key(scalar_to_label_str);
+    let start_idx = if drop_first && !distinct_cats.is_empty() {
+        1
+    } else {
+        0
+    };
+    let mut col_map = BTreeMap::new();
+    let mut col_order = Vec::new();
+
+    for cat in distinct_cats.iter().skip(start_idx) {
+        let dummy_name = if cat.is_null() {
+            if let Some(p) = prefix {
+                format!("{p}{prefix_sep}nan")
+            } else {
+                "nan".to_string()
+            }
+        } else {
+            let cat_str = scalar_to_label_str(cat);
+            if let Some(p) = prefix {
+                format!("{p}{prefix_sep}{cat_str}")
+            } else {
+                cat_str
+            }
+        };
+        let bool_vals: Vec<Scalar> = vals
+            .iter()
+            .map(|v| {
+                let matches = if cat.is_null() { v.is_null() } else { v == cat };
+                if let Some("int") | Some("int64") = dtype {
+                    Scalar::Int64(if matches { 1 } else { 0 })
+                } else {
+                    Scalar::Bool(matches)
+                }
+            })
+            .collect();
+        let col_obj = Column::from_values(bool_vals)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        col_map.insert(dummy_name.clone(), col_obj);
+        col_order.push(dummy_name);
+    }
+    let df = DataFrame::new_with_column_order(s.inner.index().clone(), col_map, col_order)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(PyDataFrame { inner: df })
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (index, columns, values=None, rownames=None, colnames=None, aggfunc=None, margins=false, dropna=true, normalize=false))]
+fn crosstab(
+    py: Python<'_>,
+    index: &Bound<'_, PyAny>,
+    columns: &Bound<'_, PyAny>,
+    values: Option<&Bound<'_, PyAny>>,
+    rownames: Option<Vec<String>>,
+    colnames: Option<Vec<String>>,
+    aggfunc: Option<&str>,
+    margins: bool,
+    dropna: bool,
+    normalize: bool,
+) -> PyResult<PyDataFrame> {
+    let _ = (values, rownames, colnames, aggfunc, margins);
+    let s_idx = PySeries::new(py, Some(index), None, None)?;
+    let s_col = PySeries::new(py, Some(columns), None, None)?;
+
+    if s_idx.inner.len() != s_col.inner.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "index and columns must have the same length",
+        ));
+    }
+    let n = s_idx.inner.len();
+    let idx_vals = s_idx.inner.column().values();
+    let col_vals = s_col.inner.column().values();
+
+    let mut distinct_rows = Vec::new();
+    let mut row_set = HashSet::new();
+    let mut distinct_cols = Vec::new();
+    let mut col_set = HashSet::new();
+
+    let mut counts: HashMap<(String, String), i64> = HashMap::new();
+
+    for i in 0..n {
+        let r = &idx_vals[i];
+        let c = &col_vals[i];
+        if dropna && (r.is_null() || c.is_null()) {
+            continue;
+        }
+        let r_str = scalar_to_label_str(r);
+        let c_str = scalar_to_label_str(c);
+        if row_set.insert(r_str.clone()) {
+            distinct_rows.push(r_str.clone());
+        }
+        if col_set.insert(c_str.clone()) {
+            distinct_cols.push(c_str.clone());
+        }
+        *counts.entry((r_str, c_str)).or_insert(0) += 1;
+    }
+
+    distinct_rows.sort();
+    distinct_cols.sort();
+
+    let total: f64 = counts.values().sum::<i64>() as f64;
+
+    let mut col_map = BTreeMap::new();
+    for c_name in &distinct_cols {
+        let mut vals = Vec::with_capacity(distinct_rows.len());
+        for r_name in &distinct_rows {
+            let count = *counts.get(&(r_name.clone(), c_name.clone())).unwrap_or(&0);
+            if normalize && total > 0.0 {
+                vals.push(Scalar::Float64(count as f64 / total));
+            } else {
+                vals.push(Scalar::Int64(count));
+            }
+        }
+        let col = Column::from_values(vals)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        col_map.insert(c_name.clone(), col);
+    }
+    let row_labels: Vec<IndexLabel> = distinct_rows.into_iter().map(IndexLabel::Utf8).collect();
+    let df = DataFrame::new_with_column_order(Index::new(row_labels), col_map, distinct_cols)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(PyDataFrame { inner: df })
+}
+
+fn flatten_dict(
+    dict: &Bound<'_, PyDict>,
+    prefix: &str,
+    sep: &str,
+    max_level: Option<usize>,
+    current_level: usize,
+    out: &mut Vec<(String, Py<PyAny>)>,
+) -> PyResult<()> {
+    for (k, v) in dict.iter() {
+        let key_str = k.extract::<String>()?;
+        let full_key = if prefix.is_empty() {
+            key_str
+        } else {
+            format!("{prefix}{sep}{key_str}")
+        };
+        let should_recurse = match max_level {
+            Some(max_l) => current_level < max_l,
+            None => true,
+        };
+        if should_recurse && v.is_instance_of::<PyDict>() {
+            let nested = v.cast::<PyDict>()?;
+            flatten_dict(nested, &full_key, sep, max_level, current_level + 1, out)?;
+        } else {
+            out.push((full_key, v.into_any().unbind()));
+        }
+    }
+    Ok(())
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (data, record_path=None, meta=None, meta_prefix=None, record_prefix=None, errors="raise", sep=".", max_level=None))]
+fn json_normalize(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    record_path: Option<&Bound<'_, PyAny>>,
+    meta: Option<&Bound<'_, PyAny>>,
+    meta_prefix: Option<&str>,
+    record_prefix: Option<&str>,
+    errors: &str,
+    sep: &str,
+    max_level: Option<usize>,
+) -> PyResult<PyDataFrame> {
+    let _ = (record_path, meta, meta_prefix, record_prefix, errors);
+    let mut records: Vec<Vec<(String, Py<PyAny>)>> = Vec::new();
+    if let Ok(d) = data.cast::<PyDict>() {
+        let mut row = Vec::new();
+        flatten_dict(d, "", sep, max_level, 0, &mut row)?;
+        records.push(row);
+    } else if let Ok(list) = data.cast::<PyList>() {
+        for item in list.iter() {
+            let mut row = Vec::new();
+            if let Ok(d) = item.cast::<PyDict>() {
+                flatten_dict(d, "", sep, max_level, 0, &mut row)?;
+            }
+            records.push(row);
+        }
+    }
+    let mut all_cols = Vec::new();
+    let mut col_set = HashSet::new();
+    for row in &records {
+        for (k, _) in row {
+            if col_set.insert(k.clone()) {
+                all_cols.push(k.clone());
+            }
+        }
+    }
+    let mut col_map: BTreeMap<String, Column> = BTreeMap::new();
+    for col_name in &all_cols {
+        let mut col_values: Vec<Scalar> = Vec::with_capacity(records.len());
+        for row in &records {
+            let mut found = None;
+            for (k, v) in row {
+                if k == col_name {
+                    found = Some(v.bind(py));
+                    break;
+                }
+            }
+            if let Some(val_bound) = found {
+                col_values.push(py_to_scalar(py, val_bound)?);
+            } else {
+                col_values.push(Scalar::Null(NullKind::NaN));
+            }
+        }
+        let col = Column::from_values(col_values)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        col_map.insert(col_name.clone(), col);
+    }
+    let len = records.len();
+    let index = Index::new((0..len).map(|i| IndexLabel::Int64(i as i64)).collect());
+    let df = DataFrame::new_with_column_order(index, col_map, all_cols)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(PyDataFrame { inner: df })
+}
+
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", "0.2.0")?;
     m.add_class::<PySeries>()?;
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyGroupBy>()?;
@@ -20511,6 +21481,12 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isnull, m)?)?;
     m.add_function(wrap_pyfunction!(notna, m)?)?;
     m.add_function(wrap_pyfunction!(notnull, m)?)?;
+    m.add_function(wrap_pyfunction!(unique, m)?)?;
+    m.add_function(wrap_pyfunction!(value_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(factorize, m)?)?;
+    m.add_function(wrap_pyfunction!(get_dummies, m)?)?;
+    m.add_function(wrap_pyfunction!(crosstab, m)?)?;
+    m.add_function(wrap_pyfunction!(json_normalize, m)?)?;
 
     let testing = PyModule::new(m.py(), "testing")?;
     testing.add_function(wrap_pyfunction!(assert_frame_equal, &testing)?)?;
@@ -20521,6 +21497,137 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .import("sys")?
         .getattr("modules")?
         .set_item("frankenpandas.testing", &testing)?;
+
+    let errors_mod = PyModule::new(m.py(), "errors")?;
+    errors_mod.add("EmptyDataError", m.py().get_type::<EmptyDataError>())?;
+    errors_mod.add("ParserError", m.py().get_type::<ParserError>())?;
+    errors_mod.add("MergeError", m.py().get_type::<MergeError>())?;
+    errors_mod.add(
+        "NullFrequencyError",
+        m.py().get_type::<NullFrequencyError>(),
+    )?;
+    errors_mod.add(
+        "OutOfBoundsDatetime",
+        m.py().get_type::<OutOfBoundsDatetime>(),
+    )?;
+    errors_mod.add(
+        "OutOfBoundsTimedelta",
+        m.py().get_type::<OutOfBoundsTimedelta>(),
+    )?;
+    errors_mod.add("DataError", m.py().get_type::<DataError>())?;
+    errors_mod.add("DatabaseError", m.py().get_type::<DatabaseError>())?;
+    errors_mod.add(
+        "DuplicateLabelError",
+        m.py().get_type::<DuplicateLabelError>(),
+    )?;
+    errors_mod.add("IndexingError", m.py().get_type::<IndexingError>())?;
+    errors_mod.add(
+        "IntCastingNaNError",
+        m.py().get_type::<IntCastingNaNError>(),
+    )?;
+    errors_mod.add("InvalidIndexError", m.py().get_type::<InvalidIndexError>())?;
+    errors_mod.add(
+        "UnsortedIndexError",
+        m.py().get_type::<UnsortedIndexError>(),
+    )?;
+    errors_mod.add(
+        "SettingWithCopyError",
+        m.py().get_type::<SettingWithCopyError>(),
+    )?;
+    errors_mod.add(
+        "SpecificationError",
+        m.py().get_type::<SpecificationError>(),
+    )?;
+    errors_mod.add(
+        "UndefinedVariableError",
+        m.py().get_type::<UndefinedVariableError>(),
+    )?;
+    errors_mod.add(
+        "UnsupportedFunctionCall",
+        m.py().get_type::<UnsupportedFunctionCall>(),
+    )?;
+    errors_mod.add(
+        "AbstractMethodError",
+        m.py().get_type::<AbstractMethodError>(),
+    )?;
+    errors_mod.add("DtypeWarning", m.py().get_type::<DtypeWarning>())?;
+    errors_mod.add(
+        "SettingWithCopyWarning",
+        m.py().get_type::<SettingWithCopyWarning>(),
+    )?;
+    errors_mod.add(
+        "PerformanceWarning",
+        m.py().get_type::<PerformanceWarning>(),
+    )?;
+    errors_mod.add("ParserWarning", m.py().get_type::<ParserWarning>())?;
+    errors_mod.add(
+        "IncompatibilityWarning",
+        m.py().get_type::<IncompatibilityWarning>(),
+    )?;
+    errors_mod.add(
+        "AttributeConflictWarning",
+        m.py().get_type::<AttributeConflictWarning>(),
+    )?;
+    errors_mod.add(
+        "CategoricalConversionWarning",
+        m.py().get_type::<CategoricalConversionWarning>(),
+    )?;
+    errors_mod.add(
+        "ChainedAssignmentError",
+        m.py().get_type::<ChainedAssignmentError>(),
+    )?;
+    m.add_submodule(&errors_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.errors", &errors_mod)?;
+
+    let api_mod = PyModule::new(m.py(), "api")?;
+    let types_mod = PyModule::new(m.py(), "types")?;
+    types_mod.add_function(wrap_pyfunction!(api_is_bool_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_numeric_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_integer_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_signed_integer_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_unsigned_integer_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_float_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_string_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_datetime64_any_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_datetime64_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_datetime64_ns_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_timedelta64_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_timedelta64_ns_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_period_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_categorical_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_interval_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_extension_array_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_object_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_list_like, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_dict_like, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_named_tuple, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_iterator, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_file_like, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_re, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_re_compilable, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_array_like, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_scalar, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_hashable, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_number, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_integer, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_float, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_bool, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_is_dtype_equal, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_infer_dtype, &types_mod)?)?;
+    types_mod.add_function(wrap_pyfunction!(api_pandas_dtype, &types_mod)?)?;
+    api_mod.add_submodule(&types_mod)?;
+    m.add_submodule(&api_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.api", &api_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.api.types", &types_mod)?;
 
     Ok(())
 }
