@@ -100027,6 +100027,7 @@ mod tests {
     /// it, so `Column::values()` allocated a fresh `Vec<Scalar>` per output
     /// column. A values-only assertion cannot see that -- both spellings return
     /// the same numbers -- so this also pins the SHARING with an address witness.
+    #[cfg(feature = "lazy-transpose-view")]
     #[test]
     fn transpose_page_shares_one_scalar_view_per_page_l4vzc() {
         // 300 source rows spans two 256-column pages after transposing.

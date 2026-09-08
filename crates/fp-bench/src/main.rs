@@ -63,6 +63,7 @@ const MATERIALIZED_CLONE_BATCH: usize = 8_192;
 /// `cumsum_batched` (1_000 both, its pandas docstring says "Match fp-bench's
 /// 1,000-call cumsum timing batch exactly") and `df_transpose_materialized_clone`
 /// (`MATERIALIZED_CLONE_BATCH` both). This lane was the only one that did not.
+#[cfg(feature = "lazy-transpose-view")]
 const TRANSPOSE_BATCH: usize = 8_192;
 const TELEMETRY_STRING_BATCH_ROWS: usize = 250_000;
 
