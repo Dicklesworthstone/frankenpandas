@@ -126,8 +126,6 @@ pub use fp_index::{
     validate_alignment_plan,
 };
 // ── IO functions ────────────────────────────────────────────────────────
-#[cfg(feature = "sql-postgresql")]
-pub use fp_io::PostgresConnection;
 pub use fp_io::{
     // CSV
     CsvOnBadLines,

@@ -30,7 +30,6 @@ quick-xml = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 mysql = { workspace = true, optional = true }
-postgres = { workspace = true, optional = true }
 ryu = { workspace = true }
 sas7bdat = { workspace = true }
 sas_xport = { workspace = true }
@@ -56,7 +55,6 @@ block-storage = ["fp-frame/block-storage"]
 hdf5 = ["dep:hdf5"]
 sql-sqlite = ["dep:rusqlite"]
 # Placeholder only. The old concrete `postgres` adapter depended on
-# tokio-postgres, which violates the workspace no-Tokio policy. The current
-# adapter uses the SYNC `postgres` crate (k1axt).
+# tokio-postgres, which violates the workspace no-Tokio policy.
 sql-mysql = ["dep:mysql"]
-sql-postgresql = ["dep:postgres"]
+sql-postgresql = []

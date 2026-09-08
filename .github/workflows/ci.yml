@@ -357,7 +357,8 @@ jobs:
         # before the cargo conformance tests catches oracle-side
         # normalize_* / dispatch regressions that would otherwise silently
         # corrupt every generated fixture.
-        run: "$FP_PYTHON_BIN" -m pytest crates/fp-conformance/oracle/tests/ -v
+        run: |
+          "$FP_PYTHON_BIN" -m pytest crates/fp-conformance/oracle/tests/ -v
 
       - name: Perf ratchet gate self-tests
         # Per br-frankenpandas-a9fh8 and br-frankenpandas-s7x8z: the ratchet in
@@ -366,7 +367,8 @@ jobs:
         # (a 50% slowdown returned ALLOW, a 50% speedup returned BLOCK), and it
         # compared a candidate against a baseline from a different worker. Both
         # are pure-Python and need no benchmark run, so they are cheap to hold.
-        run: "$FP_PYTHON_BIN" -m pytest scripts/tests/ -v
+        run: |
+          "$FP_PYTHON_BIN" -m pytest scripts/tests/ -v
 
       # br-frankenpandas-fixture-corpus-stale-vs-oracle-p6srr: REPORT-ONLY, and
       # deliberately so until the corpus is repaired.

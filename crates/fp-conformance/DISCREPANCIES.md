@@ -160,6 +160,14 @@
 - **Tests affected:** `fp_p2d_413_series_str_encode_with_nulls_hardened` (consistent with the current implementation, not with pandas). `decode()` is the sibling identity op and should be re-checked when this is decided.
 - **Review date:** 2026-08-16
 
+### DISC-027: Series.argsort uses stable sort order for ties; pandas delegates to numpy quicksort (unstable)
+- **Reference:** pandas `Series.argsort()` delegates to numpy `kind='quicksort'`, which is unstable and leaves tie order dependent on numpy's internal quicksort partition implementation. On duplicate elements (e.g. `[2.5, 1.0, 2.5, 3.0, 1.0]`), pandas emits `[1, 4, 2, 0, 3]`, placing position 2 before position 0 for the 2.5 tie.
+- **Our impl:** FrankenPandas `Series::argsort` uses stable pair-sorting (`Vec::sort_by`), preserving encounter order for tied elements (`[1, 4, 0, 2, 3]`), matching numpy `kind='stable'`.
+- **Impact:** Duplicate values in argsort produce deterministic original index order rather than reproducing arbitrary numpy quicksort artifacts.
+- **Resolution:** ACCEPTED (2026-09-08, `br-frankenpandas-dxkbb`). Option (a) (pinning numpy's undocumented quicksort artifact) is rejected as fragile tech debt. Conformance fixtures for argsort avoid ambiguous tie order across engines.
+- **Tests affected:** `series_argsort` conformance fixtures avoid ties.
+- **Review date:** 2026-09-08
+
 ## Resolved Divergences
 
 ### DISC-005: Mixed string/numeric constructors now preserve pandas object semantics
@@ -273,14 +281,6 @@
 - **Resolution:** RESOLVED — covered by fp-io test `csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value`; the stale accepted-divergence note was superseded by the per-value parse path used by `parse_csv_datetime_values`.
 - **Tests affected:** none expected; historical coverage remains `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
 - **Review date:** 2026-06-17
-
-### DISC-027: Series.argsort uses stable sort order for ties; pandas delegates to numpy quicksort (unstable)
-- **Reference:** pandas `Series.argsort()` delegates to numpy `kind='quicksort'`, which is unstable and leaves tie order dependent on numpy's internal quicksort partition implementation. On duplicate elements (e.g. `[2.5, 1.0, 2.5, 3.0, 1.0]`), pandas emits `[1, 4, 2, 0, 3]`, placing position 2 before position 0 for the 2.5 tie.
-- **Our impl:** FrankenPandas `Series::argsort` uses stable pair-sorting (`Vec::sort_by`), preserving encounter order for tied elements (`[1, 4, 0, 2, 3]`), matching numpy `kind='stable'`.
-- **Impact:** Duplicate values in argsort produce deterministic original index order rather than reproducing arbitrary numpy quicksort artifacts.
-- **Resolution:** ACCEPTED (2026-09-08, `br-frankenpandas-dxkbb`). Option (a) (pinning numpy's undocumented quicksort artifact) is rejected as fragile tech debt. Conformance fixtures for argsort avoid ambiguous tie order across engines.
-- **Tests affected:** `series_argsort` conformance fixtures avoid ties.
-- **Review date:** 2026-09-08
 
 ## Rules
 

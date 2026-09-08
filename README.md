@@ -37,7 +37,7 @@
 | `GroupBy.agg_named()` | ✓ | ✓ (different syntax) | **✓** |
 | `merge_asof` with `tolerance` / `by` / `allow_exact_matches` | ✓ | Partial | **✓** |
 | Window operations (rolling / expanding / ewm / resample) | ✓ | Partial | **✓** |
-| 14+ IO formats (CSV/TSV/FWF/JSON/L/Parquet/Excel/Feather/IPC/SQL/HTML/XML/LaTeX/Markdown/Pickle/Stata/HDF5, ORC fail-closed pending a Tokio-free backend) | ✓ | Partial | **✓** (SQL is a generic `SqlConnection` trait with a default `rusqlite` backend and a `sql-mysql` adapter; `sql-postgresql` ships a sync-driver `PostgresConnection` adapter, live-verified against PostgreSQL 17) |
+| 14+ IO formats (CSV/TSV/FWF/JSON/L/Parquet/Excel/Feather/IPC/SQL/HTML/XML/LaTeX/Markdown/Pickle/Stata/HDF5, ORC fail-closed pending a Tokio-free backend) | ✓ | Partial | **✓** (SQL is a generic `SqlConnection` trait with a default `rusqlite` backend and a `sql-mysql` adapter; `sql-postgresql` is an empty placeholder feature) |
 | Differential conformance against live pandas | ✗ | ✗ | **✓** (1,346 packets; the 2026-09-01 full live-oracle run matched 1,323 of them; pinned oracle in CI's daily batch) |
 | Bayesian runtime policy + evidence ledger | ✗ | ✗ | **✓** |
 
@@ -227,7 +227,7 @@ The `frankenpandas` umbrella forwards inner-crate feature flags so callers can o
 | Feature | Default | Forwards to | What it gates |
 |---------|---------|-------------|---------------|
 | `sql-sqlite` | **on** | `fp-io/sql-sqlite` | rusqlite-backed `SqlConnection` impl + `rusqlite::Connection` re-export via the facade |
-| `sql-postgresql` | off | `fp-io/sql-postgresql` | `PostgresConnection`: sync-driver adapter (DDL, `$N` inserts with NULLs, typed reads incl. NUMERIC/timestamps, transactions, `SqlInspector`); live-verified against PostgreSQL 17 |
+| `sql-postgresql` | off | `fp-io/sql-postgresql` | Placeholder for a future Tokio-free PostgreSQL adapter |
 | `sql-mysql` | off | `fp-io/sql-mysql` | MySQL-backed `SqlConnection` impl |
 | `hdf5` | off | `fp-io/hdf5` | Pulls in the hdf5-metno backend for `read_hdf` / `to_hdf` |
 | `tracing` | off | `fp-frame/tracing` | Emits `tracing` spans on hot paths (groupby, rolling, resample, IO) |
@@ -1775,7 +1775,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
 | Python bindings (`fp-python`) drop-in surface | 100% top-level public export parity (119/119 exports) and 100% method/property coverage across all 15 core pandas classes (1484/1484 members) with `frankenpandas.pyi` type stubs, differential pytest suite, and maturin wheel builds in CI | Install via `pip install <wheel>` or build with `maturin build -m crates/fp-python/Cargo.toml`; `import frankenpandas as pd` serves as a drop-in pandas replacement |
-| SQL backends: `rusqlite` (default), `mysql` behind `sql-mysql`, `PostgresConnection` behind `sql-postgresql` | The generic `SqlConnection` trait + `SqlInspector` is feature-complete; the PostgreSQL adapter is live-verified against PG 17 (temporal reads as `Datetime64` ns, NUMERIC as f64; no `query_column_dtypes` hints yet) | Use any of the three, or implement `SqlConnection` for another backend |
+| SQL has two bundled backends (`rusqlite` by default, `mysql` behind `sql-mysql`) | The generic `SqlConnection` trait + `SqlInspector` is feature-complete; `sql-postgresql` is an empty placeholder feature with no adapter (a Tokio-free driver is required by workspace policy) | Use SQLite or MySQL, or implement `SqlConnection` for another backend |
 | Parallelism is hand-rolled, not pooled | Hot paths fan out with `std::thread::scope` (143 occurrences across 8 files under `crates/*/src`, measured 2026-09-03) and one persistent worker pool serves string kernels; there is no rayon and no global pool, so each parallel call pays a thread-spawn cost — 203–1,011 µs for the fan-out pattern itself versus 19–98 µs for a persistent pool in the fp-columnar/src/parallel_pool.rs harness (the header documents that this overstates live per-call cost), which is the main structural loss at 100k-row sizes | Set `FP_ELEMENTWISE_PAR_MIN` / `FP_*_MAX_WORKERS` to tune thresholds; a shared pool is the tracked fix |
 | Native plot rendering deferred | `DataFrame::plot` / `hist` / `boxplot`, `Series::plot` / `hist`, and GroupBy plotting hooks now return backend-neutral `PlotSpec` / `HistogramSpec` / `BoxPlotSpec` data while the plotters/charming renderer is pending | Feed the returned specs to an external renderer, or use Feather/Parquet/CSV export with pandas/matplotlib |
 | Clipboard IO needs an OS clipboard tool | `read_clipboard` / `to_clipboard` shell out to `wl-paste`/`xclip`/`xsel`/`pbpaste` (and the copy equivalents); with none installed they return a typed clipboard error, as pandas does without pyperclip backends | Install one of the tools, or use CSV/JSON string export |
@@ -1835,7 +1835,7 @@ A: As of 2026-09-02 the tracker holds about 4,000 beads, of which roughly 80 are
 | Done | Release to crates.io | 0.2.0 was published on 2026-07-27 (`frankenpandas`, `fp-*`); tags are annotated, not yet signed, and about 1,700 commits have landed since |
 | High | Signed tags and a 0.3.0 release | Signing keys in `AUTHORS.md` are still pending; cut the next release from a green CI batch |
 | Done | Python drop-in packaging for `fp-python` | `pyproject.toml` + maturin wheel builds, 100% top-level public export parity (119/119), 100% core class coverage across all 15 classes (1484/1484 methods), full type stubs (`frankenpandas.pyi`), wheel CI job, and differential pytest harness |
-| Done | Tokio-free PostgreSQL `SqlConnection` adapter | `PostgresConnection` (sync `postgres` driver, `sql-postgresql` feature): DDL, `$N` inserts with NULLs, typed reads (incl. NUMERIC wire decode + timestamps as `Datetime64`), transactions, `SqlInspector` tables/schema/PK — live-verified against PostgreSQL 17 |
+| High | Tokio-free PostgreSQL `SqlConnection` adapter | `sql-postgresql` is an empty placeholder feature; no adapter code exists |
 | Done | MySQL `SqlConnection` adapter | `MysqlConnection` behind `sql-mysql` (no live-server integration test yet) |
 | Medium | Null-introduction promotion policy (DISC-011) | Nullable dtypes exist; the per-path promotion rule and the constructor dtype parser are the open items |
 | Medium | Shared thread pool | Replace per-call `thread::scope` fan-out (143 occurrences across 8 files) with one pool; the spawn cost is the dominant loss at 100k rows |
@@ -2844,7 +2844,7 @@ A rough heat map of how compatible we are with pandas, by API family, as of 2026
 | IO: HDF5 | 🟡 | Feature-gated; keyed-snapshot layout, not PyTables-compatible. |
 | IO: SQL (SQLite) | 🟢 | Full read / write / chunked / inspector surface. |
 | IO: SQL (MySQL) | 🟢 | `MysqlConnection` behind the `sql-mysql` feature; dtype-mapping tests only, no live-server integration test yet. |
-| IO: SQL (PostgreSQL / others) | 🟡 | `PostgresConnection` adapter (sync `postgres` driver) live-verified: DDL/inserts/reads/transactions/inspector against PG 17. Temporal columns read as `Datetime64` ns; NUMERIC decodes to f64; column dtypes hints not yet surfaced. MSSQL/Oracle: not implemented. |
+| IO: SQL (PostgreSQL / others) | 🔴 | Generic trait is in place; `sql-postgresql` is an empty placeholder feature with no adapter. |
 | Sparse (`.sparse()` accessor + `SparseDType`) | 🟡 | DISC-009: accessor surface works but physical storage is still dense. |
 | `apply` shape variants | 🟡 | DISC-010: Rust requires explicit shape (`apply_scalar` / `apply_series` / `apply_series_stacked`). Function-wise equivalent. |
 | Python bindings (PyO3) | 🟢 | `crates/fp-python` achieves 100% top-level public export parity (119/119 exports) and 100% method coverage across all 15 core classes (1484/1484 methods). Built with maturin from `pyproject.toml`, verified with `frankenpandas.pyi` type stubs, wheel CI, and differential pytest harness. |
