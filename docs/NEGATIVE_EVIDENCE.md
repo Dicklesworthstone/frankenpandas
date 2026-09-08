@@ -43982,3 +43982,53 @@ Permuting input rows across the K=3 variants leaves the grouped, inner-joined, s
 - Uncached 1M certified run: `artifacts/bench/qnkah_pipeline_etl_job_uncached_1M.json`
 - Cached 1M comparative run: `artifacts/bench/qnkah_pipeline_etl_job_cached_1M_undecidable.json`
 - Hit-vs-miss standalone probe: `crates/fp-bench/examples/probe_pipeline_csv_cache.rs`
+
+---
+
+### 2026-09-08 (br-frankenpandas-jzokm) — the user-facing file-vs-file CSV read ratio: 3.241x at 200k, uncached across K=3 files, confirming the whole-file read cost
+
+**Settles br-frankenpandas-jzokm** (filed 2026-09-01 by BlackThrush). That bead noted that
+neither previous `io/csv_read` lane measured what a user actually calls (`pd.read_csv("data.csv")`
+vs `fp_io::read_csv(path)`): `csv_read` timed an in-memory `&str` against a file, while
+`csv_read_uncached` timed an in-memory `&str` against `io.BytesIO`. Furthermore, `fp_io::read_csv(path)`
+consults the same 2-entry, 32 MiB content cache.
+
+**THE LANE:** `csv_read_file_uncached` cycles K=3 distinct files on disk on both arms,
+guaranteeing continuous eviction of `fp_io`'s content cache while executing genuine file opens,
+reads, and allocations on every sample.
+
+**Campaign result class:** incumbent-win
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=ce221961335b4a78ac92b88a6e83346332119cc21a40e3fafcc30e51dcce2022
+(89359560 bytes) /data/tmp/cargo-target/release-perf/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae
+invocation_id=vs-pandas-20260908T201738.045233Z-pid1232387 measured_ratio=3.241x
+
+**A/A null control (same invocation):** on the headline 200k row the FrankenPandas null median
+ratio is 1.004823 and the pandas null median ratio is 1.016916, both inside the 2% band.
+
+**Median-CI decision:** the 200k effect median ratio is 3.241x with a 95% CI of
+[2.93548732, 3.47099323], cleared against required threshold log effect of 0.23173409
+with claim log effect 1.17593674, and the CI excludes unity. All three clauses TRUE;
+best-vs-best 2.92x (FP min 55803.34 us, pandas min 162947.26 us), direction agreeing with the median.
+
+**CV role:** provenance only; CV had no vote. Dispersion is recorded for provenance alone:
+200k FrankenPandas 2.76% / pandas 11.39%. The three-clause median-CI decision above is what admitted the row.
+
+**COMPARISON ACROSS THE THREE IO/CSV LANES (200k rows, 10 columns Float64):**
+
+| Lane | Source Pairing | FP p50 (ms) | Pandas p50 (ms) | Ratio | Decidable |
+|---|---|---|---|---|---|
+| `csv_read` | `&str` vs `FILE` | ~51 ms | ~178 ms | **3.497x** | True |
+| `csv_read_uncached` | `&str` vs `BytesIO` | ~52 ms | ~175 ms | **3.361x** | True |
+| `csv_read_file_uncached` | `FILE` vs `FILE` | **58.05 ms** | **190.96 ms** | **3.241x** | **True** |
+
+**THE FINDING:**
+1. The whole-file `std::fs::read_to_string` and allocation in `fp_io::read_csv` costs ~6.0 ms at 200k (~36 MB), closely matching the predicted allocation and copy cost.
+2. In the true user-facing file-vs-file configuration without cache assistance, FrankenPandas outperforms pandas by **3.24x** on 200k rows.
+
+**Artifacts:**
+- Certified 200k file-vs-file run: `artifacts/bench/jzokm_csv_read_file_uncached_200k.json`

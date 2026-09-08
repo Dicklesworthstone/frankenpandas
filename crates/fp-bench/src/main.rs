@@ -3668,9 +3668,13 @@ fn run(
         //
         ("io", "csv_read_file_uncached") => {
             let csvs = build_distinct_f64_csvs(rows, cols, CSV_UNCACHED_DISTINCT_INPUTS);
-            let dir = data_dir
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::temp_dir().join(format!("fp_bench_io_csv_{}_{}", rows, std::process::id())));
+            let dir = data_dir.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::temp_dir().join(format!(
+                    "fp_bench_io_csv_{}_{}",
+                    rows,
+                    std::process::id()
+                ))
+            });
             let _ = std::fs::create_dir_all(&dir);
             let paths: Vec<PathBuf> = (0..CSV_UNCACHED_DISTINCT_INPUTS)
                 .map(|i| {
