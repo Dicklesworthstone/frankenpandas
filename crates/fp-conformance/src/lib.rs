@@ -8278,6 +8278,12 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
                             "missing cast to Utf8 should produce Utf8 string: value={value:?} result={result:?}"
                         ));
                     }
+                } else if target == DType::Null {
+                    if !matches!(result, Scalar::Null(_)) {
+                        return Err(format!(
+                            "missing cast to Null should produce Null scalar: value={value:?} result={result:?}"
+                        ));
+                    }
                 } else {
                     let expected = Scalar::missing_for_dtype(target.clone());
                     if result != expected {
@@ -8289,7 +8295,7 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
                 }
             }
 
-            if target == DType::Null && result != Scalar::Null(NullKind::Null) {
+            if target == DType::Null && !matches!(result, Scalar::Null(_)) {
                 return Err(format!(
                     "cast-to-null contract drifted: value={value:?} result={result:?}"
                 ));

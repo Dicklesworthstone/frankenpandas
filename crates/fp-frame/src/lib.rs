@@ -92486,14 +92486,16 @@ impl DataFrameGroupBy<'_> {
         }
 
         // All funcs share the same group order, so the first func's result
-        // carries the canonical group index (key name + labels).
-        let index = by_func[specs[0].1.as_str()].index.clone();
+        // carries the canonical group index (key name + labels) and row_multiindex.
+        let first_df = &by_func[specs[0].1.as_str()];
+        let index = first_df.index.clone();
+        let row_multiindex = first_df.row_multiindex.clone();
         Ok(DataFrame {
             columns: result_cols.into(),
             column_order: col_order.into(),
             index,
             column_multiindex: None,
-            row_multiindex: None,
+            row_multiindex,
             allows_duplicate_labels: true,
         })
     }

@@ -1713,6 +1713,13 @@ fn fuzz_scalar_cast_bytes_accepts_null_to_utf8_regression() {
 }
 
 #[test]
+fn fuzz_scalar_cast_bytes_accepts_null_nat_to_null_regression() {
+    // Regression for fuzz_scalar_cast: input [20, 2, 5] casts Scalar::Null(NaT) to DType::Null.
+    // Identity cast preserves the NaT kind instead of coercing to Null(Null).
+    fuzz_scalar_cast_bytes(&[20, 2, 5]).expect("null(nat)->null cast should satisfy invariants");
+}
+
+#[test]
 fn fuzz_scalar_cast_bytes_replays_committed_corpus_seeds() {
     let corpus: &[(&str, &[u8])] = &[
         (
