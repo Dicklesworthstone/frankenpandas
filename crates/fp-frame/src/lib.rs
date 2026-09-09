@@ -10274,7 +10274,7 @@ impl Series {
     ///
     /// A NON-boolean mask is NOT an error: pandas' `[]` silently stops
     /// filtering and does a LABEL TAKE instead, and so do we — see
-    /// [`Self::take_by_label_selector`] for the measurements.
+    /// `Self::take_by_label_selector` for the measurements.
     /// (br-frankenpandas-75i7h)
     pub fn filter(&self, mask: &Self) -> Result<Self, FrameError> {
         if !mask.column.dtype().is_bool()
@@ -57100,7 +57100,7 @@ fn reindex_column_with_invented_gaps(
 /// - A cell INVENTED for a column absent from one frame is `NaN`, and an
 ///   all-valid int64 column widens to float64; a column that already carried a
 ///   missing value is nullable and keeps its dtype with a `Null` gap. See
-///   [`column_with_invented_gaps`] (br-frankenpandas-nywa8).
+///   `column_with_invented_gaps` (br-frankenpandas-nywa8).
 /// - Empty input returns an empty DataFrame.
 pub fn concat_dataframes(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
     concat_dataframes_with_ignore_index(frames, false)
