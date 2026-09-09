@@ -48727,8 +48727,11 @@ impl StringAccessor<'_> {
 
     /// Decode bytes to strings (identity operation in Rust).
     ///
-    /// Matches `pd.Series.str.decode(encoding)`. Since Rust strings are
-    /// always UTF-8, this is an identity operation.
+    /// Sibling to `encode()` (see DISC-025 and br-frankenpandas-rw01l).
+    /// In live pandas 2.2.3, `.str.decode` requires a Series of `bytes` objects
+    /// and raises `AttributeError: Can only use .str.decode with 'bytes' dtype!`
+    /// on string inputs. Since FrankenPandas currently represents text and binary
+    /// strings as `Utf8`, this returns an identity clone of the string Series.
     pub fn decode(&self, _encoding: &str) -> Result<Series, FrameError> {
         Ok(self.series.clone())
     }
