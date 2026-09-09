@@ -32526,7 +32526,8 @@ fn validate_resample_options(
             let valid = matches!(
                 unit.as_str(),
                 "Y" | "A" | "YE" | "M" | "ME" | "Q" | "QE" | "D" | "W"
-            ) || (unit.as_str() == "B" && mult <= 1)
+            )
+                || (unit.as_str() == "B" && mult <= 1)
                 || matches!(
                     unit_lower.as_str(),
                     "h" | "min" | "t" | "s" | "ms" | "l" | "us" | "u" | "ns" | "n"
