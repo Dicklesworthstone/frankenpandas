@@ -32033,11 +32033,11 @@ fn resample_build_groups_with_options(
     // calendar resample buckets by period right edges and synthesizes a
     // CONTIGUOUS run of buckets from the first right edge to the last present
     // label, filling dataless buckets with empty bins (sum->0, mean->NaN).
-    if matches!(unit.as_str(), "Y" | "A" | "Q" | "M") {
+    if matches!(unit.as_str(), "Y" | "A" | "YE" | "Q" | "QE" | "M" | "ME") {
         let months_per_period = match unit.as_str() {
-            "M" => 1,
-            "Q" => 3,
-            "Y" | "A" => 12,
+            "M" | "ME" => 1,
+            "Q" | "QE" => 3,
+            "Y" | "A" | "YE" => 12,
             _ => 1,
         };
         let Some(bucket_months) = mult.checked_mul(months_per_period) else {
@@ -32055,9 +32055,9 @@ fn resample_build_groups_with_options(
             labels.iter().map(resample_label_to_month_ordinal).collect();
         let period_end_mo = |mo: i64| -> i64 {
             match unit.as_str() {
-                "M" => mo,
-                "Q" => mo.div_euclid(3) * 3 + 2,
-                "Y" | "A" => mo.div_euclid(12) * 12 + 11,
+                "M" | "ME" => mo,
+                "Q" | "QE" => mo.div_euclid(3) * 3 + 2,
+                "Y" | "A" | "YE" => mo.div_euclid(12) * 12 + 11,
                 _ => mo,
             }
         };
@@ -32523,8 +32523,10 @@ fn validate_resample_options(
             // anchors multi-week bins on Sundays `7*mult` days apart from the
             // first week-Sunday, filling dataless bins (br-frankenpandas-eov68).
             // `B` (business-day) is multiplier-1 only for now.
-            let valid = matches!(unit.as_str(), "Y" | "A" | "M" | "Q" | "D" | "W")
-                || (unit.as_str() == "B" && mult <= 1)
+            let valid = matches!(
+                unit.as_str(),
+                "Y" | "A" | "YE" | "M" | "ME" | "Q" | "QE" | "D" | "W"
+            ) || (unit.as_str() == "B" && mult <= 1)
                 || matches!(
                     unit_lower.as_str(),
                     "h" | "min" | "t" | "s" | "ms" | "l" | "us" | "u" | "ns" | "n"
@@ -32780,9 +32782,9 @@ impl Resample<'_> {
         }
         let (mult, unit) = parse_resample_freq(&self.freq)?;
         let months_per_period = match unit.as_str() {
-            "M" => 1,
-            "Q" => 3,
-            "Y" | "A" => 12,
+            "M" | "ME" => 1,
+            "Q" | "QE" => 3,
+            "Y" | "A" | "YE" => 12,
             _ => 0,
         };
         if months_per_period > 0 {
@@ -33286,9 +33288,9 @@ impl Resample<'_> {
             // from_values — bit-identical output.
             if let Some((mult, unit)) = parse_resample_freq(&self.freq) {
                 let months_per_period = match unit.as_str() {
-                    "M" => 1,
-                    "Q" => 3,
-                    "Y" | "A" => 12,
+                    "M" | "ME" => 1,
+                    "Q" | "QE" => 3,
+                    "Y" | "A" | "YE" => 12,
                     _ => 0,
                 };
                 if months_per_period > 0
@@ -191333,6 +191335,111 @@ mod tests {
         let two_year = multiplied.resample("2Y").sum().unwrap();
         assert_eq!(labels(&two_year), vec!["2024-12-31", "2026-12-31"]);
         assert_eq!(f64s(&two_year), vec![Some(6.0), Some(4.0)]);
+    }
+
+    #[test]
+    fn series_resample_modern_aliases_me_qe_ye() {
+        let labels = |s: &Series| -> Vec<String> {
+            s.index()
+                .labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Utf8(d) => d.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        let f64s = |s: &Series| -> Vec<Option<f64>> {
+            s.values()
+                .iter()
+                .map(|v| {
+                    if v.is_missing() {
+                        None
+                    } else {
+                        v.to_f64().ok()
+                    }
+                })
+                .collect()
+        };
+
+        let s = Series::from_values(
+            "val",
+            vec![
+                IndexLabel::Utf8("2024-01-15".into()),
+                IndexLabel::Utf8("2024-02-20".into()),
+                IndexLabel::Utf8("2024-05-01".into()),
+                IndexLabel::Utf8("2025-02-01".into()),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        // Single month end ME vs legacy M
+        let m = s.resample("M").sum().unwrap();
+        let me = s.resample("ME").sum().unwrap();
+        assert_eq!(labels(&m), labels(&me));
+        assert_eq!(f64s(&m), f64s(&me));
+
+        // 2ME vs 2M
+        let m2 = s.resample("2M").sum().unwrap();
+        let me2 = s.resample("2ME").sum().unwrap();
+        assert_eq!(labels(&m2), labels(&me2));
+        assert_eq!(f64s(&m2), f64s(&me2));
+
+        // QE vs Q
+        let q = s.resample("Q").sum().unwrap();
+        let qe = s.resample("QE").sum().unwrap();
+        assert_eq!(labels(&q), labels(&qe));
+        assert_eq!(f64s(&q), f64s(&qe));
+
+        // 2QE vs 2Q
+        let q2 = s.resample("2Q").sum().unwrap();
+        let qe2 = s.resample("2QE").sum().unwrap();
+        assert_eq!(labels(&q2), labels(&qe2));
+        assert_eq!(f64s(&q2), f64s(&qe2));
+
+        // YE vs Y and A
+        let y = s.resample("Y").sum().unwrap();
+        let a = s.resample("A").sum().unwrap();
+        let ye = s.resample("YE").sum().unwrap();
+        assert_eq!(labels(&y), labels(&ye));
+        assert_eq!(labels(&a), labels(&ye));
+        assert_eq!(f64s(&y), f64s(&ye));
+        assert_eq!(f64s(&a), f64s(&ye));
+
+        // 2YE vs 2Y
+        let y2 = s.resample("2Y").sum().unwrap();
+        let ye2 = s.resample("2YE").sum().unwrap();
+        assert_eq!(labels(&y2), labels(&ye2));
+        assert_eq!(f64s(&y2), f64s(&ye2));
+
+        // Mean, min, max, count with ME
+        let me_mean = s.resample("ME").mean().unwrap();
+        let m_mean = s.resample("M").mean().unwrap();
+        assert_eq!(f64s(&me_mean), f64s(&m_mean));
+
+        let me_min = s.resample("ME").min().unwrap();
+        let m_min = s.resample("M").min().unwrap();
+        assert_eq!(f64s(&me_min), f64s(&m_min));
+
+        let me_max = s.resample("ME").max().unwrap();
+        let m_max = s.resample("M").max().unwrap();
+        assert_eq!(f64s(&me_max), f64s(&m_max));
+
+        // DataFrame resample with ME, QE, YE
+        let df = DataFrame::from_series(vec![s.clone()]).unwrap();
+        let df_me = df.resample("ME").sum().unwrap();
+        let df_m = df.resample("M").sum().unwrap();
+        assert_eq!(df_me.index().labels(), df_m.index().labels());
+        assert_eq!(
+            df_me.column("val").unwrap().values(),
+            df_m.column("val").unwrap().values()
+        );
     }
 
     #[test]
