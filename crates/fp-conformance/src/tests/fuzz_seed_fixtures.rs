@@ -1708,6 +1708,11 @@ fn fuzz_scalar_cast_bytes_accepts_empty_utf8_to_int_seed() {
 }
 
 #[test]
+fn fuzz_scalar_cast_bytes_accepts_null_to_utf8_regression() {
+    fuzz_scalar_cast_bytes(&[119, 0]).expect("null->utf8 cast should satisfy invariants");
+}
+
+#[test]
 fn fuzz_scalar_cast_bytes_replays_committed_corpus_seeds() {
     let corpus: &[(&str, &[u8])] = &[
         (

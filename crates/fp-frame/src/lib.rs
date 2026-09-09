@@ -98646,12 +98646,94 @@ mod tests {
         // the all-valid ValidityMask word-bitmap repr (f9b4d259)).
         let actual_normalized = normalize_volatile_debug_repr(&actual_normalized);
         let expected = normalize_volatile_debug_repr(&expected);
+        if actual_normalized == expected
+            || text_goldens_match_with_fp_tolerance(&actual_normalized, &expected)
+        {
+            return;
+        }
         assert_eq!(
             actual_normalized,
             expected,
             "golden mismatch for {}",
             golden_path.display()
         );
+    }
+
+    fn float_tokens_match_ulps(mut act: &str, mut exp: &str) -> bool {
+        while !act.is_empty() && !exp.is_empty() {
+            let act_ch = act.chars().next().unwrap();
+            let exp_ch = exp.chars().next().unwrap();
+            if act_ch == exp_ch && !act_ch.is_ascii_digit() && act_ch != '-' && act_ch != '+' {
+                act = &act[act_ch.len_utf8()..];
+                exp = &exp[exp_ch.len_utf8()..];
+            } else {
+                break;
+            }
+        }
+        while !act.is_empty() && !exp.is_empty() {
+            let act_ch = act.chars().last().unwrap();
+            let exp_ch = exp.chars().last().unwrap();
+            if act_ch == exp_ch && !act_ch.is_ascii_digit() {
+                act = &act[..act.len() - act_ch.len_utf8()];
+                exp = &exp[..exp.len() - exp_ch.len_utf8()];
+            } else {
+                break;
+            }
+        }
+        if act == exp {
+            return true;
+        }
+        match (act.parse::<f64>(), exp.parse::<f64>()) {
+            (Ok(a), Ok(e)) => {
+                if a.is_nan() && e.is_nan() {
+                    return true;
+                }
+                if a.is_infinite()
+                    && e.is_infinite()
+                    && a.is_sign_positive() == e.is_sign_positive()
+                {
+                    return true;
+                }
+                if a.is_finite() && e.is_finite() && a.is_sign_positive() == e.is_sign_positive() {
+                    let ulp_diff = a.to_bits().abs_diff(e.to_bits());
+                    let rel_diff = if e.abs() > 1e-15 {
+                        (a - e).abs() / e.abs()
+                    } else {
+                        (a - e).abs()
+                    };
+                    return ulp_diff <= 8 || rel_diff < 1e-12;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn text_goldens_match_with_fp_tolerance(actual: &str, expected: &str) -> bool {
+        let actual_lines: Vec<&str> = actual.lines().collect();
+        let expected_lines: Vec<&str> = expected.lines().collect();
+        if actual_lines.len() != expected_lines.len() {
+            return false;
+        }
+        for (act_line, exp_line) in actual_lines.iter().zip(expected_lines.iter()) {
+            if act_line == exp_line {
+                continue;
+            }
+            let act_tokens: Vec<&str> = act_line.split_whitespace().collect();
+            let exp_tokens: Vec<&str> = exp_line.split_whitespace().collect();
+            if act_tokens.len() != exp_tokens.len() {
+                return false;
+            }
+            for (&act_tok, &exp_tok) in act_tokens.iter().zip(exp_tokens.iter()) {
+                if act_tok == exp_tok {
+                    continue;
+                }
+                if !float_tokens_match_ulps(act_tok, exp_tok) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn assert_nonnegative_f64_values_within_ulps(

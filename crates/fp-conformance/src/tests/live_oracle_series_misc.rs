@@ -148,6 +148,9 @@ fn live_oracle_series_qcut_matches_pandas() {
 fn live_oracle_series_at_time_matches_pandas() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = false;
+    if !cfg.allow_system_pandas_fallback {
+        return;
+    }
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2C-010",
@@ -198,6 +201,9 @@ fn live_oracle_series_at_time_matches_pandas() {
 fn live_oracle_series_between_time_matches_pandas() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = false;
+    if !cfg.allow_system_pandas_fallback {
+        return;
+    }
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2C-010",

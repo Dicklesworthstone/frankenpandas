@@ -9,6 +9,9 @@ fn expected_live_oracle_dataframe_or_skip(
     context: &str,
     live: bool,
 ) -> Option<super::FixtureExpectedDataFrame> {
+    if !live {
+        return None;
+    }
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = live;
 

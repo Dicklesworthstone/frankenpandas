@@ -624,8 +624,7 @@ fn live_oracle_dataframe_groupby_sem_matches_pandas() {
                 { "kind": "utf8", "value": "r0" },
                 { "kind": "utf8", "value": "r1" },
                 { "kind": "utf8", "value": "r2" },
-                { "kind": "utf8", "value": "r3" },
-                { "kind": "utf8", "value": "r4" }
+                { "kind": "utf8", "value": "r3" }
             ],
             "column_order": ["grp", "v"],
             "columns": {

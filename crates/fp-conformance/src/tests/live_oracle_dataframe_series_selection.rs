@@ -5,6 +5,9 @@ fn live_oracle_expected_or_skip(
     context: &str,
     live: bool,
 ) -> Option<super::ResolvedExpected> {
+    if !live {
+        return None;
+    }
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = live;
 

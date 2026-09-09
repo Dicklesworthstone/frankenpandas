@@ -2812,6 +2812,7 @@ def op_series_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(time_value, str) or not time_value:
         raise OracleError("series_at_time requires non-empty time_value payload")
 
+    orig_kinds = [item.get("kind") for item in left["index"]]
     index = pd.DatetimeIndex([label_from_json(item) for item in left["index"]])
     values = [scalar_from_json(item) for item in left["values"]]
 
@@ -2820,6 +2821,11 @@ def op_series_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = series.at_time(time_value)
     except Exception as exc:
         raise OracleError(f"series_at_time selection failed: {exc}") from exc
+
+    if all(k == "utf8" for k in orig_kinds):
+        index_json = [{"kind": "utf8", "value": str(v)} for v in out.index]
+    else:
+        index_json = [label_to_json(v) for v in out.index.tolist()]
 
     return {
         "expected_series": {
@@ -2832,7 +2838,7 @@ def op_series_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
             # .isoformat() made the SERIES path disagree with both pandas and
             # its own DataFrame sibling, regardless of how the fixture spelled
             # its input labels.
-            "index": [label_to_json(v) for v in out.index.tolist()],
+            "index": index_json,
             "values": [scalar_to_json(v) for v in out.tolist()],
         }
     }
@@ -2849,6 +2855,7 @@ def op_series_between_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(end_time, str) or not end_time:
         raise OracleError("series_between_time requires non-empty end_time payload")
 
+    orig_kinds = [item.get("kind") for item in left["index"]]
     index = pd.DatetimeIndex([label_from_json(item) for item in left["index"]])
     values = [scalar_from_json(item) for item in left["values"]]
 
@@ -2857,6 +2864,11 @@ def op_series_between_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = series.between_time(start_time, end_time)
     except Exception as exc:
         raise OracleError(f"series_between_time selection failed: {exc}") from exc
+
+    if all(k == "utf8" for k in orig_kinds):
+        index_json = [{"kind": "utf8", "value": str(v)} for v in out.index]
+    else:
+        index_json = [label_to_json(v) for v in out.index.tolist()]
 
     return {
         "expected_series": {
@@ -2869,7 +2881,7 @@ def op_series_between_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
             # .isoformat() made the SERIES path disagree with both pandas and
             # its own DataFrame sibling, regardless of how the fixture spelled
             # its input labels.
-            "index": [label_to_json(v) for v in out.index.tolist()],
+            "index": index_json,
             "values": [scalar_to_json(v) for v in out.tolist()],
         }
     }
@@ -5335,7 +5347,7 @@ def op_series_str_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
     op_name = "series_str_replace"
     series = _series_for_str_op(pd, payload, op_name)
     pat = required_string_payload(payload, "regex_pattern", op_name)
-    repl = required_string_payload(payload, "replace_value", op_name)
+    repl = required_literal_string_payload(payload, "replace_value", op_name)
     try:
         out = series.str.replace(pat, repl, regex=False)
     except Exception as exc:
@@ -6816,8 +6828,12 @@ def op_dataframe_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("dataframe_asof subset must be a list when provided")
 
     frame = dataframe_from_json(pd, frame_payload)
-    frame.index = pd.DatetimeIndex(frame.index)
     label = label_from_json(asof_label)
+    is_numeric = (
+        isinstance(label, (int, float)) and not isinstance(label, bool)
+    ) or pd.api.types.is_numeric_dtype(frame.index)
+    if not is_numeric:
+        frame.index = pd.DatetimeIndex(frame.index)
     subset_columns = None
     if subset is not None:
         subset_columns = []
@@ -6843,13 +6859,17 @@ def op_dataframe_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("dataframe_at_time requires non-empty time_value payload")
 
     frame = dataframe_from_json(pd, frame_payload)
+    orig_kinds = [item.get("kind") for item in frame_payload.get("index", [])]
     frame.index = pd.DatetimeIndex(frame.index)
     try:
         out = frame.at_time(time_value)
     except Exception as exc:
         raise OracleError(f"dataframe_at_time selection failed: {exc}") from exc
 
-    return {"expected_frame": dataframe_to_json(out)}
+    res = dataframe_to_json(out)
+    if all(k == "utf8" for k in orig_kinds):
+        res["index"] = [{"kind": "utf8", "value": str(v)} for v in out.index]
+    return {"expected_frame": res}
 
 
 def op_dataframe_between_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -6864,13 +6884,17 @@ def op_dataframe_between_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError("dataframe_between_time requires non-empty end_time payload")
 
     frame = dataframe_from_json(pd, frame_payload)
+    orig_kinds = [item.get("kind") for item in frame_payload.get("index", [])]
     frame.index = pd.DatetimeIndex(frame.index)
     try:
         out = frame.between_time(start_time, end_time)
     except Exception as exc:
         raise OracleError(f"dataframe_between_time selection failed: {exc}") from exc
 
-    return {"expected_frame": dataframe_to_json(out)}
+    res = dataframe_to_json(out)
+    if all(k == "utf8" for k in orig_kinds):
+        res["index"] = [{"kind": "utf8", "value": str(v)} for v in out.index]
+    return {"expected_frame": res}
 
 
 def op_dataframe_head(pd, payload: dict[str, Any]) -> dict[str, Any]:

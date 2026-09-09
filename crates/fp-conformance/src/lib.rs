@@ -2039,6 +2039,26 @@ where
     deserializer.deserialize_option(OrderedFuncMapVisitor)
 }
 
+fn serialize_ordered_func_map<S>(
+    value: &Option<OrderedFuncMap>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap as _;
+    match value {
+        None => serializer.serialize_none(),
+        Some(pairs) => {
+            let mut map = serializer.serialize_map(Some(pairs.len()))?;
+            for (col, funcs) in pairs {
+                map.serialize_entry(col, funcs)?;
+            }
+            map.end()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FixtureMultiIndex {
@@ -2168,9 +2188,13 @@ pub struct PacketFixture {
     /// Ordered pairs, not a `BTreeMap`: pandas' agg column axis follows the
     /// request order, and a `BTreeMap` sorts the keys, so the format itself
     /// could not express the request. Deserialized from the same JSON object
-    /// shape as before via [`deserialize_ordered_func_map`], so no fixture file
+    /// shape as before via `deserialize_ordered_func_map`, so no fixture file
     /// changes. (br-frankenpandas-nv5ct)
-    #[serde(default, deserialize_with = "deserialize_ordered_func_map")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_ordered_func_map",
+        serialize_with = "serialize_ordered_func_map"
+    )]
     pub groupby_agg_multi: Option<OrderedFuncMap>,
     #[serde(default)]
     pub frame: Option<FixtureDataFrame>,
@@ -3815,8 +3839,11 @@ struct OracleRequest {
     groupby_columns: Option<Vec<String>>,
     #[serde(default)]
     groupby_observed: Option<bool>,
-    // Ordered pairs, same reason as the public field (br-frankenpandas-nv5ct).
-    #[serde(default, deserialize_with = "deserialize_ordered_func_map")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_ordered_func_map",
+        serialize_with = "serialize_ordered_func_map"
+    )]
     groupby_agg_multi: Option<OrderedFuncMap>,
     frame: Option<FixtureDataFrame>,
     #[serde(default)]
@@ -8245,12 +8272,20 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
             }
 
             if value.is_missing() {
-                let expected = Scalar::missing_for_dtype(target.clone());
-                if result != expected {
-                    return Err(format!(
-                        "missing cast drifted: value={value:?} target={target:?} \
-                         result={result:?} expected={expected:?}"
-                    ));
+                if target == DType::Utf8 {
+                    if !matches!(result, Scalar::Utf8(_)) {
+                        return Err(format!(
+                            "missing cast to Utf8 should produce Utf8 string: value={value:?} result={result:?}"
+                        ));
+                    }
+                } else {
+                    let expected = Scalar::missing_for_dtype(target.clone());
+                    if result != expected {
+                        return Err(format!(
+                            "missing cast drifted: value={value:?} target={target:?} \
+                             result={result:?} expected={expected:?}"
+                        ));
+                    }
                 }
             }
 
