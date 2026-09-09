@@ -49160,7 +49160,11 @@ impl DatetimeAccessor<'_> {
     /// other dtypes. Previously a silent catch-all returned all-NaN.
     fn validate_datetime_dtype(&self) -> Result<(), FrameError> {
         match self.series.dtype() {
-            DType::Utf8 | DType::Null => Ok(()),
+            DType::Datetime64 { .. }
+            | DType::Timedelta64
+            | DType::Period
+            | DType::Utf8
+            | DType::Null => Ok(()),
             other => Err(FrameError::CompatibilityRejected(format!(
                 "Can only use .dt accessor with datetimelike values, got {other:?}"
             ))),
@@ -50416,6 +50420,26 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.tz` inspection pattern.
     pub fn tz(&self) -> Result<Series, FrameError> {
+        self.validate_datetime_dtype()?;
+        if self.is_typed_datetime() {
+            let tz_name = self.series.column().timezone();
+            let values = self
+                .series
+                .column()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Datetime64(ns) if *ns != Timestamp::NAT => match tz_name {
+                        Some(tz) => Scalar::Utf8(tz.to_string()),
+                        None => Scalar::Null(NullKind::Null),
+                    },
+                    _ => Scalar::Null(NullKind::Null),
+                })
+                .collect();
+            let index = self.series.index().clone();
+            let column = Column::from_values(values)?;
+            return Series::new(self.series.name().to_string(), index, column);
+        }
         self.extract_component(
             |s| {
                 let s = s.trim();
@@ -52533,6 +52557,161 @@ impl DatetimeAccessor<'_> {
     ) -> Result<Series, FrameError> {
         // Per br-frankenpandas-d14250: gate on dtype.
         self.validate_datetime_dtype()?;
+        if self.is_typed_datetime() {
+            if self.series.column().timezone().is_some() {
+                match tz {
+                    Some(_) => {
+                        return Err(FrameError::CompatibilityRejected(
+                            "Already tz-aware, use tz_convert to convert.".to_owned(),
+                        ));
+                    }
+                    None => {
+                        let current_tz = self.series.column().timezone().unwrap();
+                        let current_spec = parse_tz_spec(current_tz)?;
+                        let values = self
+                            .series
+                            .column()
+                            .values()
+                            .iter()
+                            .map(|v| match v {
+                                Scalar::Datetime64(nanos) if *nanos != fp_types::Timestamp::NAT => {
+                                    let seconds = nanos.div_euclid(1_000_000_000);
+                                    let subsec = nanos.rem_euclid(1_000_000_000) as u32;
+                                    Utc.timestamp_opt(seconds, subsec).single().map_or(
+                                        Scalar::Datetime64(fp_types::Timestamp::NAT),
+                                        |utc| {
+                                            let naive = match &current_spec {
+                                                TimeZoneSpec::Fixed(offset) => {
+                                                    utc.with_timezone(offset).naive_local()
+                                                }
+                                                TimeZoneSpec::Named { zone, .. } => {
+                                                    utc.with_timezone(zone).naive_local()
+                                                }
+                                            };
+                                            naive.and_utc().timestamp_nanos_opt().map_or(
+                                                Scalar::Datetime64(fp_types::Timestamp::NAT),
+                                                Scalar::Datetime64,
+                                            )
+                                        },
+                                    )
+                                }
+                                _ => Scalar::Datetime64(fp_types::Timestamp::NAT),
+                            })
+                            .collect();
+                        let column = Column::new(DType::datetime64_naive(), values)?;
+                        return Series::new(
+                            self.series.name().to_owned(),
+                            self.series.index().clone(),
+                            column,
+                        );
+                    }
+                }
+            }
+            match tz {
+                None => return Ok(self.series.clone()),
+                Some(target_tz_str) => {
+                    let tz_spec = parse_tz_spec(target_tz_str)?;
+                    let target_dtype = match &tz_spec {
+                        TimeZoneSpec::Fixed(offset) => {
+                            if offset.local_minus_utc() == 0 {
+                                DType::datetime64_tz("UTC")
+                            } else {
+                                DType::datetime64_tz(format!("UTC{offset}"))
+                            }
+                        }
+                        TimeZoneSpec::Named { name, .. } => DType::datetime64_tz(name),
+                    };
+                    let inputs = self
+                        .series
+                        .column()
+                        .values()
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Datetime64(nanos) if *nanos != fp_types::Timestamp::NAT => {
+                                let seconds = nanos.div_euclid(1_000_000_000);
+                                let subsec = nanos.rem_euclid(1_000_000_000) as u32;
+                                match DateTime::from_timestamp(seconds, subsec) {
+                                    Some(dt) => TzLocalizeInput::Naive(dt.naive_utc()),
+                                    None => TzLocalizeInput::PassThrough(Scalar::Datetime64(
+                                        fp_types::Timestamp::NAT,
+                                    )),
+                                }
+                            }
+                            _ => TzLocalizeInput::PassThrough(Scalar::Datetime64(
+                                fp_types::Timestamp::NAT,
+                            )),
+                        })
+                        .collect::<Vec<_>>();
+
+                    let ambiguous_policies = match &tz_spec {
+                        TimeZoneSpec::Fixed(_) => {
+                            vec![ResolvedAmbiguousPolicy::Raise; inputs.len()]
+                        }
+                        TimeZoneSpec::Named { zone, .. } => {
+                            resolve_series_ambiguous_policies(&inputs, *zone, &options.ambiguous)?
+                        }
+                    };
+
+                    let values = inputs
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, input)| match input {
+                            TzLocalizeInput::PassThrough(_) => {
+                                Ok(Scalar::Datetime64(fp_types::Timestamp::NAT))
+                            }
+                            TzLocalizeInput::Naive(naive) => {
+                                let utc_nanos = match &tz_spec {
+                                    TimeZoneSpec::Fixed(offset) => {
+                                        let aware = offset
+                                            .from_local_datetime(&naive)
+                                            .single()
+                                            .ok_or_else(|| {
+                                                FrameError::CompatibilityRejected(format!(
+                                                    "could not localize '{}' to fixed offset {}",
+                                                    format_naive_datetime(naive),
+                                                    offset
+                                                ))
+                                            })?;
+                                        aware.timestamp_nanos_opt().ok_or_else(|| {
+                                            FrameError::CompatibilityRejected(
+                                                "timestamp overflow".to_owned(),
+                                            )
+                                        })?
+                                    }
+                                    TimeZoneSpec::Named { zone, name } => {
+                                        match resolve_named_local_datetime(
+                                            naive,
+                                            *zone,
+                                            name,
+                                            ambiguous_policies[idx],
+                                            &options.nonexistent,
+                                        )? {
+                                            Some(aware) => {
+                                                aware.timestamp_nanos_opt().ok_or_else(|| {
+                                                    FrameError::CompatibilityRejected(
+                                                        "timestamp overflow".to_owned(),
+                                                    )
+                                                })?
+                                            }
+                                            None => fp_types::Timestamp::NAT,
+                                        }
+                                    }
+                                };
+                                Ok(Scalar::Datetime64(utc_nanos))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, FrameError>>()?;
+
+                    let column =
+                        Column::new(DType::datetime64_naive(), values)?.with_dtype(target_dtype);
+                    return Series::new(
+                        self.series.name().to_owned(),
+                        self.series.index().clone(),
+                        column,
+                    );
+                }
+            }
+        }
         match tz {
             Some(tz) => {
                 let tz_spec = parse_tz_spec(tz)?;
@@ -52571,53 +52750,24 @@ impl DatetimeAccessor<'_> {
     pub fn tz_convert(&self, tz: Option<&str>) -> Result<Series, FrameError> {
         let target_tz = tz.map(parse_tz_spec).transpose()?;
         let target_dtype = match &target_tz {
-            Some(TimeZoneSpec::Fixed(offset)) => DType::datetime64_tz(format!("UTC{offset}")),
+            Some(TimeZoneSpec::Fixed(offset)) => {
+                if offset.local_minus_utc() == 0 {
+                    DType::datetime64_tz("UTC")
+                } else {
+                    DType::datetime64_tz(format!("UTC{offset}"))
+                }
+            }
             Some(TimeZoneSpec::Named { name, .. }) => DType::datetime64_tz(name),
             None => DType::datetime64_naive(),
         };
 
-        // A typed datetime stores UTC nanoseconds, so converting its timezone
-        // changes only presentation.  The columnar timezone metadata mutation
-        // is intentionally kept out of this accessor: a typed source is
-        // converted through the same scalar rendering path as the established
-        // Utf8 implementation, preserving DST-aware wall clocks and missing
-        // values for a chained conversion.
         if self.is_typed_datetime() {
             if self.series.column().timezone().is_none() {
                 return Err(FrameError::CompatibilityRejected(
                     "Cannot convert tz-naive timestamps, use tz_localize to localize".to_owned(),
                 ));
             }
-            let values = self
-                .series
-                .column()
-                .values()
-                .iter()
-                .map(|value| match value {
-                    Scalar::Datetime64(nanos) if *nanos != fp_types::Timestamp::NAT => {
-                        let seconds = nanos.div_euclid(1_000_000_000);
-                        let subsec_nanos = nanos.rem_euclid(1_000_000_000) as u32;
-                        Utc.timestamp_opt(seconds, subsec_nanos).single().map_or(
-                            Scalar::Null(NullKind::NaN),
-                            |utc| match &target_tz {
-                                Some(TimeZoneSpec::Fixed(offset)) => Scalar::Utf8(
-                                    format_aware_datetime(utc.with_timezone(offset), None),
-                                ),
-                                Some(TimeZoneSpec::Named { zone, name }) => {
-                                    let localized = utc.with_timezone(zone);
-                                    Scalar::Utf8(format_aware_datetime(
-                                        localized.with_timezone(&localized.offset().fix()),
-                                        Some(name),
-                                    ))
-                                }
-                                None => Scalar::Utf8(format_naive_datetime(utc.naive_utc())),
-                            },
-                        )
-                    }
-                    _ => Scalar::Null(NullKind::NaN),
-                })
-                .collect();
-            let column = Column::from_values(values)?;
+            let column = self.series.column().with_dtype(target_dtype);
             return Series::new(
                 self.series.name().to_owned(),
                 self.series.index().clone(),
@@ -162855,6 +163005,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_dt_tz_typed() {
+        let naive = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Datetime64(1_705_314_600_000_000_000),
+                Scalar::Datetime64(fp_types::Timestamp::NAT),
+            ],
+        )
+        .unwrap();
+        let naive_tz = naive.dt().tz().unwrap();
+        assert_eq!(naive_tz.column().values()[0], Scalar::Null(NullKind::Null));
+        assert_eq!(naive_tz.column().values()[1], Scalar::Null(NullKind::Null));
+
+        let localized = naive.dt().tz_localize(Some("UTC")).unwrap();
+        let aware_tz = localized.dt().tz().unwrap();
+        assert_eq!(
+            aware_tz.column().values()[0],
+            Scalar::Utf8("UTC".to_string())
+        );
+        assert_eq!(aware_tz.column().values()[1], Scalar::Null(NullKind::Null));
+    }
+
     /// `.dt.timetz` across EVERY offset spelling, not one.
     ///
     /// br-frankenpandas-t2n6i. The tz family's only banked fixture
@@ -167176,11 +167350,12 @@ mod tests {
             "UTC instants must remain unchanged across the spring-forward boundary"
         );
         let utc = result.dt().tz_convert(Some("UTC")).unwrap();
+        assert_eq!(utc.dtype(), DType::datetime64_tz("UTC"));
         assert_eq!(
             utc.values(),
             &[
-                Scalar::Utf8("2024-03-10 06:30:00+00:00".into()),
-                Scalar::Utf8("2024-03-10 07:30:00+00:00".into()),
+                Scalar::Datetime64(1_710_052_200_000_000_000),
+                Scalar::Datetime64(1_710_055_800_000_000_000),
             ],
             "a typed named-zone result must remain convertible without losing either instant"
         );
