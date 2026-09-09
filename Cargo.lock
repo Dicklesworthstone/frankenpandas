@@ -1330,7 +1330,6 @@ dependencies = [
 name = "fp-conformance"
 version = "0.2.0"
 dependencies = [
- "chrono",
  "criterion",
  "fp-columnar",
  "fp-expr",
@@ -1441,7 +1440,6 @@ dependencies = [
  "arrow",
  "bytes",
  "calamine",
- "chrono",
  "csv",
  "dta",
  "fast-float2",
