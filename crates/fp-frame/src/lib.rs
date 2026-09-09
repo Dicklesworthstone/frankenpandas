@@ -32526,8 +32526,7 @@ fn validate_resample_options(
             let valid = matches!(
                 unit.as_str(),
                 "Y" | "A" | "YE" | "M" | "ME" | "Q" | "QE" | "D" | "W"
-            )
-                || (unit.as_str() == "B" && mult <= 1)
+            ) || (unit.as_str() == "B" && mult <= 1)
                 || matches!(
                     unit_lower.as_str(),
                     "h" | "min" | "t" | "s" | "ms" | "l" | "us" | "u" | "ns" | "n"
@@ -65039,6 +65038,112 @@ impl DataFrame {
         Ok(duplicated)
     }
 
+    /// Open-addressing Float64 duplicate flags (khash-style: power-of-two table,
+    /// linear probing, splitmix64 hash, raw `to_bits` keys + occupied byte-map).
+    /// All missing/NaN rows collapse into a single equivalence class.
+    fn oa_dup_flags_f64(
+        data: &[f64],
+        validity: &fp_columnar::ValidityMask,
+        nan_missing_exact: bool,
+        reverse: bool,
+    ) -> Vec<bool> {
+        let n = data.len();
+        let mut cap = 8usize;
+        while cap.saturating_mul(3) < n.saturating_mul(4) {
+            cap <<= 1;
+        }
+        let mask = cap - 1;
+        let mut keys = vec![0u64; cap];
+        let mut occ = vec![false; cap];
+        let mut flags = vec![false; n];
+        let mut seen_missing = false;
+
+        if nan_missing_exact && validity.all() {
+            for step in 0..n {
+                let i = if reverse { n - 1 - step } else { step };
+                let bits = data[i].to_bits();
+                let mut z = bits;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                let mut h = ((z ^ (z >> 31)) as usize) & mask;
+                loop {
+                    if !occ[h] {
+                        occ[h] = true;
+                        keys[h] = bits;
+                        break;
+                    }
+                    if keys[h] == bits {
+                        flags[i] = true;
+                        break;
+                    }
+                    h = (h + 1) & mask;
+                }
+            }
+            return flags;
+        }
+
+        let words_storage: Vec<u64>;
+        let presence_words: &[u64] = if nan_missing_exact {
+            if let Some(source) = validity.packed_words() {
+                source
+            } else {
+                words_storage = validity.packed_words_for_scan();
+                &words_storage
+            }
+        } else {
+            let words = n.div_ceil(64);
+            let packed = validity.packed_words();
+            let mut derived = Vec::with_capacity(words);
+            for w in 0..words {
+                let base = w * 64;
+                let hi = 64.min(n - base);
+                let mut word = 0_u64;
+                for bit in 0..hi {
+                    let i = base + bit;
+                    let valid = match packed {
+                        Some(source) => (source[w] >> bit) & 1 == 1,
+                        None => validity.get(i),
+                    };
+                    if valid && !data[i].is_nan() {
+                        word |= 1_u64 << bit;
+                    }
+                }
+                derived.push(word);
+            }
+            words_storage = derived;
+            &words_storage
+        };
+
+        for step in 0..n {
+            let i = if reverse { n - 1 - step } else { step };
+            let is_present = (presence_words[i >> 6] >> (i & 63)) & 1 == 1;
+            if is_present {
+                let bits = data[i].to_bits();
+                let mut z = bits;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                let mut h = ((z ^ (z >> 31)) as usize) & mask;
+                loop {
+                    if !occ[h] {
+                        occ[h] = true;
+                        keys[h] = bits;
+                        break;
+                    }
+                    if keys[h] == bits {
+                        flags[i] = true;
+                        break;
+                    }
+                    h = (h + 1) & mask;
+                }
+            } else if !seen_missing {
+                seen_missing = true;
+            } else {
+                flags[i] = true;
+            }
+        }
+        flags
+    }
+
     /// Single-Float64-column duplicate mask keyed directly on the raw `to_bits`
     /// pattern. A row is "present" iff valid and not NaN; all missing/NaN rows
     /// form one equivalence class (`seen_missing`). Bit-identical to the general
@@ -65049,112 +65154,70 @@ impl DataFrame {
         nan_missing_exact: bool,
         keep: DuplicateKeep,
     ) -> Vec<bool> {
+        match keep {
+            DuplicateKeep::First => {
+                return Self::oa_dup_flags_f64(data, validity, nan_missing_exact, false);
+            }
+            DuplicateKeep::Last => {
+                return Self::oa_dup_flags_f64(data, validity, nan_missing_exact, true);
+            }
+            DuplicateKeep::None => {}
+        }
+
         let n = data.len();
         let mut duplicated = vec![false; n];
-
-        // PRESENCE AS A BITMAP, RESOLVED ONCE.
-        //
-        // Every arm below asked `validity.get(i) && !data[i].is_nan()` PER ROW.
-        // `ValidityMask::get` is an out-of-line call that re-decides
-        // sentinel-vs-ranges-vs-words on every call, so the cost of that question
-        // depends on the mask's SHAPE rather than on the work: a clean column hits
-        // the all-valid sentinel branch, a column with any missing value takes the
-        // word path. Measured on `drop_duplicates @100k`: 533.7us on clean float64
-        // against 2623.2us at 10% NaN — 4.9x — even though the NaN column does
-        // FEWER hash inserts, because 10% of its rows collapse into the missing
-        // class instead of being probed. The hash was never the difference.
-        //
-        // Under `nan_missing_exact` the column's validity IS `!is_nan`, so the
-        // presence bitmap is the mask's own words and there is nothing to derive.
-        // That covers the clean case too (all-valid sentinel => all ones).
-        let words = n.div_ceil(64);
-        let present: Vec<u64> = if nan_missing_exact {
-            match validity.packed_words() {
-                Some(source) => source.to_vec(),
-                // Sentinel all-valid, or range-encoded with nothing to borrow.
-                None if validity.all() => vec![u64::MAX; words],
-                None => (0..words)
-                    .map(|w| {
-                        let base = w * 64;
-                        let mut word = 0_u64;
-                        for bit in 0..64.min(n - base) {
-                            if validity.get(base + bit) {
-                                word |= 1_u64 << bit;
-                            }
-                        }
-                        word
-                    })
-                    .collect(),
+        let words_storage: Vec<u64>;
+        let presence_words: &[u64] = if nan_missing_exact {
+            if let Some(source) = validity.packed_words() {
+                source
+            } else if validity.all() {
+                words_storage = vec![u64::MAX; n.div_ceil(64)];
+                &words_storage
+            } else {
+                words_storage = validity.packed_words_for_scan();
+                &words_storage
             }
         } else {
-            // No witness: derive `valid & !nan` word-at-a-time rather than asking
-            // per row. `x == x` is false for NaN alone and lowers to a compare.
+            let words = n.div_ceil(64);
             let packed = validity.packed_words();
-            (0..words)
-                .map(|w| {
-                    let base = w * 64;
-                    let hi = 64.min(n - base);
-                    let mut word = 0_u64;
-                    for bit in 0..hi {
-                        let i = base + bit;
-                        let valid = match packed {
-                            Some(source) => (source[i / 64] >> (i % 64)) & 1 == 1,
-                            None => validity.get(i),
-                        };
-                        if valid && !data[i].is_nan() {
-                            word |= 1_u64 << bit;
-                        }
-                    }
-                    word
-                })
-                .collect()
-        };
-        let is_present = |i: usize| (present[i / 64] >> (i % 64)) & 1 == 1;
-        match keep {
-            DuplicateKeep::First | DuplicateKeep::Last => {
-                let mut seen: FxHashMap<u64, ()> =
-                    FxHashMap::with_capacity_and_hasher(n, Default::default());
-                let mut seen_missing = false;
-                let mark = |i: usize, seen: &mut FxHashMap<u64, ()>, seen_missing: &mut bool| {
-                    if is_present(i) {
-                        seen.insert(data[i].to_bits(), ()).is_some()
-                    } else {
-                        let was = *seen_missing;
-                        *seen_missing = true;
-                        was
-                    }
-                };
-                if matches!(keep, DuplicateKeep::First) {
-                    for (i, dup) in duplicated.iter_mut().enumerate() {
-                        *dup = mark(i, &mut seen, &mut seen_missing);
-                    }
-                } else {
-                    for i in (0..n).rev() {
-                        duplicated[i] = mark(i, &mut seen, &mut seen_missing);
-                    }
-                }
-            }
-            DuplicateKeep::None => {
-                // Two passes: count occurrences per key, then mark every row whose
-                // key (or the missing class) occurs more than once.
-                let mut counts: FxHashMap<u64, u32> =
-                    FxHashMap::with_capacity_and_hasher(n, Default::default());
-                let mut missing_count: u32 = 0;
-                for (i, value) in data.iter().enumerate().take(n) {
-                    if is_present(i) {
-                        *counts.entry(value.to_bits()).or_insert(0) += 1;
-                    } else {
-                        missing_count += 1;
-                    }
-                }
-                for (i, dup) in duplicated.iter_mut().enumerate() {
-                    *dup = if is_present(i) {
-                        counts.get(&data[i].to_bits()).copied().unwrap_or(0) > 1
-                    } else {
-                        missing_count > 1
+            let mut derived = Vec::with_capacity(words);
+            for w in 0..words {
+                let base = w * 64;
+                let hi = 64.min(n - base);
+                let mut word = 0_u64;
+                for bit in 0..hi {
+                    let i = base + bit;
+                    let valid = match packed {
+                        Some(source) => (source[w] >> bit) & 1 == 1,
+                        None => validity.get(i),
                     };
+                    if valid && !data[i].is_nan() {
+                        word |= 1_u64 << bit;
+                    }
                 }
+                derived.push(word);
             }
+            words_storage = derived;
+            &words_storage
+        };
+
+        let is_present = |i: usize| (presence_words[i >> 6] >> (i & 63)) & 1 == 1;
+        let mut counts: FxHashMap<u64, u32> =
+            FxHashMap::with_capacity_and_hasher(n, Default::default());
+        let mut missing_count: u32 = 0;
+        for (i, value) in data.iter().enumerate().take(n) {
+            if is_present(i) {
+                *counts.entry(value.to_bits()).or_insert(0) += 1;
+            } else {
+                missing_count += 1;
+            }
+        }
+        for (i, dup) in duplicated.iter_mut().enumerate() {
+            *dup = if is_present(i) {
+                counts.get(&data[i].to_bits()).copied().unwrap_or(0) > 1
+            } else {
+                missing_count > 1
+            };
         }
         duplicated
     }
@@ -65230,6 +65293,161 @@ impl DataFrame {
         duplicated
     }
 
+    /// Open-addressing Float64 keep positions for `drop_duplicates` (fused mask
+    /// + row position extraction in a single pass, avoiding `Vec<bool>` materialization).
+    fn oa_dup_keep_positions_f64(
+        data: &[f64],
+        validity: &fp_columnar::ValidityMask,
+        nan_missing_exact: bool,
+        reverse: bool,
+    ) -> (Vec<usize>, bool) {
+        let n = data.len();
+        let mut cap = 8usize;
+        while cap.saturating_mul(3) < n.saturating_mul(4) {
+            cap <<= 1;
+        }
+        let mask = cap - 1;
+        let mut keys = vec![0u64; cap];
+        let mut occ = vec![false; cap];
+        let mut keep_positions = Vec::with_capacity(n);
+        let mut saw_duplicate = false;
+        let mut seen_missing = false;
+
+        if nan_missing_exact && validity.all() {
+            for step in 0..n {
+                let i = if reverse { n - 1 - step } else { step };
+                let bits = data[i].to_bits();
+                let mut z = bits;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                let mut h = ((z ^ (z >> 31)) as usize) & mask;
+                loop {
+                    if !occ[h] {
+                        occ[h] = true;
+                        keys[h] = bits;
+                        keep_positions.push(i);
+                        break;
+                    }
+                    if keys[h] == bits {
+                        saw_duplicate = true;
+                        break;
+                    }
+                    h = (h + 1) & mask;
+                }
+            }
+            if reverse {
+                keep_positions.reverse();
+            }
+            return (keep_positions, saw_duplicate);
+        }
+
+        let words_storage: Vec<u64>;
+        let presence_words: &[u64] = if nan_missing_exact {
+            if let Some(source) = validity.packed_words() {
+                source
+            } else {
+                words_storage = validity.packed_words_for_scan();
+                &words_storage
+            }
+        } else {
+            let words = n.div_ceil(64);
+            let packed = validity.packed_words();
+            let mut derived = Vec::with_capacity(words);
+            for w in 0..words {
+                let base = w * 64;
+                let hi = 64.min(n - base);
+                let mut word = 0_u64;
+                for bit in 0..hi {
+                    let i = base + bit;
+                    let valid = match packed {
+                        Some(source) => (source[w] >> bit) & 1 == 1,
+                        None => validity.get(i),
+                    };
+                    if valid && !data[i].is_nan() {
+                        word |= 1_u64 << bit;
+                    }
+                }
+                derived.push(word);
+            }
+            words_storage = derived;
+            &words_storage
+        };
+
+        for step in 0..n {
+            let i = if reverse { n - 1 - step } else { step };
+            let is_present = (presence_words[i >> 6] >> (i & 63)) & 1 == 1;
+            if is_present {
+                let bits = data[i].to_bits();
+                let mut z = bits;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                let mut h = ((z ^ (z >> 31)) as usize) & mask;
+                loop {
+                    if !occ[h] {
+                        occ[h] = true;
+                        keys[h] = bits;
+                        keep_positions.push(i);
+                        break;
+                    }
+                    if keys[h] == bits {
+                        saw_duplicate = true;
+                        break;
+                    }
+                    h = (h + 1) & mask;
+                }
+            } else if !seen_missing {
+                seen_missing = true;
+                keep_positions.push(i);
+            } else {
+                saw_duplicate = true;
+            }
+        }
+        if reverse {
+            keep_positions.reverse();
+        }
+        (keep_positions, saw_duplicate)
+    }
+
+    /// Open-addressing Int64 keep positions for `drop_duplicates` (fused mask
+    /// + row position extraction in a single pass, avoiding `Vec<bool>` materialization).
+    fn oa_dup_keep_positions_i64(data: &[i64], reverse: bool) -> (Vec<usize>, bool) {
+        let n = data.len();
+        let mut cap = 8usize;
+        while cap.saturating_mul(3) < n.saturating_mul(4) {
+            cap <<= 1;
+        }
+        let mask = cap - 1;
+        let mut keys = vec![0i64; cap];
+        let mut occ = vec![false; cap];
+        let mut keep_positions = Vec::with_capacity(n);
+        let mut saw_duplicate = false;
+        for step in 0..n {
+            let i = if reverse { n - 1 - step } else { step };
+            let v = data[i];
+            let mut z = v as u64;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            let mut h = ((z ^ (z >> 31)) as usize) & mask;
+            loop {
+                if !occ[h] {
+                    occ[h] = true;
+                    keys[h] = v;
+                    keep_positions.push(i);
+                    break;
+                }
+                if keys[h] == v {
+                    saw_duplicate = true;
+                    break;
+                }
+                h = (h + 1) & mask;
+            }
+        }
+        if reverse {
+            keep_positions.reverse();
+        }
+        (keep_positions, saw_duplicate)
+    }
+
     /// Drop duplicated rows.
     ///
     /// Matches `df.drop_duplicates(subset=..., keep=..., ignore_index=...)`.
@@ -65239,12 +65457,52 @@ impl DataFrame {
         keep: DuplicateKeep,
         ignore_index: bool,
     ) -> Result<Self, FrameError> {
-        if !ignore_index {
-            let selected_columns = self.resolve_column_selector(subset)?;
-            if !selected_columns.is_empty()
-                && self.subset_has_all_valid_unique_column(&selected_columns)
-            {
-                return Ok(self.clone());
+        let selected_columns = self.resolve_column_selector(subset)?;
+        if !ignore_index
+            && !selected_columns.is_empty()
+            && self.subset_has_all_valid_unique_column(&selected_columns)
+        {
+            return Ok(self.clone());
+        }
+
+        // Single-column fused keep-positions fast paths for First/Last (br-frankenpandas-p3x6h):
+        // Fuses mask generation and row extraction into a single pass, avoiding
+        // Vec<bool> allocation and filtering passes.
+        if !matches!(keep, DuplicateKeep::None) && selected_columns.len() == 1 {
+            let col = self
+                .columns
+                .get(&selected_columns[0])
+                .expect("column must exist");
+            let reverse = matches!(keep, DuplicateKeep::Last);
+            if let Some((data, validity)) = col.as_f64_slice_with_validity() {
+                let (keep_positions, saw_duplicate) = Self::oa_dup_keep_positions_f64(
+                    data,
+                    validity,
+                    col.nan_missing_exact(),
+                    reverse,
+                );
+                if !ignore_index && !saw_duplicate {
+                    return Ok(self.clone());
+                }
+                let out = self.take_rows_by_positions(&keep_positions)?;
+                return if ignore_index {
+                    out.reset_index(true)
+                } else {
+                    Ok(out)
+                };
+            }
+            if let Some(data) = col.as_i64_slice() {
+                let (keep_positions, saw_duplicate) =
+                    Self::oa_dup_keep_positions_i64(data, reverse);
+                if !ignore_index && !saw_duplicate {
+                    return Ok(self.clone());
+                }
+                let out = self.take_rows_by_positions(&keep_positions)?;
+                return if ignore_index {
+                    out.reset_index(true)
+                } else {
+                    Ok(out)
+                };
             }
         }
 
@@ -110529,6 +110787,153 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found"))
+        );
+    }
+
+    #[test]
+    fn dataframe_drop_duplicates_single_column_fast_paths_f64_and_i64() {
+        let df_f64 = DataFrame::from_dict(
+            &["val", "payload"],
+            vec![
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(f64::NAN),
+                        Scalar::Float64(f64::NAN),
+                        Scalar::Float64(3.5),
+                    ],
+                ),
+                (
+                    "payload",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                        Scalar::Int64(60),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let sub_val = vec!["val".to_owned()];
+
+        // keep First
+        let first_f64 = df_f64
+            .drop_duplicates(Some(&sub_val), DuplicateKeep::First, false)
+            .unwrap();
+        assert_eq!(
+            first_f64.index().labels(),
+            &[
+                IndexLabel::from(0_i64),
+                IndexLabel::from(1_i64),
+                IndexLabel::from(3_i64),
+                IndexLabel::from(5_i64),
+            ]
+        );
+        assert_eq!(
+            first_f64.column("payload").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(40),
+                Scalar::Int64(60),
+            ]
+        );
+
+        // keep Last
+        let last_f64 = df_f64
+            .drop_duplicates(Some(&sub_val), DuplicateKeep::Last, true)
+            .unwrap();
+        assert_eq!(
+            last_f64.index().labels(),
+            &[
+                IndexLabel::from(0_i64),
+                IndexLabel::from(1_i64),
+                IndexLabel::from(2_i64),
+                IndexLabel::from(3_i64),
+            ]
+        );
+        assert_eq!(
+            last_f64.column("payload").unwrap().values(),
+            &[
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(50),
+                Scalar::Int64(60),
+            ]
+        );
+
+        // Int64 test
+        let df_i64 = DataFrame::from_dict(
+            &["k", "v"],
+            vec![
+                (
+                    "k",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(100),
+                        Scalar::Int64(300),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("c".into()),
+                        Scalar::Utf8("d".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let sub_k = vec!["k".to_owned()];
+
+        let first_i64 = df_i64
+            .drop_duplicates(Some(&sub_k), DuplicateKeep::First, false)
+            .unwrap();
+        assert_eq!(
+            first_i64.index().labels(),
+            &[
+                IndexLabel::from(0_i64),
+                IndexLabel::from(1_i64),
+                IndexLabel::from(3_i64),
+            ]
+        );
+        assert_eq!(
+            first_i64.column("v").unwrap().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("d".into()),
+            ]
+        );
+
+        let last_i64 = df_i64
+            .drop_duplicates(Some(&sub_k), DuplicateKeep::Last, true)
+            .unwrap();
+        assert_eq!(
+            last_i64.index().labels(),
+            &[
+                IndexLabel::from(0_i64),
+                IndexLabel::from(1_i64),
+                IndexLabel::from(2_i64),
+            ]
+        );
+        assert_eq!(
+            last_i64.column("v").unwrap().values(),
+            &[
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("d".into()),
+            ]
         );
     }
 
