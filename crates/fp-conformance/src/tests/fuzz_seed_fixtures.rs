@@ -1720,6 +1720,14 @@ fn fuzz_scalar_cast_bytes_accepts_null_nat_to_null_regression() {
 }
 
 #[test]
+fn fuzz_scalar_cast_bytes_accepts_float_nan_identity_cast_regression() {
+    // Regression for fuzz_scalar_cast: input [3, 37, 6] casts Scalar::Float64(NaN) to DType::Float64.
+    // Float64 NaN comparison must use IEEE/bitwise NaN equivalence rather than PartialEq.
+    fuzz_scalar_cast_bytes(&[3, 37, 6])
+        .expect("float64(nan)->float64 cast should satisfy invariants");
+}
+
+#[test]
 fn fuzz_scalar_cast_bytes_replays_committed_corpus_seeds() {
     let corpus: &[(&str, &[u8])] = &[
         (

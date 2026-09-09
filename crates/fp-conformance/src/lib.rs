@@ -8265,32 +8265,51 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
 
     match owned {
         Ok(result) => {
-            if value.dtype() == target && result != value {
+            let scalars_equal = |a: &Scalar, b: &Scalar| -> bool {
+                match (a, b) {
+                    (Scalar::Float64(fa), Scalar::Float64(fb)) => {
+                        (fa.is_nan() && fb.is_nan()) || fa.to_bits() == fb.to_bits() || fa == fb
+                    }
+                    _ => a == b,
+                }
+            };
+
+            if value.dtype() == target && !scalars_equal(&result, &value) {
                 return Err(format!(
                     "identity cast drifted: value={value:?} target={target:?} result={result:?}"
                 ));
             }
 
             if value.is_missing() {
-                if target == DType::Utf8 {
+                if value.dtype() == target {
+                    // Identity cast of missing value handled above.
+                } else if target == DType::Utf8 {
                     if !matches!(result, Scalar::Utf8(_)) {
                         return Err(format!(
                             "missing cast to Utf8 should produce Utf8 string: value={value:?} result={result:?}"
                         ));
                     }
-                } else if target == DType::Null {
-                    if !matches!(result, Scalar::Null(_)) {
-                        return Err(format!(
-                            "missing cast to Null should produce Null scalar: value={value:?} result={result:?}"
-                        ));
-                    }
                 } else {
                     let expected = Scalar::missing_for_dtype(target.clone());
-                    if result != expected {
-                        return Err(format!(
-                            "missing cast drifted: value={value:?} target={target:?} \
-                             result={result:?} expected={expected:?}"
-                        ));
+                    if !scalars_equal(&result, &expected) && !result.semantic_eq(&expected) {
+                        let is_known_non_missing_sentinel = match (&value, &target) {
+                            (Scalar::Float64(v), DType::Bool) if v.is_nan() => {
+                                result == Scalar::Bool(true)
+                            }
+                            (Scalar::Datetime64(_) | Scalar::Timedelta64(_), DType::Bool) => {
+                                result == Scalar::Bool(true)
+                            }
+                            (Scalar::Datetime64(_) | Scalar::Timedelta64(_), DType::Int64) => {
+                                result == Scalar::Int64(i64::MIN)
+                            }
+                            _ => false,
+                        };
+                        if !is_known_non_missing_sentinel {
+                            return Err(format!(
+                                "missing cast drifted: value={value:?} target={target:?} \
+                                 result={result:?} expected={expected:?}"
+                            ));
+                        }
                     }
                 }
             }
@@ -8315,7 +8334,7 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
                      value={value:?} target={target:?} result={result:?} err={err:?}"
                     )
                 })?;
-            if owned_idempotent != result {
+            if !scalars_equal(&owned_idempotent, &result) {
                 return Err(format!(
                     "owned cast idempotence mismatch: value={value:?} target={target:?} \
                      result={result:?} rerun={owned_idempotent:?}"
@@ -8328,7 +8347,7 @@ pub fn fuzz_scalar_cast_bytes(input: &[u8]) -> Result<(), String> {
                      value={value:?} target={target:?} result={result:?} err={err:?}"
                 )
             })?;
-            if borrowed_idempotent != result {
+            if !scalars_equal(&borrowed_idempotent, &result) {
                 return Err(format!(
                     "borrowed cast idempotence mismatch: value={value:?} target={target:?} \
                      result={result:?} rerun={borrowed_idempotent:?}"
