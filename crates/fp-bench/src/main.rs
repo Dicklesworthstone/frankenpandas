@@ -893,7 +893,7 @@ where
     *checksum =
         checksum.rotate_left(9) ^ (std::mem::size_of_val(&result) as u64) ^ 0x9e37_79b9_7f4a_7c15;
     black_box(result);
-    elapsed_us
+    elapsed_us.max(0.001)
 }
 
 /// Measure an identical arm twice inside every round. Order alternates so
@@ -4712,7 +4712,7 @@ mod harness_contract_tests {
                 value = value.wrapping_add(1);
                 value
             },
-            1,
+            100,
             false,
         );
         assert_eq!(samples.times_us.len(), ITERS * 2);
