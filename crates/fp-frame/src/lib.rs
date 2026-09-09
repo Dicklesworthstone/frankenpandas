@@ -21815,9 +21815,18 @@ impl Series {
             return Ok(f64::NAN);
         }
         let n = count as f64;
-        // perf (br-frankenpandas-8s4mb): blocked moments for the numeric_values fallback;
-        // identical below 8 elements.
-        let (m2, m3) = Self::blocked_central_moments_f64::<false>(&vals, mean);
+        // FUSED m2/m3, sibling of the kurtosis fusion; bit-identical.
+        let (m2, m3) = {
+            let mut m2 = 0.0_f64;
+            let mut m3 = 0.0_f64;
+            for v in &vals {
+                let d = v - mean;
+                let d2 = d * d;
+                m2 += d2;
+                m3 += d2 * d;
+            }
+            (m2, m3)
+        };
         let s2 = m2 / (n - 1.0);
         if s2 == 0.0 {
             return Ok(0.0);
@@ -21883,9 +21892,21 @@ impl Series {
             return Ok(f64::NAN);
         }
         let n = count as f64;
-        // perf (br-frankenpandas-8s4mb): blocked moments for the numeric_values fallback;
-        // identical below 8 elements.
-        let (m2, m4) = Self::blocked_central_moments_f64::<true>(&vals, mean);
+        // FUSED m2/m4, matching what the all-valid arm above already does: two
+        // independent sums over the same buffer become one pass, halving the
+        // read of `vals` and computing `(v - mean)` once instead of twice.
+        // Bit-identical — fusing changes no term and no summation order.
+        let (m2, m4) = {
+            let mut m2 = 0.0_f64;
+            let mut m4 = 0.0_f64;
+            for v in &vals {
+                let d = v - mean;
+                let d2 = d * d;
+                m2 += d2;
+                m4 += d2 * d2;
+            }
+            (m2, m4)
+        };
         let s2 = m2 / (n - 1.0);
         if s2 == 0.0 {
             return Ok(0.0);
@@ -22026,7 +22047,7 @@ impl Series {
                 "no non-null numeric values".to_owned(),
             ));
         }
-        let mean = Self::blocked_sum_f64(&vals) / vals.len() as f64;
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
         Ok((vals.len(), mean, vals))
     }
 
