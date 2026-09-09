@@ -2383,6 +2383,12 @@ fn fuzz_join_series_bytes_accepts_inner_single_each() {
 }
 
 #[test]
+fn fuzz_join_series_bytes_accepts_nan_cross_join_crash_seed() {
+    let input = [249, 206, 253, 254, 157, 205, 207, 206, 99];
+    fuzz_join_series_bytes(&input).expect("nan-cross-join crash seed should satisfy invariants");
+}
+
+#[test]
 fn fuzz_groupby_sum_bytes_accepts_dropna_true_seed() {
     let seed =
         include_bytes!("../../fixtures/adversarial/fuzz_corpus/groupby_sum/dropna_true_seed.bin");

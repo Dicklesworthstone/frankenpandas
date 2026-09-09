@@ -8992,6 +8992,26 @@ pub fn fuzz_rolling_window_bytes(input: &[u8]) -> Result<(), String> {
 ///
 /// The first byte selects the join type; remaining bytes are split at `|`
 /// (or midpoint) into left/right `Series` payloads. The harness projects these
+fn columns_semantic_eq(left: &Column, right: &Column) -> bool {
+    if left.dtype() != right.dtype()
+        || left.len() != right.len()
+        || left.validity() != right.validity()
+    {
+        return false;
+    }
+    left.values()
+        .iter()
+        .zip(right.values().iter())
+        .all(|(l, r)| l.semantic_eq(r))
+}
+
+fn joined_series_semantic_eq(left: &JoinedSeries, right: &JoinedSeries) -> bool {
+    left.index == right.index
+        && columns_semantic_eq(&left.left_values, &right.left_values)
+        && columns_semantic_eq(&left.right_values, &right.right_values)
+}
+
+/// Bounded differential fuzzer for `join_series`: parses raw byte payloads
 /// into bounded numeric/missing series, then requires global, arena, and
 /// forced-fallback execution paths to agree exactly. It also checks join-type
 /// specific output contracts plus side-swapped dualities where pandas-visible
@@ -9039,13 +9059,13 @@ pub fn fuzz_join_series_bytes(input: &[u8]) -> Result<(), String> {
     )
     .map_err(|err| format!("fallback join unexpectedly failed: {err:?}"))?;
 
-    if global != arena {
+    if !joined_series_semantic_eq(&global, &arena) {
         return Err(format!(
             "arena join result drifted from global: \
              join_type={join_type:?} left={left:?} right={right:?} global={global:?} arena={arena:?}"
         ));
     }
-    if global != fallback {
+    if !joined_series_semantic_eq(&global, &fallback) {
         return Err(format!(
             "fallback join result drifted from global: \
              join_type={join_type:?} left={left:?} right={right:?} global={global:?} fallback={fallback:?}"

@@ -35379,12 +35379,17 @@ mod tests {
             "a one-worker cap must report a serial split"
         );
 
+        let expected_workers = crate::cached_available_parallelism().min(4);
+        if expected_workers <= 1 {
+            return;
+        }
+
         crate::set_elementwise_witness_policy(4, 1);
         col.log().expect("parallel log");
         assert_eq!(
             crate::elementwise_last_worker_count(),
-            4,
-            "a four-worker cap over 4096 values must report four chunks"
+            expected_workers,
+            "a four-worker cap over 4096 values must report four chunks (or available worker cap)"
         );
 
         // SERIAL BY DESIGN, not by policy: `sqrt` overrides `par_min` to
@@ -35402,7 +35407,7 @@ mod tests {
         col.log().expect("parallel log again");
         assert_eq!(
             crate::elementwise_last_worker_count(),
-            4,
+            expected_workers,
             "the counter latched instead of tracking the last map"
         );
 
@@ -35440,12 +35445,17 @@ mod tests {
         // would measure that early return and report whatever ran previously.
         let col = Column::from_f64_values((0..4096_u32).map(f64::from).map(|v| v + 0.5).collect());
 
+        let expected_workers = crate::cached_available_parallelism().min(4);
+        if expected_workers <= 1 {
+            return;
+        }
+
         crate::set_elementwise_witness_policy(4, 1);
 
         col.log().expect("parallel log control");
         assert_eq!(
             crate::elementwise_last_worker_count(),
-            4,
+            expected_workers,
             "the 4-worker par_min=1 policy is NOT in effect - the assertions below \
              cannot be read as evidence about floor/ceil/trunc"
         );
@@ -35476,7 +35486,7 @@ mod tests {
             }
             .unwrap_or_else(|e| panic!("{name} failed on an all-valid f64 column: {e:?}"));
 
-            if crate::elementwise_last_worker_count() != 4 {
+            if crate::elementwise_last_worker_count() != expected_workers {
                 serial_ops.push(name);
             }
         }
@@ -35553,11 +35563,12 @@ mod tests {
                 "{name}: the serial arm did not run serially, so this is not an A/B"
             );
 
+            let expected_workers = crate::cached_available_parallelism().min(4);
             crate::set_elementwise_witness_policy(4, 1);
             let parallel = run(&col).expect("parallel arm");
             assert_eq!(
                 crate::elementwise_last_worker_count(),
-                4,
+                expected_workers,
                 "{name}: the parallel arm did not split, so this compares serial to serial"
             );
 

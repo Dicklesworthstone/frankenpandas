@@ -143,24 +143,24 @@ jobs:
             # and known_hdf5_versions only up to 2.1.0. Homebrew ships HDF5 2.2.0.
             # Pre-extract and patch hdf5-metno-sys build.rs in cargo cache so it recognizes 2.2.0.
             cargo fetch
-            python3 - <<'PY'
-            import pathlib, tarfile
-            for c in pathlib.Path.home().glob(".cargo/registry/cache/**/hdf5-metno-sys-*.crate"):
-                src_dir = c.parent.parent.parent / "src" / c.parent.name
-                with tarfile.open(c, "r:gz") as tar:
-                    tar.extractall(src_dir)
-                for p in src_dir.glob("hdf5-metno-sys-*/build.rs"):
-                    txt = p.read_text()
-                    txt = txt.replace(
-                        r"^(1|2)\.(0|1|8|10|12|14)\.",
-                        r"^(1|2)\.(0|1|2|8|10|12|14)\."
-                    ).replace(
-                        "vs.extend((0..=1).map(|v| Version::new(2, v, 0)));",
-                        "vs.extend((0..=2).map(|v| Version::new(2, v, 0)));"
-                    )
-                    p.write_text(txt)
-                    print(f"Patched {p} for HDF5 2.2.0 compatibility")
-            PY
+            python3 -c '
+import pathlib, tarfile
+for c in pathlib.Path.home().glob(".cargo/registry/cache/**/hdf5-metno-sys-*.crate"):
+    src_dir = c.parent.parent.parent / "src" / c.parent.name
+    with tarfile.open(c, "r:gz") as tar:
+        tar.extractall(src_dir)
+    for p in src_dir.glob("hdf5-metno-sys-*/build.rs"):
+        txt = p.read_text()
+        txt = txt.replace(
+            r"^(1|2)\.(0|1|8|10|12|14)\.",
+            r"^(1|2)\.(0|1|2|8|10|12|14)\."
+        ).replace(
+            "vs.extend((0..=1).map(|v| Version::new(2, v, 0)));",
+            "vs.extend((0..=2).map(|v| Version::new(2, v, 0)));"
+        )
+        p.write_text(txt)
+        print(f"Patched {p} for HDF5 2.2.0 compatibility")
+'
           else
             echo "No known package manager on this runner; failing closed" >&2
             exit 1
