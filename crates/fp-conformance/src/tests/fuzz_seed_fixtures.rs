@@ -2051,6 +2051,14 @@ fn fuzz_column_arith_bytes_accepts_ci_crash_20260901_b() {
 }
 
 #[test]
+fn fuzz_column_arith_bytes_accepts_negative_int_pow_crash_seed() {
+    let seed1 = &[0x67, 0x82, 0x0, 0x82, 0x82, 0x62, 0x86, 0x2b, 0xa];
+    fuzz_column_arith_bytes(seed1).expect("negative int pow seed 1 should satisfy invariants");
+    let seed2 = &[103, 98, 100, 38, 101, 98, 100, 48, 134];
+    fuzz_column_arith_bytes(seed2).expect("negative int pow seed 2 should satisfy invariants");
+}
+
+#[test]
 fn fuzz_column_arith_bytes_accepts_mod_zero_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_zero_divisor_seed.bin"

@@ -93190,8 +93190,8 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Storage keeps one column per `(input_col, func)` pair keyed
     /// `{col}_{func}`, with the tuples alongside in `column_multiindex` — see
-    /// [`Self::with_agg_column_multiindex`] for why, and
-    /// [`Self::agg_dict_list_specs`] for the measured ordering rule.
+    /// `Self::with_agg_column_multiindex` for why, and
+    /// `Self::agg_dict_list_specs` for the measured ordering rule.
     ///
     /// Columns absent from the frame are skipped (pandas raises — noted in
     /// `agg_dict_list_specs`), group-by key columns are rejected, and an empty
@@ -98465,8 +98465,8 @@ impl GroupByResample<'_> {
     /// implements that the grouped wrapper did not expose. Takes `q` rather than
     /// defaulting it, matching `pd.Resampler.quantile(q)`.
     ///
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), grp=[a,a,a,b,b,b],
-    /// v=[1,3,5,2,4,8], buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), `grp=[a,a,a,b,b,b]`,
+    /// `v=[1,3,5,2,4,8]`, buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
     /// ```text
     ///   quantile(0.5)  -> [2.0, 5.0, 2.0, 6.0]     equals median, as it should
     ///   quantile(0.25) -> [1.5, 5.0, 2.0, 5.0]     LINEAR interpolation
@@ -165083,7 +165083,7 @@ mod tests {
     /// dtypes: `value_cols` dropped them, pandas aggregates them.
     ///
     /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), this exact frame —
-    /// grp=[a,a,a,b,b,b], flag=[T,F,T,F,T,T], index Jan-01/Jan-15/Feb-01 for 'a'
+    /// `grp=[a,a,a,b,b,b]`, `flag=[T,F,T,F,T,T]`, index Jan-01/Jan-15/Feb-01 for 'a'
     /// and Jan-05/Feb-05/Feb-20 for 'b':
     /// ```text
     ///   buckets [2024-01-31, 2024-02-29, 2024-01-31, 2024-02-29]  grp [a, a, b, b]
@@ -165368,8 +165368,8 @@ mod tests {
     /// wrapper exposed only seven, so `df.groupby(k).resample(f).median()` did not
     /// exist. This pins the four with unambiguous values against live pandas.
     ///
-    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), grp=[a,a,a,b,b,b],
-    /// v=[1,3,5,2,4,8], buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
+    /// MEASURED, live pandas 2.2.3 (CrimsonPine 2026-08-18), `grp=[a,a,a,b,b,b]`,
+    /// `v=[1,3,5,2,4,8]`, buckets a-Jan(1,3) a-Feb(5) b-Jan(2) b-Feb(4,8):
     /// ```text
     ///   median  [2.0, 5.0, 2.0, 6.0]
     ///   prod    [3.0, 5.0, 2.0, 32.0]

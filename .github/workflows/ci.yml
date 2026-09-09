@@ -137,7 +137,11 @@ jobs:
             sudo apt-get install -y -qq libhdf5-dev pkg-config
           elif command -v brew >/dev/null 2>&1; then
             brew install hdf5
-            echo "HDF5_DIR=$(brew --prefix hdf5)" >> "$GITHUB_ENV"
+            H5_DIR="$(brew --prefix hdf5)"
+            echo "HDF5_DIR=$H5_DIR" >> "$GITHUB_ENV"
+            # hdf5-metno-sys 0.11.3 build.rs panics on H5_VERSION "2.x.x" (homebrew 2.2.0+).
+            # Alias to 1.14.0 in H5pubconf.h so the build script parses successfully.
+            find "$H5_DIR/include" -name "H5pubconf.h" -exec sed -i '' -E 's/#define H5_VERSION "2\.[0-9]+\.[0-9]+"/#define H5_VERSION "1.14.0"/' {} + || true
           else
             echo "No known package manager on this runner; failing closed" >&2
             exit 1

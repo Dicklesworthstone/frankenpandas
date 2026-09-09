@@ -8,14 +8,44 @@
 use fp_index::{Index, IndexLabel};
 
 fn oracle_union_ns(a: &[i64], b: &[i64]) -> Vec<i64> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for &v in a.iter().chain(b.iter()) {
-        if seen.insert(v) {
-            out.push(v);
+    let mut b_seen = std::collections::HashSet::new();
+    let b_is_unique = b.iter().all(|&s| b_seen.insert(s));
+    if b_is_unique {
+        let a_set: std::collections::HashSet<i64> = a.iter().copied().collect();
+        let mut out: Vec<i64> = a.to_vec();
+        for &s in b {
+            if !a_set.contains(&s) {
+                out.push(s);
+            }
         }
+        out
+    } else {
+        let mut counts: std::collections::HashMap<i64, (usize, usize)> =
+            std::collections::HashMap::new();
+        let mut order = Vec::new();
+        for &s in a {
+            let entry = counts.entry(s).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(s);
+            }
+            entry.0 += 1;
+        }
+        for &s in b {
+            let entry = counts.entry(s).or_insert((0, 0));
+            if entry.0 == 0 && entry.1 == 0 {
+                order.push(s);
+            }
+            entry.1 += 1;
+        }
+        let mut out = Vec::new();
+        for s in order {
+            let (ca, cb) = counts.get(&s).copied().unwrap_or((0, 0));
+            for _ in 0..ca.max(cb) {
+                out.push(s);
+            }
+        }
+        out
     }
-    out
 }
 
 fn dt_labels(ns: &[i64]) -> Vec<IndexLabel> {

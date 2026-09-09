@@ -8678,9 +8678,11 @@ pub fn fuzz_column_arith_bytes(input: &[u8]) -> Result<(), String> {
     let right = Column::from_values(right_values)
         .map_err(|err| format!("right column projection failed: {err:?}"))?;
 
-    let result = left
-        .binary_numeric(&right, op)
-        .map_err(|err| format!("column arithmetic unexpectedly failed: {err:?}"))?;
+    let result = match left.binary_numeric(&right, op) {
+        Ok(result) => result,
+        Err(fp_columnar::ColumnError::NegativeIntegerPower) => return Ok(()),
+        Err(err) => return Err(format!("column arithmetic unexpectedly failed: {err:?}")),
+    };
 
     if result.len() != left.len() || result.len() != right.len() {
         return Err(format!(
