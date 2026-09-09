@@ -21815,18 +21815,9 @@ impl Series {
             return Ok(f64::NAN);
         }
         let n = count as f64;
-        // FUSED m2/m3, sibling of the kurtosis fusion; bit-identical.
-        let (m2, m3) = {
-            let mut m2 = 0.0_f64;
-            let mut m3 = 0.0_f64;
-            for v in &vals {
-                let d = v - mean;
-                let d2 = d * d;
-                m2 += d2;
-                m3 += d2 * d;
-            }
-            (m2, m3)
-        };
+        // perf (br-frankenpandas-8s4mb): blocked moments for the numeric_values fallback;
+        // identical below 8 elements.
+        let (m2, m3) = Self::blocked_central_moments_f64::<false>(&vals, mean);
         let s2 = m2 / (n - 1.0);
         if s2 == 0.0 {
             return Ok(0.0);
@@ -21892,21 +21883,9 @@ impl Series {
             return Ok(f64::NAN);
         }
         let n = count as f64;
-        // FUSED m2/m4, matching what the all-valid arm above already does: two
-        // independent sums over the same buffer become one pass, halving the
-        // read of `vals` and computing `(v - mean)` once instead of twice.
-        // Bit-identical — fusing changes no term and no summation order.
-        let (m2, m4) = {
-            let mut m2 = 0.0_f64;
-            let mut m4 = 0.0_f64;
-            for v in &vals {
-                let d = v - mean;
-                let d2 = d * d;
-                m2 += d2;
-                m4 += d2 * d2;
-            }
-            (m2, m4)
-        };
+        // perf (br-frankenpandas-8s4mb): blocked moments for the numeric_values fallback;
+        // identical below 8 elements.
+        let (m2, m4) = Self::blocked_central_moments_f64::<true>(&vals, mean);
         let s2 = m2 / (n - 1.0);
         if s2 == 0.0 {
             return Ok(0.0);
@@ -21960,9 +21939,25 @@ impl Series {
             } else {
                 match validity.packed_words() {
                     Some(words) => {
-                        for (i, &v) in data.iter().enumerate() {
-                            if (words[i / 64] >> (i % 64)) & 1 == 1 && !v.is_nan() {
-                                vals.push(v);
+                        for (w, &word) in words.iter().enumerate() {
+                            let base = w * 64;
+                            if base >= data.len() {
+                                break;
+                            }
+                            let hi = 64.min(data.len() - base);
+                            let mask = if hi == 64 {
+                                u64::MAX
+                            } else {
+                                (1_u64 << hi) - 1
+                            };
+                            let mut valid_bits = word & mask;
+                            while valid_bits != 0 {
+                                let bit = valid_bits.trailing_zeros() as usize;
+                                let v = data[base + bit];
+                                if !v.is_nan() {
+                                    vals.push(v);
+                                }
+                                valid_bits &= valid_bits - 1;
                             }
                         }
                     }
@@ -21989,9 +21984,34 @@ impl Series {
             // `validity.get(i)` is exactly the `!is_missing()` filter for an Int64 cell,
             // `v as f64 == Scalar::Int64(v).to_f64()`, same in-order values (and mean).
             // Speeds nullable Int64 skew/kurtosis (via numeric_values).
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    vals.push(v as f64);
+            vals.reserve(data.len());
+            match validity.packed_words() {
+                Some(words) => {
+                    for (w, &word) in words.iter().enumerate() {
+                        let base = w * 64;
+                        if base >= data.len() {
+                            break;
+                        }
+                        let hi = 64.min(data.len() - base);
+                        let mask = if hi == 64 {
+                            u64::MAX
+                        } else {
+                            (1_u64 << hi) - 1
+                        };
+                        let mut valid_bits = word & mask;
+                        while valid_bits != 0 {
+                            let bit = valid_bits.trailing_zeros() as usize;
+                            vals.push(data[base + bit] as f64);
+                            valid_bits &= valid_bits - 1;
+                        }
+                    }
+                }
+                None => {
+                    for (i, &v) in data.iter().enumerate() {
+                        if validity.get(i) {
+                            vals.push(v as f64);
+                        }
+                    }
                 }
             }
         } else {
@@ -22006,7 +22026,7 @@ impl Series {
                 "no non-null numeric values".to_owned(),
             ));
         }
-        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        let mean = Self::blocked_sum_f64(&vals) / vals.len() as f64;
         Ok((vals.len(), mean, vals))
     }
 
