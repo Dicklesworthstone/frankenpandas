@@ -67856,9 +67856,7 @@ impl DataFrame {
         let mut pairs = Vec::with_capacity(n_cols);
         let mut column_order = Vec::with_capacity(n_cols);
         for pos in 0..n_cols {
-            let name = self
-                .column_name_at(pos)
-                .expect("column position in bounds");
+            let name = self.column_name_at(pos).expect("column position in bounds");
             let col = self.column_at(pos).expect("column position in bounds");
             let new_name = rename_map
                 .get(name.as_str())
@@ -67911,11 +67909,9 @@ impl DataFrame {
         let mut pairs = Vec::with_capacity(n_cols);
         let mut column_order = Vec::with_capacity(n_cols);
         for pos in 0..n_cols {
-            let name = self
-                .column_name_at(pos)
-                .expect("column position in bounds");
+            let name = self.column_name_at(pos).expect("column position in bounds");
             let col = self.column_at(pos).expect("column position in bounds");
-            let new_name = func(name.as_str());
+            let new_name = func(&name);
 
             column_order.push(new_name.clone());
             pairs.push((new_name, col.clone()));
@@ -113363,17 +113359,44 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_rename_alias_rejects_duplicate_output_names() {
+    fn dataframe_rename_duplicate_columns_oracle_semantics() {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![("a", vec![Scalar::Int64(1)]), ("b", vec![Scalar::Int64(2)])],
         )
         .unwrap();
 
-        let err = df.rename(&[("a", "b")]).unwrap_err();
+        // 1. By default (allows_duplicate_labels=true), rename collision succeeds
+        // and preserves duplicate column labels matching pandas df.rename(columns={'a': 'b'}).
+        let renamed = df.rename(&[("a", "b")]).unwrap();
+        assert_eq!(renamed.column_names(), vec!["b", "b"]);
+        assert_eq!(renamed.num_columns(), 2);
+        assert_eq!(renamed.column_at(0).unwrap().values(), &[Scalar::Int64(1)]);
+        assert_eq!(renamed.column_at(1).unwrap().values(), &[Scalar::Int64(2)]);
+        assert!(renamed.columns().has_duplicates());
 
+        // rename_with collision also preserves duplicate column names
+        let renamed_with = df.rename_with(|_| "z".to_string()).unwrap();
+        assert_eq!(renamed_with.column_names(), vec!["z", "z"]);
+        assert_eq!(
+            renamed_with.column_at(0).unwrap().values(),
+            &[Scalar::Int64(1)]
+        );
+        assert_eq!(
+            renamed_with.column_at(1).unwrap().values(),
+            &[Scalar::Int64(2)]
+        );
+
+        // 2. When allows_duplicate_labels=false, collisions fail closed
+        let strict_df = df.set_flags(Some(false)).unwrap();
+        let err = strict_df.rename(&[("a", "b")]).unwrap_err();
         assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate column"))
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
+        );
+
+        let err_with = strict_df.rename_with(|_| "z".to_string()).unwrap_err();
+        assert!(
+            matches!(err_with, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
         );
     }
 
