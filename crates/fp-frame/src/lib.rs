@@ -58356,8 +58356,8 @@ impl LazyTransposeFramePlan {
 /// `.2` removes the `Deref` escape hatch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnStore {
-    primary: BTreeMap<String, Column>,
-    repeats: Vec<(String, Column)>,
+    columns: Vec<(String, Column)>,
+    lookup: BTreeMap<String, Vec<usize>>,
 }
 
 impl ColumnStore {
@@ -58365,105 +58365,130 @@ impl ColumnStore {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            primary: BTreeMap::new(),
-            repeats: Vec::new(),
+            columns: Vec::new(),
+            lookup: BTreeMap::new(),
         }
     }
 
-    /// Build from an ordered pair sequence, PRESERVING repeated names.
-    ///
-    /// Unreachable from production code until `.4` (`br-frankenpandas-8b4d4`)
-    /// lets an operation emit a repeat; the tests in this bead exercise it so
-    /// the representation is proven before anything depends on it.
-    ///
-    /// The first occurrence of each name becomes the single-valued answer;
-    /// later occurrences are retained as repeats. This is the only
-    /// constructor that can build a duplicate-carrying store, and today only
-    /// tests use it — production paths still go through [`From<BTreeMap>`],
-    /// which cannot carry one.
+    /// Build from an ordered pair sequence, PRESERVING repeated names and arrival order.
     pub fn from_pairs(pairs: impl IntoIterator<Item = (String, Column)>) -> Self {
         let mut store = Self::new();
         for (name, column) in pairs {
-            match store.primary.entry(name) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(column);
-                }
-                std::collections::btree_map::Entry::Occupied(existing) => {
-                    store.repeats.push((existing.key().clone(), column));
-                }
-            }
+            store.push(name, column);
         }
-        // Stable sort keeps repeats of one name in their arrival order, so a
-        // merged walk yields first-then-later for each name.
-        store.repeats.sort_by(|left, right| left.0.cmp(&right.0));
         store
+    }
+
+    /// Append a column at the next position, allowing repeated names.
+    pub fn push(&mut self, name: String, column: Column) {
+        let pos = self.columns.len();
+        self.lookup.entry(name.clone()).or_default().push(pos);
+        self.columns.push((name, column));
     }
 
     /// First column stored under `name`, if any.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Column> {
-        self.primary.get(name)
+        self.lookup
+            .get(name)
+            .map(|indices| &self.columns[indices[0]].1)
+    }
+
+    /// Mutable reference to the first column stored under `name`, if any.
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Column> {
+        let pos = *self.lookup.get(name)?.first()?;
+        Some(&mut self.columns[pos].1)
     }
 
     /// Every column stored under `name`, first occurrence first.
-    ///
-    /// This is the "lookup returns ALL matching columns" contract the parent
-    /// bead names. Like [`ColumnStore::from_pairs`] it has no production
-    /// caller until `.4`, and is proven by this bead's tests.
     pub fn get_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Column> + 'a {
-        self.primary.get(name).into_iter().chain(
-            self.repeats
-                .iter()
-                .filter(move |(repeat, _)| repeat == name)
-                .map(|(_, column)| column),
-        )
+        self.lookup
+            .get(name)
+            .into_iter()
+            .flat_map(move |indices| indices.iter().map(|&i| &self.columns[i].1))
     }
 
-    /// How many columns are stored under `name` (0, 1, or more once `.4`
-    /// allows repeats). No production caller until then; see
-    /// [`ColumnStore::get_all`].
+    /// How many columns are stored under `name` (0, 1, or more).
     #[must_use]
     pub fn occurrences(&self, name: &str) -> usize {
-        usize::from(self.primary.contains_key(name))
-            + self
-                .repeats
-                .iter()
-                .filter(|(repeat, _)| repeat == name)
-                .count()
+        self.lookup.get(name).map_or(0, |indices| indices.len())
     }
 
     #[must_use]
     pub fn contains_key(&self, name: &str) -> bool {
-        self.primary.contains_key(name)
+        self.lookup.contains_key(name)
     }
 
     /// Total column count, counting each repeat separately.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.primary.len() + self.repeats.len()
+        self.columns.len()
     }
 
-    /// Counterpart to [`ColumnStore::len`]. The lazy store answers emptiness
-    /// through its own `Deref` today, so this has no in-crate caller until
-    /// `.2` retargets those sites.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.primary.is_empty() && self.repeats.is_empty()
+        self.columns.is_empty()
+    }
+
+    /// O(1) positional column name access.
+    #[must_use]
+    pub fn name_at(&self, position: usize) -> Option<&str> {
+        self.columns.get(position).map(|(name, _)| name.as_str())
+    }
+
+    /// O(1) positional column access.
+    #[must_use]
+    pub fn column_at(&self, position: usize) -> Option<&Column> {
+        self.columns.get(position).map(|(_, col)| col)
+    }
+
+    /// O(1) mutable positional column access.
+    pub fn column_at_mut(&mut self, position: usize) -> Option<&mut Column> {
+        self.columns.get_mut(position).map(|(_, col)| col)
+    }
+
+    /// First position of `name`, if present.
+    #[must_use]
+    pub fn position_of(&self, name: &str) -> Option<usize> {
+        self.lookup.get(name).map(|indices| indices[0])
+    }
+
+    /// All positions of `name`, in encounter order.
+    #[must_use]
+    pub fn positions_of(&self, name: &str) -> &[usize] {
+        self.lookup
+            .get(name)
+            .map_or(&[], |indices| indices.as_slice())
+    }
+
+    /// Iterator over column names in positional (insertion) order.
+    pub fn ordered_names(&self) -> impl ExactSizeIterator<Item = &String> + '_ {
+        self.columns.iter().map(|(name, _)| name)
+    }
+
+    /// Iterator over columns in positional (insertion) order.
+    pub fn ordered_columns(&self) -> impl ExactSizeIterator<Item = &Column> + '_ {
+        self.columns.iter().map(|(_, col)| col)
+    }
+
+    /// Iterator over (name, column) pairs in positional (insertion) order.
+    pub fn iter_positional(&self) -> impl ExactSizeIterator<Item = (&String, &Column)> + '_ {
+        self.columns.iter().map(|(name, col)| (name, col))
     }
 
     /// Name-sorted walk over every column, repeats included.
     #[must_use]
     pub fn iter(&self) -> ColumnStoreIter<'_> {
         ColumnStoreIter {
-            primary: self.primary.iter(),
-            repeats: self.repeats.iter(),
-            pending_primary: None,
-            pending_repeat: None,
+            store: self,
+            map_iter: self.lookup.iter(),
+            current_indices: &[],
+            current_pos: 0,
+            remaining: self.columns.len(),
         }
     }
 
-    /// Name-sorted walk over column names, repeats included (so a repeated
-    /// name appears once per occurrence).
+    /// Name-sorted walk over column names, repeats included.
     pub fn keys(&self) -> impl Iterator<Item = &String> + '_ {
         self.iter().map(|(name, _)| name)
     }
@@ -58473,97 +58498,131 @@ impl ColumnStore {
         self.iter().map(|(_, column)| column)
     }
 
-    /// Replace (or add) the FIRST column stored under `name`, returning the
-    /// column it displaced. Mirrors `BTreeMap::insert`; repeats are untouched.
+    /// Replace the FIRST column stored under `name`, or append if absent.
+    /// Returns the column it displaced, if any.
     pub fn insert(&mut self, name: String, column: Column) -> Option<Column> {
-        self.primary.insert(name, column)
+        if let Some(indices) = self.lookup.get(&name) {
+            let first_idx = indices[0];
+            let old = std::mem::replace(&mut self.columns[first_idx].1, column);
+            Some(old)
+        } else {
+            self.push(name, column);
+            None
+        }
     }
 
     /// Remove EVERY column stored under `name`, returning the first.
-    ///
-    /// Removing only the first occurrence would leave a repeat behind with no
-    /// `primary` entry, i.e. a column that `iter` yields but `get` cannot
-    /// find — so the store would no longer be self-consistent. Dropping all
-    /// occurrences is also what pandas' `del df[name]` does on a
-    /// duplicate-labelled frame. Identical to `BTreeMap::remove` today, since
-    /// no path can build a repeat yet.
     pub fn remove(&mut self, name: &str) -> Option<Column> {
-        let first = self.primary.remove(name);
-        if first.is_some() {
-            self.repeats.retain(|(repeat, _)| repeat != name);
-        }
-        first
+        let indices = self.lookup.remove(name)?;
+        let first_idx = indices[0];
+        let first_col = self.columns[first_idx].1.clone();
+        self.columns.retain(|(col_name, _)| col_name != name);
+        self.rebuild_lookup();
+        Some(first_col)
     }
 
-    /// Mutable walk over the first occurrence of each name.
-    ///
-    /// Deliberately does NOT expose repeats: handing out `&mut` to a repeat
-    /// while `primary` is the single-valued answer is how the two halves would
-    /// drift apart. `.3` folds them into one ordered vector, at which point
-    /// this can cover everything.
-    pub fn iter_mut(&mut self) -> std::collections::btree_map::IterMut<'_, String, Column> {
-        self.primary.iter_mut()
+    fn rebuild_lookup(&mut self) {
+        self.lookup.clear();
+        for (pos, (name, _)) in self.columns.iter().enumerate() {
+            self.lookup.entry(name.clone()).or_default().push(pos);
+        }
+    }
+
+    /// Mutable walk over all stored columns in positional order.
+    pub fn iter_mut(&mut self) -> ColumnStoreIterMut<'_> {
+        ColumnStoreIterMut {
+            slice_iter: self.columns.iter_mut(),
+        }
     }
 
     /// Name-sorted owned pairs, repeats included.
-    fn into_sorted_pairs(self) -> Vec<(String, Column)> {
-        if self.repeats.is_empty() {
-            return self.primary.into_iter().collect();
+    fn into_sorted_pairs(mut self) -> Vec<(String, Column)> {
+        self.columns.sort_by(|left, right| left.0.cmp(&right.0));
+        self.columns
+    }
+
+    /// Owned pairs in positional (arrival) order.
+    #[must_use]
+    pub fn into_ordered_pairs(self) -> Vec<(String, Column)> {
+        self.columns
+    }
+
+    /// Reorder columns according to `order`, keeping any unlisted columns at the end.
+    pub fn reorder(&mut self, order: &[String]) {
+        let old_columns = std::mem::take(&mut self.columns);
+        let mut slots: Vec<Option<(String, Column)>> = old_columns.into_iter().map(Some).collect();
+        let mut new_columns = Vec::with_capacity(slots.len().max(order.len()));
+
+        for name in order {
+            if let Some(slot) = slots
+                .iter_mut()
+                .find(|s| s.as_ref().is_some_and(|(n, _)| n == name))
+            {
+                new_columns.push(slot.take().unwrap());
+            } else if let Some((_, col)) = new_columns.iter().find(|(n, _)| n == name) {
+                new_columns.push((name.clone(), col.clone()));
+            }
         }
-        let mut pairs: Vec<(String, Column)> = self.primary.into_iter().collect();
-        pairs.extend(self.repeats);
-        pairs.sort_by(|left, right| left.0.cmp(&right.0));
-        pairs
+        for slot in slots.into_iter().flatten() {
+            new_columns.push(slot);
+        }
+        self.columns = new_columns;
+        self.rebuild_lookup();
     }
 }
 
-/// Merging iterator behind [`ColumnStore::iter`]: walks the name-sorted
-/// `primary` map and the name-sorted `repeats` vector together, emitting the
-/// first occurrence of a name ahead of its repeats.
+/// Name-sorted merging iterator behind [`ColumnStore::iter`].
 pub struct ColumnStoreIter<'a> {
-    primary: std::collections::btree_map::Iter<'a, String, Column>,
-    repeats: std::slice::Iter<'a, (String, Column)>,
-    pending_primary: Option<(&'a String, &'a Column)>,
-    pending_repeat: Option<&'a (String, Column)>,
+    store: &'a ColumnStore,
+    map_iter: std::collections::btree_map::Iter<'a, String, Vec<usize>>,
+    current_indices: &'a [usize],
+    current_pos: usize,
+    remaining: usize,
 }
 
 impl<'a> Iterator for ColumnStoreIter<'a> {
     type Item = (&'a String, &'a Column);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pending_primary.is_none() {
-            self.pending_primary = self.primary.next();
-        }
-        if self.pending_repeat.is_none() {
-            self.pending_repeat = self.repeats.next();
-        }
-        match (self.pending_primary, self.pending_repeat) {
-            // Strictly-smaller repeat name goes first; on a TIE the primary
-            // (first occurrence) wins, which is what makes a repeated name
-            // emit as first-then-repeats.
-            (Some((primary, _)), Some(repeat)) if repeat.0 < *primary => {
-                self.pending_repeat = None;
-                Some((&repeat.0, &repeat.1))
+        loop {
+            if self.current_pos < self.current_indices.len() {
+                let idx = self.current_indices[self.current_pos];
+                self.current_pos += 1;
+                self.remaining = self.remaining.saturating_sub(1);
+                let (name, col) = &self.store.columns[idx];
+                return Some((name, col));
             }
-            (Some(_), _) => self.pending_primary.take(),
-            (None, Some(repeat)) => {
-                self.pending_repeat = None;
-                Some((&repeat.0, &repeat.1))
-            }
-            (None, None) => None,
+            let (_, indices) = self.map_iter.next()?;
+            self.current_indices = indices.as_slice();
+            self.current_pos = 0;
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.primary.len()
-            + self.repeats.len()
-            + usize::from(self.pending_primary.is_some())
-            + usize::from(self.pending_repeat.is_some());
-        (remaining, Some(remaining))
+        (self.remaining, Some(self.remaining))
     }
 }
 
 impl ExactSizeIterator for ColumnStoreIter<'_> {}
+
+/// Mutable iterator over columns in positional order.
+pub struct ColumnStoreIterMut<'a> {
+    slice_iter: std::slice::IterMut<'a, (String, Column)>,
+}
+
+impl<'a> Iterator for ColumnStoreIterMut<'a> {
+    type Item = (&'a String, &'a mut Column);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.slice_iter.next().map(|(name, col)| (&*name, col))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.slice_iter.size_hint()
+    }
+}
+
+impl ExactSizeIterator for ColumnStoreIterMut<'_> {}
 
 impl std::ops::Index<&str> for ColumnStore {
     type Output = Column;
@@ -58571,35 +58630,23 @@ impl std::ops::Index<&str> for ColumnStore {
     /// Panicking lookup, matching `BTreeMap`'s message shape so the ~435
     /// `self.columns[name]` sites keep their existing failure text.
     fn index(&self, name: &str) -> &Self::Output {
-        self.primary.get(name).expect("no entry found for key")
+        self.get(name).expect("no entry found for key")
     }
 }
 
-// NOTE (br-frankenpandas-u387a): ColumnStore deliberately has NO `Deref` to
-// `BTreeMap<String, Column>`. `.1` carried one so the migration could land as
-// a type substitution, but it was also a silent leak — anything not answered
-// by an inherent method fell through to the map and saw `primary` only,
-// ignoring repeats. Removing it is what makes `columns()` returning
-// `&ColumnStore` an actual encapsulation rather than a rename, and it is the
-// compile-level assertion this bead asks for: if the leak ever returns, the
-// duplicate-label work in `.3`/`.4` silently loses repeats again.
-
 impl From<BTreeMap<String, Column>> for ColumnStore {
-    /// Zero-cost: the map already collapsed any repeated name, so it becomes
-    /// `primary` by move and `repeats` stays empty.
     fn from(primary: BTreeMap<String, Column>) -> Self {
-        Self {
-            primary,
-            repeats: Vec::new(),
-        }
+        Self::from_pairs(primary)
     }
 }
 
 impl From<ColumnStore> for BTreeMap<String, Column> {
-    /// Drops repeats — lossless today because none can exist, and `.4` must
-    /// revisit every caller when they can.
     fn from(store: ColumnStore) -> Self {
-        store.primary
+        let mut map = BTreeMap::new();
+        for (name, col) in store.columns {
+            map.entry(name).or_insert(col);
+        }
+        map
     }
 }
 
@@ -58621,9 +58668,23 @@ impl<'a> IntoIterator for &'a ColumnStore {
     }
 }
 
+impl<'a> IntoIterator for &'a mut ColumnStore {
+    type Item = (&'a String, &'a mut Column);
+    type IntoIter = ColumnStoreIterMut<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 impl Serialize for ColumnStore {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.primary.serialize(serializer)
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.columns.len()))?;
+        for (name, col) in &self.columns {
+            map.serialize_entry(name, col)?;
+        }
+        map.end()
     }
 }
 
@@ -59129,7 +59190,7 @@ impl<'a> IntoIterator for &'a LazyDataFrameColumns {
 #[cfg(feature = "lazy-transpose-view")]
 impl<'a> IntoIterator for &'a mut LazyDataFrameColumns {
     type Item = (&'a String, &'a mut Column);
-    type IntoIter = std::collections::btree_map::IterMut<'a, String, Column>;
+    type IntoIter = ColumnStoreIterMut<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.make_eager().iter_mut()
@@ -61613,49 +61674,43 @@ impl DataFrame {
             .collect()
     }
 
-    // NOTE for br-frankenpandas-yion1 (.3): this still collapses repeated
-    // selectors to their last occurrence, i.e. it assumes column names are
-    // unique. Only the parameter type moved to ColumnStore here; the
-    // uniqueness assumption is .3's rewrite, not this bead's.
+    // br-frankenpandas-yion1: rewritten to preserve positions rather than
+    // deduplicating them. `column_order` positions become the column identity,
+    // allowing duplicate names to be represented and preserved.
     fn normalize_column_order(
         columns: &ColumnStore,
         column_order: Vec<String>,
     ) -> Result<Vec<String>, FrameError> {
         if column_order.is_empty() {
-            return Ok(columns.keys().cloned().collect());
+            return Ok(columns.ordered_names().cloned().collect());
         }
 
-        // Per br-frankenpandas-de4175: was O(n²) via Vec::iter().position +
-        // Vec::remove + Vec::iter().any. Now O(n+k) using last-occurrence
-        // map and a HashSet for the missing-column union.
-        // Match pandas-style selector normalization: if a selector is repeated,
-        // keep the last occurrence.
-        use std::collections::{HashMap, HashSet};
-        let mut last_idx: HashMap<&str, usize> = HashMap::with_capacity(column_order.len());
-        for (i, name) in column_order.iter().enumerate() {
-            last_idx.insert(name.as_str(), i);
-        }
-
-        let mut normalized: Vec<String> = Vec::with_capacity(columns.len());
-        for (i, name) in column_order.iter().enumerate() {
+        // Validate that every requested column exists in data.
+        for name in &column_order {
             if !columns.contains_key(name) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "column '{name}' not found in data"
                 )));
             }
-            if last_idx[name.as_str()] == i {
-                normalized.push(name.clone());
-            }
         }
 
-        let normalized_set: HashSet<&str> = normalized.iter().map(String::as_str).collect();
-        let to_append: Vec<String> = columns
-            .keys()
-            .filter(|name| !normalized_set.contains(name.as_str()))
-            .cloned()
-            .collect();
-        drop(normalized_set);
-        normalized.extend(to_append);
+        use std::collections::HashMap;
+        let mut specified_counts: HashMap<String, usize> =
+            HashMap::with_capacity(column_order.len());
+        for name in &column_order {
+            *specified_counts.entry(name.clone()).or_default() += 1;
+        }
+
+        let mut normalized = column_order;
+        for name in columns.ordered_names() {
+            if let Some(count) = specified_counts.get_mut(name.as_str())
+                && *count > 0
+            {
+                *count -= 1;
+                continue;
+            }
+            normalized.push(name.clone());
+        }
 
         Ok(normalized)
     }
@@ -62436,7 +62491,7 @@ impl DataFrame {
         C: Into<ColumnStore>,
         O: Into<Vec<String>>,
     {
-        let columns: ColumnStore = columns.into();
+        let mut columns: ColumnStore = columns.into();
         let column_order: Vec<String> = column_order.into();
         Self::validate_column_lengths(&index, &columns)?;
         if let Some(multiindex) = row_multiindex.as_ref()
@@ -62449,6 +62504,7 @@ impl DataFrame {
             )));
         }
         let column_order = Self::normalize_column_order(&columns, column_order)?;
+        columns.reorder(&column_order);
         if let Some(multiindex) = column_multiindex.as_ref()
             && multiindex.len() != column_order.len()
         {
@@ -62479,8 +62535,9 @@ impl DataFrame {
         C: Into<ColumnStore>,
         O: Into<Vec<String>>,
     {
-        let columns: ColumnStore = columns.into();
+        let mut columns: ColumnStore = columns.into();
         let column_order: Vec<String> = column_order.into();
+        columns.reorder(&column_order);
         Self {
             index,
             row_multiindex,
@@ -62506,7 +62563,7 @@ impl DataFrame {
 
     pub fn new(index: Index, columns: impl Into<ColumnStore>) -> Result<Self, FrameError> {
         let columns: ColumnStore = columns.into();
-        let column_order: Vec<String> = columns.keys().cloned().collect();
+        let column_order: Vec<String> = columns.ordered_names().cloned().collect();
         Self::new_with_column_order_and_multiindex(index, columns, column_order, None)
     }
 
@@ -64182,22 +64239,18 @@ impl DataFrame {
     pub fn column_at(&self, position: usize) -> Option<&Column> {
         #[cfg(feature = "lazy-transpose-view")]
         {
-            // The fast path answers only for a not-yet-materialized
-            // `HomogeneousTranspose`. Every other storage — `Eager`, an
-            // already-materialized transpose, `Float64Block` — is ordered by
-            // `column_order`, which the column store cannot see, so it MUST
-            // fall back to the label route. Returning the fast path's `None`
-            // directly would report real columns as absent.
             if let Some(column) = self.columns.get_one_at(position) {
                 return Some(column);
+            }
+            if let LazyDataFrameColumns::Eager(store) = &self.columns {
+                return store.column_at(position);
             }
             let name = self.column_order.name_at(position)?;
             self.columns.get_one(name.as_str())
         }
         #[cfg(not(feature = "lazy-transpose-view"))]
         {
-            let name = self.column_order.get(position)?;
-            self.columns.get(name)
+            self.columns.column_at(position)
         }
     }
 
@@ -196926,9 +196979,9 @@ mod test_normalize_column_order_de4175 {
     }
 
     #[test]
-    fn duplicate_in_column_order_keeps_last_occurrence() {
-        // Selector "a" repeated: result should reflect the LAST position.
-        // Order: [a, b, a, c] with cols {a,b,c} -> normalized [b, a, c].
+    fn duplicate_in_column_order_preserves_duplicates() {
+        // br-frankenpandas-yion1: Selector "a" repeated: duplicates must be preserved in order.
+        // Order: [a, b, a, c] with cols {a,b,c} -> normalized [a, b, a, c].
         let df = make_df(
             &[("a", &[1]), ("b", &[2]), ("c", &[3])],
             vec![
@@ -196939,13 +196992,12 @@ mod test_normalize_column_order_de4175 {
             ],
         )
         .unwrap();
-        assert_eq!(names_str(&df), vec!["b", "a", "c"]);
+        assert_eq!(names_str(&df), vec!["a", "b", "a", "c"]);
     }
 
     #[test]
     fn missing_columns_appended_after_explicit_order() {
         // column_order references only "a"; "b" and "c" must be appended.
-        // Order semantics: appended in BTreeMap key order (alphabetical).
         let df = make_df(
             &[("a", &[1]), ("b", &[2]), ("c", &[3])],
             vec!["a".to_string()],
@@ -196956,13 +197008,13 @@ mod test_normalize_column_order_de4175 {
 
     #[test]
     fn duplicate_plus_missing_columns() {
-        // Order: [b, a, b], cols {a,b,c}. Dedup-last → [a, b]. Append c.
+        // br-frankenpandas-yion1: Order: [b, a, b], cols {a,b,c}. Preserves duplicates [b, a, b]. Appends missing c.
         let df = make_df(
             &[("a", &[1]), ("b", &[2]), ("c", &[3])],
             vec!["b".to_string(), "a".to_string(), "b".to_string()],
         )
         .unwrap();
-        assert_eq!(names_str(&df), vec!["a", "b", "c"]);
+        assert_eq!(names_str(&df), vec!["b", "a", "b", "c"]);
     }
 
     #[test]
@@ -196992,8 +197044,6 @@ mod test_normalize_column_order_de4175 {
 
     #[test]
     fn scale_one_thousand_columns_with_duplicates_completes_quickly() {
-        // O(n²) impl on n=1000 with 50% duplicates would do ~500k vec scans
-        // plus 500 Vec::remove shifts. O(n+k) impl is < 10k ops.
         // Build cols {c0..c999}, order = [c0,c1,...,c999, c0,c1,...,c499].
         let mut cols: Vec<(&str, &[i64])> = Vec::new();
         let names: Vec<String> = (0..1000).map(|i| format!("c{i}")).collect();
@@ -197013,13 +197063,12 @@ mod test_normalize_column_order_de4175 {
             DataFrame::new_with_column_order(Index::new(vec![IndexLabel::Int64(0)]), map, order)
                 .unwrap();
         let elapsed = start.elapsed();
-        assert_eq!(df.column_names().len(), 1000);
-        // First 500 cols are duplicated and re-emitted later, so the dedup-last
-        // result starts with c500..c999 followed by c0..c499.
-        assert_eq!(df.column_names()[0], "c500");
-        assert_eq!(df.column_names()[499], "c999");
-        assert_eq!(df.column_names()[500], "c0");
-        assert_eq!(df.column_names()[999], "c499");
+        // br-frankenpandas-yion1: duplicates are preserved in order, total 1500 columns.
+        assert_eq!(df.column_names().len(), 1500);
+        assert_eq!(df.column_names()[0], "c0");
+        assert_eq!(df.column_names()[999], "c999");
+        assert_eq!(df.column_names()[1000], "c0");
+        assert_eq!(df.column_names()[1499], "c499");
         // Sanity: O(n+k) should finish in well under 100ms even on slow CI.
         assert!(
             elapsed.as_millis() < 500,
@@ -204951,6 +205000,175 @@ mod columns_view_u387a {
 
         assert_eq!(from_map.columns().len(), from_store.columns().len());
         assert_eq!(from_map.columns().get("a"), from_store.columns().get("a"));
+    }
+}
+
+/// `br-frankenpandas-yion1` (`.3` of `br-frankenpandas-ih4t0`):
+/// Position becomes column identity in [`ColumnStore`].
+///
+/// Order is folded into the store: `ordered_names` and `iter_positional`
+/// preserve insertion order, while `keys()` and `iter()` retain name-sorted
+/// order for set-like membership queries. Position is identity, allowing
+/// duplicate column names to be represented, looked up by position, and
+/// projected without deduplication.
+#[cfg(test)]
+mod column_store_yion1 {
+    use std::collections::BTreeMap;
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::{DType, Scalar};
+
+    use super::{ColumnStore, DataFrame};
+
+    fn column(values: &[f64]) -> Column {
+        let scalars: Vec<Scalar> = values.iter().map(|&v| Scalar::Float64(v)).collect();
+        Column::new(DType::Float64, scalars).expect("f64 column")
+    }
+
+    #[test]
+    fn positional_order_vs_name_sorted_order() {
+        let insertion = vec![
+            ("delta".to_string(), column(&[4.0])),
+            ("alpha".to_string(), column(&[1.0])),
+            ("charlie".to_string(), column(&[3.0])),
+            ("bravo".to_string(), column(&[2.0])),
+        ];
+        let store = ColumnStore::from_pairs(insertion);
+
+        // Positional (arrival) order:
+        let ordered: Vec<&str> = store.ordered_names().map(String::as_str).collect();
+        assert_eq!(ordered, vec!["delta", "alpha", "charlie", "bravo"]);
+
+        let ordered_pairs: Vec<(&str, f64)> = store
+            .iter_positional()
+            .map(|(name, col)| (name.as_str(), col.as_f64_slice().unwrap()[0]))
+            .collect();
+        assert_eq!(
+            ordered_pairs,
+            vec![
+                ("delta", 4.0),
+                ("alpha", 1.0),
+                ("charlie", 3.0),
+                ("bravo", 2.0)
+            ]
+        );
+
+        // Name-sorted order:
+        let sorted: Vec<&str> = store.keys().map(String::as_str).collect();
+        assert_eq!(sorted, vec!["alpha", "bravo", "charlie", "delta"]);
+    }
+
+    #[test]
+    fn position_as_identity_and_duplicate_lookup() {
+        let store = ColumnStore::from_pairs(vec![
+            ("dup".to_string(), column(&[10.0])),
+            ("solo".to_string(), column(&[20.0])),
+            ("dup".to_string(), column(&[30.0])),
+        ]);
+
+        assert_eq!(store.len(), 3);
+        assert_eq!(store.name_at(0), Some("dup"));
+        assert_eq!(store.name_at(1), Some("solo"));
+        assert_eq!(store.name_at(2), Some("dup"));
+        assert_eq!(store.name_at(3), None);
+
+        assert_eq!(store.column_at(0).unwrap().as_f64_slice().unwrap()[0], 10.0);
+        assert_eq!(store.column_at(1).unwrap().as_f64_slice().unwrap()[0], 20.0);
+        assert_eq!(store.column_at(2).unwrap().as_f64_slice().unwrap()[0], 30.0);
+
+        assert_eq!(store.position_of("dup"), Some(0));
+        assert_eq!(store.position_of("solo"), Some(1));
+        assert_eq!(store.position_of("missing"), None);
+
+        assert_eq!(store.positions_of("dup"), &[0, 2]);
+        assert_eq!(store.positions_of("solo"), &[1]);
+        assert_eq!(store.positions_of("missing"), &[] as &[usize]);
+    }
+
+    #[test]
+    fn dataframe_preserves_insertion_and_duplicate_order() {
+        let index = Index::new_known_unique_int64_unit_range(0, 1);
+        let store = ColumnStore::from_pairs(vec![
+            ("z".to_string(), column(&[1.0])),
+            ("a".to_string(), column(&[2.0])),
+            ("m".to_string(), column(&[3.0])),
+        ]);
+
+        let df = DataFrame::new(index, store).expect("df");
+        // Positional column names preserve insertion order:
+        let names: Vec<&str> = df.column_names().into_iter().map(String::as_str).collect();
+        assert_eq!(names, vec!["z", "a", "m"]);
+        // While keys() is name-sorted:
+        assert_eq!(
+            df.columns().keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["a", "m", "z"]
+        );
+    }
+
+    #[test]
+    fn dataframe_duplicate_columns_reorder_and_projection() {
+        let index = Index::new_known_unique_int64_unit_range(0, 1);
+        let mut map = BTreeMap::new();
+        map.insert("a".to_string(), column(&[1.0]));
+        map.insert("b".to_string(), column(&[2.0]));
+
+        let order = vec!["b".to_string(), "a".to_string(), "b".to_string()];
+        let df = DataFrame::new_with_column_order(index, map, order).expect("df with dups");
+
+        let names: Vec<&str> = df.column_names().into_iter().map(String::as_str).collect();
+        assert_eq!(names, vec!["b", "a", "b"]);
+        assert_eq!(df.columns().len(), 3);
+        assert_eq!(df.columns().occurrences("b"), 2);
+        assert_eq!(df.columns().positions_of("b"), &[0, 2]);
+        assert_eq!(
+            df.columns().column_at(0).unwrap().as_f64_slice().unwrap()[0],
+            2.0
+        );
+        assert_eq!(
+            df.columns().column_at(1).unwrap().as_f64_slice().unwrap()[0],
+            1.0
+        );
+        assert_eq!(
+            df.columns().column_at(2).unwrap().as_f64_slice().unwrap()[0],
+            2.0
+        );
+    }
+
+    #[test]
+    fn column_store_reorder_handles_duplicates_and_unlisted() {
+        let mut store = ColumnStore::from_pairs(vec![
+            ("a".to_string(), column(&[1.0])),
+            ("b".to_string(), column(&[2.0])),
+            ("c".to_string(), column(&[3.0])),
+        ]);
+
+        store.reorder(&["b".to_string(), "a".to_string(), "b".to_string()]);
+        let names: Vec<&str> = store.ordered_names().map(String::as_str).collect();
+        // Duplicate "b" preserved, and unlisted "c" appended at the end:
+        assert_eq!(names, vec!["b", "a", "b", "c"]);
+        assert_eq!(store.column_at(0).unwrap().as_f64_slice().unwrap()[0], 2.0);
+        assert_eq!(store.column_at(1).unwrap().as_f64_slice().unwrap()[0], 1.0);
+        assert_eq!(store.column_at(2).unwrap().as_f64_slice().unwrap()[0], 2.0);
+        assert_eq!(store.column_at(3).unwrap().as_f64_slice().unwrap()[0], 3.0);
+    }
+
+    #[test]
+    fn dataframe_column_at_with_duplicates() {
+        let index = Index::new_known_unique_int64_unit_range(0, 1);
+        let store = ColumnStore::from_pairs(vec![
+            ("dup".to_string(), column(&[100.0])),
+            ("solo".to_string(), column(&[200.0])),
+            ("dup".to_string(), column(&[300.0])),
+        ]);
+        let order = vec!["dup".to_string(), "solo".to_string(), "dup".to_string()];
+        let df = DataFrame::new_with_column_order(index, store, order).expect("df with dups");
+
+        assert_eq!(df.column_names(), vec!["dup", "solo", "dup"]);
+        assert_eq!(df.column_at(0).unwrap().as_f64_slice().unwrap()[0], 100.0);
+        assert_eq!(df.column_at(1).unwrap().as_f64_slice().unwrap()[0], 200.0);
+        assert_eq!(df.column_at(2).unwrap().as_f64_slice().unwrap()[0], 300.0);
+        assert!(df.column_at(3).is_none());
     }
 }
 
