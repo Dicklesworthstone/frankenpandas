@@ -61871,7 +61871,7 @@ impl DataFrame {
         };
 
         let mut selected = Vec::with_capacity(requested_columns.len());
-        let mut seen = BTreeSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         for requested in requested_columns {
             if !self.columns.contains_key(requested) {
                 return Err(FrameError::CompatibilityRejected(format!(
@@ -66750,21 +66750,47 @@ impl DataFrame {
             }
         }
 
-        let selected_columns = self.resolve_column_selector(column_selector)?;
-        let mut columns = BTreeMap::new();
-        for name in &selected_columns {
-            let column = self.columns.get(name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!("column '{name}' not found"))
-            })?;
-            // Position-based gather (every `position` indexes an existing row —
-            // loc fails closed on missing labels). `take_positions` is the same
-            // typed gather iloc uses: bit-identical row order, dtype and validity,
-            // but it also hits the zero-copy contiguous-range Float64/Int64/Utf8
-            // VIEW fast path (share the source Arc, defer materialization) when
-            // the positions are a contiguous ascending run — e.g. df.loc over a
-            // range of RangeIndex labels — instead of copying every cell out.
-            let column = column.take_positions(&positions);
-            columns.insert(name.clone(), column);
+        let (pairs, out_columns) = match column_selector {
+            None => {
+                let n_cols = self.num_columns();
+                let mut pairs = Vec::with_capacity(n_cols);
+                let mut order = Vec::with_capacity(n_cols);
+                for i in 0..n_cols {
+                    let name = self.column_name_at(i).expect("column position in bounds");
+                    let col = self.column_at(i).expect("column position in bounds");
+                    pairs.push((name.clone(), col.take_positions(&positions)));
+                    order.push(name);
+                }
+                (pairs, order)
+            }
+            Some(requested_columns) => {
+                let mut pairs = Vec::with_capacity(requested_columns.len());
+                let mut order = Vec::with_capacity(requested_columns.len());
+                for name in requested_columns {
+                    let col_positions = self.columns.positions_of(name);
+                    if col_positions.is_empty() {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "column '{name}' not found"
+                        )));
+                    }
+                    for &pos in col_positions {
+                        let col = self
+                            .columns
+                            .column_at(pos)
+                            .expect("column position in bounds");
+                        pairs.push((name.clone(), col.take_positions(&positions)));
+                        order.push(name.clone());
+                    }
+                }
+                (pairs, order)
+            }
+        };
+
+        let columns = ColumnStore::from_pairs(pairs);
+        if !self.allows_duplicate_labels && columns.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "loc: duplicate labels are present".to_owned(),
+            ));
         }
 
         // Per br-frankenpandas-j5tsz: pandas df.loc preserves row index name
@@ -66775,7 +66801,9 @@ impl DataFrame {
         } else {
             Index::new(out_labels).rename_index(self.index.name())
         };
-        Self::new_with_column_order(index, columns, selected_columns)
+        let mut out = Self::new_with_column_order(index, columns, out_columns)?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     fn require_row_multiindex(&self) -> Result<&fp_index::MultiIndex, FrameError> {
@@ -66805,27 +66833,60 @@ impl DataFrame {
         let (positions, remaining_index) = row_multiindex
             .get_loc_level(key)
             .map_err(FrameError::Index)?;
-        let selected_columns = self.resolve_column_selector(column_selector)?;
-        let mut columns = BTreeMap::new();
-        for name in &selected_columns {
-            let column = self.columns.get(name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!("column '{name}' not found"))
-            })?;
-            // perf (br-frankenpandas-j4qjl): zero-copy typed per-column gather.
-            columns.insert(name.clone(), column.take_positions(&positions));
+        let (pairs, out_columns) = match column_selector {
+            None => {
+                let n_cols = self.num_columns();
+                let mut pairs = Vec::with_capacity(n_cols);
+                let mut order = Vec::with_capacity(n_cols);
+                for i in 0..n_cols {
+                    let name = self.column_name_at(i).expect("column position in bounds");
+                    let col = self.column_at(i).expect("column position in bounds");
+                    pairs.push((name.clone(), col.take_positions(&positions)));
+                    order.push(name);
+                }
+                (pairs, order)
+            }
+            Some(requested_columns) => {
+                let mut pairs = Vec::with_capacity(requested_columns.len());
+                let mut order = Vec::with_capacity(requested_columns.len());
+                for name in requested_columns {
+                    let col_positions = self.columns.positions_of(name);
+                    if col_positions.is_empty() {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "column '{name}' not found"
+                        )));
+                    }
+                    for &pos in col_positions {
+                        let col = self
+                            .columns
+                            .column_at(pos)
+                            .expect("column position in bounds");
+                        pairs.push((name.clone(), col.take_positions(&positions)));
+                        order.push(name.clone());
+                    }
+                }
+                (pairs, order)
+            }
+        };
+
+        let columns = ColumnStore::from_pairs(pairs);
+        if !self.allows_duplicate_labels && columns.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "loc: duplicate labels are present".to_owned(),
+            ));
         }
 
-        match remaining_index {
+        let mut out = match remaining_index {
             Some(fp_index::MultiIndexOrIndex::Index(index)) => {
-                Self::new_with_axes(index, None, columns, selected_columns, None)
+                Self::new_with_axes(index, None, columns, out_columns, None)?
             }
             Some(fp_index::MultiIndexOrIndex::Multi(row_multiindex)) => Self::new_with_axes(
                 Self::flatten_row_multiindex(&row_multiindex, "|"),
                 Some(row_multiindex),
                 columns,
-                selected_columns,
+                out_columns,
                 None,
-            ),
+            )?,
             None => {
                 let index = self.index.take(&positions);
                 let row_multiindex = self
@@ -66833,9 +66894,11 @@ impl DataFrame {
                     .as_ref()
                     .map(|multiindex| Self::project_row_multiindex(multiindex, &positions))
                     .transpose()?;
-                Self::new_with_axes(index, row_multiindex, columns, selected_columns, None)
+                Self::new_with_axes(index, row_multiindex, columns, out_columns, None)?
             }
-        }
+        };
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Return row positions for a row-MultiIndex tuple or a single level key.
@@ -112302,6 +112365,108 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found"))
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_with_columns_duplicate_selector_preserves_duplicates() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("b", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+            vec!["r1".into(), "r2".into()],
+        )
+        .unwrap();
+
+        let selected = df
+            .loc_with_columns(
+                &["r2".into(), "r1".into()],
+                Some(&["a".to_owned(), "a".to_owned()]),
+            )
+            .unwrap();
+
+        assert_eq!(selected.shape(), (2, 2));
+        assert_eq!(selected.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            selected.index().labels(),
+            &[IndexLabel::from("r2"), IndexLabel::from("r1")]
+        );
+        assert_eq!(
+            selected.column_at(0).unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(10)]
+        );
+        assert_eq!(
+            selected.column_at(1).unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(10)]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_with_columns_duplicate_selector_fails_when_allows_duplicate_labels_false() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("b", vec![Scalar::Int64(100), Scalar::Int64(200)]),
+            ],
+            vec!["r1".into(), "r2".into()],
+        )
+        .unwrap()
+        .set_flags(Some(false))
+        .unwrap();
+
+        let err = df
+            .loc_with_columns(&["r1".into()], Some(&["a".to_owned(), "a".to_owned()]))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("loc: duplicate labels are present")
+        ));
+    }
+
+    #[test]
+    fn dataframe_loc_with_columns_preserves_existing_duplicate_columns() {
+        let store = crate::ColumnStore::from_pairs(vec![
+            (
+                "a".to_owned(),
+                Column::new(DType::Int64, vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+            ),
+            (
+                "a".to_owned(),
+                Column::new(DType::Int64, vec![Scalar::Int64(100), Scalar::Int64(200)]).unwrap(),
+            ),
+        ]);
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec!["r1".into(), "r2".into()]),
+            store,
+            vec!["a".to_owned(), "a".to_owned()],
+        )
+        .unwrap();
+
+        let selected = df
+            .loc_with_columns(&["r2".into()], Some(&["a".to_owned()]))
+            .unwrap();
+        assert_eq!(selected.shape(), (1, 2));
+        assert_eq!(selected.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            selected.column_at(0).unwrap().values(),
+            &[Scalar::Int64(20)]
+        );
+        assert_eq!(
+            selected.column_at(1).unwrap().values(),
+            &[Scalar::Int64(200)]
+        );
+
+        let all_cols = df.loc_with_columns(&["r1".into()], None).unwrap();
+        assert_eq!(all_cols.shape(), (1, 2));
+        assert_eq!(all_cols.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            all_cols.column_at(0).unwrap().values(),
+            &[Scalar::Int64(10)]
+        );
+        assert_eq!(
+            all_cols.column_at(1).unwrap().values(),
+            &[Scalar::Int64(100)]
         );
     }
 
@@ -168911,6 +169076,92 @@ mod tests {
             &[Scalar::Int64(10), Scalar::Int64(20)]
         );
         assert!(out.row_multiindex().is_none());
+    }
+
+    #[test]
+    fn dataframe_loc_tuple_with_columns_duplicate_selector_preserves_duplicates() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product"], true, "|")
+        .unwrap();
+
+        let out = df
+            .loc_tuple_with_columns(
+                &[IndexLabel::Utf8("east".into())],
+                Some(&["sales".to_owned(), "sales".to_owned()]),
+            )
+            .unwrap();
+
+        assert_eq!(out.shape(), (2, 2));
+        assert_eq!(out.column_names(), vec!["sales", "sales"]);
+        assert_eq!(
+            out.column_at(0).unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+        assert_eq!(
+            out.column_at(1).unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_tuple_with_columns_duplicate_selector_fails_when_allows_duplicate_labels_false()
+     {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into())],
+                ),
+                (
+                    "product",
+                    vec![Scalar::Utf8("A".into()), Scalar::Utf8("B".into())],
+                ),
+                ("sales", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap()
+        .set_index_multi(&["region", "product"], true, "|")
+        .unwrap()
+        .set_flags(Some(false))
+        .unwrap();
+
+        let err = df
+            .loc_tuple_with_columns(
+                &[IndexLabel::Utf8("east".into())],
+                Some(&["sales".to_owned(), "sales".to_owned()]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("loc: duplicate labels are present")
+        ));
     }
 
     #[test]
