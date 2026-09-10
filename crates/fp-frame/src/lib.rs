@@ -67852,27 +67852,34 @@ impl DataFrame {
     /// Matches `df.rename(columns={'old': 'new'})`.
     pub fn rename_columns(&self, mapping: &[(&str, &str)]) -> Result<Self, FrameError> {
         let rename_map: BTreeMap<&str, &str> = mapping.iter().copied().collect();
-        let mut columns = BTreeMap::new();
-        let mut column_order = Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let col = self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist");
-            let name_str = name.as_str();
-            let new_name = rename_map.get(name_str).unwrap_or(&name_str);
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self
+                .column_name_at(pos)
+                .expect("column position in bounds");
+            let col = self.column_at(pos).expect("column position in bounds");
+            let new_name = rename_map.get(name).copied().unwrap_or(name);
 
-            if columns.contains_key(*new_name) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column '{}' resulting from rename",
-                    new_name
-                )));
-            }
-
-            column_order.push((*new_name).to_owned());
-            columns.insert((*new_name).to_owned(), col.clone());
+            column_order.push(new_name.to_owned());
+            pairs.push((new_name.to_owned(), col.clone()));
         }
-        Self::new_with_column_order(self.index.clone(), columns, column_order)
+        let columns = ColumnStore::from_pairs(pairs);
+        if !self.allows_duplicate_labels && columns.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "rename: duplicate labels are present".to_owned(),
+            ));
+        }
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Rename columns using a HashMap mapping.
@@ -67897,20 +67904,34 @@ impl DataFrame {
     where
         F: Fn(&str) -> String,
     {
-        let mut columns = BTreeMap::new();
-        let mut column_order = Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let col = &self.columns[name];
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self
+                .column_name_at(pos)
+                .expect("column position in bounds");
+            let col = self.column_at(pos).expect("column position in bounds");
             let new_name = func(name);
-            if columns.contains_key(&new_name) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column '{new_name}' resulting from rename"
-                )));
-            }
+
             column_order.push(new_name.clone());
-            columns.insert(new_name, col.clone());
+            pairs.push((new_name, col.clone()));
         }
-        Self::new_with_column_order(self.index.clone(), columns, column_order)
+        let columns = ColumnStore::from_pairs(pairs);
+        if !self.allows_duplicate_labels && columns.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "rename: duplicate labels are present".to_owned(),
+            ));
+        }
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Rename index labels using a mapping.
