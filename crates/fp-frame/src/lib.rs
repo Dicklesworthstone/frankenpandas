@@ -57811,7 +57811,7 @@ fn concat_dataframes_axis1(
         }
     };
 
-    let mut columns = BTreeMap::new();
+    let mut pairs = Vec::new();
     let mut output_column_order = Vec::new();
     for frame in frames {
         let positions = if frame.index() == &target_index {
@@ -57824,25 +57824,28 @@ fn concat_dataframes_axis1(
             frame.index().get_indexer(&target_index)
         };
 
-        for name in frame.column_names() {
-            let column = frame
-                .column(name)
-                .expect("frame column listed in order must exist");
-            if columns.contains_key(name) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column '{name}' in concat(axis=1) output"
-                )));
-            }
-
-            columns.insert(
-                name.clone(),
-                reindex_concat_axis1_column(column, &positions)?,
-            );
-            output_column_order.push(name.clone());
+        let n_cols = frame.num_columns();
+        for pos in 0..n_cols {
+            let name = frame
+                .column_name_at(pos)
+                .expect("column position in bounds");
+            let column = frame.column_at(pos).expect("column position in bounds");
+            let reindexed = reindex_concat_axis1_column(column, &positions)?;
+            pairs.push((name.clone(), reindexed));
+            output_column_order.push(name);
         }
     }
 
-    DataFrame::new_with_column_order(target_index, columns, output_column_order)
+    let columns = ColumnStore::from_pairs(pairs);
+    let allows_duplicate_labels = frames.iter().all(|f| f.allows_duplicate_labels);
+    if !allows_duplicate_labels && (columns.has_duplicates() || target_index.has_duplicates()) {
+        return Err(FrameError::CompatibilityRejected(
+            "concat(axis=1): duplicate labels are present".to_owned(),
+        ));
+    }
+    let mut out = DataFrame::new_with_column_order(target_index, columns, output_column_order)?;
+    out.allows_duplicate_labels = allows_duplicate_labels;
+    Ok(out)
 }
 
 #[cfg(feature = "lazy-transpose-view")]
@@ -58419,6 +58422,12 @@ impl ColumnStore {
         self.lookup.contains_key(name)
     }
 
+    /// Whether any column name appears more than once.
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        self.lookup.len() < self.columns.len()
+    }
+
     /// Total column count, counting each repeat separately.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -58841,7 +58850,7 @@ impl LazyDataFrameColumns {
                 if let Some(columns) = materialized.get() {
                     return columns.get(name);
                 }
-                let column = *store.name_to_col.get(name)?;
+                let column = *store.name_to_col.get(name)?.first()?;
                 Some(store.cached_column(column))
             }
         }
@@ -58869,6 +58878,17 @@ impl LazyDataFrameColumns {
                 plan, materialized, ..
             } if materialized.get().is_none() => {
                 (position < plan.output_columns).then(|| plan.cached_column(position))
+            }
+            #[cfg(feature = "block-storage")]
+            Self::Float64Block {
+                store,
+                materialized,
+            } => {
+                if let Some(columns) = materialized.get() {
+                    columns.column_at(position)
+                } else {
+                    (position < store.cols).then(|| store.cached_column(position))
+                }
             }
             _ => None,
         }
@@ -58906,6 +58926,64 @@ impl LazyDataFrameColumns {
 
     fn remove(&mut self, name: &str) -> Option<Column> {
         self.make_eager().remove(name)
+    }
+
+    fn positions_of(&self, name: &str) -> &[usize] {
+        match self {
+            Self::Eager(columns) => columns.positions_of(name),
+            #[cfg(feature = "block-storage")]
+            Self::Float64Block {
+                store,
+                materialized,
+            } => {
+                if let Some(columns) = materialized.get() {
+                    columns.positions_of(name)
+                } else {
+                    store.name_to_col.get(name).map_or(&[], |v| v.as_slice())
+                }
+            }
+            _ => self.materialized().positions_of(name),
+        }
+    }
+
+    fn column_at(&self, position: usize) -> Option<&Column> {
+        match self {
+            Self::Eager(columns) => columns.column_at(position),
+            #[cfg(feature = "block-storage")]
+            Self::Float64Block {
+                store,
+                materialized,
+            } => {
+                if let Some(columns) = materialized.get() {
+                    columns.column_at(position)
+                } else {
+                    (position < store.cols).then(|| store.cached_column(position))
+                }
+            }
+            _ => self.materialized().column_at(position),
+        }
+    }
+
+    fn occurrences(&self, name: &str) -> usize {
+        self.positions_of(name).len()
+    }
+
+    fn has_duplicates(&self) -> bool {
+        match self {
+            Self::Eager(columns) => columns.has_duplicates(),
+            #[cfg(feature = "block-storage")]
+            Self::Float64Block {
+                store,
+                materialized,
+            } => {
+                if let Some(columns) = materialized.get() {
+                    columns.has_duplicates()
+                } else {
+                    store.name_to_col.len() < store.names.len()
+                }
+            }
+            _ => self.materialized().has_duplicates(),
+        }
     }
 
     fn materialized(&self) -> &ColumnStore {
@@ -59002,7 +59080,7 @@ struct Float64BlockStore {
     rows: usize,
     cols: usize,
     names: Arc<[String]>,
-    name_to_col: std::collections::HashMap<String, usize>,
+    name_to_col: std::collections::HashMap<String, Vec<usize>>,
     column_slots: Box<[OnceLock<Column>]>,
 }
 
@@ -59025,15 +59103,12 @@ impl Float64BlockStore {
     }
 
     fn materialize_columns(&self) -> ColumnStore {
-        (0..self.cols)
-            .map(|column| {
-                (
-                    self.names[column].clone(),
-                    self.cached_column(column).clone(),
-                )
-            })
-            .collect::<BTreeMap<String, Column>>()
-            .into()
+        ColumnStore::from_pairs((0..self.cols).map(|column| {
+            (
+                self.names[column].clone(),
+                self.cached_column(column).clone(),
+            )
+        }))
     }
 }
 
@@ -60622,6 +60697,12 @@ pub enum CsvQuoting {
     All,
     NonNumeric,
     None,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnSelection {
+    Series(Series),
+    DataFrame(DataFrame),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62572,14 +62653,12 @@ impl DataFrame {
     ///
     /// The frame exposes an O(1) [`DataFrame::to_numpy_block_view`] (pandas'
     /// zero-copy `df.values` on a homogeneous-float frame) and each column
-    /// borrows the shared block with no `f64` data copy. `names` must be unique
-    /// (the column store is keyed by label) and `block.len()` must equal
+    /// borrows the shared block with no `f64` data copy. `block.len()` must equal
     /// `index.len() * names.len()`.
     ///
     /// # Errors
     /// Returns [`FrameError::CompatibilityRejected`] when `block.len()` does not
-    /// match `index.len() * names.len()`, on dimension overflow, or when
-    /// `names` contains a duplicate label.
+    /// match `index.len() * names.len()` or on dimension overflow.
     #[cfg(feature = "block-storage")]
     pub fn from_f64_block_columns(
         index: Index,
@@ -62599,13 +62678,10 @@ impl DataFrame {
                 block.len()
             )));
         }
-        let mut name_to_col = std::collections::HashMap::with_capacity(cols);
+        let mut name_to_col: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::with_capacity(cols);
         for (column, name) in names.iter().enumerate() {
-            if name_to_col.insert(name.clone(), column).is_some() {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column label {name:?} in block-storage frame"
-                )));
-            }
+            name_to_col.entry(name.clone()).or_default().push(column);
         }
         let column_slots = (0..cols)
             .map(|_| OnceLock::new())
@@ -63976,54 +64052,84 @@ impl DataFrame {
 
     /// Return a new DataFrame with only the specified columns, in order.
     ///
-    /// Matches `df[["a", "c"]]` column selection in pandas.
+    /// Matches `df[["a", "c"]]` column selection in pandas, preserving repeated
+    /// columns and duplicate column names.
     pub fn select_columns(&self, names: &[&str]) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-76e1fd: build the name->position map once so
-        // the per-name lookup is O(1). Was O(|column_order|) iter().position
-        // per name → O(|names| × |column_order|) total.
-        let position_index: std::collections::HashMap<&str, usize> = self
-            .column_order
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.as_str(), i))
-            .collect();
-        let mut columns = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(names.len());
+        let mut column_order = Vec::with_capacity(names.len());
         let mut selected_positions = Vec::with_capacity(names.len());
         for &name in names {
-            match self.columns.get(name) {
-                Some(col) => {
-                    columns.insert(name.to_owned(), col.clone());
-                    selected_positions.push(
-                        *position_index
-                            .get(name)
-                            .expect("selected column must exist in observable order"),
-                    );
-                }
-                None => {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "column '{name}' not found"
-                    )));
-                }
+            let positions = self.columns.positions_of(name);
+            if positions.is_empty() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{name}' not found"
+                )));
+            }
+            for &pos in positions {
+                let col = self
+                    .columns
+                    .column_at(pos)
+                    .expect("selected column in bounds");
+                pairs.push((name.to_owned(), col.clone()));
+                column_order.push(name.to_owned());
+                selected_positions.push(pos);
             }
         }
-        let column_order: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
         let column_multiindex = self
             .column_multiindex
             .as_ref()
             .map(|multiindex| Self::project_column_multiindex(multiindex, &selected_positions))
             .transpose()?;
-        // Per br-frankenpandas-wv2mi: select_columns only changes which
-        // columns are present; the row axis (and any row_multiindex) is
-        // untouched and should pass through. Was being silently dropped
-        // via new_with_column_order_and_multiindex which hardcodes
-        // row_multiindex to None.
-        Self::new_with_axes(
+
+        let columns = ColumnStore::from_pairs(pairs);
+        let allows_duplicate_labels = self.allows_duplicate_labels;
+        if !allows_duplicate_labels && columns.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "select_columns: duplicate labels are present".to_owned(),
+            ));
+        }
+        let mut out = Self::new_with_axes(
             self.index.clone(),
             self.row_multiindex.clone(),
             columns,
             column_order,
             column_multiindex,
-        )
+        )?;
+        out.allows_duplicate_labels = allows_duplicate_labels;
+        Ok(out)
+    }
+
+    /// Single column indexing matching `df[name]` in pandas.
+    ///
+    /// If `name` matches a single column, returns [`ColumnSelection::Series`].
+    /// If `name` matches multiple duplicate columns, returns [`ColumnSelection::DataFrame`].
+    pub fn get_column_selection(&self, name: &str) -> Result<ColumnSelection, FrameError> {
+        let occ = self.columns.occurrences(name);
+        if occ == 0 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "column '{name}' not found"
+            )));
+        }
+        if occ == 1 {
+            let col = self.column(name).expect("single column exists");
+            let series = Series::new(name.to_string(), self.index.clone(), col.clone())?;
+            Ok(ColumnSelection::Series(series))
+        } else {
+            let mut pairs = Vec::with_capacity(occ);
+            let mut order = Vec::with_capacity(occ);
+            for &pos in self.columns.positions_of(name) {
+                let col = self.columns.column_at(pos).expect("position in bounds");
+                pairs.push((name.to_string(), col.clone()));
+                order.push(name.to_string());
+            }
+            let mut df = Self::new_with_column_order(
+                self.index.clone(),
+                ColumnStore::from_pairs(pairs),
+                order,
+            )?;
+            df.allows_duplicate_labels = self.allows_duplicate_labels;
+            Ok(ColumnSelection::DataFrame(df))
+        }
     }
 
     /// Return the number of rows.
@@ -69450,6 +69556,11 @@ impl DataFrame {
             self.row_multiindex.as_ref(),
             "set_flags",
         )?;
+        if !next_allows && self.columns.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "set_flags: duplicate labels are present".to_owned(),
+            ));
+        }
 
         let mut out = self.clone();
         out.allows_duplicate_labels = next_allows;
@@ -103687,7 +103798,7 @@ mod tests {
     }
 
     #[test]
-    fn concat_dataframes_axis1_duplicate_columns_rejects() {
+    fn concat_dataframes_axis1_duplicate_columns_succeeds() {
         let left = DataFrame::from_dict_with_index(
             vec![("x", vec![Scalar::Int64(1)])],
             vec![0_i64.into()],
@@ -103699,9 +103810,17 @@ mod tests {
         )
         .unwrap();
 
-        let err = concat_dataframes_with_axis(&[&left, &right], 1).expect_err("should reject");
+        let out = concat_dataframes_with_axis(&[&left, &right], 1).expect("should succeed");
+        assert_eq!(out.num_columns(), 2);
+        assert_eq!(out.column_names(), vec!["x", "x"]);
+        assert_eq!(out.column_at(0).unwrap().values(), &[Scalar::Int64(1)]);
+        assert_eq!(out.column_at(1).unwrap().values(), &[Scalar::Int64(2)]);
+
+        let strict_left = left.set_flags(Some(false)).unwrap();
+        let err =
+            concat_dataframes_with_axis(&[&strict_left, &right], 1).expect_err("should reject");
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
-        assert!(err.to_string().contains("duplicate column"));
+        assert!(err.to_string().contains("duplicate labels are present"));
     }
 
     #[test]
@@ -204462,7 +204581,7 @@ mod block_storage_cod_fp {
     use fp_columnar::Column;
     use fp_index::Index;
 
-    use super::{DataFrame, FrameError, LazyDataFrameColumns};
+    use super::{ColumnSelection, DataFrame, FrameError, LazyDataFrameColumns};
 
     fn names(cols: usize) -> Vec<String> {
         (0..cols).map(|col| format!("c{col}")).collect()
@@ -204595,14 +204714,76 @@ mod block_storage_cod_fp {
     }
 
     #[test]
-    fn duplicate_labels_are_rejected() {
-        let err = DataFrame::from_f64_block_columns(
-            Index::new_known_unique_int64_unit_range(0, 2),
-            vec!["dup".to_owned(), "dup".to_owned()],
-            vec![0.0; 4],
+    fn duplicate_labels_are_supported() {
+        let rows = 3;
+        // 3 columns: "a", "b", "a"
+        // column-major:
+        // col 0 ("a"): [10.0, 11.0, 12.0]
+        // col 1 ("b"): [20.0, 21.0, 22.0]
+        // col 2 ("a"): [30.0, 31.0, 32.0]
+        let block = vec![
+            10.0, 11.0, 12.0, // col 0
+            20.0, 21.0, 22.0, // col 1
+            30.0, 31.0, 32.0, // col 2
+        ];
+        let names = vec!["a".to_owned(), "b".to_owned(), "a".to_owned()];
+        let df = DataFrame::from_f64_block_columns(
+            Index::new_known_unique_int64_unit_range(0, rows),
+            names,
+            block.clone(),
         )
-        .unwrap_err();
-        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        .expect("block frame with duplicate column labels must succeed");
+
+        // Zero-copy block view preserved.
+        let view = df.to_numpy_block_view().expect("block view exists");
+        assert_eq!(view.rows, rows);
+        assert_eq!(view.cols, 3);
+        assert_eq!(&view.block[..], &block[..]);
+
+        // Column names preserve duplicate order.
+        assert_eq!(df.column_names(), vec!["a", "b", "a"]);
+
+        // Duplicate queries on lazy columns.
+        assert_eq!(df.columns.positions_of("a"), &[0, 2]);
+        assert_eq!(df.columns.positions_of("b"), &[1]);
+        assert_eq!(df.columns.positions_of("c"), &[] as &[usize]);
+        assert_eq!(df.columns.occurrences("a"), 2);
+        assert_eq!(df.columns.occurrences("b"), 1);
+        assert!(df.columns.has_duplicates());
+
+        // Single-column lookup returns first occurrence (col 0).
+        let col_a = df.column("a").expect("column a exists");
+        assert_eq!(col_a, &Column::from_f64_values(vec![10.0, 11.0, 12.0]));
+
+        // Positional access before materialization.
+        let col_0 = df.column_at(0).expect("column 0 exists");
+        assert_eq!(col_0, &Column::from_f64_values(vec![10.0, 11.0, 12.0]));
+        let col_2 = df.column_at(2).expect("column 2 exists");
+        assert_eq!(col_2, &Column::from_f64_values(vec![30.0, 31.0, 32.0]));
+
+        // Selection by name returning multiple columns.
+        match df.get_column_selection("a").unwrap() {
+            ColumnSelection::DataFrame(sub_df) => {
+                assert_eq!(sub_df.column_names(), vec!["a", "a"]);
+                assert_eq!(
+                    sub_df.column_at(0).unwrap(),
+                    &Column::from_f64_values(vec![10.0, 11.0, 12.0])
+                );
+                assert_eq!(
+                    sub_df.column_at(1).unwrap(),
+                    &Column::from_f64_values(vec![30.0, 31.0, 32.0])
+                );
+            }
+            ColumnSelection::Series(_) => panic!("expected DataFrame selection for duplicates"),
+        }
+
+        // Positional and duplicate queries AFTER materializing columns().
+        let store = df.columns();
+        assert!(store.has_duplicates());
+        assert_eq!(store.positions_of("a"), &[0, 2]);
+        assert_eq!(store.column_at(0).unwrap(), col_0);
+        assert_eq!(store.column_at(2).unwrap(), col_2);
+        assert_eq!(df.column_at(2).unwrap(), col_2);
     }
 
     #[test]
