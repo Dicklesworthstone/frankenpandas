@@ -67860,7 +67860,10 @@ impl DataFrame {
                 .column_name_at(pos)
                 .expect("column position in bounds");
             let col = self.column_at(pos).expect("column position in bounds");
-            let new_name = rename_map.get(name).copied().unwrap_or(name);
+            let new_name = rename_map
+                .get(name.as_str())
+                .copied()
+                .unwrap_or(name.as_str());
 
             column_order.push(new_name.to_owned());
             pairs.push((new_name.to_owned(), col.clone()));
@@ -67912,7 +67915,7 @@ impl DataFrame {
                 .column_name_at(pos)
                 .expect("column position in bounds");
             let col = self.column_at(pos).expect("column position in bounds");
-            let new_name = func(name);
+            let new_name = func(name.as_str());
 
             column_order.push(new_name.clone());
             pairs.push((new_name, col.clone()));
