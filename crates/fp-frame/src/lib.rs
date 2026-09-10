@@ -62082,22 +62082,26 @@ impl DataFrame {
         debug_assert!(self.row_multiindex.is_none());
 
         let index = self.index.slice(start, len);
-        let mut columns = BTreeMap::new();
-        for name in &self.column_order {
-            let column = self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist");
-            columns.insert(name.clone(), column.take_contiguous_range(start, len));
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut order = Vec::with_capacity(n_cols);
+        for i in 0..n_cols {
+            let name = self.column_name_at(i).expect("column name in bounds");
+            let column = self.column_at(i).expect("column in bounds");
+            pairs.push((name.clone(), column.take_contiguous_range(start, len)));
+            order.push(name);
         }
+        let columns = ColumnStore::from_pairs(pairs);
 
-        Self::new_with_axes(
+        let mut out = Self::new_with_axes(
             index,
             None,
             columns,
-            self.column_order.clone(),
+            order,
             self.column_multiindex.clone(),
-        )
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Internal unchecked variant - caller guarantees positions are in bounds.
@@ -62152,28 +62156,79 @@ impl DataFrame {
         // scope workers wins aggregate cache/bandwidth (sibling of the
         // reorder_rows_by_positions gather). Bit-identical — every column runs the
         // same take_positions and is reassembled in column_order.
-        let gathered = self.par_map_columns(&self.column_order, |name| {
-            Ok(self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist")
-                .take_positions(positions))
-        })?;
-        let mut columns = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(gathered) {
-            columns.insert(name.clone(), column);
+        let n_cols = self.num_columns();
+        let col_refs: Vec<(&str, &Column)> = (0..n_cols)
+            .map(|i| {
+                (
+                    self.column_name_at(i).expect("column position in bounds"),
+                    self.column_at(i).expect("column position in bounds"),
+                )
+            })
+            .collect();
+        let worker_count = if n_cols >= 2 && n_cols.saturating_mul(n) >= 16_384 {
+            fp_columnar::cached_available_parallelism().min(n_cols)
+        } else {
+            1
+        };
+        let gathered: Vec<Column> = if worker_count < 2 {
+            col_refs
+                .iter()
+                .map(|&(_, col)| col.take_positions(positions))
+                .collect()
+        } else {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let mut slots: Vec<Option<Column>> = (0..n_cols).map(|_| None).collect();
+            let parts = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(worker_count);
+                for _ in 0..worker_count {
+                    let next = &next;
+                    let col_refs = &col_refs;
+                    handles.push(scope.spawn(move || {
+                        let mut out = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i >= col_refs.len() {
+                                break;
+                            }
+                            out.push((i, col_refs[i].1.take_positions(positions)));
+                        }
+                        out
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("take_positions worker panicked"))
+                    .collect::<Vec<_>>()
+            });
+            for part in parts {
+                for (i, c) in part {
+                    slots[i] = Some(c);
+                }
+            }
+            slots.into_iter().map(|s| s.expect("every column gathered")).collect()
+        };
+
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut order = Vec::with_capacity(n_cols);
+        for (i, column) in gathered.into_iter().enumerate() {
+            let name = col_refs[i].0.to_owned();
+            order.push(name.clone());
+            pairs.push((name, column));
         }
+        let columns = ColumnStore::from_pairs(pairs);
 
         // Per br-frankenpandas-lhzot: preserve the index name through
         // every caller of take_rows_by_positions (iloc, take, sort_values,
         // sort_index, head, tail, groupby row-selection paths).
-        Self::new_with_axes(
+        let mut out = Self::new_with_axes(
             out_index.rename_index(self.index.name()),
             row_multiindex,
             columns,
-            self.column_order.clone(),
+            order,
             self.column_multiindex.clone(),
-        )
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Internal unchecked variant for ascending contiguous source runs.
@@ -62219,31 +62274,84 @@ impl DataFrame {
             None
         };
 
-        let gathered = self.par_map_columns_min(&self.column_order, 4_000_000, |name| {
-            let column = self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist");
+        let n_cols = self.num_columns();
+        let col_refs: Vec<(&str, &Column)> = (0..n_cols)
+            .map(|i| {
+                (
+                    self.column_name_at(i).expect("column position in bounds"),
+                    self.column_at(i).expect("column position in bounds"),
+                )
+            })
+            .collect();
+        let build_col = |name: &str, column: &Column| -> Column {
             if all_valid_f64_columns
                 .is_some_and(|columns| columns.iter().any(|selected| selected == name))
                 && let Some(gathered) = column.take_position_runs_all_valid_f64_unchecked(runs, n)
             {
-                return Ok(gathered);
+                return gathered;
             }
-            Ok(column.take_position_runs(runs, n))
-        })?;
-        let mut columns = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(gathered) {
-            columns.insert(name.clone(), column);
-        }
+            column.take_position_runs(runs, n)
+        };
+        let worker_count = if n_cols >= 2 && n_cols.saturating_mul(n) >= 4_000_000 {
+            fp_columnar::cached_available_parallelism().min(n_cols)
+        } else {
+            1
+        };
+        let gathered: Vec<Column> = if worker_count < 2 {
+            col_refs.iter().map(|&(name, col)| build_col(name, col)).collect()
+        } else {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let mut slots: Vec<Option<Column>> = (0..n_cols).map(|_| None).collect();
+            let parts = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(worker_count);
+                for _ in 0..worker_count {
+                    let next = &next;
+                    let col_refs = &col_refs;
+                    let build_col = &build_col;
+                    handles.push(scope.spawn(move || {
+                        let mut out: Vec<(usize, Column)> = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i >= col_refs.len() {
+                                break;
+                            }
+                            let (name, col) = col_refs[i];
+                            out.push((i, build_col(name, col)));
+                        }
+                        out
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("take_position_runs worker panicked"))
+                    .collect::<Vec<_>>()
+            });
+            for part in parts {
+                for (i, c) in part {
+                    slots[i] = Some(c);
+                }
+            }
+            slots.into_iter().map(|s| s.expect("all columns gathered")).collect()
+        };
 
-        Self::new_with_axes(
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut order = Vec::with_capacity(n_cols);
+        for (i, column) in gathered.into_iter().enumerate() {
+            let name = col_refs[i].0.to_owned();
+            order.push(name.clone());
+            pairs.push((name, column));
+        }
+        let columns = ColumnStore::from_pairs(pairs);
+
+        let mut out = Self::new_with_axes(
             out_index.rename_index(self.index.name()),
             row_multiindex,
             columns,
-            self.column_order.clone(),
+            order,
             self.column_multiindex.clone(),
-        )
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Boolean-filter-only unchecked variant - caller guarantees positions are
