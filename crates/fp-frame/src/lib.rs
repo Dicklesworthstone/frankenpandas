@@ -68822,14 +68822,8 @@ impl DataFrame {
     /// (converted to strings).
     #[cfg(feature = "lazy-transpose-view")]
     pub fn transpose_view(&self) -> Result<Option<DataFrameTransposeView<'_>>, FrameError> {
-        if self.index.has_duplicates() {
-            return Err(FrameError::CompatibilityRejected(
-                "transpose requires unique index labels: the source index \
-                 contains duplicates and would silently collapse columns \
-                 in the transposed DataFrame (column store keys must be \
-                 unique). Deduplicate the index before transposing."
-                    .to_owned(),
-            ));
+        if self.index.has_duplicates() || self.columns.has_duplicates() {
+            return Ok(None);
         }
 
         let Some((column_start, column_len)) = self.index.int64_unit_range_labels() else {
@@ -69154,7 +69148,7 @@ impl DataFrame {
                     view.column_len,
                 ),
                 column_multiindex: None,
-                allows_duplicate_labels: true,
+                allows_duplicate_labels: self.allows_duplicate_labels,
             });
         }
 
@@ -69162,19 +69156,11 @@ impl DataFrame {
     }
 
     fn transpose_materialized(&self) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-3eaa5: DataFrame's column store is
-        // BTreeMap<String, Column> and cannot hold duplicate column names.
-        // If the source index has duplicate labels (e.g. [10, 10, 20]),
-        // transpose would silently collapse them via BTreeMap::insert
-        // (last-write-wins) and lose data. Detect that case up front and
-        // return a clear error rather than silently dropping rows.
-        if self.index.has_duplicates() {
+        if !self.allows_duplicate_labels
+            && (self.index.has_duplicates() || self.columns.has_duplicates())
+        {
             return Err(FrameError::CompatibilityRejected(
-                "transpose requires unique index labels: the source index \
-                 contains duplicates and would silently collapse columns \
-                 in the transposed DataFrame (column store keys must be \
-                 unique). Deduplicate the index before transposing."
-                    .to_owned(),
+                "transpose: duplicate labels are present".to_owned(),
             ));
         }
 
@@ -69182,22 +69168,14 @@ impl DataFrame {
         let n_cols = self.num_columns();
 
         // New index: original column names
-        let new_index_labels: Vec<IndexLabel> = self
-            .column_order
-            .iter()
-            .map(|name| IndexLabel::Utf8(name.clone()))
+        let new_index_labels: Vec<IndexLabel> = (0..n_cols)
+            .map(|pos| {
+                let name = self.column_name_at(pos).expect("column position in bounds");
+                IndexLabel::Utf8(name)
+            })
             .collect();
         let new_index = Index::new(new_index_labels);
 
-        // New columns: one per original row, named by index label.
-        let mut new_columns = BTreeMap::new();
-        let mut new_order = Vec::with_capacity(n_rows);
-
-        // Hoist the source labels and per-column references OUT of the row loop.
-        // The old code re-fetched `self.columns.get(name)` (a BTreeMap lookup) on
-        // every (row, col) cell — n_rows * n_cols string-keyed lookups — and
-        // built every transposed column through the `Scalar` path. For a tall
-        // frame that is the difference between ~1.5s and ~tens of ms.
         let label_to_name = |label: &IndexLabel| -> String {
             match label {
                 IndexLabel::Int64(v) => v.to_string(),
@@ -69208,15 +69186,26 @@ impl DataFrame {
                 null @ IndexLabel::Null(_) => null.to_string(),
             }
         };
-        let src_cols: Vec<&Column> = self
-            .column_order
-            .iter()
-            .map(|name| {
-                self.columns
-                    .get(name)
-                    .expect("column name listed in order must exist")
-            })
+        let src_cols: Vec<&Column> = (0..n_cols)
+            .map(|pos| self.column_at(pos).expect("column position in bounds"))
             .collect();
+
+        let finish_transpose =
+            |new_index: Index, pairs: Vec<(String, Column)>| -> Result<Self, FrameError> {
+                let new_order: Vec<String> = pairs.iter().map(|(name, _)| name.clone()).collect();
+                let new_columns = ColumnStore::from_pairs(pairs);
+                if !self.allows_duplicate_labels
+                    && (new_columns.has_duplicates() || new_index.has_duplicates())
+                {
+                    return Err(FrameError::CompatibilityRejected(
+                        "transpose: duplicate labels are present".to_owned(),
+                    ));
+                }
+                let mut out =
+                    Self::new_with_axes_trusted(new_index, None, new_columns, new_order, None);
+                out.allows_duplicate_labels = self.allows_duplicate_labels;
+                Ok(out)
+            };
 
         // Shared-row-plan Float64 fast path: for Arc-backed all-valid Float64
         // sources, every transposed output column is a lazy view of one source
@@ -69232,229 +69221,111 @@ impl DataFrame {
 
             if let Some((start, len)) = self.index.int64_unit_range_labels() {
                 debug_assert_eq!(len, n_rows);
-                if start == 0 {
-                    // BTreeMap bulk-builds from sorted keys; keep public order
-                    // numeric while feeding the map lexicographic key order.
-                    fn push_lexical_transpose_row_entry(
-                        entries: &mut Vec<(String, Column)>,
-                        names: &[String],
-                        row_plan: &fp_columnar::Float64TransposeRows,
-                        row_idx: usize,
-                        len: usize,
-                    ) {
-                        if row_idx >= len {
-                            return;
-                        }
-                        entries.push((
-                            names[row_idx].clone(),
-                            Column::from_f64_transpose_row(row_plan, row_idx),
-                        ));
-                        let Some(base) = row_idx.checked_mul(10) else {
-                            return;
-                        };
-                        for digit in 0..=9 {
-                            let Some(child) = base.checked_add(digit) else {
-                                break;
-                            };
-                            if child >= len {
-                                break;
-                            }
-                            push_lexical_transpose_row_entry(entries, names, row_plan, child, len);
-                        }
-                    }
-
-                    new_order = (0..n_rows).map(|row_idx| row_idx.to_string()).collect();
-                    let mut column_entries = Vec::with_capacity(n_rows);
-                    if n_rows > 0 {
-                        column_entries.push((
-                            new_order[0].clone(),
-                            Column::from_f64_transpose_row(&row_plan, 0),
-                        ));
-                        for first_digit in 1..=9 {
-                            push_lexical_transpose_row_entry(
-                                &mut column_entries,
-                                &new_order,
-                                &row_plan,
-                                first_digit,
-                                n_rows,
-                            );
-                        }
-                    }
-                    debug_assert_eq!(column_entries.len(), n_rows);
-                    let new_columns: BTreeMap<String, Column> =
-                        column_entries.into_iter().collect();
-                    return Ok(Self::new_with_axes_trusted(
-                        new_index,
-                        None,
-                        new_columns,
-                        new_order,
-                        None,
-                    ));
-                }
-
-                for row_idx in 0..n_rows {
-                    let col_name = (start + row_idx as i64).to_string();
-                    new_columns.insert(
-                        col_name.clone(),
-                        Column::from_f64_transpose_row(&row_plan, row_idx),
-                    );
-                    new_order.push(col_name);
-                }
-                return Ok(Self::new_with_axes_trusted(
-                    new_index,
-                    None,
-                    new_columns,
-                    new_order,
-                    None,
-                ));
+                let pairs: Vec<(String, Column)> = (0..n_rows)
+                    .map(|row_idx| {
+                        (
+                            (start + row_idx as i64).to_string(),
+                            Column::from_f64_transpose_row(&row_plan, row_idx),
+                        )
+                    })
+                    .collect();
+                return finish_transpose(new_index, pairs);
             }
 
             if let Some(labels) = self.index.int64_label_values() {
-                for (row_idx, label) in labels.iter().enumerate() {
-                    let col_name = label.to_string();
-                    new_columns.insert(
-                        col_name.clone(),
-                        Column::from_f64_transpose_row(&row_plan, row_idx),
-                    );
-                    new_order.push(col_name);
-                }
-                return Ok(Self::new_with_axes_trusted(
-                    new_index,
-                    None,
-                    new_columns,
-                    new_order,
-                    None,
-                ));
+                let pairs: Vec<(String, Column)> = labels
+                    .iter()
+                    .enumerate()
+                    .map(|(row_idx, label)| {
+                        (
+                            label.to_string(),
+                            Column::from_f64_transpose_row(&row_plan, row_idx),
+                        )
+                    })
+                    .collect();
+                return finish_transpose(new_index, pairs);
             }
 
             let labels = self.index.labels();
-            for (row_idx, label) in labels.iter().enumerate() {
-                let col_name = label_to_name(label);
-                if new_columns
-                    .insert(
-                        col_name.clone(),
+            let pairs: Vec<(String, Column)> = labels
+                .iter()
+                .enumerate()
+                .map(|(row_idx, label)| {
+                    (
+                        label_to_name(label),
                         Column::from_f64_transpose_row(&row_plan, row_idx),
                     )
-                    .is_some()
-                {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "transpose requires unique stringified index labels: \
-                         more than one source index label maps to column name '{col_name}'"
-                    )));
-                }
-                new_order.push(col_name);
-            }
-            return Ok(Self::new_with_axes_trusted(
-                new_index,
-                None,
-                new_columns,
-                new_order,
-                None,
-            ));
+                })
+                .collect();
+            return finish_transpose(new_index, pairs);
         }
 
         // Typed all-valid-Float64 fast path: when every source column is a dense
         // f64 slice, each transposed row is itself all-f64, so build it directly
-        // from `&[f64]` via `from_f64_values` — no per-cell `Scalar` clone, no
-        // `from_values` dtype inference. Bit-identical to the Scalar path for
-        // all-valid f64 (from_f64_values marks NaN missing exactly as
-        // Scalar::Float64(NaN) would, and there is no NaN in an all-valid slice).
+        // from `&[f64]` via `from_f64_values`.
         let f64_slices: Option<Vec<&[f64]>> = src_cols.iter().map(|c| c.as_f64_slice()).collect();
         if let Some(f64_slices) = f64_slices {
             if let Some((start, len)) = self.index.int64_unit_range_labels() {
                 debug_assert_eq!(len, n_rows);
-                for row_idx in 0..n_rows {
-                    let col_name = (start + row_idx as i64).to_string();
-                    let mut row_values = Vec::with_capacity(n_cols);
-                    for s in &f64_slices {
-                        row_values.push(s[row_idx]);
-                    }
-                    new_columns.insert(col_name.clone(), Column::from_f64_values(row_values));
-                    new_order.push(col_name);
-                }
-                return Ok(Self::new_with_axes_trusted(
-                    new_index,
-                    None,
-                    new_columns,
-                    new_order,
-                    None,
-                ));
+                let pairs: Vec<(String, Column)> = (0..n_rows)
+                    .map(|row_idx| {
+                        let col_name = (start + row_idx as i64).to_string();
+                        let mut row_values = Vec::with_capacity(n_cols);
+                        for s in &f64_slices {
+                            row_values.push(s[row_idx]);
+                        }
+                        (col_name, Column::from_f64_values(row_values))
+                    })
+                    .collect();
+                return finish_transpose(new_index, pairs);
             }
 
             if let Some(labels) = self.index.int64_label_values() {
-                for (row_idx, label) in labels.iter().enumerate() {
-                    let col_name = label.to_string();
+                let pairs: Vec<(String, Column)> = labels
+                    .iter()
+                    .enumerate()
+                    .map(|(row_idx, label)| {
+                        let col_name = label.to_string();
+                        let mut row_values = Vec::with_capacity(n_cols);
+                        for s in &f64_slices {
+                            row_values.push(s[row_idx]);
+                        }
+                        (col_name, Column::from_f64_values(row_values))
+                    })
+                    .collect();
+                return finish_transpose(new_index, pairs);
+            }
+
+            let labels = self.index.labels();
+            let pairs: Vec<(String, Column)> = labels
+                .iter()
+                .enumerate()
+                .map(|(row_idx, label)| {
+                    let col_name = label_to_name(label);
                     let mut row_values = Vec::with_capacity(n_cols);
                     for s in &f64_slices {
                         row_values.push(s[row_idx]);
                     }
-                    new_columns.insert(col_name.clone(), Column::from_f64_values(row_values));
-                    new_order.push(col_name);
-                }
-                return Ok(Self::new_with_axes_trusted(
-                    new_index,
-                    None,
-                    new_columns,
-                    new_order,
-                    None,
-                ));
-            }
-
-            let labels = self.index.labels();
-            for (row_idx, label) in labels.iter().enumerate() {
-                let col_name = label_to_name(label);
-                let mut row_values = Vec::with_capacity(n_cols);
-                for s in &f64_slices {
-                    row_values.push(s[row_idx]);
-                }
-                if new_columns
-                    .insert(col_name.clone(), Column::from_f64_values(row_values))
-                    .is_some()
-                {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "transpose requires unique stringified index labels: \
-                         more than one source index label maps to column name '{col_name}'"
-                    )));
-                }
-                new_order.push(col_name);
-            }
-            return Ok(Self::new_with_axes_trusted(
-                new_index,
-                None,
-                new_columns,
-                new_order,
-                None,
-            ));
+                    (col_name, Column::from_f64_values(row_values))
+                })
+                .collect();
+            return finish_transpose(new_index, pairs);
         }
 
-        // Generic (mixed / nullable) path — still hoisted out of the BTreeMap.
+        // Generic (mixed / nullable) path.
         let labels = self.index.labels();
         let src_values: Vec<&[Scalar]> = src_cols.iter().map(|c| c.values()).collect();
+        let mut pairs = Vec::with_capacity(n_rows);
         for (row_idx, label) in labels.iter().enumerate() {
             let col_name = label_to_name(label);
             let mut row_values = Vec::with_capacity(n_cols);
             for vals in &src_values {
                 row_values.push(vals[row_idx].clone());
             }
-            if new_columns
-                .insert(col_name.clone(), Column::from_values(row_values)?)
-                .is_some()
-            {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "transpose requires unique stringified index labels: \
-                     more than one source index label maps to column name '{col_name}'"
-                )));
-            }
-            new_order.push(col_name);
+            pairs.push((col_name, Column::from_values(row_values)?));
         }
 
-        Ok(Self::new_with_axes_trusted(
-            new_index,
-            None,
-            new_columns,
-            new_order,
-            None,
-        ))
+        finish_transpose(new_index, pairs)
     }
 
     /// Alias for `transpose()`.
@@ -189096,12 +188967,7 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_transpose_rejects_duplicate_index_labels() {
-        // Per br-frankenpandas-3eaa5: transpose on a DataFrame with
-        // duplicate index labels would silently collapse columns in
-        // the transposed output (column store BTreeMap keys must be
-        // unique). The fix returns an explicit error rather than
-        // dropping rows silently.
+    fn dataframe_transpose_duplicate_index_labels_oracle_semantics() {
         let mut cols = BTreeMap::new();
         cols.insert(
             "a".to_owned(),
@@ -189118,16 +188984,45 @@ mod tests {
             vec!["a".to_owned()],
         )
         .unwrap();
-        let err = df.transpose().expect_err("should reject duplicate labels");
+
+        // Default: duplicate labels are preserved without collapsing columns.
+        let transposed = df
+            .transpose()
+            .expect("transpose should preserve duplicate index labels as columns");
+        assert_eq!(transposed.shape(), (1, 3));
+        assert_eq!(transposed.column_names(), vec!["10", "10", "20"]);
+        assert_eq!(
+            transposed.index().labels(),
+            vec![IndexLabel::Utf8("a".to_owned())]
+        );
+        assert_eq!(
+            transposed.column_at(0).unwrap().values(),
+            vec![Scalar::Int64(1)]
+        );
+        assert_eq!(
+            transposed.column_at(1).unwrap().values(),
+            vec![Scalar::Int64(2)]
+        );
+        assert_eq!(
+            transposed.column_at(2).unwrap().values(),
+            vec![Scalar::Int64(3)]
+        );
+
+        // Disallow duplicates: fails closed.
+        let mut df_no_dups = df.clone();
+        df_no_dups.allows_duplicate_labels = false;
+        let err = df_no_dups
+            .transpose()
+            .expect_err("should reject duplicate labels when disallowed");
         assert!(
             matches!(&err, FrameError::CompatibilityRejected(msg)
-                if msg.contains("unique") && msg.contains("transpose")),
-            "expected error mentioning unique+transpose, got: {err:?}"
+                if msg.contains("duplicate labels")),
+            "expected error mentioning duplicate labels, got: {err:?}"
         );
     }
 
     #[test]
-    fn dataframe_transpose_rejects_stringified_index_label_collisions() {
+    fn dataframe_transpose_stringified_index_label_collisions_oracle_semantics() {
         let mut cols = BTreeMap::new();
         cols.insert(
             "a".to_owned(),
@@ -189140,13 +189035,83 @@ mod tests {
         )
         .unwrap();
 
-        let err = df
+        // Default: duplicate column names preserved.
+        let transposed = df
             .transpose()
-            .expect_err("stringified labels should collide");
+            .expect("should preserve stringified colliding labels");
+        assert_eq!(transposed.shape(), (1, 2));
+        assert_eq!(transposed.column_names(), vec!["1", "1"]);
+        assert_eq!(
+            transposed.column_at(0).unwrap().values(),
+            vec![Scalar::Int64(1)]
+        );
+        assert_eq!(
+            transposed.column_at(1).unwrap().values(),
+            vec![Scalar::Int64(2)]
+        );
+
+        // Disallow duplicates: fails closed.
+        let mut df_no_dups = df.clone();
+        df_no_dups.allows_duplicate_labels = false;
+        let err = df_no_dups
+            .transpose()
+            .expect_err("should reject colliding stringified labels when disallowed");
         assert!(
             matches!(&err, FrameError::CompatibilityRejected(msg)
-                if msg.contains("stringified") && msg.contains("transpose")),
-            "expected stringified-label transpose error, got: {err:?}"
+                if msg.contains("duplicate labels")),
+            "expected duplicate labels error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn dataframe_transpose_preserves_duplicate_columns_oracle_semantics() {
+        let store = crate::ColumnStore::from_pairs(vec![
+            (
+                "a".to_owned(),
+                Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+            ),
+            (
+                "a".to_owned(),
+                Column::new(DType::Int64, vec![Scalar::Int64(3), Scalar::Int64(4)]).unwrap(),
+            ),
+        ]);
+        let df = DataFrame::new_with_column_order(
+            Index::from_i64_values(vec![0, 1]),
+            store,
+            vec!["a".to_owned(), "a".to_owned()],
+        )
+        .unwrap();
+        let transposed = df
+            .transpose()
+            .expect("transpose should preserve duplicate columns");
+        assert_eq!(transposed.shape(), (2, 2));
+        assert_eq!(
+            transposed.index().labels(),
+            vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("a".to_owned())
+            ]
+        );
+        assert_eq!(transposed.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            transposed.column_at(0).unwrap().values(),
+            vec![Scalar::Int64(1), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            transposed.column_at(1).unwrap().values(),
+            vec![Scalar::Int64(2), Scalar::Int64(4)]
+        );
+
+        // Disallow duplicates: fails closed.
+        let mut df_no_dups = df.clone();
+        df_no_dups.allows_duplicate_labels = false;
+        let err = df_no_dups
+            .transpose()
+            .expect_err("should reject duplicate column labels when disallowed");
+        assert!(
+            matches!(&err, FrameError::CompatibilityRejected(msg)
+                if msg.contains("duplicate labels")),
+            "expected duplicate labels error, got: {err:?}"
         );
     }
 
