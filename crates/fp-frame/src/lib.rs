@@ -61879,12 +61879,9 @@ impl DataFrame {
                     "column '{requested}' not found"
                 )));
             }
-            if !seen.insert(requested.clone()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column selector: '{requested}'"
-                )));
+            if seen.insert(requested.clone()) {
+                selected.extend_from_slice(positions);
             }
-            selected.extend_from_slice(positions);
         }
 
         Ok(selected)
@@ -63103,22 +63100,23 @@ impl DataFrame {
         let aligned = Self::from_series(selected)?;
         let row_count = aligned.index.len();
 
-        let mut cols = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(columns.len());
         let mut order = Vec::with_capacity(columns.len());
         for name in columns {
             if let Some(column) = aligned.columns.get(name) {
-                cols.insert(name.clone(), column.clone());
+                pairs.push((name.clone(), column.clone()));
             } else if absent.contains(&name) {
                 // An absent name is an all-missing column. pandas builds it as
                 // OBJECT holding nan (measured above), which is the invented-gap
                 // marker, not a supplied None.
-                cols.insert(
+                pairs.push((
                     name.clone(),
                     Column::new(DType::Utf8, vec![Scalar::Null(NullKind::NaN); row_count])?,
-                );
+                ));
             }
             order.push(name.clone());
         }
+        let cols = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(aligned.index.clone(), cols, order)
     }
 
@@ -63314,9 +63312,8 @@ impl DataFrame {
     /// agreed on an error and `fp_p2d_018` pinned it as truth. A user calling
     /// FrankenPandas could not express the operation the packet certified.
     ///
-    /// A repeated name in `columns` is rejected: pandas returns the column
-    /// twice, and the column store cannot represent duplicate labels
-    /// (br-frankenpandas-ih4t0).
+    /// A repeated name in `columns` is preserved: pandas returns the column
+    /// repeatedly, and ColumnStore preserves duplicate column labels.
     pub fn from_dict_with_columns(
         data: Vec<(&str, Vec<Scalar>)>,
         columns: Option<&[String]>,
@@ -63336,15 +63333,6 @@ impl DataFrame {
             supplied.insert(name, values);
         }
 
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        for name in requested {
-            if !seen.insert(name.as_str()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column selector: '{name}'"
-                )));
-            }
-        }
-
         // The row count comes from the SELECTED columns, not from the dict: a
         // selector naming nothing that exists yields a 0-row frame, not a frame
         // of missing rows.
@@ -63356,10 +63344,10 @@ impl DataFrame {
                 .unwrap_or(0),
         };
 
-        let mut cols = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(requested.len());
         let mut order = Vec::with_capacity(requested.len());
         for name in requested {
-            let column = match supplied.remove(name.as_str()) {
+            let column = match supplied.get(name.as_str()) {
                 Some(values) => {
                     if values.len() != row_count {
                         return Err(FrameError::LengthMismatch {
@@ -63367,14 +63355,14 @@ impl DataFrame {
                             column_len: values.len(),
                         });
                     }
-                    Column::from_values(values)?
+                    Column::from_values(values.clone())?
                 }
                 // An absent name is an all-missing column. pandas builds it as
                 // OBJECT holding nan — an invented gap, not a supplied None —
                 // which is how `from_series_with_columns` spells it too.
                 None => Column::new(DType::Utf8, vec![Scalar::Null(NullKind::NaN); row_count])?,
             };
-            cols.insert(name.clone(), column);
+            pairs.push((name.clone(), column));
             order.push(name.clone());
         }
 
@@ -63382,6 +63370,7 @@ impl DataFrame {
             Some(labels) => Index::new(labels),
             None => Index::new_known_unique_int64_unit_range(0, row_count),
         };
+        let cols = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(index, cols, order)
     }
 
@@ -63556,23 +63545,13 @@ impl DataFrame {
             .max()
             .unwrap_or(0);
         let output_order = if let Some(requested_order) = column_order {
-            let mut explicit = Vec::with_capacity(requested_order.len());
-            let mut seen = BTreeSet::new();
-            for requested in requested_order {
-                if !seen.insert(requested.clone()) {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "duplicate column selector: '{requested}'"
-                    )));
-                }
-                explicit.push(requested.clone());
-            }
-            if max_row_width > explicit.len() {
+            if max_row_width > requested_order.len() {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "{operation_name} row width {max_row_width} exceeds columns length {}",
-                    explicit.len()
+                    requested_order.len()
                 )));
             }
-            explicit
+            requested_order.to_vec()
         } else {
             (0..max_row_width).map(|idx| idx.to_string()).collect()
         };
@@ -63601,7 +63580,7 @@ impl DataFrame {
         let invent_gaps = invent_nan && !columns_exceed_data;
 
         let output_row_count = index.len();
-        let mut columns = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(output_order.len());
         for (column_offset, column_name) in output_order.iter().enumerate() {
             // The gap policy is the CALLER's, not this function's — see
             // `PRESERVE_NULL` / `INVENT_NAN`. Under PRESERVE_NULL this is the
@@ -63668,9 +63647,10 @@ impl DataFrame {
             } else {
                 column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?
             };
-            columns.insert(column_name.clone(), column);
+            pairs.push((column_name.clone(), column));
         }
 
+        let columns = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(index, columns, output_order)
     }
 
