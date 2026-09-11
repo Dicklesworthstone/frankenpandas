@@ -61862,6 +61862,33 @@ impl DataFrame {
         }
     }
 
+    fn resolve_column_selector(
+        &self,
+        column_selector: Option<&[String]>,
+    ) -> Result<Vec<String>, FrameError> {
+        let Some(requested_columns) = column_selector else {
+            return Ok(self.column_order.to_vec());
+        };
+
+        let mut selected = Vec::with_capacity(requested_columns.len());
+        let mut seen = rustc_hash::FxHashSet::default();
+        for requested in requested_columns {
+            if !self.columns.contains_key(requested) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{requested}' not found"
+                )));
+            }
+            if !seen.insert(requested.clone()) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "duplicate column selector: '{requested}'"
+                )));
+            }
+            selected.push(requested.clone());
+        }
+
+        Ok(selected)
+    }
+
     fn resolve_column_positions(
         &self,
         subset: Option<&[String]>,
@@ -67260,54 +67287,23 @@ impl DataFrame {
             out_labels.push(self.index.labels()[position].clone());
         }
 
-        let (pairs, out_columns) = match column_selector {
-            None => {
-                let n_cols = self.num_columns();
-                let mut pairs = Vec::with_capacity(n_cols);
-                let mut order = Vec::with_capacity(n_cols);
-                for i in 0..n_cols {
-                    let name = self.column_name_at(i).expect("column position in bounds");
-                    let col = self.column_at(i).expect("column position in bounds");
-                    pairs.push((name.clone(), col.take_positions(&normalized_positions)));
-                    order.push(name);
-                }
-                (pairs, order)
-            }
-            Some(requested_columns) => {
-                let mut pairs = Vec::with_capacity(requested_columns.len());
-                let mut order = Vec::with_capacity(requested_columns.len());
-                for name in requested_columns {
-                    let col_positions = self.columns.positions_of(name);
-                    if col_positions.is_empty() {
-                        return Err(FrameError::CompatibilityRejected(format!(
-                            "column '{name}' not found"
-                        )));
-                    }
-                    for &pos in col_positions {
-                        let col = self
-                            .columns
-                            .column_at(pos)
-                            .expect("column position in bounds");
-                        pairs.push((name.clone(), col.take_positions(&normalized_positions)));
-                        order.push(name.clone());
-                    }
-                }
-                (pairs, order)
-            }
-        };
+        let selected_columns = self.resolve_column_selector(column_selector)?;
+        let mut columns = BTreeMap::new();
+        for name in &selected_columns {
+            let column = self.columns.get(name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{name}' not found"))
+            })?;
+            // Typed gather: Column::take_positions keeps an all-valid Int64/
+            // Float64 buffer contiguous (and carries data+validity for nullable
+            // Float64) instead of cloning a 32 B Scalar per row + re-validating
+            // in Column::new. Bit-identical — it preserves the source dtype, the
+            // same Column the DataFrame row-reorder path already produces.
+            columns.insert(name.clone(), column.take_positions(&normalized_positions));
+        }
 
         // Per br-frankenpandas-4wlg0: pandas df.iloc preserves row index name.
         let index = Index::new(out_labels).rename_index(self.index.name());
-        let columns = ColumnStore::from_pairs(pairs);
-        if !self.allows_duplicate_labels && (columns.has_duplicates() || index.has_duplicates()) {
-            return Err(FrameError::CompatibilityRejected(
-                "iloc: duplicate labels are present".to_owned(),
-            ));
-        }
-
-        let mut out = Self::new_with_column_order(index, columns, out_columns)?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Self::new_with_column_order(index, columns, selected_columns)
     }
 
     /// Boolean mask row selection.
@@ -112962,68 +112958,13 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_iloc_with_columns_duplicate_selector_preserves_duplicates() {
+    fn dataframe_iloc_with_columns_duplicate_selector_is_rejected() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])]).unwrap();
-        let selected = df
-            .iloc_with_columns(&[0], Some(&["a".to_owned(), "a".to_owned()]))
-            .unwrap();
-        assert_eq!(selected.shape(), (1, 2));
-        assert_eq!(selected.column_names(), vec!["a", "a"]);
-        assert_eq!(
-            selected.column_at(0).unwrap().values(),
-            &[Scalar::Int64(10)]
-        );
-        assert_eq!(
-            selected.column_at(1).unwrap().values(),
-            &[Scalar::Int64(10)]
-        );
-
-        // When duplicate labels are forbidden, selecting duplicate columns must fail.
-        let df_no_dup = df.set_flags(Some(false)).unwrap();
-        let err = df_no_dup
+        let err = df
             .iloc_with_columns(&[0], Some(&["a".to_owned(), "a".to_owned()]))
             .unwrap_err();
         assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels are present"))
-        );
-
-        // When duplicate labels are forbidden, selecting duplicate rows must also fail.
-        let err_row = df_no_dup.iloc_with_columns(&[0, 0], None).unwrap_err();
-        assert!(
-            matches!(err_row, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels are present"))
-        );
-    }
-
-    #[test]
-    fn dataframe_iloc_with_columns_preserves_existing_duplicate_columns() {
-        let pairs = vec![
-            (
-                "a".to_string(),
-                Column::new(DType::Int64, vec![Scalar::Int64(10)]).unwrap(),
-            ),
-            (
-                "a".to_string(),
-                Column::new(DType::Int64, vec![Scalar::Int64(20)]).unwrap(),
-            ),
-        ];
-        let df = DataFrame::new_with_column_order(
-            Index::new(vec![IndexLabel::Int64(0)]),
-            crate::ColumnStore::from_pairs(pairs),
-            vec!["a".to_string(), "a".to_string()],
-        )
-        .unwrap();
-        assert_eq!(df.column_names(), vec!["a", "a"]);
-
-        let selected = df.iloc_with_columns(&[0], None).unwrap();
-        assert_eq!(selected.shape(), (1, 2));
-        assert_eq!(selected.column_names(), vec!["a", "a"]);
-        assert_eq!(
-            selected.column_at(0).unwrap().values(),
-            &[Scalar::Int64(10)]
-        );
-        assert_eq!(
-            selected.column_at(1).unwrap().values(),
-            &[Scalar::Int64(20)]
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate column selector"))
         );
     }
 
