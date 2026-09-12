@@ -154519,7 +154519,7 @@ mod tests {
             df.columns()["period"].values(),
             &[
                 Scalar::Period(Period::new(216, PeriodFreq::Quarterly)),
-                Scalar::Period(Period::new(648, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(648, PeriodFreq::Quarterly)),
             ]
         );
         assert_eq!(
