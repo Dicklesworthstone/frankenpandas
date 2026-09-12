@@ -21214,7 +21214,12 @@ mod typed_validate_cardinality_uza04 {
 
         assert_eq!(
             merged.column_order,
-            vec!["key".to_string(), "a_x".to_string(), "a_y".to_string(), "a_y".to_string()]
+            vec![
+                "key".to_string(),
+                "a_x".to_string(),
+                "a_y".to_string(),
+                "a_y".to_string()
+            ]
         );
         assert_eq!(merged.columns.occurrences("a_y"), 2);
         assert_eq!(
@@ -21227,4 +21232,3 @@ mod typed_validate_cardinality_uza04 {
         );
     }
 }
-

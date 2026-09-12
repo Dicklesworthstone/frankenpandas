@@ -406,22 +406,16 @@ fn bench_concat_axis0(c: &mut Criterion) {
 }
 
 fn bench_concat_axis1(c: &mut Criterion) {
-    // br-frankenpandas-6ojob: both operands used the default `c{i}` names, so
-    // every iteration hit `CompatibilityRejected("duplicate column 'c0' in
-    // concat(axis=1) output")` and the `.expect()` panicked — this bench timed
-    // nothing and failed the bench-as-test target of `cargo test -p
-    // fp-conformance --all-targets`.
+    // br-frankenpandas-6ojob / br-frankenpandas-8b4d4: Previously both operands
+    // used default `c{i}` names and failed when ColumnStore could not represent
+    // duplicate columns.
     //
-    // That rejection is DELIBERATE, not a bug to route around: FrankenPandas's
-    // column store is `BTreeMap<String, Column>` and structurally cannot hold
-    // duplicate column labels, and the divergence is pinned by two conformance
-    // fixtures (fp_p2d_028 strict / fp_p2d_029 hardened, both asserting
-    // "duplicate column") plus the oracle's own guard at pandas_oracle.py:7018.
-    // Neither fixture is touched here. The underlying pandas-parity gap — pandas
-    // DOES allow duplicate column labels — is tracked separately.
+    // Duplicate column label support is now fully implemented across ColumnStore
+    // (via `ColumnStore::from_pairs` and `repeats`) and `concat_dataframes_axis1`
+    // (resolved in br-frankenpandas-ih4t0 and br-frankenpandas-8b4d4).
     //
-    // So the fix is to the workload, not the semantics: disjoint prefixes make
-    // this a genuine 5+5 -> 10-column axis=1 concat.
+    // The disjoint prefixes (`l` and `r`) are kept here because evaluating
+    // 5+5 -> 10 distinct columns is the intended axis=1 benchmark workload.
     let mut group = c.benchmark_group("joins/concat_axis1");
     for &n in &[10_000usize, 50_000] {
         let f1 = build_numeric_frame_prefixed(n, 5, "l");

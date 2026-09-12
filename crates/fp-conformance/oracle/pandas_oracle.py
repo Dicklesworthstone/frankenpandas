@@ -8532,13 +8532,6 @@ def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     join = payload.get("concat_join", "outer")
 
-    if axis in (1, "columns"):
-        overlapping = sorted(set(left.columns.tolist()) & set(right.columns.tolist()))
-        if overlapping:
-            joined = ", ".join(map(str, overlapping))
-            raise OracleError(
-                f"dataframe_concat axis=1 duplicate columns unsupported: {joined}"
-            )
     try:
         out = pd.concat([left, right], axis=axis, join=join, sort=False)
     except Exception as exc:

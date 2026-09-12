@@ -8,6 +8,11 @@
     "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
     "generated_at": "2026-04-22T21:02:48Z"
   },
+  "retired": {
+    "reason": "Pandas 2.2.3 concat(axis=1) succeeds with duplicate column labels (pd.concat([left, right], axis=1)); asserting an error contract is invalid per oracle probe in br-frankenpandas-8b4d4 and br-frankenpandas-nvnvr.",
+    "retired_at": "2026-09-12T19:30:00Z",
+    "bead": "br-frankenpandas-8b4d4"
+  },
   "concat_axis": 1,
   "frame": {
     "index": [
