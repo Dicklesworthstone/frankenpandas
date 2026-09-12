@@ -1436,13 +1436,8 @@ fn insert_merged_output_column(
     name: String,
     column: Column,
 ) -> Result<(), JoinError> {
-    if output_columns.contains_key(&name) {
-        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-            format!("merge suffixes cause duplicate output column '{name}'"),
-        )));
-    }
     order.push(name.clone());
-    output_columns.insert(name, column);
+    output_columns.push(name, column);
     Ok(())
 }
 
@@ -21180,4 +21175,56 @@ mod typed_validate_cardinality_uza04 {
             "the generic checker must still own declined shapes, got: {error}"
         );
     }
+
+    #[test]
+    fn merge_suffix_collision_preserves_duplicate_columns() {
+        let left = fp_frame::DataFrame::from_dict_with_index(
+            vec![
+                ("key", vec![Scalar::Int64(1)]),
+                ("a", vec![Scalar::Int64(10)]),
+                ("a_y", vec![Scalar::Int64(20)]),
+            ],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict_with_index(
+            vec![
+                ("key", vec![Scalar::Int64(1)]),
+                ("a", vec![Scalar::Int64(30)]),
+            ],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+
+        let options = MergeExecutionOptions {
+            suffixes: Some([Some("_x".to_string()), Some("_y".to_string())]),
+            ..MergeExecutionOptions::default()
+        };
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["key"],
+            &["key"],
+            JoinType::Inner,
+            options,
+        )
+        .expect("merge with suffix collision should succeed and produce duplicate columns");
+
+        assert_eq!(
+            merged.column_order,
+            vec!["key".to_string(), "a_x".to_string(), "a_y".to_string(), "a_y".to_string()]
+        );
+        assert_eq!(merged.columns.occurrences("a_y"), 2);
+        assert_eq!(
+            merged.columns.column_at(2).unwrap().values(),
+            &[Scalar::Int64(20)]
+        );
+        assert_eq!(
+            merged.columns.column_at(3).unwrap().values(),
+            &[Scalar::Int64(30)]
+        );
+    }
 }
+
