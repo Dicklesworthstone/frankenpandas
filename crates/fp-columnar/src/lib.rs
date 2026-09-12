@@ -22944,8 +22944,8 @@ impl Column {
     /// leading `|periods|` positions are Null(NaN).
     pub fn pct_change(&self, periods: i64) -> Result<Self, ColumnError> {
         let len = self.values.len();
-        if len == 0 || periods == 0 {
-            return Self::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); len]);
+        if len == 0 {
+            return Self::new(DType::Float64, Vec::new());
         }
         let abs = periods.unsigned_abs() as usize;
         // Typed Float64-output fast paths (i64 / f64). Compute (cur−prev)/prev into
@@ -27082,17 +27082,12 @@ impl Column {
         // (older pandas gave [-1, 0, 1]). Timedelta64 keeps its dtype; all other
         // numeric types diff as Float64.
         let out_dtype = match &self.dtype {
-            DType::Timedelta64 => DType::Timedelta64,
-            DType::Bool => DType::Bool,
+            DType::Timedelta64 | DType::Datetime64 { .. } => DType::Timedelta64,
+            DType::Bool | DType::BoolNullable => DType::Bool,
             _ => DType::Float64,
         };
-        if len == 0 || periods == 0 {
-            let null = if out_dtype == DType::Timedelta64 {
-                Scalar::Null(NullKind::NaT)
-            } else {
-                Scalar::Null(NullKind::NaN)
-            };
-            return Self::new(out_dtype, vec![null; len]);
+        if len == 0 {
+            return Self::new(out_dtype, Vec::new());
         }
         let abs = periods.unsigned_abs() as usize;
         // Typed Float64-output fast paths (i64 / f64 inputs): fill an f64 body
@@ -27105,15 +27100,13 @@ impl Column {
         // ignores a partial mask — see NEGATIVE_EVIDENCE.)
         if abs < len {
             // Leading (periods>0) or trailing (periods<0) `abs` slots are vacated.
-            let boundary: (usize, usize) = if periods > 0 {
-                (0, abs)
+            let validity = if abs == 0 {
+                self.validity.clone()
+            } else if periods > 0 {
+                ValidityMask::from_invalid_ranges(Arc::from([(0, abs)]), len)
             } else {
-                (len - abs, abs)
+                ValidityMask::from_invalid_ranges(Arc::from([(len - abs, abs)]), len)
             };
-            let validity = ValidityMask::from_invalid_ranges(
-                Arc::from(vec![boundary].into_boxed_slice()),
-                len,
-            );
             // Int64: (x as f64) − (y as f64) is always finite (|i64 as f64| ≤ 9.2e18,
             // difference ≤ 1.8e19) so the body carries no NaN.
             if let Some(data) = self.as_i64_slice() {
@@ -27183,6 +27176,19 @@ impl Column {
                     // `.diff()`; FP surfaces NaT per DISC-018, keeping this
                     // path infallible. `i64::MIN` is the NaT sentinel, so the
                     // representable range is [i64::MIN + 1, i64::MAX].
+                    let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
+                    if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                        out.push(Scalar::Null(NullKind::NaT));
+                    } else {
+                        out.push(Scalar::Timedelta64(delta as i64));
+                    }
+                }
+                continue;
+            }
+            if let (Scalar::Datetime64(cur_ns), Scalar::Datetime64(prev_ns)) = (cur, prev) {
+                if *cur_ns == fp_types::Timestamp::NAT || *prev_ns == fp_types::Timestamp::NAT {
+                    out.push(Scalar::Null(NullKind::NaT));
+                } else {
                     let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
                     if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
                         out.push(Scalar::Null(NullKind::NaT));
@@ -45365,6 +45371,100 @@ mod tests {
                 d.values()[1]
             );
             assert_ne!(d.values()[1], Scalar::Timedelta64(i64::MAX));
+        }
+
+        #[test]
+        fn diff_periods_zero_computes_zero_difference() {
+            let col_int = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap();
+            let d_int = col_int.diff(0).unwrap();
+            assert_eq!(d_int.dtype(), DType::Float64);
+            assert_eq!(
+                d_int.values(),
+                &[
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(0.0)
+                ]
+            );
+
+            let col_flt = Column::from_values(vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.5),
+            ])
+            .unwrap();
+            let d_flt = col_flt.diff(0).unwrap();
+            assert_eq!(d_flt.dtype(), DType::Float64);
+            assert_eq!(d_flt.values()[0], Scalar::Float64(0.0));
+            assert!(d_flt.values()[1].is_missing());
+            assert_eq!(d_flt.values()[2], Scalar::Float64(0.0));
+
+            let col_bool =
+                Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).unwrap();
+            let d_bool = col_bool.diff(0).unwrap();
+            assert_eq!(d_bool.dtype(), DType::Bool);
+            assert_eq!(d_bool.values(), &[Scalar::Bool(false), Scalar::Bool(false)]);
+
+            let one_hour = 3_600 * 1_000_000_000_i64;
+            let col_td = Column::from_values(vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(2 * one_hour),
+            ])
+            .unwrap();
+            let d_td = col_td.diff(0).unwrap();
+            assert_eq!(d_td.dtype(), DType::Timedelta64);
+            assert_eq!(
+                d_td.values(),
+                &[Scalar::Timedelta64(0), Scalar::Timedelta64(0)]
+            );
+
+            let col_dt = Column::from_values(vec![
+                Scalar::Datetime64(1_600_000_000_000_000_000),
+                Scalar::Datetime64(1_600_000_060_000_000_000),
+            ])
+            .unwrap();
+            let d_dt = col_dt.diff(0).unwrap();
+            assert_eq!(d_dt.dtype(), DType::Timedelta64);
+            assert_eq!(
+                d_dt.values(),
+                &[Scalar::Timedelta64(0), Scalar::Timedelta64(0)]
+            );
+        }
+
+        #[test]
+        fn diff_datetime64_produces_timedelta64() {
+            let base = 1_600_000_000_000_000_000_i64;
+            let col_dt = Column::from_values(vec![
+                Scalar::Datetime64(base),
+                Scalar::Datetime64(base + 60_000_000_000),
+                Scalar::Datetime64(base + 180_000_000_000),
+            ])
+            .unwrap();
+            let d = col_dt.diff(1).unwrap();
+            assert_eq!(d.dtype(), DType::Timedelta64);
+            assert!(d.values()[0].is_missing());
+            assert_eq!(d.values()[1], Scalar::Timedelta64(60_000_000_000));
+            assert_eq!(d.values()[2], Scalar::Timedelta64(120_000_000_000));
+        }
+
+        #[test]
+        fn pct_change_periods_zero_computes_zero_or_nan() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ])
+            .unwrap();
+            let p = col.pct_change(0).unwrap();
+            assert_eq!(p.dtype(), DType::Float64);
+            assert!(p.values()[0].is_missing());
+            assert_eq!(p.values()[1], Scalar::Float64(0.0));
+            assert_eq!(p.values()[2], Scalar::Float64(0.0));
         }
 
         /// br-frankenpandas-o9e5q: the two-column temporal arm in

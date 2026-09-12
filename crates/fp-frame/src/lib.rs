@@ -18158,11 +18158,19 @@ impl Series {
                     if j < n { Some(j) } else { None }
                 };
                 out.push(match prev_idx {
-                    Some(j) => Scalar::Timedelta64(data[i].saturating_sub(data[j])),
-                    None => Scalar::Null(NullKind::NaN),
+                    Some(j) => {
+                        let delta = i128::from(data[i]) - i128::from(data[j]);
+                        if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                            Scalar::Null(NullKind::NaT)
+                        } else {
+                            Scalar::Timedelta64(delta as i64)
+                        }
+                    }
+                    None => Scalar::Null(NullKind::NaT),
                 });
             }
-            return self.with_values_preserving_index(out);
+            let column = Column::new(DType::Timedelta64, out)?;
+            return Series::new(self.name.clone(), self.index.clone(), column);
         }
 
         // Typed Datetime64 fast path: `dt.diff()` is the elapsed time between consecutive
@@ -18186,15 +18194,32 @@ impl Series {
                     if j < n { Some(j) } else { None }
                 };
                 out.push(match prev_idx {
-                    Some(j) => Scalar::Timedelta64(data[i].saturating_sub(data[j])),
-                    None => Scalar::Null(NullKind::NaN),
+                    Some(j) => {
+                        let delta = i128::from(data[i]) - i128::from(data[j]);
+                        if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                            Scalar::Null(NullKind::NaT)
+                        } else {
+                            Scalar::Timedelta64(delta as i64)
+                        }
+                    }
+                    None => Scalar::Null(NullKind::NaT),
                 });
             }
-            return self.with_values_preserving_index(out);
+            let column = Column::new(DType::Timedelta64, out)?;
+            return Series::new(self.name.clone(), self.index.clone(), column);
         }
 
         let vals = self.column.values();
         let mut out = Vec::with_capacity(n);
+        let is_temporal = matches!(
+            self.column.dtype(),
+            DType::Timedelta64 | DType::Datetime64 { .. }
+        );
+        let null_scalar = if is_temporal {
+            Scalar::Null(NullKind::NaT)
+        } else {
+            Scalar::Null(NullKind::NaN)
+        };
 
         for i in 0..n {
             let prev_idx = if periods >= 0 {
@@ -18216,7 +18241,12 @@ impl Series {
                         if *a_ns == Timedelta::NAT || *b_ns == Timedelta::NAT {
                             Scalar::Null(NullKind::NaT)
                         } else {
-                            Scalar::Timedelta64(a_ns.saturating_sub(*b_ns))
+                            let delta = i128::from(*a_ns) - i128::from(*b_ns);
+                            if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                                Scalar::Null(NullKind::NaT)
+                            } else {
+                                Scalar::Timedelta64(delta as i64)
+                            }
                         }
                     } else if let (Scalar::Datetime64(a_ns), Scalar::Datetime64(b_ns)) =
                         (&vals[i], &vals[j])
@@ -18226,7 +18256,12 @@ impl Series {
                         if *a_ns == fp_types::Timestamp::NAT || *b_ns == fp_types::Timestamp::NAT {
                             Scalar::Null(NullKind::NaT)
                         } else {
-                            Scalar::Timedelta64(a_ns.saturating_sub(*b_ns))
+                            let delta = i128::from(*a_ns) - i128::from(*b_ns);
+                            if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                                Scalar::Null(NullKind::NaT)
+                            } else {
+                                Scalar::Timedelta64(delta as i64)
+                            }
                         }
                     } else if let (Scalar::Bool(a_b), Scalar::Bool(b_b)) = (&vals[i], &vals[j]) {
                         // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
@@ -18234,16 +18269,22 @@ impl Series {
                     } else {
                         match (vals[i].to_f64(), vals[j].to_f64()) {
                             (Ok(a), Ok(b)) => Scalar::Float64(a - b),
-                            _ => Scalar::Null(NullKind::NaN),
+                            _ => null_scalar.clone(),
                         }
                     }
                 }
-                _ => Scalar::Null(NullKind::NaN),
+                _ => null_scalar.clone(),
             };
             out.push(result);
         }
 
-        self.with_values_preserving_index(out)
+        let out_dtype = match self.column.dtype() {
+            DType::Timedelta64 | DType::Datetime64 { .. } => DType::Timedelta64,
+            DType::Bool | DType::BoolNullable => DType::Bool,
+            _ => DType::Float64,
+        };
+        let column = Column::new(out_dtype, out)?;
+        Series::new(self.name.clone(), self.index.clone(), column)
     }
 
     /// Cumulative sum, skipping NaN.
@@ -37670,8 +37711,27 @@ impl SeriesGroupBy<'_> {
     where
         F: Fn(&[Scalar]) -> Vec<Scalar>,
     {
+        self.transform_groups_with_dtype(None, func)
+    }
+
+    fn transform_groups_with_dtype<F>(
+        &self,
+        target_dtype: Option<DType>,
+        func: F,
+    ) -> Result<Series, FrameError>
+    where
+        F: Fn(&[Scalar]) -> Vec<Scalar>,
+    {
         let (_order, order_keys, groups) = self.build_groups();
-        let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+        let default_null = if matches!(
+            self.series.column.dtype(),
+            DType::Timedelta64 | DType::Datetime64 { .. }
+        ) {
+            Scalar::Null(NullKind::NaT)
+        } else {
+            Scalar::Null(NullKind::NaN)
+        };
+        let mut out = vec![default_null; self.series.len()];
 
         for key in &order_keys {
             let indices = &groups[key];
@@ -37691,7 +37751,11 @@ impl SeriesGroupBy<'_> {
         // source DataFrame's index name through cumsum/cumprod/cummin/cummax
         // and any custom transform.
         let index = self.series.index.clone();
-        let column = Column::from_values(out)?;
+        let column = if let Some(dtype) = target_dtype {
+            Column::new(dtype, out)?
+        } else {
+            Column::from_values(out)?
+        };
         Series::new(self.series.name(), index, column)
     }
 
@@ -41176,16 +41240,30 @@ impl SeriesGroupBy<'_> {
                 return build(out, mask);
             }
         }
-        self.transform_groups(|vals| {
+        let is_temporal = matches!(
+            self.series.column.dtype(),
+            DType::Timedelta64 | DType::Datetime64 { .. }
+        );
+        let out_dtype = match self.series.column.dtype() {
+            DType::Timedelta64 | DType::Datetime64 { .. } => DType::Timedelta64,
+            DType::Bool | DType::BoolNullable => DType::Bool,
+            _ => DType::Float64,
+        };
+        let null_scalar = if is_temporal {
+            Scalar::Null(NullKind::NaT)
+        } else {
+            Scalar::Null(NullKind::NaN)
+        };
+        self.transform_groups_with_dtype(Some(out_dtype), |vals| {
             vals.iter()
                 .enumerate()
                 .map(|(idx, value)| {
                     if idx < periods {
-                        return Scalar::Null(NullKind::NaN);
+                        return null_scalar.clone();
                     }
                     let previous = &vals[idx - periods];
                     if value.is_missing() || previous.is_missing() {
-                        return Scalar::Null(NullKind::NaN);
+                        return null_scalar.clone();
                     }
                     // Per br-frankenpandas-q82t4: Timedelta64 diff preserves
                     // Timedelta dtype matching pandas. NaT propagates.
@@ -41195,7 +41273,25 @@ impl SeriesGroupBy<'_> {
                         if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
                             return Scalar::Null(NullKind::NaT);
                         }
-                        return Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns));
+                        let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
+                        if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                            return Scalar::Null(NullKind::NaT);
+                        }
+                        return Scalar::Timedelta64(delta as i64);
+                    }
+                    if let (Scalar::Datetime64(cur_ns), Scalar::Datetime64(prev_ns)) =
+                        (value, previous)
+                    {
+                        if *cur_ns == fp_types::Timestamp::NAT
+                            || *prev_ns == fp_types::Timestamp::NAT
+                        {
+                            return Scalar::Null(NullKind::NaT);
+                        }
+                        let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
+                        if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                            return Scalar::Null(NullKind::NaT);
+                        }
+                        return Scalar::Timedelta64(delta as i64);
                     }
                     // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
                     if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (value, previous) {
@@ -41204,7 +41300,7 @@ impl SeriesGroupBy<'_> {
                     if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
                         Scalar::Float64(current - prev)
                     } else {
-                        Scalar::Null(NullKind::NaN)
+                        null_scalar.clone()
                     }
                 })
                 .collect()
@@ -82923,7 +83019,11 @@ impl DataFrame {
                     out,
                     fp_columnar::ValidityMask::from_words(words, n),
                 ))
-            } else if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+            } else if col.dtype().is_numeric()
+                || col.dtype().is_bool()
+                || col.dtype().is_datetime()
+                || col.dtype().is_timedelta()
+            {
                 Ok(self.column_as_series(name)?.diff(periods)?.column().clone())
             } else {
                 Ok(col.clone())
@@ -82951,10 +83051,8 @@ impl DataFrame {
         let n_rows = self.len();
         let mut out_cols = BTreeMap::new();
 
-        // Per br-frankenpandas-r82bc: detect uniformly-Timedelta64 column and
-        // preserve dtype. Sister surgery to pct_change_axis1's
-        // br-frankenpandas-dj6rv Timedelta64 branch — but for diff the result
-        // is Timedelta64 (delta of deltas), not f64 (dimensionless ratio).
+        // Per br-frankenpandas-r82bc: detect uniformly-Timedelta64 or Datetime64 columns
+        // and preserve Timedelta64 dtype matching pandas (delta of durations or timestamps).
         let all_timedelta = self.column_order.iter().all(|name| {
             let col = &self.columns[name];
             matches!(col.dtype(), DType::Timedelta64)
@@ -82969,6 +83067,25 @@ impl DataFrame {
                 .iter()
                 .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
         });
+
+        let all_datetime = !self.column_order.is_empty()
+            && self.column_order.iter().all(|name| {
+                let col = &self.columns[name];
+                matches!(col.dtype(), DType::Datetime64 { .. })
+                    || col.values().iter().all(|v| {
+                        matches!(v, Scalar::Datetime64(_))
+                            || matches!(v, Scalar::Null(NullKind::NaT))
+                            || v.is_missing()
+                    })
+            })
+            && self.column_order.iter().any(|name| {
+                self.columns[name]
+                    .values()
+                    .iter()
+                    .any(|v| matches!(v, Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT))
+            });
+
+        let is_temporal = all_timedelta || all_datetime;
 
         for (j, name) in self.column_order.iter().enumerate() {
             let mut vals = Vec::with_capacity(n_rows);
@@ -82991,8 +83108,8 @@ impl DataFrame {
                     let curr_val = &current_col.values()[i];
                     let prev_val = &prev_col.values()[i];
                     if curr_val.is_missing() || prev_val.is_missing() {
-                        if all_timedelta {
-                            vals.push(Scalar::Timedelta64(Timedelta::NAT));
+                        if is_temporal {
+                            vals.push(Scalar::Null(NullKind::NaT));
                         } else {
                             vals.push(Scalar::Null(NullKind::NaN));
                         }
@@ -83001,7 +83118,31 @@ impl DataFrame {
                     if let (Scalar::Timedelta64(c_ns), Scalar::Timedelta64(p_ns)) =
                         (curr_val, prev_val)
                     {
-                        vals.push(Scalar::Timedelta64(Timedelta::sub(*c_ns, *p_ns)));
+                        if *c_ns == Timedelta::NAT || *p_ns == Timedelta::NAT {
+                            vals.push(Scalar::Null(NullKind::NaT));
+                        } else {
+                            let delta = i128::from(*c_ns) - i128::from(*p_ns);
+                            if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                                vals.push(Scalar::Null(NullKind::NaT));
+                            } else {
+                                vals.push(Scalar::Timedelta64(delta as i64));
+                            }
+                        }
+                        continue;
+                    }
+                    if let (Scalar::Datetime64(c_ns), Scalar::Datetime64(p_ns)) =
+                        (curr_val, prev_val)
+                    {
+                        if *c_ns == fp_types::Timestamp::NAT || *p_ns == fp_types::Timestamp::NAT {
+                            vals.push(Scalar::Null(NullKind::NaT));
+                        } else {
+                            let delta = i128::from(*c_ns) - i128::from(*p_ns);
+                            if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                                vals.push(Scalar::Null(NullKind::NaT));
+                            } else {
+                                vals.push(Scalar::Timedelta64(delta as i64));
+                            }
+                        }
                         continue;
                     }
                     match (curr_val.to_f64(), prev_val.to_f64()) {
@@ -83009,12 +83150,12 @@ impl DataFrame {
                         _ => vals.push(Scalar::Null(NullKind::NaN)),
                     }
                 }
-            } else if all_timedelta {
-                vals.resize(n_rows, Scalar::Timedelta64(Timedelta::NAT));
+            } else if is_temporal {
+                vals.resize(n_rows, Scalar::Null(NullKind::NaT));
             } else {
                 vals.resize(n_rows, Scalar::Null(NullKind::NaN));
             }
-            let out_dtype = if all_timedelta {
+            let out_dtype = if is_temporal {
                 DType::Timedelta64
             } else {
                 DType::Float64
@@ -96252,6 +96393,62 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// Internal: apply a per-group transform per column with explicit target dtype preservation.
+    fn transform_groups_with_column_dtype<F, G>(&self, func: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&str, &Column) -> (DType, G),
+        G: Fn(&[Scalar]) -> Vec<Scalar>,
+    {
+        let (group_order, groups) = self.build_groups();
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+
+        let n = self.df.len();
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+            let (target_dtype, transform_fn) = func(col_name, col);
+            let default_null = match &target_dtype {
+                DType::Timedelta64 | DType::Datetime64 { .. } => Scalar::Null(NullKind::NaT),
+                _ => Scalar::Null(NullKind::NaN),
+            };
+            let mut out = vec![default_null; n];
+
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+                let transformed = transform_fn(&group_vals);
+                for (j, &ri) in row_indices.iter().enumerate() {
+                    if j < transformed.len() {
+                        out[ri] = transformed[j].clone();
+                    }
+                }
+            }
+
+            result_cols.insert(col_name.clone(), Column::new(target_dtype, out)?);
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols.into(),
+            column_order: col_order.into(),
+            index: self.df.index.clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+            allows_duplicate_labels: self.df.allows_duplicate_labels,
+        })
+    }
+
     /// GroupBy cumulative sum.
     ///
     /// Matches `df.groupby(col).cumsum()`.
@@ -96630,36 +96827,68 @@ impl DataFrameGroupBy<'_> {
         if let Some(df) = self.try_diff_dense(periods) {
             return Ok(df);
         }
-        self.transform_groups(|vals| {
-            vals.iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    if i < periods {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    let prev = &vals[i - periods];
-                    if v.is_missing() || prev.is_missing() {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    // Per br-frankenpandas-q82t4: Timedelta64 diff preserves
-                    // Timedelta dtype matching pandas. NaT propagates.
-                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (v, prev) {
-                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
-                            return Scalar::Null(NullKind::NaT);
+        self.transform_groups_with_column_dtype(|_col_name, col| {
+            let is_temporal = matches!(col.dtype(), DType::Timedelta64 | DType::Datetime64 { .. });
+            let out_dtype = match col.dtype() {
+                DType::Timedelta64 | DType::Datetime64 { .. } => DType::Timedelta64,
+                DType::Bool | DType::BoolNullable => DType::Bool,
+                _ => DType::Float64,
+            };
+            let null_scalar = if is_temporal {
+                Scalar::Null(NullKind::NaT)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            };
+            (out_dtype, move |vals: &[Scalar]| {
+                vals.iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        if i < periods {
+                            return null_scalar.clone();
                         }
-                        return Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns));
-                    }
-                    // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
-                    if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (v, prev) {
-                        return Scalar::Bool(cur_b != prev_b);
-                    }
-                    if let (Ok(a), Ok(b)) = (v.to_f64(), prev.to_f64()) {
-                        Scalar::Float64(a - b)
-                    } else {
-                        Scalar::Null(NullKind::NaN)
-                    }
-                })
-                .collect()
+                        let prev = &vals[i - periods];
+                        if v.is_missing() || prev.is_missing() {
+                            return null_scalar.clone();
+                        }
+                        // Per br-frankenpandas-q82t4 and br-frankenpandas-2z1sp: Timedelta64 diff preserves
+                        // Timedelta dtype matching pandas. NaT propagates.
+                        if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
+                            (v, prev)
+                        {
+                            if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                                return Scalar::Null(NullKind::NaT);
+                            }
+                            let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
+                            if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                                return Scalar::Null(NullKind::NaT);
+                            }
+                            return Scalar::Timedelta64(delta as i64);
+                        }
+                        if let (Scalar::Datetime64(cur_ns), Scalar::Datetime64(prev_ns)) = (v, prev)
+                        {
+                            if *cur_ns == fp_types::Timestamp::NAT
+                                || *prev_ns == fp_types::Timestamp::NAT
+                            {
+                                return Scalar::Null(NullKind::NaT);
+                            }
+                            let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
+                            if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
+                                return Scalar::Null(NullKind::NaT);
+                            }
+                            return Scalar::Timedelta64(delta as i64);
+                        }
+                        // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
+                        if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (v, prev) {
+                            return Scalar::Bool(cur_b != prev_b);
+                        }
+                        if let (Ok(a), Ok(b)) = (v.to_f64(), prev.to_f64()) {
+                            Scalar::Float64(a - b)
+                        } else {
+                            null_scalar.clone()
+                        }
+                    })
+                    .collect()
+            })
         })
     }
 
@@ -135154,6 +135383,196 @@ mod tests {
         assert!(cola.values()[1].is_missing());
         assert_eq!(colb.values()[0], Scalar::Float64(3.0)); // 4 - 1
         assert_eq!(colb.values()[1], Scalar::Float64(-1.0)); // 2 - 3
+    }
+
+    #[test]
+    fn dataframe_diff_temporal_preserves_timedelta64_2z1sp() {
+        let one_sec = 1_000_000_000_i64;
+        let base_dt = 1_700_000_000_000_000_000_i64;
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "td",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Timedelta64(100),
+                    Scalar::Timedelta64(300),
+                    Scalar::Timedelta64(250),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "dt",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Datetime64(base_dt),
+                    Scalar::Datetime64(base_dt + 50 * one_sec),
+                    Scalar::Datetime64(base_dt + 30 * one_sec),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "f",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(9.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let diff_pos = df.diff(1).unwrap();
+        let col_td = diff_pos.column("td").unwrap();
+        assert_eq!(col_td.dtype(), DType::Timedelta64);
+        assert!(col_td.values()[0].is_missing());
+        assert_eq!(col_td.values()[1], Scalar::Timedelta64(200));
+        assert_eq!(col_td.values()[2], Scalar::Timedelta64(-50));
+
+        let col_dt = diff_pos.column("dt").unwrap();
+        assert_eq!(col_dt.dtype(), DType::Timedelta64);
+        assert!(col_dt.values()[0].is_missing());
+        assert_eq!(col_dt.values()[1], Scalar::Timedelta64(50 * one_sec));
+        assert_eq!(col_dt.values()[2], Scalar::Timedelta64(-20 * one_sec));
+
+        let col_f = diff_pos.column("f").unwrap();
+        assert_eq!(col_f.dtype(), DType::Float64);
+        assert!(col_f.values()[0].is_missing());
+        assert_eq!(col_f.values()[1], Scalar::Float64(3.0));
+        assert_eq!(col_f.values()[2], Scalar::Float64(5.0));
+
+        // Negative periods
+        let diff_neg = df.diff(-1).unwrap();
+        let col_td_neg = diff_neg.column("td").unwrap();
+        assert_eq!(col_td_neg.dtype(), DType::Timedelta64);
+        assert_eq!(col_td_neg.values()[0], Scalar::Timedelta64(-200));
+        assert_eq!(col_td_neg.values()[1], Scalar::Timedelta64(50));
+        assert!(col_td_neg.values()[2].is_missing());
+
+        let col_dt_neg = diff_neg.column("dt").unwrap();
+        assert_eq!(col_dt_neg.dtype(), DType::Timedelta64);
+        assert_eq!(col_dt_neg.values()[0], Scalar::Timedelta64(-50 * one_sec));
+        assert_eq!(col_dt_neg.values()[1], Scalar::Timedelta64(20 * one_sec));
+        assert!(col_dt_neg.values()[2].is_missing());
+    }
+
+    #[test]
+    fn dataframe_diff_axis1_temporal_preserves_timedelta64_2z1sp() {
+        let base_dt = 1_700_000_000_000_000_000_i64;
+        let df_dt = DataFrame::from_series(vec![
+            Series::from_values(
+                "t1",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Datetime64(base_dt),
+                    Scalar::Datetime64(base_dt + 2000),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "t2",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Datetime64(base_dt + 500),
+                    Scalar::Datetime64(base_dt + 1800),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let diff_dt = df_dt.diff_axis1(1).unwrap();
+        let col1 = diff_dt.column("t1").unwrap();
+        let col2 = diff_dt.column("t2").unwrap();
+        assert_eq!(col1.dtype(), DType::Timedelta64);
+        assert_eq!(col2.dtype(), DType::Timedelta64);
+        assert!(col1.values()[0].is_missing());
+        assert!(col1.values()[1].is_missing());
+        assert_eq!(col2.values()[0], Scalar::Timedelta64(500));
+        assert_eq!(col2.values()[1], Scalar::Timedelta64(-200));
+
+        let df_td = DataFrame::from_series(vec![
+            Series::from_values(
+                "td1",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Timedelta64(10), Scalar::Timedelta64(20)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "td2",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Timedelta64(15), Scalar::Timedelta64(12)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let diff_td = df_td.diff_axis1(1).unwrap();
+        let col_td1 = diff_td.column("td1").unwrap();
+        let col_td2 = diff_td.column("td2").unwrap();
+        assert_eq!(col_td1.dtype(), DType::Timedelta64);
+        assert_eq!(col_td2.dtype(), DType::Timedelta64);
+        assert!(col_td1.values()[0].is_missing());
+        assert!(col_td1.values()[1].is_missing());
+        assert_eq!(col_td2.values()[0], Scalar::Timedelta64(5));
+        assert_eq!(col_td2.values()[1], Scalar::Timedelta64(-8));
+    }
+
+    #[test]
+    fn dataframe_groupby_diff_temporal_preserves_timedelta64_2z1sp() {
+        let base_dt = 1_700_000_000_000_000_000_i64;
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "k",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "td",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Timedelta64(10),
+                    Scalar::Timedelta64(30),
+                    Scalar::Timedelta64(100),
+                    Scalar::Timedelta64(150),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "dt",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Datetime64(base_dt),
+                    Scalar::Datetime64(base_dt + 50),
+                    Scalar::Datetime64(base_dt + 200),
+                    Scalar::Datetime64(base_dt + 280),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let diff_gb = df.groupby(&["k"]).unwrap().diff(1).unwrap();
+        let col_td = diff_gb.column("td").unwrap();
+        assert_eq!(col_td.dtype(), DType::Timedelta64);
+        assert!(col_td.values()[0].is_missing());
+        assert_eq!(col_td.values()[1], Scalar::Timedelta64(20));
+        assert!(col_td.values()[2].is_missing());
+        assert_eq!(col_td.values()[3], Scalar::Timedelta64(50));
+
+        let col_dt = diff_gb.column("dt").unwrap();
+        assert_eq!(col_dt.dtype(), DType::Timedelta64);
+        assert!(col_dt.values()[0].is_missing());
+        assert_eq!(col_dt.values()[1], Scalar::Timedelta64(50));
+        assert!(col_dt.values()[2].is_missing());
+        assert_eq!(col_dt.values()[3], Scalar::Timedelta64(80));
     }
 
     #[test]

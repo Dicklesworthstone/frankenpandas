@@ -4302,10 +4302,11 @@ fn parse_scalar(field: &str) -> Scalar {
     if let Ok(value) = trimmed.parse::<i64>() {
         return Scalar::Int64(value);
     }
-    if let Ok(value) = trimmed.parse::<f64>() {
-        if !value.is_nan() && (!value.is_infinite() || field.len() == trimmed.len()) {
-            return Scalar::Float64(value);
-        }
+    if let Ok(value) = trimmed.parse::<f64>()
+        && !value.is_nan()
+        && (!value.is_infinite() || field.len() == trimmed.len())
+    {
+        return Scalar::Float64(value);
     }
     if field.eq_ignore_ascii_case("true") {
         return Scalar::Bool(true);
@@ -4497,10 +4498,11 @@ fn parse_scalar_with_options(
     } else {
         Cow::Borrowed(numeric_candidate.as_ref())
     };
-    if let Ok(value) = float_candidate.as_ref().parse::<f64>() {
-        if !value.is_nan() && (!value.is_infinite() || field.len() == trimmed.len()) {
-            return Scalar::Float64(value);
-        }
+    if let Ok(value) = float_candidate.as_ref().parse::<f64>()
+        && !value.is_nan()
+        && (!value.is_infinite() || field.len() == trimmed.len())
+    {
+        return Scalar::Float64(value);
     }
 
     if true_set.contains(field) {
