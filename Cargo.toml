@@ -56,6 +56,8 @@ parquet = { version = "59.3.0", default-features = false, features = ["arrow", "
 mysql = "28.0.2"
 memchr = "2.8.3"
 mimalloc = "0.1.52"
+fallible-iterator = "0.2.0"
+postgres-protocol = "0.6.12"
 # `extension-module` is DELIBERATELY NOT ENABLED HERE — it is opt-in via
 # `fp-python`'s own `extension-module` feature. The flag tells PyO3 to omit
 # libpython linkage, which is correct for a wheel loaded INTO a Python process

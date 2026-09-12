@@ -15,6 +15,7 @@ categories.workspace = true
 arrow = { workspace = true }
 bytes = { workspace = true }
 calamine = { workspace = true }
+chrono = { workspace = true }
 csv = { workspace = true }
 dta = { workspace = true }
 fast-float2 = { workspace = true }
@@ -29,6 +30,8 @@ quick-xml = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 mysql = { workspace = true, optional = true }
+fallible-iterator = { workspace = true, optional = true }
+postgres-protocol = { workspace = true, optional = true }
 ryu = { workspace = true }
 sas7bdat = { workspace = true }
 sas_xport = { workspace = true }
@@ -53,7 +56,5 @@ default = ["sql-sqlite"]
 block-storage = ["fp-frame/block-storage"]
 hdf5 = ["dep:hdf5"]
 sql-sqlite = ["dep:rusqlite"]
-# Placeholder only. The old concrete `postgres` adapter depended on
-# tokio-postgres, which violates the workspace no-Tokio policy.
 sql-mysql = ["dep:mysql"]
-sql-postgresql = []
+sql-postgresql = ["dep:postgres-protocol", "dep:fallible-iterator"]

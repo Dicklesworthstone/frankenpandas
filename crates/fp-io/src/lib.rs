@@ -12722,16 +12722,1111 @@ fn sql_column_definition<C: SqlConnection>(
 }
 
 // ============================================================================
-// PostgreSQL SqlConnection placeholder (feature = "sql-postgresql")
+// PostgreSQL SqlConnection Implementation (feature = "sql-postgresql")
 // ============================================================================
 
-#[cfg(feature = "sql-mysql")]
+#[cfg(any(feature = "sql-mysql", feature = "sql-postgresql"))]
 use std::cell::RefCell;
 
-// The `sql-postgresql` feature is intentionally a placeholder under the
-// workspace no-Tokio policy. The removed concrete adapter used the `postgres`
-// crate, which is built on tokio-postgres and pulled Tokio into all-features
-// builds even when users did not need PostgreSQL.
+#[cfg(feature = "sql-postgresql")]
+enum PgStream {
+    Tcp(std::net::TcpStream),
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixStream),
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl std::io::Read for PgStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            PgStream::Tcp(s) => s.read(buf),
+            #[cfg(unix)]
+            PgStream::Unix(s) => s.read(buf),
+        }
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl std::io::Write for PgStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            PgStream::Tcp(s) => s.write(buf),
+            #[cfg(unix)]
+            PgStream::Unix(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            PgStream::Tcp(s) => s.flush(),
+            #[cfg(unix)]
+            PgStream::Unix(s) => s.flush(),
+        }
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn format_pg_error(body: postgres_protocol::message::backend::ErrorResponseBody) -> IoError {
+    use fallible_iterator::FallibleIterator;
+    let mut fields = body.fields();
+    let mut severity = String::new();
+    let mut code = String::new();
+    let mut message = String::new();
+    let mut detail = String::new();
+    while let Ok(Some(field)) = fields.next() {
+        match field.type_() {
+            b'S' => severity = String::from_utf8_lossy(field.value_bytes()).into_owned(),
+            b'C' => code = String::from_utf8_lossy(field.value_bytes()).into_owned(),
+            b'M' => message = String::from_utf8_lossy(field.value_bytes()).into_owned(),
+            b'D' => detail = String::from_utf8_lossy(field.value_bytes()).into_owned(),
+            _ => {}
+        }
+    }
+    let detail_str = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" - {detail}")
+    };
+    IoError::Sql(format!(
+        "PostgreSQL error [SQLSTATE {code} {severity}]: {message}{detail_str}"
+    ))
+}
+
+#[cfg(feature = "sql-postgresql")]
+pub struct PgSyncClient {
+    stream: PgStream,
+    read_buf: bytes::BytesMut,
+    write_buf: bytes::BytesMut,
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl PgSyncClient {
+    fn read_message(&mut self) -> Result<postgres_protocol::message::backend::Message, IoError> {
+        use std::io::Read;
+        loop {
+            if let Some(msg) =
+                postgres_protocol::message::backend::Message::parse(&mut self.read_buf)
+                    .map_err(|e| IoError::Sql(format!("PostgreSQL protocol parse error: {e}")))?
+            {
+                return Ok(msg);
+            }
+            let mut chunk = [0u8; 8192];
+            let n = self
+                .stream
+                .read(&mut chunk)
+                .map_err(|e| IoError::Sql(format!("PostgreSQL stream read error: {e}")))?;
+            if n == 0 {
+                return Err(IoError::Sql(
+                    "PostgreSQL connection closed unexpectedly".to_owned(),
+                ));
+            }
+            self.read_buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    fn flush_write(&mut self) -> Result<(), IoError> {
+        use std::io::Write;
+        self.stream
+            .write_all(&self.write_buf)
+            .map_err(|e| IoError::Sql(format!("PostgreSQL stream write error: {e}")))?;
+        self.stream
+            .flush()
+            .map_err(|e| IoError::Sql(format!("PostgreSQL stream flush error: {e}")))?;
+        self.write_buf.clear();
+        Ok(())
+    }
+
+    pub fn connect(url_or_conn: &str) -> Result<Self, IoError> {
+        let (host, port, user, password, dbname) = parse_pg_connection_string(url_or_conn);
+        let stream = if host.starts_with('/') {
+            #[cfg(unix)]
+            {
+                let path = format!("{}/.s.PGSQL.{}", host.trim_end_matches('/'), port);
+                let unix_stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
+                    IoError::Sql(format!(
+                        "Failed to connect to PostgreSQL socket {path}: {e}"
+                    ))
+                })?;
+                PgStream::Unix(unix_stream)
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(IoError::Sql(
+                    "Unix domain sockets not supported on this platform".to_owned(),
+                ));
+            }
+        } else {
+            let tcp = std::net::TcpStream::connect((host.as_str(), port)).map_err(|e| {
+                IoError::Sql(format!(
+                    "Failed to connect to PostgreSQL at {host}:{port}: {e}"
+                ))
+            })?;
+            let _ = tcp.set_nodelay(true);
+            PgStream::Tcp(tcp)
+        };
+
+        let mut client = Self {
+            stream,
+            read_buf: bytes::BytesMut::with_capacity(8192),
+            write_buf: bytes::BytesMut::with_capacity(8192),
+        };
+
+        let user_str = user.as_str();
+        let db_str = dbname.as_str();
+        let startup_params = [
+            ("user", user_str),
+            ("database", db_str),
+            ("client_encoding", "UTF8"),
+        ];
+        postgres_protocol::message::frontend::startup_message(
+            startup_params,
+            &mut client.write_buf,
+        )
+        .map_err(|e| IoError::Sql(format!("PostgreSQL startup message encoding failed: {e}")))?;
+        client.flush_write()?;
+
+        loop {
+            let msg = client.read_message()?;
+            match msg {
+                postgres_protocol::message::backend::Message::AuthenticationOk => {}
+                postgres_protocol::message::backend::Message::AuthenticationCleartextPassword => {
+                    let pass = password.as_deref().unwrap_or("");
+                    postgres_protocol::message::frontend::password_message(
+                        pass.as_bytes(),
+                        &mut client.write_buf,
+                    )
+                    .map_err(|e| IoError::Sql(format!("password message encoding failed: {e}")))?;
+                    client.flush_write()?;
+                }
+                postgres_protocol::message::backend::Message::AuthenticationMd5Password(body) => {
+                    let pass = password.as_deref().unwrap_or("");
+                    let hash = postgres_protocol::authentication::md5_hash(
+                        user_str.as_bytes(),
+                        pass.as_bytes(),
+                        body.salt(),
+                    );
+                    postgres_protocol::message::frontend::password_message(
+                        hash.as_bytes(),
+                        &mut client.write_buf,
+                    )
+                    .map_err(|e| IoError::Sql(format!("md5 password encoding failed: {e}")))?;
+                    client.flush_write()?;
+                }
+                postgres_protocol::message::backend::Message::AuthenticationSasl(_body) => {
+                    use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+                    let pass = password.as_deref().unwrap_or("");
+                    let mut scram =
+                        ScramSha256::new(pass.as_bytes(), ChannelBinding::unsupported());
+                    postgres_protocol::message::frontend::sasl_initial_response(
+                        "SCRAM-SHA-256",
+                        scram.message(),
+                        &mut client.write_buf,
+                    )
+                    .map_err(|e| {
+                        IoError::Sql(format!("sasl initial response encoding failed: {e}"))
+                    })?;
+                    client.flush_write()?;
+
+                    let cont_msg = client.read_message()?;
+                    match cont_msg {
+                        postgres_protocol::message::backend::Message::AuthenticationSaslContinue(
+                            cont_body,
+                        ) => {
+                            scram
+                                .update(cont_body.data())
+                                .map_err(|e| IoError::Sql(format!("sasl update failed: {e}")))?;
+                            postgres_protocol::message::frontend::sasl_response(
+                                scram.message(),
+                                &mut client.write_buf,
+                            )
+                            .map_err(|e| {
+                                IoError::Sql(format!("sasl response encoding failed: {e}"))
+                            })?;
+                            client.flush_write()?;
+
+                            let fin_msg = client.read_message()?;
+                            match fin_msg {
+                                postgres_protocol::message::backend::Message::AuthenticationSaslFinal(
+                                    fin_body,
+                                ) => {
+                                    scram.finish(fin_body.data()).map_err(|e| {
+                                        IoError::Sql(format!("sasl finish failed: {e}"))
+                                    })?;
+                                }
+                                postgres_protocol::message::backend::Message::ErrorResponse(
+                                    err,
+                                ) => {
+                                    return Err(format_pg_error(err));
+                                }
+                                _ => {
+                                    return Err(IoError::Sql(
+                                        "unexpected SASL final message".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        postgres_protocol::message::backend::Message::ErrorResponse(err) => {
+                            return Err(format_pg_error(err));
+                        }
+                        _ => {
+                            return Err(IoError::Sql(
+                                "unexpected SASL continue message".to_string(),
+                            ));
+                        }
+                    }
+                }
+                postgres_protocol::message::backend::Message::ReadyForQuery(_) => {
+                    break;
+                }
+                postgres_protocol::message::backend::Message::ErrorResponse(err) => {
+                    return Err(format_pg_error(err));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(client)
+    }
+
+    pub fn batch_execute(&mut self, sql: &str) -> Result<(), IoError> {
+        self.query(sql, &[])?;
+        Ok(())
+    }
+
+    pub fn query(&mut self, sql: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+        use fallible_iterator::FallibleIterator;
+        if params.is_empty() {
+            postgres_protocol::message::frontend::query(sql, &mut self.write_buf)
+                .map_err(|e| IoError::Sql(format!("PostgreSQL query encoding failed: {e}")))?;
+            self.flush_write()?;
+
+            let mut columns = Vec::new();
+            let mut col_types = Vec::new();
+            let mut rows = Vec::new();
+            let mut query_err = None;
+
+            loop {
+                let msg = self.read_message()?;
+                match msg {
+                    postgres_protocol::message::backend::Message::RowDescription(desc) => {
+                        let mut fields = desc.fields();
+                        while let Ok(Some(f)) = fields.next() {
+                            columns.push(f.name().to_string());
+                            col_types.push(f.type_oid());
+                        }
+                    }
+                    postgres_protocol::message::backend::Message::DataRow(data_row) => {
+                        let mut ranges = data_row.ranges();
+                        let buf = data_row.buffer();
+                        let mut row = Vec::with_capacity(col_types.len());
+                        let mut col_idx = 0;
+                        while let Ok(Some(range_opt)) = ranges.next() {
+                            let type_oid = col_types.get(col_idx).copied().unwrap_or(0);
+                            let cell_bytes = range_opt.map(|r| &buf[r]);
+                            row.push(pg_text_cell_to_scalar(cell_bytes, type_oid));
+                            col_idx += 1;
+                        }
+                        rows.push(row);
+                    }
+                    postgres_protocol::message::backend::Message::ErrorResponse(e) => {
+                        query_err = Some(format_pg_error(e));
+                    }
+                    postgres_protocol::message::backend::Message::ReadyForQuery(_) => break,
+                    _ => {}
+                }
+            }
+
+            if let Some(e) = query_err {
+                return Err(e);
+            }
+            return Ok(SqlQueryResult { columns, rows });
+        }
+
+        let param_types = vec![0u32; params.len()];
+        postgres_protocol::message::frontend::parse(
+            "",
+            sql,
+            param_types.iter().copied(),
+            &mut self.write_buf,
+        )
+        .map_err(|e| IoError::Sql(format!("parse encoding failed: {e}")))?;
+
+        let param_formats = vec![0i16; params.len()];
+        let encoded_params: Vec<Option<Vec<u8>>> =
+            params.iter().map(scalar_to_pg_text_param).collect();
+
+        postgres_protocol::message::frontend::bind(
+            "",
+            "",
+            param_formats.iter().copied(),
+            encoded_params.iter(),
+            |param, buf| match param {
+                None => Ok(postgres_protocol::IsNull::Yes),
+                Some(bytes) => {
+                    buf.extend_from_slice(bytes);
+                    Ok(postgres_protocol::IsNull::No)
+                }
+            },
+            std::iter::once(0i16),
+            &mut self.write_buf,
+        )
+        .map_err(|e| match e {
+            postgres_protocol::message::frontend::BindError::Conversion(err) => {
+                IoError::Sql(format!("bind conversion error: {err}"))
+            }
+            postgres_protocol::message::frontend::BindError::Serialization(err) => {
+                IoError::Sql(format!("bind serialization error: {err}"))
+            }
+        })?;
+
+        postgres_protocol::message::frontend::describe(b'P', "", &mut self.write_buf)
+            .map_err(|e| IoError::Sql(format!("describe encoding failed: {e}")))?;
+        postgres_protocol::message::frontend::execute("", 0, &mut self.write_buf)
+            .map_err(|e| IoError::Sql(format!("execute encoding failed: {e}")))?;
+        postgres_protocol::message::frontend::sync(&mut self.write_buf);
+
+        self.flush_write()?;
+
+        let mut columns = Vec::new();
+        let mut col_types = Vec::new();
+        let mut rows = Vec::new();
+        let mut query_err = None;
+
+        loop {
+            let msg = self.read_message()?;
+            match msg {
+                postgres_protocol::message::backend::Message::RowDescription(desc) => {
+                    let mut fields = desc.fields();
+                    while let Ok(Some(f)) = fields.next() {
+                        columns.push(f.name().to_string());
+                        col_types.push(f.type_oid());
+                    }
+                }
+                postgres_protocol::message::backend::Message::DataRow(data_row) => {
+                    let mut ranges = data_row.ranges();
+                    let buf = data_row.buffer();
+                    let mut row = Vec::with_capacity(col_types.len());
+                    let mut col_idx = 0;
+                    while let Ok(Some(range_opt)) = ranges.next() {
+                        let type_oid = col_types.get(col_idx).copied().unwrap_or(0);
+                        let cell_bytes = range_opt.map(|r| &buf[r]);
+                        row.push(pg_text_cell_to_scalar(cell_bytes, type_oid));
+                        col_idx += 1;
+                    }
+                    rows.push(row);
+                }
+                postgres_protocol::message::backend::Message::ErrorResponse(e) => {
+                    query_err = Some(format_pg_error(e));
+                }
+                postgres_protocol::message::backend::Message::ReadyForQuery(_) => break,
+                _ => {}
+            }
+        }
+
+        if let Some(e) = query_err {
+            return Err(e);
+        }
+        Ok(SqlQueryResult { columns, rows })
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn parse_pg_connection_string(conn_str: &str) -> (String, u16, String, Option<String>, String) {
+    let mut host = "127.0.0.1".to_string();
+    let mut port = 5432u16;
+    let mut user = std::env::var("PGUSER")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "postgres".to_string());
+    let mut password = std::env::var("PGPASSWORD").ok();
+    let mut dbname = std::env::var("PGDATABASE").unwrap_or_else(|_| "postgres".to_string());
+
+    let s = conn_str.trim();
+    if let Some(rest) = s
+        .strip_prefix("postgres://")
+        .or_else(|| s.strip_prefix("postgresql://"))
+    {
+        let (auth_part, host_db_part) = if let Some((auth, rest2)) = rest.split_once('@') {
+            (Some(auth), rest2)
+        } else {
+            (None, rest)
+        };
+
+        if let Some(auth) = auth_part {
+            if let Some((u, p)) = auth.split_once(':') {
+                user = u.to_string();
+                password = Some(p.to_string());
+            } else {
+                user = auth.to_string();
+            }
+        }
+
+        let (host_port_part, db_query_part) = if let Some((h, d)) = host_db_part.split_once('/') {
+            (h, Some(d))
+        } else {
+            (host_db_part, None)
+        };
+
+        if !host_port_part.is_empty() {
+            if let Some((h, p)) = host_port_part.split_once(':') {
+                host = h.to_string();
+                if let Ok(num) = p.parse() {
+                    port = num;
+                }
+            } else {
+                host = host_port_part.to_string();
+            }
+        }
+
+        if let Some(d) = db_query_part {
+            let db = if let Some((db, _query)) = d.split_once('?') {
+                db
+            } else {
+                d
+            };
+            if !db.is_empty() {
+                dbname = db.to_string();
+            }
+        }
+    } else if s.contains('=') {
+        for part in s.split_whitespace() {
+            if let Some((k, v)) = part.split_once('=') {
+                match k {
+                    "host" => host = v.to_string(),
+                    "port" => {
+                        if let Ok(p) = v.parse() {
+                            port = p;
+                        }
+                    }
+                    "user" => user = v.to_string(),
+                    "password" => password = Some(v.to_string()),
+                    "dbname" => dbname = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+    } else if !s.is_empty() {
+        dbname = s.to_string();
+    }
+
+    (host, port, user, password, dbname)
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn pg_text_cell_to_scalar(bytes: Option<&[u8]>, type_oid: u32) -> Scalar {
+    let Some(bytes) = bytes else {
+        return Scalar::Null(crate::NullKind::Null);
+    };
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return Scalar::Utf8(String::from_utf8_lossy(bytes).into_owned()),
+    };
+    match type_oid {
+        16 => Scalar::Bool(s == "t" || s == "true" || s == "1"),
+        20 | 21 | 23 => match s.parse::<i64>() {
+            Ok(v) => Scalar::Int64(v),
+            Err(_) => Scalar::Utf8(s.to_owned()),
+        },
+        700 | 701 => match s.parse::<f64>() {
+            Ok(v) => Scalar::Float64(v),
+            Err(_) => Scalar::Utf8(s.to_owned()),
+        },
+        1700 => match s.parse::<f64>() {
+            Ok(v) => Scalar::Float64(v),
+            Err(_) => {
+                if s.eq_ignore_ascii_case("nan") {
+                    Scalar::Float64(f64::NAN)
+                } else if s.eq_ignore_ascii_case("infinity") || s.eq_ignore_ascii_case("inf") {
+                    Scalar::Float64(f64::INFINITY)
+                } else if s.eq_ignore_ascii_case("-infinity") || s.eq_ignore_ascii_case("-inf") {
+                    Scalar::Float64(f64::NEG_INFINITY)
+                } else {
+                    Scalar::Utf8(s.to_owned())
+                }
+            }
+        },
+        1114 | 1184 => {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                Scalar::Datetime64(dt.timestamp_nanos_opt().unwrap_or(0))
+            } else if let Ok(dt) = chrono::DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z") {
+                Scalar::Datetime64(dt.timestamp_nanos_opt().unwrap_or(0))
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+            {
+                Scalar::Datetime64(dt.and_utc().timestamp_nanos_opt().unwrap_or(0))
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                Scalar::Datetime64(dt.and_utc().timestamp_nanos_opt().unwrap_or(0))
+            } else {
+                Scalar::Utf8(s.to_owned())
+            }
+        }
+        _ => Scalar::Utf8(s.to_owned()),
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn scalar_to_pg_text_param(s: &Scalar) -> Option<Vec<u8>> {
+    match s {
+        Scalar::Null(_) => None,
+        Scalar::Bool(b) => Some(if *b { b"t".to_vec() } else { b"f".to_vec() }),
+        Scalar::Int64(i) => Some(i.to_string().into_bytes()),
+        Scalar::Float64(f) => {
+            if f.is_nan() {
+                Some(b"NaN".to_vec())
+            } else if *f == f64::INFINITY {
+                Some(b"Infinity".to_vec())
+            } else if *f == f64::NEG_INFINITY {
+                Some(b"-Infinity".to_vec())
+            } else {
+                Some(f.to_string().into_bytes())
+            }
+        }
+        Scalar::Utf8(s) => Some(s.as_bytes().to_vec()),
+        Scalar::Timedelta64(v) => {
+            if *v == Timedelta::NAT {
+                None
+            } else {
+                Some(v.to_string().into_bytes())
+            }
+        }
+        Scalar::Datetime64(nanos) => {
+            if *nanos == Timestamp::NAT {
+                None
+            } else {
+                let secs = nanos.div_euclid(1_000_000_000);
+                let sub_nanos = nanos.rem_euclid(1_000_000_000) as u32;
+                if let Some(dt) = chrono::DateTime::from_timestamp(secs, sub_nanos) {
+                    Some(
+                        dt.format("%Y-%m-%d %H:%M:%S%.f+00")
+                            .to_string()
+                            .into_bytes(),
+                    )
+                } else {
+                    Some(nanos.to_string().into_bytes())
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn postgres_dtype_sql(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Int64 | DType::Int64Nullable | DType::Timedelta64 => "BIGINT",
+        DType::Float64 | DType::Float64Nullable => "DOUBLE PRECISION",
+        DType::Bool | DType::BoolNullable => "BOOLEAN",
+        DType::Datetime64 { .. } => "TIMESTAMPTZ",
+        _ => "TEXT",
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn postgres_sql_dtype_from_index(index: &Index) -> &'static str {
+    for label in index.labels() {
+        match label {
+            IndexLabel::Int64(_) => return "BIGINT",
+            IndexLabel::Utf8(_) => return "TEXT",
+            IndexLabel::Timedelta64(v) if *v != Timedelta::NAT => return "BIGINT",
+            IndexLabel::Datetime64(v) if *v != i64::MIN => return "TIMESTAMPTZ",
+            _ => {}
+        }
+    }
+    "TEXT"
+}
+
+/// Wrapper around a synchronous `PgSyncClient` providing interior mutability
+/// for the `SqlConnection` trait (which requires `&self`).
+#[cfg(feature = "sql-postgresql")]
+pub struct PostgresConnection {
+    conn: RefCell<PgSyncClient>,
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl PostgresConnection {
+    pub fn new(client: PgSyncClient) -> Self {
+        Self {
+            conn: RefCell::new(client),
+        }
+    }
+
+    pub fn open(url: &str) -> Result<Self, IoError> {
+        let client = PgSyncClient::connect(url)?;
+        Ok(Self {
+            conn: RefCell::new(client),
+        })
+    }
+
+    fn regclass_literal(&self, table_name: &str, schema: Option<&str>) -> Result<String, IoError> {
+        let schema = schema.map(str::to_owned).or_else(|| self.default_schema());
+        Ok(match schema {
+            Some(schema) => format!(
+                "{}.{}",
+                self.quote_identifier(&schema)?,
+                self.quote_identifier(table_name)?
+            ),
+            None => self.quote_identifier(table_name)?,
+        })
+    }
+}
+
+#[cfg(feature = "sql-postgresql")]
+impl SqlConnection for PostgresConnection {
+    fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+        self.conn.borrow_mut().query(query, params)
+    }
+
+    fn supports_paged_sql_chunks(&self) -> bool {
+        true
+    }
+
+    fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+        self.conn.borrow_mut().batch_execute(sql)
+    }
+
+    fn table_exists(&self, table_name: &str) -> Result<bool, IoError> {
+        self.table_exists_in_schema(table_name, None)
+    }
+
+    fn table_exists_in_schema(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<bool, IoError> {
+        let res = self.query(
+            "SELECT 1 FROM information_schema.tables \
+             WHERE table_name = $1 AND table_schema = COALESCE($2, current_schema()) LIMIT 1",
+            &[
+                Scalar::Utf8(table_name.to_owned()),
+                schema
+                    .map(|s| Scalar::Utf8(s.to_owned()))
+                    .unwrap_or(Scalar::Null(crate::NullKind::Null)),
+            ],
+        )?;
+        Ok(!res.rows.is_empty())
+    }
+
+    fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+        self.execute_batch("BEGIN")?;
+        for row in rows {
+            if let Err(e) = self.conn.borrow_mut().query(insert_sql, row) {
+                let _ = self.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+        self.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    fn dtype_sql(&self, dtype: DType) -> &'static str {
+        postgres_dtype_sql(dtype)
+    }
+
+    fn index_dtype_sql(&self, index: &Index) -> &'static str {
+        postgres_sql_dtype_from_index(index)
+    }
+
+    fn parameter_marker(&self, ordinal: usize) -> String {
+        format!("${ordinal}")
+    }
+
+    fn dialect_name(&self) -> &'static str {
+        "postgresql"
+    }
+
+    fn supports_returning(&self) -> bool {
+        true
+    }
+
+    fn max_param_count(&self) -> Option<usize> {
+        Some(65535)
+    }
+
+    fn max_identifier_length(&self) -> Option<usize> {
+        Some(63)
+    }
+
+    fn supports_schemas(&self) -> bool {
+        true
+    }
+
+    fn default_schema(&self) -> Option<String> {
+        Some("public".to_owned())
+    }
+
+    fn with_transaction<T, F>(&self, f: F) -> Result<T, IoError>
+    where
+        F: FnOnce(&Self) -> Result<T, IoError>,
+        Self: Sized,
+    {
+        self.execute_batch("BEGIN")?;
+        match f(self) {
+            Ok(result) => {
+                self.execute_batch("COMMIT")?;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = self.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        let res = match schema {
+            Some(s) => self.query(
+                "SELECT tablename FROM pg_tables \
+                 WHERE schemaname = $1 \
+                 AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY tablename",
+                &[Scalar::Utf8(s.to_owned())],
+            )?,
+            None => self.query(
+                "SELECT tablename FROM pg_tables \
+                 WHERE schemaname = current_schema() \
+                 AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY tablename",
+                &[],
+            )?,
+        };
+        Ok(res
+            .rows
+            .into_iter()
+            .filter_map(|r| match r.into_iter().next() {
+                Some(Scalar::Utf8(s)) => Some(s),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn list_views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        let res = match schema {
+            Some(s) => self.query(
+                "SELECT viewname FROM pg_views \
+                 WHERE schemaname = $1 \
+                 AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY viewname",
+                &[Scalar::Utf8(s.to_owned())],
+            )?,
+            None => self.query(
+                "SELECT viewname FROM pg_views \
+                 WHERE schemaname = current_schema() \
+                 AND schemaname NOT IN ('pg_catalog', 'information_schema') \
+                 ORDER BY viewname",
+                &[],
+            )?,
+        };
+        Ok(res
+            .rows
+            .into_iter()
+            .filter_map(|r| match r.into_iter().next() {
+                Some(Scalar::Utf8(s)) => Some(s),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn list_schemas(&self) -> Result<Vec<String>, IoError> {
+        let res = self.query(
+            "SELECT schema_name FROM information_schema.schemata \
+             WHERE schema_name NOT IN ('pg_catalog', 'information_schema') \
+             AND schema_name NOT LIKE 'pg\\_%' ORDER BY schema_name",
+            &[],
+        )?;
+        Ok(res
+            .rows
+            .into_iter()
+            .filter_map(|r| match r.into_iter().next() {
+                Some(Scalar::Utf8(s)) => Some(s),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn server_version(&self) -> Result<Option<String>, IoError> {
+        let res = self.query("SELECT current_setting('server_version')", &[])?;
+        Ok(res.rows.first().and_then(|row| match row.first() {
+            Some(Scalar::Utf8(version)) => Some(version.clone()),
+            _ => None,
+        }))
+    }
+
+    fn table_schema(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Option<SqlTableSchema>, IoError> {
+        if !self.table_exists_in_schema(table_name, schema)? {
+            return Ok(None);
+        }
+
+        let regclass = self.regclass_literal(table_name, schema)?;
+        let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
+        let schema_sql = match schema {
+            Some(schema) => self.quote_identifier(schema)?,
+            None => "current_schema()".to_owned(),
+        };
+        let sql = format!(
+            "SELECT column_name, data_type, is_nullable, column_default, \
+                    is_identity, \
+                    col_description(({regclass_sql})::regclass, ordinal_position) \
+             FROM information_schema.columns \
+             WHERE table_name = $1 \
+             AND table_schema = {schema_sql} \
+             ORDER BY ordinal_position"
+        );
+        let res = self.query(&sql, &[Scalar::Utf8(table_name.to_owned())])?;
+
+        let pk_sql = "SELECT kcu.column_name, kcu.ordinal_position \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name \
+              AND tc.table_schema = kcu.table_schema \
+             WHERE tc.constraint_type = 'PRIMARY KEY' \
+             AND tc.table_name = $1 \
+             AND tc.table_schema = COALESCE($2, current_schema()) \
+             ORDER BY kcu.ordinal_position";
+        let pk_res = self.query(
+            pk_sql,
+            &[
+                Scalar::Utf8(table_name.to_owned()),
+                schema
+                    .map(|s| Scalar::Utf8(s.to_owned()))
+                    .unwrap_or(Scalar::Null(crate::NullKind::Null)),
+            ],
+        )?;
+
+        let pk: std::collections::BTreeMap<String, usize> = pk_res
+            .rows
+            .into_iter()
+            .enumerate()
+            .filter_map(|(pos, row)| match row.into_iter().next() {
+                Some(Scalar::Utf8(name)) => Some((name, pos + 1)),
+                _ => None,
+            })
+            .collect();
+
+        let mut columns = Vec::with_capacity(res.rows.len());
+        for row in res.rows {
+            let name = match row.first() {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => continue,
+            };
+            let declared_type = match row.get(1) {
+                Some(Scalar::Utf8(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let nullable = match row.get(2) {
+                Some(Scalar::Utf8(s)) => s == "YES",
+                _ => false,
+            };
+            let default_value = match row.get(3) {
+                Some(Scalar::Utf8(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let is_identity = match row.get(4) {
+                Some(Scalar::Utf8(s)) => s == "YES",
+                _ => false,
+            };
+            let comment = match row.get(5) {
+                Some(Scalar::Utf8(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let autoincrement = is_identity
+                || default_value
+                    .as_deref()
+                    .is_some_and(|default| default.contains("nextval"));
+            columns.push(SqlColumnSchema {
+                primary_key_ordinal: pk.get(&name).copied(),
+                name,
+                declared_type,
+                nullable,
+                default_value,
+                comment,
+                autoincrement,
+            });
+        }
+        Ok(Some(SqlTableSchema {
+            table_name: table_name.to_owned(),
+            columns,
+        }))
+    }
+
+    fn list_indexes(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlIndexSchema>, IoError> {
+        let (sql, params) = match schema {
+            Some(schema) => (
+                "SELECT indexname, indexdef FROM pg_indexes \
+                 WHERE schemaname = $1 AND tablename = $2 \
+                 ORDER BY indexname",
+                vec![
+                    Scalar::Utf8(schema.to_owned()),
+                    Scalar::Utf8(table_name.to_owned()),
+                ],
+            ),
+            None => (
+                "SELECT indexname, indexdef FROM pg_indexes \
+                 WHERE schemaname = current_schema() AND tablename = $1 \
+                 ORDER BY indexname",
+                vec![Scalar::Utf8(table_name.to_owned())],
+            ),
+        };
+        let res = self.query(sql, &params)?;
+        let mut out = Vec::with_capacity(res.rows.len());
+        for row in res.rows {
+            let name = match row.first() {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => continue,
+            };
+            let indexdef = match row.get(1) {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let columns = indexdef
+                .rsplit('(')
+                .next()
+                .map(|tail| tail.trim_end_matches(')'))
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect();
+            out.push(SqlIndexSchema {
+                name,
+                columns,
+                unique: indexdef.contains("CREATE UNIQUE"),
+            });
+        }
+        Ok(out)
+    }
+
+    fn list_unique_constraints(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
+        let regclass = self.regclass_literal(table_name, schema)?;
+        let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
+        let sql = format!(
+            "SELECT con.conname, a.attname \
+             FROM pg_constraint con \
+             JOIN pg_attribute a \
+               ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey) \
+             WHERE con.contype = 'u' AND con.conrelid = {regclass_sql}::regclass \
+             ORDER BY con.conname, a.attnum"
+        );
+        let res = self.query(&sql, &[])?;
+        let mut out: Vec<SqlUniqueConstraintSchema> = Vec::new();
+        for row in res.rows {
+            let constraint_name = match row.first() {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => continue,
+            };
+            let column = match row.get(1) {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => continue,
+            };
+            match out.last_mut() {
+                Some(last) if last.name == constraint_name => last.columns.push(column),
+                _ => out.push(SqlUniqueConstraintSchema {
+                    name: constraint_name,
+                    columns: vec![column],
+                }),
+            }
+        }
+        Ok(out)
+    }
+
+    fn table_comment(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Option<String>, IoError> {
+        let regclass = self.regclass_literal(table_name, schema)?;
+        let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
+        let sql = format!("SELECT obj_description(({regclass_sql})::regclass, 'pg_class')");
+        let res = self.query(&sql, &[])?;
+        Ok(res.rows.first().and_then(|row| match row.first() {
+            Some(Scalar::Utf8(s)) => Some(s.clone()),
+            _ => None,
+        }))
+    }
+
+    fn list_foreign_keys(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
+        let regclass = self.regclass_literal(table_name, schema)?;
+        let regclass_sql = format!("'{}'", regclass.replace('\'', "''"));
+        let sql = format!(
+            "SELECT con.conname, src.attname, ft.relname, tgt.attname \
+             FROM pg_constraint con \
+             JOIN pg_attribute src \
+               ON src.attrelid = con.conrelid AND src.attnum = ANY(con.conkey) \
+             JOIN pg_class ft ON ft.oid = con.confrelid \
+             JOIN pg_attribute tgt \
+               ON tgt.attrelid = con.confrelid AND tgt.attnum = ANY(con.confkey) \
+             WHERE con.contype = 'f' AND con.conrelid = {regclass_sql}::regclass \
+             ORDER BY con.conname, src.attnum"
+        );
+        let res = self.query(&sql, &[])?;
+        let mut out: Vec<SqlForeignKeySchema> = Vec::new();
+        for row in res.rows {
+            let constraint_name = match row.first() {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => continue,
+            };
+            let column = match row.get(1) {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => continue,
+            };
+            let referenced_table = match row.get(2) {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => continue,
+            };
+            let referenced_column = match row.get(3) {
+                Some(Scalar::Utf8(s)) => s.clone(),
+                _ => continue,
+            };
+            match out.last_mut() {
+                Some(last)
+                    if last.constraint_name.as_deref() == Some(constraint_name.as_str())
+                        && last.referenced_table == referenced_table =>
+                {
+                    last.columns.push(column);
+                    last.referenced_columns.push(referenced_column);
+                }
+                _ => out.push(SqlForeignKeySchema {
+                    constraint_name: Some(constraint_name),
+                    columns: vec![column],
+                    referenced_table,
+                    referenced_columns: vec![referenced_column],
+                }),
+            }
+        }
+        Ok(out)
+    }
+
+    fn truncate_table(&self, table_name: &str, schema: Option<&str>) -> Result<(), IoError> {
+        validate_sql_table_name(table_name)?;
+        validate_sql_table_ref_identifier_lengths(self, table_name, schema)?;
+        let qualified = match schema {
+            Some(s) if self.supports_schemas() => {
+                validate_sql_schema_name(s)?;
+                format!(
+                    "{}.{}",
+                    self.quote_identifier(s)?,
+                    self.quote_identifier(table_name)?
+                )
+            }
+            _ => self.quote_identifier(table_name)?,
+        };
+        self.execute_batch(&format!("TRUNCATE TABLE {qualified}"))
+    }
+}
 
 // ============================================================================
 // MySQL SqlConnection Implementation (feature = "sql-mysql")
@@ -12820,6 +13915,24 @@ mod nullable_dtype_sql_pairing_lkrb8 {
         }
         // The exact instance that was wrong: this returned "TEXT" via the `_` arm.
         assert_eq!(super::mysql_dtype_sql(DType::Float64Nullable), "DOUBLE");
+    }
+
+    #[cfg(feature = "sql-postgresql")]
+    #[test]
+    fn postgres_nullable_dtypes_declare_the_same_column_as_their_base() {
+        for (nullable, base) in NULLABLE_PAIRS {
+            assert_eq!(
+                super::postgres_dtype_sql(nullable.clone()),
+                super::postgres_dtype_sql(base.clone()),
+                "{nullable:?} must declare the same PostgreSQL column type as {base:?}"
+            );
+        }
+        assert_eq!(
+            super::postgres_dtype_sql(DType::Float64Nullable),
+            "DOUBLE PRECISION"
+        );
+        assert_eq!(super::postgres_dtype_sql(DType::Int64Nullable), "BIGINT");
+        assert_eq!(super::postgres_dtype_sql(DType::BoolNullable), "BOOLEAN");
     }
 }
 
@@ -18431,9 +19544,11 @@ mod tests {
 
         let padded_nan_frame = read_csv_str("x\n NaN \n1.0\n").expect("fallback padded nan");
         let padded_nan_column = padded_nan_frame.column("x").expect("x");
-        assert!(padded_nan_column.has_nulls());
-        assert!(!padded_nan_column.validity().get(0));
-        assert!(padded_nan_column.values()[0].is_missing());
+        assert_eq!(
+            padded_nan_column.values()[0],
+            Scalar::Utf8(" NaN ".to_owned())
+        );
+        assert!(!padded_nan_column.has_nulls());
     }
 
     #[test]
@@ -24044,6 +25159,264 @@ mod tests {
             super::sql_insert_rows_query(&conn, "users", &insert_cols).expect("insert"),
             "INSERT INTO `users` (`id`, `name`) VALUES (?, ?)"
         );
+    }
+
+    #[cfg(feature = "sql-postgresql")]
+    mod postgres_adapter_tests {
+        use fp_index::{Index, IndexLabel};
+        use fp_types::{DType, Scalar};
+
+        use super::*;
+        use crate::{
+            PostgresConnection, SqlConnection, SqlIfExists, SqlInspector,
+            parse_pg_connection_string, pg_text_cell_to_scalar, postgres_dtype_sql,
+            postgres_sql_dtype_from_index, read_sql_table, scalar_to_pg_text_param, write_sql,
+        };
+
+        #[test]
+        fn test_parse_pg_connection_string() {
+            let (h, p, u, pwd, db) =
+                parse_pg_connection_string("postgres://alice:secret@pg.example.com:5433/mydb");
+            assert_eq!(h, "pg.example.com");
+            assert_eq!(p, 5433);
+            assert_eq!(u, "alice");
+            assert_eq!(pwd.as_deref(), Some("secret"));
+            assert_eq!(db, "mydb");
+
+            let (h2, p2, u2, pwd2, db2) = parse_pg_connection_string(
+                "postgresql://postgres@localhost/testdb?sslmode=disable",
+            );
+            assert_eq!(h2, "localhost");
+            assert_eq!(p2, 5432);
+            assert_eq!(u2, "postgres");
+            assert_eq!(pwd2, None);
+            assert_eq!(db2, "testdb");
+
+            let (h3, p3, u3, pwd3, db3) = parse_pg_connection_string(
+                "host=127.0.0.1 port=5439 user=bob password=pass dbname=analytics",
+            );
+            assert_eq!(h3, "127.0.0.1");
+            assert_eq!(p3, 5439);
+            assert_eq!(u3, "bob");
+            assert_eq!(pwd3.as_deref(), Some("pass"));
+            assert_eq!(db3, "analytics");
+        }
+
+        #[test]
+        fn test_pg_text_cell_to_scalar() {
+            // Null
+            assert_eq!(
+                pg_text_cell_to_scalar(None, 23),
+                Scalar::Null(crate::NullKind::Null)
+            );
+
+            // Bool (16)
+            assert_eq!(pg_text_cell_to_scalar(Some(b"t"), 16), Scalar::Bool(true));
+            assert_eq!(pg_text_cell_to_scalar(Some(b"f"), 16), Scalar::Bool(false));
+
+            // Int (20, 21, 23)
+            assert_eq!(pg_text_cell_to_scalar(Some(b"42"), 23), Scalar::Int64(42));
+            assert_eq!(
+                pg_text_cell_to_scalar(Some(b"-100"), 20),
+                Scalar::Int64(-100)
+            );
+
+            // Float (700, 701)
+            let s = pg_text_cell_to_scalar(Some(b"2.718"), 701);
+            assert!(matches!(s, Scalar::Float64(v) if (v - 2.718).abs() < 1e-6));
+
+            // Numeric (1700)
+            let s = pg_text_cell_to_scalar(Some(b"3.14159"), 1700);
+            assert!(matches!(s, Scalar::Float64(v) if (v - 3.14159).abs() < 1e-5));
+            let s = pg_text_cell_to_scalar(Some(b"nan"), 1700);
+            assert!(matches!(s, Scalar::Float64(v) if v.is_nan()));
+            let s = pg_text_cell_to_scalar(Some(b"infinity"), 1700);
+            assert!(matches!(s, Scalar::Float64(v) if v.is_infinite() && v > 0.0));
+            let s = pg_text_cell_to_scalar(Some(b"-infinity"), 1700);
+            assert!(matches!(s, Scalar::Float64(v) if v.is_infinite() && v < 0.0));
+
+            // Utf8 (25, 1043, etc.)
+            assert_eq!(
+                pg_text_cell_to_scalar(Some(b"hello world"), 25),
+                Scalar::Utf8("hello world".into())
+            );
+        }
+
+        #[test]
+        fn test_scalar_to_pg_text_param() {
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Null(crate::NullKind::Null)),
+                None
+            );
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Bool(true)),
+                Some(b"t".to_vec())
+            );
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Bool(false)),
+                Some(b"f".to_vec())
+            );
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Int64(999)),
+                Some(b"999".to_vec())
+            );
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Float64(1.25)),
+                Some(b"1.25".to_vec())
+            );
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Float64(f64::NAN)),
+                Some(b"NaN".to_vec())
+            );
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Float64(f64::INFINITY)),
+                Some(b"Infinity".to_vec())
+            );
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Float64(f64::NEG_INFINITY)),
+                Some(b"-Infinity".to_vec())
+            );
+            assert_eq!(
+                scalar_to_pg_text_param(&Scalar::Utf8("pandas".into())),
+                Some(b"pandas".to_vec())
+            );
+        }
+
+        #[test]
+        fn test_postgres_dtype_sql_mappings() {
+            assert_eq!(postgres_dtype_sql(DType::Int64), "BIGINT");
+            assert_eq!(postgres_dtype_sql(DType::Int64Nullable), "BIGINT");
+            assert_eq!(postgres_dtype_sql(DType::Float64), "DOUBLE PRECISION");
+            assert_eq!(
+                postgres_dtype_sql(DType::Float64Nullable),
+                "DOUBLE PRECISION"
+            );
+            assert_eq!(postgres_dtype_sql(DType::Bool), "BOOLEAN");
+            assert_eq!(postgres_dtype_sql(DType::BoolNullable), "BOOLEAN");
+            assert_eq!(postgres_dtype_sql(DType::Timedelta64), "BIGINT");
+            assert_eq!(postgres_dtype_sql(DType::datetime64_naive()), "TIMESTAMPTZ");
+            assert_eq!(postgres_dtype_sql(DType::Utf8), "TEXT");
+
+            let int_idx = Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+            assert_eq!(postgres_sql_dtype_from_index(&int_idx), "BIGINT");
+            let str_idx = Index::new(vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+            ]);
+            assert_eq!(postgres_sql_dtype_from_index(&str_idx), "TEXT");
+        }
+
+        #[test]
+        fn test_postgres_live_roundtrip_and_inspector() {
+            let pg_url = std::env::var("PG_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| "postgres://ubuntu:ubuntu@127.0.0.1:5432/ubuntu".to_string());
+
+            let conn = match PostgresConnection::open(&pg_url) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("SKIPPING live PostgreSQL test: unable to connect to {pg_url}: {e}");
+                    return;
+                }
+            };
+
+            // Server version check
+            let version = conn.server_version().expect("server_version query");
+            assert!(version.is_some(), "expected server version");
+            eprintln!("Connected to PostgreSQL version: {}", version.unwrap());
+
+            let table_name = "fp_test_roundtrip_tbl";
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+
+            // 1. Create test DataFrame
+            let df = make_test_dataframe();
+            // write_sql with Fail
+            write_sql(&df, &conn, table_name, SqlIfExists::Fail).expect("write_sql fail");
+
+            // 2. table_exists
+            assert!(conn.table_exists(table_name).expect("table_exists"));
+            assert!(
+                !conn
+                    .table_exists("nonexistent_pg_tbl")
+                    .expect("nonexistent")
+            );
+
+            // 3. SqlInspector check
+            let inspector = SqlInspector::new(&conn);
+            let tables = inspector.tables(None).expect("inspector tables");
+            assert!(
+                tables.contains(&table_name.to_string()),
+                "tables list should contain {table_name}"
+            );
+
+            let schema = inspector
+                .columns(table_name, None)
+                .expect("table_schema")
+                .expect("schema exists");
+            assert_eq!(schema.table_name, table_name);
+            let col_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+            assert!(col_names.contains(&"ints"));
+            assert!(col_names.contains(&"floats"));
+            assert!(col_names.contains(&"names"));
+
+            // 4. read_sql_table roundtrip
+            let read_back = read_sql_table(&conn, table_name).expect("read_sql_table");
+            assert_eq!(read_back.index().len(), 3);
+            let ints = read_back.column("ints").unwrap();
+            assert_eq!(ints.values()[0], Scalar::Int64(10));
+            assert_eq!(ints.values()[1], Scalar::Int64(20));
+            assert_eq!(ints.values()[2], Scalar::Int64(30));
+
+            let floats = read_back.column("floats").unwrap();
+            assert_eq!(floats.values()[0], Scalar::Float64(1.5));
+            assert_eq!(floats.values()[1], Scalar::Float64(2.5));
+            assert_eq!(floats.values()[2], Scalar::Float64(3.5));
+
+            let names = read_back.column("names").unwrap();
+            assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
+            assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
+            assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+
+            // 5. Differential parity with SQLite on identical fixture
+            #[cfg(feature = "sql-sqlite")]
+            {
+                let sqlite_conn = rusqlite::Connection::open_in_memory().expect("sqlite in memory");
+                write_sql(&df, &sqlite_conn, "sqlite_tbl", SqlIfExists::Fail)
+                    .expect("sqlite write");
+                let sqlite_read = read_sql_table(&sqlite_conn, "sqlite_tbl").expect("sqlite read");
+                assert_eq!(read_back.index().len(), sqlite_read.index().len());
+                assert_eq!(read_back.column_names(), sqlite_read.column_names());
+                for col in read_back.column_names() {
+                    let pg_col = read_back.column(&col).unwrap();
+                    let sl_col = sqlite_read.column(&col).unwrap();
+                    assert_eq!(
+                        pg_col.values(),
+                        sl_col.values(),
+                        "column {col} mismatch between PG and SQLite"
+                    );
+                }
+            }
+
+            // 6. SqlIfExists::Append
+            write_sql(&df, &conn, table_name, SqlIfExists::Append).expect("write_sql append");
+            let appended = read_sql_table(&conn, table_name).expect("read_sql_table after append");
+            assert_eq!(appended.index().len(), 6);
+
+            // 7. SqlIfExists::Replace
+            write_sql(&df, &conn, table_name, SqlIfExists::Replace).expect("write_sql replace");
+            let replaced = read_sql_table(&conn, table_name).expect("read_sql_table after replace");
+            assert_eq!(replaced.index().len(), 3);
+
+            // 8. truncate_table
+            conn.truncate_table(table_name, None)
+                .expect("truncate_table");
+            let empty_read =
+                read_sql_table(&conn, table_name).expect("read_sql_table after truncate");
+            assert_eq!(empty_read.index().len(), 0);
+
+            // Cleanup
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+        }
     }
 
     #[test]

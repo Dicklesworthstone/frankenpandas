@@ -125,6 +125,10 @@ pub use fp_index::{
     timedelta_range,
     validate_alignment_plan,
 };
+#[cfg(feature = "sql-mysql")]
+pub use fp_io::MysqlConnection;
+#[cfg(feature = "sql-postgresql")]
+pub use fp_io::PostgresConnection;
 // ── IO functions ────────────────────────────────────────────────────────
 pub use fp_io::{
     // CSV
@@ -963,6 +967,13 @@ mod tests {
             let _ = read_sql_query_with_options_and_index_col::<rusqlite::Connection>;
             let _ = read_sql_table_chunks::<rusqlite::Connection>;
             let _ = read_sql_table_with_options::<rusqlite::Connection>;
+        }
+        #[cfg(feature = "sql-postgresql")]
+        {
+            let _is_inspector: fn(&SqlInspector<'_, crate::PostgresConnection>) = |_| {};
+            let _ = read_sql_chunks::<crate::PostgresConnection>;
+            let _ = write_sql_with_options::<crate::PostgresConnection>;
+            let _ = read_sql_with_options::<crate::PostgresConnection>;
         }
         // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
         let _is_insert_method: fn(SqlInsertMethod) -> _ = |m| m;
