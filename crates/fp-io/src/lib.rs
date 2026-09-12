@@ -1629,7 +1629,10 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                     ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
                 }
-            } else if let Ok(v) = trimmed.parse::<f64>() {
+            } else if let Ok(v) = trimmed.parse::<f64>()
+                && !v.is_nan()
+                && (!v.is_infinite() || field.len() == trimmed.len())
+            {
                 match acc {
                     ColAcc::Int(buf, valid) => {
                         let mut promoted: Vec<f64> = buf.iter().map(|&i| i as f64).collect();
@@ -4300,7 +4303,9 @@ fn parse_scalar(field: &str) -> Scalar {
         return Scalar::Int64(value);
     }
     if let Ok(value) = trimmed.parse::<f64>() {
-        return Scalar::Float64(value);
+        if !value.is_nan() && (!value.is_infinite() || field.len() == trimmed.len()) {
+            return Scalar::Float64(value);
+        }
     }
     if field.eq_ignore_ascii_case("true") {
         return Scalar::Bool(true);
@@ -4493,7 +4498,9 @@ fn parse_scalar_with_options(
         Cow::Borrowed(numeric_candidate.as_ref())
     };
     if let Ok(value) = float_candidate.as_ref().parse::<f64>() {
-        return Scalar::Float64(value);
+        if !value.is_nan() && (!value.is_infinite() || field.len() == trimmed.len()) {
+            return Scalar::Float64(value);
+        }
     }
 
     if true_set.contains(field) {
@@ -20845,6 +20852,28 @@ mod tests {
         assert_eq!(b.values()[0], Scalar::Utf8("NA".into()));
         assert_eq!(b.values()[1], Scalar::Utf8("".into()));
         assert_eq!(b.values()[2], Scalar::Utf8("None".into()));
+    }
+
+    #[test]
+    fn csv_padded_nan_and_inf_stay_strings_matching_pandas() {
+        // Padded " nan " or " inf " must not parse to Float64(NaN) or Float64(inf),
+        // but remain strings, matching pandas 2.2.3 behavior.
+        assert_eq!(super::parse_scalar(" nan "), Scalar::Utf8(" nan ".into()));
+        assert_eq!(super::parse_scalar(" NaN "), Scalar::Utf8(" NaN ".into()));
+        assert_eq!(super::parse_scalar(" inf "), Scalar::Utf8(" inf ".into()));
+        assert_eq!(super::parse_scalar(" -inf "), Scalar::Utf8(" -inf ".into()));
+        assert_eq!(super::parse_scalar(" 1.5 "), Scalar::Float64(1.5));
+        assert_eq!(super::parse_scalar("inf"), Scalar::Float64(f64::INFINITY));
+        assert_eq!(
+            super::parse_scalar("-inf"),
+            Scalar::Float64(f64::NEG_INFINITY)
+        );
+
+        let input = "col\n nan \n 1.5 \n";
+        let frame = read_csv_str(input).expect("parse");
+        let col = frame.column("col").unwrap();
+        assert_eq!(col.values()[0], Scalar::Utf8(" nan ".into()));
+        assert_eq!(col.values()[1], Scalar::Utf8(" 1.5 ".into()));
     }
 
     #[test]
