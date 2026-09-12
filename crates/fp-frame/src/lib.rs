@@ -58616,6 +58616,18 @@ impl ColumnStore {
         }
     }
 
+    /// Replace ALL columns stored under `name` with copies of `column`, or append if absent.
+    pub fn replace_all(&mut self, name: &str, column: Column) {
+        if let Some(indices) = self.lookup.get(name) {
+            let idxs = indices.clone();
+            for &idx in &idxs {
+                self.columns[idx].1 = column.clone();
+            }
+        } else {
+            self.push(name.to_owned(), column);
+        }
+    }
+
     /// Remove EVERY column stored under `name`, returning the first.
     pub fn remove(&mut self, name: &str) -> Option<Column> {
         let indices = self.lookup.remove(name)?;
@@ -59018,6 +59030,18 @@ impl LazyDataFrameColumns {
 
     fn insert(&mut self, name: String, column: Column) -> Option<Column> {
         self.make_eager().insert(name, column)
+    }
+
+    fn push(&mut self, name: String, column: Column) {
+        self.make_eager().push(name, column);
+    }
+
+    fn replace_all(&mut self, name: &str, column: Column) {
+        self.make_eager().replace_all(name, column);
+    }
+
+    fn column_at_mut(&mut self, position: usize) -> Option<&mut Column> {
+        self.make_eager().column_at_mut(position)
     }
 
     fn remove(&mut self, name: &str) -> Option<Column> {
@@ -67655,13 +67679,17 @@ impl DataFrame {
             });
         }
         let name = name.into();
+        let is_new = !self.columns.contains_key(&name);
         let mut columns = self.columns.clone();
-        columns.insert(name.clone(), column);
+        columns.replace_all(&name, column);
         let mut column_order = self.column_order.clone();
-        if !column_order.contains(&name) {
+        if is_new {
             column_order.push(name);
         }
-        Self::new_with_column_order(self.index.clone(), columns, column_order)
+        let mut out = Self::new_with_column_order(self.index.clone(), columns, column_order)?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        out.row_multiindex = self.row_multiindex.clone();
+        Ok(out)
     }
 
     /// Cast one or more columns to target dtypes.
@@ -85473,26 +85501,8 @@ impl DataFrame {
     /// Matches `pd.DataFrame.assign(**kwargs)` for single-column assignment.
     /// If the column already exists, it is replaced. Otherwise it is appended.
     pub fn assign_column(&self, name: &str, values: Vec<Scalar>) -> Result<Self, FrameError> {
-        if values.len() != self.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.len(),
-                column_len: values.len(),
-            });
-        }
-        let mut new_cols = self.columns.clone();
-        new_cols.insert(name.to_owned(), Column::from_values(values)?);
-        let mut new_order = self.column_order.clone();
-        if !new_order.contains(&name.to_owned()) {
-            new_order.push(name.to_owned());
-        }
-        Ok(Self {
-            columns: new_cols,
-            column_order: new_order,
-            index: self.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let col = Column::from_values(values)?;
+        self.with_column(name, col)
     }
 
     /// Internal: apply a binary f64 operation with a scalar to each numeric column.
