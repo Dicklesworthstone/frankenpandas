@@ -34395,29 +34395,26 @@ impl DataFrameRolling<'_> {
     where
         F: Fn(&Series, usize, usize) -> Result<Series, FrameError> + Sync,
     {
-        let numeric: Vec<&String> = self
-            .df
-            .column_order
-            .iter()
-            .filter(|name| {
+        let numeric_positions: Vec<usize> = (0..self.df.num_columns())
+            .filter(|&pos| {
                 matches!(
-                    self.df.columns[*name].dtype(),
+                    self.df.column_at(pos).expect("pos in bounds").dtype(),
                     DType::Int64 | DType::Float64
                 )
             })
             .collect();
-        let col_order: Vec<String> = numeric.iter().map(|s| (*s).clone()).collect();
 
-        let agg_one = |col_name: &str| -> Result<(String, Column), FrameError> {
-            let col = &self.df.columns[col_name];
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+        let agg_one = |pos: usize| -> Result<(String, Column), FrameError> {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let name = self.df.column_name_at(pos).expect("pos in bounds");
+            let series = Series::new(&name, self.df.index.clone(), col.clone())?;
             let result = agg(&series, self.window, self.min_periods)?;
-            Ok((col_name.to_string(), result.column().clone()))
+            Ok((name, result.column().clone()))
         };
 
         const ROLL_PAR_MIN_COLS: usize = 2;
         const ROLL_PAR_MIN_VALUES: usize = 16_384;
-        let ncols = numeric.len();
+        let ncols = numeric_positions.len();
         let worker_count = if ncols >= ROLL_PAR_MIN_COLS
             && ncols.saturating_mul(self.df.index.len()) >= ROLL_PAR_MIN_VALUES
         {
@@ -34426,54 +34423,68 @@ impl DataFrameRolling<'_> {
             1
         };
 
-        let result_cols: BTreeMap<String, Column> = if worker_count >= 2 {
+        let (pairs, col_order): (Vec<(String, Column)>, Vec<String>) = if worker_count >= 2 {
             let next = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| -> Result<BTreeMap<String, Column>, FrameError> {
-                let mut handles = Vec::with_capacity(worker_count);
-                for _ in 0..worker_count {
-                    let next = &next;
-                    let agg_one = &agg_one;
-                    let numeric = &numeric;
-                    handles.push(scope.spawn(
-                        move || -> Result<Vec<(String, Column)>, FrameError> {
-                            let mut out = Vec::new();
-                            loop {
-                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if i >= numeric.len() {
-                                    break;
+            let results =
+                std::thread::scope(|scope| -> Result<Vec<(String, Column)>, FrameError> {
+                    let mut handles = Vec::with_capacity(worker_count);
+                    for _ in 0..worker_count {
+                        let next = &next;
+                        let agg_one = &agg_one;
+                        let numeric_positions = &numeric_positions;
+                        handles.push(scope.spawn(
+                            move || -> Result<Vec<(usize, (String, Column))>, FrameError> {
+                                let mut out = Vec::new();
+                                loop {
+                                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if i >= numeric_positions.len() {
+                                        break;
+                                    }
+                                    out.push((i, agg_one(numeric_positions[i])?));
                                 }
-                                out.push(agg_one(numeric[i])?);
-                            }
-                            Ok(out)
-                        },
-                    ));
-                }
-                let mut map = BTreeMap::new();
-                for handle in handles {
-                    let worker_out = handle.join().map_err(|_| {
-                        FrameError::CompatibilityRejected("rolling worker thread panicked".into())
-                    })??;
-                    map.extend(worker_out);
-                }
-                Ok(map)
-            })?
+                                Ok(out)
+                            },
+                        ));
+                    }
+                    let mut slots: Vec<Option<(String, Column)>> =
+                        (0..ncols).map(|_| None).collect();
+                    for handle in handles {
+                        let worker_out = handle.join().map_err(|_| {
+                            FrameError::CompatibilityRejected(
+                                "rolling worker thread panicked".into(),
+                            )
+                        })??;
+                        for (i, pair) in worker_out {
+                            slots[i] = Some(pair);
+                        }
+                    }
+                    Ok(slots
+                        .into_iter()
+                        .map(|s| s.expect("all slots filled"))
+                        .collect())
+                })?;
+            let order = results.iter().map(|(name, _)| name.clone()).collect();
+            (results, order)
         } else {
-            let mut map = BTreeMap::new();
-            for col_name in &numeric {
-                let (name, col) = agg_one(col_name)?;
-                map.insert(name, col);
+            let mut pairs = Vec::with_capacity(ncols);
+            let mut order = Vec::with_capacity(ncols);
+            for &pos in &numeric_positions {
+                let (name, col) = agg_one(pos)?;
+                order.push(name.clone());
+                pairs.push((name, col));
             }
-            map
+            (pairs, order)
         };
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            self.df.row_multiindex.clone(),
+            ColumnStore::from_pairs(pairs),
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Rolling sum across all numeric columns.
@@ -34567,54 +34578,59 @@ impl DataFrameRolling<'_> {
     where
         F: Fn(&Rolling<'_>, &Series) -> Result<Series, FrameError>,
     {
-        let numeric_cols: Vec<String> = self
-            .df
-            .column_order
-            .iter()
-            .filter(|name| {
-                let dt = self.df.columns[name.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64
+        let numeric_positions: Vec<usize> = (0..self.df.num_columns())
+            .filter(|&pos| {
+                matches!(
+                    self.df.column_at(pos).expect("pos in bounds").dtype(),
+                    DType::Int64 | DType::Float64
+                )
             })
-            .cloned()
             .collect();
 
-        let mut result_cols = BTreeMap::new();
+        let mut pairs = Vec::new();
         let mut col_order = Vec::new();
 
-        for (i, left_name) in numeric_cols.iter().enumerate() {
+        for (idx, &left_pos) in numeric_positions.iter().enumerate() {
             let left_col = self
                 .df
-                .columns
-                .get(left_name)
-                .expect("numeric column listed in order must exist")
+                .column_at(left_pos)
+                .expect("numeric column in bounds")
                 .clone();
-            let left_series = Series::new(left_name, self.df.index.clone(), left_col)?;
+            let left_name = self
+                .df
+                .column_name_at(left_pos)
+                .expect("numeric column in bounds");
+            let left_series = Series::new(&left_name, self.df.index.clone(), left_col)?;
 
-            for right_name in numeric_cols.iter().skip(i) {
+            for &right_pos in numeric_positions.iter().skip(idx) {
                 let right_col = self
                     .df
-                    .columns
-                    .get(right_name)
-                    .expect("numeric column listed in order must exist")
+                    .column_at(right_pos)
+                    .expect("numeric column in bounds")
                     .clone();
-                let right_series = Series::new(right_name, self.df.index.clone(), right_col)?;
+                let right_name = self
+                    .df
+                    .column_name_at(right_pos)
+                    .expect("numeric column in bounds");
+                let right_series = Series::new(&right_name, self.df.index.clone(), right_col)?;
 
                 let rolling = left_series.rolling(self.window, Some(self.min_periods));
                 let pair = agg(&rolling, &right_series)?;
                 let pair_name = format!("{left_name}__{right_name}");
-                result_cols.insert(pair_name.clone(), pair.column().clone());
+                pairs.push((pair_name.clone(), pair.column().clone()));
                 col_order.push(pair_name);
             }
         }
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            None,
+            ColumnStore::from_pairs(pairs),
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Rolling pairwise Pearson correlation across numeric columns.
@@ -34657,37 +34673,33 @@ impl DataFrameRolling<'_> {
     where
         F: Fn(&Rolling<'_>, &Series) -> Result<Series, FrameError>,
     {
-        let numeric_cols: Vec<String> = self
-            .df
-            .column_order
-            .iter()
-            .filter(|name| {
-                let dt = self.df.columns[name.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64
-            })
-            .cloned()
-            .collect();
-
-        let mut result_cols = BTreeMap::new();
+        let n_cols = self.df.num_columns();
+        let mut pairs = Vec::new();
         let mut col_order = Vec::new();
 
-        for col_name in &numeric_cols {
-            let col = self.df.columns[col_name].clone();
-            let left_series = Series::new(col_name, self.df.index.clone(), col)?;
+        for pos in 0..n_cols {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let dt = col.dtype();
+            if dt != DType::Int64 && dt != DType::Float64 {
+                continue;
+            }
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
+            let left_series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let rolling = left_series.rolling(self.window, Some(self.min_periods));
             let paired = agg(&rolling, other)?;
-            result_cols.insert(col_name.clone(), paired.column().clone());
-            col_order.push(col_name.clone());
+            pairs.push((col_name.clone(), paired.column().clone()));
+            col_order.push(col_name);
         }
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            None,
+            ColumnStore::from_pairs(pairs),
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Aggregate each numeric column with multiple rolling functions.
@@ -34695,35 +34707,38 @@ impl DataFrameRolling<'_> {
     /// Matches `df.rolling(window).agg(['sum', 'mean'])`. Output columns are
     /// named `{column}_{function}`.
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
-        let mut result_cols = BTreeMap::new();
+        let n_cols = self.df.num_columns();
+        let mut pairs = Vec::new();
         let mut col_order = Vec::new();
 
-        for col_name in &self.df.column_order {
-            let col = &self.df.columns[col_name];
+        for pos in 0..n_cols {
+            let col = self.df.column_at(pos).expect("pos in bounds");
             let dt = col.dtype();
             if dt != DType::Int64 && dt != DType::Float64 {
                 continue;
             }
 
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
+            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let rolled = series
                 .rolling(self.window, Some(self.min_periods))
                 .agg(funcs)?;
             for func in funcs {
                 let out_name = format!("{col_name}_{func}");
-                result_cols.insert(out_name.clone(), rolled.columns()[*func].clone());
+                pairs.push((out_name.clone(), rolled.columns()[*func].clone()));
                 col_order.push(out_name);
             }
         }
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            None,
+            ColumnStore::from_pairs(pairs),
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// pandas alias for [`Self::agg`].
@@ -34778,80 +34793,92 @@ impl DataFrameExpanding<'_> {
     where
         F: Fn(&Series, usize) -> Result<Series, FrameError> + Sync,
     {
-        let numeric: Vec<&String> = self
-            .df
-            .column_order
-            .iter()
-            .filter(|name| {
+        let numeric_positions: Vec<usize> = (0..self.df.num_columns())
+            .filter(|&pos| {
                 matches!(
-                    self.df.columns[*name].dtype(),
+                    self.df.column_at(pos).expect("pos in bounds").dtype(),
                     DType::Int64 | DType::Float64
                 )
             })
             .collect();
-        let col_order: Vec<String> = numeric.iter().map(|s| (*s).clone()).collect();
 
-        let agg_one = |col_name: &str| -> Result<(String, Column), FrameError> {
-            let col = &self.df.columns[col_name];
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+        let agg_one = |pos: usize| -> Result<(String, Column), FrameError> {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let name = self.df.column_name_at(pos).expect("pos in bounds");
+            let series = Series::new(&name, self.df.index.clone(), col.clone())?;
             let result = agg(&series, self.min_periods)?;
-            Ok((col_name.to_string(), result.column().clone()))
+            Ok((name, result.column().clone()))
         };
 
-        let ncols = numeric.len();
+        let ncols = numeric_positions.len();
         let worker_count = if ncols >= 2 && ncols.saturating_mul(self.df.index.len()) >= 16_384 {
             fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
 
-        let result_cols: BTreeMap<String, Column> = if worker_count >= 2 {
+        let (pairs, col_order): (Vec<(String, Column)>, Vec<String>) = if worker_count >= 2 {
             let next = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| -> Result<BTreeMap<String, Column>, FrameError> {
-                let mut handles = Vec::with_capacity(worker_count);
-                for _ in 0..worker_count {
-                    let next = &next;
-                    let agg_one = &agg_one;
-                    let numeric = &numeric;
-                    handles.push(scope.spawn(
-                        move || -> Result<Vec<(String, Column)>, FrameError> {
-                            let mut out = Vec::new();
-                            loop {
-                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if i >= numeric.len() {
-                                    break;
+            let results =
+                std::thread::scope(|scope| -> Result<Vec<(String, Column)>, FrameError> {
+                    let mut handles = Vec::with_capacity(worker_count);
+                    for _ in 0..worker_count {
+                        let next = &next;
+                        let agg_one = &agg_one;
+                        let numeric_positions = &numeric_positions;
+                        handles.push(scope.spawn(
+                            move || -> Result<Vec<(usize, (String, Column))>, FrameError> {
+                                let mut out = Vec::new();
+                                loop {
+                                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if i >= numeric_positions.len() {
+                                        break;
+                                    }
+                                    out.push((i, agg_one(numeric_positions[i])?));
                                 }
-                                out.push(agg_one(numeric[i])?);
-                            }
-                            Ok(out)
-                        },
-                    ));
-                }
-                let mut map = BTreeMap::new();
-                for handle in handles {
-                    map.extend(handle.join().map_err(|_| {
-                        FrameError::CompatibilityRejected("expanding worker thread panicked".into())
-                    })??);
-                }
-                Ok(map)
-            })?
+                                Ok(out)
+                            },
+                        ));
+                    }
+                    let mut slots: Vec<Option<(String, Column)>> =
+                        (0..ncols).map(|_| None).collect();
+                    for handle in handles {
+                        let worker_out = handle.join().map_err(|_| {
+                            FrameError::CompatibilityRejected(
+                                "expanding worker thread panicked".into(),
+                            )
+                        })??;
+                        for (i, pair) in worker_out {
+                            slots[i] = Some(pair);
+                        }
+                    }
+                    Ok(slots
+                        .into_iter()
+                        .map(|s| s.expect("all slots filled"))
+                        .collect())
+                })?;
+            let order = results.iter().map(|(name, _)| name.clone()).collect();
+            (results, order)
         } else {
-            let mut map = BTreeMap::new();
-            for col_name in &numeric {
-                let (name, col) = agg_one(col_name)?;
-                map.insert(name, col);
+            let mut pairs = Vec::with_capacity(ncols);
+            let mut order = Vec::with_capacity(ncols);
+            for &pos in &numeric_positions {
+                let (name, col) = agg_one(pos)?;
+                order.push(name.clone());
+                pairs.push((name, col));
             }
-            map
+            (pairs, order)
         };
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            self.df.row_multiindex.clone(),
+            ColumnStore::from_pairs(pairs),
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Expanding sum across all numeric columns.
@@ -34936,33 +34963,36 @@ impl DataFrameExpanding<'_> {
     /// Matches `df.expanding(Some(1)).agg(['sum', 'mean'])`. Output columns are
     /// named `{column}_{function}`.
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
-        let mut result_cols = BTreeMap::new();
+        let n_cols = self.df.num_columns();
+        let mut pairs = Vec::new();
         let mut col_order = Vec::new();
 
-        for col_name in &self.df.column_order {
-            let col = &self.df.columns[col_name];
+        for pos in 0..n_cols {
+            let col = self.df.column_at(pos).expect("pos in bounds");
             let dt = col.dtype();
             if dt != DType::Int64 && dt != DType::Float64 {
                 continue;
             }
 
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
+            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let expanded = series.expanding(Some(self.min_periods)).agg(funcs)?;
             for func in funcs {
                 let out_name = format!("{col_name}_{func}");
-                result_cols.insert(out_name.clone(), expanded.columns()[*func].clone());
+                pairs.push((out_name.clone(), expanded.columns()[*func].clone()));
                 col_order.push(out_name);
             }
         }
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            self.df.row_multiindex.clone(),
+            ColumnStore::from_pairs(pairs),
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// pandas alias for [`Self::agg`].
@@ -35017,80 +35047,90 @@ impl DataFrameEwm<'_> {
     where
         F: Fn(&Series, Option<f64>, Option<f64>) -> Result<Series, FrameError> + Sync,
     {
-        let numeric: Vec<&String> = self
-            .df
-            .column_order
-            .iter()
-            .filter(|name| {
+        let numeric_positions: Vec<usize> = (0..self.df.num_columns())
+            .filter(|&pos| {
                 matches!(
-                    self.df.columns[*name].dtype(),
+                    self.df.column_at(pos).expect("pos in bounds").dtype(),
                     DType::Int64 | DType::Float64
                 )
             })
             .collect();
-        let col_order: Vec<String> = numeric.iter().map(|s| (*s).clone()).collect();
 
-        let agg_one = |col_name: &str| -> Result<(String, Column), FrameError> {
-            let col = &self.df.columns[col_name];
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+        let agg_one = |pos: usize| -> Result<(String, Column), FrameError> {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let name = self.df.column_name_at(pos).expect("pos in bounds");
+            let series = Series::new(&name, self.df.index.clone(), col.clone())?;
             let result = agg(&series, self.span, self.alpha)?;
-            Ok((col_name.to_string(), result.column().clone()))
+            Ok((name, result.column().clone()))
         };
 
-        let ncols = numeric.len();
+        let ncols = numeric_positions.len();
         let worker_count = if ncols >= 2 && ncols.saturating_mul(self.df.index.len()) >= 16_384 {
             fp_columnar::cached_available_parallelism().min(ncols)
         } else {
             1
         };
 
-        let result_cols: BTreeMap<String, Column> = if worker_count >= 2 {
+        let (pairs, col_order): (Vec<(String, Column)>, Vec<String>) = if worker_count >= 2 {
             let next = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| -> Result<BTreeMap<String, Column>, FrameError> {
-                let mut handles = Vec::with_capacity(worker_count);
-                for _ in 0..worker_count {
-                    let next = &next;
-                    let agg_one = &agg_one;
-                    let numeric = &numeric;
-                    handles.push(scope.spawn(
-                        move || -> Result<Vec<(String, Column)>, FrameError> {
-                            let mut out = Vec::new();
-                            loop {
-                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if i >= numeric.len() {
-                                    break;
+            let results =
+                std::thread::scope(|scope| -> Result<Vec<(String, Column)>, FrameError> {
+                    let mut handles = Vec::with_capacity(worker_count);
+                    for _ in 0..worker_count {
+                        let next = &next;
+                        let agg_one = &agg_one;
+                        let numeric_positions = &numeric_positions;
+                        handles.push(scope.spawn(
+                            move || -> Result<Vec<(usize, (String, Column))>, FrameError> {
+                                let mut out = Vec::new();
+                                loop {
+                                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if i >= numeric_positions.len() {
+                                        break;
+                                    }
+                                    out.push((i, agg_one(numeric_positions[i])?));
                                 }
-                                out.push(agg_one(numeric[i])?);
-                            }
-                            Ok(out)
-                        },
-                    ));
-                }
-                let mut map = BTreeMap::new();
-                for handle in handles {
-                    map.extend(handle.join().map_err(|_| {
-                        FrameError::CompatibilityRejected("ewm worker thread panicked".into())
-                    })??);
-                }
-                Ok(map)
-            })?
+                                Ok(out)
+                            },
+                        ));
+                    }
+                    let mut slots: Vec<Option<(String, Column)>> =
+                        (0..ncols).map(|_| None).collect();
+                    for handle in handles {
+                        let worker_out = handle.join().map_err(|_| {
+                            FrameError::CompatibilityRejected("ewm worker thread panicked".into())
+                        })??;
+                        for (i, pair) in worker_out {
+                            slots[i] = Some(pair);
+                        }
+                    }
+                    Ok(slots
+                        .into_iter()
+                        .map(|s| s.expect("all slots filled"))
+                        .collect())
+                })?;
+            let order = results.iter().map(|(name, _)| name.clone()).collect();
+            (results, order)
         } else {
-            let mut map = BTreeMap::new();
-            for col_name in &numeric {
-                let (name, col) = agg_one(col_name)?;
-                map.insert(name, col);
+            let mut pairs = Vec::with_capacity(ncols);
+            let mut order = Vec::with_capacity(ncols);
+            for &pos in &numeric_positions {
+                let (name, col) = agg_one(pos)?;
+                order.push(name.clone());
+                pairs.push((name, col));
             }
-            map
+            (pairs, order)
         };
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            self.df.row_multiindex.clone(),
+            ColumnStore::from_pairs(pairs),
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// EWM mean across all numeric columns.
@@ -35122,33 +35162,36 @@ impl DataFrameEwm<'_> {
     /// Matches `df.ewm(span=...).agg(['mean', 'sum'])`. Output columns are
     /// named `{column}_{function}`.
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
-        let mut result_cols = BTreeMap::new();
+        let n_cols = self.df.num_columns();
+        let mut pairs = Vec::new();
         let mut col_order = Vec::new();
 
-        for col_name in &self.df.column_order {
-            let col = &self.df.columns[col_name];
+        for pos in 0..n_cols {
+            let col = self.df.column_at(pos).expect("pos in bounds");
             let dt = col.dtype();
             if dt != DType::Int64 && dt != DType::Float64 {
                 continue;
             }
 
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
+            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let ewm = series.ewm(self.span, self.alpha).agg(funcs)?;
             for func in funcs {
                 let out_name = format!("{col_name}_{func}");
-                result_cols.insert(out_name.clone(), ewm.columns()[*func].clone());
+                pairs.push((out_name.clone(), ewm.columns()[*func].clone()));
                 col_order.push(out_name);
             }
         }
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            self.df.row_multiindex.clone(),
+            ColumnStore::from_pairs(pairs),
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// pandas alias for [`Self::agg`].
@@ -35231,15 +35274,12 @@ impl<'a> DataFrameResample<'a> {
         )
     }
 
-    fn numeric_column_names(&self) -> Vec<String> {
-        self.df
-            .column_order
-            .iter()
-            .filter(|name| {
-                let dtype = self.df.columns[name.as_str()].dtype();
+    fn numeric_column_positions(&self) -> Vec<usize> {
+        (0..self.df.num_columns())
+            .filter(|&pos| {
+                let dtype = self.df.column_at(pos).expect("pos in bounds").dtype();
                 dtype == DType::Int64 || dtype == DType::Float64
             })
-            .cloned()
             .collect()
     }
 
@@ -35249,39 +35289,32 @@ impl<'a> DataFrameResample<'a> {
         F: Fn(&Resample<'_>) -> Result<Series, FrameError>,
     {
         self.validate()?;
-        let mut result_cols = BTreeMap::new();
+        let mut pairs = Vec::new();
         let mut col_order = Vec::new();
         let mut result_index: Option<Index> = None;
 
-        for col_name in &self.df.column_order {
-            let col = &self.df.columns[col_name];
-            let dt = col.dtype();
-            if dt != DType::Int64 && dt != DType::Float64 {
-                continue;
-            }
+        for pos in self.numeric_column_positions() {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
 
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let resample = self.series_resample(&series);
             let result = agg(&resample)?;
             if result_index.is_none() {
                 result_index = Some(result.index().clone());
             }
-            result_cols.insert(col_name.clone(), result.column().clone());
-            col_order.push(col_name.clone());
+            pairs.push((col_name.clone(), result.column().clone()));
+            col_order.push(col_name);
         }
 
         // Per br-frankenpandas-pjjro: pandas resample preserves source axis
         // name even when the result is empty (no numeric columns).
         let index = result_index
             .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name()));
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index,
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = DataFrame::new_with_axes(index, None, columns, col_order, None)?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     fn apply_resample_all_columns<F>(&self, agg: F) -> Result<DataFrame, FrameError>
@@ -35289,33 +35322,32 @@ impl<'a> DataFrameResample<'a> {
         F: Fn(&Resample<'_>) -> Result<Series, FrameError>,
     {
         self.validate()?;
-        let mut result_cols = BTreeMap::new();
-        let mut col_order = Vec::new();
+        let n_cols = self.df.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut col_order = Vec::with_capacity(n_cols);
         let mut result_index: Option<Index> = None;
 
-        for col_name in &self.df.column_order {
-            let col = &self.df.columns[col_name];
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+        for pos in 0..n_cols {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
+            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let resample = self.series_resample(&series);
             let result = agg(&resample)?;
             if result_index.is_none() {
                 result_index = Some(result.index().clone());
             }
-            result_cols.insert(col_name.clone(), result.column().clone());
-            col_order.push(col_name.clone());
+            pairs.push((col_name.clone(), result.column().clone()));
+            col_order.push(col_name);
         }
 
         // Per br-frankenpandas-hkcdn: pandas resample preserves source axis
         // name even when the all-columns result is empty.
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: result_index
-                .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name())),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let index = result_index
+            .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name()));
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = DataFrame::new_with_axes(index, None, columns, col_order, None)?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Resample sum across all numeric columns.
@@ -35412,18 +35444,15 @@ impl<'a> DataFrameResample<'a> {
     /// gets one output column per function, named `{col}_{func}`.
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
         self.validate()?;
-        let mut result_cols = BTreeMap::new();
+        let mut pairs = Vec::new();
         let mut col_order = Vec::new();
         let mut result_index: Option<Index> = None;
 
-        for col_name in &self.df.column_order {
-            let col = &self.df.columns[col_name];
-            let dt = col.dtype();
-            if dt != DType::Int64 && dt != DType::Float64 {
-                continue;
-            }
+        for pos in self.numeric_column_positions() {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
 
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let resample = self.series_resample(&series);
 
             for &func in funcs {
@@ -35473,7 +35502,7 @@ impl<'a> DataFrameResample<'a> {
                     result_index = Some(agg_result.index().clone());
                 }
                 let out_name = format!("{col_name}_{func}");
-                result_cols.insert(out_name.clone(), agg_result.column().clone());
+                pairs.push((out_name.clone(), agg_result.column().clone()));
                 col_order.push(out_name);
             }
         }
@@ -35482,14 +35511,10 @@ impl<'a> DataFrameResample<'a> {
         // axis name even when no numeric columns produce results.
         let index = result_index
             .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name()));
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index,
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = DataFrame::new_with_axes(index, None, columns, col_order, None)?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// pandas spelling alias for [`Self::agg`].
@@ -35623,12 +35648,13 @@ impl<'a> DataFrameResample<'a> {
     }
 
     fn ohlc_column_multiindex(&self) -> Result<fp_index::MultiIndex, FrameError> {
-        let value_cols = self.numeric_column_names();
+        let numeric_positions = self.numeric_column_positions();
         let stats = ["open", "high", "low", "close"];
-        let mut top = Vec::with_capacity(value_cols.len() * stats.len());
-        let mut bottom = Vec::with_capacity(value_cols.len() * stats.len());
+        let mut top = Vec::with_capacity(numeric_positions.len() * stats.len());
+        let mut bottom = Vec::with_capacity(numeric_positions.len() * stats.len());
 
-        for col_name in &value_cols {
+        for pos in numeric_positions {
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             for stat in stats {
                 top.push(IndexLabel::Utf8(col_name.clone()));
                 bottom.push(IndexLabel::Utf8(stat.to_owned()));
@@ -35641,63 +35667,73 @@ impl<'a> DataFrameResample<'a> {
     /// Open-high-low-close per bucket for each numeric column.
     pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
         self.validate()?;
-        let mut result_cols = BTreeMap::new();
+        let mut pairs = Vec::new();
         let mut col_order = Vec::new();
         let mut result_index: Option<Index> = None;
-        let numeric_cols = self.numeric_column_names();
+        let numeric_positions = self.numeric_column_positions();
 
-        for col_name in &numeric_cols {
-            let col = &self.df.columns[col_name];
-            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+        for &pos in &numeric_positions {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
+            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let result = self.series_resample(&series).ohlc()?;
             if result_index.is_none() {
                 result_index = Some(result.index().clone());
             }
 
             for stat in ["open", "high", "low", "close"] {
-                let out_name = if numeric_cols.len() > 1 {
+                let out_name = if numeric_positions.len() > 1 {
                     format!("{col_name}_{stat}")
                 } else {
                     stat.to_owned()
                 };
-                result_cols.insert(out_name.clone(), result.columns()[stat].clone());
+                pairs.push((out_name.clone(), result.columns()[stat].clone()));
                 col_order.push(out_name);
             }
         }
 
         // Per br-frankenpandas-imbo3: pandas resample.ohlc preserves source
         // axis name even when there are no numeric columns.
-        DataFrame::new_with_column_order_and_multiindex(
-            result_index
-                .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name())),
-            result_cols,
+        let index = result_index
+            .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name()));
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = DataFrame::new_with_axes(
+            index,
+            None,
+            columns,
             col_order,
             Some(self.ohlc_column_multiindex()?),
-        )
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Broadcast a named bucket reduction back to the original DataFrame shape.
     pub fn transform(&self, func: &str) -> Result<DataFrame, FrameError> {
         self.validate()?;
-        let mut result_cols = BTreeMap::new();
-        let mut col_order = Vec::new();
+        let numeric_positions = self.numeric_column_positions();
+        let mut pairs = Vec::with_capacity(numeric_positions.len());
+        let mut col_order = Vec::with_capacity(numeric_positions.len());
 
-        for col_name in self.numeric_column_names() {
-            let col = &self.df.columns[&col_name];
+        for pos in numeric_positions {
+            let col = self.df.column_at(pos).expect("pos in bounds");
+            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let transformed = self.series_resample(&series).transform(func)?;
-            result_cols.insert(col_name.clone(), transformed.column().clone());
+            pairs.push((col_name.clone(), transformed.column().clone()));
             col_order.push(col_name);
         }
 
-        Ok(DataFrame {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.df.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = DataFrame::new_with_axes(
+            self.df.index.clone(),
+            self.df.row_multiindex.clone(),
+            columns,
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Pipe this resampler through a caller-provided function.
@@ -58616,6 +58652,18 @@ impl ColumnStore {
         }
     }
 
+    /// Replace ALL columns stored under `name` with copies of `column`, or append if absent.
+    pub fn replace_all(&mut self, name: &str, column: Column) {
+        if let Some(indices) = self.lookup.get(name) {
+            let idxs = indices.clone();
+            for &idx in &idxs {
+                self.columns[idx].1 = column.clone();
+            }
+        } else {
+            self.push(name.to_owned(), column);
+        }
+    }
+
     /// Remove EVERY column stored under `name`, returning the first.
     pub fn remove(&mut self, name: &str) -> Option<Column> {
         let indices = self.lookup.remove(name)?;
@@ -59020,6 +59068,20 @@ impl LazyDataFrameColumns {
         self.make_eager().insert(name, column)
     }
 
+    #[allow(dead_code)]
+    fn push(&mut self, name: String, column: Column) {
+        self.make_eager().push(name, column);
+    }
+
+    fn replace_all(&mut self, name: &str, column: Column) {
+        self.make_eager().replace_all(name, column);
+    }
+
+    fn column_at_mut(&mut self, position: usize) -> Option<&mut Column> {
+        self.make_eager().column_at_mut(position)
+    }
+
+    #[allow(dead_code)]
     fn remove(&mut self, name: &str) -> Option<Column> {
         self.make_eager().remove(name)
     }
@@ -59080,6 +59142,28 @@ impl LazyDataFrameColumns {
             }
             _ => self.materialized().has_duplicates(),
         }
+    }
+
+    #[allow(dead_code)]
+    fn iter_positional(&self) -> impl ExactSizeIterator<Item = (&String, &Column)> + '_ {
+        self.materialized().iter_positional()
+    }
+
+    fn name_at(&self, position: usize) -> Option<&str> {
+        self.materialized().name_at(position)
+    }
+
+    fn ordered_names(&self) -> impl ExactSizeIterator<Item = &String> + '_ {
+        self.materialized().ordered_names()
+    }
+
+    fn len(&self) -> usize {
+        self.logical_len()
+    }
+
+    #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.logical_len() == 0
     }
 
     fn materialized(&self) -> &ColumnStore {
@@ -64372,15 +64456,23 @@ impl DataFrame {
         } else {
             let mut pairs = Vec::with_capacity(occ);
             let mut order = Vec::with_capacity(occ);
-            for &pos in self.columns.positions_of(name) {
+            let positions = self.columns.positions_of(name);
+            for &pos in positions {
                 let col = self.columns.column_at(pos).expect("position in bounds");
                 pairs.push((name.to_string(), col.clone()));
                 order.push(name.to_string());
             }
-            let mut df = Self::new_with_column_order(
+            let column_multiindex = self
+                .column_multiindex
+                .as_ref()
+                .map(|multiindex| Self::project_column_multiindex(multiindex, positions))
+                .transpose()?;
+            let mut df = Self::new_with_axes(
                 self.index.clone(),
+                self.row_multiindex.clone(),
                 ColumnStore::from_pairs(pairs),
                 order,
+                column_multiindex,
             )?;
             df.allows_duplicate_labels = self.allows_duplicate_labels;
             Ok(ColumnSelection::DataFrame(df))
@@ -64778,32 +64870,52 @@ impl DataFrame {
     ///
     /// Matches `df.isna()`.
     pub fn isna(&self) -> Result<Self, FrameError> {
-        let mut columns = BTreeMap::new();
-        for name in &self.column_order {
-            let column = self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist");
-            columns.insert(name.clone(), column_na_mask(column, true));
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let column = self.column_at(pos).expect("column in bounds");
+            pairs.push((name.to_string(), column_na_mask(column, true)));
+            column_order.push(name.to_string());
         }
 
-        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Return a DataFrame of booleans indicating non-missing values.
     ///
     /// Matches `df.notna()`.
     pub fn notna(&self) -> Result<Self, FrameError> {
-        let mut columns = BTreeMap::new();
-        for name in &self.column_order {
-            let column = self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist");
-            columns.insert(name.clone(), column_na_mask(column, false));
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let column = self.column_at(pos).expect("column in bounds");
+            pairs.push((name.to_string(), column_na_mask(column, false)));
+            column_order.push(name.to_string());
         }
 
-        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Alias for `isna`.
@@ -64824,23 +64936,16 @@ impl DataFrame {
     ///
     /// Matches `df.count()` default behavior (`axis=0`, `skipna=True`).
     pub fn count(&self) -> Result<Series, FrameError> {
-        let labels = self
-            .column_order
-            .iter()
-            .map(|name| IndexLabel::Utf8(name.clone()))
-            .collect::<Vec<_>>();
-        let values = self
-            .column_order
-            .iter()
-            .map(|name| {
-                let column = self
-                    .columns
-                    .get(name)
-                    .expect("column name listed in order must exist");
-                let count = i64::try_from(column.validity().count_valid()).unwrap_or(i64::MAX);
-                Scalar::Int64(count)
-            })
-            .collect::<Vec<_>>();
+        let n_cols = self.num_columns();
+        let mut labels = Vec::with_capacity(n_cols);
+        let mut values = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let column = self.column_at(pos).expect("column in bounds");
+            let count = i64::try_from(column.validity().count_valid()).unwrap_or(i64::MAX);
+            labels.push(IndexLabel::Utf8(name.to_string()));
+            values.push(Scalar::Int64(count));
+        }
         Series::from_values("count", labels, values)
     }
 
@@ -64848,20 +64953,16 @@ impl DataFrame {
     ///
     /// Matches `df.isna().sum()`. Returns a Series indexed by column name.
     pub fn count_na(&self) -> Result<Series, FrameError> {
-        let labels: Vec<IndexLabel> = self
-            .column_order
-            .iter()
-            .map(|name| IndexLabel::Utf8(name.clone()))
-            .collect();
-        let values: Vec<Scalar> = self
-            .column_order
-            .iter()
-            .map(|name| {
-                let col = &self.columns[name];
-                let na_count = col.values().iter().filter(|v| v.is_missing()).count();
-                Scalar::Int64(na_count as i64)
-            })
-            .collect();
+        let n_cols = self.num_columns();
+        let mut labels: Vec<IndexLabel> = Vec::with_capacity(n_cols);
+        let mut values: Vec<Scalar> = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
+            let na_count = col.values().iter().filter(|v| v.is_missing()).count();
+            labels.push(IndexLabel::Utf8(name.to_string()));
+            values.push(Scalar::Int64(na_count as i64));
+        }
         Series::from_values("count_na", labels, values)
     }
 
@@ -64870,22 +64971,32 @@ impl DataFrame {
     /// Matches `df.fillna(value)` for scalar `value`.
     pub fn fillna(&self, fill_value: &Scalar) -> Result<Self, FrameError> {
         // Column-parallel (br-frankenpandas-applyall-par): each column's fill is
-        // independent, so spread the columns across par_map_columns scope
-        // workers. Bit-identical — same Column::fillna per column, reassembled in
-        // column_order.
-        let filled = self.par_map_columns(&self.column_order, |name| {
+        // independent, so spread the columns across par_map_column_positions_min
+        // scope workers. Bit-identical — same Column::fillna per column, reassembled in
+        // column order.
+        let filled = self.par_map_column_positions_min(16_384, |pos| {
             Ok(self
                 .columns
-                .get(name)
-                .expect("column name listed in order must exist")
+                .column_at(pos)
+                .expect("column in bounds")
                 .fillna(fill_value)?)
         })?;
-        let mut columns = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(filled) {
-            columns.insert(name.clone(), column);
-        }
-
-        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+        let pairs: Vec<(String, Column)> =
+            self.columns.ordered_names().cloned().zip(filled).collect();
+        let column_order = pairs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Fill missing values with `fill_value`, filling at most `limit`
@@ -64908,19 +65019,29 @@ impl DataFrame {
                 )));
             }
         }
-        let mut columns = BTreeMap::new();
-        for name in &self.column_order {
-            let col = self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist");
-            if let Some(fill_val) = fill_map.get(name) {
-                columns.insert(name.clone(), col.fillna(fill_val)?);
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
+            if let Some(fill_val) = fill_map.get(&name) {
+                pairs.push((name.clone(), col.fillna(fill_val)?));
             } else {
-                columns.insert(name.clone(), col.clone());
+                pairs.push((name.clone(), col.clone()));
             }
+            column_order.push(name);
         }
-        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Drop rows containing missing values in any selected column.
@@ -66287,6 +66408,11 @@ impl DataFrame {
         drop: bool,
         verify_integrity: bool,
     ) -> Result<Self, FrameError> {
+        if self.columns.occurrences(column) > 1 {
+            return Err(FrameError::CompatibilityRejected(
+                "Index data must be 1-dimensional".to_owned(),
+            ));
+        }
         let source = self.columns.get(column).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column '{column}' not found"))
         })?;
@@ -66371,81 +66497,118 @@ impl DataFrame {
             ));
         }
 
-        if !drop {
-            return Self::new_with_column_order(
+        let mut out = if !drop {
+            Self::new_with_axes(
                 index,
+                self.row_multiindex.clone(),
                 self.columns.clone(),
                 self.column_order.clone(),
-            );
-        }
-
-        let column_order = self
-            .column_order
-            .iter()
-            .filter(|name| name.as_str() != column)
-            .cloned()
-            .collect::<Vec<_>>();
-        let columns: BTreeMap<String, Column> = column_order
-            .iter()
-            .map(|name| (name.clone(), self.columns[name].clone()))
-            .collect();
-        Self::new_with_column_order(index, columns, column_order)
+                self.column_multiindex.clone(),
+            )?
+        } else {
+            let n_cols = self.num_columns();
+            let mut keep_positions = Vec::with_capacity(n_cols);
+            let mut pairs = Vec::with_capacity(n_cols);
+            let mut column_order = Vec::with_capacity(n_cols);
+            for pos in 0..n_cols {
+                let name = self.column_name_at(pos).expect("column in bounds");
+                if name != column {
+                    keep_positions.push(pos);
+                    column_order.push(name.clone());
+                    pairs.push((name, self.column_at(pos).expect("column in bounds").clone()));
+                }
+            }
+            let column_multiindex = self
+                .column_multiindex
+                .as_ref()
+                .map(|multiindex| Self::project_column_multiindex(multiindex, &keep_positions))
+                .transpose()?;
+            let store = ColumnStore::from_pairs(pairs);
+            Self::new_with_axes(
+                index,
+                self.row_multiindex.clone(),
+                store,
+                column_order,
+                column_multiindex,
+            )?
+        };
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Set the index from multiple columns, creating a composite index.
     ///
     /// Matches `df.set_index([col1, col2, ...])` in pandas. The composite
-    /// index labels are created by joining column values with a separator.
-    /// A `MultiIndex` can be recovered via `to_multi_index()`.
+    /// index is formed from the tuple of values across the specified columns,
+    /// formatted with the separator (default `"/"`). If `drop` is true
+    /// (pandas default), the columns are removed from the DataFrame.
     pub fn set_index_multi(
         &self,
         columns: &[&str],
         drop: bool,
         sep: &str,
     ) -> Result<Self, FrameError> {
-        if columns.is_empty() {
-            return Err(FrameError::CompatibilityRejected(
-                "set_index_multi requires at least one column".into(),
-            ));
-        }
-
-        // Single column: delegate to existing set_index.
-        if columns.len() == 1 {
-            return self.set_index(columns[0], drop);
-        }
-
-        // Validate all columns exist.
         for &col in columns {
             if !self.columns.contains_key(col) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "column '{col}' not found"
                 )));
             }
+            if self.columns.occurrences(col) > 1 {
+                return Err(FrameError::CompatibilityRejected(
+                    "Index data must be 1-dimensional".to_owned(),
+                ));
+            }
         }
 
         let row_multiindex = self.to_multi_index(columns)?;
-        // Keep the flat storage fallback index for now so the existing API
-        // surface keeps working while row MultiIndex support lands incrementally.
-        // `to_flat_index` now returns a contiguous-Utf8-backed Index; keep that
-        // backing and just set the name — the old `.labels().to_vec()` +
-        // `Index::new(labels)` round-trip re-materialized every composite label into a
+        // Contiguous flat-index allocation (br-frankenpandas-21804). The MultiIndex
+        // labels are already in memory, and its `to_flat_index` joins them via
+        // an exact-capacity single-pass string builder. The old loop mapped each
+        // row through `get_loc`, then formatted each tuple element into its own
         // fresh `String`, throwing away the contiguous build's whole benefit.
         let new_name_parts: Vec<String> = columns.iter().map(|c| (*c).to_owned()).collect();
         let index = row_multiindex
             .to_flat_index(sep)
             .set_name(&new_name_parts.join(sep));
 
-        let mut out_columns = self.columns.clone();
-        let mut out_order = self.column_order.clone();
-
-        if drop {
-            for &col in columns {
-                out_columns.remove(col);
-                out_order.retain(|n| n != col);
+        let mut out = if drop {
+            let drop_set: std::collections::BTreeSet<&str> = columns.iter().copied().collect();
+            let n_cols = self.num_columns();
+            let mut keep_positions = Vec::with_capacity(n_cols);
+            let mut pairs = Vec::with_capacity(n_cols);
+            let mut out_order = Vec::with_capacity(n_cols);
+            for pos in 0..n_cols {
+                let name = self.column_name_at(pos).expect("column in bounds");
+                if !drop_set.contains(name.as_str()) {
+                    keep_positions.push(pos);
+                    out_order.push(name.clone());
+                    pairs.push((name, self.column_at(pos).expect("column in bounds").clone()));
+                }
             }
-        }
-
-        Self::new_with_axes(index, Some(row_multiindex), out_columns, out_order, None)
+            let column_multiindex = self
+                .column_multiindex
+                .as_ref()
+                .map(|multiindex| Self::project_column_multiindex(multiindex, &keep_positions))
+                .transpose()?;
+            Self::new_with_axes(
+                index,
+                Some(row_multiindex),
+                ColumnStore::from_pairs(pairs),
+                out_order,
+                column_multiindex,
+            )?
+        } else {
+            Self::new_with_axes(
+                index,
+                Some(row_multiindex),
+                self.columns.clone(),
+                self.column_order.clone(),
+                self.column_multiindex.clone(),
+            )?
+        };
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Extract a `MultiIndex` from the specified columns.
@@ -67489,19 +67652,7 @@ impl DataFrame {
         };
 
         if start_pos > end_pos {
-            let empty_cols: BTreeMap<String, Column> = self
-                .column_order
-                .iter()
-                .map(|name| {
-                    let col = &self.columns[name];
-                    (name.clone(), Column::new(col.dtype(), Vec::new()).unwrap())
-                })
-                .collect();
-            return Self::new_with_column_order(
-                Index::new(Vec::new()),
-                empty_cols,
-                self.column_order.clone(),
-            );
+            return self.take_rows_by_positions(&[]);
         }
 
         let positions: Vec<usize> = (start_pos..=end_pos).collect();
@@ -67528,19 +67679,7 @@ impl DataFrame {
         let end_pos = stop.map_or(len, resolve);
 
         if start_pos >= end_pos || start_pos >= len {
-            let empty_cols: BTreeMap<String, Column> = self
-                .column_order
-                .iter()
-                .map(|name| {
-                    let col = &self.columns[name];
-                    (name.clone(), Column::new(col.dtype(), Vec::new()).unwrap())
-                })
-                .collect();
-            return Self::new_with_column_order(
-                Index::new(Vec::new()),
-                empty_cols,
-                self.column_order.clone(),
-            );
+            return self.take_rows_by_positions(&[]);
         }
 
         let len = end_pos - start_pos;
@@ -67655,13 +67794,44 @@ impl DataFrame {
             });
         }
         let name = name.into();
+        let is_new = !self.columns.contains_key(&name);
         let mut columns = self.columns.clone();
-        columns.insert(name.clone(), column);
+        columns.replace_all(&name, column);
         let mut column_order = self.column_order.clone();
-        if !column_order.contains(&name) {
-            column_order.push(name);
+        if is_new {
+            column_order.push(name.clone());
         }
-        Self::new_with_column_order(self.index.clone(), columns, column_order)
+        let new_column_multiindex = if let Some(ref col_mi) = self.column_multiindex {
+            if is_new {
+                let mut arrays = Vec::with_capacity(col_mi.nlevels());
+                for level in 0..col_mi.nlevels() {
+                    let level_values = col_mi.get_level_values(level)?;
+                    let mut labels = level_values.labels().to_vec();
+                    if level == 0 {
+                        labels.push(IndexLabel::from(name.as_str()));
+                    } else {
+                        labels.push(IndexLabel::from(""));
+                    }
+                    arrays.push(labels);
+                }
+                let new_mi =
+                    fp_index::MultiIndex::from_arrays(arrays)?.set_names(col_mi.names().to_vec());
+                Some(new_mi)
+            } else {
+                Some(col_mi.clone())
+            }
+        } else {
+            None
+        };
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            new_column_multiindex,
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Cast one or more columns to target dtypes.
@@ -67685,21 +67855,38 @@ impl DataFrame {
             }
         }
 
-        let mut columns = self.columns.clone();
-        for &(name, ref dtype) in mapping {
-            let source = self.columns.get(name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!("column '{name}' not found"))
-            })?;
-            let casted = source.astype(dtype.clone())?;
-            columns.insert(name.to_owned(), casted);
-        }
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        let mapping_dict: BTreeMap<&str, &DType> =
+            mapping.iter().map(|&(k, ref v)| (k, v)).collect();
 
-        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+        for pos in 0..n_cols {
+            let col_name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
+            if let Some(&dtype) = mapping_dict.get(col_name.as_str()) {
+                let casted = col.astype(dtype.clone())?;
+                pairs.push((col_name.clone(), casted));
+            } else {
+                pairs.push((col_name.clone(), col.clone()));
+            }
+            column_order.push(col_name);
+        }
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Cast a single column to a target dtype.
     ///
-    /// Matches `df.astype({\"col\": dtype})` for single-column mapping.
+    /// Matches `df.astype({"col": dtype})` for single-column mapping.
     pub fn astype_column(&self, name: &str, dtype: DType) -> Result<Self, FrameError> {
         self.astype_columns(&[(name, dtype)])
     }
@@ -67708,12 +67895,27 @@ impl DataFrame {
     ///
     /// Matches `df.astype(dtype)` (scalar form).
     pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
-        let mut columns = BTreeMap::new();
-        for (name, col) in &self.columns {
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+
+        for pos in 0..n_cols {
+            let col_name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
             let casted = col.astype(dtype.clone())?;
-            columns.insert(name.clone(), casted);
+            pairs.push((col_name.clone(), casted));
+            column_order.push(col_name);
         }
-        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Apply the CONSTRUCTOR's `dtype=` argument to every column.
@@ -68225,41 +68427,67 @@ impl DataFrame {
             return self.take_rows_by_positions(&kept_positions);
         }
 
-        let kept_in_order: Vec<String> = if let Some(items) = items {
-            let mut seen = HashSet::new();
-            items
-                .iter()
-                .filter(|name| self.columns.contains_key(name) && seen.insert(*name))
-                .map(|name| (*name).to_owned())
-                .collect()
-        } else if let Some(like) = like {
-            self.column_order
-                .iter()
-                .filter(|name| name.contains(like))
-                .cloned()
-                .collect()
-        } else {
-            let pattern = regex.expect("regex Some checked above");
-            let re = regex::Regex::new(pattern).map_err(|e| {
-                FrameError::CompatibilityRejected(format!("filter: invalid regex: {e}"))
-            })?;
-            self.column_order
-                .iter()
-                .filter(|name| re.is_match(name))
-                .cloned()
-                .collect()
-        };
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::new();
+        let mut column_order = Vec::new();
+        let mut selected_positions = Vec::new();
 
-        let kept_set: std::collections::HashSet<&str> =
-            kept_in_order.iter().map(|s| s.as_str()).collect();
-        let mut columns = BTreeMap::new();
-        for name in &self.column_order {
-            if kept_set.contains(name.as_str()) {
-                let col = self.columns.get(name).expect("column in order must exist");
-                columns.insert(name.clone(), col.clone());
+        if let Some(items) = items {
+            if self.columns.has_duplicates() {
+                return Err(FrameError::CompatibilityRejected(
+                    "filter: axis=1 items cannot reindex duplicate labels".to_owned(),
+                ));
+            }
+            let mut seen = HashSet::new();
+            for &item in items {
+                if seen.insert(item)
+                    && let Some(col) = self.columns.get(item)
+                {
+                    if let Some(&pos) = self.columns.positions_of(item).first() {
+                        selected_positions.push(pos);
+                    }
+                    pairs.push((item.to_string(), col.clone()));
+                    column_order.push(item.to_string());
+                }
+            }
+        } else {
+            let matches_fn: Box<dyn Fn(&str) -> bool> = if let Some(like) = like {
+                Box::new(move |name: &str| name.contains(like))
+            } else {
+                let pattern = regex.expect("regex Some checked above");
+                let re = regex::Regex::new(pattern).map_err(|e| {
+                    FrameError::CompatibilityRejected(format!("filter: invalid regex: {e}"))
+                })?;
+                Box::new(move |name: &str| re.is_match(name))
+            };
+
+            for pos in 0..n_cols {
+                let name = self.column_name_at(pos).expect("column in bounds");
+                if matches_fn(name.as_str()) {
+                    let col = self.column_at(pos).expect("column in bounds").clone();
+                    pairs.push((name.clone(), col));
+                    column_order.push(name.clone());
+                    selected_positions.push(pos);
+                }
             }
         }
-        Self::new_with_column_order(self.index.clone(), columns, kept_in_order)
+
+        let column_multiindex = self
+            .column_multiindex
+            .as_ref()
+            .map(|multiindex| Self::project_column_multiindex(multiindex, &selected_positions))
+            .transpose()?;
+
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            column_multiindex,
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     fn filter_row_positions_by_label(
@@ -71063,24 +71291,11 @@ impl DataFrame {
     /// Matches `df.assign(**kwargs)`. Takes a list of (column_name, Column) pairs.
     /// Existing columns are replaced; new columns are appended.
     pub fn assign(&self, assignments: Vec<(&str, Column)>) -> Result<Self, FrameError> {
-        let mut new_columns = self.columns.clone();
-        let mut new_order = self.column_order.clone();
-
+        let mut current = self.clone();
         for (name, col) in assignments {
-            if col.len() != self.len() {
-                return Err(FrameError::LengthMismatch {
-                    index_len: self.len(),
-                    column_len: col.len(),
-                });
-            }
-            let name_str = name.to_owned();
-            if !new_columns.contains_key(&name_str) {
-                new_order.push(name_str.clone());
-            }
-            new_columns.insert(name_str, col);
+            current = current.with_column(name, col)?;
         }
-
-        Self::new_with_column_order(self.index.clone(), new_columns, new_order)
+        Ok(current)
     }
 
     /// Assign new columns computed from the DataFrame via closures.
@@ -71096,17 +71311,7 @@ impl DataFrame {
         let mut current = self.clone();
         for (name, func) in assignments {
             let col = func(&current)?;
-            if col.len() != current.len() {
-                return Err(FrameError::LengthMismatch {
-                    index_len: current.len(),
-                    column_len: col.len(),
-                });
-            }
-            let name_str = name.to_owned();
-            if !current.columns.contains_key(&name_str) {
-                current.column_order.push(name_str.clone());
-            }
-            current.columns.insert(name_str, col);
+            current = current.with_column(name, col)?;
         }
         Ok(current)
     }
@@ -75800,30 +76005,43 @@ impl DataFrame {
     /// but missing from the DataFrame are filled with NaN. Columns not in the
     /// new list are dropped. Order follows the provided list.
     pub fn reindex_columns(&self, new_columns: &[&str]) -> Result<Self, FrameError> {
+        if self.columns.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "cannot reindex on an axis with duplicate labels".to_string(),
+            ));
+        }
         let n = self.len();
-        let mut result_cols = BTreeMap::new();
-        let mut col_order = Vec::new();
+        let mut pairs = Vec::with_capacity(new_columns.len());
+        let mut col_order = Vec::with_capacity(new_columns.len());
 
         for &col_name in new_columns {
             let name = col_name.to_string();
             if let Some(col) = self.columns.get(&name) {
-                result_cols.insert(name.clone(), col.clone());
+                pairs.push((name.clone(), col.clone()));
             } else {
                 // Add a NaN-filled column
                 let nans = vec![Scalar::Null(NullKind::NaN); n];
-                result_cols.insert(name.clone(), Column::new(DType::Float64, nans)?);
+                pairs.push((name.clone(), Column::new(DType::Float64, nans)?));
             }
             col_order.push(name);
         }
 
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: col_order.into(),
-            index: self.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        if !self.allows_duplicate_labels && columns.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "reindex_columns: duplicate labels are present".to_owned(),
+            ));
+        }
+
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            col_order,
+            None,
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Update values using non-null values from another DataFrame.
@@ -80924,6 +81142,65 @@ impl DataFrame {
         })
     }
 
+    fn par_map_column_positions_min<T, F>(
+        &self,
+        par_min_values: usize,
+        f: F,
+    ) -> Result<Vec<T>, FrameError>
+    where
+        T: Send,
+        F: Fn(usize) -> Result<T, FrameError> + Sync,
+    {
+        const PAR_MIN_COLS: usize = 2;
+
+        let ncols = self.columns.len();
+        let worker_count =
+            if ncols >= PAR_MIN_COLS && ncols.saturating_mul(self.len()) >= par_min_values {
+                fp_columnar::cached_available_parallelism().min(ncols)
+            } else {
+                1
+            };
+
+        if worker_count < 2 {
+            return (0..ncols).map(&f).collect();
+        }
+
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| -> Result<Vec<T>, FrameError> {
+            let mut handles = Vec::with_capacity(worker_count);
+            for _ in 0..worker_count {
+                let next = &next;
+                let f = &f;
+                handles.push(scope.spawn(move || -> Result<Vec<(usize, T)>, FrameError> {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= ncols {
+                            break;
+                        }
+                        out.push((i, f(i)?));
+                    }
+                    Ok(out)
+                }));
+            }
+            let mut slots: Vec<Option<T>> = (0..ncols).map(|_| None).collect();
+            for handle in handles {
+                let worker_out = handle.join().map_err(|_| {
+                    FrameError::CompatibilityRejected(
+                        "column mapping worker thread panicked".into(),
+                    )
+                })??;
+                for (i, value) in worker_out {
+                    slots[i] = Some(value);
+                }
+            }
+            Ok(slots
+                .into_iter()
+                .map(|slot| slot.expect("every column position is assigned to exactly one worker"))
+                .collect())
+        })
+    }
+
     fn reduce_numeric(&self, func: &str) -> Result<Series, FrameError> {
         // THE DEFAULT IS numeric_only=FALSE, matching pandas 2.x
         // (br-frankenpandas-reductions-numeric-only-default-zx21n). It was TRUE
@@ -82688,6 +82965,17 @@ impl DataFrame {
         Series::new(name.to_string(), self.index.clone(), col.clone())
     }
 
+    /// Internal: extract a column at a positional index as a Series.
+    fn column_at_as_series(&self, pos: usize) -> Result<Series, FrameError> {
+        let name = self.columns.name_at(pos).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column position {pos} out of range"))
+        })?;
+        let col = self.columns.column_at(pos).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column position {pos} out of range"))
+        })?;
+        Series::new(name.to_string(), self.index.clone(), col.clone())
+    }
+
     // ── DataFrame element-wise operations ──
 
     /// Cumulative sum per column.
@@ -82771,10 +83059,11 @@ impl DataFrame {
         // acc), so any NaN breaks to the generic path. Bool/Utf8/nullable columns
         // likewise break to the generic path.
         'typed: {
+            let n_cols = self.num_columns();
             let mut owned: Vec<Vec<f64>> = Vec::new();
-            let mut is_owned: Vec<bool> = Vec::with_capacity(self.column_order.len());
-            for name in &self.column_order {
-                let col = &self.columns[name];
+            let mut is_owned: Vec<bool> = Vec::with_capacity(n_cols);
+            for pos in 0..n_cols {
+                let col = self.column_at(pos).expect("column in bounds");
                 if let Some(f) = col.as_f64_slice() {
                     if f.iter().any(|x| x.is_nan()) {
                         break 'typed;
@@ -82788,18 +83077,17 @@ impl DataFrame {
                 }
             }
             let mut owned_iter = owned.iter();
-            let col_f64: Vec<&[f64]> = self
-                .column_order
-                .iter()
+            let col_f64: Vec<&[f64]> = (0..n_cols)
                 .zip(&is_owned)
-                .map(|(name, &owned_flag)| {
+                .map(|(pos, &owned_flag)| {
                     if owned_flag {
                         owned_iter
                             .next()
                             .expect("one owned vec per Int64 column")
                             .as_slice()
                     } else {
-                        self.columns[name]
+                        self.column_at(pos)
+                            .expect("column in bounds")
                             .as_f64_slice()
                             .expect("Float64 column checked all-valid above")
                     }
@@ -82815,30 +83103,35 @@ impl DataFrame {
                     out_cols[col_idx].push(acc);
                 }
             }
-            let mut columns = BTreeMap::new();
-            for (name, vals) in self.column_order.iter().cloned().zip(out_cols) {
-                columns.insert(name, Column::from_f64_values(vals));
+            let mut pairs = Vec::with_capacity(k);
+            let mut column_order = Vec::with_capacity(k);
+            for (pos, vals) in out_cols.into_iter().enumerate() {
+                let name = self.column_name_at(pos).expect("column in bounds");
+                pairs.push((name.clone(), Column::from_f64_values(vals)));
+                column_order.push(name);
             }
-            return Ok(Self {
-                columns: columns.into(),
-                column_order: self.column_order.clone(),
-                index: self.index.clone(),
-                column_multiindex: self.column_multiindex.clone(),
-                row_multiindex: self.row_multiindex.clone(),
-                allows_duplicate_labels: self.allows_duplicate_labels,
-            });
+            let columns = ColumnStore::from_pairs(pairs);
+            let mut out = Self::new_with_axes(
+                self.index.clone(),
+                self.row_multiindex.clone(),
+                columns,
+                column_order,
+                self.column_multiindex.clone(),
+            )?;
+            out.allows_duplicate_labels = self.allows_duplicate_labels;
+            return Ok(out);
         }
 
-        let mut per_column: Vec<Vec<Scalar>> = self
-            .column_order
-            .iter()
+        let n_cols = self.num_columns();
+        let mut per_column: Vec<Vec<Scalar>> = (0..n_cols)
             .map(|_| Vec::with_capacity(self.len()))
             .collect();
 
         for row_idx in 0..self.len() {
             let mut acc = init;
-            for (col_idx, col_name) in self.column_order.iter().enumerate() {
-                let value = &self.columns[col_name].values()[row_idx];
+            for col_idx in 0..n_cols {
+                let col = self.column_at(col_idx).expect("column in bounds");
+                let value = &col.values()[row_idx];
                 if value.is_missing() {
                     per_column[col_idx].push(Scalar::Null(NullKind::NaN));
                 } else {
@@ -82849,30 +83142,38 @@ impl DataFrame {
             }
         }
 
-        let mut columns = BTreeMap::new();
-        for (name, values) in self.column_order.iter().cloned().zip(per_column) {
-            columns.insert(name, Column::new(DType::Float64, values)?);
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for (pos, values) in per_column.into_iter().enumerate() {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            pairs.push((name.clone(), Column::new(DType::Float64, values)?));
+            column_order.push(name);
         }
 
-        Ok(Self {
-            columns: columns.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Per br-frankenpandas-bktp1: detect uniformly-Timedelta64 DataFrame.
     /// The f64 cumulative_axis1 helper errors via to_f64() on Timedelta64
     /// columns.
     fn all_columns_timedelta(&self) -> bool {
-        !self.column_order.is_empty()
-            && self
-                .column_order
-                .iter()
-                .all(|name| matches!(self.columns[name].dtype(), DType::Timedelta64))
+        let n_cols = self.num_columns();
+        n_cols > 0
+            && (0..n_cols).all(|pos| {
+                matches!(
+                    self.column_at(pos).expect("column in bounds").dtype(),
+                    DType::Timedelta64
+                )
+            })
     }
 
     /// Per br-frankenpandas-bktp1: typed-i64 cumulative axis=1 reducer for
@@ -82882,16 +83183,16 @@ impl DataFrame {
     where
         Op: Fn(i64, i64) -> i64,
     {
-        let mut per_column: Vec<Vec<Scalar>> = self
-            .column_order
-            .iter()
+        let n_cols = self.num_columns();
+        let mut per_column: Vec<Vec<Scalar>> = (0..n_cols)
             .map(|_| Vec::with_capacity(self.len()))
             .collect();
         for row_idx in 0..self.len() {
             let mut acc = init;
             let mut started = false;
-            for (col_idx, col_name) in self.column_order.iter().enumerate() {
-                let value = &self.columns[col_name].values()[row_idx];
+            for col_idx in 0..n_cols {
+                let col = self.column_at(col_idx).expect("column in bounds");
+                let value = &col.values()[row_idx];
                 match value {
                     Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => {
                         acc = if started { op(acc, *ns) } else { *ns };
@@ -82902,18 +83203,23 @@ impl DataFrame {
                 }
             }
         }
-        let mut columns = BTreeMap::new();
-        for (name, values) in self.column_order.iter().cloned().zip(per_column) {
-            columns.insert(name, Column::new(DType::Timedelta64, values)?);
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for (pos, values) in per_column.into_iter().enumerate() {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            pairs.push((name.clone(), Column::new(DType::Timedelta64, values)?));
+            column_order.push(name);
         }
-        Ok(Self {
-            columns: columns.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Cumulative sum across columns, computed row-wise.
@@ -82934,22 +83240,28 @@ impl DataFrame {
         // td_df.cumprod(axis=1); mirror Series::cumprod br-v36qy by emitting
         // all-NaT for uniformly-Timedelta DataFrames.
         if self.all_columns_timedelta() {
-            let mut columns = BTreeMap::new();
-            for name in &self.column_order {
-                let len = self.len();
+            let n_cols = self.num_columns();
+            let mut pairs = Vec::with_capacity(n_cols);
+            let mut column_order = Vec::with_capacity(n_cols);
+            let len = self.len();
+            for pos in 0..n_cols {
+                let name = self.column_name_at(pos).expect("column in bounds");
                 let vals: Vec<Scalar> = (0..len)
                     .map(|_| Scalar::Timedelta64(Timedelta::NAT))
                     .collect();
-                columns.insert(name.clone(), Column::new(DType::Timedelta64, vals)?);
+                pairs.push((name.clone(), Column::new(DType::Timedelta64, vals)?));
+                column_order.push(name);
             }
-            return Ok(Self {
-                columns: columns.into(),
-                column_order: self.column_order.clone(),
-                index: self.index.clone(),
-                column_multiindex: self.column_multiindex.clone(),
-                row_multiindex: self.row_multiindex.clone(),
-                allows_duplicate_labels: self.allows_duplicate_labels,
-            });
+            let columns = ColumnStore::from_pairs(pairs);
+            let mut out = Self::new_with_axes(
+                self.index.clone(),
+                self.row_multiindex.clone(),
+                columns,
+                column_order,
+                self.column_multiindex.clone(),
+            )?;
+            out.allows_duplicate_labels = self.allows_duplicate_labels;
+            return Ok(out);
         }
         self.cumulative_axis1(1.0, |acc, x| acc * x)
     }
@@ -82989,8 +83301,8 @@ impl DataFrame {
         // generic diff, which emits Null(NaN) for any boundary/missing-operand slot).
         // Non-Float64 columns delegate to Series::diff (Timedelta/Bool/Int64 dtype
         // rules preserved).
-        let transformed = self.par_map_columns_min(&self.column_order, 16_384, |name| {
-            let col = &self.columns[name];
+        let transformed = self.par_map_column_positions_min(16_384, |pos| {
+            let col = self.columns.column_at(pos).expect("column in bounds");
             if col.dtype() == DType::Float64
                 && let Some((data, validity)) = col.as_f64_slice_with_validity()
             {
@@ -83024,53 +83336,64 @@ impl DataFrame {
                 || col.dtype().is_datetime()
                 || col.dtype().is_timedelta()
             {
-                Ok(self.column_as_series(name)?.diff(periods)?.column().clone())
+                Ok(self
+                    .column_at_as_series(pos)?
+                    .diff(periods)?
+                    .column()
+                    .clone())
             } else {
                 Ok(col.clone())
             }
         })?;
-        let mut result_cols = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(transformed) {
-            result_cols.insert(name.clone(), column);
-        }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let pairs: Vec<(String, Column)> = self
+            .columns
+            .ordered_names()
+            .cloned()
+            .zip(transformed)
+            .collect();
+        let column_order = pairs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// First-order difference across columns per row.
     ///
     /// Matches `pd.DataFrame.diff(periods, axis=1)`.
     pub fn diff_axis1(&self, periods: i64) -> Result<Self, FrameError> {
-        let n_cols = self.column_order.len();
+        let n_cols = self.num_columns();
         let n_rows = self.len();
-        let mut out_cols = BTreeMap::new();
 
         // Per br-frankenpandas-r82bc: detect uniformly-Timedelta64 or Datetime64 columns
         // and preserve Timedelta64 dtype matching pandas (delta of durations or timestamps).
-        let all_timedelta = self.column_order.iter().all(|name| {
-            let col = &self.columns[name];
+        let all_timedelta = (0..n_cols).all(|pos| {
+            let col = self.column_at(pos).expect("column in bounds");
             matches!(col.dtype(), DType::Timedelta64)
                 || col.values().iter().all(|v| {
                     matches!(v, Scalar::Timedelta64(_))
                         || matches!(v, Scalar::Null(NullKind::NaT))
                         || v.is_missing()
                 })
-        }) && self.column_order.iter().any(|name| {
-            self.columns[name]
-                .values()
+        }) && (0..n_cols).any(|pos| {
+            let col = self.column_at(pos).expect("column in bounds");
+            col.values()
                 .iter()
                 .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
         });
 
-        let all_datetime = !self.column_order.is_empty()
-            && self.column_order.iter().all(|name| {
-                let col = &self.columns[name];
+        let all_datetime = n_cols > 0
+            && (0..n_cols).all(|pos| {
+                let col = self.column_at(pos).expect("column in bounds");
                 matches!(col.dtype(), DType::Datetime64 { .. })
                     || col.values().iter().all(|v| {
                         matches!(v, Scalar::Datetime64(_))
@@ -83078,16 +83401,20 @@ impl DataFrame {
                             || v.is_missing()
                     })
             })
-            && self.column_order.iter().any(|name| {
-                self.columns[name]
-                    .values()
+            && (0..n_cols).any(|pos| {
+                let col = self.column_at(pos).expect("column in bounds");
+                col.values()
                     .iter()
                     .any(|v| matches!(v, Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT))
             });
 
         let is_temporal = all_timedelta || all_datetime;
 
-        for (j, name) in self.column_order.iter().enumerate() {
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+
+        for j in 0..n_cols {
+            let name = self.column_name_at(j).expect("column in bounds");
             let mut vals = Vec::with_capacity(n_rows);
             let prev_idx = if periods >= 0 {
                 j.checked_sub(periods as usize)
@@ -83100,9 +83427,8 @@ impl DataFrame {
             };
 
             if let Some(p_idx) = prev_idx {
-                let prev_name = &self.column_order[p_idx];
-                let current_col = &self.columns[name];
-                let prev_col = &self.columns[prev_name];
+                let current_col = self.column_at(j).expect("column in bounds");
+                let prev_col = self.column_at(p_idx).expect("column in bounds");
 
                 for i in 0..n_rows {
                     let curr_val = &current_col.values()[i];
@@ -83160,23 +83486,36 @@ impl DataFrame {
             } else {
                 DType::Float64
             };
-            out_cols.insert(name.clone(), Column::new(out_dtype, vals)?);
+            pairs.push((name.clone(), Column::new(out_dtype, vals)?));
+            column_order.push(name);
         }
-        Self::new_with_column_order(self.index.clone(), out_cols, self.column_order.clone())
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Percentage change across columns per row.
     ///
     /// Matches `pd.DataFrame.pct_change(periods, axis=1)`.
     pub fn pct_change_axis1(&self, periods: i64) -> Result<Self, FrameError> {
-        let n_cols = self.column_order.len();
+        let n_cols = self.num_columns();
         let n_rows = self.len();
-        let mut out_cols = BTreeMap::new();
         // pandas pct_change(axis=1) default fill_method='pad' forward-fills
         // across columns (per row) before computing. (br-frankenpandas-c3zld)
         let src = self.ffill_axis1(None)?;
 
-        for (j, name) in self.column_order.iter().enumerate() {
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+
+        for j in 0..n_cols {
+            let name = self.column_name_at(j).expect("column in bounds");
             let mut vals = Vec::with_capacity(n_rows);
             let prev_idx = if periods >= 0 {
                 j.checked_sub(periods as usize)
@@ -83189,9 +83528,8 @@ impl DataFrame {
             };
 
             if let Some(p_idx) = prev_idx {
-                let prev_name = &self.column_order[p_idx];
-                let current_col = &src.columns[name];
-                let prev_col = &src.columns[prev_name];
+                let current_col = src.column_at(j).expect("column in bounds");
+                let prev_col = src.column_at(p_idx).expect("column in bounds");
 
                 for i in 0..n_rows {
                     let curr_val = &current_col.values()[i];
@@ -83222,10 +83560,20 @@ impl DataFrame {
             } else {
                 vals.resize(n_rows, Scalar::Null(NullKind::NaN));
             }
-            out_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
+            pairs.push((name.clone(), Column::new(DType::Float64, vals)?));
+            column_order.push(name);
         }
 
-        Self::new_with_column_order(self.index.clone(), out_cols, self.column_order.clone())
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Shift values per column.
@@ -83255,8 +83603,8 @@ impl DataFrame {
         // `validity[src]` reproduces `vals[src].clone()`. Non-Float64 columns keep
         // the exact `apply_per_column` gate (numeric → Series shift, non-numeric →
         // clone passthrough).
-        let transformed = self.par_map_columns_min(&self.column_order, 131_072, |name| {
-            let col = &self.columns[name];
+        let transformed = self.par_map_column_positions_min(131_072, |pos| {
+            let col = self.columns.column_at(pos).expect("column in bounds");
             if col.dtype() == DType::Float64
                 && let Some((data, validity)) = col.as_f64_slice_with_validity()
             {
@@ -83287,7 +83635,7 @@ impl DataFrame {
                 ))
             } else if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
                 Ok(self
-                    .column_as_series(name)?
+                    .column_at_as_series(pos)?
                     .shift(periods)?
                     .column()
                     .clone())
@@ -83295,18 +83643,26 @@ impl DataFrame {
                 Ok(col.clone())
             }
         })?;
-        let mut result_cols = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(transformed) {
-            result_cols.insert(name.clone(), column);
-        }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let pairs: Vec<(String, Column)> = self
+            .columns
+            .ordered_names()
+            .cloned()
+            .zip(transformed)
+            .collect();
+        let column_order = pairs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Shift values per column, filling the vacated positions with `fill_value`
@@ -83325,33 +83681,39 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.shift(periods, axis=1)`.
     pub fn shift_axis1(&self, periods: i64) -> Result<Self, FrameError> {
-        let n_cols = self.column_order.len();
+        let n_cols = self.num_columns();
         if n_cols == 0 {
             return Ok(self.clone());
         }
 
-        let mut out_cols = std::collections::BTreeMap::new();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
         let missing_val = fp_types::Scalar::Null(fp_types::NullKind::NaN);
 
-        for (i, name) in self.column_order.iter().enumerate() {
+        for i in 0..n_cols {
+            let name = self.column_name_at(i).expect("column in bounds");
             let src_idx = i as i64 - periods;
             let col = if src_idx >= 0 && (src_idx as usize) < n_cols {
-                let src_name = &self.column_order[src_idx as usize];
-                self.columns[src_name].clone()
+                self.column_at(src_idx as usize)
+                    .expect("column in bounds")
+                    .clone()
             } else {
                 Column::from_values(vec![missing_val.clone(); self.len()])?
             };
-            out_cols.insert(name.clone(), col);
+            pairs.push((name.clone(), col));
+            column_order.push(name);
         }
 
-        Ok(Self {
-            index: self.index.clone(),
-            column_order: self.column_order.clone(),
-            columns: out_cols.into(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Absolute value per column.
@@ -85473,26 +85835,8 @@ impl DataFrame {
     /// Matches `pd.DataFrame.assign(**kwargs)` for single-column assignment.
     /// If the column already exists, it is replaced. Otherwise it is appended.
     pub fn assign_column(&self, name: &str, values: Vec<Scalar>) -> Result<Self, FrameError> {
-        if values.len() != self.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.len(),
-                column_len: values.len(),
-            });
-        }
-        let mut new_cols = self.columns.clone();
-        new_cols.insert(name.to_owned(), Column::from_values(values)?);
-        let mut new_order = self.column_order.clone();
-        if !new_order.contains(&name.to_owned()) {
-            new_order.push(name.to_owned());
-        }
-        Ok(Self {
-            columns: new_cols,
-            column_order: new_order,
-            index: self.index.clone(),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let col = Column::from_values(values)?;
+        self.with_column(name, col)
     }
 
     /// Internal: apply a binary f64 operation with a scalar to each numeric column.
@@ -86468,6 +86812,19 @@ impl DataFrame {
         name: impl Into<String>,
         column: Column,
     ) -> Result<Self, FrameError> {
+        self.insert_allow_duplicates(loc, name, column, false)
+    }
+
+    /// Insert a column at a specific position, optionally allowing duplicate labels.
+    ///
+    /// Matches `df.insert(loc, column, value, allow_duplicates=...)`.
+    pub fn insert_allow_duplicates(
+        &self,
+        loc: usize,
+        name: impl Into<String>,
+        column: Column,
+        allow_duplicates: bool,
+    ) -> Result<Self, FrameError> {
         let name = name.into();
         if column.len() != self.len() {
             return Err(FrameError::LengthMismatch {
@@ -86475,9 +86832,14 @@ impl DataFrame {
                 column_len: column.len(),
             });
         }
-        if self.columns.contains_key(&name) {
+        if allow_duplicates && !self.allows_duplicate_labels {
+            return Err(FrameError::CompatibilityRejected(
+                "Cannot specify 'allow_duplicates=True' when 'self.flags.allows_duplicate_labels' is False.".to_string(),
+            ));
+        }
+        if !allow_duplicates && self.columns.contains_key(&name) {
             return Err(FrameError::CompatibilityRejected(format!(
-                "column '{name}' already exists; use with_column to overwrite"
+                "cannot insert {name}, already exists"
             )));
         }
         // Per br-frankenpandas-wmucs: pandas raises ValueError when loc
@@ -86490,11 +86852,51 @@ impl DataFrame {
                 self.column_order.len()
             )));
         }
-        let mut column_order = self.column_order.clone();
-        column_order.insert(loc, name.clone());
-        let mut columns = self.columns.clone();
-        columns.insert(name, column);
-        Self::new_with_column_order(self.index.clone(), columns, column_order)
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols + 1);
+        let mut column_order = Vec::with_capacity(n_cols + 1);
+        for pos in 0..loc {
+            let col_name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds").clone();
+            pairs.push((col_name.clone(), col));
+            column_order.push(col_name);
+        }
+        pairs.push((name.clone(), column));
+        column_order.push(name.clone());
+        for pos in loc..n_cols {
+            let col_name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds").clone();
+            pairs.push((col_name.clone(), col));
+            column_order.push(col_name);
+        }
+        let new_column_multiindex = if let Some(ref col_mi) = self.column_multiindex {
+            let mut arrays = Vec::with_capacity(col_mi.nlevels());
+            for level in 0..col_mi.nlevels() {
+                let level_values = col_mi.get_level_values(level)?;
+                let mut labels = level_values.labels().to_vec();
+                if level == 0 {
+                    labels.insert(loc, IndexLabel::from(name.as_str()));
+                } else {
+                    labels.insert(loc, IndexLabel::from(""));
+                }
+                arrays.push(labels);
+            }
+            let new_mi =
+                fp_index::MultiIndex::from_arrays(arrays)?.set_names(col_mi.names().to_vec());
+            Some(new_mi)
+        } else {
+            None
+        };
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            new_column_multiindex,
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Replace the column at a specific integer position.
@@ -86516,9 +86918,10 @@ impl DataFrame {
             });
         }
 
-        let name = self.column_order[loc].clone();
         let mut columns = self.columns.clone();
-        columns.insert(name, column);
+        if let Some(c) = columns.column_at_mut(loc) {
+            *c = column;
+        }
         Ok(Self {
             index: self.index.clone(),
             row_multiindex: self.row_multiindex.clone(),
@@ -86569,21 +86972,27 @@ impl DataFrame {
         // matches by exact `ScalarKey`, which equals `semantic_eq` for int/str/
         // bool; a Float64 key disables the hash path so the same linear
         // `semantic_eq` (tolerant) scan runs, first match wins in both.
-        let mut result_cols = BTreeMap::new();
-        for name in &self.column_order {
-            let col = &self.columns[name];
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
             let replaced = Series::new(name.clone(), self.index.clone(), col.clone())?
                 .replace(replacements)?;
-            result_cols.insert(name.clone(), replaced.column().clone());
+            pairs.push((name.clone(), replaced.column().clone()));
+            column_order.push(name.clone());
         }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Replace values on a per-column basis.
@@ -86602,28 +87011,34 @@ impl DataFrame {
                 )));
             }
         }
-        let mut result_cols = BTreeMap::new();
-        for name in &self.column_order {
-            let col = &self.columns[name];
-            if let Some(replacements) = per_column.get(name) {
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
+            if let Some(replacements) = per_column.get(name.as_str()) {
                 // Delegate to the hash-indexed (and Int64-typed) `Series::replace`
                 // instead of the prior O(n·m) per-value `semantic_eq` linear scan
                 // — bit-identical (see `DataFrame::replace`).
                 let replaced = Series::new(name.clone(), self.index.clone(), col.clone())?
                     .replace(replacements)?;
-                result_cols.insert(name.clone(), replaced.column().clone());
+                pairs.push((name.clone(), replaced.column().clone()));
             } else {
-                result_cols.insert(name.clone(), col.clone());
+                pairs.push((name.clone(), col.clone()));
             }
+            column_order.push(name.clone());
         }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Replace string values matching a regex pattern across all columns.
@@ -86633,9 +87048,12 @@ impl DataFrame {
     pub fn replace_regex(&self, pat: &str, repl: &str) -> Result<Self, FrameError> {
         let re = regex::Regex::new(pat)
             .map_err(|e| FrameError::CompatibilityRejected(format!("invalid regex: {e}")))?;
-        let mut result_cols = BTreeMap::new();
-        for name in &self.column_order {
-            let col = &self.columns[name];
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
             if col.dtype() == DType::Utf8 {
                 let new_vals: Vec<Scalar> = col
                     .values()
@@ -86645,19 +87063,22 @@ impl DataFrame {
                         other => other.clone(),
                     })
                     .collect();
-                result_cols.insert(name.clone(), Column::from_values(new_vals)?);
+                pairs.push((name.clone(), Column::from_values(new_vals)?));
             } else {
-                result_cols.insert(name.clone(), col.clone());
+                pairs.push((name.clone(), col.clone()));
             }
+            column_order.push(name.clone());
         }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Align two DataFrames on their indices.
@@ -164627,6 +165048,170 @@ mod tests {
             result.columns["val_prod"].values(),
             &[Scalar::Float64(2.0), Scalar::Float64(12.0)]
         );
+    }
+
+    #[test]
+    fn test_resample_duplicate_columns() {
+        let index = Index::new(vec![
+            IndexLabel::Utf8("2023-01-01".to_string()),
+            IndexLabel::Utf8("2023-01-15".to_string()),
+            IndexLabel::Utf8("2023-02-01".to_string()),
+            IndexLabel::Utf8("2023-02-15".to_string()),
+        ]);
+        let col1 = Column::from_values(vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+        ])
+        .unwrap();
+        let col2 = Column::from_values(vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(30.0),
+            Scalar::Float64(40.0),
+        ])
+        .unwrap();
+        let store = crate::ColumnStore::from_pairs(vec![
+            ("val".to_string(), col1),
+            ("val".to_string(), col2),
+        ]);
+        let order = vec!["val".to_string(), "val".to_string()];
+        let df = DataFrame::new_with_column_order(index, store, order).expect("df with dups");
+
+        // sum()
+        let res_sum = df.resample("M").sum().unwrap();
+        assert_eq!(res_sum.column_names(), vec!["val", "val"]);
+        assert_eq!(res_sum.num_columns(), 2);
+        assert_eq!(
+            res_sum.column_at(0).unwrap().values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(7.0)]
+        );
+        assert_eq!(
+            res_sum.column_at(1).unwrap().values(),
+            &[Scalar::Float64(30.0), Scalar::Float64(70.0)]
+        );
+        assert!(res_sum.allows_duplicate_labels);
+
+        // mean()
+        let res_mean = df.resample("M").mean().unwrap();
+        assert_eq!(res_mean.column_names(), vec!["val", "val"]);
+        assert_eq!(
+            res_mean.column_at(0).unwrap().values(),
+            &[Scalar::Float64(1.5), Scalar::Float64(3.5)]
+        );
+        assert_eq!(
+            res_mean.column_at(1).unwrap().values(),
+            &[Scalar::Float64(15.0), Scalar::Float64(35.0)]
+        );
+
+        // min()
+        let res_min = df.resample("M").min().unwrap();
+        assert_eq!(res_min.column_names(), vec!["val", "val"]);
+        assert_eq!(
+            res_min.column_at(0).unwrap().values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(3.0)]
+        );
+        assert_eq!(
+            res_min.column_at(1).unwrap().values(),
+            &[Scalar::Float64(10.0), Scalar::Float64(30.0)]
+        );
+
+        // max()
+        let res_max = df.resample("M").max().unwrap();
+        assert_eq!(res_max.column_names(), vec!["val", "val"]);
+        assert_eq!(
+            res_max.column_at(0).unwrap().values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(4.0)]
+        );
+        assert_eq!(
+            res_max.column_at(1).unwrap().values(),
+            &[Scalar::Float64(20.0), Scalar::Float64(40.0)]
+        );
+
+        // first()
+        let res_first = df.resample("M").first().unwrap();
+        assert_eq!(res_first.column_names(), vec!["val", "val"]);
+        assert_eq!(
+            res_first.column_at(0).unwrap().values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(3.0)]
+        );
+
+        // last()
+        let res_last = df.resample("M").last().unwrap();
+        assert_eq!(res_last.column_names(), vec!["val", "val"]);
+        assert_eq!(
+            res_last.column_at(0).unwrap().values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(4.0)]
+        );
+
+        // agg()
+        let res_agg = df.resample("M").agg(&["sum", "mean"]).unwrap();
+        assert_eq!(
+            res_agg.column_names(),
+            vec!["val_sum", "val_mean", "val_sum", "val_mean"]
+        );
+        assert_eq!(res_agg.num_columns(), 4);
+        assert_eq!(
+            res_agg.column_at(0).unwrap().values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(7.0)]
+        );
+        assert_eq!(
+            res_agg.column_at(1).unwrap().values(),
+            &[Scalar::Float64(1.5), Scalar::Float64(3.5)]
+        );
+        assert_eq!(
+            res_agg.column_at(2).unwrap().values(),
+            &[Scalar::Float64(30.0), Scalar::Float64(70.0)]
+        );
+        assert_eq!(
+            res_agg.column_at(3).unwrap().values(),
+            &[Scalar::Float64(15.0), Scalar::Float64(35.0)]
+        );
+
+        // ohlc()
+        let res_ohlc = df.resample("M").ohlc().unwrap();
+        assert_eq!(
+            res_ohlc.column_names(),
+            vec![
+                "val_open",
+                "val_high",
+                "val_low",
+                "val_close",
+                "val_open",
+                "val_high",
+                "val_low",
+                "val_close"
+            ]
+        );
+        assert_eq!(res_ohlc.num_columns(), 8);
+
+        // transform()
+        let res_tr = df.resample("M").transform("sum").unwrap();
+        assert_eq!(res_tr.column_names(), vec!["val", "val"]);
+        assert_eq!(res_tr.num_columns(), 2);
+        assert_eq!(
+            res_tr.column_at(0).unwrap().values(),
+            &[
+                Scalar::Float64(3.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0)
+            ]
+        );
+        assert_eq!(
+            res_tr.column_at(1).unwrap().values(),
+            &[
+                Scalar::Float64(30.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(70.0),
+                Scalar::Float64(70.0)
+            ]
+        );
+
+        // size()
+        let res_size = df.resample("M").size().unwrap();
+        assert_eq!(res_size.len(), 2);
     }
 
     #[test]
