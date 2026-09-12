@@ -18622,7 +18622,7 @@ fn dataframe_from_fixture_columns(
     index_labels: Vec<IndexLabel>,
 ) -> Result<DataFrame, String> {
     let n = index_labels.len();
-    let mut store = BTreeMap::new();
+    let mut pairs = Vec::with_capacity(columns.len());
     let mut order = Vec::with_capacity(columns.len());
     for (name, values) in columns {
         if values.len() != n {
@@ -18632,10 +18632,14 @@ fn dataframe_from_fixture_columns(
             ));
         }
         order.push(name.clone());
-        store.insert(name, column_from_fixture_values(values)?);
+        pairs.push((name, column_from_fixture_values(values)?));
     }
-    DataFrame::new_with_column_order(Index::new(index_labels), store, order)
-        .map_err(|err| err.to_string())
+    DataFrame::new_with_column_order(
+        Index::new(index_labels),
+        fp_frame::ColumnStore::from_pairs(pairs),
+        order,
+    )
+    .map_err(|err| err.to_string())
 }
 
 fn build_series(series: &FixtureSeries) -> Result<Series, String> {
@@ -18784,11 +18788,9 @@ fn resolve_frame_column_order(frame: &FixtureDataFrame) -> Result<Vec<String>, S
                     "frame column_order references missing column '{name}'"
                 ));
             }
-            if !seen.insert(name.clone()) {
-                return Err(format!(
-                    "frame column_order contains duplicate column '{name}'"
-                ));
-            }
+            // Positions in column_order are unique while column names need not be.
+            // Record seen names to prevent appending already-requested columns.
+            seen.insert(name.clone());
             column_order.push(name.clone());
         }
     }
@@ -18829,13 +18831,10 @@ fn build_fixture_categorical_series(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Series::from_categorical_codes(
-        name.to_owned(),
-        codes,
-        spec.categories.clone(),
-        spec.ordered.unwrap_or(false),
-    )
-    .map_err(|err| err.to_string())
+    let categories = spec.categories.clone();
+    let ordered = spec.ordered.unwrap_or(false);
+    Series::from_categorical_codes(name.to_owned(), codes, categories, ordered)
+        .map_err(|err| err.to_string())
 }
 
 fn build_fixture_multiindex(spec: &FixtureMultiIndex) -> Result<fp_index::MultiIndex, String> {
@@ -18876,7 +18875,7 @@ fn attach_fixture_row_multiindex(
 
     let row_multiindex = build_fixture_multiindex(spec)?;
     // br-frankenpandas-wfkzm: `new_with_row_multiindex` takes a ColumnStore and
-    // derives the column order from its (alphabetical) keys, so every
+    // re-sorts its names alphabetically, so a previously-reordered
     // row-MultiIndex fixture reached FrankenPandas with its columns reordered
     // and seven live tests compared the wrong frame. Keep the order the
     // fixture declared.
@@ -18911,13 +18910,12 @@ fn build_dataframe(frame_spec: &FixtureDataFrame) -> Result<DataFrame, String> {
         let materialized = DataFrame::from_series(series_list).map_err(|err| err.to_string())?;
         let rebuilt_columns = column_order
             .iter()
-            .map(|name| {
-                let values = materialized
-                    .column(name)
-                    .ok_or_else(|| format!("materialized frame is missing column '{name}'"))?
-                    .values()
-                    .to_vec();
-                Ok((name.clone(), values))
+            .enumerate()
+            .map(|(col_idx, name)| {
+                let col = materialized.column_at(col_idx).ok_or_else(|| {
+                    format!("materialized frame is missing column at idx={col_idx}")
+                })?;
+                Ok((name.clone(), col.values().to_vec()))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let frame = dataframe_from_fixture_columns(rebuilt_columns, row_index)?;
@@ -29638,5 +29636,61 @@ mod constructor_dtype_tier_locks_jozfk {
             parse_constructor_dtype_spec("boolean[pyarrow]"),
             Ok(DType::Bool)
         );
+    }
+
+    #[test]
+    fn test_conformance_duplicate_column_support_8b4d4() {
+        use std::collections::BTreeMap;
+
+        use fp_frame::ColumnSelection;
+        use fp_types::Scalar;
+
+        use super::{
+            FixtureDataFrame, OrderedColumnData, dataframe_from_fixture_columns,
+            resolve_frame_column_order,
+        };
+
+        // 1. resolve_frame_column_order accepts duplicate column names
+        let mut col_data = BTreeMap::new();
+        col_data.insert("a".to_string(), vec![Scalar::Int64(1)]);
+        let fixture_frame = FixtureDataFrame {
+            index: vec![0_i64.into()],
+            columns: OrderedColumnData::from(col_data),
+            column_order: Some(vec!["a".to_string(), "a".to_string()]),
+            categorical_columns: None,
+            row_multiindex: None,
+        };
+        let resolved = resolve_frame_column_order(&fixture_frame).expect("order resolution");
+        assert_eq!(resolved, vec!["a", "a"]);
+
+        // 2. dataframe_from_fixture_columns preserves duplicate columns and distinct values
+        let cols = vec![
+            ("a".to_string(), vec![Scalar::Int64(10)]),
+            ("a".to_string(), vec![Scalar::Int64(20)]),
+        ];
+        let df = dataframe_from_fixture_columns(cols, vec![0_i64.into()])
+            .expect("dataframe_from_fixture_columns");
+        assert_eq!(df.column_names(), vec!["a", "a"]);
+        assert_eq!(df.column_at(0).unwrap().values(), &[Scalar::Int64(10)]);
+        assert_eq!(df.column_at(1).unwrap().values(), &[Scalar::Int64(20)]);
+
+        // 3. Negative case: df['a'] on duplicate column must NOT return just a Series
+        let selection = df.get_column_selection("a").expect("selection");
+        assert!(
+            matches!(selection, ColumnSelection::DataFrame(_)),
+            "df['a'] with duplicate 'a' columns must return a DataFrame, not a Series"
+        );
+        if let ColumnSelection::DataFrame(selected) = selection {
+            assert_eq!(selected.shape(), (1, 2));
+            assert_eq!(selected.column_names(), vec!["a", "a"]);
+            assert_eq!(
+                selected.column_at(0).unwrap().values(),
+                &[Scalar::Int64(10)]
+            );
+            assert_eq!(
+                selected.column_at(1).unwrap().values(),
+                &[Scalar::Int64(20)]
+            );
+        }
     }
 }

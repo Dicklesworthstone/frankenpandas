@@ -8,7 +8,7 @@
 > resolve to the wrong entry depending on which heading a reader hit first, and one
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
 > number on whichever entry the existing in-tree citations actually meant. The next
-> free number is DISC-028. To see every ID in use:
+> free number is DISC-029. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -281,6 +281,14 @@
 - **Resolution:** RESOLVED — covered by fp-io test `csv_parse_dates_mixed_naive_and_aware_strings_normalizes_per_value`; the stale accepted-divergence note was superseded by the per-value parse path used by `parse_csv_datetime_values`.
 - **Tests affected:** none expected; historical coverage remains `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
 - **Review date:** 2026-06-17
+
+### DISC-028: Concat axis=1 duplicate column label support (prior rejection resolved)
+- **Reference:** In pandas 2.2.3, `pd.concat([left, right], axis=1)` succeeds when input frames share column names, preserving all columns in order (e.g. `['dup', 'dup']`). It only rejects when `verify_integrity=True` is explicitly passed.
+- **Our impl:** `concat_dataframes_axis1` now constructs output frames via `ColumnStore::from_pairs`, preserving duplicate column names in order when `allows_duplicate_labels` is true (the pandas default). When `allows_duplicate_labels=false`, it rejects with `FrameError::CompatibilityRejected`.
+- **Impact:** Previous rejection contract was a legacy artifact where the store used `BTreeMap<String, Column>`. Four packet fixtures (`fp_p2d_028` strict/hardened and `fp_p2d_029` strict/hardened) asserted an artificial error contract (`duplicate column`) that neither pandas nor current FrankenPandas raises. They are marked `retired` with documented provenance per `br-frankenpandas-8b4d4`.
+- **Resolution:** RESOLVED (br-frankenpandas-ih4t0 / br-frankenpandas-8b4d4).
+- **Tests affected:** `fp_p2d_028` (strict, hardened), `fp_p2d_029` (strict, hardened), `concat_dataframes_axis1_duplicate_columns_succeeds`.
+- **Review date:** 2026-09-12
 
 ## Rules
 
