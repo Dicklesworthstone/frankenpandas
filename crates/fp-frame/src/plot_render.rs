@@ -62,7 +62,7 @@ fn numeric_view(series: &PlotSeriesSpec) -> Result<Vec<Option<f64>>, FrameError>
         .values
         .iter()
         .map(|value| match value {
-            Scalar::Float64(v) => Ok(Some(*v)),
+            Scalar::Float64(v) => Ok(if v.is_nan() { None } else { Some(*v) }),
             Scalar::Int64(v) => Ok(Some(*v as f64)),
             Scalar::Bool(b) => Ok(Some(if *b { 1.0 } else { 0.0 })),
             Scalar::Null(_) => Ok(None),
@@ -277,30 +277,49 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             let cx = MARGIN_LEFT + PLOT_W / 2.0;
             let cy = MARGIN_TOP + PLOT_H / 2.0;
             let r = 140.0;
+            let mut slice_idx = 0;
             for (si, values) in views.iter().enumerate() {
-                let total: f64 = values.iter().flatten().copied().sum();
-                if values.iter().flatten().any(|v| *v < 0.0) {
+                let finite_values: Vec<f64> = values
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .collect();
+                if finite_values.iter().any(|v| *v < 0.0) {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "pie requires non-negative values: series '{}' has a negative slice",
                         spec.series[si].name
                     )));
                 }
-                if total == 0.0 {
+                let total: f64 = finite_values.iter().sum();
+                if total <= 0.0 {
                     continue;
                 }
-                let color = palette(si);
-                for v in values.iter().flatten().copied() {
-                    let next = angle + (v / total) * std::f64::consts::TAU;
-                    let large = (next - angle) > std::f64::consts::PI;
-                    body.push_str(&format!(
-                        "<path d=\"M {cx:.2} {cy:.2} L {:.2} {:.2} A {r} {r} 0 {} 1 {:.2} {:.2} Z\" fill=\"{color}\" stroke=\"white\"/>",
-                        cx + r * angle.cos(),
-                        cy + r * angle.sin(),
-                        i64::from(large),
-                        cx + r * next.cos(),
-                        cy + r * next.sin(),
-                    ));
-                    angle = next;
+                for v in finite_values {
+                    if v <= 0.0 {
+                        continue;
+                    }
+                    let color = palette(slice_idx);
+                    slice_idx += 1;
+                    let frac = v / total;
+                    if frac >= 1.0 - 1e-6 {
+                        body.push_str(&format!(
+                            "<circle cx=\"{cx:.2}\" cy=\"{cy:.2}\" r=\"{r}\" fill=\"{color}\" stroke=\"white\"/>"
+                        ));
+                        angle += std::f64::consts::TAU;
+                    } else {
+                        let next = angle + frac * std::f64::consts::TAU;
+                        let large = (next - angle) > std::f64::consts::PI;
+                        body.push_str(&format!(
+                            "<path d=\"M {cx:.2} {cy:.2} L {:.2} {:.2} A {r} {r} 0 {} 1 {:.2} {:.2} Z\" fill=\"{color}\" stroke=\"white\"/>",
+                            cx + r * angle.cos(),
+                            cy + r * angle.sin(),
+                            i64::from(large),
+                            cx + r * next.cos(),
+                            cy + r * next.sin(),
+                        ));
+                        angle = next;
+                    }
                 }
             }
         }
@@ -316,16 +335,41 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
         }
     }
 
-    let legend_entries: Vec<(String, &str)> = spec
-        .series
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.name.clone(), palette(i)))
-        .collect();
+    let legend_entries: Vec<(String, &str)> =
+        if spec.kind == PlotKind::Pie && spec.series.len() == 1 {
+            let s = &spec.series[0];
+            let mut entries = Vec::new();
+            let mut s_idx = 0;
+            for (i, v) in views[0].iter().enumerate() {
+                if let Some(val) = v
+                    && val.is_finite()
+                    && *val > 0.0
+                {
+                    let label = s
+                        .index
+                        .get(i)
+                        .map(|lbl| crate::scalar_plot_label(&crate::index_label_to_scalar(lbl)))
+                        .unwrap_or_else(|| i.to_string());
+                    entries.push((label, palette(s_idx)));
+                    s_idx += 1;
+                }
+            }
+            entries
+        } else {
+            spec.series
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.name.clone(), palette(i)))
+                .collect()
+        };
+    let axes = if spec.kind == PlotKind::Pie {
+        String::new()
+    } else {
+        svg_axes(&scale, &x_labels)
+    };
     Ok(format!(
-        "{}{body}{}{}</svg>",
+        "{}{body}{axes}{}</svg>",
         svg_open(&spec.method),
-        svg_axes(&scale, &x_labels),
         legend(&legend_entries),
     ))
 }
@@ -693,5 +737,55 @@ mod tests {
             negative_pie.to_svg(),
             Err(FrameError::CompatibilityRejected(_))
         ));
+    }
+
+    #[test]
+    fn pie_chart_handles_nan_distinct_colors_and_full_circle() {
+        // 1. Nan in pie values must be skipped, not produce NaN in path coordinates.
+        let pie_nan = PlotSpec {
+            method: "pie".to_owned(),
+            kind: PlotKind::Pie,
+            series: vec![series(
+                "p",
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(f64::NAN),
+                    Scalar::Float64(20.0),
+                ],
+            )],
+        };
+        let svg_nan = pie_nan.to_svg().expect("pie with nan renders");
+        assert!(
+            !svg_nan.contains("NaN"),
+            "pie svg must never contain NaN coordinates"
+        );
+        assert!(svg_nan.contains("<path"), "pie wedges must be drawn");
+
+        // 2. Multi-slice pie must use distinct palette colors for slices, not monochrome.
+        let pie_multi = PlotSpec {
+            method: "pie".to_owned(),
+            kind: PlotKind::Pie,
+            series: vec![series("p", floats(&[10.0, 20.0]))],
+        };
+        let svg_multi = pie_multi.to_svg().expect("multi-slice pie renders");
+        assert!(svg_multi.contains(super::palette(0)));
+        assert!(svg_multi.contains(super::palette(1)));
+        // Pie charts must not render Cartesian axes or gridlines
+        assert!(
+            !svg_multi.contains("<line x1=\"56\" y1=\"30\""),
+            "pie charts must not render cartesian axes"
+        );
+
+        // 3. Single-slice (100%) pie must render a full circle rather than degenerate 0-length arc.
+        let pie_single = PlotSpec {
+            method: "pie".to_owned(),
+            kind: PlotKind::Pie,
+            series: vec![series("p", floats(&[100.0]))],
+        };
+        let svg_single = pie_single.to_svg().expect("single-slice pie renders");
+        assert!(
+            svg_single.contains("<circle"),
+            "100% single slice must render circle"
+        );
     }
 }
