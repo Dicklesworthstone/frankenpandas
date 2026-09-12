@@ -5967,7 +5967,23 @@ impl Index {
     #[must_use]
     pub fn diff(&self, periods: usize) -> Vec<Option<IndexLabel>> {
         if periods == 0 {
-            return vec![None; self.len()];
+            if let Some(values) = self.labels.int64_view() {
+                return values.iter().map(|_| Some(IndexLabel::Int64(0))).collect();
+            }
+            return self
+                .labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Int64(_) => Some(IndexLabel::Int64(0)),
+                    IndexLabel::Timedelta64(current) if *current != Timedelta::NAT => {
+                        Some(IndexLabel::Timedelta64(0))
+                    }
+                    IndexLabel::Datetime64(current) if *current != i64::MIN => {
+                        Some(IndexLabel::Timedelta64(0))
+                    }
+                    _ => None,
+                })
+                .collect();
         }
         if let Some(values) = self.labels.int64_view() {
             let leading = periods.min(values.len());
@@ -26644,6 +26660,15 @@ mod tests {
 
         assert_eq!(actual, vec![None, None, Some(IndexLabel::Int64(10)), None,]);
         assert_eq!(index.diff(99), vec![None, None, None, None]);
+        assert_eq!(
+            index.diff(0),
+            vec![
+                Some(IndexLabel::Int64(0)),
+                Some(IndexLabel::Int64(0)),
+                Some(IndexLabel::Int64(0)),
+                Some(IndexLabel::Int64(0)),
+            ]
+        );
         assert!(
             index.labels.materialized.get().is_none(),
             "raw Int64 diff should not materialize source labels"
