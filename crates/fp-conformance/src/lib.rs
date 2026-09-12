@@ -9679,6 +9679,25 @@ fn run_fixture(
     fixture: &PacketFixture,
     options: &SuiteOptions,
 ) -> Result<CaseResult, HarnessError> {
+    if let Some(retirement) = &fixture.retired {
+        let replay_key =
+            deterministic_replay_key(&fixture.packet_id, &fixture.case_id, fixture.mode);
+        let trace_id = deterministic_trace_id(&fixture.packet_id, &fixture.case_id, fixture.mode);
+        return Ok(CaseResult {
+            packet_id: fixture.packet_id.clone(),
+            case_id: fixture.case_id.clone(),
+            mode: fixture.mode,
+            operation: fixture.operation,
+            status: CaseStatus::Retired,
+            mismatch: Some(format!("retired: {}", retirement.reason)),
+            mismatch_class: None,
+            replay_key,
+            trace_id,
+            elapsed_us: 1,
+            evidence_records: 0,
+        });
+    }
+
     let policy = match fixture.mode {
         RuntimeMode::Strict => RuntimePolicy::strict(),
         RuntimeMode::Hardened => RuntimePolicy::hardened(Some(100_000)),

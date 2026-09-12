@@ -61862,33 +61862,6 @@ impl DataFrame {
         }
     }
 
-    fn resolve_column_selector(
-        &self,
-        column_selector: Option<&[String]>,
-    ) -> Result<Vec<String>, FrameError> {
-        let Some(requested_columns) = column_selector else {
-            return Ok(self.column_order.to_vec());
-        };
-
-        let mut selected = Vec::with_capacity(requested_columns.len());
-        let mut seen = rustc_hash::FxHashSet::default();
-        for requested in requested_columns {
-            if !self.columns.contains_key(requested) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "column '{requested}' not found"
-                )));
-            }
-            if !seen.insert(requested.clone()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column selector: '{requested}'"
-                )));
-            }
-            selected.push(requested.clone());
-        }
-
-        Ok(selected)
-    }
-
     fn resolve_column_positions(
         &self,
         subset: Option<&[String]>,
@@ -61906,12 +61879,9 @@ impl DataFrame {
                     "column '{requested}' not found"
                 )));
             }
-            if !seen.insert(requested.clone()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column selector: '{requested}'"
-                )));
+            if seen.insert(requested.clone()) {
+                selected.extend_from_slice(positions);
             }
-            selected.extend_from_slice(positions);
         }
 
         Ok(selected)
@@ -63130,22 +63100,23 @@ impl DataFrame {
         let aligned = Self::from_series(selected)?;
         let row_count = aligned.index.len();
 
-        let mut cols = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(columns.len());
         let mut order = Vec::with_capacity(columns.len());
         for name in columns {
             if let Some(column) = aligned.columns.get(name) {
-                cols.insert(name.clone(), column.clone());
+                pairs.push((name.clone(), column.clone()));
             } else if absent.contains(&name) {
                 // An absent name is an all-missing column. pandas builds it as
                 // OBJECT holding nan (measured above), which is the invented-gap
                 // marker, not a supplied None.
-                cols.insert(
+                pairs.push((
                     name.clone(),
                     Column::new(DType::Utf8, vec![Scalar::Null(NullKind::NaN); row_count])?,
-                );
+                ));
             }
             order.push(name.clone());
         }
+        let cols = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(aligned.index.clone(), cols, order)
     }
 
@@ -63266,8 +63237,8 @@ impl DataFrame {
         // Lazy unit-range default index (br-frankenpandas-arr72).
         let index = Index::new_known_unique_int64_unit_range(0, n);
 
-        let mut columns = BTreeMap::new();
-        let mut input_order = Vec::new();
+        let mut input_pairs = Vec::with_capacity(data.len());
+        let mut input_order = Vec::with_capacity(data.len());
         for (name, values) in data {
             if values.len() != n {
                 return Err(FrameError::LengthMismatch {
@@ -63276,36 +63247,32 @@ impl DataFrame {
                 });
             }
             input_order.push(name.to_owned());
-            columns.insert(name.to_owned(), Column::from_values(values)?);
+            input_pairs.push((name.to_owned(), Column::from_values(values)?));
         }
 
-        let output_order = if column_order.is_empty() {
-            input_order
+        if column_order.is_empty() {
+            Self::new_with_column_order(index, ColumnStore::from_pairs(input_pairs), input_order)
         } else {
-            let mut explicit = Vec::with_capacity(columns.len());
-            let mut seen = BTreeSet::new();
+            let mut explicit = Vec::with_capacity(column_order.len());
+            let mut pairs = Vec::with_capacity(column_order.len());
             for &name in column_order {
-                if !columns.contains_key(name) {
+                let Some((_, col)) = input_pairs.iter().find(|(k, _)| k == name) else {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "column '{name}' not found in data"
                     )));
-                }
-                if !seen.insert(name.to_owned()) {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "duplicate column selector: '{name}'"
-                    )));
-                }
+                };
                 explicit.push(name.to_owned());
+                pairs.push((name.to_owned(), col.clone()));
             }
-            for name in input_order {
-                if seen.insert(name.clone()) {
-                    explicit.push(name);
+            let requested_set: BTreeSet<&str> = column_order.iter().copied().collect();
+            for (name, col) in input_pairs {
+                if !requested_set.contains(name.as_str()) {
+                    explicit.push(name.clone());
+                    pairs.push((name, col));
                 }
             }
-            explicit
-        };
-
-        Self::new_with_column_order(index, columns, output_order)
+            Self::new_with_column_order(index, ColumnStore::from_pairs(pairs), explicit)
+        }
     }
 
     /// Construct a DataFrame from dict-of-columns data under pandas' `columns=`
@@ -63341,9 +63308,8 @@ impl DataFrame {
     /// agreed on an error and `fp_p2d_018` pinned it as truth. A user calling
     /// FrankenPandas could not express the operation the packet certified.
     ///
-    /// A repeated name in `columns` is rejected: pandas returns the column
-    /// twice, and the column store cannot represent duplicate labels
-    /// (br-frankenpandas-ih4t0).
+    /// A repeated name in `columns` is preserved: pandas returns the column
+    /// repeatedly, and ColumnStore preserves duplicate column labels.
     pub fn from_dict_with_columns(
         data: Vec<(&str, Vec<Scalar>)>,
         columns: Option<&[String]>,
@@ -63363,15 +63329,6 @@ impl DataFrame {
             supplied.insert(name, values);
         }
 
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        for name in requested {
-            if !seen.insert(name.as_str()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column selector: '{name}'"
-                )));
-            }
-        }
-
         // The row count comes from the SELECTED columns, not from the dict: a
         // selector naming nothing that exists yields a 0-row frame, not a frame
         // of missing rows.
@@ -63383,10 +63340,10 @@ impl DataFrame {
                 .unwrap_or(0),
         };
 
-        let mut cols = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(requested.len());
         let mut order = Vec::with_capacity(requested.len());
         for name in requested {
-            let column = match supplied.remove(name.as_str()) {
+            let column = match supplied.get(name.as_str()) {
                 Some(values) => {
                     if values.len() != row_count {
                         return Err(FrameError::LengthMismatch {
@@ -63394,14 +63351,14 @@ impl DataFrame {
                             column_len: values.len(),
                         });
                     }
-                    Column::from_values(values)?
+                    Column::from_values(values.clone())?
                 }
                 // An absent name is an all-missing column. pandas builds it as
                 // OBJECT holding nan — an invented gap, not a supplied None —
                 // which is how `from_series_with_columns` spells it too.
                 None => Column::new(DType::Utf8, vec![Scalar::Null(NullKind::NaN); row_count])?,
             };
-            cols.insert(name.clone(), column);
+            pairs.push((name.clone(), column));
             order.push(name.clone());
         }
 
@@ -63409,6 +63366,7 @@ impl DataFrame {
             Some(labels) => Index::new(labels),
             None => Index::new_known_unique_int64_unit_range(0, row_count),
         };
+        let cols = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(index, cols, order)
     }
 
@@ -63583,23 +63541,13 @@ impl DataFrame {
             .max()
             .unwrap_or(0);
         let output_order = if let Some(requested_order) = column_order {
-            let mut explicit = Vec::with_capacity(requested_order.len());
-            let mut seen = BTreeSet::new();
-            for requested in requested_order {
-                if !seen.insert(requested.clone()) {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "duplicate column selector: '{requested}'"
-                    )));
-                }
-                explicit.push(requested.clone());
-            }
-            if max_row_width > explicit.len() {
+            if max_row_width > requested_order.len() {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "{operation_name} row width {max_row_width} exceeds columns length {}",
-                    explicit.len()
+                    requested_order.len()
                 )));
             }
-            explicit
+            requested_order.to_vec()
         } else {
             (0..max_row_width).map(|idx| idx.to_string()).collect()
         };
@@ -63628,7 +63576,7 @@ impl DataFrame {
         let invent_gaps = invent_nan && !columns_exceed_data;
 
         let output_row_count = index.len();
-        let mut columns = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(output_order.len());
         for (column_offset, column_name) in output_order.iter().enumerate() {
             // The gap policy is the CALLER's, not this function's — see
             // `PRESERVE_NULL` / `INVENT_NAN`. Under PRESERVE_NULL this is the
@@ -63695,9 +63643,10 @@ impl DataFrame {
             } else {
                 column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?
             };
-            columns.insert(column_name.clone(), column);
+            pairs.push((column_name.clone(), column));
         }
 
+        let columns = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(index, columns, output_order)
     }
 
@@ -63763,15 +63712,6 @@ impl DataFrame {
             ));
         };
 
-        let mut seen = BTreeSet::new();
-        for name in column_order {
-            if !seen.insert(name.clone()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column selector: '{name}'"
-                )));
-            }
-        }
-
         // Broadcasting a MISSING scalar invents every cell, so the gap is NaN
         // rather than whatever null kind was handed in. Measured on pandas
         // 2.2.3: pd.DataFrame(None, index=[1,2], columns=['a','b']) is object
@@ -63784,23 +63724,28 @@ impl DataFrame {
         };
 
         let row_count = index_labels.len();
-        let mut columns = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(column_order.len());
         for name in column_order {
             let values = vec![broadcast.clone(); row_count];
-            columns.insert(name.clone(), Column::from_values(values)?);
+            pairs.push((name.clone(), Column::from_values(values)?));
         }
 
+        let columns = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(Index::new(index_labels), columns, column_order.to_vec())
     }
 
     pub fn from_tuples(records: Vec<Vec<Scalar>>, columns: &[&str]) -> Result<Self, FrameError> {
         if records.is_empty() {
-            let cols: BTreeMap<String, Column> = columns
+            let pairs = columns
                 .iter()
                 .map(|&c| Ok((c.to_string(), Column::new(DType::Float64, Vec::new())?)))
-                .collect::<Result<_, FrameError>>()?;
+                .collect::<Result<Vec<_>, FrameError>>()?;
             let col_order: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
-            return Self::new_with_column_order(Index::new(Vec::new()), cols, col_order);
+            return Self::new_with_column_order(
+                Index::new(Vec::new()),
+                ColumnStore::from_pairs(pairs),
+                col_order,
+            );
         }
 
         let n_rows = records.len();
@@ -63936,22 +63881,12 @@ impl DataFrame {
         }
 
         let output_order = if let Some(requested_order) = column_order {
-            let mut explicit = Vec::with_capacity(requested_order.len());
-            let mut seen = BTreeSet::new();
-            for requested in requested_order {
-                if !seen.insert(requested.clone()) {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "duplicate column selector: '{requested}'"
-                    )));
-                }
-                explicit.push(requested.clone());
-            }
-            explicit
+            requested_order.to_vec()
         } else {
             discovered_columns
         };
 
-        let mut columns = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(output_order.len());
         for name in &output_order {
             // A key absent from a record is a gap the CONSTRUCTOR invents, and
             // pandas fills it with NaN, widening that column to float64.
@@ -63974,10 +63909,8 @@ impl DataFrame {
                 .iter()
                 .map(|record| record.get(name).cloned().unwrap_or_else(|| gap.clone()))
                 .collect::<Vec<_>>();
-            columns.insert(
-                name.clone(),
-                column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
-            );
+            let column = column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?;
+            pairs.push((name.clone(), column));
         }
 
         let index = match index_labels {
@@ -63986,6 +63919,7 @@ impl DataFrame {
             None => Index::new_known_unique_int64_unit_range(0, row_count),
         };
 
+        let columns = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(index, columns, output_order)
     }
 
@@ -67287,23 +67221,54 @@ impl DataFrame {
             out_labels.push(self.index.labels()[position].clone());
         }
 
-        let selected_columns = self.resolve_column_selector(column_selector)?;
-        let mut columns = BTreeMap::new();
-        for name in &selected_columns {
-            let column = self.columns.get(name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!("column '{name}' not found"))
-            })?;
-            // Typed gather: Column::take_positions keeps an all-valid Int64/
-            // Float64 buffer contiguous (and carries data+validity for nullable
-            // Float64) instead of cloning a 32 B Scalar per row + re-validating
-            // in Column::new. Bit-identical — it preserves the source dtype, the
-            // same Column the DataFrame row-reorder path already produces.
-            columns.insert(name.clone(), column.take_positions(&normalized_positions));
-        }
+        let (pairs, out_columns) = match column_selector {
+            None => {
+                let n_cols = self.num_columns();
+                let mut pairs = Vec::with_capacity(n_cols);
+                let mut order = Vec::with_capacity(n_cols);
+                for i in 0..n_cols {
+                    let name = self.column_name_at(i).expect("column position in bounds");
+                    let col = self.column_at(i).expect("column position in bounds");
+                    pairs.push((name.clone(), col.take_positions(&normalized_positions)));
+                    order.push(name);
+                }
+                (pairs, order)
+            }
+            Some(requested_columns) => {
+                let mut pairs = Vec::with_capacity(requested_columns.len());
+                let mut order = Vec::with_capacity(requested_columns.len());
+                for name in requested_columns {
+                    let col_positions = self.columns.positions_of(name);
+                    if col_positions.is_empty() {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "column '{name}' not found"
+                        )));
+                    }
+                    for &pos in col_positions {
+                        let col = self
+                            .columns
+                            .column_at(pos)
+                            .expect("column position in bounds");
+                        pairs.push((name.clone(), col.take_positions(&normalized_positions)));
+                        order.push(name.clone());
+                    }
+                }
+                (pairs, order)
+            }
+        };
 
         // Per br-frankenpandas-4wlg0: pandas df.iloc preserves row index name.
         let index = Index::new(out_labels).rename_index(self.index.name());
-        Self::new_with_column_order(index, columns, selected_columns)
+        let columns = ColumnStore::from_pairs(pairs);
+        if !self.allows_duplicate_labels && (columns.has_duplicates() || index.has_duplicates()) {
+            return Err(FrameError::CompatibilityRejected(
+                "iloc: duplicate labels are present".to_owned(),
+            ));
+        }
+
+        let mut out = Self::new_with_column_order(index, columns, out_columns)?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Boolean mask row selection.
@@ -101851,6 +101816,83 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_from_records_with_duplicate_column_selectors() {
+        let records = vec![
+            BTreeMap::from([
+                ("a".to_owned(), Scalar::Int64(1)),
+                ("b".to_owned(), Scalar::Int64(2)),
+            ]),
+            BTreeMap::from([
+                ("a".to_owned(), Scalar::Int64(3)),
+                ("b".to_owned(), Scalar::Int64(4)),
+            ]),
+        ];
+
+        let order = vec!["a".to_owned(), "a".to_owned()];
+        let df = DataFrame::from_record_maps(records, Some(&order), None).expect(
+            "duplicate column selectors in from_records should succeed per pandas oracle semantics",
+        );
+        assert_eq!(df.column_names(), vec!["a", "a"]);
+        assert_eq!(df.shape(), (2, 2));
+
+        assert_eq!(df.columns().len(), 2);
+        assert_eq!(
+            df.columns().column_at(0).unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            df.columns().column_at(1).unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_dict_and_tuples_duplicate_column_selectors() {
+        // from_dict with duplicate column_order
+        let df_dict = DataFrame::from_dict(
+            &["a", "a"],
+            vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .expect("duplicate column selectors in from_dict should succeed");
+        assert_eq!(df_dict.column_names(), vec!["a", "a"]);
+        assert_eq!(df_dict.shape(), (2, 2));
+
+        // from_dict with duplicate data columns and empty column_order
+        let df_dict_dup = DataFrame::from_dict(
+            &[],
+            vec![
+                ("x", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("x", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .expect("duplicate data columns in from_dict should succeed");
+        assert_eq!(df_dict_dup.column_names(), vec!["x", "x"]);
+        assert_eq!(df_dict_dup.shape(), (2, 2));
+
+        // from_tuples with duplicate columns
+        let df_tuples = DataFrame::from_tuples(
+            vec![
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+                vec![Scalar::Int64(3), Scalar::Int64(4)],
+            ],
+            &["dup", "dup"],
+        )
+        .expect("duplicate columns in from_tuples should succeed");
+        assert_eq!(df_tuples.column_names(), vec!["dup", "dup"]);
+        assert_eq!(df_tuples.shape(), (2, 2));
+
+        // from_scalar with duplicate column_order
+        let df_scalar = DataFrame::from_scalar(
+            &Scalar::Int64(99),
+            vec![0_i64.into(), 1_i64.into()],
+            Some(&["s".to_string(), "s".to_string()]),
+        )
+        .expect("duplicate columns in from_scalar should succeed");
+        assert_eq!(df_scalar.column_names(), vec!["s", "s"]);
+        assert_eq!(df_scalar.shape(), (2, 2));
+    }
+
+    #[test]
     fn dataframe_from_records_matrix_default_columns() {
         let df = DataFrame::from_records(
             vec![
@@ -102793,9 +102835,11 @@ mod tests {
             &[Scalar::Int64(1), Scalar::Int64(2)]
         );
 
-        // A repeated selector would need duplicate column labels, which the
-        // column store cannot represent (br-frankenpandas-ih4t0).
-        assert!(DataFrame::from_dict_with_columns(data(), Some(&cols(&["a", "a"])), None).is_err());
+        // A repeated selector preserves duplicate column labels per pandas oracle semantics (br-frankenpandas-8b4d4).
+        let repeated =
+            DataFrame::from_dict_with_columns(data(), Some(&cols(&["a", "a"])), None).unwrap();
+        assert_eq!(repeated.column_names(), vec!["a", "a"]);
+        assert_eq!(repeated.index().len(), 2);
 
         // No selector at all is the plain dict constructor.
         let unselected = DataFrame::from_dict_with_columns(data(), None, None).unwrap();
@@ -110585,13 +110629,10 @@ mod tests {
         ));
 
         let duplicate_subset = vec!["a".to_owned(), "a".to_owned()];
-        let err = df
+        let out = df
             .dropna_with_options(DropNaHow::Any, Some(&duplicate_subset))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FrameError::CompatibilityRejected(msg) if msg.contains("duplicate column selector")
-        ));
+            .expect("duplicate subset columns should succeed per pandas oracle semantics");
+        assert_eq!(out.len(), 2);
     }
 
     #[test]
@@ -112958,13 +112999,78 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_iloc_with_columns_duplicate_selector_is_rejected() {
+    fn dataframe_iloc_with_columns_duplicate_selector_preserves_duplicates() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])]).unwrap();
+        let selected = df
+            .iloc_with_columns(&[0], Some(&["a".to_owned(), "a".to_owned()]))
+            .unwrap();
+        assert_eq!(selected.shape(), (1, 2));
+        assert_eq!(selected.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            selected.column_at(0).unwrap().values(),
+            &[Scalar::Int64(10)]
+        );
+        assert_eq!(
+            selected.column_at(1).unwrap().values(),
+            &[Scalar::Int64(10)]
+        );
+    }
+
+    #[test]
+    fn dataframe_iloc_with_columns_duplicate_selector_rejected_when_flags_disallow_duplicates() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])])
+            .unwrap()
+            .set_flags(Some(false))
+            .unwrap();
         let err = df
             .iloc_with_columns(&[0], Some(&["a".to_owned(), "a".to_owned()]))
             .unwrap_err();
         assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate column selector"))
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels are present"))
+        );
+    }
+
+    #[test]
+    fn dataframe_iloc_with_columns_preserves_existing_duplicate_columns() {
+        let store = crate::ColumnStore::from_pairs(vec![
+            (
+                "a".to_owned(),
+                Column::new(DType::Int64, vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+            ),
+            (
+                "a".to_owned(),
+                Column::new(DType::Int64, vec![Scalar::Int64(100), Scalar::Int64(200)]).unwrap(),
+            ),
+        ]);
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec!["r1".into(), "r2".into()]),
+            store,
+            vec!["a".to_owned(), "a".to_owned()],
+        )
+        .unwrap();
+
+        let selected = df.iloc_with_columns(&[1], Some(&["a".to_owned()])).unwrap();
+        assert_eq!(selected.shape(), (1, 2));
+        assert_eq!(selected.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            selected.column_at(0).unwrap().values(),
+            &[Scalar::Int64(20)]
+        );
+        assert_eq!(
+            selected.column_at(1).unwrap().values(),
+            &[Scalar::Int64(200)]
+        );
+
+        let all_cols = df.iloc_with_columns(&[0], None).unwrap();
+        assert_eq!(all_cols.shape(), (1, 2));
+        assert_eq!(all_cols.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            all_cols.column_at(0).unwrap().values(),
+            &[Scalar::Int64(10)]
+        );
+        assert_eq!(
+            all_cols.column_at(1).unwrap().values(),
+            &[Scalar::Int64(100)]
         );
     }
 
@@ -154413,7 +154519,7 @@ mod tests {
             df.columns()["period"].values(),
             &[
                 Scalar::Period(Period::new(216, PeriodFreq::Quarterly)),
-                Scalar::Period(Period::new(648, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(648, PeriodFreq::Quarterly)),
             ]
         );
         assert_eq!(

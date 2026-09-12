@@ -8,6 +8,11 @@
     "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
     "generated_at": "2026-04-22T21:02:48Z"
   },
+  "retired": {
+    "reason": "Pandas 2.2.3 succeeds with duplicate column selections (df.iloc[:, [0,0]]); asserting an error contract is invalid per oracle probe in br-frankenpandas-eda3x.",
+    "retired_at": "2026-09-11T05:47:34Z",
+    "bead": "br-frankenpandas-eda3x"
+  },
   "frame": {
     "index": [
       { "kind": "int64", "value": 0 }
