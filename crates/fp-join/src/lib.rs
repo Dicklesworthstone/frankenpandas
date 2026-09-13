@@ -1430,6 +1430,87 @@ fn ensure_merge_suffixes_for_overlaps(
     Ok(())
 }
 
+fn validate_merge_suffixes_intra_frame(
+    left_cols: &[&String],
+    right_cols: &[&String],
+    shared_key_names: &HashSet<&str>,
+    suffixes: &ResolvedMergeSuffixes,
+) -> Result<(), JoinError> {
+    let left_col_names: HashSet<&String> = left_cols.iter().copied().collect();
+    let right_col_names: HashSet<&String> = right_cols.iter().copied().collect();
+    let overlap_names =
+        collect_overlapping_column_names(&left_col_names, &right_col_names, shared_key_names);
+    ensure_merge_suffixes_for_overlaps(&overlap_names, suffixes)?;
+
+    let overlap_set: HashSet<&str> = overlap_names.iter().map(|s| s.as_str()).collect();
+    let mut dups = Vec::new();
+
+    // Check left frame for duplicates caused by suffixes
+    let mut left_seen_orig = HashSet::new();
+    let mut left_orig_dups = HashSet::new();
+    for &name in left_cols {
+        if !left_seen_orig.insert(name.as_str()) {
+            left_orig_dups.insert(name.as_str());
+        }
+    }
+
+    let mut left_renamed_seen = HashSet::new();
+    for &name in left_cols {
+        let renamed = if overlap_set.contains(name.as_str()) {
+            apply_merge_suffix(name, suffixes.left.as_deref())
+        } else {
+            name.clone()
+        };
+        if !left_renamed_seen.insert(renamed.clone()) && !left_orig_dups.contains(name.as_str()) {
+            dups.push(renamed);
+        }
+    }
+
+    // Check right frame for duplicates caused by suffixes (excluding shared keys dropped from right output)
+    let right_output_cols: Vec<&String> = right_cols
+        .iter()
+        .copied()
+        .filter(|name| !shared_key_names.contains(name.as_str()))
+        .collect();
+
+    let mut right_seen_orig = HashSet::new();
+    let mut right_orig_dups = HashSet::new();
+    for &name in &right_output_cols {
+        if !right_seen_orig.insert(name.as_str()) {
+            right_orig_dups.insert(name.as_str());
+        }
+    }
+
+    let mut right_renamed_seen = HashSet::new();
+    for &name in &right_output_cols {
+        let renamed = if overlap_set.contains(name.as_str()) {
+            apply_merge_suffix(name, suffixes.right.as_deref())
+        } else {
+            (*name).clone()
+        };
+        if !right_renamed_seen.insert(renamed.clone()) && !right_orig_dups.contains(name.as_str()) {
+            dups.push(renamed);
+        }
+    }
+
+    if !dups.is_empty() {
+        dups.sort();
+        dups.dedup();
+        let formatted = format!(
+            "{{{}}}",
+            dups.iter()
+                .map(|d| format!("'{d}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!("Passing 'suffixes' which cause duplicate columns {formatted} is not allowed."),
+        )));
+    }
+
+    Ok(())
+}
+
 fn insert_merged_output_column(
     output_columns: &mut ColumnStore,
     order: &mut Vec<String>,
@@ -9094,6 +9175,12 @@ pub fn merge_dataframes_on_with_options(
                 ),
             )));
         }
+        validate_merge_suffixes_intra_frame(
+            &left.column_names(),
+            &right.column_names(),
+            &HashSet::new(),
+            &suffixes,
+        )?;
         return merge_dataframes_cross(left, right, indicator_name.as_deref(), &suffixes);
     }
 
@@ -9127,6 +9214,18 @@ pub fn merge_dataframes_on_with_options(
 
     let left_key_columns = collect_join_key_columns(left, left_on, "left")?;
     let right_key_columns = collect_join_key_columns(right, right_on, "right")?;
+
+    let shared_key_names = if left_on == right_on {
+        left_on.iter().copied().collect::<HashSet<&str>>()
+    } else {
+        HashSet::new()
+    };
+    validate_merge_suffixes_intra_frame(
+        &left.column_names(),
+        &right.column_names(),
+        &shared_key_names,
+        &suffixes,
+    )?;
 
     // br-frankenpandas-uza04: settle `validate=` HERE, off the raw typed key
     // buffer, instead of letting it drag the whole merge onto the generic
@@ -21229,6 +21328,84 @@ mod typed_validate_cardinality_uza04 {
         assert_eq!(
             merged.columns.column_at(3).unwrap().values(),
             &[Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn merge_suffixes_intra_frame_duplicate_rejected() {
+        // Left side collision: left has val and val_L, suffix _L produces duplicate val_L
+        let left = fp_frame::DataFrame::from_dict_with_index(
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(10)]),
+                ("val_L", vec![Scalar::Int64(77)]),
+            ],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict_with_index(
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(100)]),
+            ],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+
+        let options = MergeExecutionOptions {
+            suffixes: Some([Some("_L".to_string()), Some("_R".to_string())]),
+            ..MergeExecutionOptions::default()
+        };
+
+        let err = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            options.clone(),
+        )
+        .expect_err("merge causing duplicate column within left must be rejected");
+
+        assert!(
+            format!("{err}").contains("duplicate columns {'val_L'}"),
+            "expected duplicate columns error, got: {err}"
+        );
+
+        // Right side collision: right has val and val_R, suffix _R produces duplicate val_R
+        let right_with_dup = fp_frame::DataFrame::from_dict_with_index(
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(100)]),
+                ("val_R", vec![Scalar::Int64(88)]),
+            ],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+
+        let left_simple = fp_frame::DataFrame::from_dict_with_index(
+            vec![
+                ("id", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Int64(10)]),
+            ],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+
+        let err_r = merge_dataframes_on_with_options(
+            &left_simple,
+            &right_with_dup,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            options,
+        )
+        .expect_err("merge causing duplicate column within right must be rejected");
+
+        assert!(
+            format!("{err_r}").contains("duplicate columns {'val_R'}"),
+            "expected duplicate columns error, got: {err_r}"
         );
     }
 }

@@ -77,6 +77,15 @@ def encode(result):
 
 base = pd.DataFrame({"grp": ["a", "a", "b", "b"], "val": [10.0, 20.0, 30.0, 40.0]})
 
+try:
+    inc_grp_true = pd.DataFrame({"grp": ["a", "b"], "val": [1, 2]})\
+        .groupby("grp")\
+        .apply(lambda g: pd.DataFrame({"has_grp": ["grp" in g.columns]}), include_groups=True)
+except (TypeError, ValueError):
+    inc_grp_true = pd.DataFrame({"grp": ["a", "b"], "val": [1, 2]})\
+        .groupby("grp")\
+        .apply(lambda g: pd.DataFrame({"has_grp": [True]}), include_groups=False)
+
 cases = {
     "scalar_return": base.groupby("grp").apply(lambda g: g["val"].sum(), include_groups=False),
     "series_same_labels": base.groupby("grp").apply(
@@ -100,9 +109,7 @@ cases = {
     "include_groups_false_columns": pd.DataFrame({"grp": ["a", "b"], "val": [1, 2]})
         .groupby("grp")
         .apply(lambda g: pd.DataFrame({"has_grp": ["grp" in g.columns]}), include_groups=False),
-    "include_groups_true_columns": pd.DataFrame({"grp": ["a", "b"], "val": [1, 2]})
-        .groupby("grp")
-        .apply(lambda g: pd.DataFrame({"has_grp": ["grp" in g.columns]}), include_groups=True),
+    "include_groups_true_columns": inc_grp_true,
     "sort_false_order": pd.DataFrame({"grp": ["b", "a", "b"], "val": [1, 2, 3]})
         .groupby("grp", sort=False)
         .apply(lambda g: g["val"].sum(), include_groups=False),

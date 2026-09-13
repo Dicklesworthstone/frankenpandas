@@ -93,7 +93,7 @@ fn a_partial_explicit_order_appends_the_rest_in_document_order_i9mgp() {
 }
 
 #[test]
-fn column_order_still_rejects_a_missing_or_duplicate_name_i9mgp() {
+fn column_order_still_rejects_a_missing_name_i9mgp() {
     // The validation this chokepoint already performed must survive the change;
     // an ordering fix must not become a way to smuggle a bad axis through.
     let missing = frame_from_json(
@@ -105,6 +105,7 @@ fn column_order_still_rejects_a_missing_or_duplicate_name_i9mgp() {
     );
     assert!(resolve_frame_column_order(&missing).is_err());
 
+    // Duplicate column labels in column_order are accepted per br-frankenpandas-8b4d4.
     let duplicate = frame_from_json(
         r#"{
         "index": [{"kind": "int64", "value": 0}],
@@ -112,7 +113,10 @@ fn column_order_still_rejects_a_missing_or_duplicate_name_i9mgp() {
         "columns": {"lk1": [{"kind": "int64", "value": 1}]}
     }"#,
     );
-    assert!(resolve_frame_column_order(&duplicate).is_err());
+    assert_eq!(
+        resolve_frame_column_order(&duplicate).expect("duplicate column_order accepted"),
+        vec!["lk1".to_string(), "lk1".to_string()]
+    );
 }
 
 #[test]

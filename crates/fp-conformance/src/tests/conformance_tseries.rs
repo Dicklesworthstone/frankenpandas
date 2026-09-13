@@ -136,6 +136,8 @@ for key in ("start", "end", "periods", "name"):
         kwargs[key] = request[key]
 
 index = getattr(pd, request["function"])(**kwargs)
+if hasattr(index, "as_unit"):
+    index = index.as_unit("ns")
 print(json.dumps({
     "values": [int(value) for value in index.asi8.tolist()],
     "name": index.name,

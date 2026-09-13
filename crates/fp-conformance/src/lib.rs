@@ -23813,15 +23813,35 @@ fn diff_dataframe(actual: &DataFrame, expected: &FixtureExpectedDataFrame) -> Ve
         )),
     }
 
-    let actual_names = actual.columns().keys().cloned().collect::<Vec<_>>();
-    let expected_names = expected.columns.keys().cloned().collect::<Vec<_>>();
-    if actual_names != expected_names {
-        drifts.push(make_drift_record(
-            ComparisonCategory::Shape,
-            DriftLevel::Critical,
-            "dataframe.columns",
-            format!("column mismatch: actual={actual_names:?}, expected={expected_names:?}"),
-        ));
+    let actual_names = actual
+        .column_names()
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(expected_order) = expected.column_order.as_ref() {
+        if &actual_names != expected_order {
+            drifts.push(make_drift_record(
+                ComparisonCategory::Shape,
+                DriftLevel::Critical,
+                "dataframe.columns",
+                format!("column mismatch: actual={actual_names:?}, expected={expected_order:?}"),
+            ));
+        }
+    } else {
+        let mut expected_names = expected.columns.keys().cloned().collect::<Vec<_>>();
+        expected_names.sort();
+        let mut actual_sorted = actual_names.clone();
+        actual_sorted.sort();
+        if actual_sorted != expected_names {
+            drifts.push(make_drift_record(
+                ComparisonCategory::Shape,
+                DriftLevel::Critical,
+                "dataframe.columns",
+                format!(
+                    "column set mismatch: actual={actual_names:?}, expected={expected_names:?}"
+                ),
+            ));
+        }
     }
 
     for (name, expected_values) in &expected.columns {

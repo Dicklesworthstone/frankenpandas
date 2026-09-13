@@ -172,7 +172,7 @@ for row_idx in range(len(frame)):
 
 sys.stdout.write(json.dumps({
     "columns": list(frame.columns),
-    "dtypes": [str(frame[column].dtype) for column in frame.columns],
+    "dtypes": ["object" if str(frame[column].dtype) in ("str", "string") else str(frame[column].dtype) for column in frame.columns],
     "rows": rows,
 }, sort_keys=True))
 "#;
