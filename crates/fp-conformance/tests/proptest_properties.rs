@@ -10911,12 +10911,11 @@ proptest! {
     fn prop_transpose_cell_correspondence(df in arb_numeric_dataframe(8)) {
         let t = match df.transpose() { Ok(t) => t, Err(_) => return Ok(()) };
         let orig_cols: Vec<String> = df.column_names().into_iter().cloned().collect();
-        let t_cols: Vec<String> = t.column_names().into_iter().cloned().collect();
         for (j, cname) in orig_cols.iter().enumerate() {
             let vals = df.columns().get(cname).expect("orig column").values();
             for (i, v) in vals.iter().enumerate() {
                 // t's i-th column corresponds to df's i-th row.
-                let t_col = t.columns().get(&t_cols[i]).expect("t column");
+                let t_col = t.column_at(i).expect("t column");
                 let t_val = &t_col.values()[j];
                 prop_assert!(
                     mm_scalar_value_eq(v, t_val),
