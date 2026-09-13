@@ -202,6 +202,11 @@ no newer stable under that name. Migration candidates (`serde_yml`,
 - **Tests:** `cargo check -p fp-runtime --features asupersync --all-targets` → OK; `cargo test -p fp-runtime --features asupersync` → 30 passed, 0 failed.
 - **Note:** A parallel agent landed the same logical bump as commit `a0b05d2` immediately after; resolved via rebase, no conflicts.
 
+### asupersync: 0.3.1 → 0.5.0 — 2026-09-12 (br-frankenpandas-uydao)
+- **Scope:** `crates/fp-runtime/Cargo.toml` (`version = "0.5.0"`, optional, `default-features = false`). `Cargo.lock` resolves exactly one registry asupersync 0.5.0 and companion franken-{kernel,evidence,decision} 0.5.0.
+- **Breaking:** none for fp-runtime interop surface; `Outcome<T, E>` preserved.
+- **Tests:** `cargo test -p fp-runtime --features asupersync` (55 passed, 0 failed), `ag_e2e::e2e_scenario6_asupersync_replay_bundle_integrity` (passed), no-feature refusal `sidecar_verification_rejects_asupersync_evidence_without_feature_y13st` (passed), workspace check / clippy / fmt all clean.
+
 ### libfuzzer-sys: 0.4.10 → 0.4.12 — 2026-04-22 (commit `b3f3322`)
 - **Scope:** `fuzz/Cargo.toml` (separate inner workspace).
 - **Breaking:** none.
