@@ -43962,12 +43962,15 @@ Pandas `read_csv(sales.csv)` on the same machine: **109.258 ms** (76.8% of panda
 - Contaminated CSV read ratio (vs cache hit): 109.26 / 4.20 = **26.01x**
 - Honest CSV read ratio (vs true parse): 109.26 / 39.29 = **2.78x**
 
-**MEASUREMENT 2: Side-by-side whole-job pipeline runs at 1M rows (balanced-square ABBAABBA, 9 rounds):**
+**MEASUREMENT 2: Side-by-side whole-job pipeline runs (balanced-square ABBAABBA, 9 rounds):**
 
-| Workload | FP p50 (ms) | Pandas p50 (ms) | Ratio | Verdict | Decidable | Output Match |
-|---|---|---|---|---|---|---|
-| `etl_job` (cached load) | **22.74 ms** | **163.68 ms** | **7.227x** | NULL_UNDECIDABLE | False (null 1.021 > 2%) | byte_identical |
-| `etl_job_uncached` (honest parse) | **63.13 ms** | **160.02 ms** | **2.526x** | **FASTER (2.53x)** | **True** (all 3 clauses TRUE) | **byte_identical** |
+| Workload | Size | FP p50 | Pandas p50 | Ratio | Verdict | Decidable | Output Match |
+|---|---|---|---|---|---|---|---|
+| `etl_job` (cached load) | 1M | **22.74 ms** | **163.68 ms** | **7.227x** | NULL_UNDECIDABLE | False (null 1.021 > 2%) | byte_identical |
+| `etl_job_uncached` (honest parse) | 1M | **63.13 ms** | **160.02 ms** | **2.526x** | **FASTER (2.53x)** | **True** (all 3 clauses TRUE) | **byte_identical** |
+| `etl_job_uncached` (honest parse) | 10k | **797.19 us** | **6950.11 us** | **8.507x** | **FASTER (8.51x)** | **True** (all 3 clauses TRUE) | **byte_identical** |
+
+On the 10k uncached row (invocation `vs-pandas-20260908T193948.131466Z-pid923091`): FrankenPandas p50 797.19 us vs pandas p50 6950.11 us (8.507x faster, 95% CI [8.03365246, 8.98467887]); passing A/A null medians: FP 0.989824, pandas 0.991270, all 3 clauses TRUE.
 
 **Cross-engine output equivalence:**
 Output CSV is **100% byte-identical** (211,304 bytes, SHA-256 `04bae1d757c33c5e2eae36ccb00c3bfb3732e4d10632b499b0ebf845c63f35ce`).
@@ -43975,10 +43978,11 @@ Permuting input rows across the K=3 variants leaves the grouped, inner-joined, s
 
 **THE FINDING:**
 1. The 7.23x ratio on `etl_job` was **65% an artifact of the 32 MiB content cache**.
-2. When both engines perform the honest, user-facing file read and CSV parse, FrankenPandas is **2.53x faster** end-to-end on the 1M whole-job star-schema rollup.
+2. When both engines perform the honest, user-facing file read and CSV parse, FrankenPandas is **2.53x faster** end-to-end on the 1M whole-job star-schema rollup and **8.51x faster** on the 10k rollup.
 3. The load delta (63.13 ms - 22.74 ms = 40.39 ms) accounts for virtually 100% of the whole-job execution difference.
 
 **Artifacts:**
+- Uncached 10k certified run: `artifacts/bench/qnkah_pipeline_etl_job_uncached_10k.json`
 - Uncached 1M certified run: `artifacts/bench/qnkah_pipeline_etl_job_uncached_1M.json`
 - Cached 1M comparative run: `artifacts/bench/qnkah_pipeline_etl_job_cached_1M_undecidable.json`
 - Hit-vs-miss standalone probe: `crates/fp-bench/examples/probe_pipeline_csv_cache.rs`
