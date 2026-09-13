@@ -7041,6 +7041,17 @@ impl Clone for Column {
             {
                 Some(d.clone())
             }
+            Some(d @ ColumnData::Datetime64(_))
+                if self.dtype.is_datetime() && matches!(values, ScalarValues::Eager(_)) =>
+            {
+                Some(d.clone())
+            }
+            Some(d @ ColumnData::Timedelta64(_))
+                if matches!(self.dtype, DType::Timedelta64)
+                    && matches!(values, ScalarValues::Eager(_)) =>
+            {
+                Some(d.clone())
+            }
             _ => None,
         };
         Self {
@@ -11794,9 +11805,7 @@ impl Column {
             (Some(ColumnData::Datetime64(data)), DType::Datetime64 { .. })
                 if data.len() == self.values.len() =>
             {
-                Some(ScalarValues::from_vec(
-                    data.iter().copied().map(Scalar::Datetime64).collect(),
-                ))
+                Some(ScalarValues::lazy_all_valid_datetime64(data.clone()))
             }
             (Some(ColumnData::Period(data, freq)), DType::Period)
                 if data.len() == self.values.len() =>
@@ -11931,6 +11940,9 @@ impl Column {
             }
             (Some(ColumnData::Int64(data)), DType::Int64, true) => {
                 ScalarValues::lazy_all_valid_int64_arc(Arc::clone(data))
+            }
+            (Some(ColumnData::Datetime64(data)), DType::Datetime64 { .. }, true) => {
+                ScalarValues::lazy_all_valid_datetime64(data.clone())
             }
             _ => ScalarValues::from_vec(coerced),
         };

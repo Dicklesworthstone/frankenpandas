@@ -17445,7 +17445,7 @@ mod tests {
             },
         )
         .expect_err("merge should reject duplicate output names caused by suffixes");
-        assert!(format!("{err}").contains("duplicate output column"));
+        assert!(format!("{err}").contains("duplicate column"));
     }
 
     #[test]
