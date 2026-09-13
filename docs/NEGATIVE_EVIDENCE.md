@@ -44032,3 +44032,51 @@ best-vs-best 2.92x (FP min 55803.34 us, pandas min 162947.26 us), direction agre
 
 **Artifacts:**
 - Certified 200k file-vs-file run: `artifacts/bench/jzokm_csv_read_file_uncached_200k.json`
+
+---
+
+### 2026-09-13 (br-frankenpandas-92n1x) — json_read_records @1M certified 44.384x faster: 73292.48 us vs pandas 3267272.54 us, resolving the 399ms serial read residual
+
+**Settles br-frankenpandas-92n1x**. That bead tracked `io/json_read_records` as the hottest IO workload (~399ms @1M×10) after `to_json` was parallelized in `34e3c8f97`. The parallel numeric record reader (`try_read_json_records_numeric_parallel` in `crates/fp-io/src/lib.rs:7071`) divides record boundaries across worker threads using `std::thread::scope` with chunked range parsing.
+
+**THE RUN:**
+- Workload: `io/json_read_records`
+- Size: 1M rows × 10 columns Float64
+- Invocation: `vs-pandas-20260831T000020.547185Z-pid1903642`
+- Measurement mode: balanced-square ABBAABBA, 9 rounds
+- Host: `thinkstation1` (AMD Ryzen Threadripper PRO 5975WX 32-Cores / 64 threads)
+- Live oracle: pandas 2.2.3
+
+**Campaign result class:** incumbent-win
+
+**Executing ELF SHA-256 (self-reported by process):**
+`bench_elf_sha256=e623e94ce02d9a5b9ce5586974740356127591795ae36f38b63f0ef24ef4e43f
+(87311648 bytes) /data/projects/frankenpandas/target-olivehawk-92n1x-fpbench/fp-bench`
+
+**Legacy incumbent arm (same invocation):** name=pandas version=2.2.3
+artifact_sha256=3488eb961e4a4dc126d229287542c81ab9a04db4252cbee59ffab52ba33fd5ae
+invocation_id=vs-pandas-20260831T000020.547185Z-pid1903642 measured_ratio=44.384x
+
+**A/A null control (same invocation):**
+- FrankenPandas null median ratio: 1.000534 (95% CI [0.959195, 1.064974]), within 2% of unity.
+- Pandas null median ratio: 0.996574 (95% CI [0.958844, 1.032243]), within 2% of unity.
+- Both null controls pass cleanly.
+
+**Median-CI decision:**
+- Effect median ratio: 44.384x with paired-bootstrap 95% CI [42.5208, 47.2551], FP p50 73292.48 us vs pandas p50 3267272.54 us.
+- All three clauses TRUE:
+  1. `effect_ci_excludes_unity`: true
+  2. `effect_exceeds_two_x_null_margin`: true (claim log effect 3.79286813 vs required 0.12590082)
+  3. `null_medians_within_2pct_unity`: true
+- Best-vs-best: 45.4357x (FP min 67347.68 us, pandas min 3059990.86 us), agreeing in direction with median.
+- Verdict: **FASTER** (decidable = true).
+
+**CV role:** provenance only; CV had no vote. Dispersion is recorded for provenance alone:
+FrankenPandas cv is 3.83% and pandas cv is 5.59%.
+
+**THE FINDING:**
+1. Parallel numeric record parsing drops `json_read_records` @1M from the baseline ~399 ms down to **73.29 ms** (5.4x speedup over the previous serial reader).
+2. FrankenPandas outperforms pandas 2.2.3 (3,267.27 ms) by **44.384x** on 1M rows × 10 Float64 columns in a fully decidable, certified same-invocation balanced-square measurement.
+
+**Artifacts:**
+- Certified 1M run: `artifacts/bench/bench_2026-08-31T00-00-20.547171+00-00.json`
