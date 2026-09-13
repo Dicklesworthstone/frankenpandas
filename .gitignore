@@ -38,6 +38,7 @@ rustc-ice-*.txt
 a.out
 --graph-format.svg
 target-codex*/
+target-*/
 target_*/
 
 # Legacy oracle checkout (upstream source mirror, not project code)
@@ -59,6 +60,9 @@ artifacts/perf/round*_packet_strace.txt
 artifacts/perf/round*_*.json
 artifacts/perf/round*_*.txt
 artifacts/perf/round*_*.svg
+artifacts/bench/**/fp-bench
+artifacts/bench/*candidate*/
+artifacts/bench/bench_2026-09*.json
 
 # Ephemeral files (agent-generated, build artifacts, test detritus)
 ci-artifacts/
