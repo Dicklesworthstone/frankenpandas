@@ -56,7 +56,7 @@ parquet = { version = "59.3.0", default-features = false, features = ["arrow", "
 mysql = "28.0.2"
 memchr = "2.8.3"
 mimalloc = "0.1.52"
-fallible-iterator = "0.2.0"
+fallible-iterator = "0.3.0"
 postgres-protocol = "0.6.12"
 # `extension-module` is DELIBERATELY NOT ENABLED HERE — it is opt-in via
 # `fp-python`'s own `extension-module` feature. The flag tells PyO3 to omit
@@ -70,7 +70,7 @@ regex = "1.13.1"
 rust_xlsxwriter = "0.99.0"
 rusqlite = { version = "0.40.2", features = ["bundled", "column_decltype"] }
 ryu = "1.0.23"
-sas7bdat = "0.2.0"
+sas7bdat = "0.9.0"
 sas_xport = "0.4.1"
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
