@@ -6005,10 +6005,9 @@ pub fn read_sas(path: &Path) -> Result<DataFrame, IoError> {
         return read_sas_xport(path);
     }
 
-    let mut reader = sas7bdat::SasReader::open(path).map_err(sas_error)?;
-    let column_order = reader
-        .metadata()
-        .variables
+    let dataset = sas7bdat::Dataset::open(path).map_err(sas_error)?;
+    let column_order = dataset
+        .columns()
         .iter()
         .map(|variable| variable.name.trim_end().to_owned())
         .collect::<Vec<_>>();
@@ -6018,23 +6017,38 @@ pub fn read_sas(path: &Path) -> Result<DataFrame, IoError> {
         .map(|_| Vec::new())
         .collect::<Vec<Vec<Scalar>>>();
     let mut row_count: i64 = 0;
-    let mut rows = reader.rows_named().map_err(sas_error)?;
-    while let Some(row) = rows.try_next().map_err(sas_error)? {
-        let row_values = row.values();
-        if row_values.len() != columns.len() {
-            return Err(IoError::Sas(format!(
+    let mut cell_error: Option<IoError> = None;
+    let scan_result = dataset.visit_rows(|row| {
+        if row.len() != columns.len() {
+            cell_error = Some(IoError::Sas(format!(
                 "row {row_count} has {} cells; metadata declares {} columns",
-                row_values.len(),
+                row.len(),
                 columns.len()
             )));
+            return Ok(std::ops::ControlFlow::Break(()));
         }
-        for (column, value) in columns.iter_mut().zip(row_values) {
-            column.push(sas_cell_to_scalar(value)?);
+        for (column, value) in columns.iter_mut().zip(row.iter()) {
+            match sas_cell_to_scalar(value) {
+                Ok(scalar) => column.push(scalar),
+                Err(err) => {
+                    cell_error = Some(err);
+                    return Ok(std::ops::ControlFlow::Break(()));
+                }
+            }
         }
-        row_count = row_count
-            .checked_add(1)
-            .ok_or_else(|| IoError::Sas("row count exceeded i64 range".to_owned()))?;
+        if let Some(next) = row_count.checked_add(1) {
+            row_count = next;
+            Ok(std::ops::ControlFlow::Continue(()))
+        } else {
+            cell_error = Some(IoError::Sas("row count exceeded i64 range".to_owned()));
+            Ok(std::ops::ControlFlow::Break(()))
+        }
+    });
+
+    if let Some(err) = cell_error {
+        return Err(err);
     }
+    scan_result.map_err(sas_error)?;
     sas_rows_to_frame(column_order, columns)
 }
 
@@ -6121,7 +6135,7 @@ fn sas_cell_to_scalar(cell: &sas7bdat::CellValue<'_>) -> Result<Scalar, IoError>
     use sas7bdat::CellValue;
 
     match cell {
-        CellValue::Float(value) => Ok(Scalar::Float64(*value)),
+        CellValue::Float64(value) => Ok(Scalar::Float64(*value)),
         CellValue::Int32(value) => Ok(Scalar::Float64(f64::from(*value))),
         CellValue::Int64(value) => {
             // pandas represents SAS numeric storage as float64, including values
@@ -6130,31 +6144,39 @@ fn sas_cell_to_scalar(cell: &sas7bdat::CellValue<'_>) -> Result<Scalar, IoError>
             let value = *value as f64;
             Ok(Scalar::Float64(value))
         }
-        CellValue::NumericString(value) => {
-            value.parse::<f64>().map(Scalar::Float64).map_err(|_| {
-                IoError::Sas(format!(
-                    "numeric SAS cell is not representable as f64: {value}"
-                ))
-            })
-        }
-        CellValue::Str(value) => Ok(Scalar::Utf8(value.to_string())),
+        CellValue::Str(value) => Ok(Scalar::Utf8((*value).to_owned())),
         CellValue::Bytes(_) => Err(IoError::Sas(
             "SAS reader yielded undecoded bytes; a supported source encoding is required"
                 .to_owned(),
         )),
-        CellValue::DateTime(value) | CellValue::Date(value) => {
-            let nanos = i64::try_from(value.unix_timestamp_nanos()).map_err(|_| {
+        CellValue::Date(value) => {
+            // SasDate::unix_days() returns days since Unix epoch (1970-01-01).
+            const NANOS_PER_DAY: i64 = 86_400 * 1_000_000_000;
+            let days = i64::from(value.unix_days());
+            let nanos = days.checked_mul(NANOS_PER_DAY).ok_or_else(|| {
+                IoError::Sas("SAS date is outside datetime64[ns] range".to_owned())
+            })?;
+            Ok(Scalar::Datetime64(nanos))
+        }
+        CellValue::DateTime(value) => {
+            // SasDateTime::unix_seconds() returns seconds since Unix epoch.
+            const NANOS_PER_SEC: i64 = 1_000_000_000;
+            let secs = value.unix_seconds();
+            let nanos = secs.checked_mul(NANOS_PER_SEC).ok_or_else(|| {
                 IoError::Sas("SAS datetime is outside datetime64[ns] range".to_owned())
             })?;
             Ok(Scalar::Datetime64(nanos))
         }
         CellValue::Time(value) => {
-            let nanos = i64::try_from(value.whole_nanoseconds()).map_err(|_| {
+            // SasTime::seconds_since_midnight returns seconds since midnight.
+            const NANOS_PER_SEC: i64 = 1_000_000_000;
+            let secs = i64::from(value.seconds_since_midnight);
+            let nanos = secs.checked_mul(NANOS_PER_SEC).ok_or_else(|| {
                 IoError::Sas("SAS time is outside timedelta64[ns] range".to_owned())
             })?;
             Ok(Scalar::Timedelta64(nanos))
         }
-        CellValue::Missing(_) => Ok(Scalar::Null(NullKind::NaN)),
+        CellValue::Null => Ok(Scalar::Null(NullKind::NaN)),
     }
 }
 
@@ -22958,21 +22980,16 @@ mod tests {
 
     #[test]
     fn sas_cells_build_typed_frame_and_reject_undecoded_bytes_9jvao() {
-        use std::borrow::Cow;
-
         let columns = vec![
             vec![
-                super::sas_cell_to_scalar(&sas7bdat::CellValue::Float(1.5))
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Float64(1.5))
                     .expect("numeric SAS cell"),
-                super::sas_cell_to_scalar(&sas7bdat::CellValue::Missing(
-                    sas7bdat::MissingValue::System,
-                ))
-                .expect("missing SAS cell"),
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Null).expect("missing SAS cell"),
             ],
             vec![
-                super::sas_cell_to_scalar(&sas7bdat::CellValue::Str(Cow::Borrowed("alpha")))
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Str("alpha"))
                     .expect("text SAS cell"),
-                super::sas_cell_to_scalar(&sas7bdat::CellValue::Str(Cow::Borrowed("beta")))
+                super::sas_cell_to_scalar(&sas7bdat::CellValue::Str("beta"))
                     .expect("text SAS cell"),
             ],
         ];
@@ -22988,9 +23005,8 @@ mod tests {
             Scalar::Utf8("beta".into())
         );
 
-        let undecoded =
-            super::sas_cell_to_scalar(&sas7bdat::CellValue::Bytes(Cow::Borrowed(b"\xff")))
-                .expect_err("raw SAS bytes must not be silently lossy-decoded");
+        let undecoded = super::sas_cell_to_scalar(&sas7bdat::CellValue::Bytes(b"\xff"))
+            .expect_err("raw SAS bytes must not be silently lossy-decoded");
         assert!(matches!(undecoded, super::IoError::Sas(message) if message.contains("undecoded")));
     }
 
