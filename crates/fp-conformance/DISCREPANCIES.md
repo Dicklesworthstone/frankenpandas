@@ -229,12 +229,7 @@
 > with "Datetime64 mean/median/quantile are exact" above. Three of the four in-tree
 > citations of `DISC-019` mean the Datetime64 entry, so that one kept the number.
 >
-> ⚠️ **ONE CITATION STILL POINTS HERE BY THE OLD NUMBER:**
-> `crates/fp-frame/src/lib.rs:52880` reads "is a NULLABLE Int64 (that is how the
-> payload is constructed — see DISC-019)" and means THIS entry, not the Datetime64
-> one. It should read `DISC-023`. I could not make that edit: `fp-frame/src/lib.rs`
-> is exclusively reserved by another agent, and the repo was under a build freeze.
-> Whoever holds that file next should fix the reference.
+> *(The former citation in `crates/fp-frame/src/lib.rs` has since been updated to `DISC-023` at line 57361).*
 - **Reference:** pandas 2.2.3 infers `pd.Series([1, None, 3])` as **float64** (values `[1.0, nan, 3.0]`) and `pd.Series([True, None])` as **object**. Nullable `Int64` / `boolean` are reached only by asking for them explicitly.
 - **Our impl:** `pandas_oracle.series_dtype_for_payload_values` returns `"Int64"` for an all-int payload containing a null, and `"boolean"` for an all-bool payload containing a null — so the oracle constructs a column pandas' own constructor would never build from the same data.
 - **Impact:** ACCEPTED, and it is **load-bearing rather than a defect**, which is the opposite of how it reads. The fixture format tags **every value** with its own `kind`; a float64 column would rewrite each `{"kind":"int64"}` into `{"kind":"float64"}` on the way out, so the nullable dtype is what preserves the payload's kinds across the round trip. Measured 2026-08-08 over the whole corpus, switching both arms to pandas' inference: `agree` 977 → 947 (−30), `moved, unattributed` 151 → 181 (+30), and the `KIND int64->float64` move class 57 → 86 (+29). The change makes the corpus strictly worse and **grows the very class it was expected to shrink**.
