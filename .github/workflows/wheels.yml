@@ -158,12 +158,12 @@ jobs:
     needs: [linux, macos, windows, sdist]
     if: "startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'"
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: sdist
           path: dist
