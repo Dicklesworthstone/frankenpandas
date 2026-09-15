@@ -7597,11 +7597,13 @@ impl Series {
             });
         }
 
+        let categorical = column.categorical().cloned();
+
         Ok(Self {
             name: name.into(),
             index,
             column,
-            categorical: None,
+            categorical,
             sparse: None,
         })
     }
@@ -102833,6 +102835,29 @@ mod tests {
             .with_constructor_dtype(DType::Float64)
             .expect("int64 widens to float64");
         assert_eq!(widened.columns["a"].values(), &[Scalar::Float64(1.0)]);
+    }
+
+    #[test]
+    fn dataframe_with_constructor_dtype_category() {
+        let df = DataFrame::from_dict(
+            &["kind"],
+            vec![("kind", vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())])],
+        )
+        .expect("frame");
+        let cat_df = df
+            .with_constructor_dtype(DType::Categorical)
+            .expect("categorical constructor dtype succeeds");
+        let col = cat_df.column("kind").expect("column");
+        assert_eq!(col.dtype(), DType::Categorical);
+        let meta = col.categorical().expect("categorical metadata present");
+        assert_eq!(
+            meta.categories,
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+        );
+        assert!(!meta.ordered);
+        let s = cat_df.column_as_series("kind").expect("series");
+        assert!(s.is_categorical());
+        assert_eq!(s.dtype(), DType::Categorical);
     }
 
     /// The frame shape the zx21n baseline was measured on: float 'b', object
