@@ -184,15 +184,76 @@ fn pandas_temporal_error_class(error: PandasTemporalError) -> &'static str {
 /// (`PlotSpec::to_svg` / `HistogramSpec::to_svg` / `BoxPlotSpec::to_svg`).
 mod plot_render;
 /// Logical plot kind requested by a pandas-style plotting hook.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlotKind {
     Line,
     Bar,
+    Barh,
     Area,
     Scatter,
     Pie,
     Histogram,
     Box,
+    Kde,
+    Density,
+    Hexbin,
+}
+
+impl PlotKind {
+    /// Return the canonical string identifier matching pandas `kind` parameter.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Line => "line",
+            Self::Bar => "bar",
+            Self::Barh => "barh",
+            Self::Area => "area",
+            Self::Scatter => "scatter",
+            Self::Pie => "pie",
+            Self::Histogram => "hist",
+            Self::Box => "box",
+            Self::Kde => "kde",
+            Self::Density => "density",
+            Self::Hexbin => "hexbin",
+        }
+    }
+
+    /// Parse a plot kind from its case-insensitive name or alias.
+    #[must_use]
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "line" => Some(Self::Line),
+            "bar" => Some(Self::Bar),
+            "barh" => Some(Self::Barh),
+            "area" => Some(Self::Area),
+            "scatter" => Some(Self::Scatter),
+            "pie" => Some(Self::Pie),
+            "hist" | "histogram" => Some(Self::Histogram),
+            "box" | "boxplot" => Some(Self::Box),
+            "kde" => Some(Self::Kde),
+            "density" => Some(Self::Density),
+            "hexbin" => Some(Self::Hexbin),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for PlotKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for PlotKind {
+    type Err = FrameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_name(s).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "invalid plot kind '{s}'; expected one of line, bar, barh, hist, box, kde, density, area, pie, scatter, hexbin"
+            ))
+        })
+    }
 }
 
 /// One logical series ready for a future plotting backend.
@@ -7980,6 +8041,11 @@ impl Series {
         self.boxplot()
     }
 
+    /// Return a backend-neutral pandas-style boxplot request (alias for [`Series::boxplot`]).
+    pub fn r#box(&self) -> Result<BoxPlotSpec, FrameError> {
+        self.boxplot()
+    }
+
     /// Convenience helper: render series boxplot directly to deterministic SVG string.
     pub fn boxplot_to_svg(&self) -> Result<String, FrameError> {
         self.boxplot()?.to_svg()
@@ -7993,6 +8059,238 @@ impl Series {
     /// Convenience helper: save rendered series boxplot directly to disk.
     pub fn boxplot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
         self.boxplot()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style line plot request.
+    pub fn line(&self) -> Result<PlotSpec, FrameError> {
+        let mut spec = self.plot()?;
+        spec.method = "Series.plot.line".to_owned();
+        Ok(spec)
+    }
+
+    /// Convenience helper: render series line plot directly to deterministic SVG string.
+    pub fn line_to_svg(&self) -> Result<String, FrameError> {
+        self.line()?.to_svg()
+    }
+
+    /// Convenience helper: render series line plot directly to HTML figure snippet.
+    pub fn line_to_html(&self) -> Result<String, FrameError> {
+        self.line()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series line plot directly to disk.
+    pub fn line_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.line()?.save(path)
+    }
+
+    /// Convenience helper: render series bar plot directly to deterministic SVG string.
+    pub fn bar_to_svg(&self) -> Result<String, FrameError> {
+        self.bar()?.to_svg()
+    }
+
+    /// Convenience helper: render series bar plot directly to HTML figure snippet.
+    pub fn bar_to_html(&self) -> Result<String, FrameError> {
+        self.bar()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series bar plot directly to disk.
+    pub fn bar_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.bar()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style horizontal bar plot request.
+    pub fn barh(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "Series.plot.barh".to_owned(),
+            kind: PlotKind::Barh,
+            series: vec![plot_series_spec(
+                self.name(),
+                self.index.labels().to_vec(),
+                self.column.dtype(),
+                self.column.values().to_vec(),
+                None,
+            )],
+        })
+    }
+
+    /// Convenience helper: render series horizontal bar plot directly to deterministic SVG string.
+    pub fn barh_to_svg(&self) -> Result<String, FrameError> {
+        self.barh()?.to_svg()
+    }
+
+    /// Convenience helper: render series horizontal bar plot directly to HTML figure snippet.
+    pub fn barh_to_html(&self) -> Result<String, FrameError> {
+        self.barh()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series horizontal bar plot directly to disk.
+    pub fn barh_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.barh()?.save(path)
+    }
+
+    /// Convenience helper: render series area plot directly to deterministic SVG string.
+    pub fn area_to_svg(&self) -> Result<String, FrameError> {
+        self.area()?.to_svg()
+    }
+
+    /// Convenience helper: render series area plot directly to HTML figure snippet.
+    pub fn area_to_html(&self) -> Result<String, FrameError> {
+        self.area()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series area plot directly to disk.
+    pub fn area_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.area()?.save(path)
+    }
+
+    /// Convenience helper: render series scatter plot directly to deterministic SVG string.
+    pub fn scatter_to_svg(&self) -> Result<String, FrameError> {
+        self.scatter()?.to_svg()
+    }
+
+    /// Convenience helper: render series scatter plot directly to HTML figure snippet.
+    pub fn scatter_to_html(&self) -> Result<String, FrameError> {
+        self.scatter()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series scatter plot directly to disk.
+    pub fn scatter_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.scatter()?.save(path)
+    }
+
+    /// Convenience helper: render series pie plot directly to deterministic SVG string.
+    pub fn pie_to_svg(&self) -> Result<String, FrameError> {
+        self.pie()?.to_svg()
+    }
+
+    /// Convenience helper: render series pie plot directly to HTML figure snippet.
+    pub fn pie_to_html(&self) -> Result<String, FrameError> {
+        self.pie()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series pie plot directly to disk.
+    pub fn pie_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.pie()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style kernel density estimation plot request.
+    pub fn kde(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "Series.plot.kde".to_owned(),
+            kind: PlotKind::Kde,
+            series: vec![plot_series_spec(
+                self.name(),
+                self.index.labels().to_vec(),
+                self.column.dtype(),
+                self.column.values().to_vec(),
+                None,
+            )],
+        })
+    }
+
+    /// Convenience helper: render series KDE plot directly to deterministic SVG string.
+    pub fn kde_to_svg(&self) -> Result<String, FrameError> {
+        self.kde()?.to_svg()
+    }
+
+    /// Convenience helper: render series KDE plot directly to HTML figure snippet.
+    pub fn kde_to_html(&self) -> Result<String, FrameError> {
+        self.kde()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series KDE plot directly to disk.
+    pub fn kde_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.kde()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style density plot request (alias for [`Series::kde`]).
+    pub fn density(&self) -> Result<PlotSpec, FrameError> {
+        let mut spec = self.kde()?;
+        spec.method = "Series.plot.density".to_owned();
+        spec.kind = PlotKind::Density;
+        Ok(spec)
+    }
+
+    /// Convenience helper: render series density plot directly to deterministic SVG string.
+    pub fn density_to_svg(&self) -> Result<String, FrameError> {
+        self.density()?.to_svg()
+    }
+
+    /// Convenience helper: render series density plot directly to HTML figure snippet.
+    pub fn density_to_html(&self) -> Result<String, FrameError> {
+        self.density()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series density plot directly to disk.
+    pub fn density_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.density()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style hexbin plot request.
+    pub fn hexbin(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "Series.plot.hexbin".to_owned(),
+            kind: PlotKind::Hexbin,
+            series: vec![plot_series_spec(
+                self.name(),
+                self.index.labels().to_vec(),
+                self.column.dtype(),
+                self.column.values().to_vec(),
+                None,
+            )],
+        })
+    }
+
+    /// Convenience helper: render series hexbin plot directly to deterministic SVG string.
+    pub fn hexbin_to_svg(&self) -> Result<String, FrameError> {
+        self.hexbin()?.to_svg()
+    }
+
+    /// Convenience helper: render series hexbin plot directly to HTML figure snippet.
+    pub fn hexbin_to_html(&self) -> Result<String, FrameError> {
+        self.hexbin()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series hexbin plot directly to disk.
+    pub fn hexbin_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.hexbin()?.save(path)
+    }
+
+    /// Return a backend-neutral plot request for the specified plot kind.
+    pub fn plot_with_kind(&self, kind: PlotKind) -> Result<PlotSpec, FrameError> {
+        match kind {
+            PlotKind::Line => self.line(),
+            PlotKind::Bar => self.bar(),
+            PlotKind::Barh => self.barh(),
+            PlotKind::Area => self.area(),
+            PlotKind::Scatter => self.scatter(),
+            PlotKind::Pie => self.pie(),
+            PlotKind::Kde => self.kde(),
+            PlotKind::Density => self.density(),
+            PlotKind::Hexbin => self.hexbin(),
+            PlotKind::Histogram => Ok(PlotSpec {
+                method: "Series.plot.hist".to_owned(),
+                kind: PlotKind::Histogram,
+                series: vec![plot_series_spec(
+                    self.name(),
+                    self.index.labels().to_vec(),
+                    self.column.dtype(),
+                    self.column.values().to_vec(),
+                    None,
+                )],
+            }),
+            PlotKind::Box => Ok(PlotSpec {
+                method: "Series.plot.box".to_owned(),
+                kind: PlotKind::Box,
+                series: vec![plot_series_spec(
+                    self.name(),
+                    self.index.labels().to_vec(),
+                    self.column.dtype(),
+                    self.column.values().to_vec(),
+                    None,
+                )],
+            }),
+        }
     }
 
     /// Pretty-print the Series as a string table.
@@ -38129,6 +38427,28 @@ impl SeriesGroupBy<'_> {
         })
     }
 
+    /// Return a backend-neutral pandas-style grouped line plot request.
+    pub fn line(&self) -> Result<PlotSpec, FrameError> {
+        let mut spec = self.plot()?;
+        spec.method = "SeriesGroupBy.plot.line".to_owned();
+        Ok(spec)
+    }
+
+    /// Convenience helper: render grouped series line plot directly to deterministic SVG string.
+    pub fn line_to_svg(&self) -> Result<String, FrameError> {
+        self.line()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series line plot directly to HTML figure snippet.
+    pub fn line_to_html(&self) -> Result<String, FrameError> {
+        self.line()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series line plot directly to disk.
+    pub fn line_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.line()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style grouped bar plot request.
     pub fn bar(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -38136,6 +38456,45 @@ impl SeriesGroupBy<'_> {
             kind: PlotKind::Bar,
             series: self.plot_series_specs(),
         })
+    }
+
+    /// Convenience helper: render grouped series bar plot directly to deterministic SVG string.
+    pub fn bar_to_svg(&self) -> Result<String, FrameError> {
+        self.bar()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series bar plot directly to HTML figure snippet.
+    pub fn bar_to_html(&self) -> Result<String, FrameError> {
+        self.bar()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series bar plot directly to disk.
+    pub fn bar_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.bar()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped horizontal bar plot request.
+    pub fn barh(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "SeriesGroupBy.plot.barh".to_owned(),
+            kind: PlotKind::Barh,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render grouped series horizontal bar plot directly to deterministic SVG string.
+    pub fn barh_to_svg(&self) -> Result<String, FrameError> {
+        self.barh()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series horizontal bar plot directly to HTML figure snippet.
+    pub fn barh_to_html(&self) -> Result<String, FrameError> {
+        self.barh()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series horizontal bar plot directly to disk.
+    pub fn barh_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.barh()?.save(path)
     }
 
     /// Return a backend-neutral pandas-style grouped area plot request.
@@ -38147,6 +38506,21 @@ impl SeriesGroupBy<'_> {
         })
     }
 
+    /// Convenience helper: render grouped series area plot directly to deterministic SVG string.
+    pub fn area_to_svg(&self) -> Result<String, FrameError> {
+        self.area()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series area plot directly to HTML figure snippet.
+    pub fn area_to_html(&self) -> Result<String, FrameError> {
+        self.area()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series area plot directly to disk.
+    pub fn area_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.area()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style grouped scatter plot request.
     pub fn scatter(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -38156,6 +38530,21 @@ impl SeriesGroupBy<'_> {
         })
     }
 
+    /// Convenience helper: render grouped series scatter plot directly to deterministic SVG string.
+    pub fn scatter_to_svg(&self) -> Result<String, FrameError> {
+        self.scatter()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series scatter plot directly to HTML figure snippet.
+    pub fn scatter_to_html(&self) -> Result<String, FrameError> {
+        self.scatter()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series scatter plot directly to disk.
+    pub fn scatter_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.scatter()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style grouped pie plot request.
     pub fn pie(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -38163,6 +38552,117 @@ impl SeriesGroupBy<'_> {
             kind: PlotKind::Pie,
             series: self.plot_series_specs(),
         })
+    }
+
+    /// Convenience helper: render grouped series pie plot directly to deterministic SVG string.
+    pub fn pie_to_svg(&self) -> Result<String, FrameError> {
+        self.pie()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series pie plot directly to HTML figure snippet.
+    pub fn pie_to_html(&self) -> Result<String, FrameError> {
+        self.pie()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series pie plot directly to disk.
+    pub fn pie_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.pie()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped kernel density estimation plot request.
+    pub fn kde(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "SeriesGroupBy.plot.kde".to_owned(),
+            kind: PlotKind::Kde,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render grouped series KDE plot directly to deterministic SVG string.
+    pub fn kde_to_svg(&self) -> Result<String, FrameError> {
+        self.kde()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series KDE plot directly to HTML figure snippet.
+    pub fn kde_to_html(&self) -> Result<String, FrameError> {
+        self.kde()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series KDE plot directly to disk.
+    pub fn kde_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.kde()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped density plot request (alias for [`SeriesGroupBy::kde`]).
+    pub fn density(&self) -> Result<PlotSpec, FrameError> {
+        let mut spec = self.kde()?;
+        spec.method = "SeriesGroupBy.plot.density".to_owned();
+        spec.kind = PlotKind::Density;
+        Ok(spec)
+    }
+
+    /// Convenience helper: render grouped series density plot directly to deterministic SVG string.
+    pub fn density_to_svg(&self) -> Result<String, FrameError> {
+        self.density()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series density plot directly to HTML figure snippet.
+    pub fn density_to_html(&self) -> Result<String, FrameError> {
+        self.density()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series density plot directly to disk.
+    pub fn density_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.density()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped hexbin plot request.
+    pub fn hexbin(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "SeriesGroupBy.plot.hexbin".to_owned(),
+            kind: PlotKind::Hexbin,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render grouped series hexbin plot directly to deterministic SVG string.
+    pub fn hexbin_to_svg(&self) -> Result<String, FrameError> {
+        self.hexbin()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series hexbin plot directly to HTML figure snippet.
+    pub fn hexbin_to_html(&self) -> Result<String, FrameError> {
+        self.hexbin()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series hexbin plot directly to disk.
+    pub fn hexbin_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.hexbin()?.save(path)
+    }
+
+    /// Return a backend-neutral grouped plot request for the specified plot kind.
+    pub fn plot_with_kind(&self, kind: PlotKind) -> Result<PlotSpec, FrameError> {
+        match kind {
+            PlotKind::Line => self.line(),
+            PlotKind::Bar => self.bar(),
+            PlotKind::Barh => self.barh(),
+            PlotKind::Area => self.area(),
+            PlotKind::Scatter => self.scatter(),
+            PlotKind::Pie => self.pie(),
+            PlotKind::Kde => self.kde(),
+            PlotKind::Density => self.density(),
+            PlotKind::Hexbin => self.hexbin(),
+            PlotKind::Histogram => Ok(PlotSpec {
+                method: "SeriesGroupBy.plot.hist".to_owned(),
+                kind: PlotKind::Histogram,
+                series: self.plot_series_specs(),
+            }),
+            PlotKind::Box => Ok(PlotSpec {
+                method: "SeriesGroupBy.plot.box".to_owned(),
+                kind: PlotKind::Box,
+                series: self.plot_series_specs(),
+            }),
+        }
     }
 
     /// Return a backend-neutral pandas-style grouped histogram request.
@@ -38184,6 +38684,11 @@ impl SeriesGroupBy<'_> {
 
     /// Return a backend-neutral pandas-style grouped boxplot request (alias for [`SeriesGroupBy::boxplot`]).
     pub fn box_plot(&self) -> Result<BoxPlotSpec, FrameError> {
+        self.boxplot()
+    }
+
+    /// Return a backend-neutral pandas-style grouped boxplot request (alias for [`SeriesGroupBy::boxplot`]).
+    pub fn r#box(&self) -> Result<BoxPlotSpec, FrameError> {
         self.boxplot()
     }
 
@@ -63305,6 +63810,28 @@ impl DataFrame {
         self.plot()?.save(path)
     }
 
+    /// Return a backend-neutral pandas-style line plot request.
+    pub fn line(&self) -> Result<PlotSpec, FrameError> {
+        let mut spec = self.plot()?;
+        spec.method = "DataFrame.plot.line".to_owned();
+        Ok(spec)
+    }
+
+    /// Convenience helper: render dataframe line plot directly to deterministic SVG string.
+    pub fn line_to_svg(&self) -> Result<String, FrameError> {
+        self.line()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe line plot directly to HTML figure snippet.
+    pub fn line_to_html(&self) -> Result<String, FrameError> {
+        self.line()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe line plot directly to disk.
+    pub fn line_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.line()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style bar plot request.
     pub fn bar(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -63312,6 +63839,45 @@ impl DataFrame {
             kind: PlotKind::Bar,
             series: self.plot_series_specs(),
         })
+    }
+
+    /// Convenience helper: render dataframe bar plot directly to deterministic SVG string.
+    pub fn bar_to_svg(&self) -> Result<String, FrameError> {
+        self.bar()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe bar plot directly to HTML figure snippet.
+    pub fn bar_to_html(&self) -> Result<String, FrameError> {
+        self.bar()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe bar plot directly to disk.
+    pub fn bar_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.bar()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style horizontal bar plot request.
+    pub fn barh(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "DataFrame.plot.barh".to_owned(),
+            kind: PlotKind::Barh,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render dataframe horizontal bar plot directly to deterministic SVG string.
+    pub fn barh_to_svg(&self) -> Result<String, FrameError> {
+        self.barh()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe horizontal bar plot directly to HTML figure snippet.
+    pub fn barh_to_html(&self) -> Result<String, FrameError> {
+        self.barh()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe horizontal bar plot directly to disk.
+    pub fn barh_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.barh()?.save(path)
     }
 
     /// Return a backend-neutral pandas-style area plot request.
@@ -63323,6 +63889,21 @@ impl DataFrame {
         })
     }
 
+    /// Convenience helper: render dataframe area plot directly to deterministic SVG string.
+    pub fn area_to_svg(&self) -> Result<String, FrameError> {
+        self.area()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe area plot directly to HTML figure snippet.
+    pub fn area_to_html(&self) -> Result<String, FrameError> {
+        self.area()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe area plot directly to disk.
+    pub fn area_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.area()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style scatter plot request.
     pub fn scatter(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -63332,6 +63913,21 @@ impl DataFrame {
         })
     }
 
+    /// Convenience helper: render dataframe scatter plot directly to deterministic SVG string.
+    pub fn scatter_to_svg(&self) -> Result<String, FrameError> {
+        self.scatter()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe scatter plot directly to HTML figure snippet.
+    pub fn scatter_to_html(&self) -> Result<String, FrameError> {
+        self.scatter()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe scatter plot directly to disk.
+    pub fn scatter_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.scatter()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style pie plot request.
     pub fn pie(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -63339,6 +63935,117 @@ impl DataFrame {
             kind: PlotKind::Pie,
             series: self.plot_series_specs(),
         })
+    }
+
+    /// Convenience helper: render dataframe pie plot directly to deterministic SVG string.
+    pub fn pie_to_svg(&self) -> Result<String, FrameError> {
+        self.pie()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe pie plot directly to HTML figure snippet.
+    pub fn pie_to_html(&self) -> Result<String, FrameError> {
+        self.pie()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe pie plot directly to disk.
+    pub fn pie_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.pie()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style kernel density estimation plot request.
+    pub fn kde(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "DataFrame.plot.kde".to_owned(),
+            kind: PlotKind::Kde,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render dataframe KDE plot directly to deterministic SVG string.
+    pub fn kde_to_svg(&self) -> Result<String, FrameError> {
+        self.kde()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe KDE plot directly to HTML figure snippet.
+    pub fn kde_to_html(&self) -> Result<String, FrameError> {
+        self.kde()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe KDE plot directly to disk.
+    pub fn kde_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.kde()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style density plot request (alias for [`DataFrame::kde`]).
+    pub fn density(&self) -> Result<PlotSpec, FrameError> {
+        let mut spec = self.kde()?;
+        spec.method = "DataFrame.plot.density".to_owned();
+        spec.kind = PlotKind::Density;
+        Ok(spec)
+    }
+
+    /// Convenience helper: render dataframe density plot directly to deterministic SVG string.
+    pub fn density_to_svg(&self) -> Result<String, FrameError> {
+        self.density()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe density plot directly to HTML figure snippet.
+    pub fn density_to_html(&self) -> Result<String, FrameError> {
+        self.density()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe density plot directly to disk.
+    pub fn density_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.density()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style hexbin plot request.
+    pub fn hexbin(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "DataFrame.plot.hexbin".to_owned(),
+            kind: PlotKind::Hexbin,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render dataframe hexbin plot directly to deterministic SVG string.
+    pub fn hexbin_to_svg(&self) -> Result<String, FrameError> {
+        self.hexbin()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe hexbin plot directly to HTML figure snippet.
+    pub fn hexbin_to_html(&self) -> Result<String, FrameError> {
+        self.hexbin()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe hexbin plot directly to disk.
+    pub fn hexbin_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.hexbin()?.save(path)
+    }
+
+    /// Return a backend-neutral plot request for the specified plot kind.
+    pub fn plot_with_kind(&self, kind: PlotKind) -> Result<PlotSpec, FrameError> {
+        match kind {
+            PlotKind::Line => self.line(),
+            PlotKind::Bar => self.bar(),
+            PlotKind::Barh => self.barh(),
+            PlotKind::Area => self.area(),
+            PlotKind::Scatter => self.scatter(),
+            PlotKind::Pie => self.pie(),
+            PlotKind::Kde => self.kde(),
+            PlotKind::Density => self.density(),
+            PlotKind::Hexbin => self.hexbin(),
+            PlotKind::Histogram => Ok(PlotSpec {
+                method: "DataFrame.plot.hist".to_owned(),
+                kind: PlotKind::Histogram,
+                series: self.plot_series_specs(),
+            }),
+            PlotKind::Box => Ok(PlotSpec {
+                method: "DataFrame.plot.box".to_owned(),
+                kind: PlotKind::Box,
+                series: self.plot_series_specs(),
+            }),
+        }
     }
 
     /// Return a backend-neutral pandas-style histogram request.
@@ -63375,6 +64082,11 @@ impl DataFrame {
 
     /// Return a backend-neutral pandas-style boxplot request (alias for [`DataFrame::boxplot`]).
     pub fn box_plot(&self) -> Result<BoxPlotSpec, FrameError> {
+        self.boxplot()
+    }
+
+    /// Return a backend-neutral pandas-style boxplot request (alias for [`DataFrame::boxplot`]).
+    pub fn r#box(&self) -> Result<BoxPlotSpec, FrameError> {
         self.boxplot()
     }
 
@@ -92541,6 +93253,28 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// Return a backend-neutral pandas-style grouped line plot request.
+    pub fn line(&self) -> Result<PlotSpec, FrameError> {
+        let mut spec = self.plot()?;
+        spec.method = "DataFrameGroupBy.plot.line".to_owned();
+        Ok(spec)
+    }
+
+    /// Convenience helper: render grouped dataframe line plot directly to deterministic SVG string.
+    pub fn line_to_svg(&self) -> Result<String, FrameError> {
+        self.line()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe line plot directly to HTML figure snippet.
+    pub fn line_to_html(&self) -> Result<String, FrameError> {
+        self.line()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe line plot directly to disk.
+    pub fn line_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.line()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style grouped bar plot request.
     pub fn bar(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -92548,6 +93282,45 @@ impl DataFrameGroupBy<'_> {
             kind: PlotKind::Bar,
             series: self.plot_series_specs(),
         })
+    }
+
+    /// Convenience helper: render grouped dataframe bar plot directly to deterministic SVG string.
+    pub fn bar_to_svg(&self) -> Result<String, FrameError> {
+        self.bar()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe bar plot directly to HTML figure snippet.
+    pub fn bar_to_html(&self) -> Result<String, FrameError> {
+        self.bar()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe bar plot directly to disk.
+    pub fn bar_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.bar()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped horizontal bar plot request.
+    pub fn barh(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "DataFrameGroupBy.plot.barh".to_owned(),
+            kind: PlotKind::Barh,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render grouped dataframe horizontal bar plot directly to deterministic SVG string.
+    pub fn barh_to_svg(&self) -> Result<String, FrameError> {
+        self.barh()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe horizontal bar plot directly to HTML figure snippet.
+    pub fn barh_to_html(&self) -> Result<String, FrameError> {
+        self.barh()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe horizontal bar plot directly to disk.
+    pub fn barh_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.barh()?.save(path)
     }
 
     /// Return a backend-neutral pandas-style grouped area plot request.
@@ -92559,6 +93332,21 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// Convenience helper: render grouped dataframe area plot directly to deterministic SVG string.
+    pub fn area_to_svg(&self) -> Result<String, FrameError> {
+        self.area()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe area plot directly to HTML figure snippet.
+    pub fn area_to_html(&self) -> Result<String, FrameError> {
+        self.area()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe area plot directly to disk.
+    pub fn area_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.area()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style grouped scatter plot request.
     pub fn scatter(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -92568,6 +93356,21 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// Convenience helper: render grouped dataframe scatter plot directly to deterministic SVG string.
+    pub fn scatter_to_svg(&self) -> Result<String, FrameError> {
+        self.scatter()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe scatter plot directly to HTML figure snippet.
+    pub fn scatter_to_html(&self) -> Result<String, FrameError> {
+        self.scatter()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe scatter plot directly to disk.
+    pub fn scatter_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.scatter()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style grouped pie plot request.
     pub fn pie(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -92575,6 +93378,117 @@ impl DataFrameGroupBy<'_> {
             kind: PlotKind::Pie,
             series: self.plot_series_specs(),
         })
+    }
+
+    /// Convenience helper: render grouped dataframe pie plot directly to deterministic SVG string.
+    pub fn pie_to_svg(&self) -> Result<String, FrameError> {
+        self.pie()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe pie plot directly to HTML figure snippet.
+    pub fn pie_to_html(&self) -> Result<String, FrameError> {
+        self.pie()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe pie plot directly to disk.
+    pub fn pie_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.pie()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped kernel density estimation plot request.
+    pub fn kde(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "DataFrameGroupBy.plot.kde".to_owned(),
+            kind: PlotKind::Kde,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render grouped dataframe KDE plot directly to deterministic SVG string.
+    pub fn kde_to_svg(&self) -> Result<String, FrameError> {
+        self.kde()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe KDE plot directly to HTML figure snippet.
+    pub fn kde_to_html(&self) -> Result<String, FrameError> {
+        self.kde()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe KDE plot directly to disk.
+    pub fn kde_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.kde()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped density plot request (alias for [`DataFrameGroupBy::kde`]).
+    pub fn density(&self) -> Result<PlotSpec, FrameError> {
+        let mut spec = self.kde()?;
+        spec.method = "DataFrameGroupBy.plot.density".to_owned();
+        spec.kind = PlotKind::Density;
+        Ok(spec)
+    }
+
+    /// Convenience helper: render grouped dataframe density plot directly to deterministic SVG string.
+    pub fn density_to_svg(&self) -> Result<String, FrameError> {
+        self.density()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe density plot directly to HTML figure snippet.
+    pub fn density_to_html(&self) -> Result<String, FrameError> {
+        self.density()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe density plot directly to disk.
+    pub fn density_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.density()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped hexbin plot request.
+    pub fn hexbin(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "DataFrameGroupBy.plot.hexbin".to_owned(),
+            kind: PlotKind::Hexbin,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render grouped dataframe hexbin plot directly to deterministic SVG string.
+    pub fn hexbin_to_svg(&self) -> Result<String, FrameError> {
+        self.hexbin()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe hexbin plot directly to HTML figure snippet.
+    pub fn hexbin_to_html(&self) -> Result<String, FrameError> {
+        self.hexbin()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe hexbin plot directly to disk.
+    pub fn hexbin_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.hexbin()?.save(path)
+    }
+
+    /// Return a backend-neutral grouped plot request for the specified plot kind.
+    pub fn plot_with_kind(&self, kind: PlotKind) -> Result<PlotSpec, FrameError> {
+        match kind {
+            PlotKind::Line => self.line(),
+            PlotKind::Bar => self.bar(),
+            PlotKind::Barh => self.barh(),
+            PlotKind::Area => self.area(),
+            PlotKind::Scatter => self.scatter(),
+            PlotKind::Pie => self.pie(),
+            PlotKind::Kde => self.kde(),
+            PlotKind::Density => self.density(),
+            PlotKind::Hexbin => self.hexbin(),
+            PlotKind::Histogram => Ok(PlotSpec {
+                method: "DataFrameGroupBy.plot.hist".to_owned(),
+                kind: PlotKind::Histogram,
+                series: self.plot_series_specs(),
+            }),
+            PlotKind::Box => Ok(PlotSpec {
+                method: "DataFrameGroupBy.plot.box".to_owned(),
+                kind: PlotKind::Box,
+                series: self.plot_series_specs(),
+            }),
+        }
     }
 
     /// Return a backend-neutral pandas-style grouped histogram request.
@@ -92596,6 +93510,11 @@ impl DataFrameGroupBy<'_> {
 
     /// Return a backend-neutral pandas-style grouped boxplot request (alias for [`DataFrameGroupBy::boxplot`]).
     pub fn box_plot(&self) -> Result<BoxPlotSpec, FrameError> {
+        self.boxplot()
+    }
+
+    /// Return a backend-neutral pandas-style grouped boxplot request (alias for [`DataFrameGroupBy::boxplot`]).
+    pub fn r#box(&self) -> Result<BoxPlotSpec, FrameError> {
         self.boxplot()
     }
 
@@ -100510,7 +101429,15 @@ mod tests {
     fn normalize_volatile_debug_repr(s: &str) -> String {
         let stripped = strip_volatile_label_identity(s);
         let cached = normalize_oncelock_caches(&stripped);
-        normalize_validity_mask_words(&cached)
+        let validity = normalize_validity_mask_words(&cached);
+        normalize_column_categorical_none(&validity)
+    }
+
+    /// Strip `categorical: None` from `Column` struct representations, so the
+    /// internal columnar carrier added in e1a194986 does not desync pre-existing
+    /// Debug goldens where non-categorical columns omitted the field.
+    fn normalize_column_categorical_none(s: &str) -> String {
+        s.replace(", categorical: None }", " }")
     }
 
     /// Replace each `<cache>: OnceLock(...)` value with a canonical
@@ -173391,6 +174318,512 @@ mod tests {
         assert!(svg.starts_with("<svg"));
         let html = grouped.boxplot_to_html().unwrap();
         assert!(html.contains("<div class=\"frankenpandas-plot\""));
+    }
+
+    #[test]
+    fn plot_kind_enum_conversions_and_display() {
+        use std::str::FromStr;
+        for (kind, expected_str) in [
+            (super::PlotKind::Line, "line"),
+            (super::PlotKind::Bar, "bar"),
+            (super::PlotKind::Barh, "barh"),
+            (super::PlotKind::Histogram, "hist"),
+            (super::PlotKind::Box, "box"),
+            (super::PlotKind::Kde, "kde"),
+            (super::PlotKind::Density, "density"),
+            (super::PlotKind::Area, "area"),
+            (super::PlotKind::Pie, "pie"),
+            (super::PlotKind::Scatter, "scatter"),
+            (super::PlotKind::Hexbin, "hexbin"),
+        ] {
+            assert_eq!(kind.as_str(), expected_str);
+            assert_eq!(kind.to_string(), expected_str);
+            assert_eq!(super::PlotKind::from_str(expected_str).unwrap(), kind);
+        }
+        // Aliases
+        assert_eq!(
+            super::PlotKind::from_str("histogram").unwrap(),
+            super::PlotKind::Histogram
+        );
+        assert_eq!(
+            super::PlotKind::from_str("boxplot").unwrap(),
+            super::PlotKind::Box
+        );
+        assert_eq!(
+            super::PlotKind::from_str("LINE").unwrap(),
+            super::PlotKind::Line
+        );
+        assert_eq!(
+            super::PlotKind::from_str("BARH").unwrap(),
+            super::PlotKind::Barh
+        );
+    }
+
+    #[test]
+    fn dataframe_and_series_all_plot_kinds_and_direct_helpers() {
+        let df = nk54a_df().select_columns(&["a", "b"]).unwrap();
+        let s = m785r_series();
+
+        // 1. DataFrame plot methods for each kind
+        let line_spec = df.line().unwrap();
+        assert_eq!(line_spec.kind, super::PlotKind::Line);
+        assert_eq!(line_spec.method, "DataFrame.plot.line");
+
+        let barh_spec = df.barh().unwrap();
+        assert_eq!(barh_spec.kind, super::PlotKind::Barh);
+        assert_eq!(barh_spec.method, "DataFrame.plot.barh");
+
+        let kde_spec = df.kde().unwrap();
+        assert_eq!(kde_spec.kind, super::PlotKind::Kde);
+        assert_eq!(kde_spec.method, "DataFrame.plot.kde");
+
+        let dens_spec = df.density().unwrap();
+        assert_eq!(dens_spec.kind, super::PlotKind::Density);
+        assert_eq!(dens_spec.method, "DataFrame.plot.density");
+
+        let hex_spec = df.hexbin().unwrap();
+        assert_eq!(hex_spec.kind, super::PlotKind::Hexbin);
+        assert_eq!(hex_spec.method, "DataFrame.plot.hexbin");
+
+        let box_r = df.r#box().unwrap();
+        assert_eq!(box_r.method, "DataFrame.boxplot");
+
+        // 2. DataFrame plot_with_kind dispatcher for all 11 kinds
+        for kind in [
+            super::PlotKind::Line,
+            super::PlotKind::Bar,
+            super::PlotKind::Barh,
+            super::PlotKind::Area,
+            super::PlotKind::Scatter,
+            super::PlotKind::Pie,
+            super::PlotKind::Kde,
+            super::PlotKind::Density,
+            super::PlotKind::Hexbin,
+            super::PlotKind::Histogram,
+            super::PlotKind::Box,
+        ] {
+            let spec = df.plot_with_kind(kind).unwrap();
+            assert_eq!(spec.kind, kind);
+        }
+
+        // 3. DataFrame direct rendering helpers
+        assert!(df.line_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.line_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.bar_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.bar_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.barh_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.barh_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.area_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.area_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.scatter_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.scatter_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.pie_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.pie_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.kde_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.kde_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.density_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.density_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.hexbin_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.hexbin_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.hist_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.hist_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(df.boxplot_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            df.boxplot_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+
+        // 4. Series plot methods for each kind
+        let s_line = s.line().unwrap();
+        assert_eq!(s_line.kind, super::PlotKind::Line);
+        assert_eq!(s_line.method, "Series.plot.line");
+
+        let s_barh = s.barh().unwrap();
+        assert_eq!(s_barh.kind, super::PlotKind::Barh);
+        assert_eq!(s_barh.method, "Series.plot.barh");
+
+        let s_kde = s.kde().unwrap();
+        assert_eq!(s_kde.kind, super::PlotKind::Kde);
+        assert_eq!(s_kde.method, "Series.plot.kde");
+
+        let s_dens = s.density().unwrap();
+        assert_eq!(s_dens.kind, super::PlotKind::Density);
+        assert_eq!(s_dens.method, "Series.plot.density");
+
+        let s_hex = s.hexbin().unwrap();
+        assert_eq!(s_hex.kind, super::PlotKind::Hexbin);
+        assert_eq!(s_hex.method, "Series.plot.hexbin");
+
+        let s_box_plot = s.box_plot().unwrap();
+        assert_eq!(s_box_plot.method, "Series.boxplot");
+        let s_box_r = s.r#box().unwrap();
+        assert_eq!(s_box_r.method, "Series.boxplot");
+
+        // 5. Series plot_with_kind dispatcher for all 11 kinds
+        for kind in [
+            super::PlotKind::Line,
+            super::PlotKind::Bar,
+            super::PlotKind::Barh,
+            super::PlotKind::Area,
+            super::PlotKind::Scatter,
+            super::PlotKind::Pie,
+            super::PlotKind::Kde,
+            super::PlotKind::Density,
+            super::PlotKind::Hexbin,
+            super::PlotKind::Histogram,
+            super::PlotKind::Box,
+        ] {
+            let spec = s.plot_with_kind(kind).unwrap();
+            assert_eq!(spec.kind, kind);
+        }
+
+        // 6. Series direct rendering helpers
+        assert!(s.line_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.line_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.bar_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.bar_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.barh_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.barh_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.area_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.area_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.scatter_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.scatter_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.pie_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.pie_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.kde_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.kde_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.density_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.density_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.hexbin_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.hexbin_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.hist_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.hist_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(s.boxplot_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            s.boxplot_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_and_series_groupby_all_plot_kinds_and_direct_helpers() {
+        let df = nk54a_df();
+        let dfg = df.groupby(&["secret"]).unwrap();
+
+        // 1. DataFrameGroupBy plot methods
+        let line_spec = dfg.line().unwrap();
+        assert_eq!(line_spec.kind, super::PlotKind::Line);
+        assert_eq!(line_spec.method, "DataFrameGroupBy.plot.line");
+
+        let barh_spec = dfg.barh().unwrap();
+        assert_eq!(barh_spec.kind, super::PlotKind::Barh);
+        assert_eq!(barh_spec.method, "DataFrameGroupBy.plot.barh");
+
+        let kde_spec = dfg.kde().unwrap();
+        assert_eq!(kde_spec.kind, super::PlotKind::Kde);
+        assert_eq!(kde_spec.method, "DataFrameGroupBy.plot.kde");
+
+        let dens_spec = dfg.density().unwrap();
+        assert_eq!(dens_spec.kind, super::PlotKind::Density);
+        assert_eq!(dens_spec.method, "DataFrameGroupBy.plot.density");
+
+        let hex_spec = dfg.hexbin().unwrap();
+        assert_eq!(hex_spec.kind, super::PlotKind::Hexbin);
+        assert_eq!(hex_spec.method, "DataFrameGroupBy.plot.hexbin");
+
+        let box_r = dfg.r#box().unwrap();
+        assert_eq!(box_r.method, "DataFrameGroupBy.boxplot");
+
+        // 2. DataFrameGroupBy plot_with_kind dispatcher for all 11 kinds
+        for kind in [
+            super::PlotKind::Line,
+            super::PlotKind::Bar,
+            super::PlotKind::Barh,
+            super::PlotKind::Area,
+            super::PlotKind::Scatter,
+            super::PlotKind::Pie,
+            super::PlotKind::Kde,
+            super::PlotKind::Density,
+            super::PlotKind::Hexbin,
+            super::PlotKind::Histogram,
+            super::PlotKind::Box,
+        ] {
+            let spec = dfg.plot_with_kind(kind).unwrap();
+            assert_eq!(spec.kind, kind);
+        }
+
+        // 3. DataFrameGroupBy direct rendering helpers
+        assert!(dfg.line_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.line_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.bar_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.bar_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.barh_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.barh_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.area_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.area_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.scatter_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.scatter_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.pie_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.pie_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.kde_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.kde_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.density_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.density_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.hexbin_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.hexbin_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.hist_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.hist_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(dfg.boxplot_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            dfg.boxplot_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+
+        // 4. SeriesGroupBy plot methods
+        let series = m785r_series();
+        let by = Series::from_values(
+            "group",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let sg = series.groupby(&by).unwrap();
+
+        let s_line = sg.line().unwrap();
+        assert_eq!(s_line.kind, super::PlotKind::Line);
+        assert_eq!(s_line.method, "SeriesGroupBy.plot.line");
+
+        let s_barh = sg.barh().unwrap();
+        assert_eq!(s_barh.kind, super::PlotKind::Barh);
+        assert_eq!(s_barh.method, "SeriesGroupBy.plot.barh");
+
+        let s_kde = sg.kde().unwrap();
+        assert_eq!(s_kde.kind, super::PlotKind::Kde);
+        assert_eq!(s_kde.method, "SeriesGroupBy.plot.kde");
+
+        let s_dens = sg.density().unwrap();
+        assert_eq!(s_dens.kind, super::PlotKind::Density);
+        assert_eq!(s_dens.method, "SeriesGroupBy.plot.density");
+
+        let s_hex = sg.hexbin().unwrap();
+        assert_eq!(s_hex.kind, super::PlotKind::Hexbin);
+        assert_eq!(s_hex.method, "SeriesGroupBy.plot.hexbin");
+
+        let s_box_r = sg.r#box().unwrap();
+        assert_eq!(s_box_r.method, "SeriesGroupBy.boxplot");
+
+        // 5. SeriesGroupBy plot_with_kind dispatcher for all 11 kinds
+        for kind in [
+            super::PlotKind::Line,
+            super::PlotKind::Bar,
+            super::PlotKind::Barh,
+            super::PlotKind::Area,
+            super::PlotKind::Scatter,
+            super::PlotKind::Pie,
+            super::PlotKind::Kde,
+            super::PlotKind::Density,
+            super::PlotKind::Hexbin,
+            super::PlotKind::Histogram,
+            super::PlotKind::Box,
+        ] {
+            let spec = sg.plot_with_kind(kind).unwrap();
+            assert_eq!(spec.kind, kind);
+        }
+
+        // 6. SeriesGroupBy direct rendering helpers
+        assert!(sg.line_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.line_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.bar_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.bar_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.barh_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.barh_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.area_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.area_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.scatter_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.scatter_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.pie_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.pie_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.kde_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.kde_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.density_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.density_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.hexbin_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.hexbin_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.hist_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.hist_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(sg.boxplot_to_svg().unwrap().starts_with("<svg"));
+        assert!(
+            sg.boxplot_to_html()
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
     }
 
     // ── agg_named tests ──

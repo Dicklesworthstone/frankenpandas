@@ -155,6 +155,47 @@ fn svg_axes(scale: &Scale, x_labels: &[String]) -> String {
     out
 }
 
+fn svg_horizontal_axes(scale: &Scale, y_labels: &[String]) -> String {
+    let mut out = String::new();
+    let right = MARGIN_LEFT + PLOT_W;
+    let bottom = MARGIN_TOP + PLOT_H;
+    for i in 0..=4 {
+        let frac = i as f64 / 4.0;
+        let value = scale.min + frac * (scale.max - scale.min);
+        let x = MARGIN_LEFT + frac * PLOT_W;
+        out.push_str(&format!(
+            "<line x1=\"{x:.2}\" y1=\"{MARGIN_TOP}\" x2=\"{x:.2}\" y2=\"{bottom}\" stroke=\"#e5e5e5\"/><text x=\"{x:.2}\" y=\"{:.2}\" text-anchor=\"middle\" fill=\"#666\">{}</text>",
+            bottom + 14.0,
+            esc(&fmt_num(value))
+        ));
+    }
+    out.push_str(&format!(
+        "<line x1=\"{MARGIN_LEFT}\" y1=\"{MARGIN_TOP}\" x2=\"{MARGIN_LEFT}\" y2=\"{bottom}\" stroke=\"#333\"/><line x1=\"{MARGIN_LEFT}\" y1=\"{bottom}\" x2=\"{right}\" y2=\"{bottom}\" stroke=\"#333\"/>"
+    ));
+    let n = y_labels.len();
+    if n > 0 {
+        let step = n.div_ceil(MAX_X_TICKS);
+        let slot = PLOT_H / n as f64;
+        for (i, label) in y_labels.iter().enumerate() {
+            if i % step != 0 {
+                continue;
+            }
+            let y = MARGIN_TOP + (i as f64 + 0.5) * slot;
+            let truncated = if label.len() > 8 {
+                format!("{}…", &label[..7])
+            } else {
+                label.clone()
+            };
+            out.push_str(&format!(
+                "<text x=\"{}\" y=\"{y:.2}\" text-anchor=\"end\" dominant-baseline=\"middle\" fill=\"#666\">{}</text>",
+                MARGIN_LEFT - 6.0,
+                esc(&truncated)
+            ));
+        }
+    }
+    out
+}
+
 fn legend(entries: &[(String, &str)]) -> String {
     if entries.is_empty() {
         return String::new();
@@ -211,7 +252,7 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
         spec.series.iter().map(numeric_view).collect();
     let views = views?;
     let mut scale = data_scale(&views)?;
-    if spec.kind == PlotKind::Bar {
+    if spec.kind == PlotKind::Bar || spec.kind == PlotKind::Barh {
         scale.min = scale.min.min(0.0);
         scale.max = scale.max.max(0.0);
         if (scale.max - scale.min).abs() < f64::EPSILON {
@@ -374,6 +415,185 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 }
             }
         }
+        PlotKind::Barh => {
+            let k = views.len().max(1);
+            let slot = PLOT_H / n.max(1) as f64;
+            let bar_h = (slot * 0.7 / k as f64).max(0.5);
+            let baseline = 0.0f64.clamp(scale.min, scale.max);
+            let base_x = MARGIN_LEFT + (baseline - scale.min) / (scale.max - scale.min) * PLOT_W;
+            let val_to_x =
+                |v: f64| MARGIN_LEFT + (v - scale.min) / (scale.max - scale.min) * PLOT_W;
+            for (si, values) in views.iter().enumerate() {
+                let color = palette(si);
+                let offset = si as f64 * bar_h + slot * 0.15;
+                for (i, v) in values.iter().enumerate() {
+                    if let Some(v) = v.filter(|v| v.is_finite()) {
+                        let vx = val_to_x(v);
+                        let rect_x = vx.min(base_x);
+                        let rect_w = (vx - base_x).abs().max(0.5);
+                        let rect_y = MARGIN_TOP + i as f64 * slot + offset;
+                        body.push_str(&format!(
+                            "<rect x=\"{rect_x:.2}\" y=\"{rect_y:.2}\" width=\"{rect_w:.2}\" height=\"{bar_h:.2}\" fill=\"{color}\"/>",
+                        ));
+                    }
+                }
+            }
+        }
+        PlotKind::Kde | PlotKind::Density => {
+            let mut all_finite: Vec<f64> = Vec::new();
+            let mut per_series_finite: Vec<Vec<f64>> = Vec::new();
+            for values in &views {
+                let finite: Vec<f64> = values
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .collect();
+                all_finite.extend(&finite);
+                per_series_finite.push(finite);
+            }
+            if all_finite.is_empty() {
+                return Err(FrameError::CompatibilityRejected(
+                    "kde plot requires at least one finite numeric value".to_owned(),
+                ));
+            }
+            let (data_min, data_max) = all_finite
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| {
+                    (mn.min(v), mx.max(v))
+                });
+            let span = (data_max - data_min).max(1.0);
+            let eval_min = data_min - 0.2 * span;
+            let eval_max = data_max + 0.2 * span;
+            let grid_size = 100;
+            let step = (eval_max - eval_min) / (grid_size - 1) as f64;
+
+            let mut curves: Vec<Vec<(f64, f64)>> = Vec::new();
+            let mut max_density = 0.0f64;
+            let inv_sqrt_2pi = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
+
+            for finite in &per_series_finite {
+                let m = finite.len();
+                if m == 0 {
+                    curves.push(Vec::new());
+                    continue;
+                }
+                let mean = finite.iter().sum::<f64>() / m as f64;
+                let var = if m > 1 {
+                    finite.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (m - 1) as f64
+                } else {
+                    1.0
+                };
+                let std_dev = var.sqrt().max(1e-6);
+                let bandwidth = (1.06 * std_dev * (m as f64).powf(-0.2)).max(1e-6);
+                let two_h_sq = 2.0 * bandwidth * bandwidth;
+                let norm = 1.0 / (m as f64 * bandwidth) * inv_sqrt_2pi;
+
+                let mut curve = Vec::with_capacity(grid_size);
+                for g in 0..grid_size {
+                    let t = eval_min + g as f64 * step;
+                    let mut d = 0.0;
+                    for &x_val in finite {
+                        let diff = t - x_val;
+                        d += (-diff * diff / two_h_sq).exp();
+                    }
+                    d *= norm;
+                    max_density = max_density.max(d);
+                    curve.push((t, d));
+                }
+                curves.push(curve);
+            }
+            if max_density <= 0.0 {
+                max_density = 1.0;
+            }
+
+            let y_dens = |d: f64| MARGIN_TOP + (1.0 - d / (max_density * 1.05)) * PLOT_H;
+            let x_dens = |t: f64| MARGIN_LEFT + (t - eval_min) / (eval_max - eval_min) * PLOT_W;
+
+            for (si, curve) in curves.iter().enumerate() {
+                if curve.is_empty() {
+                    continue;
+                }
+                let color = palette(si);
+                let points = curve
+                    .iter()
+                    .map(|(t, d)| format!("{:.2},{:.2}", x_dens(*t), y_dens(*d)))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let first_x = x_dens(curve[0].0);
+                let last_x = x_dens(curve[curve.len() - 1].0);
+                let base_y = y_dens(0.0);
+                body.push_str(&format!(
+                    "<polygon points=\"{first_x:.2},{base_y:.2} {points} {last_x:.2},{base_y:.2}\" fill=\"{color}\" fill-opacity=\"0.15\" stroke=\"none\"/>"
+                ));
+                body.push_str(&format!(
+                    "<polyline points=\"{points}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2\"/>"
+                ));
+            }
+        }
+        PlotKind::Hexbin => {
+            let pairs: Vec<(f64, f64)> = if views.len() >= 2 {
+                let v0 = &views[0];
+                let v1 = &views[1];
+                let len = v0.len().min(v1.len());
+                (0..len)
+                    .filter_map(|i| match (v0[i], v1[i]) {
+                        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some((x, y)),
+                        _ => None,
+                    })
+                    .collect()
+            } else if let Some(v0) = views.first() {
+                v0.iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| v.filter(|v| v.is_finite()).map(|v| (i as f64, v)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            if pairs.is_empty() {
+                return Err(FrameError::CompatibilityRejected(
+                    "hexbin plot requires numeric coordinate pairs".to_owned(),
+                ));
+            }
+
+            let (min_x, max_x) = pairs
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
+                    (mn.min(p.0), mx.max(p.0))
+                });
+            let (min_y, max_y) = pairs
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
+                    (mn.min(p.1), mx.max(p.1))
+                });
+            let span_x = (max_x - min_x).max(1.0);
+            let span_y = (max_y - min_y).max(1.0);
+            let grid_nx = 16;
+            let grid_ny = 12;
+            let mut bins: std::collections::HashMap<(usize, usize), usize> =
+                std::collections::HashMap::new();
+            for &(px, py) in &pairs {
+                let bx = (((px - min_x) / span_x * (grid_nx as f64 - 1.0)).round() as usize)
+                    .min(grid_nx - 1);
+                let by = (((py - min_y) / span_y * (grid_ny as f64 - 1.0)).round() as usize)
+                    .min(grid_ny - 1);
+                *bins.entry((bx, by)).or_insert(0) += 1;
+            }
+            let max_count = bins.values().copied().max().unwrap_or(1) as f64;
+            let cell_w = PLOT_W / grid_nx as f64;
+            let cell_h = PLOT_H / grid_ny as f64;
+
+            for ((bx, by), count) in &bins {
+                let cx = MARGIN_LEFT + (*bx as f64 + 0.5) * cell_w;
+                let cy = MARGIN_TOP + (grid_ny - 1 - *by) as f64 * cell_h + cell_h * 0.5;
+                let intensity = (*count as f64 / max_count).clamp(0.15, 1.0);
+                let r = (cell_w.min(cell_h) * 0.45 * (0.4 + 0.6 * intensity)).max(2.0);
+                body.push_str(&format!(
+                    "<circle cx=\"{cx:.2}\" cy=\"{cy:.2}\" r=\"{r:.2}\" fill=\"#4e79a7\" fill-opacity=\"{intensity:.2}\" stroke=\"#333\" stroke-width=\"0.5\"/>"
+                ));
+            }
+        }
         PlotKind::Histogram | PlotKind::Box => unreachable!(),
     }
 
@@ -439,6 +659,8 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
     };
     let axes = if spec.kind == PlotKind::Pie {
         String::new()
+    } else if spec.kind == PlotKind::Barh {
+        svg_horizontal_axes(&scale, &x_labels)
     } else {
         svg_axes(&scale, &x_labels)
     };
@@ -1217,6 +1439,61 @@ mod tests {
         assert!(
             svg.contains("+3 more"),
             "overflow legend must display +3 more"
+        );
+    }
+
+    #[test]
+    fn barh_kde_density_hexbin_render_expected_svg_elements() {
+        // 1. Barh
+        let barh_spec = PlotSpec {
+            method: "test_barh".to_owned(),
+            kind: PlotKind::Barh,
+            series: vec![series("bh", floats(&[10.0, 20.0, 15.0]))],
+        };
+        let barh_svg = barh_spec.to_svg().expect("barh renders");
+        assert!(barh_svg.contains("<rect"), "barh must contain rects");
+        assert!(
+            barh_svg.contains("bh"),
+            "barh must contain legend series name"
+        );
+
+        // 2. KDE & Density
+        let kde_spec = PlotSpec {
+            method: "test_kde".to_owned(),
+            kind: PlotKind::Kde,
+            series: vec![series("kd", floats(&[1.0, 2.0, 2.5, 3.0, 4.0, 5.0]))],
+        };
+        let kde_svg = kde_spec.to_svg().expect("kde renders");
+        assert!(
+            kde_svg.contains("<polyline"),
+            "kde must contain polyline curve"
+        );
+        assert!(kde_svg.contains("<polygon"), "kde must contain filled area");
+
+        let density_spec = PlotSpec {
+            method: "test_density".to_owned(),
+            kind: PlotKind::Density,
+            series: vec![series("dens", floats(&[1.0, 2.0, 2.5, 3.0, 4.0, 5.0]))],
+        };
+        let dens_svg = density_spec.to_svg().expect("density renders");
+        assert!(
+            dens_svg.contains("<polyline"),
+            "density must contain polyline curve"
+        );
+
+        // 3. Hexbin
+        let hexbin_spec = PlotSpec {
+            method: "test_hexbin".to_owned(),
+            kind: PlotKind::Hexbin,
+            series: vec![
+                series("x", floats(&[1.0, 2.0, 3.0, 4.0, 5.0])),
+                series("y", floats(&[2.0, 4.0, 6.0, 8.0, 10.0])),
+            ],
+        };
+        let hex_svg = hexbin_spec.to_svg().expect("hexbin renders");
+        assert!(
+            hex_svg.contains("<circle"),
+            "hexbin must contain binned circles"
         );
     }
 }
