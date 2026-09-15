@@ -163,7 +163,10 @@ fn legend(entries: &[(String, &str)]) -> String {
     let y = HEIGHT - 10.0;
     let max_display = 6;
     let (display_entries, overflow) = if entries.len() > max_display {
-        (&entries[..max_display - 1], Some(entries.len() - (max_display - 1)))
+        (
+            &entries[..max_display - 1],
+            Some(entries.len() - (max_display - 1)),
+        )
     } else {
         (entries, None)
     };
@@ -303,7 +306,7 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 let offset = si as f64 * bar_w + slot * 0.15;
                 for (i, v) in values.iter().enumerate() {
                     if let Some(v) = v.filter(|v| v.is_finite()) {
-                        let top = y(*v);
+                        let top = y(v);
                         let rect_y = top.min(base);
                         let rect_h = (base - top).abs().max(0.5);
                         body.push_str(&format!(
@@ -315,9 +318,7 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             }
         }
         PlotKind::Pie => {
-            let any_positive = views
-                .iter()
-                .any(|v| v.iter().flatten().any(|x| *x > 0.0));
+            let any_positive = views.iter().any(|v| v.iter().flatten().any(|x| *x > 0.0));
             if !any_positive {
                 return Err(FrameError::CompatibilityRejected(
                     "pie plot requires at least one positive value".to_owned(),
@@ -544,10 +545,7 @@ fn histogram_body(
     ))
 }
 
-fn boxplot_body(
-    series: &[PlotSeriesSpec],
-    title: &str,
-) -> Result<String, FrameError> {
+fn boxplot_body(series: &[PlotSeriesSpec], title: &str) -> Result<String, FrameError> {
     let views: Result<Vec<Vec<Option<f64>>>, FrameError> =
         series.iter().map(numeric_view).collect();
     let views = views?;
@@ -677,7 +675,10 @@ impl HistogramSpec {
     pub fn to_svg(&self) -> Result<String, FrameError> {
         let title = format!(
             "histogram ({})",
-            self.series.first().map(|s| s.name.as_str()).unwrap_or("values")
+            self.series
+                .first()
+                .map(|s| s.name.as_str())
+                .unwrap_or("values")
         );
         histogram_body(&self.series, self.bins, &title)
     }
@@ -717,7 +718,10 @@ impl BoxPlotSpec {
     pub fn to_svg(&self) -> Result<String, FrameError> {
         let title = format!(
             "boxplot ({})",
-            self.series.first().map(|s| s.name.as_str()).unwrap_or("values")
+            self.series
+                .first()
+                .map(|s| s.name.as_str())
+                .unwrap_or("values")
         );
         boxplot_body(&self.series, &title)
     }
@@ -1123,10 +1127,10 @@ mod tests {
     #[test]
     fn infinite_and_neg_infinite_values_become_gaps_not_coordinates() {
         let spec = PlotSpec {
-            method: "plot_inf".to_owned(),
+            method: "plot_gap_test".to_owned(),
             kind: PlotKind::Line,
             series: vec![series(
-                "inf_test",
+                "s_test",
                 vec![
                     Scalar::Float64(1.0),
                     Scalar::Float64(f64::INFINITY),
@@ -1137,9 +1141,19 @@ mod tests {
             )],
         };
         let svg = spec.to_svg().expect("inf values must render as gaps");
-        assert!(!svg.contains("inf"), "SVG must not contain 'inf' coordinates: {svg}");
-        assert!(!svg.contains("-inf"), "SVG must not contain '-inf' coordinates: {svg}");
-        assert_eq!(svg.matches("<polyline").count(), 3, "2 infs split 5 items into 3 runs");
+        assert!(
+            !svg.contains("inf"),
+            "SVG must not contain 'inf' coordinates: {svg}"
+        );
+        assert!(
+            !svg.contains("-inf"),
+            "SVG must not contain '-inf' coordinates: {svg}"
+        );
+        assert_eq!(
+            svg.matches("<polyline").count(),
+            3,
+            "2 infs split 5 items into 3 runs"
+        );
     }
 
     #[test]
@@ -1158,7 +1172,10 @@ mod tests {
         };
         let svg = spec.to_svg().expect("bar plot with negatives renders");
         assert!(svg.contains("<rect"), "bars must render as rects");
-        assert!(!svg.contains("height=\"-"), "rect height must never be negative");
+        assert!(
+            !svg.contains("height=\"-"),
+            "rect height must never be negative"
+        );
     }
 
     #[test]
@@ -1197,6 +1214,9 @@ mod tests {
             series: s_vec,
         };
         let svg = spec.to_svg().expect("multi series renders");
-        assert!(svg.contains("+3 more"), "overflow legend must display +3 more");
+        assert!(
+            svg.contains("+3 more"),
+            "overflow legend must display +3 more"
+        );
     }
 }

@@ -38187,6 +38187,51 @@ impl SeriesGroupBy<'_> {
         self.boxplot()
     }
 
+    /// Convenience helper: render grouped series plot directly to deterministic SVG string.
+    pub fn plot_to_svg(&self) -> Result<String, FrameError> {
+        self.plot()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series plot directly to HTML figure snippet.
+    pub fn plot_to_html(&self) -> Result<String, FrameError> {
+        self.plot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series plot directly to disk.
+    pub fn plot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.plot()?.save(path)
+    }
+
+    /// Convenience helper: render grouped series histogram directly to deterministic SVG string.
+    pub fn hist_to_svg(&self) -> Result<String, FrameError> {
+        self.hist()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series histogram directly to HTML figure snippet.
+    pub fn hist_to_html(&self) -> Result<String, FrameError> {
+        self.hist()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series histogram directly to disk.
+    pub fn hist_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.hist()?.save(path)
+    }
+
+    /// Convenience helper: render grouped series boxplot directly to deterministic SVG string.
+    pub fn boxplot_to_svg(&self) -> Result<String, FrameError> {
+        self.boxplot()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series boxplot directly to HTML figure snippet.
+    pub fn boxplot_to_html(&self) -> Result<String, FrameError> {
+        self.boxplot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series boxplot directly to disk.
+    pub fn boxplot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.boxplot()?.save(path)
+    }
+
     /// Number of groups.
     #[must_use]
     pub fn ngroups(&self) -> usize {
@@ -92547,6 +92592,56 @@ impl DataFrameGroupBy<'_> {
             method: "DataFrameGroupBy.boxplot".to_owned(),
             series: self.plot_series_specs(),
         })
+    }
+
+    /// Return a backend-neutral pandas-style grouped boxplot request (alias for [`DataFrameGroupBy::boxplot`]).
+    pub fn box_plot(&self) -> Result<BoxPlotSpec, FrameError> {
+        self.boxplot()
+    }
+
+    /// Convenience helper: render grouped dataframe plot directly to deterministic SVG string.
+    pub fn plot_to_svg(&self) -> Result<String, FrameError> {
+        self.plot()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe plot directly to HTML figure snippet.
+    pub fn plot_to_html(&self) -> Result<String, FrameError> {
+        self.plot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe plot directly to disk.
+    pub fn plot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.plot()?.save(path)
+    }
+
+    /// Convenience helper: render grouped dataframe histogram directly to deterministic SVG string.
+    pub fn hist_to_svg(&self) -> Result<String, FrameError> {
+        self.hist()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe histogram directly to HTML figure snippet.
+    pub fn hist_to_html(&self) -> Result<String, FrameError> {
+        self.hist()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe histogram directly to disk.
+    pub fn hist_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.hist()?.save(path)
+    }
+
+    /// Convenience helper: render grouped dataframe boxplot directly to deterministic SVG string.
+    pub fn boxplot_to_svg(&self) -> Result<String, FrameError> {
+        self.boxplot()?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe boxplot directly to HTML figure snippet.
+    pub fn boxplot_to_html(&self) -> Result<String, FrameError> {
+        self.boxplot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe boxplot directly to disk.
+    pub fn boxplot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.boxplot()?.save(path)
     }
 
     /// Dense sequential all/any for typed (Bool/Int64/Float64) value columns
@@ -173211,6 +173306,14 @@ mod tests {
         let boxplot = grouped.boxplot().unwrap();
         assert_eq!(boxplot.method, "DataFrameGroupBy.boxplot");
         assert_eq!(boxplot.series.len(), 6);
+
+        let box_plot = grouped.box_plot().unwrap();
+        assert_eq!(box_plot.method, "DataFrameGroupBy.boxplot");
+        assert_eq!(box_plot.series.len(), 6);
+        let svg = grouped.boxplot_to_svg().unwrap();
+        assert!(svg.starts_with("<svg"));
+        let html = grouped.boxplot_to_html().unwrap();
+        assert!(html.contains("<div class=\"frankenpandas-plot\""));
     }
 
     #[test]
@@ -173276,6 +173379,18 @@ mod tests {
         assert_eq!(hist.method, "SeriesGroupBy.hist");
         assert_eq!(hist.bins, 10);
         assert_eq!(hist.series.len(), 2);
+
+        let boxplot = grouped.boxplot().unwrap();
+        assert_eq!(boxplot.method, "SeriesGroupBy.boxplot");
+        assert_eq!(boxplot.series.len(), 2);
+
+        let box_plot = grouped.box_plot().unwrap();
+        assert_eq!(box_plot.method, "SeriesGroupBy.boxplot");
+        assert_eq!(box_plot.series.len(), 2);
+        let svg = grouped.boxplot_to_svg().unwrap();
+        assert!(svg.starts_with("<svg"));
+        let html = grouped.boxplot_to_html().unwrap();
+        assert!(html.contains("<div class=\"frankenpandas-plot\""));
     }
 
     // ── agg_named tests ──
