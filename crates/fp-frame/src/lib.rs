@@ -317,18 +317,7 @@ fn describe_percentile_label(percentile: f64) -> String {
     format!("{label}%")
 }
 
-/// Metadata for categorical (factor) data.
-///
-/// Stores the unique category values and an ordered flag. The underlying
-/// Series column contains integer codes (indices into `categories`).
-/// Series-level dtype reporting still surfaces `DType::Categorical`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CategoricalMetadata {
-    /// The unique category values, in order.
-    pub categories: Vec<Scalar>,
-    /// Whether the categories have a meaningful total ordering.
-    pub ordered: bool,
-}
+pub use fp_types::CategoricalMetadata;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Series {

@@ -1613,6 +1613,24 @@ impl TimedeltaError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CategoricalMetadata {
+    /// The unique category values, in order.
+    pub categories: Vec<Scalar>,
+    /// Whether the categories have a meaningful total ordering.
+    pub ordered: bool,
+}
+
+impl CategoricalMetadata {
+    #[must_use]
+    pub fn new(categories: Vec<Scalar>, ordered: bool) -> Self {
+        Self {
+            categories,
+            ordered,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimedeltaComponents {
     pub days: i64,

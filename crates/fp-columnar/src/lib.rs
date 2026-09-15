@@ -67,11 +67,12 @@
 use std::sync::{Arc, OnceLock};
 
 use fp_types::{
-    DType, DatetimeStringResolution, Interval, IntervalClosed, NullKind, Period, PeriodFreq,
-    Scalar, SparseDType, Timedelta, TimedeltaStringResolution, Timestamp, TypeError, cast_scalar,
-    cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax,
-    nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique,
-    nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum, nanvar,
+    CategoricalMetadata, DType, DatetimeStringResolution, Interval, IntervalClosed, NullKind,
+    Period, PeriodFreq, Scalar, SparseDType, Timedelta, TimedeltaStringResolution, Timestamp,
+    TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany,
+    nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean,
+    nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum,
+    nanvar,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -7012,6 +7013,8 @@ pub struct Column {
     validity: ValidityMask,
     #[serde(skip)]
     data: Option<ColumnData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    categorical: Option<CategoricalMetadata>,
 }
 
 impl Clone for Column {
@@ -7059,13 +7062,17 @@ impl Clone for Column {
             values,
             validity: self.validity.clone(),
             data,
+            categorical: self.categorical.clone(),
         }
     }
 }
 
 impl PartialEq for Column {
     fn eq(&self, other: &Self) -> bool {
-        self.dtype == other.dtype && self.values == other.values && self.validity == other.validity
+        self.dtype == other.dtype
+            && self.values == other.values
+            && self.validity == other.validity
+            && self.categorical == other.categorical
     }
 }
 
@@ -7075,6 +7082,7 @@ impl std::fmt::Debug for Column {
             .field("dtype", &self.dtype)
             .field("values", &self.values)
             .field("validity", &self.validity)
+            .field("categorical", &self.categorical)
             .finish()
     }
 }
@@ -11852,6 +11860,7 @@ impl Column {
             values: ScalarValues::from_vec(values),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -11859,6 +11868,65 @@ impl Column {
     /// AG-03: takes ownership of the values vec and uses `cast_scalar_owned`
     /// to skip cloning when values already have the correct dtype.
     pub fn new(dtype: DType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
+        if dtype == DType::Categorical {
+            let mut categories: Vec<Scalar> = Vec::new();
+            let mut seen_keys = rustc_hash::FxHashSet::default();
+            let mut normalized = Vec::with_capacity(values.len());
+
+            #[derive(Hash, PartialEq, Eq)]
+            enum CatKey {
+                Bool(bool),
+                Int64(i64),
+                FloatBits(u64),
+                Utf8(Box<str>),
+                Timedelta64(i64),
+                Datetime64(i64),
+                Period(i64),
+            }
+
+            for val in values {
+                if val.is_missing() {
+                    normalized.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    let key = match &val {
+                        Scalar::Bool(b) => Some(CatKey::Bool(*b)),
+                        Scalar::Int64(i) => Some(CatKey::Int64(*i)),
+                        Scalar::Float64(f) => {
+                            let norm = if *f == 0.0 { 0.0 } else { *f };
+                            Some(CatKey::FloatBits(norm.to_bits()))
+                        }
+                        Scalar::Utf8(s) => Some(CatKey::Utf8(s.clone().into())),
+                        Scalar::Timedelta64(t) => Some(CatKey::Timedelta64(*t)),
+                        Scalar::Datetime64(d) => Some(CatKey::Datetime64(*d)),
+                        Scalar::Period(p) => Some(CatKey::Period(p.ordinal)),
+                        _ => None,
+                    };
+                    if let Some(k) = key
+                        && seen_keys.insert(k)
+                    {
+                        categories.push(val.clone());
+                    }
+                    normalized.push(val);
+                }
+            }
+
+            categories.sort_by(|a, b| compare_scalars_na_last(a, b, true));
+
+            let validity = ValidityMask::from_values(&normalized);
+            let categorical = Some(CategoricalMetadata {
+                categories,
+                ordered: false,
+            });
+            let values = ScalarValues::from_vec(normalized);
+            return Ok(Self {
+                dtype: DType::Categorical,
+                validity,
+                data: None,
+                categorical,
+                values,
+            });
+        }
+
         // br-frankenpandas-rh1od: a bool+numeric mix under a Utf8 label is the
         // pandas OBJECT bucket (infer_dtype routes it here); coercing would
         // stringify True -> "True", which no pandas constructor produces.
@@ -11951,6 +12019,7 @@ impl Column {
             dtype,
             validity,
             data,
+            categorical: None,
             values,
         })
     }
@@ -12024,6 +12093,7 @@ impl Column {
             dtype: DType::Float64,
             validity,
             data,
+            categorical: None,
             values,
         })
     }
@@ -12076,6 +12146,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_int64(data),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12092,6 +12163,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_int64_owned(data),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12118,6 +12190,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_int64_chunks(Arc::from(chunks), len),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12135,6 +12208,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_datetime64(data),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12169,6 +12243,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_period_owned(data, freq),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12188,6 +12263,7 @@ impl Column {
             values: ScalarValues::lazy_contiguous_utf8(bytes, offsets),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12212,6 +12288,7 @@ impl Column {
             values,
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         })
     }
 
@@ -12229,6 +12306,7 @@ impl Column {
             values: ScalarValues::lazy_repeat_runs_int64(runs, total_len),
             validity: ValidityMask::all_valid(total_len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12248,6 +12326,7 @@ impl Column {
             values: ScalarValues::lazy_repeat_values_int64(run_values, run_lens, total_len),
             validity: ValidityMask::all_valid(total_len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12264,6 +12343,7 @@ impl Column {
             values: ScalarValues::lazy_repeated_slices_int64(data, segments, total_len),
             validity: ValidityMask::all_valid(total_len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12281,6 +12361,7 @@ impl Column {
             values: ScalarValues::lazy_repeated_slices_int64_shared(data, segments, total_len),
             validity: ValidityMask::all_valid(total_len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12301,6 +12382,7 @@ impl Column {
             values: ScalarValues::lazy_repeat_values_float64(run_values, run_lens, total_len),
             validity: ValidityMask::all_valid(total_len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12320,6 +12402,7 @@ impl Column {
             values: ScalarValues::lazy_repeated_slices_float64_shared(data, segments, total_len),
             validity: ValidityMask::all_valid(total_len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12375,6 +12458,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_repeated_slices_int64(data, segments, total_len),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12410,6 +12494,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_repeated_slices_float64(data, segments, total_len),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12451,6 +12536,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12476,6 +12562,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12507,6 +12594,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12539,6 +12627,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12563,6 +12652,7 @@ impl Column {
             ),
             validity: ValidityMask::all_valid(total_len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12588,6 +12678,7 @@ impl Column {
             ),
             validity: ValidityMask::all_valid(total_len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12614,6 +12705,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12641,6 +12733,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12670,6 +12763,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12691,6 +12785,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_float64(data),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12726,6 +12821,7 @@ impl Column {
             ),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12760,6 +12856,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_float64_owned(data),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12780,6 +12877,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_float64(data, validity.clone()),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12813,6 +12911,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12845,6 +12944,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_float64_slice(data, start, len),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12868,6 +12968,7 @@ impl Column {
             ),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12886,6 +12987,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_float64_owned_with_finite(data, all_finite),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12900,6 +13002,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_float64_owned_with_finite(data, all_finite),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -12926,6 +13029,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_float64_chunks(Arc::from(chunks), len),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -12981,6 +13085,7 @@ impl Column {
             ),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -13020,6 +13125,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13149,6 +13255,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_float64_dot(Arc::clone(&a_panel.0), b_col, len),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -13188,6 +13295,7 @@ impl Column {
                 ),
                 validity: ValidityMask::all_valid(n),
                 data: None,
+                categorical: None,
             })
             .collect()
     }
@@ -13225,6 +13333,7 @@ impl Column {
             ),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -13246,6 +13355,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_float64(data, validity.clone()),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13265,6 +13375,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_int64(data, validity.clone()),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13281,6 +13392,7 @@ impl Column {
                 values: ScalarValues::lazy_all_valid_datetime64_owned(data),
                 validity,
                 data: None,
+                categorical: None,
             };
         }
         Self {
@@ -13288,6 +13400,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_datetime64(data, validity.clone()),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13301,6 +13414,7 @@ impl Column {
                 values: ScalarValues::lazy_all_valid_timedelta64_owned(data),
                 validity,
                 data: None,
+                categorical: None,
             };
         }
         Self {
@@ -13308,6 +13422,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_timedelta64(data, validity.clone()),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13334,6 +13449,7 @@ impl Column {
             ),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13356,6 +13472,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_bool(data, validity.clone()),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13381,6 +13498,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_utf8(bytes, offsets, validity.clone()),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13402,6 +13520,7 @@ impl Column {
             values: ScalarValues::lazy_gather_utf8(source, positions),
             validity,
             data: None,
+            categorical: None,
         }
     }
 
@@ -13472,6 +13591,7 @@ impl Column {
             ),
             validity: ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), len),
             data: None,
+            categorical: None,
         })
     }
 
@@ -13998,6 +14118,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_bool(data),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         }
     }
 
@@ -14173,6 +14294,7 @@ impl Column {
             values: ScalarValues::lazy_all_valid_int64_arc(Arc::clone(&witness.codes)),
             validity: ValidityMask::all_valid(codes_len),
             data: None,
+            categorical: None,
         };
         let uniques = Self {
             dtype: DType::Utf8,
@@ -14182,6 +14304,7 @@ impl Column {
             ),
             validity: ValidityMask::all_valid(unique_len),
             data: None,
+            categorical: None,
         };
         Some((codes, uniques))
     }
@@ -14708,6 +14831,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_float64_slice(src_data, view_start, n),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -14731,6 +14855,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_float64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -14750,6 +14875,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_int64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -14768,6 +14894,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_bool(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -14792,6 +14919,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_datetime64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -14808,6 +14936,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_timedelta64_owned(data),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -14849,6 +14978,7 @@ impl Column {
                     ),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: self.categorical.clone(),
                 };
             }
 
@@ -14876,6 +15006,7 @@ impl Column {
                     values: ScalarValues::lazy_contiguous_utf8(new_bytes, new_offsets),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: self.categorical.clone(),
                 };
             }
 
@@ -14907,6 +15038,7 @@ impl Column {
                     values: ScalarValues::lazy_contiguous_utf8(new_bytes, new_offsets),
                     validity: ValidityMask::all_valid(n),
                     data: None,
+                    categorical: self.categorical.clone(),
                 };
             }
 
@@ -14923,6 +15055,7 @@ impl Column {
                 values: ScalarValues::from_vec(values),
                 validity: ValidityMask::all_valid(n),
                 data: None,
+                categorical: self.categorical.clone(),
             };
         }
 
@@ -15149,6 +15282,7 @@ impl Column {
             values: ScalarValues::from_vec(values),
             validity: ValidityMask::from_words(words, n),
             data: None,
+            categorical: self.categorical.clone(),
         }
     }
 
@@ -15189,6 +15323,7 @@ impl Column {
             ),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         })
     }
 
@@ -15248,6 +15383,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_float64(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15261,6 +15397,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_int64(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15274,6 +15411,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_bool(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15292,6 +15430,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_datetime64_owned(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15307,6 +15446,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_timedelta64_owned(data),
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15436,6 +15576,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_float64_slice(src_data, view_start, len),
                     validity: ValidityMask::all_valid(len),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15460,6 +15601,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_int64_slice(src_data, view_start, len),
                     validity: ValidityMask::all_valid(len),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15478,6 +15620,7 @@ impl Column {
                     ),
                     validity: ValidityMask::all_valid(len),
                     data: None,
+                    categorical: self.categorical.clone(),
                 };
             }
 
@@ -15496,6 +15639,7 @@ impl Column {
                     ),
                     validity: ValidityMask::all_valid(len),
                     data: None,
+                    categorical: self.categorical.clone(),
                 };
             }
         }
@@ -15561,6 +15705,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_float64_slice(buffer, view_start, len),
                     validity: ValidityMask::from_words(words, len),
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15654,6 +15799,7 @@ impl Column {
                     ),
                     validity: mask,
                     data: None,
+                    categorical: None,
                 };
             }
             // ZERO-COPY WINDOW FOR NaN-AS-MISSING SOURCES. `from_f64_values`
@@ -15682,6 +15828,7 @@ impl Column {
                     values: ScalarValues::lazy_all_valid_float64_slice(buffer, view_start, len),
                     validity: mask,
                     data: None,
+                    categorical: None,
                 };
             }
 
@@ -15795,6 +15942,7 @@ impl Column {
             values: ScalarValues::lazy_strided_float64(data, start, step, len),
             validity: ValidityMask::all_valid(len),
             data: None,
+            categorical: None,
         })
     }
 
@@ -15818,6 +15966,7 @@ impl Column {
             values: ScalarValues::lazy_strided_float64(data, start, step, positions.len()),
             validity: ValidityMask::all_valid(positions.len()),
             data: None,
+            categorical: None,
         })
     }
 
@@ -16220,6 +16369,22 @@ impl Column {
         self.dtype.clone()
     }
 
+    #[must_use]
+    pub fn categorical(&self) -> Option<&CategoricalMetadata> {
+        self.categorical.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_categorical(&self, categorical: Option<CategoricalMetadata>) -> Self {
+        Self {
+            dtype: self.dtype.clone(),
+            values: self.values.clone(),
+            validity: self.validity.clone(),
+            data: self.data.clone(),
+            categorical,
+        }
+    }
+
     /// Returns true if this column contains any null/missing values.
     #[must_use]
     pub fn has_nulls(&self) -> bool {
@@ -16244,6 +16409,7 @@ impl Column {
             values: self.values.clone(),
             validity: self.validity.clone(),
             data: self.data.clone(),
+            categorical: self.categorical.clone(),
         }
     }
 
@@ -16254,11 +16420,17 @@ impl Column {
     /// for the target dtype.
     #[must_use]
     pub fn with_dtype(&self, dtype: DType) -> Self {
+        let categorical = if matches!(dtype, DType::Categorical) {
+            self.categorical.clone()
+        } else {
+            None
+        };
         Self {
             dtype,
             values: self.values.clone(),
             validity: self.validity.clone(),
             data: None,
+            categorical,
         }
     }
 
@@ -16916,6 +17088,7 @@ impl Column {
             values: ScalarValues::from_vec(values),
             validity,
             data: None,
+            categorical: self.categorical.clone(),
         })
     }
 
@@ -16963,6 +17136,7 @@ impl Column {
             values: ScalarValues::from_vec(values),
             validity,
             data: None,
+            categorical: self.categorical.clone(),
         })
     }
 
@@ -17559,6 +17733,7 @@ impl Column {
             values: ScalarValues::lazy_nullable_float64(data, validity.clone()),
             validity,
             data: None,
+            categorical: None,
         })
     }
 
@@ -31498,6 +31673,7 @@ impl Column {
                 values: ScalarValues::lazy_shifted_bool(data, periods, *fill_b, len),
                 validity: ValidityMask::all_valid(len),
                 data: None,
+                categorical: None,
             });
         }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
@@ -36902,6 +37078,7 @@ mod tests {
                 values: ScalarValues::lazy_all_valid_float64(data),
                 validity: ValidityMask::all_valid(len),
                 data: None,
+                categorical: None,
             }
         };
         let left = make(vec![1.0, f64::NAN, 2.0, f64::INFINITY, 1.0, f64::NAN, -3.5]);
@@ -40338,6 +40515,7 @@ mod tests {
                 values: ScalarValues::lazy_all_valid_float64(vec![1.0, f64::NAN, f64::INFINITY]),
                 validity: ValidityMask::all_valid(3),
                 data: None,
+                categorical: None,
             };
             assert!(mixed.has_any_missing());
             assert!(!mixed.all_missing());
@@ -40350,6 +40528,7 @@ mod tests {
                 values: ScalarValues::lazy_all_valid_float64(vec![f64::NAN, f64::NAN]),
                 validity: ValidityMask::all_valid(2),
                 data: None,
+                categorical: None,
             };
             assert!(all_nan.has_any_missing());
             assert!(all_nan.all_missing());
@@ -46442,6 +46621,7 @@ mod tests {
                 ),
                 validity: ValidityMask::all_valid(5),
                 data: None,
+                categorical: None,
             };
 
             let (codes, uniques) = col.factorize().expect("factorize");
@@ -46496,6 +46676,7 @@ mod tests {
                 ),
                 validity: ValidityMask::all_valid(4),
                 data: None,
+                categorical: None,
             };
 
             let (codes, uniques) = col.factorize().expect("factorize");
@@ -51892,6 +52073,7 @@ mod tests {
                 values: ScalarValues::lazy_all_valid_float64(vec![1.0, f64::NAN, f64::INFINITY]),
                 validity: ValidityMask::all_valid(3),
                 data: None,
+                categorical: None,
             };
 
             let is_null = col.isnull().expect("isnull");
@@ -52058,12 +52240,14 @@ mod tests {
                 values: ScalarValues::lazy_all_valid_bool(vec![true, false, true, false]),
                 validity: ValidityMask::all_valid(4),
                 data: None,
+                categorical: None,
             };
             let right = Column {
                 dtype: DType::Bool,
                 values: ScalarValues::lazy_all_valid_bool(vec![true, true, false, false]),
                 validity: ValidityMask::all_valid(4),
                 data: None,
+                categorical: None,
             };
 
             assert_eq!(
@@ -52126,12 +52310,14 @@ mod tests {
                 values: ScalarValues::lazy_all_valid_bool(vec![true, false, true, false]),
                 validity: ValidityMask::all_valid(4),
                 data: None,
+                categorical: None,
             };
             let right = Column {
                 dtype: DType::Bool,
                 values: ScalarValues::lazy_all_valid_bool(vec![false, false, true, true]),
                 validity: ValidityMask::all_valid(4),
                 data: None,
+                categorical: None,
             };
 
             assert_eq!(
@@ -52188,12 +52374,14 @@ mod tests {
                 values: ScalarValues::lazy_all_valid_bool(vec![false, false, true, true]),
                 validity: ValidityMask::all_valid(4),
                 data: None,
+                categorical: None,
             };
             let right = Column {
                 dtype: DType::Bool,
                 values: ScalarValues::lazy_all_valid_bool(vec![false, true, false, true]),
                 validity: ValidityMask::all_valid(4),
                 data: None,
+                categorical: None,
             };
 
             assert_eq!(
@@ -52942,6 +53130,7 @@ mod tests {
                 ]),
                 validity: ValidityMask::all_valid(4),
                 data: None,
+                categorical: None,
             };
 
             assert_eq!(col.count(), 3);
