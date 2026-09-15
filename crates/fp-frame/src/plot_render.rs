@@ -62,7 +62,7 @@ fn numeric_view(series: &PlotSeriesSpec) -> Result<Vec<Option<f64>>, FrameError>
         .values
         .iter()
         .map(|value| match value {
-            Scalar::Float64(v) => Ok(if v.is_nan() { None } else { Some(*v) }),
+            Scalar::Float64(v) => Ok(if v.is_finite() { Some(*v) } else { None }),
             Scalar::Int64(v) => Ok(Some(*v as f64)),
             Scalar::Bool(b) => Ok(Some(if *b { 1.0 } else { 0.0 })),
             Scalar::Null(_) => Ok(None),
@@ -156,15 +156,39 @@ fn svg_axes(scale: &Scale, x_labels: &[String]) -> String {
 }
 
 fn legend(entries: &[(String, &str)]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
     let mut out = String::new();
     let y = HEIGHT - 10.0;
-    for (i, (name, color)) in entries.iter().enumerate() {
-        let x = MARGIN_LEFT + 8.0 + (i as f64 * 150.0);
+    let max_display = 6;
+    let (display_entries, overflow) = if entries.len() > max_display {
+        (&entries[..max_display - 1], Some(entries.len() - (max_display - 1)))
+    } else {
+        (entries, None)
+    };
+    let total_items = display_entries.len() + if overflow.is_some() { 1 } else { 0 };
+    let spacing = (PLOT_W / total_items.max(1) as f64).min(140.0);
+    for (i, (name, color)) in display_entries.iter().enumerate() {
+        let x = MARGIN_LEFT + (i as f64 * spacing);
+        let max_chars = ((spacing - 20.0) / 7.0).floor() as usize;
+        let display_name = if name.chars().count() > max_chars && max_chars >= 4 {
+            let truncated: String = name.chars().take(max_chars - 1).collect();
+            format!("{truncated}…")
+        } else {
+            name.clone()
+        };
         out.push_str(&format!(
-            "<rect x=\"{x}\" y=\"{:.2}\" width=\"10\" height=\"10\" fill=\"{color}\"/><text x=\"{}\" y=\"{y}\" fill=\"#333\">{}</text>",
+            "<rect x=\"{x:.2}\" y=\"{:.2}\" width=\"10\" height=\"10\" fill=\"{color}\"/><text x=\"{:.2}\" y=\"{y:.2}\" fill=\"#333\">{}</text>",
             y - 9.0,
             x + 14.0,
-            esc(name)
+            esc(&display_name)
+        ));
+    }
+    if let Some(count) = overflow {
+        let x = MARGIN_LEFT + (display_entries.len() as f64 * spacing);
+        out.push_str(&format!(
+            "<text x=\"{x:.2}\" y=\"{y:.2}\" fill=\"#666\">+{count} more</text>"
         ));
     }
     out
@@ -173,17 +197,32 @@ fn legend(entries: &[(String, &str)]) -> String {
 // ── PlotSpec rendering (line / area / scatter / bar / pie) ─────────────────
 
 fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
+    if spec.kind == PlotKind::Box {
+        return boxplot_body(&spec.series, &spec.method);
+    }
+    if spec.kind == PlotKind::Histogram {
+        return histogram_body(&spec.series, 10, &spec.method);
+    }
+
     let views: Result<Vec<Vec<Option<f64>>>, FrameError> =
         spec.series.iter().map(numeric_view).collect();
     let views = views?;
-    let scale = data_scale(&views)?;
+    let mut scale = data_scale(&views)?;
+    if spec.kind == PlotKind::Bar {
+        scale.min = scale.min.min(0.0);
+        scale.max = scale.max.max(0.0);
+        if (scale.max - scale.min).abs() < f64::EPSILON {
+            scale.max += 1.0;
+        }
+    }
+
     let n = spec
         .series
         .iter()
         .map(|s| s.values.len())
         .max()
         .unwrap_or(0);
-    let x_labels: Vec<String> = spec
+    let mut x_labels: Vec<String> = spec
         .series
         .first()
         .map(|first| {
@@ -194,6 +233,9 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 .collect()
         })
         .unwrap_or_default();
+    if x_labels.len() < n {
+        x_labels = (0..n).map(|i| i.to_string()).collect();
+    }
 
     let y = |v: f64| MARGIN_TOP + (scale.max - v) / (scale.max - scale.min) * PLOT_H;
     let x = |i: usize| MARGIN_LEFT + (i as f64 + 0.5) * PLOT_W / n.max(1) as f64;
@@ -253,26 +295,34 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
         PlotKind::Bar => {
             let k = views.len().max(1);
             let slot = PLOT_W / n.max(1) as f64;
-            let bar_w = slot * 0.7 / k as f64;
-            let base = y(scale.min);
+            let bar_w = (slot * 0.7 / k as f64).max(0.5);
+            let baseline = 0.0f64.clamp(scale.min, scale.max);
+            let base = y(baseline);
             for (si, values) in views.iter().enumerate() {
                 let color = palette(si);
                 let offset = si as f64 * bar_w + slot * 0.15;
                 for (i, v) in values.iter().enumerate() {
                     if let Some(v) = v.filter(|v| v.is_finite()) {
-                        let top = y(v);
+                        let top = y(*v);
+                        let rect_y = top.min(base);
+                        let rect_h = (base - top).abs().max(0.5);
                         body.push_str(&format!(
-                            "<rect x=\"{:.2}\" y=\"{top:.2}\" width=\"{bar_w:.2}\" height=\"{:.2}\" fill=\"{color}\"/>",
+                            "<rect x=\"{:.2}\" y=\"{rect_y:.2}\" width=\"{bar_w:.2}\" height=\"{rect_h:.2}\" fill=\"{color}\"/>",
                             MARGIN_LEFT + i as f64 * slot + offset,
-                            (base - top).abs().max(0.5)
                         ));
                     }
                 }
             }
         }
         PlotKind::Pie => {
-            // Wedges from each series' share of its sum; negative totals are a
-            // fail-closed error (pandas raises too); NaN skipped.
+            let any_positive = views
+                .iter()
+                .any(|v| v.iter().flatten().any(|x| *x > 0.0));
+            if !any_positive {
+                return Err(FrameError::CompatibilityRejected(
+                    "pie plot requires at least one positive value".to_owned(),
+                ));
+            }
             let mut angle: f64 = -std::f64::consts::FRAC_PI_2;
             let cx = MARGIN_LEFT + PLOT_W / 2.0;
             let cy = MARGIN_TOP + PLOT_H / 2.0;
@@ -323,20 +373,11 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 }
             }
         }
-        // The plot() hooks never emit these two, but be total rather than
-        // failing mysteriously: route through the histogram primitives.
-        PlotKind::Histogram | PlotKind::Box => {
-            let finite: Vec<Vec<f64>> = views
-                .iter()
-                .map(|v| v.iter().flatten().copied().collect())
-                .collect();
-            let names: Vec<String> = spec.series.iter().map(|s| s.name.clone()).collect();
-            body = histogram_body(&finite, &names, 10, &format!("{} (as bars)", spec.method))?;
-        }
+        PlotKind::Histogram | PlotKind::Box => unreachable!(),
     }
 
-    let legend_entries: Vec<(String, &str)> =
-        if spec.kind == PlotKind::Pie && spec.series.len() == 1 {
+    let legend_entries: Vec<(String, &str)> = if spec.kind == PlotKind::Pie {
+        if spec.series.len() == 1 {
             let s = &spec.series[0];
             let mut entries = Vec::new();
             let mut s_idx = 0;
@@ -355,13 +396,46 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 }
             }
             entries
-        } else {
+        } else if spec.series.iter().all(|s| s.values.len() == 1) {
             spec.series
                 .iter()
                 .enumerate()
                 .map(|(i, s)| (s.name.clone(), palette(i)))
                 .collect()
-        };
+        } else {
+            let mut entries = Vec::new();
+            let mut s_idx = 0;
+            for (si, s) in spec.series.iter().enumerate() {
+                for (i, v) in views[si].iter().enumerate() {
+                    if let Some(val) = v
+                        && val.is_finite()
+                        && *val > 0.0
+                    {
+                        let label = s
+                            .index
+                            .get(i)
+                            .map(|lbl| {
+                                format!(
+                                    "{}[{}]",
+                                    s.name,
+                                    crate::scalar_plot_label(&crate::index_label_to_scalar(lbl))
+                                )
+                            })
+                            .unwrap_or_else(|| format!("{}[{i}]", s.name));
+                        entries.push((label, palette(s_idx)));
+                        s_idx += 1;
+                    }
+                }
+            }
+            entries
+        }
+    } else {
+        spec.series
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.name.clone(), palette(i)))
+            .collect()
+    };
     let axes = if spec.kind == PlotKind::Pie {
         String::new()
     } else {
@@ -376,11 +450,8 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
 
 // ── Histogram primitives ───────────────────────────────────────────────────
 
-/// Bar body for binned counts: one inset of `bins` bars per series, laid out
-/// side by side. `scale` spans ALL series so heights are comparable.
 fn histogram_body(
-    series: &[Vec<f64>],
-    _names: &[String],
+    series: &[PlotSeriesSpec],
     bins: usize,
     title: &str,
 ) -> Result<String, FrameError> {
@@ -389,7 +460,20 @@ fn histogram_body(
             "histogram requires at least one bin".to_owned(),
         ));
     }
-    let flat: Vec<Option<f64>> = series
+    let views: Result<Vec<Vec<Option<f64>>>, FrameError> =
+        series.iter().map(numeric_view).collect();
+    let views = views?;
+    let finite_series: Vec<Vec<f64>> = views
+        .iter()
+        .map(|v| v.iter().flatten().copied().collect())
+        .collect();
+    if finite_series.iter().all(|v| v.is_empty()) {
+        return Err(FrameError::CompatibilityRejected(
+            "no plottable (non-missing) values in this histogram".to_owned(),
+        ));
+    }
+
+    let flat: Vec<Option<f64>> = finite_series
         .iter()
         .flat_map(|v| v.iter().copied())
         .map(Some)
@@ -398,15 +482,17 @@ fn histogram_body(
     let step = (scale.max - scale.min) / bins as f64;
 
     let mut global_max = 0usize;
-    let mut all_counts: Vec<Vec<usize>> = Vec::with_capacity(series.len());
-    for values in series {
+    let mut all_counts: Vec<Vec<usize>> = Vec::with_capacity(finite_series.len());
+    for values in &finite_series {
         let mut counts = vec![0usize; bins];
         for v in values {
-            // Right-closed last bin, matching pandas' `np.histogram` default.
-            let idx = if *v == scale.max {
+            let raw_idx = ((v - scale.min) / step).floor();
+            let idx = if *v >= scale.max {
                 bins - 1
+            } else if raw_idx <= 0.0 {
+                0
             } else {
-                (((v - scale.min) / step).floor() as usize).min(bins - 1)
+                (raw_idx as usize).min(bins - 1)
             };
             counts[idx] += 1;
         }
@@ -416,12 +502,12 @@ fn histogram_body(
     let global_max = global_max.max(1);
 
     let mut body = String::new();
-    let width = PLOT_W / series.len().max(1) as f64;
+    let width = PLOT_W / finite_series.len().max(1) as f64;
     for (si, counts) in all_counts.iter().enumerate() {
         let color = palette(si);
         let x0 = MARGIN_LEFT + si as f64 * width;
         let inner = width * 0.85;
-        let bar_w = inner / bins as f64 - 1.0;
+        let bar_w = (inner / bins as f64 - 1.0).max(0.5);
         for (bi, count) in counts.iter().enumerate() {
             if *count == 0 {
                 continue;
@@ -434,7 +520,107 @@ fn histogram_body(
             ));
         }
     }
-    Ok(format!("{}{body}</svg>", svg_open(title)))
+
+    let count_scale = Scale {
+        min: 0.0,
+        max: global_max as f64,
+    };
+    let mut x_labels = Vec::with_capacity(bins);
+    for i in 0..bins {
+        let bin_mid = scale.min + (i as f64 + 0.5) * step;
+        x_labels.push(fmt_num(bin_mid));
+    }
+    let axes = svg_axes(&count_scale, &x_labels);
+    let legend_entries: Vec<(String, &str)> = series
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.name.clone(), palette(i)))
+        .collect();
+
+    Ok(format!(
+        "{}{body}{axes}{}</svg>",
+        svg_open(title),
+        legend(&legend_entries)
+    ))
+}
+
+fn boxplot_body(
+    series: &[PlotSeriesSpec],
+    title: &str,
+) -> Result<String, FrameError> {
+    let views: Result<Vec<Vec<Option<f64>>>, FrameError> =
+        series.iter().map(numeric_view).collect();
+    let views = views?;
+    let mut sorted: Vec<(usize, Vec<f64>)> = views
+        .iter()
+        .enumerate()
+        .map(|(si, v)| {
+            let mut vals: Vec<f64> = v.iter().flatten().copied().collect();
+            vals.sort_by(f64::total_cmp);
+            (si, vals)
+        })
+        .collect();
+    sorted.retain(|(_, vals)| !vals.is_empty());
+    if sorted.is_empty() {
+        return Err(FrameError::CompatibilityRejected(
+            "no plottable (non-missing) values in this boxplot".to_owned(),
+        ));
+    }
+    let scale = data_scale(&views)?;
+    let y = |v: f64| MARGIN_TOP + (scale.max - v) / (scale.max - scale.min) * PLOT_H;
+    let slot = PLOT_W / sorted.len() as f64;
+    let mut body = String::new();
+    let mut x_labels = Vec::with_capacity(sorted.len());
+    let mut legend_entries = Vec::with_capacity(sorted.len());
+    for (box_idx, (orig_si, vals)) in sorted.iter().enumerate() {
+        let color = palette(*orig_si);
+        let name = &series[*orig_si].name;
+        x_labels.push(name.clone());
+        legend_entries.push((name.clone(), color));
+        let (q1, med, q3) = (
+            quantile(vals, 0.25),
+            quantile(vals, 0.5),
+            quantile(vals, 0.75),
+        );
+        let (lo, hi) = (vals[0], vals[vals.len() - 1]);
+        let cx = MARGIN_LEFT + slot * (box_idx as f64 + 0.5);
+        let bw = (slot * 0.5).max(1.0);
+        let top = y(q3);
+        let bottom = y(q1);
+        body.push_str(&format!(
+            "<line x1=\"{cx:.2}\" y1=\"{:.2}\" x2=\"{cx:.2}\" y2=\"{:.2}\" stroke=\"{color}\"/><line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{color}\"/>",
+            y(lo),
+            y(q1),
+            cx - bw / 2.0,
+            y(lo),
+            cx + bw / 2.0,
+            y(lo),
+        ));
+        body.push_str(&format!(
+            "<line x1=\"{cx:.2}\" y1=\"{:.2}\" x2=\"{cx:.2}\" y2=\"{:.2}\" stroke=\"{color}\"/><line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{color}\"/>",
+            y(q3),
+            y(hi),
+            cx - bw / 2.0,
+            y(hi),
+            cx + bw / 2.0,
+            y(hi),
+        ));
+        body.push_str(&format!(
+            "<rect x=\"{:.2}\" y=\"{top:.2}\" width=\"{bw:.2}\" height=\"{:.2}\" fill=\"{color}\" fill-opacity=\"0.35\" stroke=\"{color}\"/><line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{color}\" stroke-width=\"2\"/>",
+            cx - bw / 2.0,
+            (bottom - top).abs().max(0.5),
+            cx - bw / 2.0,
+            y(med),
+            cx + bw / 2.0,
+            y(med),
+        ));
+    }
+    let axes = svg_axes(&scale, &x_labels);
+    Ok(format!(
+        "{}{body}{axes}{}</svg>",
+        svg_open(title),
+        legend(&legend_entries)
+    ))
 }
 
 fn quantile(sorted: &[f64], q: f64) -> f64 {
@@ -458,35 +644,69 @@ impl PlotSpec {
     pub fn to_svg_bytes(&self) -> Result<Vec<u8>, FrameError> {
         self.to_svg().map(String::into_bytes)
     }
+
+    /// Wrap the deterministic SVG in an HTML figure container suitable for
+    /// embedding into notebooks, dashboards, or web pages.
+    pub fn to_html(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_html(&s))
+    }
+
+    /// Render this spec to a complete, self-contained HTML5 page document.
+    pub fn to_html_page(&self, title: Option<&str>) -> Result<String, FrameError> {
+        let title_str = title.unwrap_or(&self.method);
+        self.to_svg().map(|s| wrap_svg_html_page(&s, title_str))
+    }
+
+    /// Render this spec to Markdown-compatible HTML embedding.
+    pub fn to_markdown(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_markdown(&s))
+    }
+
+    /// Save the rendered plot to a file on disk. The file extension determines
+    /// the target format: `.svg` (raw SVG XML), `.html` / `.htm` (standalone HTML
+    /// document), or `.md` (markdown snippet).
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        let svg = self.to_svg()?;
+        save_rendered_svg(&svg, path, &self.method)
+    }
 }
 
 impl HistogramSpec {
     /// Render a grouped histogram: one inset of `bins` bars per series, NaN
     /// values skipped. Fails closed on non-numeric input or all-missing data.
     pub fn to_svg(&self) -> Result<String, FrameError> {
-        let views: Result<Vec<Vec<Option<f64>>>, FrameError> =
-            self.series.iter().map(numeric_view).collect();
-        let views = views?;
-        let finite: Vec<Vec<f64>> = views
-            .iter()
-            .map(|v| v.iter().flatten().copied().collect())
-            .collect();
-        if finite.iter().all(|v| v.is_empty()) {
-            return Err(FrameError::CompatibilityRejected(
-                "no plottable (non-missing) values in this histogram".to_owned(),
-            ));
-        }
-        let names: Vec<String> = self.series.iter().map(|s| s.name.clone()).collect();
         let title = format!(
             "histogram ({})",
-            names.first().map(String::as_str).unwrap_or("values")
+            self.series.first().map(|s| s.name.as_str()).unwrap_or("values")
         );
-        histogram_body(&finite, &names, self.bins, &title)
+        histogram_body(&self.series, self.bins, &title)
     }
 
     /// [`HistogramSpec::to_svg`] as UTF-8 bytes.
     pub fn to_svg_bytes(&self) -> Result<Vec<u8>, FrameError> {
         self.to_svg().map(String::into_bytes)
+    }
+
+    /// Wrap the deterministic SVG in an HTML figure container.
+    pub fn to_html(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_html(&s))
+    }
+
+    /// Render this histogram spec to a complete HTML5 page document.
+    pub fn to_html_page(&self, title: Option<&str>) -> Result<String, FrameError> {
+        let title_str = title.unwrap_or(&self.method);
+        self.to_svg().map(|s| wrap_svg_html_page(&s, title_str))
+    }
+
+    /// Render this histogram spec to Markdown-compatible HTML embedding.
+    pub fn to_markdown(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_markdown(&s))
+    }
+
+    /// Save the rendered histogram to disk (`.svg`, `.html`/`.htm`, or `.md`).
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        let svg = self.to_svg()?;
+        save_rendered_svg(&svg, path, &self.method)
     }
 }
 
@@ -495,81 +715,92 @@ impl BoxPlotSpec {
     /// linear-interpolated quantiles, NaN skipped). Fails closed when every
     /// series is empty, or on non-numeric input.
     pub fn to_svg(&self) -> Result<String, FrameError> {
-        let views: Result<Vec<Vec<Option<f64>>>, FrameError> =
-            self.series.iter().map(numeric_view).collect();
-        let views = views?;
-        let mut sorted: Vec<Vec<f64>> = views
-            .iter()
-            .map(|v| {
-                let mut vals: Vec<f64> = v.iter().flatten().copied().collect();
-                vals.sort_by(f64::total_cmp);
-                vals
-            })
-            .collect();
-        sorted.retain(|vals| !vals.is_empty());
-        if sorted.is_empty() {
-            return Err(FrameError::CompatibilityRejected(
-                "no plottable (non-missing) values in this boxplot".to_owned(),
-            ));
-        }
-        let scale = data_scale(&views)?;
-        let y = |v: f64| MARGIN_TOP + (scale.max - v) / (scale.max - scale.min) * PLOT_H;
-        let slot = PLOT_W / sorted.len() as f64;
-        let mut body = String::new();
-        for (si, vals) in sorted.iter().enumerate() {
-            let color = palette(si);
-            let (q1, med, q3) = (
-                quantile(vals, 0.25),
-                quantile(vals, 0.5),
-                quantile(vals, 0.75),
-            );
-            let (lo, hi) = (vals[0], vals[vals.len() - 1]);
-            let cx = MARGIN_LEFT + slot * (si as f64 + 0.5);
-            let bw = slot * 0.5;
-            let top = y(q3);
-            let bottom = y(q1);
-            body.push_str(&format!(
-                "<line x1=\"{cx:.2}\" y1=\"{:.2}\" x2=\"{cx:.2}\" y2=\"{:.2}\" stroke=\"{color}\"/><line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{color}\"/>",
-                y(lo),
-                y(q1),
-                cx - bw / 2.0,
-                y(lo),
-                cx + bw / 2.0,
-                y(lo),
-            ));
-            body.push_str(&format!(
-                "<line x1=\"{cx:.2}\" y1=\"{:.2}\" x2=\"{cx:.2}\" y2=\"{:.2}\" stroke=\"{color}\"/><line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{color}\"/>",
-                y(q3),
-                y(hi),
-                cx - bw / 2.0,
-                y(hi),
-                cx + bw / 2.0,
-                y(hi),
-            ));
-            body.push_str(&format!(
-                "<rect x=\"{:.2}\" y=\"{top:.2}\" width=\"{bw:.2}\" height=\"{:.2}\" fill=\"{color}\" fill-opacity=\"0.35\" stroke=\"{color}\"/><line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{color}\" stroke-width=\"2\"/>",
-                cx - bw / 2.0,
-                (bottom - top).abs().max(0.5),
-                cx - bw / 2.0,
-                y(med),
-                cx + bw / 2.0,
-                y(med),
-            ));
-        }
         let title = format!(
             "boxplot ({})",
-            self.series
-                .first()
-                .map(|s| s.name.as_str())
-                .unwrap_or("values")
+            self.series.first().map(|s| s.name.as_str()).unwrap_or("values")
         );
-        Ok(format!("{}{body}</svg>", svg_open(&title)))
+        boxplot_body(&self.series, &title)
     }
 
     /// [`BoxPlotSpec::to_svg`] as UTF-8 bytes.
     pub fn to_svg_bytes(&self) -> Result<Vec<u8>, FrameError> {
         self.to_svg().map(String::into_bytes)
     }
+
+    /// Wrap the deterministic SVG in an HTML figure container.
+    pub fn to_html(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_html(&s))
+    }
+
+    /// Render this boxplot spec to a complete HTML5 page document.
+    pub fn to_html_page(&self, title: Option<&str>) -> Result<String, FrameError> {
+        let title_str = title.unwrap_or(&self.method);
+        self.to_svg().map(|s| wrap_svg_html_page(&s, title_str))
+    }
+
+    /// Render this boxplot spec to Markdown-compatible HTML embedding.
+    pub fn to_markdown(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_markdown(&s))
+    }
+
+    /// Save the rendered boxplot to disk (`.svg`, `.html`/`.htm`, or `.md`).
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        let svg = self.to_svg()?;
+        save_rendered_svg(&svg, path, &self.method)
+    }
+}
+
+fn wrap_svg_html(svg: &str) -> String {
+    format!(
+        "<div class=\"frankenpandas-plot\" style=\"display:inline-block;max-width:100%;height:auto;\">\n{svg}\n</div>"
+    )
+}
+
+fn wrap_svg_html_page(svg: &str, title: &str) -> String {
+    let esc_title = esc(title);
+    format!(
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title>{esc_title}</title>\n  <style>\n    body {{\n      margin: 0;\n      padding: 24px;\n      font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n      background-color: #f8f9fa;\n      color: #212529;\n      display: flex;\n      justify-content: center;\n      align-items: center;\n      min-height: 100vh;\n    }}\n    .frankenpandas-plot-container {{\n      background: #ffffff;\n      padding: 20px;\n      border-radius: 8px;\n      box-shadow: 0 4px 12px rgba(0,0,0,0.08);\n      max-width: 100%;\n    }}\n    .frankenpandas-plot-container svg {{\n      display: block;\n      max-width: 100%;\n      height: auto;\n    }}\n  </style>\n</head>\n<body>\n  <div class=\"frankenpandas-plot-container\">\n    {svg}\n  </div>\n</body>\n</html>\n"
+    )
+}
+
+fn wrap_svg_markdown(svg: &str) -> String {
+    format!("<div class=\"frankenpandas-plot\">\n{svg}\n</div>\n")
+}
+
+fn save_rendered_svg<P: AsRef<std::path::Path>>(
+    svg: &str,
+    path: P,
+    default_title: &str,
+) -> Result<(), FrameError> {
+    let path_ref = path.as_ref();
+    let ext = path_ref
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let content = match ext.as_str() {
+        "svg" => svg.as_bytes().to_vec(),
+        "html" | "htm" => wrap_svg_html_page(svg, default_title).into_bytes(),
+        "md" | "markdown" => wrap_svg_markdown(svg).into_bytes(),
+        "png" | "pdf" | "jpg" | "jpeg" => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "saving plot directly to '.{ext}' requires an external rasterizer; supported vector formats are: .svg, .html, .htm, .md"
+            )));
+        }
+        _ => svg.as_bytes().to_vec(),
+    };
+
+    if let Some(parent) = path_ref.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    std::fs::write(path_ref, content).map_err(|err| {
+        FrameError::CompatibilityRejected(format!(
+            "failed to save plot to '{}': {err}",
+            path_ref.display()
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -787,5 +1018,185 @@ mod tests {
             svg_single.contains("<circle"),
             "100% single slice must render circle"
         );
+    }
+
+    #[test]
+    fn export_formats_html_page_markdown_and_file_save() {
+        let spec = PlotSpec {
+            method: "test_export".to_owned(),
+            kind: PlotKind::Line,
+            series: vec![series("y", floats(&[1.0, 2.0, 3.0]))],
+        };
+
+        // 1. to_html wraps in container
+        let html = spec.to_html().expect("to_html");
+        assert!(html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(html.contains("<svg"));
+
+        // 2. to_html_page produces valid HTML5 document
+        let page = spec.to_html_page(Some("My Title")).expect("to_html_page");
+        assert!(page.starts_with("<!DOCTYPE html>"));
+        assert!(page.contains("<title>My Title</title>"));
+        assert!(page.contains("<svg"));
+
+        // 3. to_markdown embeds in div container
+        let md = spec.to_markdown().expect("to_markdown");
+        assert!(md.contains("<div class=\"frankenpandas-plot\">"));
+        assert!(md.contains("<svg"));
+
+        // 4. save to tempdir
+        let temp_dir = std::env::temp_dir().join(format!("fp_test_plot_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let svg_path = temp_dir.join("plot.svg");
+        spec.save(&svg_path).expect("save svg");
+        let read_svg = std::fs::read_to_string(&svg_path).expect("read saved svg");
+        assert!(read_svg.starts_with("<svg"));
+
+        let html_path = temp_dir.join("plot.html");
+        spec.save(&html_path).expect("save html");
+        let read_html = std::fs::read_to_string(&html_path).expect("read saved html");
+        assert!(read_html.starts_with("<!DOCTYPE html>"));
+
+        let md_path = temp_dir.join("plot.md");
+        spec.save(&md_path).expect("save md");
+        let read_md = std::fs::read_to_string(&md_path).expect("read saved md");
+        assert!(read_md.contains("<div class=\"frankenpandas-plot\">"));
+
+        // 5. save to unsupported raster format fails closed
+        let png_path = temp_dir.join("plot.png");
+        let err = spec.save(&png_path).expect_err("png must fail closed");
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+
+        // Clean up temp test files
+        let _ = std::fs::remove_file(&svg_path);
+        let _ = std::fs::remove_file(&html_path);
+        let _ = std::fs::remove_file(&md_path);
+        let _ = std::fs::remove_dir(&temp_dir);
+
+        // 6. Histogram and BoxPlot export methods
+        let hist = HistogramSpec {
+            method: "hist".to_owned(),
+            bins: 3,
+            series: vec![series("h", floats(&[1.0, 2.0, 3.0]))],
+        };
+        assert!(
+            hist.to_html()
+                .expect("hist html")
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(
+            hist.to_html_page(None)
+                .expect("hist page")
+                .contains("<!DOCTYPE html>")
+        );
+        assert!(
+            hist.to_markdown()
+                .expect("hist md")
+                .contains("<div class=\"frankenpandas-plot\">")
+        );
+
+        let bplot = BoxPlotSpec {
+            method: "bplot".to_owned(),
+            series: vec![series("b", floats(&[1.0, 2.0, 3.0]))],
+        };
+        assert!(
+            bplot
+                .to_html()
+                .expect("bplot html")
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
+        assert!(
+            bplot
+                .to_html_page(None)
+                .expect("bplot page")
+                .contains("<!DOCTYPE html>")
+        );
+        assert!(
+            bplot
+                .to_markdown()
+                .expect("bplot md")
+                .contains("<div class=\"frankenpandas-plot\">")
+        );
+    }
+
+    #[test]
+    fn infinite_and_neg_infinite_values_become_gaps_not_coordinates() {
+        let spec = PlotSpec {
+            method: "plot_inf".to_owned(),
+            kind: PlotKind::Line,
+            series: vec![series(
+                "inf_test",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(f64::INFINITY),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(f64::NEG_INFINITY),
+                    Scalar::Float64(5.0),
+                ],
+            )],
+        };
+        let svg = spec.to_svg().expect("inf values must render as gaps");
+        assert!(!svg.contains("inf"), "SVG must not contain 'inf' coordinates: {svg}");
+        assert!(!svg.contains("-inf"), "SVG must not contain '-inf' coordinates: {svg}");
+        assert_eq!(svg.matches("<polyline").count(), 3, "2 infs split 5 items into 3 runs");
+    }
+
+    #[test]
+    fn bar_plot_supports_negative_values_and_zero_baseline() {
+        let spec = PlotSpec {
+            method: "bar_neg".to_owned(),
+            kind: PlotKind::Bar,
+            series: vec![series(
+                "b",
+                vec![
+                    Scalar::Float64(-10.0),
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(20.0),
+                ],
+            )],
+        };
+        let svg = spec.to_svg().expect("bar plot with negatives renders");
+        assert!(svg.contains("<rect"), "bars must render as rects");
+        assert!(!svg.contains("height=\"-"), "rect height must never be negative");
+    }
+
+    #[test]
+    fn plot_kind_box_and_histogram_render_correct_primitives() {
+        // PlotKind::Box on PlotSpec must render boxplot primitives (rect + line whiskers)
+        let box_spec = PlotSpec {
+            method: "box_kind".to_owned(),
+            kind: PlotKind::Box,
+            series: vec![series("box_s", floats(&[1.0, 2.0, 3.0, 4.0, 5.0]))],
+        };
+        let svg_box = box_spec.to_svg().expect("box kind renders");
+        assert!(svg_box.contains("<rect"), "boxplot must have box rect");
+        assert!(svg_box.contains("<line"), "boxplot must have whisker lines");
+        assert!(svg_box.contains("box_s"), "boxplot must carry series name");
+
+        // PlotKind::Histogram on PlotSpec must render histogram primitives
+        let hist_spec = PlotSpec {
+            method: "hist_kind".to_owned(),
+            kind: PlotKind::Histogram,
+            series: vec![series("hist_s", floats(&[1.0, 2.0, 2.5, 3.0]))],
+        };
+        let svg_hist = hist_spec.to_svg().expect("hist kind renders");
+        assert!(svg_hist.contains("<rect"), "hist must have bars");
+        assert!(svg_hist.contains("hist_s"), "hist must carry series name");
+    }
+
+    #[test]
+    fn legend_overflow_handles_more_than_six_series() {
+        let mut s_vec = Vec::new();
+        for i in 0..8 {
+            s_vec.push(series(&format!("col_{i}"), floats(&[1.0, 2.0])));
+        }
+        let spec = PlotSpec {
+            method: "multi".to_owned(),
+            kind: PlotKind::Line,
+            series: s_vec,
+        };
+        let svg = spec.to_svg().expect("multi series renders");
+        assert!(svg.contains("+3 more"), "overflow legend must display +3 more");
     }
 }

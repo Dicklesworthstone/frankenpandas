@@ -7856,6 +7856,21 @@ impl Series {
         })
     }
 
+    /// Convenience helper: render series plot directly to deterministic SVG string.
+    pub fn plot_to_svg(&self) -> Result<String, FrameError> {
+        self.plot()?.to_svg()
+    }
+
+    /// Convenience helper: render series plot directly to HTML figure snippet.
+    pub fn plot_to_html(&self) -> Result<String, FrameError> {
+        self.plot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series plot directly to disk.
+    pub fn plot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.plot()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style bar plot request.
     pub fn bar(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -7929,6 +7944,55 @@ impl Series {
                 None,
             )],
         })
+    }
+
+    /// Convenience helper: render series histogram directly to deterministic SVG string.
+    pub fn hist_to_svg(&self) -> Result<String, FrameError> {
+        self.hist()?.to_svg()
+    }
+
+    /// Convenience helper: render series histogram directly to HTML figure snippet.
+    pub fn hist_to_html(&self) -> Result<String, FrameError> {
+        self.hist()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series histogram directly to disk.
+    pub fn hist_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.hist()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style boxplot request.
+    pub fn boxplot(&self) -> Result<BoxPlotSpec, FrameError> {
+        Ok(BoxPlotSpec {
+            method: "Series.boxplot".to_owned(),
+            series: vec![plot_series_spec(
+                self.name(),
+                self.index.labels().to_vec(),
+                self.column.dtype(),
+                self.column.values().to_vec(),
+                None,
+            )],
+        })
+    }
+
+    /// Return a backend-neutral pandas-style boxplot request (alias for [`Series::boxplot`]).
+    pub fn box_plot(&self) -> Result<BoxPlotSpec, FrameError> {
+        self.boxplot()
+    }
+
+    /// Convenience helper: render series boxplot directly to deterministic SVG string.
+    pub fn boxplot_to_svg(&self) -> Result<String, FrameError> {
+        self.boxplot()?.to_svg()
+    }
+
+    /// Convenience helper: render series boxplot directly to HTML figure snippet.
+    pub fn boxplot_to_html(&self) -> Result<String, FrameError> {
+        self.boxplot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series boxplot directly to disk.
+    pub fn boxplot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.boxplot()?.save(path)
     }
 
     /// Pretty-print the Series as a string table.
@@ -38110,6 +38174,19 @@ impl SeriesGroupBy<'_> {
         })
     }
 
+    /// Return a backend-neutral pandas-style grouped boxplot request.
+    pub fn boxplot(&self) -> Result<BoxPlotSpec, FrameError> {
+        Ok(BoxPlotSpec {
+            method: "SeriesGroupBy.boxplot".to_owned(),
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Return a backend-neutral pandas-style grouped boxplot request (alias for [`SeriesGroupBy::boxplot`]).
+    pub fn box_plot(&self) -> Result<BoxPlotSpec, FrameError> {
+        self.boxplot()
+    }
+
     /// Number of groups.
     #[must_use]
     pub fn ngroups(&self) -> usize {
@@ -63168,6 +63245,21 @@ impl DataFrame {
         })
     }
 
+    /// Convenience helper: render dataframe plot directly to deterministic SVG string.
+    pub fn plot_to_svg(&self) -> Result<String, FrameError> {
+        self.plot()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe plot directly to HTML figure snippet.
+    pub fn plot_to_html(&self) -> Result<String, FrameError> {
+        self.plot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe plot directly to disk.
+    pub fn plot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.plot()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style bar plot request.
     pub fn bar(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -63213,12 +63305,47 @@ impl DataFrame {
         })
     }
 
+    /// Convenience helper: render dataframe histogram directly to deterministic SVG string.
+    pub fn hist_to_svg(&self) -> Result<String, FrameError> {
+        self.hist()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe histogram directly to HTML figure snippet.
+    pub fn hist_to_html(&self) -> Result<String, FrameError> {
+        self.hist()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe histogram directly to disk.
+    pub fn hist_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.hist()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style boxplot request.
     pub fn boxplot(&self) -> Result<BoxPlotSpec, FrameError> {
         Ok(BoxPlotSpec {
             method: "DataFrame.boxplot".to_owned(),
             series: self.plot_series_specs(),
         })
+    }
+
+    /// Return a backend-neutral pandas-style boxplot request (alias for [`DataFrame::boxplot`]).
+    pub fn box_plot(&self) -> Result<BoxPlotSpec, FrameError> {
+        self.boxplot()
+    }
+
+    /// Convenience helper: render dataframe boxplot directly to deterministic SVG string.
+    pub fn boxplot_to_svg(&self) -> Result<String, FrameError> {
+        self.boxplot()?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe boxplot directly to HTML figure snippet.
+    pub fn boxplot_to_html(&self) -> Result<String, FrameError> {
+        self.boxplot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe boxplot directly to disk.
+    pub fn boxplot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        self.boxplot()?.save(path)
     }
 
     /// `pd.DataFrame(dict_of_series, columns=[...])` — SELECT the named columns
@@ -172991,6 +173118,43 @@ mod tests {
         assert_eq!(hist.method, "Series.hist");
         assert_eq!(hist.bins, 10);
         assert_eq!(hist.series[0].name, "vals");
+    }
+
+    #[test]
+    fn dataframe_and_series_plot_convenience_helpers() {
+        let df = nk54a_df().select_columns(&["a", "b"]).unwrap();
+        let df_svg = df.plot_to_svg().unwrap();
+        assert!(df_svg.starts_with("<svg"));
+        let df_html = df.plot_to_html().unwrap();
+        assert!(df_html.contains("<div class=\"frankenpandas-plot\""));
+
+        let series = m785r_series();
+        let s_svg = series.plot_to_svg().unwrap();
+        assert!(s_svg.starts_with("<svg"));
+        let s_html = series.plot_to_html().unwrap();
+        assert!(s_html.contains("<div class=\"frankenpandas-plot\""));
+
+        let temp_dir = std::env::temp_dir().join(format!("fp_test_conv_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let df_file = temp_dir.join("df.svg");
+        df.plot_to_file(&df_file).unwrap();
+        assert!(
+            std::fs::read_to_string(&df_file)
+                .unwrap()
+                .starts_with("<svg")
+        );
+
+        let s_file = temp_dir.join("s.html");
+        series.plot_to_file(&s_file).unwrap();
+        assert!(
+            std::fs::read_to_string(&s_file)
+                .unwrap()
+                .starts_with("<!DOCTYPE html>")
+        );
+
+        let _ = std::fs::remove_file(&df_file);
+        let _ = std::fs::remove_file(&s_file);
+        let _ = std::fs::remove_dir(&temp_dir);
     }
 
     #[test]
