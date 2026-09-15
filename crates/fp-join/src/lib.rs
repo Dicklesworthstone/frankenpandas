@@ -1828,7 +1828,7 @@ enum AffineInnerOutputLane<'a> {
         start: usize,
         step: usize,
     },
-    Built(Column),
+    Built(Box<Column>),
 }
 
 struct AffineInnerOutputSpec<'a> {
@@ -1864,7 +1864,7 @@ fn affine_inner_output_lane<'a>(
         let positions = affine_selection_positions(start, step, len);
         column.take_positions(&positions)
     };
-    Some(AffineInnerOutputLane::Built(built))
+    Some(AffineInnerOutputLane::Built(Box::new(built)))
 }
 
 /// Zero-copy Int64 output for a unit-stride side of an affine match.
@@ -2006,6 +2006,7 @@ fn build_single_key_affine_i64_inner_merge_output(
                             plan.len,
                         )
                     })
+                    .map(Box::new)
                     .map(AffineInnerOutputLane::Built)
             })
             .flatten();
@@ -2065,7 +2066,7 @@ fn build_single_key_affine_i64_inner_merge_output(
                     .next()
                     .expect("one filled lane for every affine Int64 output"),
             ),
-            AffineInnerOutputLane::Built(column) => column,
+            AffineInnerOutputLane::Built(column) => *column,
         };
         debug_assert_eq!(column.len(), plan.len);
         insert_merged_output_column(&mut columns, &mut column_order, spec.name, column)?;
