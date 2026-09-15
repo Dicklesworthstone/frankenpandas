@@ -15703,6 +15703,7 @@ fn parse_constructor_dtype_spec(dtype_spec: &str) -> Result<DType, String> {
         // it here keeps the accepted constructor vocabulary explicit, while the
         // no-op retains mixed Scalar values instead of stringifying them as Utf8.
         "object" => Ok(DType::Utf8),
+        "category" | "categorical" => Ok(DType::Categorical),
         _ => Err(format!(
             "unsupported constructor dtype '{}'",
             dtype_spec.trim()
@@ -29655,6 +29656,14 @@ mod constructor_dtype_tier_locks_jozfk {
         assert_eq!(
             parse_constructor_dtype_spec("boolean[pyarrow]"),
             Ok(DType::Bool)
+        );
+        assert_eq!(
+            parse_constructor_dtype_spec("category"),
+            Ok(DType::Categorical)
+        );
+        assert_eq!(
+            parse_constructor_dtype_spec("categorical"),
+            Ok(DType::Categorical)
         );
     }
 

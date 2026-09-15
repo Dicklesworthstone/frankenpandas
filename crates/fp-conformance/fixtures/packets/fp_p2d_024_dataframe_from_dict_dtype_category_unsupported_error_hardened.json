@@ -5,8 +5,8 @@
   "operation": "dataframe_from_dict",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "5f6bac5b0bebf886b6260f31ff3cc761754647f09b9663f4fc338b8ccf236c48",
+    "generated_at": "2026-09-15T19:53:43Z"
   },
   "constructor_dtype": "category",
   "dict_columns": {
@@ -15,5 +15,31 @@
       { "kind": "utf8", "value": "b" }
     ]
   },
-  "expected_error_contains": "unsupported constructor dtype 'category'"
+  "expected_frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "columns": {
+      "kind": [
+        {
+          "kind": "utf8",
+          "value": "a"
+        },
+        {
+          "kind": "utf8",
+          "value": "b"
+        }
+      ]
+    },
+    "column_order": [
+      "kind"
+    ]
+  }
 }

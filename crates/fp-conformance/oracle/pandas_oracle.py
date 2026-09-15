@@ -4290,6 +4290,8 @@ def pandas_dtype_from_constructor_spec(dtype_spec: str) -> str:
     # pandas error (br-frankenpandas-bhyqp).
     if normalized in {"object", "uint64", "boolean[pyarrow]"}:
         return normalized
+    if normalized in {"category", "categorical"}:
+        return "category"
     raise OracleError(f"unsupported constructor dtype {dtype_spec!r}")
 
 

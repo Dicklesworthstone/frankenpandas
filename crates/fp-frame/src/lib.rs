@@ -102841,7 +102841,10 @@ mod tests {
     fn dataframe_with_constructor_dtype_category() {
         let df = DataFrame::from_dict(
             &["kind"],
-            vec![("kind", vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())])],
+            vec![(
+                "kind",
+                vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())],
+            )],
         )
         .expect("frame");
         let cat_df = df
