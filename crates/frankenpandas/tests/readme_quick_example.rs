@@ -6980,3 +6980,191 @@ fn facade_reexports_cover_every_fp_io_read_write_fn() {
         "facade expected-list is stale vs the fp-io surface — regenerate FP_IO_EXPORTED_IO_FNS"
     );
 }
+
+#[test]
+fn facade_prelude_plotting_api_comprehensive() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Verify PlotKind identifiers and aliases
+    assert_eq!(PlotKind::Line.as_str(), "line");
+    assert_eq!(PlotKind::Bar.as_str(), "bar");
+    assert_eq!(PlotKind::Barh.as_str(), "barh");
+    assert_eq!(PlotKind::Area.as_str(), "area");
+    assert_eq!(PlotKind::Scatter.as_str(), "scatter");
+    assert_eq!(PlotKind::Pie.as_str(), "pie");
+    assert_eq!(PlotKind::Histogram.as_str(), "hist");
+    assert_eq!(PlotKind::Box.as_str(), "box");
+    assert_eq!(PlotKind::Kde.as_str(), "kde");
+    assert_eq!(PlotKind::Density.as_str(), "density");
+    assert_eq!(PlotKind::Hexbin.as_str(), "hexbin");
+
+    assert_eq!(PlotKind::from_name("line"), Some(PlotKind::Line));
+    assert_eq!(PlotKind::from_name("LINE"), Some(PlotKind::Line));
+    assert_eq!(PlotKind::from_name("bar"), Some(PlotKind::Bar));
+    assert_eq!(PlotKind::from_name("barh"), Some(PlotKind::Barh));
+    assert_eq!(PlotKind::from_name("area"), Some(PlotKind::Area));
+    assert_eq!(PlotKind::from_name("scatter"), Some(PlotKind::Scatter));
+    assert_eq!(PlotKind::from_name("pie"), Some(PlotKind::Pie));
+    assert_eq!(PlotKind::from_name("hist"), Some(PlotKind::Histogram));
+    assert_eq!(PlotKind::from_name("histogram"), Some(PlotKind::Histogram));
+    assert_eq!(PlotKind::from_name("box"), Some(PlotKind::Box));
+    assert_eq!(PlotKind::from_name("boxplot"), Some(PlotKind::Box));
+    assert_eq!(PlotKind::from_name("kde"), Some(PlotKind::Kde));
+    assert_eq!(PlotKind::from_name("density"), Some(PlotKind::Density));
+    assert_eq!(PlotKind::from_name("hexbin"), Some(PlotKind::Hexbin));
+    assert_eq!(PlotKind::from_name("nonexistent"), None);
+
+    // 2. Numeric DataFrame for plotting
+    let df = read_csv_str("group,x,y\nA,1.0,10.0\nA,2.0,20.0\nB,3.0,30.0\nB,4.0,40.0")?;
+    let num_df = read_csv_str("x,y\n1.0,10.0\n2.0,20.0\n3.0,30.0\n4.0,40.0")?;
+
+    // Verify DataFrame plot specs
+    let line_spec = num_df.line()?;
+    assert_eq!(line_spec.kind, PlotKind::Line);
+    assert_eq!(line_spec.method, "DataFrame.plot.line");
+    assert_eq!(line_spec.series.len(), 2);
+
+    let bar_spec = num_df.bar()?;
+    assert_eq!(bar_spec.kind, PlotKind::Bar);
+    assert_eq!(bar_spec.method, "DataFrame.plot.bar");
+
+    let barh_spec = num_df.barh()?;
+    assert_eq!(barh_spec.kind, PlotKind::Barh);
+    assert_eq!(barh_spec.method, "DataFrame.plot.barh");
+
+    let area_spec = num_df.area()?;
+    assert_eq!(area_spec.kind, PlotKind::Area);
+
+    let scatter_spec = num_df.scatter()?;
+    assert_eq!(scatter_spec.kind, PlotKind::Scatter);
+
+    let pie_spec = num_df.pie()?;
+    assert_eq!(pie_spec.kind, PlotKind::Pie);
+
+    let kde_spec = num_df.kde()?;
+    assert_eq!(kde_spec.kind, PlotKind::Kde);
+
+    let density_spec = num_df.density()?;
+    assert_eq!(density_spec.kind, PlotKind::Density);
+
+    let hexbin_spec = num_df.hexbin()?;
+    assert_eq!(hexbin_spec.kind, PlotKind::Hexbin);
+
+    let hist_spec = num_df.hist()?;
+    assert_eq!(hist_spec.method, "DataFrame.hist");
+    assert_eq!(hist_spec.bins, 10);
+
+    let box_spec = num_df.boxplot()?;
+    assert_eq!(box_spec.method, "DataFrame.boxplot");
+    assert_eq!(num_df.box_plot()?.method, "DataFrame.boxplot");
+    assert_eq!(num_df.r#box()?.method, "DataFrame.boxplot");
+
+    // 3. Direct SVG rendering on DataFrame
+    let line_svg = num_df.line_to_svg()?;
+    assert!(line_svg.starts_with("<svg") && line_svg.ends_with("</svg>"));
+
+    let bar_svg = num_df.bar_to_svg()?;
+    assert!(bar_svg.contains("<rect"));
+
+    let barh_svg = num_df.barh_to_svg()?;
+    assert!(barh_svg.contains("<rect"));
+
+    let area_svg = num_df.area_to_svg()?;
+    assert!(area_svg.contains("<polygon"));
+
+    let scatter_svg = num_df.scatter_to_svg()?;
+    assert!(scatter_svg.contains("<circle"));
+
+    let pie_svg = num_df.pie_to_svg()?;
+    assert!(pie_svg.contains("<path") || pie_svg.contains("<circle"));
+
+    let kde_svg = num_df.kde_to_svg()?;
+    assert!(kde_svg.contains("<polyline"));
+
+    let density_svg = num_df.density_to_svg()?;
+    assert!(density_svg.contains("<polyline"));
+
+    let hexbin_svg = num_df.hexbin_to_svg()?;
+    assert!(hexbin_svg.contains("<circle"));
+
+    let hist_svg = num_df.hist_to_svg()?;
+    assert!(hist_svg.starts_with("<svg") && hist_svg.ends_with("</svg>"));
+
+    let box_svg = num_df.boxplot_to_svg()?;
+    assert!(box_svg.starts_with("<svg") && box_svg.ends_with("</svg>"));
+
+    // 4. HTML, Page, and Markdown wrappers
+    let html_snippet = line_spec.to_html()?;
+    assert!(html_snippet.contains("class=\"frankenpandas-plot\""));
+
+    let html_page = line_spec.to_html_page(Some("Benchmark Plot"))?;
+    assert!(html_page.contains("<!DOCTYPE html>"));
+    assert!(html_page.contains("<title>Benchmark Plot</title>"));
+
+    let md_snippet = line_spec.to_markdown()?;
+    assert!(md_snippet.contains("<div class=\"frankenpandas-plot\">"));
+
+    // 5. Series plotting
+    let s = num_df.get("x")?.expect("column x exists");
+    let s_line_svg = s.line_to_svg()?;
+    assert!(s_line_svg.starts_with("<svg"));
+
+    let s_bar_svg = s.bar_to_svg()?;
+    assert!(s_bar_svg.starts_with("<svg"));
+
+    let s_barh_svg = s.barh_to_svg()?;
+    assert!(s_barh_svg.starts_with("<svg"));
+
+    let s_hist_svg = s.hist_to_svg()?;
+    assert!(s_hist_svg.starts_with("<svg"));
+
+    let s_box_svg = s.boxplot_to_svg()?;
+    assert!(s_box_svg.starts_with("<svg"));
+
+    let s_kde_svg = s.kde_to_svg()?;
+    assert!(s_kde_svg.starts_with("<svg"));
+
+    let s_density_svg = s.density_to_svg()?;
+    assert!(s_density_svg.starts_with("<svg"));
+
+    let s_hexbin_svg = s.hexbin_to_svg()?;
+    assert!(s_hexbin_svg.starts_with("<svg"));
+
+    // 6. GroupBy plotting
+    let grouped = df.groupby(&["group"])?;
+    let g_line_svg = grouped.plot_to_svg()?;
+    assert!(g_line_svg.starts_with("<svg"));
+
+    let g_hist_svg = grouped.hist_to_svg()?;
+    assert!(g_hist_svg.starts_with("<svg"));
+
+    let g_box_svg = grouped.boxplot_to_svg()?;
+    assert!(g_box_svg.starts_with("<svg"));
+
+    // 7. Save and format validation
+    let temp_dir = std::env::temp_dir().join(format!("fp_facade_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let svg_out = temp_dir.join("test.svg");
+    num_df.line()?.save(&svg_out)?;
+    assert!(svg_out.exists());
+    let read_back = std::fs::read_to_string(&svg_out)?;
+    assert!(read_back.starts_with("<svg"));
+
+    // Unsupported raster format fails closed
+    let png_out = temp_dir.join("test.png");
+    assert!(num_df.line()?.save(&png_out).is_err());
+
+    // 8. Spec serialization round-trip
+    let json = serde_json::to_string(&line_spec)?;
+    let deserialized: PlotSpec = serde_json::from_str(&json)?;
+    assert_eq!(line_spec, deserialized);
+
+    let hist_json = serde_json::to_string(&hist_spec)?;
+    let deserialized_hist: HistogramSpec = serde_json::from_str(&hist_json)?;
+    assert_eq!(hist_spec, deserialized_hist);
+
+    let box_json = serde_json::to_string(&box_spec)?;
+    let deserialized_box: BoxPlotSpec = serde_json::from_str(&box_json)?;
+    assert_eq!(box_spec, deserialized_box);
+
+    Ok(())
+}
