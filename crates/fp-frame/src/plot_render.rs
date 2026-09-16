@@ -376,14 +376,15 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 let y_map = |v: f64| MARGIN_TOP + (y_sc.max - v) / (y_sc.max - y_sc.min) * PLOT_H;
                 let len = views[0].len().min(views[1].len());
                 for i in 0..len {
-                    if let (Some(vx), Some(vy)) = (views[0][i], views[1][i]) {
-                        if vx.is_finite() && vy.is_finite() {
-                            body.push_str(&format!(
-                                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2.5\" fill=\"{color}\"/>",
-                                x_map(vx),
-                                y_map(vy)
-                            ));
-                        }
+                    if let (Some(vx), Some(vy)) = (views[0][i], views[1][i])
+                        && vx.is_finite()
+                        && vy.is_finite()
+                    {
+                        body.push_str(&format!(
+                            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2.5\" fill=\"{color}\"/>",
+                            x_map(vx),
+                            y_map(vy)
+                        ));
                     }
                 }
             } else {
@@ -1677,4 +1678,3 @@ mod tests {
         assert_eq!(p_line.series.len(), 2);
     }
 }
-

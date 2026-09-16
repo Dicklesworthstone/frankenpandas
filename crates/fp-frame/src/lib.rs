@@ -63930,12 +63930,14 @@ impl DataFrame {
 
     /// Return a backend-neutral pandas-style scatter plot request for the specified (x, y) column pair.
     pub fn scatter_columns(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
-        let col_x = self.columns.get(x).ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!("column '{x}' not found"))
-        })?;
-        let col_y = self.columns.get(y).ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!("column '{y}' not found"))
-        })?;
+        let col_x = self
+            .columns
+            .get(x)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{x}' not found")))?;
+        let col_y = self
+            .columns
+            .get(y)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{y}' not found")))?;
         let spec_x = plot_series_spec(
             x.to_owned(),
             self.index.labels().to_vec(),
@@ -64099,12 +64101,14 @@ impl DataFrame {
 
     /// Return a backend-neutral pandas-style hexbin plot request for the specified (x, y) column pair.
     pub fn hexbin_columns(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
-        let col_x = self.columns.get(x).ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!("column '{x}' not found"))
-        })?;
-        let col_y = self.columns.get(y).ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!("column '{y}' not found"))
-        })?;
+        let col_x = self
+            .columns
+            .get(x)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{x}' not found")))?;
+        let col_y = self
+            .columns
+            .get(y)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{y}' not found")))?;
         let spec_x = plot_series_spec(
             x.to_owned(),
             self.index.labels().to_vec(),
