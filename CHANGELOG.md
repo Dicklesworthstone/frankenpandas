@@ -3,13 +3,13 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-**12+ workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.2.0**.
+**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.3.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
 
-Scope window: project inception on 2026-02-13 through HEAD on 2026-08-19.
-This 2026-08-19 refresh covers the previously undocumented window **2026-05-17 through 2026-08-19**
-(Phase 3 plus published GitHub Releases). Phase 1 (thematic sections) and Phase 2 are unchanged.
+Scope window: project inception on 2026-02-13 through HEAD on 2026-09-15.
+This 2026-09-15 refresh covers the window **2026-05-17 through 2026-09-15**
+(Phase 3 & Phase 4 plus published GitHub Releases). Phase 1 (thematic sections) and Phase 2 are unchanged.
 The 2026-05-16 commit-statistics / open-workstreams block is a **snapshot**, not current state.
 Representative commits in each wave are live-linked to GitHub.
 
@@ -20,6 +20,7 @@ Representative commits in each wave are live-linked to GitHub.
 
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
+| `0.3.0` / Phase 4 | dev head | 2026-08-20 → 2026-09-15 | 100% Python export & class parity (`fp-python`), pure synchronous PostgreSQL adapter (`sql-postgresql`), deterministic in-house SVG/HTML visual plotting renderer across 11 kinds, CategoricalMetadata persistence on Column, decision docket resolutions (Int64 null promotion, timezone carrier, duplicate column labels). |
 | `[Unreleased]` / Phase 3 | dev head | 2026-05-17 → 2026-08-19 | 5,077 non-merge commits after the 2026-05-16 snapshot: `fp-python` bindings, measured vs-pandas kernels, radix sorts, groupby rolling scatter, oracle/parity tail, repo-janitor docs move. |
 | [`frankenpandas-v0.2.0`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/frankenpandas-v0.2.0) | GitHub Release | 2026-07-28 | Workspace 0.2.0 crate release (with matching `fp-*-v0.2.0` crate Releases). |
 | [`v0.1.2`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/v0.1.2) | GitHub Release | 2026-06-22 | Workspace v0.1.2 (also [`frankenpandas-v0.1.2`](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/frankenpandas-v0.1.2)). |
