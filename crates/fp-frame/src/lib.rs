@@ -63928,6 +63928,80 @@ impl DataFrame {
         self.scatter()?.save(path)
     }
 
+    /// Return a backend-neutral pandas-style scatter plot request for the specified (x, y) column pair.
+    pub fn scatter_columns(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        let col_x = self.columns.get(x).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{x}' not found"))
+        })?;
+        let col_y = self.columns.get(y).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{y}' not found"))
+        })?;
+        let spec_x = plot_series_spec(
+            x.to_owned(),
+            self.index.labels().to_vec(),
+            col_x.dtype(),
+            col_x.values().to_vec(),
+            None,
+        );
+        let spec_y = plot_series_spec(
+            y.to_owned(),
+            self.index.labels().to_vec(),
+            col_y.dtype(),
+            col_y.values().to_vec(),
+            None,
+        );
+        Ok(PlotSpec {
+            method: format!("DataFrame.plot.scatter(x='{x}', y='{y}')"),
+            kind: PlotKind::Scatter,
+            series: vec![spec_x, spec_y],
+        })
+    }
+
+    /// Return a backend-neutral pandas-style scatter plot request for the specified (x, y) column pair (alias for [`DataFrame::scatter_columns`]).
+    pub fn scatter_xy(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        self.scatter_columns(x, y)
+    }
+
+    /// Convenience helper: render dataframe (x, y) scatter plot directly to deterministic SVG string.
+    pub fn scatter_columns_to_svg(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.scatter_columns(x, y)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe (x, y) scatter plot directly to deterministic SVG string (alias for [`DataFrame::scatter_columns_to_svg`]).
+    pub fn scatter_xy_to_svg(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.scatter_columns_to_svg(x, y)
+    }
+
+    /// Convenience helper: render dataframe (x, y) scatter plot directly to HTML figure snippet.
+    pub fn scatter_columns_to_html(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.scatter_columns(x, y)?.to_html()
+    }
+
+    /// Convenience helper: render dataframe (x, y) scatter plot directly to HTML figure snippet (alias for [`DataFrame::scatter_columns_to_html`]).
+    pub fn scatter_xy_to_html(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.scatter_columns_to_html(x, y)
+    }
+
+    /// Convenience helper: save rendered dataframe (x, y) scatter plot directly to disk.
+    pub fn scatter_columns_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        x: &str,
+        y: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.scatter_columns(x, y)?.save(path)
+    }
+
+    /// Convenience helper: save rendered dataframe (x, y) scatter plot directly to disk (alias for [`DataFrame::scatter_columns_to_file`]).
+    pub fn scatter_xy_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        x: &str,
+        y: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.scatter_columns_to_file(x, y, path)
+    }
+
     /// Return a backend-neutral pandas-style pie plot request.
     pub fn pie(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -64023,6 +64097,80 @@ impl DataFrame {
         self.hexbin()?.save(path)
     }
 
+    /// Return a backend-neutral pandas-style hexbin plot request for the specified (x, y) column pair.
+    pub fn hexbin_columns(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        let col_x = self.columns.get(x).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{x}' not found"))
+        })?;
+        let col_y = self.columns.get(y).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{y}' not found"))
+        })?;
+        let spec_x = plot_series_spec(
+            x.to_owned(),
+            self.index.labels().to_vec(),
+            col_x.dtype(),
+            col_x.values().to_vec(),
+            None,
+        );
+        let spec_y = plot_series_spec(
+            y.to_owned(),
+            self.index.labels().to_vec(),
+            col_y.dtype(),
+            col_y.values().to_vec(),
+            None,
+        );
+        Ok(PlotSpec {
+            method: format!("DataFrame.plot.hexbin(x='{x}', y='{y}')"),
+            kind: PlotKind::Hexbin,
+            series: vec![spec_x, spec_y],
+        })
+    }
+
+    /// Return a backend-neutral pandas-style hexbin plot request for the specified (x, y) column pair (alias for [`DataFrame::hexbin_columns`]).
+    pub fn hexbin_xy(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        self.hexbin_columns(x, y)
+    }
+
+    /// Convenience helper: render dataframe (x, y) hexbin plot directly to deterministic SVG string.
+    pub fn hexbin_columns_to_svg(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.hexbin_columns(x, y)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe (x, y) hexbin plot directly to deterministic SVG string (alias for [`DataFrame::hexbin_columns_to_svg`]).
+    pub fn hexbin_xy_to_svg(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.hexbin_columns_to_svg(x, y)
+    }
+
+    /// Convenience helper: render dataframe (x, y) hexbin plot directly to HTML figure snippet.
+    pub fn hexbin_columns_to_html(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.hexbin_columns(x, y)?.to_html()
+    }
+
+    /// Convenience helper: render dataframe (x, y) hexbin plot directly to HTML figure snippet (alias for [`DataFrame::hexbin_columns_to_html`]).
+    pub fn hexbin_xy_to_html(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.hexbin_columns_to_html(x, y)
+    }
+
+    /// Convenience helper: save rendered dataframe (x, y) hexbin plot directly to disk.
+    pub fn hexbin_columns_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        x: &str,
+        y: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hexbin_columns(x, y)?.save(path)
+    }
+
+    /// Convenience helper: save rendered dataframe (x, y) hexbin plot directly to disk (alias for [`DataFrame::hexbin_columns_to_file`]).
+    pub fn hexbin_xy_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        x: &str,
+        y: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hexbin_columns_to_file(x, y, path)
+    }
+
     /// Return a backend-neutral plot request for the specified plot kind.
     pub fn plot_with_kind(&self, kind: PlotKind) -> Result<PlotSpec, FrameError> {
         match kind {
@@ -64045,6 +64193,40 @@ impl DataFrame {
                 kind: PlotKind::Box,
                 series: self.plot_series_specs(),
             }),
+        }
+    }
+
+    /// Return a backend-neutral plot request for the specified plot kind and (x, y) column pair.
+    pub fn plot_xy(&self, kind: PlotKind, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        match kind {
+            PlotKind::Scatter => self.scatter_columns(x, y),
+            PlotKind::Hexbin => self.hexbin_columns(x, y),
+            _ => {
+                let mut spec = self.plot_with_kind(kind)?;
+                let col_x = self.columns.get(x).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!("column '{x}' not found"))
+                })?;
+                let col_y = self.columns.get(y).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!("column '{y}' not found"))
+                })?;
+                let spec_x = plot_series_spec(
+                    x.to_owned(),
+                    self.index.labels().to_vec(),
+                    col_x.dtype(),
+                    col_x.values().to_vec(),
+                    None,
+                );
+                let spec_y = plot_series_spec(
+                    y.to_owned(),
+                    self.index.labels().to_vec(),
+                    col_y.dtype(),
+                    col_y.values().to_vec(),
+                    None,
+                );
+                spec.series = vec![spec_x, spec_y];
+                spec.method = format!("{}(x='{x}', y='{y}')", spec.method);
+                Ok(spec)
+            }
         }
     }
 

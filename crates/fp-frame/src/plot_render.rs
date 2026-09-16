@@ -76,6 +76,7 @@ fn numeric_view(series: &PlotSeriesSpec) -> Result<Vec<Option<f64>>, FrameError>
 
 /// A finite min/max pair across every series; constant data is padded so the
 /// band keeps height instead of dividing by zero. All-missing data is an error.
+#[derive(Debug, Clone, Copy)]
 struct Scale {
     min: f64,
     max: f64,
@@ -196,6 +197,37 @@ fn svg_horizontal_axes(scale: &Scale, y_labels: &[String]) -> String {
     out
 }
 
+fn svg_numeric_2d_axes(x_scale: &Scale, y_scale: &Scale) -> String {
+    let mut out = String::new();
+    let right = MARGIN_LEFT + PLOT_W;
+    let bottom = MARGIN_TOP + PLOT_H;
+    for i in 0..=4 {
+        let frac = i as f64 / 4.0;
+        let value = y_scale.max - frac * (y_scale.max - y_scale.min);
+        let y = MARGIN_TOP + frac * PLOT_H;
+        out.push_str(&format!(
+            "<line x1=\"{MARGIN_LEFT}\" y1=\"{y:.2}\" x2=\"{right}\" y2=\"{y:.2}\" stroke=\"#e5e5e5\"/><text x=\"{}\" y=\"{:.2}\" text-anchor=\"end\" fill=\"#666\">{}</text>",
+            MARGIN_LEFT - 6.0,
+            y + 4.0,
+            esc(&fmt_num(value))
+        ));
+    }
+    for i in 0..=4 {
+        let frac = i as f64 / 4.0;
+        let value = x_scale.min + frac * (x_scale.max - x_scale.min);
+        let x = MARGIN_LEFT + frac * PLOT_W;
+        out.push_str(&format!(
+            "<line x1=\"{x:.2}\" y1=\"{MARGIN_TOP}\" x2=\"{x:.2}\" y2=\"{bottom}\" stroke=\"#e5e5e5\"/><text x=\"{x:.2}\" y=\"{:.2}\" text-anchor=\"middle\" fill=\"#666\">{}</text>",
+            bottom + 14.0,
+            esc(&fmt_num(value))
+        ));
+    }
+    out.push_str(&format!(
+        "<line x1=\"{MARGIN_LEFT}\" y1=\"{MARGIN_TOP}\" x2=\"{MARGIN_LEFT}\" y2=\"{bottom}\" stroke=\"#333\"/><line x1=\"{MARGIN_LEFT}\" y1=\"{bottom}\" x2=\"{right}\" y2=\"{bottom}\" stroke=\"#333\"/>"
+    ));
+    out
+}
+
 fn legend(entries: &[(String, &str)]) -> String {
     if entries.is_empty() {
         return String::new();
@@ -251,14 +283,29 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
     let views: Result<Vec<Vec<Option<f64>>>, FrameError> =
         spec.series.iter().map(numeric_view).collect();
     let views = views?;
-    let mut scale = data_scale(&views)?;
-    if spec.kind == PlotKind::Bar || spec.kind == PlotKind::Barh {
-        scale.min = scale.min.min(0.0);
-        scale.max = scale.max.max(0.0);
-        if (scale.max - scale.min).abs() < f64::EPSILON {
-            scale.max += 1.0;
+
+    let is_xy_scatter = spec.kind == PlotKind::Scatter
+        && spec.series.len() == 2
+        && (spec.method.contains("(x=") || spec.method.contains("scatter_columns"));
+    let is_xy_hexbin = spec.kind == PlotKind::Hexbin
+        && spec.series.len() == 2
+        && (spec.method.contains("(x=") || spec.method.contains("hexbin_columns"));
+
+    let (scale, xy_scales) = if (is_xy_scatter || is_xy_hexbin) && views.len() >= 2 {
+        let x_sc = data_scale(&views[0..1])?;
+        let y_sc = data_scale(&views[1..2])?;
+        (y_sc, Some((x_sc, y_sc)))
+    } else {
+        let mut sc = data_scale(&views)?;
+        if spec.kind == PlotKind::Bar || spec.kind == PlotKind::Barh {
+            sc.min = sc.min.min(0.0);
+            sc.max = sc.max.max(0.0);
+            if (sc.max - sc.min).abs() < f64::EPSILON {
+                sc.max += 1.0;
+            }
         }
-    }
+        (sc, None)
+    };
 
     let n = spec
         .series
@@ -323,15 +370,33 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             }
         }
         PlotKind::Scatter => {
-            for (si, values) in views.iter().enumerate() {
-                let color = palette(si);
-                for (i, v) in values.iter().enumerate() {
-                    if let Some(v) = v.filter(|v| v.is_finite()) {
-                        body.push_str(&format!(
-                            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2.5\" fill=\"{color}\"/>",
-                            x(i),
-                            y(v)
-                        ));
+            if let Some((ref x_sc, ref y_sc)) = xy_scales {
+                let color = palette(0);
+                let x_map = |v: f64| MARGIN_LEFT + (v - x_sc.min) / (x_sc.max - x_sc.min) * PLOT_W;
+                let y_map = |v: f64| MARGIN_TOP + (y_sc.max - v) / (y_sc.max - y_sc.min) * PLOT_H;
+                let len = views[0].len().min(views[1].len());
+                for i in 0..len {
+                    if let (Some(vx), Some(vy)) = (views[0][i], views[1][i]) {
+                        if vx.is_finite() && vy.is_finite() {
+                            body.push_str(&format!(
+                                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2.5\" fill=\"{color}\"/>",
+                                x_map(vx),
+                                y_map(vy)
+                            ));
+                        }
+                    }
+                }
+            } else {
+                for (si, values) in views.iter().enumerate() {
+                    let color = palette(si);
+                    for (i, v) in values.iter().enumerate() {
+                        if let Some(v) = v.filter(|v| v.is_finite()) {
+                            body.push_str(&format!(
+                                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2.5\" fill=\"{color}\"/>",
+                                x(i),
+                                y(v)
+                            ));
+                        }
                     }
                 }
             }
@@ -557,16 +622,24 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 ));
             }
 
-            let (min_x, max_x) = pairs
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
-                    (mn.min(p.0), mx.max(p.0))
-                });
-            let (min_y, max_y) = pairs
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
-                    (mn.min(p.1), mx.max(p.1))
-                });
+            let (min_x, max_x) = if let Some((ref x_sc, _)) = xy_scales {
+                (x_sc.min, x_sc.max)
+            } else {
+                pairs
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
+                        (mn.min(p.0), mx.max(p.0))
+                    })
+            };
+            let (min_y, max_y) = if let Some((_, ref y_sc)) = xy_scales {
+                (y_sc.min, y_sc.max)
+            } else {
+                pairs
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
+                        (mn.min(p.1), mx.max(p.1))
+                    })
+            };
             let span_x = (max_x - min_x).max(1.0);
             let span_y = (max_y - min_y).max(1.0);
             let grid_nx = 16;
@@ -650,6 +723,11 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             }
             entries
         }
+    } else if xy_scales.is_some() {
+        vec![(
+            format!("{} vs {}", spec.series[1].name, spec.series[0].name),
+            palette(0),
+        )]
     } else {
         spec.series
             .iter()
@@ -659,6 +737,8 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
     };
     let axes = if spec.kind == PlotKind::Pie {
         String::new()
+    } else if let Some((ref x_sc, ref y_sc)) = xy_scales {
+        svg_numeric_2d_axes(x_sc, y_sc)
     } else if spec.kind == PlotKind::Barh {
         svg_horizontal_axes(&scale, &x_labels)
     } else {
@@ -1496,4 +1576,105 @@ mod tests {
             "hexbin must contain binned circles"
         );
     }
+
+    #[test]
+    fn scatter_xy_renders_numeric_2d_axes_and_mapped_coordinates() {
+        let spec = PlotSpec {
+            method: "DataFrame.plot.scatter(x='wt', y='mpg')".to_owned(),
+            kind: PlotKind::Scatter,
+            series: vec![
+                series("wt", floats(&[10.0, 20.0, 30.0])),
+                series("mpg", floats(&[100.0, 200.0, 300.0])),
+            ],
+        };
+        let svg = spec.to_svg().expect("xy scatter renders");
+        // Must contain circles for data points
+        assert!(svg.contains("<circle"));
+        assert_eq!(svg.matches("<circle").count(), 3);
+        // Point (10.0, 100.0) -> left (56.00), bottom (358.00)
+        assert!(
+            svg.contains("cx=\"56.00\" cy=\"358.00\""),
+            "lower-left point must map to (56.00, 358.00): {svg}"
+        );
+        // Point (30.0, 300.0) -> right (624.00), top (30.00)
+        assert!(
+            svg.contains("cx=\"624.00\" cy=\"30.00\""),
+            "upper-right point must map to (624.00, 30.00): {svg}"
+        );
+        // Point (20.0, 200.0) -> center (340.00, 194.00)
+        assert!(
+            svg.contains("cx=\"340.00\" cy=\"194.00\""),
+            "center point must map to (340.00, 194.00): {svg}"
+        );
+        // Must contain numeric 2D tick labels for both axes
+        assert!(svg.contains(">10</text>"));
+        assert!(svg.contains(">30</text>"));
+        assert!(svg.contains(">100</text>"));
+        assert!(svg.contains(">300</text>"));
+        // Legend must display "mpg vs wt"
+        assert!(svg.contains("mpg vs wt"));
+    }
+
+    #[test]
+    fn hexbin_xy_renders_numeric_2d_axes_and_legend() {
+        let spec = PlotSpec {
+            method: "DataFrame.plot.hexbin(x='a', y='b')".to_owned(),
+            kind: PlotKind::Hexbin,
+            series: vec![
+                series("a", floats(&[1.0, 2.0, 3.0, 4.0, 5.0])),
+                series("b", floats(&[10.0, 20.0, 30.0, 40.0, 50.0])),
+            ],
+        };
+        let svg = spec.to_svg().expect("xy hexbin renders");
+        assert!(svg.contains("<circle"));
+        assert!(svg.contains("b vs a"));
+        assert!(svg.contains(">1</text>"));
+        assert!(svg.contains(">5</text>"));
+        assert!(svg.contains(">10</text>"));
+        assert!(svg.contains(">50</text>"));
+    }
+
+    #[test]
+    fn dataframe_scatter_and_hexbin_xy_methods() {
+        use crate::{DataFrame, IndexLabel, Series};
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let sx = Series::from_values("x", labels.clone(), floats(&[10.0, 20.0, 30.0])).unwrap();
+        let sy = Series::from_values("y", labels, floats(&[100.0, 200.0, 300.0])).unwrap();
+        let df = DataFrame::from_series(vec![sx, sy]).unwrap();
+
+        // 1. scatter_xy
+        let sc_spec = df.scatter_xy("x", "y").expect("scatter_xy");
+        assert_eq!(sc_spec.kind, PlotKind::Scatter);
+        assert_eq!(sc_spec.method, "DataFrame.plot.scatter(x='x', y='y')");
+        let svg = df.scatter_xy_to_svg("x", "y").expect("scatter_xy_to_svg");
+        assert!(svg.contains("<circle"));
+        let html = df.scatter_xy_to_html("x", "y").expect("scatter_xy_to_html");
+        assert!(html.contains("<svg"));
+
+        // 2. hexbin_xy & hexbin_columns
+        let hb_spec = df.hexbin_xy("x", "y").expect("hexbin_xy");
+        assert_eq!(hb_spec.kind, PlotKind::Hexbin);
+        let hb_svg = df.hexbin_xy_to_svg("x", "y").expect("hexbin_xy_to_svg");
+        assert!(hb_svg.contains("<circle"));
+        let hb_html = df.hexbin_xy_to_html("x", "y").expect("hexbin_xy_to_html");
+        assert!(hb_html.contains("<svg"));
+
+        // 3. plot_xy
+        let p_sc = df
+            .plot_xy(PlotKind::Scatter, "x", "y")
+            .expect("plot_xy scatter");
+        assert_eq!(p_sc.kind, PlotKind::Scatter);
+        let p_hb = df
+            .plot_xy(PlotKind::Hexbin, "x", "y")
+            .expect("plot_xy hexbin");
+        assert_eq!(p_hb.kind, PlotKind::Hexbin);
+        let p_line = df.plot_xy(PlotKind::Line, "x", "y").expect("plot_xy line");
+        assert_eq!(p_line.kind, PlotKind::Line);
+        assert_eq!(p_line.series.len(), 2);
+    }
 }
+
