@@ -300,6 +300,144 @@ pub struct ScatterMatrixSpec {
     pub series: Vec<PlotSeriesSpec>,
 }
 
+/// Backend-neutral table plot request produced by `table()` hooks (pandas `pandas.plotting.table`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TablePlotSpec {
+    pub method: String,
+    pub row_labels: Vec<String>,
+    pub col_labels: Vec<String>,
+    pub cells: Vec<Vec<String>>,
+}
+
+/// Free functions matching `pandas.plotting` (e.g. `pandas.plotting.scatter_matrix`, `pandas.plotting.table`).
+pub mod plotting {
+    use crate::{
+        BoxPlotSpec, DataFrame, DataFrameGroupBy, FrameError, HistogramSpec, PlotSpec,
+        ScatterMatrixSpec, Series, TablePlotSpec,
+    };
+
+    /// Draw a matrix of scatter plots (pandas `pandas.plotting.scatter_matrix`).
+    pub fn scatter_matrix(
+        frame: &DataFrame,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<ScatterMatrixSpec, FrameError> {
+        frame.scatter_matrix(alpha, diagonal, range_padding)
+    }
+
+    /// Draw a matrix of scatter plots with explicit column selection.
+    pub fn scatter_matrix_with_cols(
+        frame: &DataFrame,
+        cols: Option<&[&str]>,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<ScatterMatrixSpec, FrameError> {
+        frame.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)
+    }
+
+    /// Generate Andrews curves for visualizing clusters of multivariate data (pandas `pandas.plotting.andrews_curves`).
+    pub fn andrews_curves(
+        frame: &DataFrame,
+        class_column: &str,
+        samples: usize,
+    ) -> Result<PlotSpec, FrameError> {
+        frame.andrews_curves(class_column, samples)
+    }
+
+    /// Parallel coordinates plot (pandas `pandas.plotting.parallel_coordinates`).
+    pub fn parallel_coordinates(
+        frame: &DataFrame,
+        class_column: &str,
+        cols: Option<&[&str]>,
+    ) -> Result<PlotSpec, FrameError> {
+        frame.parallel_coordinates(class_column, cols)
+    }
+
+    /// Plot a multidimensional dataset in 2D (pandas `pandas.plotting.radviz`).
+    pub fn radviz(
+        frame: &DataFrame,
+        class_column: &str,
+        cols: Option<&[&str]>,
+    ) -> Result<PlotSpec, FrameError> {
+        frame.radviz(class_column, cols)
+    }
+
+    /// Bootstrap plot on mean statistic via resampling (pandas `pandas.plotting.bootstrap_plot`).
+    pub fn bootstrap_plot(
+        series: &Series,
+        size: usize,
+        samples: usize,
+    ) -> Result<HistogramSpec, FrameError> {
+        series.bootstrap_plot(size, samples)
+    }
+
+    /// Autocorrelation plot for time series (pandas `pandas.plotting.autocorrelation_plot`).
+    pub fn autocorrelation_plot(series: &Series) -> Result<PlotSpec, FrameError> {
+        series.autocorrelation_plot()
+    }
+
+    /// Lag plot for time series (pandas `pandas.plotting.lag_plot`).
+    pub fn lag_plot(series: &Series, lag: usize) -> Result<PlotSpec, FrameError> {
+        series.lag_plot(lag)
+    }
+
+    /// Make a box plot of DataFrame columns (pandas `pandas.plotting.boxplot`).
+    pub fn boxplot(frame: &DataFrame) -> Result<BoxPlotSpec, FrameError> {
+        frame.boxplot()
+    }
+
+    /// Make a box plot from DataFrame columns (pandas `pandas.plotting.boxplot_frame`).
+    pub fn boxplot_frame(frame: &DataFrame) -> Result<BoxPlotSpec, FrameError> {
+        frame.boxplot()
+    }
+
+    /// Make box plots from DataFrameGroupBy (pandas `pandas.plotting.boxplot_frame_groupby`).
+    pub fn boxplot_frame_groupby(grouped: &DataFrameGroupBy<'_>) -> Result<BoxPlotSpec, FrameError> {
+        grouped.boxplot()
+    }
+
+    /// Draw histogram of DataFrame columns (pandas `pandas.plotting.hist_frame`).
+    pub fn hist_frame(frame: &DataFrame) -> Result<HistogramSpec, FrameError> {
+        frame.hist()
+    }
+
+    /// Draw histogram of the input Series (pandas `pandas.plotting.hist_series`).
+    pub fn hist_series(series: &Series) -> Result<HistogramSpec, FrameError> {
+        series.hist()
+    }
+
+    /// Helper function to convert DataFrame to a table plot specification (pandas `pandas.plotting.table`).
+    pub fn table(frame: &DataFrame) -> Result<TablePlotSpec, FrameError> {
+        frame.table()
+    }
+
+    /// Helper function to convert DataFrame to a table plot with custom row and column labels.
+    pub fn table_frame(
+        frame: &DataFrame,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<TablePlotSpec, FrameError> {
+        frame.table_with_labels(row_labels, col_labels)
+    }
+
+    /// Helper function to convert Series to a table plot specification.
+    pub fn table_series(
+        series: &Series,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<TablePlotSpec, FrameError> {
+        series.table_with_labels(row_labels, col_labels)
+    }
+
+    /// Register pandas formatters and converters with matplotlib (no-op compatibility hook).
+    pub fn register_matplotlib_converters() {}
+
+    /// Deregister pandas formatters and converters with matplotlib (no-op compatibility hook).
+    pub fn deregister_matplotlib_converters() {}
+}
+
 fn plot_series_spec(
     name: impl Into<String>,
     index: Vec<IndexLabel>,
@@ -333,6 +471,45 @@ pub(crate) fn scalar_plot_label(value: &Scalar) -> String {
         Scalar::Datetime64(value) => format_datetime_ns(*value),
         Scalar::Period(ordinal) => ordinal.calendar_string(),
         Scalar::Interval(interval) => format!("{interval}"),
+    }
+}
+
+pub(crate) fn format_plot_table_scalar(val: &Scalar) -> String {
+    match val {
+        Scalar::Null(_) => "NaN".to_string(),
+        Scalar::Bool(b) => {
+            if *b {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            }
+        }
+        Scalar::Int64(v) => v.to_string(),
+        Scalar::Float64(v) => {
+            if v.is_nan() {
+                "NaN".to_string()
+            } else if *v == v.round() && v.abs() < 1e15 {
+                format!("{v:.1}")
+            } else {
+                v.to_string()
+            }
+        }
+        Scalar::Utf8(s) => s.clone(),
+        Scalar::Timedelta64(v) => Timedelta::format(*v),
+        Scalar::Datetime64(v) => format_datetime_ns(*v),
+        Scalar::Period(v) => v.calendar_string(),
+        Scalar::Interval(interval) => format!("{interval}"),
+    }
+}
+
+pub(crate) fn format_plot_index_label(l: &IndexLabel) -> String {
+    match l {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Utf8(s) => s.clone(),
+        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
+        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        IndexLabel::Null(_) => l.to_string(),
     }
 }
 
@@ -8441,6 +8618,90 @@ impl Series {
         path: P,
     ) -> Result<(), FrameError> {
         self.bootstrap_plot(size, samples)?.save(path)
+    }
+
+    /// Return a backend-neutral table plot request (pandas `pandas.plotting.table(ax, series, ...)`).
+    pub fn table(&self) -> Result<TablePlotSpec, FrameError> {
+        self.table_with_labels(None, None)
+    }
+
+    /// Return a backend-neutral table plot request with optional custom row and column labels.
+    pub fn table_with_labels(
+        &self,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<TablePlotSpec, FrameError> {
+        let n = self.len();
+        if n == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "table requires a non-empty Series".to_owned(),
+            ));
+        }
+
+        let r_labels: Vec<String> = if let Some(rl) = row_labels {
+            if rl.len() != n {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "table: rowLabels length ({}) does not match Series length ({n})",
+                    rl.len()
+                )));
+            }
+            rl.iter().map(|s| (*s).to_string()).collect()
+        } else {
+            self.index.labels().iter().map(format_plot_index_label).collect()
+        };
+
+        let c_labels: Vec<String> = if let Some(cl) = col_labels {
+            if cl.len() != 1 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "table: colLabels length ({}) must be 1 for Series",
+                    cl.len()
+                )));
+            }
+            cl.iter().map(|s| (*s).to_string()).collect()
+        } else {
+            vec![self.name().to_string()]
+        };
+
+        let mut cells = Vec::with_capacity(n);
+        let col_vals = self.column.values();
+        for val in col_vals {
+            cells.push(vec![format_plot_table_scalar(val)]);
+        }
+
+        Ok(TablePlotSpec {
+            method: "pandas.plotting.table".to_owned(),
+            row_labels: r_labels,
+            col_labels: c_labels,
+            cells,
+        })
+    }
+
+    /// Convenience helper: render Series table directly to deterministic SVG string.
+    pub fn table_to_svg(
+        &self,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        self.table_with_labels(row_labels, col_labels)?.to_svg()
+    }
+
+    /// Convenience helper: render Series table directly to HTML figure snippet.
+    pub fn table_to_html(
+        &self,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        self.table_with_labels(row_labels, col_labels)?.to_html()
+    }
+
+    /// Convenience helper: save rendered Series table directly to disk.
+    pub fn table_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<(), FrameError> {
+        self.table_with_labels(row_labels, col_labels)?.save(path)
     }
 
     /// Return a backend-neutral pandas-style line plot request.
@@ -65842,6 +66103,117 @@ impl DataFrame {
         range_padding: Option<f64>,
     ) -> Result<(), FrameError> {
         self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?.save(path)
+    }
+
+    /// Return a backend-neutral table plot request (pandas `pandas.plotting.table(ax, frame, ...)`).
+    pub fn table(&self) -> Result<TablePlotSpec, FrameError> {
+        self.table_with_labels(None, None)
+    }
+
+    /// Return a backend-neutral table plot request with optional custom row and column labels.
+    pub fn table_with_labels(
+        &self,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<TablePlotSpec, FrameError> {
+        let n_rows = self.len();
+        if n_rows == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "table requires a non-empty DataFrame".to_owned(),
+            ));
+        }
+
+        let n_cols = self.num_columns();
+        if n_cols == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "table requires DataFrame with at least one column".to_owned(),
+            ));
+        }
+
+        let r_labels: Vec<String> = if let Some(rl) = row_labels {
+            if rl.len() != n_rows {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "table: rowLabels length ({}) does not match DataFrame row count ({n_rows})",
+                    rl.len()
+                )));
+            }
+            rl.iter().map(|s| (*s).to_string()).collect()
+        } else {
+            self.index.labels().iter().map(format_plot_index_label).collect()
+        };
+
+        let c_labels: Vec<String> = if let Some(cl) = col_labels {
+            if cl.len() != n_cols {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "table: colLabels length ({}) does not match DataFrame column count ({n_cols})",
+                    cl.len()
+                )));
+            }
+            cl.iter().map(|s| (*s).to_string()).collect()
+        } else {
+            self.column_order.iter().map(|s| s.as_str().to_string()).collect()
+        };
+
+        let mut col_slices = Vec::with_capacity(n_cols);
+        for col_name in &self.column_order {
+            if let Some(col) = self.column(col_name) {
+                col_slices.push(Some(col.values()));
+            } else {
+                col_slices.push(None);
+            }
+        }
+
+        let mut cells = Vec::with_capacity(n_rows);
+        for row_idx in 0..n_rows {
+            let mut row_cells = Vec::with_capacity(n_cols);
+            for col_vals in &col_slices {
+                if let Some(vals) = col_vals {
+                    if let Some(val) = vals.get(row_idx) {
+                        row_cells.push(format_plot_table_scalar(val));
+                    } else {
+                        row_cells.push("NaN".to_string());
+                    }
+                } else {
+                    row_cells.push("NaN".to_string());
+                }
+            }
+            cells.push(row_cells);
+        }
+
+        Ok(TablePlotSpec {
+            method: "pandas.plotting.table".to_owned(),
+            row_labels: r_labels,
+            col_labels: c_labels,
+            cells,
+        })
+    }
+
+    /// Convenience helper: render DataFrame table directly to deterministic SVG string.
+    pub fn table_to_svg(
+        &self,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        self.table_with_labels(row_labels, col_labels)?.to_svg()
+    }
+
+    /// Convenience helper: render DataFrame table directly to HTML figure snippet.
+    pub fn table_to_html(
+        &self,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        self.table_with_labels(row_labels, col_labels)?.to_html()
+    }
+
+    /// Convenience helper: save rendered DataFrame table directly to disk.
+    pub fn table_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        row_labels: Option<&[&str]>,
+        col_labels: Option<&[&str]>,
+    ) -> Result<(), FrameError> {
+        self.table_with_labels(row_labels, col_labels)?.save(path)
     }
 
     /// `pd.DataFrame(dict_of_series, columns=[...])` — SELECT the named columns

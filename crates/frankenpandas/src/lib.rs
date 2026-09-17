@@ -60,6 +60,7 @@ pub use fp_frame::{
     Rolling,
     ScatterMatrixSpec,
     Series,
+    TablePlotSpec,
     SeriesGroupBy,
     SeriesResetIndexResult,
     SparseAccessor,
@@ -86,6 +87,7 @@ pub use fp_frame::{
     to_datetime_with_options, to_datetime_with_unit, to_numeric, to_timedelta,
     to_timedelta_with_options, to_timedelta_with_unit,
 };
+pub use fp_frame::plotting;
 // ── GroupBy errors ──────────────────────────────────────────────────────
 pub use fp_groupby::{AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions};
 pub use fp_index::{
@@ -553,6 +555,7 @@ pub mod prelude {
         Scalar,
         ScatterMatrixSpec,
         Series,
+        TablePlotSpec,
         SeriesGroupBy,
         SeriesIoExt,
         SeriesResetIndexResult,
@@ -1241,6 +1244,7 @@ mod tests {
         let _is_af: fn(AggFunc) -> _ = |x| x;
         let _is_gbo: fn(GroupByOptions) -> _ = |x| x;
         let _is_gbeo: fn(GroupByExecutionOptions) -> _ = |x| x;
+        let _is_tps: fn(TablePlotSpec) -> _ = |x| x;
         let _ = index_to_frame;
         let _ = index_to_series;
 

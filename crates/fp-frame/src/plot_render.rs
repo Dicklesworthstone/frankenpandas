@@ -19,7 +19,7 @@
 
 use crate::{
     BoxPlotSpec, FrameError, HistogramSpec, PlotKind, PlotSeriesSpec, PlotSpec, Scalar,
-    ScatterMatrixSpec,
+    ScatterMatrixSpec, TablePlotSpec,
 };
 
 // ── Geometry / palette ─────────────────────────────────────────────────────
@@ -1237,6 +1237,40 @@ impl ScatterMatrixSpec {
     }
 }
 
+impl TablePlotSpec {
+    /// Render this table plot specification to deterministic SVG XML.
+    pub fn to_svg(&self) -> Result<String, FrameError> {
+        table_body(self)
+    }
+
+    /// [`TablePlotSpec::to_svg`] as UTF-8 bytes.
+    pub fn to_svg_bytes(&self) -> Result<Vec<u8>, FrameError> {
+        self.to_svg().map(String::into_bytes)
+    }
+
+    /// Wrap the deterministic SVG in an HTML figure container.
+    pub fn to_html(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_html(&s))
+    }
+
+    /// Render this table plot spec to a complete HTML5 page document.
+    pub fn to_html_page(&self, title: Option<&str>) -> Result<String, FrameError> {
+        let title_str = title.unwrap_or(&self.method);
+        self.to_svg().map(|s| wrap_svg_html_page(&s, title_str))
+    }
+
+    /// Render this table plot spec to Markdown-compatible HTML embedding.
+    pub fn to_markdown(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_markdown(&s))
+    }
+
+    /// Save the rendered table to disk (`.svg`, `.html`/`.htm`, or `.md`).
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        let svg = self.to_svg()?;
+        save_rendered_svg(&svg, path, &self.method)
+    }
+}
+
 fn scatter_matrix_body(spec: &ScatterMatrixSpec) -> Result<String, FrameError> {
     let n = spec.columns.len();
     if n == 0 {
@@ -1519,6 +1553,176 @@ fn scatter_matrix_body(spec: &ScatterMatrixSpec) -> Result<String, FrameError> {
                     ));
                 }
             }
+        }
+    }
+
+    svg.push_str("</svg>");
+    Ok(svg)
+}
+
+fn table_body(spec: &TablePlotSpec) -> Result<String, FrameError> {
+    let n_rows = spec.cells.len();
+    if n_rows == 0 {
+        return Err(FrameError::CompatibilityRejected(
+            "table requires at least one row".to_owned(),
+        ));
+    }
+    let n_cols = spec.cells[0].len();
+    if n_cols == 0 {
+        return Err(FrameError::CompatibilityRejected(
+            "table requires at least one column".to_owned(),
+        ));
+    }
+
+    for (idx, row) in spec.cells.iter().enumerate() {
+        if row.len() != n_cols {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "table: row {idx} length ({}) does not match column count ({n_cols})",
+                row.len()
+            )));
+        }
+    }
+
+    let has_row_labels = !spec.row_labels.is_empty();
+    if has_row_labels && spec.row_labels.len() != n_rows {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "table: row_labels length ({}) does not match row count ({n_rows})",
+            spec.row_labels.len()
+        )));
+    }
+
+    let has_col_labels = !spec.col_labels.is_empty();
+    if has_col_labels && spec.col_labels.len() != n_cols {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "table: col_labels length ({}) does not match column count ({n_cols})",
+            spec.col_labels.len()
+        )));
+    }
+
+    const ROW_H: f64 = 28.0;
+    const HEADER_H: f64 = 32.0;
+    const PAD_X: f64 = 20.0;
+    const PAD_Y: f64 = 20.0;
+    const TITLE_H: f64 = 26.0;
+
+    let row_label_w = if has_row_labels {
+        let max_len = spec
+            .row_labels
+            .iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(4);
+        (max_len as f64 * 8.5 + 24.0).clamp(70.0, 200.0)
+    } else {
+        0.0
+    };
+
+    let mut col_widths = Vec::with_capacity(n_cols);
+    for col_idx in 0..n_cols {
+        let header_len = if has_col_labels {
+            spec.col_labels[col_idx].chars().count()
+        } else {
+            0
+        };
+        let cell_max_len = spec
+            .cells
+            .iter()
+            .map(|row| row[col_idx].chars().count())
+            .max()
+            .unwrap_or(0);
+        let max_len = header_len.max(cell_max_len);
+        let w = (max_len as f64 * 8.5 + 24.0).clamp(65.0, 220.0);
+        col_widths.push(w);
+    }
+
+    let total_table_w: f64 = row_label_w + col_widths.iter().sum::<f64>();
+    let total_table_h: f64 =
+        (if has_col_labels { HEADER_H } else { 0.0 }) + (n_rows as f64 * ROW_H);
+
+    let canvas_w = (total_table_w + PAD_X * 2.0).max(320.0);
+    let canvas_h = total_table_h + PAD_Y * 2.0 + TITLE_H;
+
+    let mut svg = String::with_capacity(4096);
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {canvas_w:.1} {canvas_h:.1}\" width=\"{canvas_w:.1}\" height=\"{canvas_h:.1}\">\n"
+    ));
+    svg.push_str("  <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n");
+
+    let title_text = if !spec.method.is_empty() {
+        &spec.method
+    } else {
+        "pandas.plotting.table"
+    };
+    svg.push_str(&format!(
+        "  <text x=\"{PAD_X:.1}\" y=\"{:.1}\" font-family=\"system-ui, -apple-system, sans-serif\" font-size=\"13\" font-weight=\"bold\" fill=\"#1e293b\">{}</text>\n",
+        PAD_Y + 14.0,
+        esc(title_text)
+    ));
+
+    let start_x = PAD_X;
+    let start_y = PAD_Y + TITLE_H;
+
+    // Header row (column labels)
+    if has_col_labels {
+        let mut curr_x = start_x;
+        if has_row_labels {
+            svg.push_str(&format!(
+                "  <rect x=\"{curr_x:.1}\" y=\"{start_y:.1}\" width=\"{row_label_w:.1}\" height=\"{HEADER_H:.1}\" fill=\"#f1f5f9\" stroke=\"#cbd5e1\" stroke-width=\"1\"/>\n"
+            ));
+            curr_x += row_label_w;
+        }
+        for (col_idx, w) in col_widths.iter().enumerate() {
+            let label = &spec.col_labels[col_idx];
+            svg.push_str(&format!(
+                "  <rect x=\"{curr_x:.1}\" y=\"{start_y:.1}\" width=\"{w:.1}\" height=\"{HEADER_H:.1}\" fill=\"#f1f5f9\" stroke=\"#cbd5e1\" stroke-width=\"1\"/>\n"
+            ));
+            let text_x = curr_x + w / 2.0;
+            let text_y = start_y + HEADER_H / 2.0 + 4.0;
+            svg.push_str(&format!(
+                "  <text x=\"{text_x:.1}\" y=\"{text_y:.1}\" text-anchor=\"middle\" font-family=\"system-ui, -apple-system, sans-serif\" font-size=\"12\" font-weight=\"bold\" fill=\"#334155\">{}</text>\n",
+                esc(label)
+            ));
+            curr_x += w;
+        }
+    }
+
+    let rows_start_y = if has_col_labels {
+        start_y + HEADER_H
+    } else {
+        start_y
+    };
+
+    for row_idx in 0..n_rows {
+        let row_y = rows_start_y + (row_idx as f64 * ROW_H);
+        let row_bg = if row_idx % 2 == 0 { "#ffffff" } else { "#f8fafc" };
+        let mut curr_x = start_x;
+
+        if has_row_labels {
+            let r_label = &spec.row_labels[row_idx];
+            svg.push_str(&format!(
+                "  <rect x=\"{curr_x:.1}\" y=\"{row_y:.1}\" width=\"{row_label_w:.1}\" height=\"{ROW_H:.1}\" fill=\"#f8fafc\" stroke=\"#cbd5e1\" stroke-width=\"1\"/>\n"
+            ));
+            let text_x = curr_x + 10.0;
+            let text_y = row_y + ROW_H / 2.0 + 4.0;
+            svg.push_str(&format!(
+                "  <text x=\"{text_x:.1}\" y=\"{text_y:.1}\" text-anchor=\"start\" font-family=\"system-ui, -apple-system, sans-serif\" font-size=\"12\" font-weight=\"600\" fill=\"#475569\">{}</text>\n",
+                esc(r_label)
+            ));
+            curr_x += row_label_w;
+        }
+
+        for (col_idx, w) in col_widths.iter().enumerate() {
+            let cell_val = &spec.cells[row_idx][col_idx];
+            svg.push_str(&format!(
+                "  <rect x=\"{curr_x:.1}\" y=\"{row_y:.1}\" width=\"{w:.1}\" height=\"{ROW_H:.1}\" fill=\"{row_bg}\" stroke=\"#cbd5e1\" stroke-width=\"1\"/>\n"
+            ));
+            let text_x = curr_x + w / 2.0;
+            let text_y = row_y + ROW_H / 2.0 + 4.0;
+            svg.push_str(&format!(
+                "  <text x=\"{text_x:.1}\" y=\"{text_y:.1}\" text-anchor=\"middle\" font-family=\"system-ui, -apple-system, sans-serif\" font-size=\"12\" fill=\"#1e293b\">{}</text>\n",
+                esc(cell_val)
+            ));
+            curr_x += w;
         }
     }
 
@@ -3048,6 +3252,137 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(&sm_svg_file);
         let _ = std::fs::remove_file(&sm_html_file);
+        let _ = std::fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn table_full_pipeline_and_error_modes() {
+        use crate::{plotting, DataFrame, IndexLabel, Series};
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+
+        let s1 = Series::from_values("a", labels.clone(), floats(&[1.0, 2.5, 3.0])).unwrap();
+        let s2 = Series::from_values("b", labels.clone(), ints(&[10, 20, 30])).unwrap();
+        let s3 = Series::from_values(
+            "c",
+            labels.clone(),
+            vec![
+                Scalar::Utf8("x".to_string()),
+                Scalar::Utf8("y".to_string()),
+                Scalar::Null(fp_types::NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let df = DataFrame::from_series(vec![s1.clone(), s2.clone(), s3.clone()]).unwrap();
+
+        // 1. DataFrame::table() default
+        let spec = df.table().expect("default df.table()");
+        assert_eq!(spec.method, "pandas.plotting.table");
+        assert_eq!(spec.row_labels, vec!["0", "1", "2"]);
+        assert_eq!(spec.col_labels, vec!["a", "b", "c"]);
+        assert_eq!(spec.cells.len(), 3);
+        assert_eq!(spec.cells[0], vec!["1.0", "10", "x"]);
+        assert_eq!(spec.cells[1], vec!["2.5", "20", "y"]);
+        assert_eq!(spec.cells[2], vec!["3.0", "30", "NaN"]);
+
+        // SVG rendering
+        let svg = df.table_to_svg(None, None).expect("df.table_to_svg()");
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("pandas.plotting.table"));
+        assert!(svg.contains("1.0"));
+        assert!(svg.contains("10"));
+        assert!(svg.contains("NaN"));
+
+        // HTML rendering
+        let html = df.table_to_html(None, None).expect("df.table_to_html()");
+        assert!(html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(html.contains("<svg"));
+
+        // HTML page & markdown
+        let page = spec.to_html_page(Some("Custom Title")).expect("to_html_page");
+        assert!(page.contains("<title>Custom Title</title>"));
+        assert!(page.contains("<svg"));
+        let md = spec.to_markdown().expect("to_markdown");
+        assert!(md.contains("<div class=\"frankenpandas-plot\">"));
+
+        // Save to file
+        let temp_dir = std::env::temp_dir().join(format!("fp_table_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let table_svg_file = temp_dir.join("table.svg");
+        let table_html_file = temp_dir.join("table.html");
+        df.table_to_file(&table_svg_file, None, None).expect("table_to_file svg");
+        assert!(table_svg_file.exists());
+        df.table_to_file(&table_html_file, None, None).expect("table_to_file html");
+        assert!(table_html_file.exists());
+
+        // Custom labels
+        let spec_custom = df
+            .table_with_labels(
+                Some(&["rowA", "rowB", "rowC"]),
+                Some(&["col1", "col2", "col3"]),
+            )
+            .expect("table_with_labels");
+        assert_eq!(spec_custom.row_labels, vec!["rowA", "rowB", "rowC"]);
+        assert_eq!(spec_custom.col_labels, vec!["col1", "col2", "col3"]);
+
+        // 2. Series::table()
+        let s_spec = s1.table().expect("s.table()");
+        assert_eq!(s_spec.method, "pandas.plotting.table");
+        assert_eq!(s_spec.row_labels, vec!["0", "1", "2"]);
+        assert_eq!(s_spec.col_labels, vec!["a"]);
+        assert_eq!(s_spec.cells.len(), 3);
+        assert_eq!(s_spec.cells[0], vec!["1.0"]);
+        assert_eq!(s_spec.cells[1], vec!["2.5"]);
+        assert_eq!(s_spec.cells[2], vec!["3.0"]);
+
+        let s_svg = s1.table_to_svg(None, None).expect("s.table_to_svg");
+        assert!(s_svg.contains("<svg"));
+        let s_html = s1.table_to_html(None, None).expect("s.table_to_html");
+        assert!(s_html.contains("<svg"));
+
+        let table_s_svg_file = temp_dir.join("table_s.svg");
+        s1.table_to_file(&table_s_svg_file, None, None).expect("s.table_to_file");
+        assert!(table_s_svg_file.exists());
+
+        // 3. plotting::table free functions
+        let plot_df_spec = plotting::table(&df).expect("plotting::table(&df)");
+        assert_eq!(plot_df_spec.row_labels.len(), 3);
+        let plot_df_custom = plotting::table_frame(&df, Some(&["r1", "r2", "r3"]), None)
+            .expect("plotting::table_frame");
+        assert_eq!(plot_df_custom.row_labels, vec!["r1", "r2", "r3"]);
+        let plot_s_spec = plotting::table_series(&s1, None, Some(&["val"])).expect("plotting::table_series");
+        assert_eq!(plot_s_spec.col_labels, vec!["val"]);
+
+        // 4. Error modes
+        // Empty frame
+        let empty_df = DataFrame::from_series(vec![]).unwrap();
+        assert!(empty_df.table().is_err());
+        assert!(empty_df.table_to_svg(None, None).is_err());
+
+        // Empty series
+        let empty_s = Series::from_values("empty", vec![], vec![]).unwrap();
+        assert!(empty_s.table().is_err());
+        assert!(empty_s.table_to_svg(None, None).is_err());
+
+        // Label length mismatch
+        assert!(df.table_with_labels(Some(&["too", "few"]), None).is_err());
+        assert!(df.table_with_labels(None, Some(&["too", "few"])).is_err());
+        assert!(s1.table_with_labels(Some(&["too", "few"]), None).is_err());
+        assert!(s1.table_with_labels(None, Some(&["c1", "c2"])).is_err());
+
+        // Unsupported extension
+        let invalid_ext = temp_dir.join("table.png");
+        assert!(df.table_to_file(&invalid_ext, None, None).is_err());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&table_svg_file);
+        let _ = std::fs::remove_file(&table_html_file);
+        let _ = std::fs::remove_file(&table_s_svg_file);
         let _ = std::fs::remove_dir(&temp_dir);
     }
 }
