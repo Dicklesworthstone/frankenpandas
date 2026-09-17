@@ -7140,6 +7140,14 @@ fn facade_prelude_plotting_api_comprehensive() -> Result<(), Box<dyn std::error:
     let s_hexbin_svg = s.hexbin_to_svg()?;
     assert!(s_hexbin_svg.starts_with("<svg"));
 
+    let s_lag_svg = s.lag_plot_to_svg(1)?;
+    assert!(s_lag_svg.starts_with("<svg"));
+    assert!(s_lag_svg.contains("<circle"));
+
+    let s_ac_svg = s.autocorrelation_plot_to_svg()?;
+    assert!(s_ac_svg.starts_with("<svg"));
+    assert!(s_ac_svg.contains("<polyline"));
+
     // 6. GroupBy plotting
     let grouped = df.groupby(&["group"])?;
     let g_line_svg = grouped.plot_to_svg()?;
@@ -7159,6 +7167,19 @@ fn facade_prelude_plotting_api_comprehensive() -> Result<(), Box<dyn std::error:
 
     let g_box_cols_svg = grouped.boxplot_columns_to_svg(&["x"])?;
     assert!(g_box_cols_svg.starts_with("<svg"));
+
+    // Multi-column and all-column grouped plotting on DataFrame
+    let df_hist_by_svg = df.hist_columns_by_to_svg(&["x", "y"], "group", 5)?;
+    assert!(df_hist_by_svg.starts_with("<svg"));
+
+    let df_hist_all_svg = df.hist_by_all_to_svg("group", 4)?;
+    assert!(df_hist_all_svg.starts_with("<svg"));
+
+    let df_box_by_svg = df.boxplot_columns_by_to_svg(&["x", "y"], "group")?;
+    assert!(df_box_by_svg.starts_with("<svg"));
+
+    let df_box_all_svg = df.boxplot_by_all_to_svg("group")?;
+    assert!(df_box_all_svg.starts_with("<svg"));
 
     // 7. Save and format validation
     let temp_dir = std::env::temp_dir().join(format!("fp_facade_test_{}", std::process::id()));

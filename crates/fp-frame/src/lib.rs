@@ -8207,6 +8207,123 @@ impl Series {
         self.boxplot_by(by)?.save(path)
     }
 
+    /// Return a backend-neutral lag plot request plotting y(t) against y(t+lag) (pandas `pandas.plotting.lag_plot(series, lag=...)`).
+    pub fn lag_plot(&self, lag: usize) -> Result<PlotSpec, FrameError> {
+        if !self.column.dtype().is_numeric() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "lag_plot requires numeric values; found {:?}",
+                self.column.dtype()
+            )));
+        }
+        let n = self.len();
+        let effective_lag = if lag == 0 { 1 } else { lag };
+        if effective_lag >= n {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "lag {effective_lag} must be less than series length {n}"
+            )));
+        }
+        let count = n - effective_lag;
+        let mut labels = Vec::with_capacity(count);
+        let mut x_vals = Vec::with_capacity(count);
+        let mut y_vals = Vec::with_capacity(count);
+        let col_vals = self.column.values();
+        for i in 0..count {
+            labels.push(IndexLabel::Int64(i as i64));
+            x_vals.push(col_vals[i].clone());
+            y_vals.push(col_vals[i + effective_lag].clone());
+        }
+        let x_series = plot_series_spec(
+            "y(t)".to_owned(),
+            labels.clone(),
+            self.column.dtype(),
+            x_vals,
+            None,
+        );
+        let y_series = plot_series_spec(
+            format!("y(t+{effective_lag})"),
+            labels,
+            self.column.dtype(),
+            y_vals,
+            None,
+        );
+        Ok(PlotSpec {
+            method: format!("Series.plot.lag(lag={effective_lag})"),
+            kind: PlotKind::Scatter,
+            series: vec![x_series, y_series],
+        })
+    }
+
+    /// Convenience helper: render series lag plot directly to deterministic SVG string.
+    pub fn lag_plot_to_svg(&self, lag: usize) -> Result<String, FrameError> {
+        self.lag_plot(lag)?.to_svg()
+    }
+
+    /// Convenience helper: render series lag plot directly to HTML figure snippet.
+    pub fn lag_plot_to_html(&self, lag: usize) -> Result<String, FrameError> {
+        self.lag_plot(lag)?.to_html()
+    }
+
+    /// Convenience helper: save rendered series lag plot directly to disk.
+    pub fn lag_plot_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        lag: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.lag_plot(lag)?.save(path)
+    }
+
+    /// Return a backend-neutral autocorrelation plot request computing autocorrelation across all integer lags (pandas `pandas.plotting.autocorrelation_plot(series)`).
+    pub fn autocorrelation_plot(&self) -> Result<PlotSpec, FrameError> {
+        if !self.column.dtype().is_numeric() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "autocorrelation_plot requires numeric values; found {:?}",
+                self.column.dtype()
+            )));
+        }
+        let n = self.len();
+        if n < 2 {
+            return Err(FrameError::CompatibilityRejected(
+                "autocorrelation_plot requires at least 2 data points".to_owned(),
+            ));
+        }
+        let mut lag_labels = Vec::with_capacity(n - 1);
+        let mut autocorr_values = Vec::with_capacity(n - 1);
+        for k in 1..n {
+            let ac = self.autocorr(k)?;
+            lag_labels.push(IndexLabel::Int64(k as i64));
+            autocorr_values.push(Scalar::Float64(ac));
+        }
+        Ok(PlotSpec {
+            method: "Series.plot.autocorrelation".to_owned(),
+            kind: PlotKind::Line,
+            series: vec![plot_series_spec(
+                format!("{}_autocorr", self.name()),
+                lag_labels,
+                DType::Float64,
+                autocorr_values,
+                None,
+            )],
+        })
+    }
+
+    /// Convenience helper: render series autocorrelation plot directly to deterministic SVG string.
+    pub fn autocorrelation_plot_to_svg(&self) -> Result<String, FrameError> {
+        self.autocorrelation_plot()?.to_svg()
+    }
+
+    /// Convenience helper: render series autocorrelation plot directly to HTML figure snippet.
+    pub fn autocorrelation_plot_to_html(&self) -> Result<String, FrameError> {
+        self.autocorrelation_plot()?.to_html()
+    }
+
+    /// Convenience helper: save rendered series autocorrelation plot directly to disk.
+    pub fn autocorrelation_plot_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.autocorrelation_plot()?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style line plot request.
     pub fn line(&self) -> Result<PlotSpec, FrameError> {
         let mut spec = self.plot()?;
@@ -64587,6 +64704,143 @@ impl DataFrame {
         self.hist_by(column, by, bins)?.save(path)
     }
 
+    /// Return a backend-neutral histogram request grouping multiple numeric columns by values of another column (pandas `df.hist(column=[...], by=...)`).
+    pub fn hist_columns_by(
+        &self,
+        columns: &[&str],
+        by: &str,
+        bins: usize,
+    ) -> Result<HistogramSpec, FrameError> {
+        let by_col = self
+            .columns
+            .get(by)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{by}' not found")))?;
+
+        let mut target_cols = Vec::with_capacity(columns.len());
+        for &col_name in columns {
+            let col = self.columns.get(col_name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{col_name}' not found"))
+            })?;
+            target_cols.push((col_name, col));
+        }
+
+        let mut all_series = Vec::new();
+        for (col_name, col) in target_cols {
+            let mut group_map: std::collections::BTreeMap<
+                String,
+                (Vec<IndexLabel>, Vec<Scalar>, Scalar),
+            > = std::collections::BTreeMap::new();
+            let num_rows = self.index.len().min(col.len()).min(by_col.len());
+            for i in 0..num_rows {
+                let by_val = &by_col.values()[i];
+                let key_str = scalar_plot_label(by_val);
+                let target_val = col.values()[i].clone();
+                let label = self.index.labels()[i].clone();
+                let entry = group_map
+                    .entry(key_str)
+                    .or_insert_with(|| (Vec::new(), Vec::new(), by_val.clone()));
+                entry.0.push(label);
+                entry.1.push(target_val);
+            }
+            for (group_name, (idx, vals, by_val)) in group_map {
+                let series_name = if columns.len() == 1 {
+                    group_name
+                } else {
+                    format!("{col_name}[{group_name}]")
+                };
+                all_series.push(plot_series_spec(
+                    series_name,
+                    idx,
+                    col.dtype(),
+                    vals,
+                    Some(vec![by_val]),
+                ));
+            }
+        }
+
+        Ok(HistogramSpec {
+            method: format!("DataFrame.hist(columns={columns:?}, by='{by}')"),
+            bins: if bins == 0 { 10 } else { bins },
+            series: all_series,
+        })
+    }
+
+    /// Convenience helper: render dataframe multi-column grouped histogram directly to deterministic SVG string.
+    pub fn hist_columns_by_to_svg(
+        &self,
+        columns: &[&str],
+        by: &str,
+        bins: usize,
+    ) -> Result<String, FrameError> {
+        self.hist_columns_by(columns, by, bins)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe multi-column grouped histogram directly to HTML figure snippet.
+    pub fn hist_columns_by_to_html(
+        &self,
+        columns: &[&str],
+        by: &str,
+        bins: usize,
+    ) -> Result<String, FrameError> {
+        self.hist_columns_by(columns, by, bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe multi-column grouped histogram directly to disk.
+    pub fn hist_columns_by_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        columns: &[&str],
+        by: &str,
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_columns_by(columns, by, bins)?.save(path)
+    }
+
+    /// Return a backend-neutral histogram request grouping all numeric columns (excluding `by`) by values of `by` (pandas `df.hist(by=...)`).
+    pub fn hist_by_all(&self, by: &str, bins: usize) -> Result<HistogramSpec, FrameError> {
+        let numeric_cols: Vec<&str> = self
+            .column_order
+            .iter()
+            .filter_map(|col_name| {
+                if col_name == by {
+                    return None;
+                }
+                let col = self.columns.get(col_name)?;
+                if col.dtype().is_numeric() {
+                    Some(col_name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if numeric_cols.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "hist_by_all found no numeric columns to plot".to_owned(),
+            ));
+        }
+        self.hist_columns_by(&numeric_cols, by, bins)
+    }
+
+    /// Convenience helper: render all-numeric-columns grouped histogram directly to deterministic SVG string.
+    pub fn hist_by_all_to_svg(&self, by: &str, bins: usize) -> Result<String, FrameError> {
+        self.hist_by_all(by, bins)?.to_svg()
+    }
+
+    /// Convenience helper: render all-numeric-columns grouped histogram directly to HTML figure snippet.
+    pub fn hist_by_all_to_html(&self, by: &str, bins: usize) -> Result<String, FrameError> {
+        self.hist_by_all(by, bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered all-numeric-columns grouped histogram directly to disk.
+    pub fn hist_by_all_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        by: &str,
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_by_all(by, bins)?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style boxplot request.
     pub fn boxplot(&self) -> Result<BoxPlotSpec, FrameError> {
         Ok(BoxPlotSpec {
@@ -64722,6 +64976,137 @@ impl DataFrame {
         path: P,
     ) -> Result<(), FrameError> {
         self.boxplot_by(column, by)?.save(path)
+    }
+
+    /// Return a backend-neutral boxplot request grouping multiple numeric columns by values of another column (pandas `df.boxplot(column=[...], by=...)`).
+    pub fn boxplot_columns_by(
+        &self,
+        columns: &[&str],
+        by: &str,
+    ) -> Result<BoxPlotSpec, FrameError> {
+        let by_col = self
+            .columns
+            .get(by)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{by}' not found")))?;
+
+        let mut target_cols = Vec::with_capacity(columns.len());
+        for &col_name in columns {
+            let col = self.columns.get(col_name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{col_name}' not found"))
+            })?;
+            target_cols.push((col_name, col));
+        }
+
+        let mut all_series = Vec::new();
+        for (col_name, col) in target_cols {
+            let mut group_map: std::collections::BTreeMap<
+                String,
+                (Vec<IndexLabel>, Vec<Scalar>, Scalar),
+            > = std::collections::BTreeMap::new();
+            let num_rows = self.index.len().min(col.len()).min(by_col.len());
+            for i in 0..num_rows {
+                let by_val = &by_col.values()[i];
+                let key_str = scalar_plot_label(by_val);
+                let target_val = col.values()[i].clone();
+                let label = self.index.labels()[i].clone();
+                let entry = group_map
+                    .entry(key_str)
+                    .or_insert_with(|| (Vec::new(), Vec::new(), by_val.clone()));
+                entry.0.push(label);
+                entry.1.push(target_val);
+            }
+            for (group_name, (idx, vals, by_val)) in group_map {
+                let series_name = if columns.len() == 1 {
+                    group_name
+                } else {
+                    format!("{col_name}[{group_name}]")
+                };
+                all_series.push(plot_series_spec(
+                    series_name,
+                    idx,
+                    col.dtype(),
+                    vals,
+                    Some(vec![by_val]),
+                ));
+            }
+        }
+
+        Ok(BoxPlotSpec {
+            method: format!("DataFrame.boxplot(columns={columns:?}, by='{by}')"),
+            series: all_series,
+        })
+    }
+
+    /// Convenience helper: render dataframe multi-column grouped boxplot directly to deterministic SVG string.
+    pub fn boxplot_columns_by_to_svg(
+        &self,
+        columns: &[&str],
+        by: &str,
+    ) -> Result<String, FrameError> {
+        self.boxplot_columns_by(columns, by)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe multi-column grouped boxplot directly to HTML figure snippet.
+    pub fn boxplot_columns_by_to_html(
+        &self,
+        columns: &[&str],
+        by: &str,
+    ) -> Result<String, FrameError> {
+        self.boxplot_columns_by(columns, by)?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe multi-column grouped boxplot directly to disk.
+    pub fn boxplot_columns_by_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        columns: &[&str],
+        by: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.boxplot_columns_by(columns, by)?.save(path)
+    }
+
+    /// Return a backend-neutral boxplot request grouping all numeric columns (excluding `by`) by values of `by` (pandas `df.boxplot(by=...)`).
+    pub fn boxplot_by_all(&self, by: &str) -> Result<BoxPlotSpec, FrameError> {
+        let numeric_cols: Vec<&str> = self
+            .column_order
+            .iter()
+            .filter_map(|col_name| {
+                if col_name == by {
+                    return None;
+                }
+                let col = self.columns.get(col_name)?;
+                if col.dtype().is_numeric() {
+                    Some(col_name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if numeric_cols.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "boxplot_by_all found no numeric columns to plot".to_owned(),
+            ));
+        }
+        self.boxplot_columns_by(&numeric_cols, by)
+    }
+
+    /// Convenience helper: render all-numeric-columns grouped boxplot directly to deterministic SVG string.
+    pub fn boxplot_by_all_to_svg(&self, by: &str) -> Result<String, FrameError> {
+        self.boxplot_by_all(by)?.to_svg()
+    }
+
+    /// Convenience helper: render all-numeric-columns grouped boxplot directly to HTML figure snippet.
+    pub fn boxplot_by_all_to_html(&self, by: &str) -> Result<String, FrameError> {
+        self.boxplot_by_all(by)?.to_html()
+    }
+
+    /// Convenience helper: save rendered all-numeric-columns grouped boxplot directly to disk.
+    pub fn boxplot_by_all_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        by: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.boxplot_by_all(by)?.save(path)
     }
 
     /// `pd.DataFrame(dict_of_series, columns=[...])` — SELECT the named columns

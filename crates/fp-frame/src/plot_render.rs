@@ -287,7 +287,9 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
     let is_xy_scatter = spec.kind == PlotKind::Scatter
         && spec.series.len() >= 2
         && spec.series.len().is_multiple_of(2)
-        && (spec.method.contains("(x=") || spec.method.contains("scatter_columns"));
+        && (spec.method.contains("(x=")
+            || spec.method.contains("scatter_columns")
+            || spec.method.contains(".lag("));
     let is_xy_hexbin = spec.kind == PlotKind::Hexbin
         && spec.series.len() >= 2
         && spec.series.len().is_multiple_of(2)
@@ -2067,6 +2069,138 @@ mod tests {
         let _ = std::fs::remove_file(&gb_hc_file);
         let _ = std::fs::remove_file(&gb_bc_file);
         let _ = std::fs::remove_file(&sgb_h_file);
+        let _ = std::fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn lag_plot_and_autocorrelation_plot_and_grouped_plots() {
+        use crate::{DataFrame, IndexLabel, Series};
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(4),
+            IndexLabel::Int64(5),
+        ];
+        let sx = Series::from_values(
+            "val",
+            labels.clone(),
+            floats(&[1.0, 2.0, 3.0, 2.0, 1.0, 2.0]),
+        )
+        .unwrap();
+        let sy = Series::from_values(
+            "val2",
+            labels.clone(),
+            floats(&[10.0, 20.0, 15.0, 25.0, 30.0, 20.0]),
+        )
+        .unwrap();
+        let sg = Series::from_values(
+            "group",
+            labels.clone(),
+            vec![
+                Scalar::Utf8("A".to_string()),
+                Scalar::Utf8("B".to_string()),
+                Scalar::Utf8("A".to_string()),
+                Scalar::Utf8("B".to_string()),
+                Scalar::Utf8("A".to_string()),
+                Scalar::Utf8("B".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let df = DataFrame::from_series(vec![sx.clone(), sy.clone(), sg.clone()]).unwrap();
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("fp_test_lag_ac_grouped_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // 1. Series lag_plot
+        let lag_spec = sx.lag_plot(1).expect("lag_plot(1)");
+        assert_eq!(lag_spec.kind, PlotKind::Scatter);
+        assert_eq!(lag_spec.series.len(), 2);
+        assert_eq!(lag_spec.series[0].name, "y(t)");
+        assert_eq!(lag_spec.series[1].name, "y(t+1)");
+        let lag_svg = sx.lag_plot_to_svg(1).expect("lag_plot_to_svg");
+        assert!(lag_svg.contains("<svg"));
+        assert!(lag_svg.contains("<circle"));
+        let lag_html = sx.lag_plot_to_html(1).expect("lag_plot_to_html");
+        assert!(lag_html.contains("<div class=\"frankenpandas-plot\""));
+        let lag_file = temp_dir.join("lag.svg");
+        sx.lag_plot_to_file(1, &lag_file).expect("lag_plot_to_file");
+        assert!(std::fs::read_to_string(&lag_file).expect("read lag").contains("<svg"));
+
+        // 2. Series autocorrelation_plot
+        let ac_spec = sx.autocorrelation_plot().expect("autocorrelation_plot");
+        assert_eq!(ac_spec.kind, PlotKind::Line);
+        assert_eq!(ac_spec.series.len(), 1);
+        let ac_svg = sx.autocorrelation_plot_to_svg().expect("autocorrelation_plot_to_svg");
+        assert!(ac_svg.contains("<svg"));
+        assert!(ac_svg.contains("<polyline"));
+        let ac_html = sx.autocorrelation_plot_to_html().expect("autocorrelation_plot_to_html");
+        assert!(ac_html.contains("<div class=\"frankenpandas-plot\""));
+        let ac_file = temp_dir.join("autocorr.svg");
+        sx.autocorrelation_plot_to_file(&ac_file).expect("autocorrelation_plot_to_file");
+        assert!(std::fs::read_to_string(&ac_file).expect("read autocorr").contains("<svg"));
+
+        // 3. Error cases for lag_plot and autocorrelation_plot
+        assert!(sg.lag_plot(1).is_err());
+        assert!(sg.autocorrelation_plot().is_err());
+        assert!(sx.lag_plot(10).is_err());
+        let s_short = Series::from_values("short", vec![labels[0].clone()], floats(&[1.0])).unwrap();
+        assert!(s_short.autocorrelation_plot().is_err());
+
+        // 4. DataFrame hist_columns_by and hist_by_all
+        let hc_by_svg = df.hist_columns_by_to_svg(&["val", "val2"], "group", 5).expect("hist_columns_by_to_svg");
+        assert!(hc_by_svg.contains("<svg"));
+        let hc_by_html = df.hist_columns_by_to_html(&["val", "val2"], "group", 5).expect("hist_columns_by_to_html");
+        assert!(hc_by_html.contains("<div class=\"frankenpandas-plot\""));
+        let hc_by_file = temp_dir.join("hist_cols_by.svg");
+        df.hist_columns_by_to_file(&["val", "val2"], "group", 5, &hc_by_file).expect("hist_columns_by_to_file");
+        assert!(std::fs::read_to_string(&hc_by_file).expect("read hist_cols_by").contains("<svg"));
+
+        let h_all_svg = df.hist_by_all_to_svg("group", 4).expect("hist_by_all_to_svg");
+        assert!(h_all_svg.contains("<svg"));
+        let h_all_html = df.hist_by_all_to_html("group", 4).expect("hist_by_all_to_html");
+        assert!(h_all_html.contains("<div class=\"frankenpandas-plot\""));
+        let h_all_file = temp_dir.join("hist_by_all.svg");
+        df.hist_by_all_to_file("group", 4, &h_all_file).expect("hist_by_all_to_file");
+        assert!(std::fs::read_to_string(&h_all_file).expect("read hist_by_all").contains("<svg"));
+
+        // 5. DataFrame boxplot_columns_by and boxplot_by_all
+        let bc_by_svg = df.boxplot_columns_by_to_svg(&["val", "val2"], "group").expect("boxplot_columns_by_to_svg");
+        assert!(bc_by_svg.contains("<svg"));
+        assert!(bc_by_svg.contains("<line"));
+        let bc_by_html = df.boxplot_columns_by_to_html(&["val", "val2"], "group").expect("boxplot_columns_by_to_html");
+        assert!(bc_by_html.contains("<div class=\"frankenpandas-plot\""));
+        let bc_by_file = temp_dir.join("box_cols_by.svg");
+        df.boxplot_columns_by_to_file(&["val", "val2"], "group", &bc_by_file).expect("boxplot_columns_by_to_file");
+        assert!(std::fs::read_to_string(&bc_by_file).expect("read box_cols_by").contains("<svg"));
+
+        let b_all_svg = df.boxplot_by_all_to_svg("group").expect("boxplot_by_all_to_svg");
+        assert!(b_all_svg.contains("<svg"));
+        let b_all_html = df.boxplot_by_all_to_html("group").expect("boxplot_by_all_to_html");
+        assert!(b_all_html.contains("<div class=\"frankenpandas-plot\""));
+        let b_all_file = temp_dir.join("box_by_all.svg");
+        df.boxplot_by_all_to_file("group", &b_all_file).expect("boxplot_by_all_to_file");
+        assert!(std::fs::read_to_string(&b_all_file).expect("read box_by_all").contains("<svg"));
+
+        // 6. Error handling
+        assert!(df.hist_columns_by(&["nonexistent"], "group", 5).is_err());
+        assert!(df.hist_columns_by(&["val"], "nonexistent", 5).is_err());
+        assert!(df.boxplot_columns_by(&["nonexistent"], "group").is_err());
+        assert!(df.boxplot_columns_by(&["val"], "nonexistent").is_err());
+        let df_str_only = DataFrame::from_series(vec![sg.clone()]).unwrap();
+        assert!(df_str_only.hist_by_all("group", 5).is_err());
+        assert!(df_str_only.boxplot_by_all("group").is_err());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&lag_file);
+        let _ = std::fs::remove_file(&ac_file);
+        let _ = std::fs::remove_file(&hc_by_file);
+        let _ = std::fs::remove_file(&h_all_file);
+        let _ = std::fs::remove_file(&bc_by_file);
+        let _ = std::fs::remove_file(&b_all_file);
         let _ = std::fs::remove_dir(&temp_dir);
     }
 }
