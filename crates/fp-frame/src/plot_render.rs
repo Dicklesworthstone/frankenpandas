@@ -285,15 +285,25 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
     let views = views?;
 
     let is_xy_scatter = spec.kind == PlotKind::Scatter
-        && spec.series.len() == 2
+        && spec.series.len() >= 2
+        && spec.series.len() % 2 == 0
         && (spec.method.contains("(x=") || spec.method.contains("scatter_columns"));
     let is_xy_hexbin = spec.kind == PlotKind::Hexbin
-        && spec.series.len() == 2
+        && spec.series.len() >= 2
+        && spec.series.len() % 2 == 0
         && (spec.method.contains("(x=") || spec.method.contains("hexbin_columns"));
 
     let (scale, xy_scales) = if (is_xy_scatter || is_xy_hexbin) && views.len() >= 2 {
-        let x_sc = data_scale(&views[0..1])?;
-        let y_sc = data_scale(&views[1..2])?;
+        let x_views: Vec<_> = (0..views.len())
+            .step_by(2)
+            .map(|i| views[i].clone())
+            .collect();
+        let y_views: Vec<_> = (1..views.len())
+            .step_by(2)
+            .map(|i| views[i].clone())
+            .collect();
+        let x_sc = data_scale(&x_views)?;
+        let y_sc = data_scale(&y_views)?;
         (y_sc, Some((x_sc, y_sc)))
     } else {
         let mut sc = data_scale(&views)?;
@@ -371,20 +381,25 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
         }
         PlotKind::Scatter => {
             if let Some((ref x_sc, ref y_sc)) = xy_scales {
-                let color = palette(0);
                 let x_map = |v: f64| MARGIN_LEFT + (v - x_sc.min) / (x_sc.max - x_sc.min) * PLOT_W;
                 let y_map = |v: f64| MARGIN_TOP + (y_sc.max - v) / (y_sc.max - y_sc.min) * PLOT_H;
-                let len = views[0].len().min(views[1].len());
-                for i in 0..len {
-                    if let (Some(vx), Some(vy)) = (views[0][i], views[1][i])
-                        && vx.is_finite()
-                        && vy.is_finite()
-                    {
-                        body.push_str(&format!(
-                            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2.5\" fill=\"{color}\"/>",
-                            x_map(vx),
-                            y_map(vy)
-                        ));
+                let num_groups = views.len() / 2;
+                for g in 0..num_groups {
+                    let color = palette(g);
+                    let vx_view = &views[2 * g];
+                    let vy_view = &views[2 * g + 1];
+                    let len = vx_view.len().min(vy_view.len());
+                    for i in 0..len {
+                        if let (Some(vx), Some(vy)) = (vx_view[i], vy_view[i])
+                            && vx.is_finite()
+                            && vy.is_finite()
+                        {
+                            body.push_str(&format!(
+                                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2.5\" fill=\"{color}\"/>",
+                                x_map(vx),
+                                y_map(vy)
+                            ));
+                        }
                     }
                 }
             } else {
@@ -598,7 +613,23 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             }
         }
         PlotKind::Hexbin => {
-            let pairs: Vec<(f64, f64)> = if views.len() >= 2 {
+            let pairs: Vec<(f64, f64)> = if is_xy_hexbin && views.len() >= 2 {
+                let mut p = Vec::new();
+                for g in 0..views.len() / 2 {
+                    let v0 = &views[2 * g];
+                    let v1 = &views[2 * g + 1];
+                    let len = v0.len().min(v1.len());
+                    for i in 0..len {
+                        if let (Some(x), Some(y)) = (v0[i], v1[i])
+                            && x.is_finite()
+                            && y.is_finite()
+                        {
+                            p.push((x, y));
+                        }
+                    }
+                }
+                p
+            } else if views.len() >= 2 {
                 let v0 = &views[0];
                 let v1 = &views[1];
                 let len = v0.len().min(v1.len());
@@ -725,10 +756,31 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             entries
         }
     } else if xy_scales.is_some() {
-        vec![(
-            format!("{} vs {}", spec.series[1].name, spec.series[0].name),
-            palette(0),
-        )]
+        let num_groups = spec.series.len() / 2;
+        if num_groups <= 1 {
+            vec![(
+                format!("{} vs {}", spec.series[1].name, spec.series[0].name),
+                palette(0),
+            )]
+        } else {
+            (0..num_groups)
+                .map(|g| {
+                    let label = if let Some(ref gk) = spec.series[2 * g].group_key {
+                        crate::group_key_label(gk)
+                    } else if let Some(b_start) = spec.series[2 * g].name.find('[') {
+                        let s = &spec.series[2 * g].name;
+                        if let Some(b_end) = s.rfind(']') {
+                            s[b_start + 1..b_end].to_owned()
+                        } else {
+                            s.clone()
+                        }
+                    } else {
+                        format!("group {g}")
+                    };
+                    (label, palette(g))
+                })
+                .collect()
+        }
     } else {
         spec.series
             .iter()
@@ -1676,5 +1728,168 @@ mod tests {
         let p_line = df.plot_xy(PlotKind::Line, "x", "y").expect("plot_xy line");
         assert_eq!(p_line.kind, PlotKind::Line);
         assert_eq!(p_line.series.len(), 2);
+    }
+
+    #[test]
+    fn dataframe_hist_and_boxplot_columns_and_by() {
+        use crate::{DataFrame, IndexLabel, Series};
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+        ];
+        let sa = Series::from_values("a", labels.clone(), floats(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        let sb =
+            Series::from_values("b", labels.clone(), floats(&[10.0, 20.0, 30.0, 40.0])).unwrap();
+        let sc = Series::from_values(
+            "category",
+            labels.clone(),
+            vec![
+                Scalar::Utf8("cat1".to_string()),
+                Scalar::Utf8("cat2".to_string()),
+                Scalar::Utf8("cat1".to_string()),
+                Scalar::Utf8("cat2".to_string()),
+            ],
+        )
+        .unwrap();
+        let df = DataFrame::from_series(vec![sa, sb, sc]).unwrap();
+
+        // 1. hist_columns
+        let h_cols = df.hist_columns(&["a", "b"], 5).expect("hist_columns");
+        assert_eq!(h_cols.method, "DataFrame.hist(column=[\"a\", \"b\"])");
+        assert_eq!(h_cols.bins, 5);
+        assert_eq!(h_cols.series.len(), 2);
+        let h_svg = df
+            .hist_columns_to_svg(&["a", "b"], 5)
+            .expect("hist_columns_to_svg");
+        assert!(h_svg.contains("<svg"));
+        let h_html = df
+            .hist_columns_to_html(&["a", "b"], 5)
+            .expect("hist_columns_to_html");
+        assert!(h_html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(h_html.contains("<svg"));
+
+        // 2. hist_by
+        let h_by = df.hist_by("a", "category", 4).expect("hist_by");
+        assert_eq!(h_by.method, "DataFrame.hist(column='a', by='category')");
+        assert_eq!(h_by.bins, 4);
+        assert_eq!(h_by.series.len(), 2); // cat1 and cat2
+        let h_by_svg = df
+            .hist_by_to_svg("a", "category", 4)
+            .expect("hist_by_to_svg");
+        assert!(h_by_svg.contains("<svg"));
+        let h_by_html = df
+            .hist_by_to_html("a", "category", 4)
+            .expect("hist_by_to_html");
+        assert!(h_by_html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(h_by_html.contains("<svg"));
+
+        // 3. boxplot_columns
+        let b_cols = df.boxplot_columns(&["a", "b"]).expect("boxplot_columns");
+        assert_eq!(b_cols.method, "DataFrame.boxplot(column=[\"a\", \"b\"])");
+        assert_eq!(b_cols.series.len(), 2);
+        let b_svg = df
+            .boxplot_columns_to_svg(&["a", "b"])
+            .expect("boxplot_columns_to_svg");
+        assert!(b_svg.contains("<svg"));
+        let b_html = df
+            .boxplot_columns_to_html(&["a", "b"])
+            .expect("boxplot_columns_to_html");
+        assert!(b_html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(b_html.contains("<svg"));
+
+        // 4. boxplot_by
+        let b_by = df.boxplot_by("b", "category").expect("boxplot_by");
+        assert_eq!(b_by.method, "DataFrame.boxplot(column='b', by='category')");
+        assert_eq!(b_by.series.len(), 2); // cat1 and cat2
+        let b_by_svg = df
+            .boxplot_by_to_svg("b", "category")
+            .expect("boxplot_by_to_svg");
+        assert!(b_by_svg.contains("<svg"));
+        let b_by_html = df
+            .boxplot_by_to_html("b", "category")
+            .expect("boxplot_by_to_html");
+        assert!(b_by_html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(b_by_html.contains("<svg"));
+    }
+
+    #[test]
+    fn dataframe_groupby_scatter_and_hexbin() {
+        use crate::{DataFrame, IndexLabel, Series};
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+        ];
+        let sx = Series::from_values("x", labels.clone(), floats(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        let sy =
+            Series::from_values("y", labels.clone(), floats(&[10.0, 20.0, 30.0, 40.0])).unwrap();
+        let sg = Series::from_values(
+            "group",
+            labels.clone(),
+            vec![
+                Scalar::Utf8("alpha".to_string()),
+                Scalar::Utf8("beta".to_string()),
+                Scalar::Utf8("alpha".to_string()),
+                Scalar::Utf8("beta".to_string()),
+            ],
+        )
+        .unwrap();
+        let df = DataFrame::from_series(vec![sx, sy, sg]).unwrap();
+        let gb = df.groupby(&["group"]).unwrap();
+
+        // 1. scatter_columns and scatter_xy
+        let sc_spec = gb.scatter_columns("x", "y").expect("gb scatter_columns");
+        assert_eq!(sc_spec.kind, PlotKind::Scatter);
+        assert_eq!(
+            sc_spec.method,
+            "DataFrameGroupBy.plot.scatter(x='x', y='y')"
+        );
+        assert_eq!(sc_spec.series.len(), 4); // 2 groups * 2 cols (x, y)
+        let sc_svg = gb
+            .scatter_columns_to_svg("x", "y")
+            .expect("gb scatter_columns_to_svg");
+        assert!(sc_svg.contains("<svg"));
+        assert!(sc_svg.contains("<circle"));
+        let sc_html = gb
+            .scatter_xy_to_html("x", "y")
+            .expect("gb scatter_xy_to_html");
+        assert!(sc_html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(sc_html.contains("<svg"));
+
+        // 2. hexbin_columns and hexbin_xy
+        let hb_spec = gb.hexbin_columns("x", "y").expect("gb hexbin_columns");
+        assert_eq!(hb_spec.kind, PlotKind::Hexbin);
+        assert_eq!(hb_spec.method, "DataFrameGroupBy.plot.hexbin(x='x', y='y')");
+        assert_eq!(hb_spec.series.len(), 4);
+        let hb_svg = gb
+            .hexbin_columns_to_svg("x", "y")
+            .expect("gb hexbin_columns_to_svg");
+        assert!(hb_svg.contains("<svg"));
+        assert!(hb_svg.contains("<circle"));
+        let hb_html = gb
+            .hexbin_xy_to_html("x", "y")
+            .expect("gb hexbin_xy_to_html");
+        assert!(hb_html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(hb_html.contains("<svg"));
+
+        // 3. plot_xy
+        let p_sc = gb
+            .plot_xy(PlotKind::Scatter, "x", "y")
+            .expect("gb plot_xy scatter");
+        assert_eq!(p_sc.kind, PlotKind::Scatter);
+        assert_eq!(p_sc.series.len(), 4);
+
+        let p_hb = gb
+            .plot_xy(PlotKind::Hexbin, "x", "y")
+            .expect("gb plot_xy hexbin");
+        assert_eq!(p_hb.kind, PlotKind::Hexbin);
+        assert_eq!(p_hb.series.len(), 4);
+
+        // Invalid plot_xy kind error check
+        let err = gb.plot_xy(PlotKind::Line, "x", "y");
+        assert!(err.is_err());
     }
 }

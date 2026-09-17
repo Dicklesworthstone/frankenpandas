@@ -325,7 +325,7 @@ pub(crate) fn scalar_plot_label(value: &Scalar) -> String {
     }
 }
 
-fn group_key_label(group_key: &[Scalar]) -> String {
+pub(crate) fn group_key_label(group_key: &[Scalar]) -> String {
     group_key
         .iter()
         .map(scalar_plot_label)
@@ -64258,6 +64258,133 @@ impl DataFrame {
         self.hist()?.save(path)
     }
 
+    /// Return a backend-neutral histogram request restricted to the specified columns with custom bin count.
+    pub fn hist_columns(&self, columns: &[&str], bins: usize) -> Result<HistogramSpec, FrameError> {
+        let mut specs = Vec::with_capacity(columns.len());
+        for &col_name in columns {
+            let col = self.columns.get(col_name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{col_name}' not found"))
+            })?;
+            specs.push(plot_series_spec(
+                col_name.to_owned(),
+                self.index.labels().to_vec(),
+                col.dtype(),
+                col.values().to_vec(),
+                None,
+            ));
+        }
+        Ok(HistogramSpec {
+            method: format!("DataFrame.hist(column={columns:?})"),
+            bins: if bins == 0 { 10 } else { bins },
+            series: specs,
+        })
+    }
+
+    /// Convenience helper: render dataframe histogram for specified columns directly to deterministic SVG string.
+    pub fn hist_columns_to_svg(&self, columns: &[&str], bins: usize) -> Result<String, FrameError> {
+        self.hist_columns(columns, bins)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe histogram for specified columns directly to HTML figure snippet.
+    pub fn hist_columns_to_html(
+        &self,
+        columns: &[&str],
+        bins: usize,
+    ) -> Result<String, FrameError> {
+        self.hist_columns(columns, bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe histogram for specified columns directly to disk.
+    pub fn hist_columns_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        columns: &[&str],
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_columns(columns, bins)?.save(path)
+    }
+
+    /// Return a backend-neutral histogram request grouping a numeric column by values of another column (pandas `df.hist(column=..., by=...)`).
+    pub fn hist_by(
+        &self,
+        column: &str,
+        by: &str,
+        bins: usize,
+    ) -> Result<HistogramSpec, FrameError> {
+        let target_col = self.columns.get(column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{column}' not found"))
+        })?;
+        let by_col = self
+            .columns
+            .get(by)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{by}' not found")))?;
+
+        let mut group_map: std::collections::BTreeMap<
+            String,
+            (Vec<IndexLabel>, Vec<Scalar>, Scalar),
+        > = std::collections::BTreeMap::new();
+        let num_rows = self.index.len().min(target_col.len()).min(by_col.len());
+        for i in 0..num_rows {
+            let by_val = &by_col.values()[i];
+            let key_str = scalar_plot_label(by_val);
+            let target_val = target_col.values()[i].clone();
+            let label = self.index.labels()[i].clone();
+            let entry = group_map
+                .entry(key_str)
+                .or_insert_with(|| (Vec::new(), Vec::new(), by_val.clone()));
+            entry.0.push(label);
+            entry.1.push(target_val);
+        }
+
+        let mut series = Vec::with_capacity(group_map.len());
+        for (group_name, (idx, vals, by_val)) in group_map {
+            series.push(plot_series_spec(
+                group_name,
+                idx,
+                target_col.dtype(),
+                vals,
+                Some(vec![by_val]),
+            ));
+        }
+
+        Ok(HistogramSpec {
+            method: format!("DataFrame.hist(column='{column}', by='{by}')"),
+            bins: if bins == 0 { 10 } else { bins },
+            series,
+        })
+    }
+
+    /// Convenience helper: render dataframe grouped histogram directly to deterministic SVG string.
+    pub fn hist_by_to_svg(
+        &self,
+        column: &str,
+        by: &str,
+        bins: usize,
+    ) -> Result<String, FrameError> {
+        self.hist_by(column, by, bins)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe grouped histogram directly to HTML figure snippet.
+    pub fn hist_by_to_html(
+        &self,
+        column: &str,
+        by: &str,
+        bins: usize,
+    ) -> Result<String, FrameError> {
+        self.hist_by(column, by, bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe grouped histogram directly to disk.
+    pub fn hist_by_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        column: &str,
+        by: &str,
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_by(column, by, bins)?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style boxplot request.
     pub fn boxplot(&self) -> Result<BoxPlotSpec, FrameError> {
         Ok(BoxPlotSpec {
@@ -64289,6 +64416,110 @@ impl DataFrame {
     /// Convenience helper: save rendered dataframe boxplot directly to disk.
     pub fn boxplot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
         self.boxplot()?.save(path)
+    }
+
+    /// Return a backend-neutral boxplot request restricted to the specified columns.
+    pub fn boxplot_columns(&self, columns: &[&str]) -> Result<BoxPlotSpec, FrameError> {
+        let mut specs = Vec::with_capacity(columns.len());
+        for &col_name in columns {
+            let col = self.columns.get(col_name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{col_name}' not found"))
+            })?;
+            specs.push(plot_series_spec(
+                col_name.to_owned(),
+                self.index.labels().to_vec(),
+                col.dtype(),
+                col.values().to_vec(),
+                None,
+            ));
+        }
+        Ok(BoxPlotSpec {
+            method: format!("DataFrame.boxplot(column={columns:?})"),
+            series: specs,
+        })
+    }
+
+    /// Convenience helper: render dataframe boxplot for specified columns directly to deterministic SVG string.
+    pub fn boxplot_columns_to_svg(&self, columns: &[&str]) -> Result<String, FrameError> {
+        self.boxplot_columns(columns)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe boxplot for specified columns directly to HTML figure snippet.
+    pub fn boxplot_columns_to_html(&self, columns: &[&str]) -> Result<String, FrameError> {
+        self.boxplot_columns(columns)?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe boxplot for specified columns directly to disk.
+    pub fn boxplot_columns_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        columns: &[&str],
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.boxplot_columns(columns)?.save(path)
+    }
+
+    /// Return a backend-neutral boxplot request grouping a numeric column by values of another column (pandas `df.boxplot(column=..., by=...)`).
+    pub fn boxplot_by(&self, column: &str, by: &str) -> Result<BoxPlotSpec, FrameError> {
+        let target_col = self.columns.get(column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{column}' not found"))
+        })?;
+        let by_col = self
+            .columns
+            .get(by)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{by}' not found")))?;
+
+        let mut group_map: std::collections::BTreeMap<
+            String,
+            (Vec<IndexLabel>, Vec<Scalar>, Scalar),
+        > = std::collections::BTreeMap::new();
+        let num_rows = self.index.len().min(target_col.len()).min(by_col.len());
+        for i in 0..num_rows {
+            let by_val = &by_col.values()[i];
+            let key_str = scalar_plot_label(by_val);
+            let target_val = target_col.values()[i].clone();
+            let label = self.index.labels()[i].clone();
+            let entry = group_map
+                .entry(key_str)
+                .or_insert_with(|| (Vec::new(), Vec::new(), by_val.clone()));
+            entry.0.push(label);
+            entry.1.push(target_val);
+        }
+
+        let mut series = Vec::with_capacity(group_map.len());
+        for (group_name, (idx, vals, by_val)) in group_map {
+            series.push(plot_series_spec(
+                group_name,
+                idx,
+                target_col.dtype(),
+                vals,
+                Some(vec![by_val]),
+            ));
+        }
+
+        Ok(BoxPlotSpec {
+            method: format!("DataFrame.boxplot(column='{column}', by='{by}')"),
+            series,
+        })
+    }
+
+    /// Convenience helper: render dataframe grouped boxplot directly to deterministic SVG string.
+    pub fn boxplot_by_to_svg(&self, column: &str, by: &str) -> Result<String, FrameError> {
+        self.boxplot_by(column, by)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe grouped boxplot directly to HTML figure snippet.
+    pub fn boxplot_by_to_html(&self, column: &str, by: &str) -> Result<String, FrameError> {
+        self.boxplot_by(column, by)?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe grouped boxplot directly to disk.
+    pub fn boxplot_by_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        column: &str,
+        by: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.boxplot_by(column, by)?.save(path)
     }
 
     /// `pd.DataFrame(dict_of_series, columns=[...])` — SELECT the named columns
@@ -93557,6 +93788,110 @@ impl DataFrameGroupBy<'_> {
         self.scatter()?.save(path)
     }
 
+    /// Return a backend-neutral pandas-style grouped scatter plot request for the specified (x, y) column pair.
+    pub fn scatter_columns(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        let col_x =
+            self.df.columns.get(x).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{x}' not found"))
+            })?;
+        let col_y =
+            self.df.columns.get(y).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{y}' not found"))
+            })?;
+        let (group_order, groups) = self.build_groups();
+        let mut specs = Vec::new();
+        for key in group_order {
+            let positions = groups
+                .get(&key)
+                .expect("group key listed in order must exist");
+            let group_key = positions.first().map(|&position| {
+                self.by
+                    .iter()
+                    .map(|name| self.df.columns[name].values()[position].clone())
+                    .collect::<Vec<_>>()
+            });
+            let group_label = group_key
+                .as_ref()
+                .map_or_else(String::new, |values| group_key_label(values));
+            let index = positions
+                .iter()
+                .map(|&position| self.df.index.labels()[position].clone())
+                .collect::<Vec<_>>();
+            let vals_x = positions
+                .iter()
+                .map(|&position| col_x.values()[position].clone())
+                .collect::<Vec<_>>();
+            let vals_y = positions
+                .iter()
+                .map(|&position| col_y.values()[position].clone())
+                .collect::<Vec<_>>();
+            specs.push(plot_series_spec(
+                format!("{x}[{group_label}]"),
+                index.clone(),
+                col_x.dtype(),
+                vals_x,
+                group_key.clone(),
+            ));
+            specs.push(plot_series_spec(
+                format!("{y}[{group_label}]"),
+                index,
+                col_y.dtype(),
+                vals_y,
+                group_key,
+            ));
+        }
+        Ok(PlotSpec {
+            method: format!("DataFrameGroupBy.plot.scatter(x='{x}', y='{y}')"),
+            kind: PlotKind::Scatter,
+            series: specs,
+        })
+    }
+
+    /// Return a backend-neutral pandas-style grouped scatter plot request for the specified (x, y) column pair (alias for [`DataFrameGroupBy::scatter_columns`]).
+    pub fn scatter_xy(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        self.scatter_columns(x, y)
+    }
+
+    /// Convenience helper: render grouped dataframe (x, y) scatter plot directly to deterministic SVG string.
+    pub fn scatter_columns_to_svg(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.scatter_columns(x, y)?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe (x, y) scatter plot directly to deterministic SVG string (alias for [`DataFrameGroupBy::scatter_columns_to_svg`]).
+    pub fn scatter_xy_to_svg(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.scatter_columns_to_svg(x, y)
+    }
+
+    /// Convenience helper: render grouped dataframe (x, y) scatter plot directly to HTML figure snippet.
+    pub fn scatter_columns_to_html(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.scatter_columns(x, y)?.to_html()
+    }
+
+    /// Convenience helper: render grouped dataframe (x, y) scatter plot directly to HTML figure snippet (alias for [`DataFrameGroupBy::scatter_columns_to_html`]).
+    pub fn scatter_xy_to_html(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.scatter_columns_to_html(x, y)
+    }
+
+    /// Convenience helper: save rendered grouped dataframe (x, y) scatter plot directly to disk.
+    pub fn scatter_columns_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        x: &str,
+        y: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.scatter_columns(x, y)?.save(path)
+    }
+
+    /// Convenience helper: save rendered grouped dataframe (x, y) scatter plot directly to disk (alias for [`DataFrameGroupBy::scatter_columns_to_file`]).
+    pub fn scatter_xy_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        x: &str,
+        y: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.scatter_columns_to_file(x, y, path)
+    }
+
     /// Return a backend-neutral pandas-style grouped pie plot request.
     pub fn pie(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
@@ -93650,6 +93985,121 @@ impl DataFrameGroupBy<'_> {
     /// Convenience helper: save rendered grouped dataframe hexbin plot directly to disk.
     pub fn hexbin_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
         self.hexbin()?.save(path)
+    }
+
+    /// Return a backend-neutral pandas-style grouped hexbin plot request for the specified (x, y) column pair.
+    pub fn hexbin_columns(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        let col_x =
+            self.df.columns.get(x).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{x}' not found"))
+            })?;
+        let col_y =
+            self.df.columns.get(y).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{y}' not found"))
+            })?;
+        let (group_order, groups) = self.build_groups();
+        let mut specs = Vec::new();
+        for key in group_order {
+            let positions = groups
+                .get(&key)
+                .expect("group key listed in order must exist");
+            let group_key = positions.first().map(|&position| {
+                self.by
+                    .iter()
+                    .map(|name| self.df.columns[name].values()[position].clone())
+                    .collect::<Vec<_>>()
+            });
+            let group_label = group_key
+                .as_ref()
+                .map_or_else(String::new, |values| group_key_label(values));
+            let index = positions
+                .iter()
+                .map(|&position| self.df.index.labels()[position].clone())
+                .collect::<Vec<_>>();
+            let vals_x = positions
+                .iter()
+                .map(|&position| col_x.values()[position].clone())
+                .collect::<Vec<_>>();
+            let vals_y = positions
+                .iter()
+                .map(|&position| col_y.values()[position].clone())
+                .collect::<Vec<_>>();
+            specs.push(plot_series_spec(
+                format!("{x}[{group_label}]"),
+                index.clone(),
+                col_x.dtype(),
+                vals_x,
+                group_key.clone(),
+            ));
+            specs.push(plot_series_spec(
+                format!("{y}[{group_label}]"),
+                index,
+                col_y.dtype(),
+                vals_y,
+                group_key,
+            ));
+        }
+        Ok(PlotSpec {
+            method: format!("DataFrameGroupBy.plot.hexbin(x='{x}', y='{y}')"),
+            kind: PlotKind::Hexbin,
+            series: specs,
+        })
+    }
+
+    /// Return a backend-neutral pandas-style grouped hexbin plot request for the specified (x, y) column pair (alias for [`DataFrameGroupBy::hexbin_columns`]).
+    pub fn hexbin_xy(&self, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        self.hexbin_columns(x, y)
+    }
+
+    /// Convenience helper: render grouped dataframe (x, y) hexbin plot directly to deterministic SVG string.
+    pub fn hexbin_columns_to_svg(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.hexbin_columns(x, y)?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe (x, y) hexbin plot directly to deterministic SVG string (alias for [`DataFrameGroupBy::hexbin_columns_to_svg`]).
+    pub fn hexbin_xy_to_svg(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.hexbin_columns_to_svg(x, y)
+    }
+
+    /// Convenience helper: render grouped dataframe (x, y) hexbin plot directly to HTML figure snippet.
+    pub fn hexbin_columns_to_html(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.hexbin_columns(x, y)?.to_html()
+    }
+
+    /// Convenience helper: render grouped dataframe (x, y) hexbin plot directly to HTML figure snippet (alias for [`DataFrameGroupBy::hexbin_columns_to_html`]).
+    pub fn hexbin_xy_to_html(&self, x: &str, y: &str) -> Result<String, FrameError> {
+        self.hexbin_columns_to_html(x, y)
+    }
+
+    /// Convenience helper: save rendered grouped dataframe (x, y) hexbin plot directly to disk.
+    pub fn hexbin_columns_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        x: &str,
+        y: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hexbin_columns(x, y)?.save(path)
+    }
+
+    /// Convenience helper: save rendered grouped dataframe (x, y) hexbin plot directly to disk (alias for [`DataFrameGroupBy::hexbin_columns_to_file`]).
+    pub fn hexbin_xy_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        x: &str,
+        y: &str,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hexbin_columns_to_file(x, y, path)
+    }
+
+    /// Return a backend-neutral grouped plot request for the specified plot kind and (x, y) column pair.
+    pub fn plot_xy(&self, kind: PlotKind, x: &str, y: &str) -> Result<PlotSpec, FrameError> {
+        match kind {
+            PlotKind::Scatter => self.scatter_columns(x, y),
+            PlotKind::Hexbin => self.hexbin_columns(x, y),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "plot_xy only supports Scatter and Hexbin, got {other:?}"
+            ))),
+        }
     }
 
     /// Return a backend-neutral grouped plot request for the specified plot kind.
