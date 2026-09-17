@@ -8022,6 +8022,97 @@ impl Series {
         self.hist()?.save(path)
     }
 
+    /// Return a backend-neutral histogram request with a custom number of bins.
+    pub fn hist_with_bins(&self, bins: usize) -> Result<HistogramSpec, FrameError> {
+        Ok(HistogramSpec {
+            method: format!("Series.hist(bins={bins})"),
+            bins,
+            series: vec![plot_series_spec(
+                self.name(),
+                self.index.labels().to_vec(),
+                self.column.dtype(),
+                self.column.values().to_vec(),
+                None,
+            )],
+        })
+    }
+
+    /// Convenience helper: render series histogram with custom bins directly to deterministic SVG string.
+    pub fn hist_with_bins_to_svg(&self, bins: usize) -> Result<String, FrameError> {
+        self.hist_with_bins(bins)?.to_svg()
+    }
+
+    /// Convenience helper: render series histogram with custom bins directly to HTML figure snippet.
+    pub fn hist_with_bins_to_html(&self, bins: usize) -> Result<String, FrameError> {
+        self.hist_with_bins(bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered series histogram with custom bins directly to disk.
+    pub fn hist_with_bins_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_with_bins(bins)?.save(path)
+    }
+
+    /// Return a backend-neutral histogram request grouping values by another Series (pandas `Series.hist(by=...)`).
+    pub fn hist_by(&self, by: &Series, bins: usize) -> Result<HistogramSpec, FrameError> {
+        let mut group_map: std::collections::BTreeMap<
+            String,
+            (Vec<IndexLabel>, Vec<Scalar>, Scalar),
+        > = std::collections::BTreeMap::new();
+        let num_rows = self.len().min(by.len());
+        for i in 0..num_rows {
+            let by_val = &by.column.values()[i];
+            let key_str = scalar_plot_label(by_val);
+            let target_val = self.column.values()[i].clone();
+            let label = self.index.labels()[i].clone();
+            let entry = group_map
+                .entry(key_str)
+                .or_insert_with(|| (Vec::new(), Vec::new(), by_val.clone()));
+            entry.0.push(label);
+            entry.1.push(target_val);
+        }
+
+        let mut series = Vec::with_capacity(group_map.len());
+        for (group_name, (idx, vals, by_val)) in group_map {
+            series.push(plot_series_spec(
+                group_name,
+                idx,
+                self.column.dtype(),
+                vals,
+                Some(vec![by_val]),
+            ));
+        }
+
+        Ok(HistogramSpec {
+            method: format!("Series.hist(by='{}')", by.name()),
+            bins,
+            series,
+        })
+    }
+
+    /// Convenience helper: render grouped series histogram directly to deterministic SVG string.
+    pub fn hist_by_to_svg(&self, by: &Series, bins: usize) -> Result<String, FrameError> {
+        self.hist_by(by, bins)?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series histogram directly to HTML figure snippet.
+    pub fn hist_by_to_html(&self, by: &Series, bins: usize) -> Result<String, FrameError> {
+        self.hist_by(by, bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series histogram directly to disk.
+    pub fn hist_by_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        by: &Series,
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_by(by, bins)?.save(path)
+    }
+
     /// Return a backend-neutral pandas-style boxplot request.
     pub fn boxplot(&self) -> Result<BoxPlotSpec, FrameError> {
         Ok(BoxPlotSpec {
@@ -8059,6 +8150,61 @@ impl Series {
     /// Convenience helper: save rendered series boxplot directly to disk.
     pub fn boxplot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
         self.boxplot()?.save(path)
+    }
+
+    /// Return a backend-neutral boxplot request grouping values by another Series (pandas `Series.boxplot(by=...)`).
+    pub fn boxplot_by(&self, by: &Series) -> Result<BoxPlotSpec, FrameError> {
+        let mut group_map: std::collections::BTreeMap<
+            String,
+            (Vec<IndexLabel>, Vec<Scalar>, Scalar),
+        > = std::collections::BTreeMap::new();
+        let num_rows = self.len().min(by.len());
+        for i in 0..num_rows {
+            let by_val = &by.column.values()[i];
+            let key_str = scalar_plot_label(by_val);
+            let target_val = self.column.values()[i].clone();
+            let label = self.index.labels()[i].clone();
+            let entry = group_map
+                .entry(key_str)
+                .or_insert_with(|| (Vec::new(), Vec::new(), by_val.clone()));
+            entry.0.push(label);
+            entry.1.push(target_val);
+        }
+
+        let mut series = Vec::with_capacity(group_map.len());
+        for (group_name, (idx, vals, by_val)) in group_map {
+            series.push(plot_series_spec(
+                group_name,
+                idx,
+                self.column.dtype(),
+                vals,
+                Some(vec![by_val]),
+            ));
+        }
+
+        Ok(BoxPlotSpec {
+            method: format!("Series.boxplot(by='{}')", by.name()),
+            series,
+        })
+    }
+
+    /// Convenience helper: render grouped series boxplot directly to deterministic SVG string.
+    pub fn boxplot_by_to_svg(&self, by: &Series) -> Result<String, FrameError> {
+        self.boxplot_by(by)?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series boxplot directly to HTML figure snippet.
+    pub fn boxplot_by_to_html(&self, by: &Series) -> Result<String, FrameError> {
+        self.boxplot_by(by)?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series boxplot directly to disk.
+    pub fn boxplot_by_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        by: &Series,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.boxplot_by(by)?.save(path)
     }
 
     /// Return a backend-neutral pandas-style line plot request.
@@ -38722,6 +38868,34 @@ impl SeriesGroupBy<'_> {
         self.hist()?.save(path)
     }
 
+    /// Return a backend-neutral grouped histogram request with a custom number of bins.
+    pub fn hist_with_bins(&self, bins: usize) -> Result<HistogramSpec, FrameError> {
+        Ok(HistogramSpec {
+            method: format!("SeriesGroupBy.hist(bins={bins})"),
+            bins,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render grouped series histogram with custom bins directly to deterministic SVG string.
+    pub fn hist_with_bins_to_svg(&self, bins: usize) -> Result<String, FrameError> {
+        self.hist_with_bins(bins)?.to_svg()
+    }
+
+    /// Convenience helper: render grouped series histogram with custom bins directly to HTML figure snippet.
+    pub fn hist_with_bins_to_html(&self, bins: usize) -> Result<String, FrameError> {
+        self.hist_with_bins(bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped series histogram with custom bins directly to disk.
+    pub fn hist_with_bins_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_with_bins(bins)?.save(path)
+    }
+
     /// Convenience helper: render grouped series boxplot directly to deterministic SVG string.
     pub fn boxplot_to_svg(&self) -> Result<String, FrameError> {
         self.boxplot()?.to_svg()
@@ -64256,6 +64430,34 @@ impl DataFrame {
     /// Convenience helper: save rendered dataframe histogram directly to disk.
     pub fn hist_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
         self.hist()?.save(path)
+    }
+
+    /// Return a backend-neutral histogram request with a custom number of bins across all numerical columns.
+    pub fn hist_with_bins(&self, bins: usize) -> Result<HistogramSpec, FrameError> {
+        Ok(HistogramSpec {
+            method: format!("DataFrame.hist(bins={bins})"),
+            bins,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render dataframe histogram with custom bins directly to deterministic SVG string.
+    pub fn hist_with_bins_to_svg(&self, bins: usize) -> Result<String, FrameError> {
+        self.hist_with_bins(bins)?.to_svg()
+    }
+
+    /// Convenience helper: render dataframe histogram with custom bins directly to HTML figure snippet.
+    pub fn hist_with_bins_to_html(&self, bins: usize) -> Result<String, FrameError> {
+        self.hist_with_bins(bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered dataframe histogram with custom bins directly to disk.
+    pub fn hist_with_bins_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_with_bins(bins)?.save(path)
     }
 
     /// Return a backend-neutral histogram request restricted to the specified columns with custom bin count.
@@ -94197,6 +94399,173 @@ impl DataFrameGroupBy<'_> {
     /// Convenience helper: save rendered grouped dataframe boxplot directly to disk.
     pub fn boxplot_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
         self.boxplot()?.save(path)
+    }
+
+    /// Return a backend-neutral grouped histogram request with a custom number of bins.
+    pub fn hist_with_bins(&self, bins: usize) -> Result<HistogramSpec, FrameError> {
+        Ok(HistogramSpec {
+            method: format!("DataFrameGroupBy.hist(bins={bins})"),
+            bins,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Convenience helper: render grouped dataframe histogram with custom bins directly to deterministic SVG string.
+    pub fn hist_with_bins_to_svg(&self, bins: usize) -> Result<String, FrameError> {
+        self.hist_with_bins(bins)?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe histogram with custom bins directly to HTML figure snippet.
+    pub fn hist_with_bins_to_html(&self, bins: usize) -> Result<String, FrameError> {
+        self.hist_with_bins(bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe histogram with custom bins directly to disk.
+    pub fn hist_with_bins_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_with_bins(bins)?.save(path)
+    }
+
+    /// Return a backend-neutral grouped histogram request restricted to the specified columns with custom bin count.
+    pub fn hist_columns(&self, columns: &[&str], bins: usize) -> Result<HistogramSpec, FrameError> {
+        for &col_name in columns {
+            if !self.df.columns.contains_key(col_name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{col_name}' not found"
+                )));
+            }
+        }
+        let (group_order, groups) = self.build_groups();
+        let mut specs = Vec::new();
+        for key in group_order {
+            let positions = groups
+                .get(&key)
+                .expect("group key listed in order must exist");
+            let group_key = positions.first().map(|&position| {
+                self.by
+                    .iter()
+                    .map(|name| self.df.columns[name].values()[position].clone())
+                    .collect::<Vec<_>>()
+            });
+            let group_label = group_key
+                .as_ref()
+                .map_or_else(String::new, |values| group_key_label(values));
+            let index = positions
+                .iter()
+                .map(|&position| self.df.index.labels()[position].clone())
+                .collect::<Vec<_>>();
+            for &name in columns {
+                let column = &self.df.columns[name];
+                let values = positions
+                    .iter()
+                    .map(|&position| column.values()[position].clone())
+                    .collect::<Vec<_>>();
+                specs.push(plot_series_spec(
+                    format!("{name}[{group_label}]"),
+                    index.clone(),
+                    column.dtype(),
+                    values,
+                    group_key.clone(),
+                ));
+            }
+        }
+        let effective_bins = if bins == 0 { 10 } else { bins };
+        Ok(HistogramSpec {
+            method: format!("DataFrameGroupBy.hist(columns={columns:?}, bins={effective_bins})"),
+            bins: effective_bins,
+            series: specs,
+        })
+    }
+
+    /// Convenience helper: render grouped dataframe histogram for selected columns directly to deterministic SVG string.
+    pub fn hist_columns_to_svg(&self, columns: &[&str], bins: usize) -> Result<String, FrameError> {
+        self.hist_columns(columns, bins)?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe histogram for selected columns directly to HTML figure snippet.
+    pub fn hist_columns_to_html(&self, columns: &[&str], bins: usize) -> Result<String, FrameError> {
+        self.hist_columns(columns, bins)?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe histogram for selected columns directly to disk.
+    pub fn hist_columns_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        columns: &[&str],
+        bins: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.hist_columns(columns, bins)?.save(path)
+    }
+
+    /// Return a backend-neutral grouped boxplot request restricted to the specified columns.
+    pub fn boxplot_columns(&self, columns: &[&str]) -> Result<BoxPlotSpec, FrameError> {
+        for &col_name in columns {
+            if !self.df.columns.contains_key(col_name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{col_name}' not found"
+                )));
+            }
+        }
+        let (group_order, groups) = self.build_groups();
+        let mut specs = Vec::new();
+        for key in group_order {
+            let positions = groups
+                .get(&key)
+                .expect("group key listed in order must exist");
+            let group_key = positions.first().map(|&position| {
+                self.by
+                    .iter()
+                    .map(|name| self.df.columns[name].values()[position].clone())
+                    .collect::<Vec<_>>()
+            });
+            let group_label = group_key
+                .as_ref()
+                .map_or_else(String::new, |values| group_key_label(values));
+            let index = positions
+                .iter()
+                .map(|&position| self.df.index.labels()[position].clone())
+                .collect::<Vec<_>>();
+            for &name in columns {
+                let column = &self.df.columns[name];
+                let values = positions
+                    .iter()
+                    .map(|&position| column.values()[position].clone())
+                    .collect::<Vec<_>>();
+                specs.push(plot_series_spec(
+                    format!("{name}[{group_label}]"),
+                    index.clone(),
+                    column.dtype(),
+                    values,
+                    group_key.clone(),
+                ));
+            }
+        }
+        Ok(BoxPlotSpec {
+            method: format!("DataFrameGroupBy.boxplot(columns={columns:?})"),
+            series: specs,
+        })
+    }
+
+    /// Convenience helper: render grouped dataframe boxplot for selected columns directly to deterministic SVG string.
+    pub fn boxplot_columns_to_svg(&self, columns: &[&str]) -> Result<String, FrameError> {
+        self.boxplot_columns(columns)?.to_svg()
+    }
+
+    /// Convenience helper: render grouped dataframe boxplot for selected columns directly to HTML figure snippet.
+    pub fn boxplot_columns_to_html(&self, columns: &[&str]) -> Result<String, FrameError> {
+        self.boxplot_columns(columns)?.to_html()
+    }
+
+    /// Convenience helper: save rendered grouped dataframe boxplot for selected columns directly to disk.
+    pub fn boxplot_columns_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        columns: &[&str],
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.boxplot_columns(columns)?.save(path)
     }
 
     /// Dense sequential all/any for typed (Bool/Int64/Float64) value columns
@@ -174728,6 +175097,11 @@ mod tests {
         assert_eq!(hist.bins, 10);
         assert_eq!(hist.series.len(), 3);
 
+        let hist_bins = df.hist_with_bins(7).unwrap();
+        assert_eq!(hist_bins.method, "DataFrame.hist(bins=7)");
+        assert_eq!(hist_bins.bins, 7);
+        assert_eq!(hist_bins.series.len(), 3);
+
         let boxplot = df.boxplot().unwrap();
         assert_eq!(boxplot.method, "DataFrame.boxplot");
         assert_eq!(boxplot.series.len(), 3);
@@ -174776,6 +175150,11 @@ mod tests {
         assert_eq!(hist.method, "Series.hist");
         assert_eq!(hist.bins, 10);
         assert_eq!(hist.series[0].name, "vals");
+
+        let hist_bins = series.hist_with_bins(7).unwrap();
+        assert_eq!(hist_bins.method, "Series.hist(bins=7)");
+        assert_eq!(hist_bins.bins, 7);
+        assert_eq!(hist_bins.series[0].name, "vals");
     }
 
     #[test]
@@ -174866,9 +175245,52 @@ mod tests {
         assert_eq!(hist.bins, 10);
         assert_eq!(hist.series.len(), 6);
 
+        let hist_bins = grouped.hist_with_bins(7).unwrap();
+        assert_eq!(hist_bins.method, "DataFrameGroupBy.hist(bins=7)");
+        assert_eq!(hist_bins.bins, 7);
+        assert_eq!(hist_bins.series.len(), 6);
+        assert!(grouped.hist_with_bins_to_svg(7).unwrap().starts_with("<svg"));
+        assert!(grouped
+            .hist_with_bins_to_html(7)
+            .unwrap()
+            .contains("<div class=\"frankenpandas-plot\""));
+
+        let hist_cols = grouped.hist_columns(&["a", "b"], 5).unwrap();
+        assert_eq!(
+            hist_cols.method,
+            "DataFrameGroupBy.hist(columns=[\"a\", \"b\"], bins=5)"
+        );
+        assert_eq!(hist_cols.bins, 5);
+        assert_eq!(hist_cols.series.len(), 6);
+        assert!(grouped
+            .hist_columns_to_svg(&["a", "b"], 5)
+            .unwrap()
+            .starts_with("<svg"));
+        assert!(grouped
+            .hist_columns_to_html(&["a", "b"], 5)
+            .unwrap()
+            .contains("<div class=\"frankenpandas-plot\""));
+        assert!(grouped.hist_columns(&["nonexistent"], 5).is_err());
+
         let boxplot = grouped.boxplot().unwrap();
         assert_eq!(boxplot.method, "DataFrameGroupBy.boxplot");
         assert_eq!(boxplot.series.len(), 6);
+
+        let box_cols = grouped.boxplot_columns(&["a"]).unwrap();
+        assert_eq!(
+            box_cols.method,
+            "DataFrameGroupBy.boxplot(columns=[\"a\"])"
+        );
+        assert_eq!(box_cols.series.len(), 3);
+        assert!(grouped
+            .boxplot_columns_to_svg(&["a"])
+            .unwrap()
+            .starts_with("<svg"));
+        assert!(grouped
+            .boxplot_columns_to_html(&["a"])
+            .unwrap()
+            .contains("<div class=\"frankenpandas-plot\""));
+        assert!(grouped.boxplot_columns(&["nonexistent"]).is_err());
 
         let box_plot = grouped.box_plot().unwrap();
         assert_eq!(box_plot.method, "DataFrameGroupBy.boxplot");
@@ -174942,6 +175364,16 @@ mod tests {
         assert_eq!(hist.method, "SeriesGroupBy.hist");
         assert_eq!(hist.bins, 10);
         assert_eq!(hist.series.len(), 2);
+
+        let hist_bins = grouped.hist_with_bins(5).unwrap();
+        assert_eq!(hist_bins.method, "SeriesGroupBy.hist(bins=5)");
+        assert_eq!(hist_bins.bins, 5);
+        assert_eq!(hist_bins.series.len(), 2);
+        assert!(grouped.hist_with_bins_to_svg(5).unwrap().starts_with("<svg"));
+        assert!(grouped
+            .hist_with_bins_to_html(5)
+            .unwrap()
+            .contains("<div class=\"frankenpandas-plot\""));
 
         let boxplot = grouped.boxplot().unwrap();
         assert_eq!(boxplot.method, "SeriesGroupBy.boxplot");

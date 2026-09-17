@@ -1892,4 +1892,181 @@ mod tests {
         let err = gb.plot_xy(PlotKind::Line, "x", "y");
         assert!(err.is_err());
     }
+
+    #[test]
+    fn dataframe_and_groupby_hist_and_boxplot_ergonomics() {
+        use crate::{DataFrame, IndexLabel, Series};
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+        ];
+        let sx = Series::from_values("x", labels.clone(), floats(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        let sy =
+            Series::from_values("y", labels.clone(), floats(&[10.0, 20.0, 30.0, 40.0])).unwrap();
+        let sg = Series::from_values(
+            "group",
+            labels.clone(),
+            vec![
+                Scalar::Utf8("alpha".to_string()),
+                Scalar::Utf8("beta".to_string()),
+                Scalar::Utf8("alpha".to_string()),
+                Scalar::Utf8("beta".to_string()),
+            ],
+        )
+        .unwrap();
+        let df = DataFrame::from_series(vec![sx.clone(), sy.clone(), sg.clone()]).unwrap();
+        let df_num = DataFrame::from_series(vec![sx.clone(), sy.clone()]).unwrap();
+        let gb = df.groupby(&["group"]).unwrap();
+        let by_s = sg.clone();
+        let ser_gb = sx.groupby(&by_s).unwrap();
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("fp_test_hist_box_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // 1. DataFrame hist_with_bins (svg, html, file)
+        let df_h_svg = df_num
+            .hist_with_bins_to_svg(6)
+            .expect("df hist_with_bins_to_svg");
+        assert!(df_h_svg.contains("<svg"));
+        assert!(df_h_svg.contains("<rect"));
+        let df_h_html = df_num
+            .hist_with_bins_to_html(6)
+            .expect("df hist_with_bins_to_html");
+        assert!(df_h_html.contains("<div class=\"frankenpandas-plot\""));
+        assert!(df_h_html.contains("<svg"));
+        let df_h_file = temp_dir.join("df_hist.svg");
+        df_num
+            .hist_with_bins_to_file(6, &df_h_file)
+            .expect("df hist_with_bins_to_file");
+        assert!(std::fs::read_to_string(&df_h_file)
+            .expect("read df_hist")
+            .contains("<svg"));
+
+        // 2. DataFrame hist_columns & boxplot_columns (svg, html, file)
+        let df_hc_svg = df
+            .hist_columns_to_svg(&["x", "y"], 5)
+            .expect("df hist_columns_to_svg");
+        assert!(df_hc_svg.contains("<svg"));
+        let df_hc_html = df
+            .hist_columns_to_html(&["x", "y"], 5)
+            .expect("df hist_columns_to_html");
+        assert!(df_hc_html.contains("<div class=\"frankenpandas-plot\""));
+        let df_hc_file = temp_dir.join("df_hist_cols.svg");
+        df.hist_columns_to_file(&["x", "y"], 5, &df_hc_file)
+            .expect("df hist_columns_to_file");
+        assert!(std::fs::read_to_string(&df_hc_file)
+            .expect("read df_hist_cols")
+            .contains("<svg"));
+
+        let df_bc_svg = df
+            .boxplot_columns_to_svg(&["x"])
+            .expect("df boxplot_columns_to_svg");
+        assert!(df_bc_svg.contains("<svg"));
+        assert!(df_bc_svg.contains("<line"));
+        let df_bc_html = df
+            .boxplot_columns_to_html(&["x"])
+            .expect("df boxplot_columns_to_html");
+        assert!(df_bc_html.contains("<div class=\"frankenpandas-plot\""));
+        let df_bc_file = temp_dir.join("df_box_cols.svg");
+        df.boxplot_columns_to_file(&["x"], &df_bc_file)
+            .expect("df boxplot_columns_to_file");
+        assert!(std::fs::read_to_string(&df_bc_file)
+            .expect("read df_box_cols")
+            .contains("<svg"));
+
+        // 3. Series hist_with_bins (svg, html, file)
+        let s_h_svg = sx.hist_with_bins_to_svg(4).expect("s hist_with_bins_to_svg");
+        assert!(s_h_svg.contains("<svg"));
+        let s_h_html = sx.hist_with_bins_to_html(4).expect("s hist_with_bins_to_html");
+        assert!(s_h_html.contains("<div class=\"frankenpandas-plot\""));
+        let s_h_file = temp_dir.join("s_hist.svg");
+        sx.hist_with_bins_to_file(4, &s_h_file)
+            .expect("s hist_with_bins_to_file");
+        assert!(std::fs::read_to_string(&s_h_file)
+            .expect("read s_hist")
+            .contains("<svg"));
+
+        // 4. DataFrameGroupBy hist_with_bins (svg, html, file)
+        let gb_h_svg = gb.hist_with_bins_to_svg(5).expect("gb hist_with_bins_to_svg");
+        assert!(gb_h_svg.contains("<svg"));
+        let gb_h_html = gb
+            .hist_with_bins_to_html(5)
+            .expect("gb hist_with_bins_to_html");
+        assert!(gb_h_html.contains("<div class=\"frankenpandas-plot\""));
+        let gb_h_file = temp_dir.join("gb_hist.svg");
+        gb.hist_with_bins_to_file(5, &gb_h_file)
+            .expect("gb hist_with_bins_to_file");
+        assert!(std::fs::read_to_string(&gb_h_file)
+            .expect("read gb_hist")
+            .contains("<svg"));
+
+        // 5. DataFrameGroupBy hist_columns & boxplot_columns (svg, html, file)
+        let gb_hc_svg = gb
+            .hist_columns_to_svg(&["x", "y"], 5)
+            .expect("gb hist_columns_to_svg");
+        assert!(gb_hc_svg.contains("<svg"));
+        let gb_hc_html = gb
+            .hist_columns_to_html(&["x", "y"], 5)
+            .expect("gb hist_columns_to_html");
+        assert!(gb_hc_html.contains("<div class=\"frankenpandas-plot\""));
+        let gb_hc_file = temp_dir.join("gb_hist_cols.svg");
+        gb.hist_columns_to_file(&["x", "y"], 5, &gb_hc_file)
+            .expect("gb hist_columns_to_file");
+        assert!(std::fs::read_to_string(&gb_hc_file)
+            .expect("read gb_hist_cols")
+            .contains("<svg"));
+
+        let gb_bc_svg = gb
+            .boxplot_columns_to_svg(&["x"])
+            .expect("gb boxplot_columns_to_svg");
+        assert!(gb_bc_svg.contains("<svg"));
+        assert!(gb_bc_svg.contains("<line"));
+        let gb_bc_html = gb
+            .boxplot_columns_to_html(&["x"])
+            .expect("gb boxplot_columns_to_html");
+        assert!(gb_bc_html.contains("<div class=\"frankenpandas-plot\""));
+        let gb_bc_file = temp_dir.join("gb_box_cols.svg");
+        gb.boxplot_columns_to_file(&["x"], &gb_bc_file)
+            .expect("gb boxplot_columns_to_file");
+        assert!(std::fs::read_to_string(&gb_bc_file)
+            .expect("read gb_box_cols")
+            .contains("<svg"));
+
+        // 6. SeriesGroupBy hist_with_bins (svg, html, file)
+        let sgb_h_svg = ser_gb
+            .hist_with_bins_to_svg(4)
+            .expect("sgb hist_with_bins_to_svg");
+        assert!(sgb_h_svg.contains("<svg"));
+        let sgb_h_html = ser_gb
+            .hist_with_bins_to_html(4)
+            .expect("sgb hist_with_bins_to_html");
+        assert!(sgb_h_html.contains("<div class=\"frankenpandas-plot\""));
+        let sgb_h_file = temp_dir.join("sgb_hist.svg");
+        ser_gb
+            .hist_with_bins_to_file(4, &sgb_h_file)
+            .expect("sgb hist_with_bins_to_file");
+        assert!(std::fs::read_to_string(&sgb_h_file)
+            .expect("read sgb_hist")
+            .contains("<svg"));
+
+        // 7. Error handling for missing columns
+        assert!(gb.hist_columns(&["nonexistent"], 5).is_err());
+        assert!(gb.boxplot_columns(&["nonexistent"]).is_err());
+        assert!(df.hist_columns(&["nonexistent"], 5).is_err());
+        assert!(df.boxplot_columns(&["nonexistent"]).is_err());
+
+        // Cleanup temp files
+        let _ = std::fs::remove_file(&df_h_file);
+        let _ = std::fs::remove_file(&df_hc_file);
+        let _ = std::fs::remove_file(&df_bc_file);
+        let _ = std::fs::remove_file(&s_h_file);
+        let _ = std::fs::remove_file(&gb_h_file);
+        let _ = std::fs::remove_file(&gb_hc_file);
+        let _ = std::fs::remove_file(&gb_bc_file);
+        let _ = std::fs::remove_file(&sgb_h_file);
+        let _ = std::fs::remove_dir(&temp_dir);
+    }
 }
