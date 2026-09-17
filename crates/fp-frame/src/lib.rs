@@ -333,6 +333,15 @@ pub(crate) fn group_key_label(group_key: &[Scalar]) -> String {
         .join(",")
 }
 
+pub(crate) fn scalar_to_finite_f64(value: &Scalar) -> Option<f64> {
+    match value {
+        Scalar::Float64(f) if f.is_finite() => Some(*f),
+        Scalar::Int64(i) => Some(*i as f64),
+        Scalar::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
 fn normalize_describe_percentiles(percentiles: &[f64]) -> Result<Vec<f64>, FrameError> {
     let mut normalized = Vec::with_capacity(percentiles.len() + 1);
 
@@ -8322,6 +8331,105 @@ impl Series {
         path: P,
     ) -> Result<(), FrameError> {
         self.autocorrelation_plot()?.save(path)
+    }
+
+    /// Return a backend-neutral bootstrap plot request assessing statistical uncertainty via resampling (pandas `pandas.plotting.bootstrap_plot(series, size=..., samples=...)`).
+    pub fn bootstrap_plot(
+        &self,
+        size: usize,
+        samples: usize,
+    ) -> Result<HistogramSpec, FrameError> {
+        if !self.column.dtype().is_numeric() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "bootstrap_plot requires numeric values; found {:?}",
+                self.column.dtype()
+            )));
+        }
+        let n = self.len();
+        if n == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "bootstrap_plot requires a non-empty series".to_owned(),
+            ));
+        }
+        let sample_size = if size == 0 { 50.min(n) } else { size.min(n) };
+        let num_samples = if samples == 0 { 500 } else { samples };
+
+        let finite_vals: Vec<f64> = self
+            .column
+            .values()
+            .iter()
+            .filter_map(scalar_to_finite_f64)
+            .collect();
+
+        if finite_vals.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "bootstrap_plot requires at least one finite numeric value".to_owned(),
+            ));
+        }
+
+        let m = finite_vals.len();
+        let eff_size = sample_size.min(m).max(1);
+        let mut rng_state: u64 = 0x853c49e6748fea9b ^ (m as u64);
+        let mut next_u64 = || {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            rng_state
+        };
+
+        let mut means = Vec::with_capacity(num_samples);
+        let mut labels = Vec::with_capacity(num_samples);
+        for s in 0..num_samples {
+            let mut sum = 0.0;
+            for _ in 0..eff_size {
+                let idx = (next_u64() % (m as u64)) as usize;
+                sum += finite_vals[idx];
+            }
+            labels.push(IndexLabel::Int64(s as i64));
+            means.push(Scalar::Float64(sum / eff_size as f64));
+        }
+
+        Ok(HistogramSpec {
+            method: format!(
+                "Series.plot.bootstrap(size={eff_size}, samples={num_samples})"
+            ),
+            bins: 20,
+            series: vec![plot_series_spec(
+                format!("{}_bootstrap_mean", self.name()),
+                labels,
+                DType::Float64,
+                means,
+                None,
+            )],
+        })
+    }
+
+    /// Convenience helper: render series bootstrap plot directly to deterministic SVG string.
+    pub fn bootstrap_plot_to_svg(
+        &self,
+        size: usize,
+        samples: usize,
+    ) -> Result<String, FrameError> {
+        self.bootstrap_plot(size, samples)?.to_svg()
+    }
+
+    /// Convenience helper: render series bootstrap plot directly to HTML figure snippet.
+    pub fn bootstrap_plot_to_html(
+        &self,
+        size: usize,
+        samples: usize,
+    ) -> Result<String, FrameError> {
+        self.bootstrap_plot(size, samples)?.to_html()
+    }
+
+    /// Convenience helper: save rendered series bootstrap plot directly to disk.
+    pub fn bootstrap_plot_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        size: usize,
+        samples: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.bootstrap_plot(size, samples)?.save(path)
     }
 
     /// Return a backend-neutral pandas-style line plot request.
@@ -65107,6 +65215,436 @@ impl DataFrame {
         path: P,
     ) -> Result<(), FrameError> {
         self.boxplot_by_all(by)?.save(path)
+    }
+
+    /// Return a backend-neutral parallel coordinates plot request (pandas `pandas.plotting.parallel_coordinates(frame, class_column, cols=...)`).
+    pub fn parallel_coordinates(
+        &self,
+        class_column: &str,
+        cols: Option<&[&str]>,
+    ) -> Result<PlotSpec, FrameError> {
+        let class_col = self
+            .columns
+            .get(class_column)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{class_column}' not found")))?;
+
+        let target_cols: Vec<(&str, &crate::Column)> = if let Some(col_names) = cols {
+            let mut list = Vec::with_capacity(col_names.len());
+            for &cname in col_names {
+                if cname == class_column {
+                    continue;
+                }
+                let col = self.columns.get(cname).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!("column '{cname}' not found"))
+                })?;
+                if !col.dtype().is_numeric() {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "parallel_coordinates requires numeric column '{cname}', found {:?}",
+                        col.dtype()
+                    )));
+                }
+                list.push((cname, col));
+            }
+            list
+        } else {
+            self.column_order
+                .iter()
+                .filter_map(|col_name| {
+                    if col_name == class_column {
+                        return None;
+                    }
+                    let col = self.columns.get(col_name)?;
+                    if col.dtype().is_numeric() {
+                        Some((col_name.as_str(), col))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if target_cols.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "parallel_coordinates requires at least one numeric feature column".to_owned(),
+            ));
+        }
+
+        let num_rows = self.index.len();
+        if num_rows == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "parallel_coordinates requires a non-empty DataFrame".to_owned(),
+            ));
+        }
+
+        let x_labels: Vec<IndexLabel> = target_cols
+            .iter()
+            .map(|(name, _)| IndexLabel::Utf8((*name).to_string()))
+            .collect();
+
+        let mut series = Vec::with_capacity(num_rows);
+        for r in 0..num_rows {
+            let class_val = class_col.values().get(r).cloned().unwrap_or(Scalar::Null(NullKind::Null));
+            let class_label = scalar_plot_label(&class_val);
+            let vals: Vec<Scalar> = target_cols
+                .iter()
+                .map(|(_, col)| col.values().get(r).cloned().unwrap_or(Scalar::Null(NullKind::NaN)))
+                .collect();
+            series.push(plot_series_spec(
+                format!("{class_label}_{r}"),
+                x_labels.clone(),
+                DType::Float64,
+                vals,
+                Some(vec![class_val]),
+            ));
+        }
+
+        Ok(PlotSpec {
+            method: format!("DataFrame.plot.parallel_coordinates(class_column='{class_column}')"),
+            kind: PlotKind::Line,
+            series,
+        })
+    }
+
+    /// Convenience helper: render parallel coordinates plot directly to deterministic SVG string.
+    pub fn parallel_coordinates_to_svg(
+        &self,
+        class_column: &str,
+        cols: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        self.parallel_coordinates(class_column, cols)?.to_svg()
+    }
+
+    /// Convenience helper: render parallel coordinates plot directly to HTML figure snippet.
+    pub fn parallel_coordinates_to_html(
+        &self,
+        class_column: &str,
+        cols: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        self.parallel_coordinates(class_column, cols)?.to_html()
+    }
+
+    /// Convenience helper: save rendered parallel coordinates plot directly to disk.
+    pub fn parallel_coordinates_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        class_column: &str,
+        cols: Option<&[&str]>,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.parallel_coordinates(class_column, cols)?.save(path)
+    }
+
+    /// Return a backend-neutral Andrews curves plot request (pandas `pandas.plotting.andrews_curves(frame, class_column, samples=...)`).
+    pub fn andrews_curves(
+        &self,
+        class_column: &str,
+        samples: usize,
+    ) -> Result<PlotSpec, FrameError> {
+        let class_col = self
+            .columns
+            .get(class_column)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{class_column}' not found")))?;
+
+        let target_cols: Vec<(&str, &crate::Column)> = self
+            .column_order
+            .iter()
+            .filter_map(|col_name| {
+                if col_name == class_column {
+                    return None;
+                }
+                let col = self.columns.get(col_name)?;
+                if col.dtype().is_numeric() {
+                    Some((col_name.as_str(), col))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if target_cols.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "andrews_curves requires at least one numeric feature column".to_owned(),
+            ));
+        }
+
+        let num_rows = self.index.len();
+        if num_rows == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "andrews_curves requires a non-empty DataFrame".to_owned(),
+            ));
+        }
+
+        let num_samples = if samples == 0 { 200 } else { samples };
+        let t_step = 2.0 * std::f64::consts::PI / (num_samples - 1).max(1) as f64;
+        let sqrt_2 = std::f64::consts::SQRT_2;
+
+        let mut series = Vec::with_capacity(num_rows);
+        for r in 0..num_rows {
+            let class_val = class_col.values().get(r).cloned().unwrap_or(Scalar::Null(NullKind::Null));
+            let class_label = scalar_plot_label(&class_val);
+
+            let row_nums: Vec<f64> = target_cols
+                .iter()
+                .map(|(_, col)| {
+                    col.values()
+                        .get(r)
+                        .and_then(scalar_to_finite_f64)
+                        .unwrap_or(f64::NAN)
+                })
+                .collect();
+
+            let mut curve_vals = Vec::with_capacity(num_samples);
+            let mut labels = Vec::with_capacity(num_samples);
+
+            for s in 0..num_samples {
+                let t = -std::f64::consts::PI + s as f64 * t_step;
+                labels.push(IndexLabel::Utf8(format!("{t:.2}")));
+                let mut sum = 0.0;
+                for (k, &val) in row_nums.iter().enumerate() {
+                    if !val.is_finite() {
+                        continue;
+                    }
+                    if k == 0 {
+                        sum += val / sqrt_2;
+                    } else if k % 2 == 1 {
+                        let j = ((k + 1) / 2) as f64;
+                        sum += val * (j * t).sin();
+                    } else {
+                        let j = (k / 2) as f64;
+                        sum += val * (j * t).cos();
+                    }
+                }
+                curve_vals.push(Scalar::Float64(sum));
+            }
+
+            series.push(plot_series_spec(
+                format!("{class_label}_{r}"),
+                labels,
+                DType::Float64,
+                curve_vals,
+                Some(vec![class_val]),
+            ));
+        }
+
+        Ok(PlotSpec {
+            method: format!("DataFrame.plot.andrews_curves(class_column='{class_column}', samples={num_samples})"),
+            kind: PlotKind::Line,
+            series,
+        })
+    }
+
+    /// Convenience helper: render Andrews curves plot directly to deterministic SVG string.
+    pub fn andrews_curves_to_svg(
+        &self,
+        class_column: &str,
+        samples: usize,
+    ) -> Result<String, FrameError> {
+        self.andrews_curves(class_column, samples)?.to_svg()
+    }
+
+    /// Convenience helper: render Andrews curves plot directly to HTML figure snippet.
+    pub fn andrews_curves_to_html(
+        &self,
+        class_column: &str,
+        samples: usize,
+    ) -> Result<String, FrameError> {
+        self.andrews_curves(class_column, samples)?.to_html()
+    }
+
+    /// Convenience helper: save rendered Andrews curves plot directly to disk.
+    pub fn andrews_curves_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        class_column: &str,
+        samples: usize,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.andrews_curves(class_column, samples)?.save(path)
+    }
+
+    /// Return a backend-neutral RadViz plot request (pandas `pandas.plotting.radviz(frame, class_column, cols=...)`).
+    pub fn radviz(
+        &self,
+        class_column: &str,
+        cols: Option<&[&str]>,
+    ) -> Result<PlotSpec, FrameError> {
+        let class_col = self
+            .columns
+            .get(class_column)
+            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{class_column}' not found")))?;
+
+        let target_cols: Vec<(&str, &crate::Column)> = if let Some(col_names) = cols {
+            let mut list = Vec::with_capacity(col_names.len());
+            for &cname in col_names {
+                if cname == class_column {
+                    continue;
+                }
+                let col = self.columns.get(cname).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!("column '{cname}' not found"))
+                })?;
+                if !col.dtype().is_numeric() {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "radviz requires numeric column '{cname}', found {:?}",
+                        col.dtype()
+                    )));
+                }
+                list.push((cname, col));
+            }
+            list
+        } else {
+            self.column_order
+                .iter()
+                .filter_map(|col_name| {
+                    if col_name == class_column {
+                        return None;
+                    }
+                    let col = self.columns.get(col_name)?;
+                    if col.dtype().is_numeric() {
+                        Some((col_name.as_str(), col))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if target_cols.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "radviz requires at least one numeric feature column".to_owned(),
+            ));
+        }
+
+        let num_rows = self.index.len();
+        if num_rows == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "radviz requires a non-empty DataFrame".to_owned(),
+            ));
+        }
+
+        let m = target_cols.len();
+        let mut col_min_max = Vec::with_capacity(m);
+        for (_, col) in &target_cols {
+            let mut c_min = f64::INFINITY;
+            let mut c_max = f64::NEG_INFINITY;
+            for val in col.values() {
+                if let Some(n) = scalar_to_finite_f64(val) {
+                    c_min = c_min.min(n);
+                    c_max = c_max.max(n);
+                }
+            }
+            if !c_min.is_finite() || !c_max.is_finite() || (c_max - c_min).abs() < f64::EPSILON {
+                c_min = 0.0;
+                c_max = 1.0;
+            }
+            col_min_max.push((c_min, c_max));
+        }
+
+        let anchors: Vec<(f64, f64)> = (0..m)
+            .map(|j| {
+                let theta = 2.0 * std::f64::consts::PI * (j as f64) / (m as f64);
+                (theta.cos(), theta.sin())
+            })
+            .collect();
+
+        let mut class_order = Vec::new();
+        let mut class_groups: std::collections::BTreeMap<String, (Scalar, Vec<IndexLabel>, Vec<Scalar>, Vec<Scalar>)> =
+            std::collections::BTreeMap::new();
+
+        for r in 0..num_rows {
+            let class_val = class_col.values().get(r).cloned().unwrap_or(Scalar::Null(NullKind::Null));
+            let class_label = scalar_plot_label(&class_val);
+
+            let mut sum_norm = 0.0;
+            let mut sum_x = 0.0;
+            let mut sum_y = 0.0;
+
+            for (j, (_, col)) in target_cols.iter().enumerate() {
+                let val_num = col
+                    .values()
+                    .get(r)
+                    .and_then(scalar_to_finite_f64)
+                    .unwrap_or(0.0);
+                let (c_min, c_max) = col_min_max[j];
+                let norm = if c_max > c_min {
+                    ((val_num - c_min) / (c_max - c_min)).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                sum_norm += norm;
+                sum_x += norm * anchors[j].0;
+                sum_y += norm * anchors[j].1;
+            }
+
+            let (u, v) = if sum_norm > 0.0 {
+                (sum_x / sum_norm, sum_y / sum_norm)
+            } else {
+                (0.0, 0.0)
+            };
+
+            let row_label = self.index.labels().get(r).cloned().unwrap_or_else(|| IndexLabel::Int64(r as i64));
+
+            if !class_groups.contains_key(&class_label) {
+                class_order.push(class_label.clone());
+            }
+            let entry = class_groups.entry(class_label).or_insert_with(|| {
+                (class_val.clone(), Vec::new(), Vec::new(), Vec::new())
+            });
+            entry.1.push(row_label);
+            entry.2.push(Scalar::Float64(u));
+            entry.3.push(Scalar::Float64(v));
+        }
+
+        let mut series = Vec::with_capacity(class_order.len() * 2);
+        for class_label in class_order {
+            if let Some((class_val, labels, u_vals, v_vals)) = class_groups.remove(&class_label) {
+                series.push(plot_series_spec(
+                    format!("{class_label}_x"),
+                    labels.clone(),
+                    DType::Float64,
+                    u_vals,
+                    Some(vec![class_val.clone()]),
+                ));
+                series.push(plot_series_spec(
+                    format!("{class_label}_y"),
+                    labels,
+                    DType::Float64,
+                    v_vals,
+                    Some(vec![class_val]),
+                ));
+            }
+        }
+
+        Ok(PlotSpec {
+            method: format!("DataFrame.plot.radviz(class_column='{class_column}')"),
+            kind: PlotKind::Scatter,
+            series,
+        })
+    }
+
+    /// Convenience helper: render RadViz plot directly to deterministic SVG string.
+    pub fn radviz_to_svg(
+        &self,
+        class_column: &str,
+        cols: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        self.radviz(class_column, cols)?.to_svg()
+    }
+
+    /// Convenience helper: render RadViz plot directly to HTML figure snippet.
+    pub fn radviz_to_html(
+        &self,
+        class_column: &str,
+        cols: Option<&[&str]>,
+    ) -> Result<String, FrameError> {
+        self.radviz(class_column, cols)?.to_html()
+    }
+
+    /// Convenience helper: save rendered RadViz plot directly to disk.
+    pub fn radviz_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        class_column: &str,
+        cols: Option<&[&str]>,
+        path: P,
+    ) -> Result<(), FrameError> {
+        self.radviz(class_column, cols)?.save(path)
     }
 
     /// `pd.DataFrame(dict_of_series, columns=[...])` — SELECT the named columns

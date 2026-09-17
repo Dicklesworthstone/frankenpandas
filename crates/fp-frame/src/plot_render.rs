@@ -289,7 +289,8 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
         && spec.series.len().is_multiple_of(2)
         && (spec.method.contains("(x=")
             || spec.method.contains("scatter_columns")
-            || spec.method.contains(".lag("));
+            || spec.method.contains(".lag(")
+            || spec.method.contains("radviz"));
     let is_xy_hexbin = spec.kind == PlotKind::Hexbin
         && spec.series.len() >= 2
         && spec.series.len().is_multiple_of(2)
@@ -304,8 +305,20 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             .step_by(2)
             .map(|i| views[i].clone())
             .collect();
-        let x_sc = data_scale(&x_views)?;
-        let y_sc = data_scale(&y_views)?;
+        let (x_sc, y_sc) = if spec.method.contains("radviz") {
+            (
+                Scale {
+                    min: -1.15,
+                    max: 1.15,
+                },
+                Scale {
+                    min: -1.15,
+                    max: 1.15,
+                },
+            )
+        } else {
+            (data_scale(&x_views)?, data_scale(&y_views)?)
+        };
         (y_sc, Some((x_sc, y_sc)))
     } else {
         let mut sc = data_scale(&views)?;
@@ -346,10 +359,57 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
     let mut body = String::new();
     match spec.kind {
         PlotKind::Line | PlotKind::Area => {
+            let is_class_grouped = spec.kind == PlotKind::Line
+                && (spec.method.contains("parallel_coordinates")
+                    || spec.method.contains("andrews_curves"));
+            let mut unique_classes: Vec<String> = Vec::new();
+            if is_class_grouped {
+                for s in &spec.series {
+                    let class_name = s
+                        .group_key
+                        .as_ref()
+                        .and_then(|gk| gk.first())
+                        .map(crate::scalar_plot_label)
+                        .unwrap_or_else(|| s.name.clone());
+                    if !unique_classes.contains(&class_name) {
+                        unique_classes.push(class_name);
+                    }
+                }
+            }
+
+            if spec.method.contains("parallel_coordinates") {
+                let bottom = MARGIN_TOP + PLOT_H;
+                for i in 0..n {
+                    let xi = x(i);
+                    body.push_str(&format!(
+                        "<line x1=\"{xi:.2}\" y1=\"{MARGIN_TOP}\" x2=\"{xi:.2}\" y2=\"{bottom}\" stroke=\"#ccc\" stroke-width=\"1\" stroke-dasharray=\"3,3\"/>"
+                    ));
+                }
+            }
+
             // Contiguous finite runs become separate polylines; NaN/Null breaks
             // the line exactly like a masked gap.
             for (si, values) in views.iter().enumerate() {
-                let color = palette(si);
+                let color = if is_class_grouped {
+                    let class_name = spec.series[si]
+                        .group_key
+                        .as_ref()
+                        .and_then(|gk| gk.first())
+                        .map(crate::scalar_plot_label)
+                        .unwrap_or_else(|| spec.series[si].name.clone());
+                    let c_idx = unique_classes
+                        .iter()
+                        .position(|c| c == &class_name)
+                        .unwrap_or(si);
+                    palette(c_idx)
+                } else {
+                    palette(si)
+                };
+                let stroke_attrs = if is_class_grouped {
+                    "stroke-width=\"1.5\" stroke-opacity=\"0.6\""
+                } else {
+                    "stroke-width=\"2\""
+                };
                 let mut runs: Vec<Vec<(f64, f64)>> = vec![Vec::new()];
                 for (i, v) in values.iter().enumerate() {
                     match v.filter(|v| v.is_finite()) {
@@ -376,7 +436,7 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                         ));
                     }
                     body.push_str(&format!(
-                        "<polyline points=\"{points}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2\"/>"
+                        "<polyline points=\"{points}\" fill=\"none\" stroke=\"{color}\" {stroke_attrs}/>"
                     ));
                 }
             }
@@ -385,6 +445,15 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             if let Some((ref x_sc, ref y_sc)) = xy_scales {
                 let x_map = |v: f64| MARGIN_LEFT + (v - x_sc.min) / (x_sc.max - x_sc.min) * PLOT_W;
                 let y_map = |v: f64| MARGIN_TOP + (y_sc.max - v) / (y_sc.max - y_sc.min) * PLOT_H;
+                if spec.method.contains("radviz") {
+                    let cx = x_map(0.0);
+                    let cy = y_map(0.0);
+                    let rx = (x_map(1.0) - cx).abs();
+                    let ry = (y_map(1.0) - cy).abs();
+                    body.push_str(&format!(
+                        "<ellipse cx=\"{cx:.2}\" cy=\"{cy:.2}\" rx=\"{rx:.2}\" ry=\"{ry:.2}\" fill=\"none\" stroke=\"#bbb\" stroke-width=\"1.5\"/>"
+                    ));
+                }
                 let num_groups = views.len() / 2;
                 for g in 0..num_groups {
                     let color = palette(g);
@@ -759,7 +828,7 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
         }
     } else if xy_scales.is_some() {
         let num_groups = spec.series.len() / 2;
-        if num_groups <= 1 {
+        if num_groups <= 1 && !spec.method.contains("radviz") {
             vec![(
                 format!("{} vs {}", spec.series[1].name, spec.series[0].name),
                 palette(0),
@@ -783,6 +852,27 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 })
                 .collect()
         }
+    } else if spec.kind == PlotKind::Line
+        && (spec.method.contains("parallel_coordinates")
+            || spec.method.contains("andrews_curves"))
+    {
+        let mut unique_classes: Vec<String> = Vec::new();
+        for s in &spec.series {
+            let class_name = s
+                .group_key
+                .as_ref()
+                .and_then(|gk| gk.first())
+                .map(crate::scalar_plot_label)
+                .unwrap_or_else(|| s.name.clone());
+            if !unique_classes.contains(&class_name) {
+                unique_classes.push(class_name);
+            }
+        }
+        unique_classes
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (c, palette(i)))
+            .collect()
     } else {
         spec.series
             .iter()
@@ -2201,6 +2291,162 @@ mod tests {
         let _ = std::fs::remove_file(&h_all_file);
         let _ = std::fs::remove_file(&bc_by_file);
         let _ = std::fs::remove_file(&b_all_file);
+        let _ = std::fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn bootstrap_plot_and_multivariate_plots() {
+        let labels: Vec<IndexLabel> = (0..6).map(IndexLabel::Int64).collect();
+        let sx = Series::from_values(
+            "sepal_len",
+            labels.clone(),
+            floats(&[5.1, 4.9, 4.7, 7.0, 6.4, 6.9]),
+        )
+        .unwrap();
+        let sy = Series::from_values(
+            "sepal_wid",
+            labels.clone(),
+            floats(&[3.5, 3.0, 3.2, 3.2, 3.2, 3.1]),
+        )
+        .unwrap();
+        let sz = Series::from_values(
+            "petal_len",
+            labels.clone(),
+            floats(&[1.4, 1.4, 1.3, 4.7, 4.5, 4.9]),
+        )
+        .unwrap();
+        let sc = Series::from_values(
+            "species",
+            labels.clone(),
+            vec![
+                Scalar::Utf8("setosa".into()),
+                Scalar::Utf8("setosa".into()),
+                Scalar::Utf8("setosa".into()),
+                Scalar::Utf8("versicolor".into()),
+                Scalar::Utf8("versicolor".into()),
+                Scalar::Utf8("versicolor".into()),
+            ],
+        )
+        .unwrap();
+
+        let df =
+            DataFrame::from_series(vec![sx.clone(), sy.clone(), sz.clone(), sc.clone()]).unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("fp_test_multivariate_plots_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // 1. Series bootstrap_plot
+        let boot_spec = sx.bootstrap_plot(4, 50).expect("bootstrap_plot");
+        assert_eq!(boot_spec.series.len(), 1);
+        assert_eq!(boot_spec.series[0].values.len(), 50);
+        let boot_svg = sx
+            .bootstrap_plot_to_svg(4, 50)
+            .expect("bootstrap_plot_to_svg");
+        assert!(boot_svg.contains("<svg"));
+        assert!(boot_svg.contains("<rect"));
+        let boot_html = sx
+            .bootstrap_plot_to_html(4, 50)
+            .expect("bootstrap_plot_to_html");
+        assert!(boot_html.contains("<div class=\"frankenpandas-plot\""));
+        let boot_file = temp_dir.join("boot.svg");
+        sx.bootstrap_plot_to_file(4, 50, &boot_file)
+            .expect("bootstrap_plot_to_file");
+        assert!(std::fs::read_to_string(&boot_file)
+            .expect("read boot")
+            .contains("<svg"));
+
+        // 2. DataFrame parallel_coordinates
+        let pc_spec = df
+            .parallel_coordinates("species", None)
+            .expect("parallel_coordinates");
+        assert_eq!(pc_spec.kind, PlotKind::Line);
+        assert_eq!(pc_spec.series.len(), 6);
+        let pc_svg = df
+            .parallel_coordinates_to_svg("species", None)
+            .expect("parallel_coordinates_to_svg");
+        assert!(pc_svg.contains("<svg"));
+        assert!(pc_svg.contains("stroke-dasharray=\"3,3\""));
+        assert!(pc_svg.contains("stroke-opacity=\"0.6\""));
+        assert!(pc_svg.contains("setosa"));
+        assert!(pc_svg.contains("versicolor"));
+        let pc_html = df
+            .parallel_coordinates_to_html("species", None)
+            .expect("parallel_coordinates_to_html");
+        assert!(pc_html.contains("<div class=\"frankenpandas-plot\""));
+        let pc_file = temp_dir.join("parallel.svg");
+        df.parallel_coordinates_to_file("species", None, &pc_file)
+            .expect("parallel_coordinates_to_file");
+        assert!(std::fs::read_to_string(&pc_file)
+            .expect("read parallel")
+            .contains("<svg"));
+
+        // parallel_coordinates with explicit cols
+        let pc_sub_svg = df
+            .parallel_coordinates_to_svg("species", Some(&["sepal_len", "sepal_wid"]))
+            .expect("pc_sub");
+        assert!(pc_sub_svg.contains("<svg"));
+
+        // 3. DataFrame andrews_curves
+        let ac_spec = df.andrews_curves("species", 30).expect("andrews_curves");
+        assert_eq!(ac_spec.kind, PlotKind::Line);
+        assert_eq!(ac_spec.series.len(), 6);
+        assert_eq!(ac_spec.series[0].values.len(), 30);
+        let ac_svg = df
+            .andrews_curves_to_svg("species", 30)
+            .expect("andrews_curves_to_svg");
+        assert!(ac_svg.contains("<svg"));
+        assert!(ac_svg.contains("stroke-opacity=\"0.6\""));
+        assert!(ac_svg.contains("setosa"));
+        assert!(ac_svg.contains("versicolor"));
+        let ac_html = df
+            .andrews_curves_to_html("species", 30)
+            .expect("andrews_curves_to_html");
+        assert!(ac_html.contains("<div class=\"frankenpandas-plot\""));
+        let ac_file = temp_dir.join("andrews.svg");
+        df.andrews_curves_to_file("species", 30, &ac_file)
+            .expect("andrews_curves_to_file");
+        assert!(std::fs::read_to_string(&ac_file)
+            .expect("read andrews")
+            .contains("<svg"));
+
+        // 4. DataFrame radviz
+        let rv_spec = df.radviz("species", None).expect("radviz");
+        assert_eq!(rv_spec.kind, PlotKind::Scatter);
+        assert_eq!(rv_spec.series.len(), 4); // 2 classes * 2 (x, y)
+        let rv_svg = df.radviz_to_svg("species", None).expect("radviz_to_svg");
+        assert!(rv_svg.contains("<svg"));
+        assert!(rv_svg.contains("<ellipse")); // circular boundary
+        assert!(rv_svg.contains("<circle")); // scatter points
+        assert!(rv_svg.contains("setosa"));
+        assert!(rv_svg.contains("versicolor"));
+        let rv_html = df.radviz_to_html("species", None).expect("radviz_to_html");
+        assert!(rv_html.contains("<div class=\"frankenpandas-plot\""));
+        let rv_file = temp_dir.join("radviz.svg");
+        df.radviz_to_file("species", None, &rv_file)
+            .expect("radviz_to_file");
+        assert!(std::fs::read_to_string(&rv_file)
+            .expect("read radviz")
+            .contains("<svg"));
+
+        // 5. Error conditions
+        assert!(sc.bootstrap_plot(5, 10).is_err());
+        assert!(df.parallel_coordinates("nonexistent", None).is_err());
+        assert!(df
+            .parallel_coordinates("species", Some(&["nonexistent"]))
+            .is_err());
+        assert!(df.andrews_curves("nonexistent", 50).is_err());
+        assert!(df.radviz("nonexistent", None).is_err());
+        assert!(df.radviz("species", Some(&["species"])).is_err()); // no numeric cols
+        let df_str = DataFrame::from_series(vec![sc.clone()]).unwrap();
+        assert!(df_str.parallel_coordinates("species", None).is_err());
+        assert!(df_str.andrews_curves("species", 50).is_err());
+        assert!(df_str.radviz("species", None).is_err());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&boot_file);
+        let _ = std::fs::remove_file(&pc_file);
+        let _ = std::fs::remove_file(&ac_file);
+        let _ = std::fs::remove_file(&rv_file);
         let _ = std::fs::remove_dir(&temp_dir);
     }
 }
