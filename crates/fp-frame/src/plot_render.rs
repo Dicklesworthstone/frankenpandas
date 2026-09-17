@@ -17,7 +17,10 @@
 //! Style floor only: axes, ticks, gridlines, series colors, titles, legend,
 //! XML-escaped labels. This is not matplotlib parity by design.
 
-use crate::{BoxPlotSpec, FrameError, HistogramSpec, PlotKind, PlotSeriesSpec, PlotSpec, Scalar};
+use crate::{
+    BoxPlotSpec, FrameError, HistogramSpec, PlotKind, PlotSeriesSpec, PlotSpec, Scalar,
+    ScatterMatrixSpec,
+};
 
 // ── Geometry / palette ─────────────────────────────────────────────────────
 
@@ -853,8 +856,7 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
                 .collect()
         }
     } else if spec.kind == PlotKind::Line
-        && (spec.method.contains("parallel_coordinates")
-            || spec.method.contains("andrews_curves"))
+        && (spec.method.contains("parallel_coordinates") || spec.method.contains("andrews_curves"))
     {
         let mut unique_classes: Vec<String> = Vec::new();
         for s in &spec.series {
@@ -1199,6 +1201,329 @@ impl BoxPlotSpec {
         let svg = self.to_svg()?;
         save_rendered_svg(&svg, path, &self.method)
     }
+}
+
+impl ScatterMatrixSpec {
+    /// Render this scatter matrix specification to deterministic SVG XML.
+    pub fn to_svg(&self) -> Result<String, FrameError> {
+        scatter_matrix_body(self)
+    }
+
+    /// [`ScatterMatrixSpec::to_svg`] as UTF-8 bytes.
+    pub fn to_svg_bytes(&self) -> Result<Vec<u8>, FrameError> {
+        self.to_svg().map(String::into_bytes)
+    }
+
+    /// Wrap the deterministic SVG in an HTML figure container.
+    pub fn to_html(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_html(&s))
+    }
+
+    /// Render this scatter matrix spec to a complete HTML5 page document.
+    pub fn to_html_page(&self, title: Option<&str>) -> Result<String, FrameError> {
+        let title_str = title.unwrap_or(&self.method);
+        self.to_svg().map(|s| wrap_svg_html_page(&s, title_str))
+    }
+
+    /// Render this scatter matrix spec to Markdown-compatible HTML embedding.
+    pub fn to_markdown(&self) -> Result<String, FrameError> {
+        self.to_svg().map(|s| wrap_svg_markdown(&s))
+    }
+
+    /// Save the rendered scatter matrix to disk (`.svg`, `.html`/`.htm`, or `.md`).
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), FrameError> {
+        let svg = self.to_svg()?;
+        save_rendered_svg(&svg, path, &self.method)
+    }
+}
+
+fn scatter_matrix_body(spec: &ScatterMatrixSpec) -> Result<String, FrameError> {
+    let n = spec.columns.len();
+    if n == 0 {
+        return Err(FrameError::CompatibilityRejected(
+            "scatter_matrix requires at least one numeric column".to_owned(),
+        ));
+    }
+    if spec.series.len() != n {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "scatter_matrix: series count ({}) does not match columns count ({n})",
+            spec.series.len()
+        )));
+    }
+
+    if !spec.alpha.is_finite() || !(0.0..=1.0).contains(&spec.alpha) {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "scatter_matrix: alpha must be in [0, 1], found {}",
+            spec.alpha
+        )));
+    }
+
+    if !spec.range_padding.is_finite() || spec.range_padding < 0.0 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "scatter_matrix: range_padding must be finite and >= 0, found {}",
+            spec.range_padding
+        )));
+    }
+
+    let diag = spec.diagonal.to_ascii_lowercase();
+    if diag != "hist" && diag != "kde" && diag != "density" {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "scatter_matrix: diagonal must be 'hist', 'kde', or 'density', found '{}'",
+            spec.diagonal
+        )));
+    }
+
+    let views: Result<Vec<Vec<Option<f64>>>, FrameError> =
+        spec.series.iter().map(numeric_view).collect();
+    let views = views?;
+
+    let mut finite_series: Vec<Vec<f64>> = Vec::with_capacity(n);
+    let mut scales: Vec<Scale> = Vec::with_capacity(n);
+
+    for (k, view) in views.iter().enumerate() {
+        let finite_vals: Vec<f64> = view
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        if finite_vals.is_empty() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "no plottable (non-missing) values in column '{}'",
+                spec.columns[k]
+            )));
+        }
+        let mut c_min = finite_vals.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut c_max = finite_vals
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        if (c_max - c_min).abs() < f64::EPSILON {
+            c_min -= 1.0;
+            c_max += 1.0;
+        }
+        let span = c_max - c_min;
+        let pad = span * spec.range_padding;
+        scales.push(Scale {
+            min: c_min - pad,
+            max: c_max + pad,
+        });
+        finite_series.push(finite_vals);
+    }
+
+    let panel_size: f64 = if n == 1 {
+        240.0
+    } else if n == 2 {
+        180.0
+    } else {
+        150.0
+    };
+    let margin_left: f64 = 65.0;
+    let margin_right: f64 = 25.0;
+    let margin_top: f64 = 35.0;
+    let margin_bottom: f64 = 45.0;
+    let grid_w = n as f64 * panel_size;
+    let grid_h = n as f64 * panel_size;
+    let total_w = margin_left + grid_w + margin_right;
+    let total_h = margin_top + grid_h + margin_bottom;
+    let cell_pad = 6.0;
+
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total_w:.2}\" height=\"{total_h:.2}\" viewBox=\"0 0 {total_w:.2} {total_h:.2}\" font-family=\"monospace\" font-size=\"11\">\
+        <rect width=\"{total_w:.2}\" height=\"{total_h:.2}\" fill=\"white\"/>\
+        <text x=\"{:.2}\" y=\"22\" text-anchor=\"middle\" fill=\"#333\" font-size=\"13\" font-weight=\"bold\">{}</text>",
+        total_w / 2.0,
+        esc(&spec.method)
+    );
+
+    for i in 0..n {
+        for j in 0..n {
+            let cell_x0 = margin_left + (j as f64) * panel_size;
+            let cell_y0 = margin_top + (i as f64) * panel_size;
+            let plot_x = cell_x0 + cell_pad;
+            let plot_y = cell_y0 + cell_pad;
+            let plot_w = panel_size - 2.0 * cell_pad;
+            let plot_h = panel_size - 2.0 * cell_pad;
+
+            svg.push_str(&format!(
+                "<rect x=\"{plot_x:.2}\" y=\"{plot_y:.2}\" width=\"{plot_w:.2}\" height=\"{plot_h:.2}\" fill=\"#fafafa\" stroke=\"#d0d0d0\" stroke-width=\"1\"/>"
+            ));
+
+            for frac in [0.25, 0.5, 0.75] {
+                let gx = plot_x + frac * plot_w;
+                let gy = plot_y + frac * plot_h;
+                svg.push_str(&format!(
+                    "<line x1=\"{gx:.2}\" y1=\"{plot_y:.2}\" x2=\"{gx:.2}\" y2=\"{:.2}\" stroke=\"#ececec\" stroke-dasharray=\"2,2\"/>\
+                    <line x1=\"{plot_x:.2}\" y1=\"{gy:.2}\" x2=\"{:.2}\" y2=\"{gy:.2}\" stroke=\"#ececec\" stroke-dasharray=\"2,2\"/>",
+                    plot_y + plot_h,
+                    plot_x + plot_w
+                ));
+            }
+
+            if i == j {
+                if diag == "hist" {
+                    let values = &finite_series[i];
+                    let x_scale = &scales[i];
+                    let bins = 10usize;
+                    let mut counts = vec![0usize; bins];
+                    let step = (x_scale.max - x_scale.min) / bins as f64;
+                    for v in values {
+                        let raw_idx = ((v - x_scale.min) / step).floor();
+                        let idx = if *v >= x_scale.max {
+                            bins - 1
+                        } else if raw_idx <= 0.0 {
+                            0
+                        } else {
+                            (raw_idx as usize).min(bins - 1)
+                        };
+                        counts[idx] += 1;
+                    }
+                    let max_count = counts.iter().copied().max().unwrap_or(1).max(1);
+                    let bar_w = (plot_w / bins as f64 - 1.0).max(0.5);
+                    for (bi, &cnt) in counts.iter().enumerate() {
+                        if cnt == 0 {
+                            continue;
+                        }
+                        let h = (cnt as f64 / max_count as f64) * (plot_h - 2.0);
+                        let bx = plot_x + (bi as f64 * plot_w / bins as f64);
+                        let by = plot_y + plot_h - h;
+                        svg.push_str(&format!(
+                            "<rect x=\"{bx:.2}\" y=\"{by:.2}\" width=\"{bar_w:.2}\" height=\"{h:.2}\" fill=\"#4e79a7\" fill-opacity=\"0.7\" stroke=\"white\" stroke-width=\"0.5\"/>"
+                        ));
+                    }
+                } else {
+                    let values = &finite_series[i];
+                    let x_scale = &scales[i];
+                    let n_pts = values.len();
+                    let mean = values.iter().sum::<f64>() / n_pts as f64;
+                    let var = if n_pts > 1 {
+                        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n_pts - 1) as f64
+                    } else {
+                        1.0
+                    };
+                    let std = var.sqrt();
+                    let h = if std > 1e-9 {
+                        1.06 * std * (n_pts as f64).powf(-0.2)
+                    } else {
+                        (x_scale.max - x_scale.min) / 10.0
+                    };
+                    let h = if h > 1e-9 { h } else { 1.0 };
+                    let m_steps = 50usize;
+                    let x_span = x_scale.max - x_scale.min;
+                    let mut densities = Vec::with_capacity(m_steps);
+                    let inv_sqrt_2pi = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
+                    for s in 0..m_steps {
+                        let x_val = x_scale.min + (s as f64 / (m_steps - 1) as f64) * x_span;
+                        let mut sum = 0.0;
+                        for v in values {
+                            let u = (x_val - v) / h;
+                            sum += (-0.5 * u * u).exp();
+                        }
+                        let dens = sum / (n_pts as f64 * h) * inv_sqrt_2pi;
+                        densities.push(dens);
+                    }
+                    let max_dens = densities.iter().copied().fold(0.0, f64::max).max(1e-9);
+                    let mut poly_pts = Vec::with_capacity(m_steps);
+                    for (s, &dens) in densities.iter().enumerate() {
+                        let px = plot_x + (s as f64 / (m_steps - 1) as f64) * plot_w;
+                        let frac = (dens / max_dens).clamp(0.0, 1.0);
+                        let py = plot_y + (1.0 - frac) * (plot_h - 2.0);
+                        poly_pts.push((px, py));
+                    }
+                    let mut poly_str = format!("{plot_x:.2},{:.2} ", plot_y + plot_h);
+                    for (px, py) in &poly_pts {
+                        poly_str.push_str(&format!("{px:.2},{py:.2} "));
+                    }
+                    poly_str.push_str(&format!("{:.2},{:.2}", plot_x + plot_w, plot_y + plot_h));
+                    svg.push_str(&format!(
+                        "<polygon points=\"{poly_str}\" fill=\"#4e79a7\" fill-opacity=\"0.2\"/>"
+                    ));
+                    let mut line_str = String::new();
+                    for (k, (px, py)) in poly_pts.iter().enumerate() {
+                        if k > 0 {
+                            line_str.push(' ');
+                        }
+                        line_str.push_str(&format!("{px:.2},{py:.2}"));
+                    }
+                    svg.push_str(&format!(
+                        "<polyline points=\"{line_str}\" fill=\"none\" stroke=\"#4e79a7\" stroke-width=\"1.5\"/>"
+                    ));
+                }
+            } else {
+                let x_scale = &scales[j];
+                let y_scale = &scales[i];
+                let x_col = &views[j];
+                let y_col = &views[i];
+                let num_rows = x_col.len().min(y_col.len());
+                let x_span = (x_scale.max - x_scale.min).max(f64::EPSILON);
+                let y_span = (y_scale.max - y_scale.min).max(f64::EPSILON);
+                for r in 0..num_rows {
+                    if let (Some(x_val), Some(y_val)) = (x_col[r], y_col[r])
+                        && x_val.is_finite()
+                        && y_val.is_finite()
+                    {
+                        let x_frac = ((x_val - x_scale.min) / x_span).clamp(0.0, 1.0);
+                        let y_frac = ((y_val - y_scale.min) / y_span).clamp(0.0, 1.0);
+                        let px = plot_x + x_frac * plot_w;
+                        let py = plot_y + (1.0 - y_frac) * plot_h;
+                        svg.push_str(&format!(
+                            "<circle cx=\"{px:.2}\" cy=\"{py:.2}\" r=\"2.5\" fill=\"#4e79a7\" fill-opacity=\"{:.2}\"/>",
+                            spec.alpha
+                        ));
+                    }
+                }
+            }
+
+            if j == 0 {
+                let y_scale = &scales[i];
+                let col_name = &spec.columns[i];
+                let cy = plot_y + plot_h / 2.0;
+                svg.push_str(&format!(
+                    "<text x=\"{:.2}\" y=\"{cy:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" transform=\"rotate(-90 {:.2} {cy:.2})\" fill=\"#333\" font-size=\"11\" font-weight=\"bold\">{}</text>",
+                    margin_left - 38.0,
+                    margin_left - 38.0,
+                    esc(col_name)
+                ));
+                for &frac in &[0.0, 0.5, 1.0] {
+                    let val = y_scale.min + frac * (y_scale.max - y_scale.min);
+                    let ty = plot_y + (1.0 - frac) * plot_h;
+                    svg.push_str(&format!(
+                        "<line x1=\"{:.2}\" y1=\"{ty:.2}\" x2=\"{plot_x:.2}\" y2=\"{ty:.2}\" stroke=\"#999\" stroke-width=\"1\"/>\
+                        <text x=\"{:.2}\" y=\"{ty:.2}\" text-anchor=\"end\" dominant-baseline=\"middle\" fill=\"#666\" font-size=\"9\">{}</text>",
+                        plot_x - 3.0,
+                        plot_x - 5.0,
+                        esc(&fmt_num(val))
+                    ));
+                }
+            }
+
+            if i == n - 1 {
+                let x_scale = &scales[j];
+                let col_name = &spec.columns[j];
+                let cx = plot_x + plot_w / 2.0;
+                svg.push_str(&format!(
+                    "<text x=\"{cx:.2}\" y=\"{:.2}\" text-anchor=\"middle\" fill=\"#333\" font-size=\"11\" font-weight=\"bold\">{}</text>",
+                    total_h - 8.0,
+                    esc(col_name)
+                ));
+                for &frac in &[0.0, 0.5, 1.0] {
+                    let val = x_scale.min + frac * (x_scale.max - x_scale.min);
+                    let tx = plot_x + frac * plot_w;
+                    let ty = plot_y + plot_h;
+                    svg.push_str(&format!(
+                        "<line x1=\"{tx:.2}\" y1=\"{ty:.2}\" x2=\"{tx:.2}\" y2=\"{:.2}\" stroke=\"#999\" stroke-width=\"1\"/>\
+                        <text x=\"{tx:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"hanging\" fill=\"#666\" font-size=\"9\">{}</text>",
+                        ty + 3.0,
+                        ty + 5.0,
+                        esc(&fmt_num(val))
+                    ));
+                }
+            }
+        }
+    }
+
+    svg.push_str("</svg>");
+    Ok(svg)
 }
 
 fn wrap_svg_html(svg: &str) -> String {
@@ -2033,9 +2358,11 @@ mod tests {
         df_num
             .hist_with_bins_to_file(6, &df_h_file)
             .expect("df hist_with_bins_to_file");
-        assert!(std::fs::read_to_string(&df_h_file)
-            .expect("read df_hist")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&df_h_file)
+                .expect("read df_hist")
+                .contains("<svg")
+        );
 
         // 2. DataFrame hist_columns & boxplot_columns (svg, html, file)
         let df_hc_svg = df
@@ -2049,9 +2376,11 @@ mod tests {
         let df_hc_file = temp_dir.join("df_hist_cols.svg");
         df.hist_columns_to_file(&["x", "y"], 5, &df_hc_file)
             .expect("df hist_columns_to_file");
-        assert!(std::fs::read_to_string(&df_hc_file)
-            .expect("read df_hist_cols")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&df_hc_file)
+                .expect("read df_hist_cols")
+                .contains("<svg")
+        );
 
         let df_bc_svg = df
             .boxplot_columns_to_svg(&["x"])
@@ -2065,24 +2394,34 @@ mod tests {
         let df_bc_file = temp_dir.join("df_box_cols.svg");
         df.boxplot_columns_to_file(&["x"], &df_bc_file)
             .expect("df boxplot_columns_to_file");
-        assert!(std::fs::read_to_string(&df_bc_file)
-            .expect("read df_box_cols")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&df_bc_file)
+                .expect("read df_box_cols")
+                .contains("<svg")
+        );
 
         // 3. Series hist_with_bins (svg, html, file)
-        let s_h_svg = sx.hist_with_bins_to_svg(4).expect("s hist_with_bins_to_svg");
+        let s_h_svg = sx
+            .hist_with_bins_to_svg(4)
+            .expect("s hist_with_bins_to_svg");
         assert!(s_h_svg.contains("<svg"));
-        let s_h_html = sx.hist_with_bins_to_html(4).expect("s hist_with_bins_to_html");
+        let s_h_html = sx
+            .hist_with_bins_to_html(4)
+            .expect("s hist_with_bins_to_html");
         assert!(s_h_html.contains("<div class=\"frankenpandas-plot\""));
         let s_h_file = temp_dir.join("s_hist.svg");
         sx.hist_with_bins_to_file(4, &s_h_file)
             .expect("s hist_with_bins_to_file");
-        assert!(std::fs::read_to_string(&s_h_file)
-            .expect("read s_hist")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&s_h_file)
+                .expect("read s_hist")
+                .contains("<svg")
+        );
 
         // 4. DataFrameGroupBy hist_with_bins (svg, html, file)
-        let gb_h_svg = gb.hist_with_bins_to_svg(5).expect("gb hist_with_bins_to_svg");
+        let gb_h_svg = gb
+            .hist_with_bins_to_svg(5)
+            .expect("gb hist_with_bins_to_svg");
         assert!(gb_h_svg.contains("<svg"));
         let gb_h_html = gb
             .hist_with_bins_to_html(5)
@@ -2091,9 +2430,11 @@ mod tests {
         let gb_h_file = temp_dir.join("gb_hist.svg");
         gb.hist_with_bins_to_file(5, &gb_h_file)
             .expect("gb hist_with_bins_to_file");
-        assert!(std::fs::read_to_string(&gb_h_file)
-            .expect("read gb_hist")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&gb_h_file)
+                .expect("read gb_hist")
+                .contains("<svg")
+        );
 
         // 5. DataFrameGroupBy hist_columns & boxplot_columns (svg, html, file)
         let gb_hc_svg = gb
@@ -2107,9 +2448,11 @@ mod tests {
         let gb_hc_file = temp_dir.join("gb_hist_cols.svg");
         gb.hist_columns_to_file(&["x", "y"], 5, &gb_hc_file)
             .expect("gb hist_columns_to_file");
-        assert!(std::fs::read_to_string(&gb_hc_file)
-            .expect("read gb_hist_cols")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&gb_hc_file)
+                .expect("read gb_hist_cols")
+                .contains("<svg")
+        );
 
         let gb_bc_svg = gb
             .boxplot_columns_to_svg(&["x"])
@@ -2123,9 +2466,11 @@ mod tests {
         let gb_bc_file = temp_dir.join("gb_box_cols.svg");
         gb.boxplot_columns_to_file(&["x"], &gb_bc_file)
             .expect("gb boxplot_columns_to_file");
-        assert!(std::fs::read_to_string(&gb_bc_file)
-            .expect("read gb_box_cols")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&gb_bc_file)
+                .expect("read gb_box_cols")
+                .contains("<svg")
+        );
 
         // 6. SeriesGroupBy hist_with_bins (svg, html, file)
         let sgb_h_svg = ser_gb
@@ -2140,9 +2485,11 @@ mod tests {
         ser_gb
             .hist_with_bins_to_file(4, &sgb_h_file)
             .expect("sgb hist_with_bins_to_file");
-        assert!(std::fs::read_to_string(&sgb_h_file)
-            .expect("read sgb_hist")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&sgb_h_file)
+                .expect("read sgb_hist")
+                .contains("<svg")
+        );
 
         // 7. Error handling for missing columns
         assert!(gb.hist_columns(&["nonexistent"], 5).is_err());
@@ -2218,62 +2565,112 @@ mod tests {
         assert!(lag_html.contains("<div class=\"frankenpandas-plot\""));
         let lag_file = temp_dir.join("lag.svg");
         sx.lag_plot_to_file(1, &lag_file).expect("lag_plot_to_file");
-        assert!(std::fs::read_to_string(&lag_file).expect("read lag").contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&lag_file)
+                .expect("read lag")
+                .contains("<svg")
+        );
 
         // 2. Series autocorrelation_plot
         let ac_spec = sx.autocorrelation_plot().expect("autocorrelation_plot");
         assert_eq!(ac_spec.kind, PlotKind::Line);
         assert_eq!(ac_spec.series.len(), 1);
-        let ac_svg = sx.autocorrelation_plot_to_svg().expect("autocorrelation_plot_to_svg");
+        let ac_svg = sx
+            .autocorrelation_plot_to_svg()
+            .expect("autocorrelation_plot_to_svg");
         assert!(ac_svg.contains("<svg"));
         assert!(ac_svg.contains("<polyline"));
-        let ac_html = sx.autocorrelation_plot_to_html().expect("autocorrelation_plot_to_html");
+        let ac_html = sx
+            .autocorrelation_plot_to_html()
+            .expect("autocorrelation_plot_to_html");
         assert!(ac_html.contains("<div class=\"frankenpandas-plot\""));
         let ac_file = temp_dir.join("autocorr.svg");
-        sx.autocorrelation_plot_to_file(&ac_file).expect("autocorrelation_plot_to_file");
-        assert!(std::fs::read_to_string(&ac_file).expect("read autocorr").contains("<svg"));
+        sx.autocorrelation_plot_to_file(&ac_file)
+            .expect("autocorrelation_plot_to_file");
+        assert!(
+            std::fs::read_to_string(&ac_file)
+                .expect("read autocorr")
+                .contains("<svg")
+        );
 
         // 3. Error cases for lag_plot and autocorrelation_plot
         assert!(sg.lag_plot(1).is_err());
         assert!(sg.autocorrelation_plot().is_err());
         assert!(sx.lag_plot(10).is_err());
-        let s_short = Series::from_values("short", vec![labels[0].clone()], floats(&[1.0])).unwrap();
+        let s_short =
+            Series::from_values("short", vec![labels[0].clone()], floats(&[1.0])).unwrap();
         assert!(s_short.autocorrelation_plot().is_err());
 
         // 4. DataFrame hist_columns_by and hist_by_all
-        let hc_by_svg = df.hist_columns_by_to_svg(&["val", "val2"], "group", 5).expect("hist_columns_by_to_svg");
+        let hc_by_svg = df
+            .hist_columns_by_to_svg(&["val", "val2"], "group", 5)
+            .expect("hist_columns_by_to_svg");
         assert!(hc_by_svg.contains("<svg"));
-        let hc_by_html = df.hist_columns_by_to_html(&["val", "val2"], "group", 5).expect("hist_columns_by_to_html");
+        let hc_by_html = df
+            .hist_columns_by_to_html(&["val", "val2"], "group", 5)
+            .expect("hist_columns_by_to_html");
         assert!(hc_by_html.contains("<div class=\"frankenpandas-plot\""));
         let hc_by_file = temp_dir.join("hist_cols_by.svg");
-        df.hist_columns_by_to_file(&["val", "val2"], "group", 5, &hc_by_file).expect("hist_columns_by_to_file");
-        assert!(std::fs::read_to_string(&hc_by_file).expect("read hist_cols_by").contains("<svg"));
+        df.hist_columns_by_to_file(&["val", "val2"], "group", 5, &hc_by_file)
+            .expect("hist_columns_by_to_file");
+        assert!(
+            std::fs::read_to_string(&hc_by_file)
+                .expect("read hist_cols_by")
+                .contains("<svg")
+        );
 
-        let h_all_svg = df.hist_by_all_to_svg("group", 4).expect("hist_by_all_to_svg");
+        let h_all_svg = df
+            .hist_by_all_to_svg("group", 4)
+            .expect("hist_by_all_to_svg");
         assert!(h_all_svg.contains("<svg"));
-        let h_all_html = df.hist_by_all_to_html("group", 4).expect("hist_by_all_to_html");
+        let h_all_html = df
+            .hist_by_all_to_html("group", 4)
+            .expect("hist_by_all_to_html");
         assert!(h_all_html.contains("<div class=\"frankenpandas-plot\""));
         let h_all_file = temp_dir.join("hist_by_all.svg");
-        df.hist_by_all_to_file("group", 4, &h_all_file).expect("hist_by_all_to_file");
-        assert!(std::fs::read_to_string(&h_all_file).expect("read hist_by_all").contains("<svg"));
+        df.hist_by_all_to_file("group", 4, &h_all_file)
+            .expect("hist_by_all_to_file");
+        assert!(
+            std::fs::read_to_string(&h_all_file)
+                .expect("read hist_by_all")
+                .contains("<svg")
+        );
 
         // 5. DataFrame boxplot_columns_by and boxplot_by_all
-        let bc_by_svg = df.boxplot_columns_by_to_svg(&["val", "val2"], "group").expect("boxplot_columns_by_to_svg");
+        let bc_by_svg = df
+            .boxplot_columns_by_to_svg(&["val", "val2"], "group")
+            .expect("boxplot_columns_by_to_svg");
         assert!(bc_by_svg.contains("<svg"));
         assert!(bc_by_svg.contains("<line"));
-        let bc_by_html = df.boxplot_columns_by_to_html(&["val", "val2"], "group").expect("boxplot_columns_by_to_html");
+        let bc_by_html = df
+            .boxplot_columns_by_to_html(&["val", "val2"], "group")
+            .expect("boxplot_columns_by_to_html");
         assert!(bc_by_html.contains("<div class=\"frankenpandas-plot\""));
         let bc_by_file = temp_dir.join("box_cols_by.svg");
-        df.boxplot_columns_by_to_file(&["val", "val2"], "group", &bc_by_file).expect("boxplot_columns_by_to_file");
-        assert!(std::fs::read_to_string(&bc_by_file).expect("read box_cols_by").contains("<svg"));
+        df.boxplot_columns_by_to_file(&["val", "val2"], "group", &bc_by_file)
+            .expect("boxplot_columns_by_to_file");
+        assert!(
+            std::fs::read_to_string(&bc_by_file)
+                .expect("read box_cols_by")
+                .contains("<svg")
+        );
 
-        let b_all_svg = df.boxplot_by_all_to_svg("group").expect("boxplot_by_all_to_svg");
+        let b_all_svg = df
+            .boxplot_by_all_to_svg("group")
+            .expect("boxplot_by_all_to_svg");
         assert!(b_all_svg.contains("<svg"));
-        let b_all_html = df.boxplot_by_all_to_html("group").expect("boxplot_by_all_to_html");
+        let b_all_html = df
+            .boxplot_by_all_to_html("group")
+            .expect("boxplot_by_all_to_html");
         assert!(b_all_html.contains("<div class=\"frankenpandas-plot\""));
         let b_all_file = temp_dir.join("box_by_all.svg");
-        df.boxplot_by_all_to_file("group", &b_all_file).expect("boxplot_by_all_to_file");
-        assert!(std::fs::read_to_string(&b_all_file).expect("read box_by_all").contains("<svg"));
+        df.boxplot_by_all_to_file("group", &b_all_file)
+            .expect("boxplot_by_all_to_file");
+        assert!(
+            std::fs::read_to_string(&b_all_file)
+                .expect("read box_by_all")
+                .contains("<svg")
+        );
 
         // 6. Error handling
         assert!(df.hist_columns_by(&["nonexistent"], "group", 5).is_err());
@@ -2351,9 +2748,11 @@ mod tests {
         let boot_file = temp_dir.join("boot.svg");
         sx.bootstrap_plot_to_file(4, 50, &boot_file)
             .expect("bootstrap_plot_to_file");
-        assert!(std::fs::read_to_string(&boot_file)
-            .expect("read boot")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&boot_file)
+                .expect("read boot")
+                .contains("<svg")
+        );
 
         // 2. DataFrame parallel_coordinates
         let pc_spec = df
@@ -2376,9 +2775,11 @@ mod tests {
         let pc_file = temp_dir.join("parallel.svg");
         df.parallel_coordinates_to_file("species", None, &pc_file)
             .expect("parallel_coordinates_to_file");
-        assert!(std::fs::read_to_string(&pc_file)
-            .expect("read parallel")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&pc_file)
+                .expect("read parallel")
+                .contains("<svg")
+        );
 
         // parallel_coordinates with explicit cols
         let pc_sub_svg = df
@@ -2405,9 +2806,11 @@ mod tests {
         let ac_file = temp_dir.join("andrews.svg");
         df.andrews_curves_to_file("species", 30, &ac_file)
             .expect("andrews_curves_to_file");
-        assert!(std::fs::read_to_string(&ac_file)
-            .expect("read andrews")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&ac_file)
+                .expect("read andrews")
+                .contains("<svg")
+        );
 
         // 4. DataFrame radviz
         let rv_spec = df.radviz("species", None).expect("radviz");
@@ -2424,16 +2827,19 @@ mod tests {
         let rv_file = temp_dir.join("radviz.svg");
         df.radviz_to_file("species", None, &rv_file)
             .expect("radviz_to_file");
-        assert!(std::fs::read_to_string(&rv_file)
-            .expect("read radviz")
-            .contains("<svg"));
+        assert!(
+            std::fs::read_to_string(&rv_file)
+                .expect("read radviz")
+                .contains("<svg")
+        );
 
         // 5. Error conditions
         assert!(sc.bootstrap_plot(5, 10).is_err());
         assert!(df.parallel_coordinates("nonexistent", None).is_err());
-        assert!(df
-            .parallel_coordinates("species", Some(&["nonexistent"]))
-            .is_err());
+        assert!(
+            df.parallel_coordinates("species", Some(&["nonexistent"]))
+                .is_err()
+        );
         assert!(df.andrews_curves("nonexistent", 50).is_err());
         assert!(df.radviz("nonexistent", None).is_err());
         assert!(df.radviz("species", Some(&["species"])).is_err()); // no numeric cols
@@ -2447,6 +2853,201 @@ mod tests {
         let _ = std::fs::remove_file(&pc_file);
         let _ = std::fs::remove_file(&ac_file);
         let _ = std::fs::remove_file(&rv_file);
+        let _ = std::fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn scatter_matrix_full_pipeline_and_error_modes() {
+        let labels: Vec<IndexLabel> = (0..5).map(IndexLabel::Int64).collect();
+        let s_a =
+            Series::from_values("a", labels.clone(), floats(&[1.0, 2.0, 3.0, 4.0, 5.0])).unwrap();
+        let s_b = Series::from_values("b", labels.clone(), floats(&[10.0, 25.0, 15.0, 30.0, 20.0]))
+            .unwrap();
+        let s_c =
+            Series::from_values("c", labels.clone(), floats(&[0.5, 1.5, 2.5, 3.5, 4.5])).unwrap();
+        let s_cat = Series::from_values(
+            "category",
+            labels.clone(),
+            vec![
+                Scalar::Utf8("x".to_string()),
+                Scalar::Utf8("y".to_string()),
+                Scalar::Utf8("x".to_string()),
+                Scalar::Utf8("y".to_string()),
+                Scalar::Utf8("z".to_string()),
+            ],
+        )
+        .unwrap();
+        let df = DataFrame::from_series(vec![s_a, s_b.clone(), s_c, s_cat.clone()]).unwrap();
+
+        // 1. Default scatter matrix: automatically picks all numeric columns, diagonal='hist'
+        let spec = df
+            .scatter_matrix(None, None, None)
+            .expect("default scatter_matrix");
+        assert_eq!(spec.columns, vec!["a", "b", "c"]);
+        assert_eq!(spec.diagonal, "hist");
+        assert!((spec.alpha - 0.5).abs() < 1e-9);
+        assert!((spec.range_padding - 0.05).abs() < 1e-9);
+
+        let svg1 = spec.to_svg().expect("to_svg");
+        let svg2 = spec.to_svg().expect("to_svg repeat");
+        assert_eq!(svg1, svg2, "rendering must be deterministic");
+        assert!(svg1.starts_with("<svg") && svg1.ends_with("</svg>"));
+        assert!(
+            svg1.contains("<rect"),
+            "diagonal histograms and cell boxes must have rects"
+        );
+        assert!(
+            svg1.contains("<circle"),
+            "off-diagonal scatter plots must have circles"
+        );
+        assert!(svg1.contains(">a</text>"), "column a must be labeled");
+        assert!(svg1.contains(">b</text>"), "column b must be labeled");
+        assert!(svg1.contains(">c</text>"), "column c must be labeled");
+
+        let bytes = spec.to_svg_bytes().expect("to_svg_bytes");
+        assert!(bytes.starts_with(b"<svg"));
+        let html = spec.to_html().expect("to_html");
+        assert!(html.contains("<div class=\"frankenpandas-plot\""));
+        let page = spec
+            .to_html_page(Some("Custom Title"))
+            .expect("to_html_page");
+        assert!(page.contains("<title>Custom Title</title>"));
+        let md = spec.to_markdown().expect("to_markdown");
+        assert!(md.contains("<div class=\"frankenpandas-plot\">"));
+
+        // 2. Diagonal 'kde' and 'density'
+        let spec_kde = df
+            .scatter_matrix(Some(0.8), Some("kde"), Some(0.1))
+            .expect("kde scatter_matrix");
+        assert_eq!(spec_kde.diagonal, "kde");
+        assert!((spec_kde.alpha - 0.8).abs() < 1e-9);
+        assert!((spec_kde.range_padding - 0.1).abs() < 1e-9);
+        let svg_kde = spec_kde.to_svg().expect("kde to_svg");
+        assert!(
+            svg_kde.contains("<polyline"),
+            "kde diagonal must render polyline curve"
+        );
+        assert!(
+            svg_kde.contains("<polygon"),
+            "kde diagonal must render polygon area"
+        );
+
+        let spec_density = df
+            .scatter_matrix(Some(0.3), Some("density"), None)
+            .expect("density scatter_matrix");
+        assert_eq!(spec_density.diagonal, "density");
+        let svg_density = spec_density.to_svg().expect("density to_svg");
+        assert!(svg_density.contains("<polyline"));
+
+        // 3. Column subset selection
+        let spec_cols = df
+            .scatter_matrix_with_cols(Some(&["b", "c"]), Some(0.6), Some("hist"), None)
+            .expect("scatter_matrix_with_cols");
+        assert_eq!(spec_cols.columns, vec!["b", "c"]);
+        assert_eq!(spec_cols.series.len(), 2);
+
+        // 4. Convenience DataFrame helpers
+        let df_svg = df
+            .scatter_matrix_to_svg(None, None, None)
+            .expect("scatter_matrix_to_svg");
+        assert!(df_svg.contains("<svg"));
+        let df_html = df
+            .scatter_matrix_to_html(None, None, None)
+            .expect("scatter_matrix_to_html");
+        assert!(df_html.contains("<div class=\"frankenpandas-plot\""));
+
+        let temp_dir = std::env::temp_dir().join(format!("fp_test_sm_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let sm_svg_file = temp_dir.join("sm.svg");
+        df.scatter_matrix_to_file(&sm_svg_file, None, None, None)
+            .expect("scatter_matrix_to_file");
+        assert!(
+            std::fs::read_to_string(&sm_svg_file)
+                .expect("read sm.svg")
+                .contains("<svg")
+        );
+
+        let sm_html_file = temp_dir.join("sm.html");
+        df.scatter_matrix_with_cols_to_file(Some(&["a", "b"]), &sm_html_file, None, None, None)
+            .expect("scatter_matrix_with_cols_to_file");
+        assert!(
+            std::fs::read_to_string(&sm_html_file)
+                .expect("read sm.html")
+                .contains("<!DOCTYPE html>")
+        );
+
+        let sm_cols_svg = df
+            .scatter_matrix_with_cols_to_svg(Some(&["a", "c"]), None, None, None)
+            .expect("scatter_matrix_with_cols_to_svg");
+        assert!(sm_cols_svg.contains("<svg"));
+        let sm_cols_html = df
+            .scatter_matrix_with_cols_to_html(Some(&["a", "c"]), None, None, None)
+            .expect("scatter_matrix_with_cols_to_html");
+        assert!(sm_cols_html.contains("<div class=\"frankenpandas-plot\""));
+
+        // 5. Missing / NaN values handling
+        let s_nan = Series::from_values(
+            "a_nan",
+            labels.clone(),
+            floats(&[1.0, f64::NAN, 3.0, 4.0, f64::NAN]),
+        )
+        .unwrap();
+        let df_nan = DataFrame::from_series(vec![s_nan, s_b]).unwrap();
+        let svg_nan = df_nan
+            .scatter_matrix_to_svg(None, None, None)
+            .expect("svg with nan");
+        assert!(svg_nan.contains("<svg"));
+        assert!(
+            !svg_nan.contains("NaN"),
+            "SVG must not contain literal NaN coordinates"
+        );
+
+        // 6. Error conditions
+        // Empty dataframe
+        let empty_df = DataFrame::from_series(vec![]).unwrap();
+        assert!(empty_df.scatter_matrix(None, None, None).is_err());
+
+        // DataFrame with no numeric columns
+        let str_df = DataFrame::from_series(vec![s_cat]).unwrap();
+        assert!(str_df.scatter_matrix(None, None, None).is_err());
+
+        // Non-existent column requested
+        assert!(
+            df.scatter_matrix_with_cols(Some(&["nonexistent"]), None, None, None)
+                .is_err()
+        );
+
+        // Non-numeric column requested
+        assert!(
+            df.scatter_matrix_with_cols(Some(&["category"]), None, None, None)
+                .is_err()
+        );
+
+        // Invalid alpha (< 0, > 1, NaN)
+        assert!(df.scatter_matrix(Some(-0.5), None, None).is_err());
+        assert!(df.scatter_matrix(Some(1.5), None, None).is_err());
+        assert!(df.scatter_matrix(Some(f64::NAN), None, None).is_err());
+
+        // Invalid range_padding (< 0, NaN)
+        assert!(df.scatter_matrix(None, None, Some(-0.1)).is_err());
+        assert!(df.scatter_matrix(None, None, Some(f64::NAN)).is_err());
+
+        // Invalid diagonal
+        assert!(df.scatter_matrix(None, Some("invalid"), None).is_err());
+
+        // Column with all NaN values fails closed on render
+        let s_all_nan = Series::from_values(
+            "all_nan",
+            labels,
+            floats(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN]),
+        )
+        .unwrap();
+        let df_all_nan = DataFrame::from_series(vec![s_all_nan]).unwrap();
+        assert!(df_all_nan.scatter_matrix_to_svg(None, None, None).is_err());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&sm_svg_file);
+        let _ = std::fs::remove_file(&sm_html_file);
         let _ = std::fs::remove_dir(&temp_dir);
     }
 }

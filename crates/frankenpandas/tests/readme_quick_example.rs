@@ -7211,5 +7211,11 @@ fn facade_prelude_plotting_api_comprehensive() -> Result<(), Box<dyn std::error:
     let deserialized_box: BoxPlotSpec = serde_json::from_str(&box_json)?;
     assert_eq!(box_spec, deserialized_box);
 
+    let sm_spec = num_df.scatter_matrix(None, None, None)?;
+    let sm_json = serde_json::to_string(&sm_spec)?;
+    let deserialized_sm: ScatterMatrixSpec = serde_json::from_str(&sm_json)?;
+    assert_eq!(sm_spec, deserialized_sm);
+    assert!(sm_spec.to_svg()?.starts_with("<svg"));
+
     Ok(())
 }
