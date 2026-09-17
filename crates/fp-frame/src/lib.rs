@@ -65406,7 +65406,7 @@ impl DataFrame {
                     if k == 0 {
                         sum += val / sqrt_2;
                     } else if k % 2 == 1 {
-                        let j = ((k + 1) / 2) as f64;
+                        let j = k.div_ceil(2) as f64;
                         sum += val * (j * t).sin();
                     } else {
                         let j = (k / 2) as f64;
@@ -65579,7 +65579,7 @@ impl DataFrame {
                 (0.0, 0.0)
             };
 
-            let row_label = self.index.labels().get(r).cloned().unwrap_or_else(|| IndexLabel::Int64(r as i64));
+            let row_label = self.index.labels().get(r).cloned().unwrap_or(IndexLabel::Int64(r as i64));
 
             if !class_groups.contains_key(&class_label) {
                 class_order.push(class_label.clone());
