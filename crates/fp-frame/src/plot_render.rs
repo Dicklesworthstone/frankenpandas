@@ -3266,7 +3266,12 @@ mod tests {
         ];
 
         let s1 = Series::from_values("a", labels.clone(), floats(&[1.0, 2.5, 3.0])).unwrap();
-        let s2 = Series::from_values("b", labels.clone(), ints(&[10, 20, 30])).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            labels.clone(),
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
         let s3 = Series::from_values(
             "c",
             labels.clone(),
