@@ -1260,7 +1260,7 @@ mod tests {
         BoxPlotSpec, FrameError, HistogramSpec, PlotKind, PlotSeriesSpec, PlotSpec, Scalar,
         numeric_view, quantile,
     };
-    use crate::DType;
+    use crate::{DType, DataFrame, IndexLabel, Series};
 
     fn series(name: &str, values: Vec<Scalar>) -> PlotSeriesSpec {
         PlotSeriesSpec {
