@@ -181,7 +181,7 @@ fn pandas_temporal_error_class(error: PandasTemporalError) -> &'static str {
 }
 
 /// Zero-dependency deterministic SVG renderer for the plot spec types below
-/// (`PlotSpec::to_svg` / `HistogramSpec::to_svg` / `BoxPlotSpec::to_svg`).
+/// (`PlotSpec::to_svg` / `HistogramSpec::to_svg` / `BoxPlotSpec::to_svg` / `ScatterMatrixSpec::to_svg`).
 mod plot_render;
 /// Logical plot kind requested by a pandas-style plotting hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -286,6 +286,17 @@ pub struct HistogramSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoxPlotSpec {
     pub method: String,
+    pub series: Vec<PlotSeriesSpec>,
+}
+
+/// Backend-neutral scatter matrix request produced by `scatter_matrix()` hooks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScatterMatrixSpec {
+    pub method: String,
+    pub columns: Vec<String>,
+    pub diagonal: String,
+    pub alpha: f64,
+    pub range_padding: f64,
     pub series: Vec<PlotSeriesSpec>,
 }
 
@@ -65645,6 +65656,192 @@ impl DataFrame {
         path: P,
     ) -> Result<(), FrameError> {
         self.radviz(class_column, cols)?.save(path)
+    }
+
+    /// Return a backend-neutral scatter matrix plot request (pandas `pandas.plotting.scatter_matrix(frame, ...)`).
+    pub fn scatter_matrix(
+        &self,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<ScatterMatrixSpec, FrameError> {
+        self.scatter_matrix_with_cols(None, alpha, diagonal, range_padding)
+    }
+
+    /// Return a backend-neutral scatter matrix plot request selecting explicit columns.
+    pub fn scatter_matrix_with_cols(
+        &self,
+        cols: Option<&[&str]>,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<ScatterMatrixSpec, FrameError> {
+        if self.index.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "scatter_matrix requires a non-empty DataFrame".to_owned(),
+            ));
+        }
+
+        let alpha_val = match alpha {
+            Some(a) => {
+                if !a.is_finite() || !(0.0..=1.0).contains(&a) {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "scatter_matrix: alpha must be in [0, 1], found {a}"
+                    )));
+                }
+                a
+            }
+            None => 0.5,
+        };
+
+        let diag_val = match diagonal {
+            Some(d) => {
+                let d_lower = d.to_ascii_lowercase();
+                if d_lower != "hist" && d_lower != "kde" && d_lower != "density" {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "scatter_matrix: diagonal must be 'hist', 'kde', or 'density', found '{d}'"
+                    )));
+                }
+                d_lower
+            }
+            None => "hist".to_string(),
+        };
+
+        let pad_val = match range_padding {
+            Some(p) => {
+                if !p.is_finite() || p < 0.0 {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "scatter_matrix: range_padding must be finite and >= 0, found {p}"
+                    )));
+                }
+                p
+            }
+            None => 0.05,
+        };
+
+        let target_cols: Vec<(&str, &crate::Column)> = if let Some(col_names) = cols {
+            let mut list = Vec::with_capacity(col_names.len());
+            for &cname in col_names {
+                let col = self.columns.get(cname).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!("column '{cname}' not found"))
+                })?;
+                if !col.dtype().is_numeric() {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "scatter_matrix requires numeric column '{cname}', found {:?}",
+                        col.dtype()
+                    )));
+                }
+                list.push((cname, col));
+            }
+            list
+        } else {
+            self.column_order
+                .iter()
+                .filter_map(|col_name| {
+                    let col = self.columns.get(col_name)?;
+                    if col.dtype().is_numeric() {
+                        Some((col_name.as_str(), col))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if target_cols.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "scatter_matrix requires at least one numeric column".to_owned(),
+            ));
+        }
+
+        let mut columns = Vec::with_capacity(target_cols.len());
+        let mut series = Vec::with_capacity(target_cols.len());
+        let x_labels = self.index.labels().to_vec();
+
+        for (cname, col) in &target_cols {
+            columns.push((*cname).to_string());
+            series.push(plot_series_spec(
+                (*cname).to_string(),
+                x_labels.clone(),
+                col.dtype(),
+                col.values().to_vec(),
+                None,
+            ));
+        }
+
+        Ok(ScatterMatrixSpec {
+            method: format!("pandas.plotting.scatter_matrix(diagonal='{diag_val}')"),
+            columns,
+            diagonal: diag_val,
+            alpha: alpha_val,
+            range_padding: pad_val,
+            series,
+        })
+    }
+
+    /// Convenience helper: render scatter matrix directly to deterministic SVG string.
+    pub fn scatter_matrix_to_svg(
+        &self,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<String, FrameError> {
+        self.scatter_matrix(alpha, diagonal, range_padding)?.to_svg()
+    }
+
+    /// Convenience helper: render scatter matrix directly to HTML figure snippet.
+    pub fn scatter_matrix_to_html(
+        &self,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<String, FrameError> {
+        self.scatter_matrix(alpha, diagonal, range_padding)?.to_html()
+    }
+
+    /// Convenience helper: save rendered scatter matrix plot directly to disk.
+    pub fn scatter_matrix_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<(), FrameError> {
+        self.scatter_matrix(alpha, diagonal, range_padding)?.save(path)
+    }
+
+    /// Convenience helper: render scatter matrix with explicit columns directly to deterministic SVG string.
+    pub fn scatter_matrix_with_cols_to_svg(
+        &self,
+        cols: Option<&[&str]>,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<String, FrameError> {
+        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?.to_svg()
+    }
+
+    /// Convenience helper: render scatter matrix with explicit columns directly to HTML figure snippet.
+    pub fn scatter_matrix_with_cols_to_html(
+        &self,
+        cols: Option<&[&str]>,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<String, FrameError> {
+        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?.to_html()
+    }
+
+    /// Convenience helper: save rendered scatter matrix with explicit columns directly to disk.
+    pub fn scatter_matrix_with_cols_to_file<P: AsRef<std::path::Path>>(
+        &self,
+        cols: Option<&[&str]>,
+        path: P,
+        alpha: Option<f64>,
+        diagonal: Option<&str>,
+        range_padding: Option<f64>,
+    ) -> Result<(), FrameError> {
+        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?.save(path)
     }
 
     /// `pd.DataFrame(dict_of_series, columns=[...])` — SELECT the named columns
