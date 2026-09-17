@@ -286,11 +286,11 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
 
     let is_xy_scatter = spec.kind == PlotKind::Scatter
         && spec.series.len() >= 2
-        && spec.series.len() % 2 == 0
+        && spec.series.len().is_multiple_of(2)
         && (spec.method.contains("(x=") || spec.method.contains("scatter_columns"));
     let is_xy_hexbin = spec.kind == PlotKind::Hexbin
         && spec.series.len() >= 2
-        && spec.series.len() % 2 == 0
+        && spec.series.len().is_multiple_of(2)
         && (spec.method.contains("(x=") || spec.method.contains("hexbin_columns"));
 
     let (scale, xy_scales) = if (is_xy_scatter || is_xy_hexbin) && views.len() >= 2 {
