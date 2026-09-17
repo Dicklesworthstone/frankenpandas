@@ -7088,8 +7088,17 @@ fn facade_prelude_plotting_api_comprehensive() -> Result<(), Box<dyn std::error:
     let hist_svg = num_df.hist_to_svg()?;
     assert!(hist_svg.starts_with("<svg") && hist_svg.ends_with("</svg>"));
 
+    let hist_bins_svg = num_df.hist_with_bins_to_svg(6)?;
+    assert!(hist_bins_svg.starts_with("<svg") && hist_bins_svg.ends_with("</svg>"));
+
+    let hist_cols_svg = num_df.hist_columns_to_svg(&["x", "y"], 5)?;
+    assert!(hist_cols_svg.starts_with("<svg"));
+
     let box_svg = num_df.boxplot_to_svg()?;
     assert!(box_svg.starts_with("<svg") && box_svg.ends_with("</svg>"));
+
+    let box_cols_svg = num_df.boxplot_columns_to_svg(&["x"])?;
+    assert!(box_cols_svg.starts_with("<svg"));
 
     // 4. HTML, Page, and Markdown wrappers
     let html_snippet = line_spec.to_html()?;
@@ -7116,6 +7125,9 @@ fn facade_prelude_plotting_api_comprehensive() -> Result<(), Box<dyn std::error:
     let s_hist_svg = s.hist_to_svg()?;
     assert!(s_hist_svg.starts_with("<svg"));
 
+    let s_hist_bins_svg = s.hist_with_bins_to_svg(4)?;
+    assert!(s_hist_bins_svg.starts_with("<svg"));
+
     let s_box_svg = s.boxplot_to_svg()?;
     assert!(s_box_svg.starts_with("<svg"));
 
@@ -7136,8 +7148,17 @@ fn facade_prelude_plotting_api_comprehensive() -> Result<(), Box<dyn std::error:
     let g_hist_svg = grouped.hist_to_svg()?;
     assert!(g_hist_svg.starts_with("<svg"));
 
+    let g_hist_bins_svg = grouped.hist_with_bins_to_svg(5)?;
+    assert!(g_hist_bins_svg.starts_with("<svg"));
+
+    let g_hist_cols_svg = grouped.hist_columns_to_svg(&["x", "y"], 5)?;
+    assert!(g_hist_cols_svg.starts_with("<svg"));
+
     let g_box_svg = grouped.boxplot_to_svg()?;
     assert!(g_box_svg.starts_with("<svg"));
+
+    let g_box_cols_svg = grouped.boxplot_columns_to_svg(&["x"])?;
+    assert!(g_box_cols_svg.starts_with("<svg"));
 
     // 7. Save and format validation
     let temp_dir = std::env::temp_dir().join(format!("fp_facade_test_{}", std::process::id()));
@@ -7152,6 +7173,9 @@ fn facade_prelude_plotting_api_comprehensive() -> Result<(), Box<dyn std::error:
     // Unsupported raster format fails closed
     let png_out = temp_dir.join("test.png");
     assert!(num_df.line()?.save(&png_out).is_err());
+
+    let _ = std::fs::remove_file(&svg_out);
+    let _ = std::fs::remove_dir(&temp_dir);
 
     // 8. Spec serialization round-trip
     let json = serde_json::to_string(&line_spec)?;
