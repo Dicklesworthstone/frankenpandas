@@ -88,6 +88,13 @@ pub use fp_frame::{
     to_timedelta_with_options, to_timedelta_with_unit,
 };
 pub use fp_frame::plotting;
+pub use fp_frame::testing;
+pub use fp_frame::testing::{
+    AssertEqualOptions, AssertionError, assert_extension_array_equal, assert_frame_equal,
+    assert_frame_equal_default, assert_index_equal, assert_index_equal_default,
+    assert_series_equal, assert_series_equal_default,
+};
+pub use fp_frame::{assert_frame_eq, assert_index_eq, assert_series_eq};
 // ── GroupBy errors ──────────────────────────────────────────────────────
 pub use fp_groupby::{AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions};
 pub use fp_index::{
@@ -446,6 +453,8 @@ pub mod prelude {
         // fd90.222: ArithmeticOp + ComparisonOp are parameter types for
         // Column.binary_numeric, DataFrame.compare_scalar, etc.
         ArithmeticOp,
+        AssertEqualOptions,
+        AssertionError,
         // Join (types + functions, matches README Recipes + Merge: Advanced Options)
         AsofDirection,
         BoxPlotSpec,
@@ -612,6 +621,17 @@ pub mod prelude {
         // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
         // lists it among types deriving Serialize + Deserialize (line 1567).
         ValidityMask,
+        assert_extension_array_equal,
+        assert_frame_eq,
+        assert_frame_equal,
+        assert_frame_equal_default,
+        assert_index_eq,
+        assert_index_equal,
+        assert_index_equal_default,
+        assert_series_eq,
+        assert_series_equal,
+        assert_series_equal_default,
+        testing,
         // fd90.33: apply_date_offset is the primary use-site for
         // DateOffset (above). Without it in the prelude the user can
         // name the offset variant but can't apply it from prelude
@@ -1265,5 +1285,44 @@ mod tests {
         let _ = crate::sql_max_insert_rows::<rusqlite::Connection>;
         let _ = crate::sql_supports_returning::<rusqlite::Connection>;
         let _ = crate::sql_supports_schemas::<rusqlite::Connection>;
+    }
+
+    #[test]
+    fn testing_utilities_and_macros_compile_and_run() {
+        use crate::prelude::*;
+
+        let s1 = Series::from_values(
+            "a",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("s1");
+        let s2 = Series::from_values(
+            "a",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("s2");
+        assert_series_eq!(&s1, &s2);
+        s1.assert_equals(&s2, &AssertEqualOptions::default())
+            .expect("series assert_equals failed");
+
+        let df1 = DataFrame::from_series(vec![s1.clone()]).expect("df1");
+        let df2 = DataFrame::from_series(vec![s2.clone()]).expect("df2");
+        assert_frame_eq!(&df1, &df2);
+        df1.assert_equals(&df2, &AssertEqualOptions::default())
+            .expect("df assert_equals failed");
+
+        let idx1 = Index::from_range(0, 2, 1);
+        let idx2 = Index::from_range(0, 2, 1);
+        assert_index_eq!(&idx1, &idx2);
+
+        // Also test root testing module access
+        assert!(crate::testing::assert_frame_equal_default(&df1, &df2).is_ok());
+        assert!(crate::testing::assert_series_equal_default(&s1, &s2).is_ok());
+
+        // Test plotting::plot_params
+        let params = crate::plotting::plot_params();
+        assert!(params.contains_key("xaxis.compat"));
     }
 }
