@@ -56533,6 +56533,18 @@ impl std::fmt::Display for Series {
     }
 }
 
+impl fp_types::AsDType for Series {
+    fn as_dtype(&self) -> DType {
+        self.dtype()
+    }
+}
+
+impl fp_types::AsDType for &Series {
+    fn as_dtype(&self) -> DType {
+        self.dtype()
+    }
+}
+
 fn format_repr_scalar(value: &Scalar) -> String {
     match value {
         Scalar::Float64(value) => format!("{value:?}"),
@@ -60049,6 +60061,146 @@ fn concat_dataframes_axis1(
     let mut out = DataFrame::new_with_column_order(target_index, columns, output_column_order)?;
     out.allows_duplicate_labels = allows_duplicate_labels;
     Ok(out)
+}
+
+/// Reshape DataFrame by unpivoting wide format columns into long format rows (`pd.melt`).
+pub fn melt(
+    df: &DataFrame,
+    id_vars: &[&str],
+    value_vars: &[&str],
+    var_name: Option<&str>,
+    value_name: Option<&str>,
+) -> Result<DataFrame, FrameError> {
+    df.melt(id_vars, value_vars, var_name, value_name)
+}
+
+/// Reshape DataFrame by pivoting columns into a multidimensional layout (`pd.pivot`).
+pub fn pivot(
+    df: &DataFrame,
+    index_col: &str,
+    columns_col: &str,
+    values_col: &str,
+) -> Result<DataFrame, FrameError> {
+    df.pivot(index_col, columns_col, values_col)
+}
+
+/// Create a spreadsheet-style pivot table as a DataFrame (`pd.pivot_table`).
+pub fn pivot_table(
+    df: &DataFrame,
+    values: &str,
+    index_col: &str,
+    columns_col: &str,
+    aggfunc: &str,
+) -> Result<DataFrame, FrameError> {
+    df.pivot_table(values, index_col, columns_col, aggfunc)
+}
+
+/// Create a spreadsheet-style pivot table with explicit dropna control (`pd.pivot_table(..., dropna=...)`).
+pub fn pivot_table_with_dropna(
+    df: &DataFrame,
+    values: &str,
+    index_col: &str,
+    columns_col: &str,
+    aggfunc: &str,
+    dropna: bool,
+) -> Result<DataFrame, FrameError> {
+    df.pivot_table_with_dropna(values, index_col, columns_col, aggfunc, dropna)
+}
+
+/// Compute a contingency table (crosstab) from two Series (`pd.crosstab`).
+pub fn crosstab(index_series: &Series, columns_series: &Series) -> Result<DataFrame, FrameError> {
+    DataFrame::crosstab(index_series, columns_series)
+}
+
+/// Compute a normalized contingency table (crosstab) from two Series (`pd.crosstab(..., normalize=...)`).
+pub fn crosstab_normalize(
+    index_series: &Series,
+    columns_series: &Series,
+    normalize: &str,
+) -> Result<DataFrame, FrameError> {
+    DataFrame::crosstab_normalize(index_series, columns_series, normalize)
+}
+
+/// Convert categorical variable into dummy/indicator variables (`pd.get_dummies`).
+pub fn get_dummies(df: &DataFrame, columns: &[&str]) -> Result<DataFrame, FrameError> {
+    df.get_dummies(columns)
+}
+
+/// Convert categorical variable into dummy/indicator variables with options (`pd.get_dummies`).
+pub fn get_dummies_with_options(
+    df: &DataFrame,
+    columns: &[&str],
+    prefix_sep: &str,
+    dummy_na: bool,
+    drop_first: bool,
+) -> Result<DataFrame, FrameError> {
+    df.get_dummies_with_options(columns, prefix_sep, dummy_na, drop_first)
+}
+
+/// Convert dummy/indicator DataFrame back to categorical/string columns (`pd.from_dummies`).
+pub fn from_dummies(
+    df: &DataFrame,
+    sep: Option<&str>,
+    default_category: Option<&str>,
+) -> Result<DataFrame, FrameError> {
+    df.from_dummies(sep, default_category)
+}
+
+/// Reshape wide-format DataFrame to long-format with grouped columns (`pd.lreshape`).
+pub fn lreshape(
+    df: &DataFrame,
+    groups: &BTreeMap<String, Vec<String>>,
+    dropna: bool,
+) -> Result<DataFrame, FrameError> {
+    df.lreshape(groups, dropna)
+}
+
+/// Return unique values of a Series in order of appearance (`pd.unique`).
+#[must_use]
+pub fn unique(series: &Series) -> Vec<Scalar> {
+    series.unique()
+}
+
+/// Return a Series containing counts of unique values (`pd.value_counts`).
+pub fn value_counts(series: &Series) -> Result<Series, FrameError> {
+    series.value_counts()
+}
+
+/// Return a Series containing counts of unique values with options (`pd.value_counts`).
+pub fn value_counts_with_options(
+    series: &Series,
+    normalize: bool,
+    sort: bool,
+    ascending: bool,
+    dropna: bool,
+) -> Result<Series, FrameError> {
+    series.value_counts_with_options(normalize, sort, ascending, dropna)
+}
+
+/// Factorize values into integer codes and unique values (`pd.factorize`).
+pub fn factorize(series: &Series) -> Result<(Series, Series), FrameError> {
+    series.factorize()
+}
+
+/// Factorize values into integer codes and unique values with options (`pd.factorize(..., sort=..., use_na_sentinel=...)`).
+pub fn factorize_with_options(
+    series: &Series,
+    sort: bool,
+    use_na_sentinel: bool,
+) -> Result<(Series, Series), FrameError> {
+    series.factorize_with_options(sort, use_na_sentinel)
+}
+
+/// Print information about FrankenPandas and system dependencies (`pd.show_versions`).
+#[must_use]
+pub fn show_versions() -> String {
+    format!(
+        "INSTALLED VERSIONS\n------------------\nfrankenpandas: {}\nrustc: {}\nos: {}\narch: {}\n",
+        env!("CARGO_PKG_VERSION"),
+        "nightly",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
 }
 
 #[cfg(feature = "lazy-transpose-view")]
@@ -89489,6 +89641,234 @@ impl DataFrame {
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
         })
+    }
+
+    /// Convert dummy (one-hot encoded) columns back into categorical / string columns.
+    ///
+    /// Matches `pd.from_dummies(df, sep=..., default_category=...)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::CompatibilityRejected`] if:
+    /// - `sep` is given and any column name does not contain the separator.
+    /// - Any row contains multiple 1s.
+    /// - Any row contains no 1s and no `default_category` is provided.
+    pub fn from_dummies(
+        &self,
+        sep: Option<&str>,
+        default_category: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        let col_names = self.column_names();
+        let num_rows = self.index().len();
+
+        if let Some(s) = sep {
+            let mut prefixes: Vec<String> = Vec::new();
+            let mut prefix_map: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+            for &col_name in &col_names {
+                if let Some((pfx, cat)) = col_name.split_once(s) {
+                    if !prefix_map.contains_key(pfx) {
+                        prefixes.push(pfx.to_string());
+                    }
+                    prefix_map
+                        .entry(pfx.to_string())
+                        .or_default()
+                        .push((cat.to_string(), col_name.to_string()));
+                } else {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "from_dummies: dummy column '{col_name}' does not contain separator '{s}'"
+                    )));
+                }
+            }
+
+            let mut res_col_map = BTreeMap::new();
+            let mut res_col_order = Vec::new();
+
+            for pfx in &prefixes {
+                let cat_cols = prefix_map.get(pfx).expect("prefix exists");
+                let mut result_cats = Vec::with_capacity(num_rows);
+                for row_idx in 0..num_rows {
+                    let mut matched_cat: Option<String> = None;
+                    for (cat_name, col_name) in cat_cols {
+                        if let Some(col) = self.column(col_name) {
+                            let is_one = match &col.values()[row_idx] {
+                                Scalar::Int64(1) => true,
+                                Scalar::Float64(f) => (*f - 1.0).abs() < 1e-6,
+                                Scalar::Bool(true) => true,
+                                Scalar::Utf8(s) => s == "1" || s == "true" || s == "True",
+                                _ => false,
+                            };
+                            if is_one {
+                                if matched_cat.is_some() {
+                                    return Err(FrameError::CompatibilityRejected(
+                                        "from_dummies: Dummy DataFrame contains rows with multiple 1s".to_string(),
+                                    ));
+                                }
+                                matched_cat = Some(cat_name.clone());
+                            }
+                        }
+                    }
+                    match matched_cat {
+                        Some(c) => result_cats.push(Scalar::Utf8(c)),
+                        None => {
+                            if let Some(dc) = default_category {
+                                result_cats.push(Scalar::Utf8(dc.to_string()));
+                            } else {
+                                return Err(FrameError::CompatibilityRejected(
+                                    "from_dummies: Dummy DataFrame contains rows with no 1s".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                let col = Column::from_values(result_cats)?;
+                res_col_map.insert(pfx.clone(), col);
+                res_col_order.push(pfx.clone());
+            }
+
+            Self::new_with_column_order(self.index().clone(), res_col_map, res_col_order)
+        } else {
+            let mut result_cats = Vec::with_capacity(num_rows);
+            for row_idx in 0..num_rows {
+                let mut matched_cat: Option<String> = None;
+                for &col_name in &col_names {
+                    if let Some(col) = self.column(col_name) {
+                        let is_one = match &col.values()[row_idx] {
+                            Scalar::Int64(1) => true,
+                            Scalar::Float64(f) => (*f - 1.0).abs() < 1e-6,
+                            Scalar::Bool(true) => true,
+                            Scalar::Utf8(s) => s == "1" || s == "true" || s == "True",
+                            _ => false,
+                        };
+                        if is_one {
+                            if matched_cat.is_some() {
+                                return Err(FrameError::CompatibilityRejected(
+                                    "from_dummies: Dummy DataFrame contains rows with multiple 1s".to_string(),
+                                ));
+                            }
+                            matched_cat = Some(col_name.to_string());
+                        }
+                    }
+                }
+                match matched_cat {
+                    Some(c) => result_cats.push(Scalar::Utf8(c)),
+                    None => {
+                        if let Some(dc) = default_category {
+                            result_cats.push(Scalar::Utf8(dc.to_string()));
+                        } else {
+                            return Err(FrameError::CompatibilityRejected(
+                                "from_dummies: Dummy DataFrame contains rows with no 1s".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+            let col = Column::from_values(result_cats)?;
+            let mut res_col_map = BTreeMap::new();
+            let res_col_order = vec!["".to_string()];
+            res_col_map.insert("".to_string(), col);
+            Self::new_with_column_order(self.index().clone(), res_col_map, res_col_order)
+        }
+    }
+
+    /// Reshape wide-format data to long format by grouping specified columns into target columns.
+    ///
+    /// Matches `pd.lreshape(df, groups, dropna=...)`.
+    ///
+    /// `groups`: mapping of target column name to list of wide source column names.
+    /// All lists in `groups` must have identical lengths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::CompatibilityRejected`] if the group column lists do not have equal lengths.
+    pub fn lreshape(
+        &self,
+        groups: &BTreeMap<String, Vec<String>>,
+        dropna: bool,
+    ) -> Result<Self, FrameError> {
+        let num_slices = match groups.values().next() {
+            Some(cols) => cols.len(),
+            None => 0,
+        };
+        for cols in groups.values() {
+            if cols.len() != num_slices {
+                return Err(FrameError::CompatibilityRejected(
+                    "lreshape: all group column lists must have equal length".to_string(),
+                ));
+            }
+        }
+
+        let mut all_group_source_cols = BTreeSet::new();
+        for cols in groups.values() {
+            for col in cols {
+                all_group_source_cols.insert(col.as_str());
+            }
+        }
+
+        let id_cols: Vec<String> = self
+            .column_names()
+            .into_iter()
+            .filter(|c| !all_group_source_cols.contains(c.as_str()))
+            .map(|c| c.to_string())
+            .collect();
+
+        let mut result_chunks: Vec<DataFrame> = Vec::new();
+
+        for slice_idx in 0..num_slices {
+            let mut slice_dict = Vec::new();
+            for id_col in &id_cols {
+                if let Some(col) = self.column(id_col) {
+                    slice_dict.push((id_col.clone(), col.values().to_vec()));
+                }
+            }
+            for (target_name, src_cols) in groups {
+                let src_name = &src_cols[slice_idx];
+                if let Some(col) = self.column(src_name) {
+                    slice_dict.push((target_name.clone(), col.values().to_vec()));
+                } else {
+                    let nulls = vec![Scalar::Null(NullKind::NaN); self.len()];
+                    slice_dict.push((target_name.clone(), nulls));
+                }
+            }
+
+            let chunk_col_names: Vec<String> = slice_dict.iter().map(|(n, _)| n.clone()).collect();
+            let chunk_col_refs: Vec<&str> = chunk_col_names.iter().map(String::as_str).collect();
+            let chunk_dict: Vec<(&str, Vec<Scalar>)> = slice_dict
+                .iter()
+                .map(|(n, v)| (n.as_str(), v.clone()))
+                .collect();
+
+            let chunk_df = DataFrame::from_dict(&chunk_col_refs, chunk_dict)?;
+            result_chunks.push(chunk_df);
+        }
+
+        if result_chunks.is_empty() {
+            return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+        }
+
+        let chunk_refs: Vec<&DataFrame> = result_chunks.iter().collect();
+        let mut concatenated = concat_dataframes_with_ignore_index(&chunk_refs, true)?;
+
+        if dropna && !groups.is_empty() {
+            let mut valid_mask = vec![false; concatenated.len()];
+            for target_name in groups.keys() {
+                if let Some(col) = concatenated.column(target_name) {
+                    for (i, val) in col.values().iter().enumerate() {
+                        if !val.is_null() && !val.is_nan() {
+                            valid_mask[i] = true;
+                        }
+                    }
+                }
+            }
+            let keep_indices: Vec<i64> = valid_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &b)| if b { Some(i as i64) } else { None })
+                .collect();
+            concatenated = concatenated.take(&keep_indices, 0)?;
+            concatenated = concatenated.reset_index(true)?;
+        }
+
+        Ok(concatenated)
     }
 
     /// Squeeze: pandas-named alias for `squeeze_to_series`.
@@ -216703,6 +217083,225 @@ mod group_bool_reduce_utf8_key_uza04 {
         assert!(all_ref.iter().any(|&b| b) && all_ref.iter().any(|&b| !b));
         assert!(any_ref.iter().any(|&b| b));
         let _ = IndexLabel::Int64(0);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_top_level_and_reshaping {
+    use super::*;
+
+    #[test]
+    fn test_from_dummies_success_and_errors() -> Result<(), FrameError> {
+        // Roundtrip from get_dummies
+        let s = Series::from_values(
+            "cat",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("alpha".into()),
+                Scalar::Utf8("beta".into()),
+                Scalar::Utf8("alpha".into()),
+            ],
+        )?;
+        let df = DataFrame::from_series(vec![s])?;
+        let dummies = df.get_dummies(&["cat"])?;
+        assert_eq!(dummies.column_names().len(), 2);
+
+        let reconstructed = dummies.from_dummies(Some("_"), None)?;
+        assert_eq!(reconstructed.column_names(), vec![&"cat".to_string()]);
+        let reconstructed_col = reconstructed.column("cat").unwrap();
+        assert_eq!(reconstructed_col.values()[0], Scalar::Utf8("alpha".into()));
+        assert_eq!(reconstructed_col.values()[1], Scalar::Utf8("beta".into()));
+        assert_eq!(reconstructed_col.values()[2], Scalar::Utf8("alpha".into()));
+
+        // Test default_category for rows with all 0s
+        let d0 = Series::from_values(
+            "k_a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(0)],
+        )?;
+        let d1 = Series::from_values(
+            "k_b",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Int64(0)],
+        )?;
+        let df_zero = DataFrame::from_series(vec![d0, d1])?;
+        let rec_default = df_zero.from_dummies(Some("_"), Some("missing"))?;
+        let col = rec_default.column("k").unwrap();
+        assert_eq!(col.values()[0], Scalar::Utf8("a".into()));
+        assert_eq!(col.values()[1], Scalar::Utf8("missing".into()));
+
+        // Error: multiple 1s in a row
+        let d_m0 = Series::from_values("k_a", vec![0_i64.into()], vec![Scalar::Int64(1)])?;
+        let d_m1 = Series::from_values("k_b", vec![0_i64.into()], vec![Scalar::Int64(1)])?;
+        let df_mult = DataFrame::from_series(vec![d_m0, d_m1])?;
+        assert!(df_mult.from_dummies(Some("_"), None).is_err());
+
+        // Error: row with no 1s and no default_category
+        let d_z0 = Series::from_values("k_a", vec![0_i64.into()], vec![Scalar::Int64(0)])?;
+        let d_z1 = Series::from_values("k_b", vec![0_i64.into()], vec![Scalar::Int64(0)])?;
+        let df_no1 = DataFrame::from_series(vec![d_z0, d_z1])?;
+        assert!(df_no1.from_dummies(Some("_"), None).is_err());
+
+        // Error: column does not contain separator
+        let d_bad = Series::from_values("nosep", vec![0_i64.into()], vec![Scalar::Int64(1)])?;
+        let df_bad = DataFrame::from_series(vec![d_bad])?;
+        assert!(df_bad.from_dummies(Some("_"), None).is_err());
+
+        // No separator mode
+        let d_n0 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(0)],
+        )?;
+        let d_n1 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Int64(1)],
+        )?;
+        let df_nosep = DataFrame::from_series(vec![d_n0, d_n1])?;
+        let rec_nosep = df_nosep.from_dummies(None, None)?;
+        let nosep_col = rec_nosep.column("").unwrap();
+        assert_eq!(nosep_col.values()[0], Scalar::Utf8("x".into()));
+        assert_eq!(nosep_col.values()[1], Scalar::Utf8("y".into()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_lreshape_success_and_errors() -> Result<(), FrameError> {
+        use std::collections::BTreeMap;
+
+        let s_id = Series::from_values(
+            "id",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("A".into()), Scalar::Utf8("B".into())],
+        )?;
+        let s_e1 = Series::from_values(
+            "e1",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )?;
+        let s_e2 = Series::from_values(
+            "e2",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        )?;
+        let df = DataFrame::from_series(vec![s_id, s_e1, s_e2])?;
+
+        let mut groups = BTreeMap::new();
+        groups.insert("e".to_string(), vec!["e1".to_string(), "e2".to_string()]);
+
+        let reshaped = df.lreshape(&groups, false)?;
+        assert_eq!(reshaped.len(), 4);
+        assert_eq!(reshaped.column_names(), vec![&"id".to_string(), &"e".to_string()]);
+
+        // Error: mismatched group lengths
+        let mut bad_groups = BTreeMap::new();
+        bad_groups.insert("e".to_string(), vec!["e1".to_string(), "e2".to_string()]);
+        bad_groups.insert("f".to_string(), vec!["f1".to_string()]);
+        assert!(df.lreshape(&bad_groups, false).is_err());
+
+        // Empty groups
+        let empty_groups = BTreeMap::new();
+        let reshaped_empty = df.lreshape(&empty_groups, false)?;
+        assert_eq!(reshaped_empty.len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp_frame_top_level_free_functions() -> Result<(), FrameError> {
+        use std::collections::BTreeMap;
+
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10)],
+        )?;
+
+        // unique
+        let u = unique(&s);
+        assert_eq!(u.len(), 2);
+
+        // value_counts
+        let vc = value_counts(&s)?;
+        assert_eq!(vc.len(), 2);
+        let vc_opts = value_counts_with_options(&s, false, true, true, true)?;
+        assert_eq!(vc_opts.len(), 2);
+
+        // factorize
+        let (f_codes, f_uniques) = factorize(&s)?;
+        assert_eq!(f_codes.len(), 3);
+        assert_eq!(f_uniques.len(), 2);
+        let (f_opts_c, f_opts_u) = factorize_with_options(&s, true, true)?;
+        assert_eq!(f_opts_c.len(), 3);
+        assert_eq!(f_opts_u.len(), 2);
+
+        // DataFrame functions
+        let s_a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("X".into()), Scalar::Utf8("Y".into())],
+        )?;
+        let s_b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("C1".into()), Scalar::Utf8("C2".into())],
+        )?;
+        let s_c = Series::from_values(
+            "c",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.5), Scalar::Float64(2.5)],
+        )?;
+        let s_d = Series::from_values(
+            "d",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(3.5), Scalar::Float64(4.5)],
+        )?;
+        let df = DataFrame::from_series(vec![s_a, s_b, s_c, s_d])?;
+
+        // melt
+        let m = melt(&df, &["a", "b"], &["c", "d"], Some("variable"), Some("value"))?;
+        assert_eq!(m.len(), 4);
+
+        // pivot
+        let p = pivot(&df, "a", "b", "c")?;
+        assert_eq!(p.len(), 2);
+
+        // pivot_table & pivot_table_with_dropna
+        let pt = pivot_table(&df, "c", "a", "b", "mean")?;
+        assert_eq!(pt.len(), 2);
+        let ptd = pivot_table_with_dropna(&df, "c", "a", "b", "mean", true)?;
+        assert_eq!(ptd.len(), 2);
+
+        // crosstab & crosstab_normalize
+        let ct = crosstab(&s, &s)?;
+        assert_eq!(ct.len(), 2);
+        let ctn = crosstab_normalize(&s, &s, "all")?;
+        assert_eq!(ctn.len(), 2);
+
+        // get_dummies & get_dummies_with_options
+        let df_cat = DataFrame::from_series(vec![s.clone()])?;
+        let gd = get_dummies(&df_cat, &["data"])?;
+        assert_eq!(gd.column_names().len(), 2);
+        let gd_opts = get_dummies_with_options(&df_cat, &["data"], "__", false, false)?;
+        assert_eq!(gd_opts.column_names().len(), 2);
+
+        // from_dummies
+        let fd = from_dummies(&gd, Some("_"), None)?;
+        assert_eq!(fd.column_names().len(), 1);
+
+        // lreshape
+        let mut grps = BTreeMap::new();
+        grps.insert("num".to_string(), vec!["c".to_string(), "d".to_string()]);
+        let lr = lreshape(&df, &grps, false)?;
+        assert_eq!(lr.len(), 4);
+
+        // show_versions
+        let sv = show_versions();
+        assert!(sv.contains("frankenpandas:"));
+
         Ok(())
     }
 }

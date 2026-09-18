@@ -457,6 +457,283 @@ impl DType {
     }
 }
 
+impl std::str::FromStr for DType {
+    type Err = TypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        match trimmed {
+            "int64" | "int" | "i8" | "integer" | "<i8" => Ok(Self::Int64),
+            "Int64" | "Int64Dtype" => Ok(Self::Int64Nullable),
+            "float64" | "float" | "f8" | "floating" | "<f8" => Ok(Self::Float64),
+            "Float64" | "Float64Dtype" => Ok(Self::Float64Nullable),
+            "bool" | "|b1" => Ok(Self::Bool),
+            "boolean" | "BooleanDtype" => Ok(Self::BoolNullable),
+            "string" | "str" | "object" | "utf8" | "Utf8" | "O" | "|O8" => Ok(Self::Utf8),
+            "category" | "categorical" | "CategoricalDtype" => Ok(Self::Categorical),
+            "timedelta64" | "timedelta64[ns]" | "timedelta" | "Timedelta" | "<m8[ns]" => {
+                Ok(Self::Timedelta64)
+            }
+            "period" | "Period" => Ok(Self::Period),
+            "interval" | "Interval" => Ok(Self::Interval),
+            "sparse" | "Sparse" => Ok(Self::Sparse),
+            "null" | "Null" => Ok(Self::Null),
+            _ if trimmed.starts_with("datetime64")
+                || trimmed.starts_with("datetime")
+                || trimmed.starts_with("<M8") =>
+            {
+                if let Some(idx) = trimmed.find(',') {
+                    let tz_part = if let Some(rest) = trimmed.get(idx + 1..) {
+                        rest.trim().trim_end_matches(']').trim().to_string()
+                    } else {
+                        String::new()
+                    };
+                    Ok(Self::Datetime64 { tz: Some(tz_part) })
+                } else {
+                    Ok(Self::Datetime64 { tz: None })
+                }
+            }
+            _ => Err(TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "DType".to_string(),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for DType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
+/// Trait for types that carry or represent a [`DType`].
+pub trait AsDType {
+    /// Return the corresponding [`DType`].
+    fn as_dtype(&self) -> DType;
+}
+
+impl AsDType for DType {
+    fn as_dtype(&self) -> DType {
+        self.clone()
+    }
+}
+
+impl AsDType for &DType {
+    fn as_dtype(&self) -> DType {
+        (*self).clone()
+    }
+}
+
+impl AsDType for &str {
+    fn as_dtype(&self) -> DType {
+        self.parse::<DType>().unwrap_or(DType::Utf8)
+    }
+}
+
+impl AsDType for String {
+    fn as_dtype(&self) -> DType {
+        self.as_str().as_dtype()
+    }
+}
+
+pub mod api {
+    //! Public pandas API modules (`pandas.api.*`).
+
+    pub mod types {
+        //! Dtype inspection and conversion functions (`pandas.api.types`).
+
+        use crate::{AsDType, DType, Scalar, TypeError};
+
+        /// Matches `pd.api.types.is_bool_dtype`.
+        #[must_use]
+        pub fn is_bool_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_bool()
+        }
+
+        /// Matches `pd.api.types.is_numeric_dtype`.
+        #[must_use]
+        pub fn is_numeric_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_numeric()
+        }
+
+        /// Matches `pd.api.types.is_integer_dtype`.
+        #[must_use]
+        pub fn is_integer_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_integer()
+        }
+
+        /// Matches `pd.api.types.is_signed_integer_dtype`.
+        #[must_use]
+        pub fn is_signed_integer_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_signed_integer()
+        }
+
+        /// Matches `pd.api.types.is_unsigned_integer_dtype`.
+        #[must_use]
+        pub fn is_unsigned_integer_dtype(_dtype: &impl AsDType) -> bool {
+            false
+        }
+
+        /// Matches `pd.api.types.is_float_dtype`.
+        #[must_use]
+        pub fn is_float_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_floating()
+        }
+
+        /// Matches `pd.api.types.is_string_dtype`.
+        #[must_use]
+        pub fn is_string_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_string_dtype()
+        }
+
+        /// Matches `pd.api.types.is_datetime64_any_dtype`.
+        #[must_use]
+        pub fn is_datetime64_any_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_datetime()
+        }
+
+        /// Matches `pd.api.types.is_datetime64_dtype`.
+        #[must_use]
+        pub fn is_datetime64_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_datetime()
+        }
+
+        /// Matches `pd.api.types.is_datetime64_ns_dtype`.
+        #[must_use]
+        pub fn is_datetime64_ns_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_datetime()
+        }
+
+        /// Matches `pd.api.types.is_timedelta64_dtype`.
+        #[must_use]
+        pub fn is_timedelta64_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_timedelta()
+        }
+
+        /// Matches `pd.api.types.is_timedelta64_ns_dtype`.
+        #[must_use]
+        pub fn is_timedelta64_ns_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_timedelta()
+        }
+
+        /// Matches `pd.api.types.is_period_dtype`.
+        #[must_use]
+        pub fn is_period_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_period()
+        }
+
+        /// Matches `pd.api.types.is_categorical_dtype`.
+        #[must_use]
+        pub fn is_categorical_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_categorical()
+        }
+
+        /// Matches `pd.api.types.is_interval_dtype`.
+        #[must_use]
+        pub fn is_interval_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_interval()
+        }
+
+        /// Matches `pd.api.types.is_sparse`.
+        #[must_use]
+        pub fn is_sparse(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_sparse()
+        }
+
+        /// Matches `pd.api.types.is_extension_array_dtype`.
+        #[must_use]
+        pub fn is_extension_array_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_extension()
+        }
+
+        /// Matches `pd.api.types.is_scalar`.
+        #[must_use]
+        pub const fn is_scalar(_scalar: &Scalar) -> bool {
+            true
+        }
+
+        /// Convert a string specification into a pandas DType. Matches `pd.api.types.pandas_dtype`.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TypeError::ValueNotParseable`] if the string cannot be parsed as a valid dtype.
+        pub fn pandas_dtype(name: &str) -> Result<DType, TypeError> {
+            name.parse::<DType>()
+        }
+
+        /// Infer the dtype kind of a slice of scalars. Matches `pd.api.types.infer_dtype`.
+        #[must_use]
+        pub fn infer_dtype(scalars: &[Scalar], skipna: bool) -> &'static str {
+            if scalars.is_empty() {
+                return "empty";
+            }
+            let mut has_int = false;
+            let mut has_float = false;
+            let mut has_bool = false;
+            let mut has_str = false;
+            let mut has_ts = false;
+            let mut has_td = false;
+            let mut has_period = false;
+            let mut count = 0;
+
+            for s in scalars {
+                if s.is_null() {
+                    if !skipna {
+                        return "mixed";
+                    }
+                    continue;
+                }
+                count += 1;
+                match s {
+                    Scalar::Bool(_) => has_bool = true,
+                    Scalar::Int64(_) => has_int = true,
+                    Scalar::Float64(_) => has_float = true,
+                    Scalar::Utf8(_) => has_str = true,
+                    Scalar::Datetime64(_) => has_ts = true,
+                    Scalar::Timedelta64(_) => has_td = true,
+                    Scalar::Period(_) => has_period = true,
+                    _ => {}
+                }
+            }
+
+            if count == 0 {
+                return "empty";
+            }
+            if has_bool && !has_int && !has_float && !has_str && !has_ts && !has_td && !has_period {
+                return "boolean";
+            }
+            if has_int && !has_float && !has_bool && !has_str && !has_ts && !has_td && !has_period {
+                return "integer";
+            }
+            if (has_float || (has_int && has_float))
+                && !has_bool
+                && !has_str
+                && !has_ts
+                && !has_td
+                && !has_period
+            {
+                return "floating";
+            }
+            if has_str && !has_int && !has_float && !has_bool && !has_ts && !has_td && !has_period {
+                return "string";
+            }
+            if has_ts && !has_int && !has_float && !has_bool && !has_str && !has_td && !has_period {
+                return "datetime64";
+            }
+            if has_td && !has_int && !has_float && !has_bool && !has_str && !has_ts && !has_period {
+                return "timedelta64";
+            }
+            if has_period && !has_int && !has_float && !has_bool && !has_str && !has_ts && !has_td {
+                return "period";
+            }
+            "mixed"
+        }
+    }
+}
+
+pub use api::types::pandas_dtype;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SparseDType {
     pub value_dtype: DType,
@@ -17199,5 +17476,87 @@ mod sparse_dtype_pandas_name_3gxc6 {
                 "malformed sparse name {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn test_dtype_from_str_and_display() {
+        use crate::DType;
+        use std::str::FromStr;
+
+        assert_eq!(DType::from_str("int64").unwrap(), DType::Int64);
+        assert_eq!(DType::from_str("Int64").unwrap(), DType::Int64Nullable);
+        assert_eq!(DType::from_str("float64").unwrap(), DType::Float64);
+        assert_eq!(DType::from_str("Float64").unwrap(), DType::Float64Nullable);
+        assert_eq!(DType::from_str("bool").unwrap(), DType::Bool);
+        assert_eq!(DType::from_str("boolean").unwrap(), DType::BoolNullable);
+        assert_eq!(DType::from_str("string").unwrap(), DType::Utf8);
+        assert_eq!(DType::from_str("category").unwrap(), DType::Categorical);
+        assert_eq!(DType::from_str("timedelta64[ns]").unwrap(), DType::Timedelta64);
+        assert_eq!(DType::from_str("datetime64[ns]").unwrap(), DType::Datetime64 { tz: None });
+        assert_eq!(
+            DType::from_str("datetime64[ns, UTC]").unwrap(),
+            DType::Datetime64 { tz: Some("UTC".to_string()) }
+        );
+        assert_eq!(DType::from_str("period").unwrap(), DType::Period);
+        assert_eq!(DType::from_str("interval").unwrap(), DType::Interval);
+        assert_eq!(DType::from_str("sparse").unwrap(), DType::Sparse);
+
+        assert_eq!(format!("{}", DType::Int64), "int64");
+        assert_eq!(format!("{}", DType::Datetime64 { tz: Some("UTC".to_string()) }), "datetime64[ns, UTC]");
+    }
+
+    #[test]
+    fn test_api_types_inspection_and_infer_dtype() {
+        use crate::api::types::{
+            infer_dtype, is_bool_dtype, is_categorical_dtype, is_datetime64_any_dtype,
+            is_extension_array_dtype, is_float_dtype, is_integer_dtype, is_interval_dtype,
+            is_numeric_dtype, is_period_dtype, is_scalar, is_signed_integer_dtype, is_sparse,
+            is_string_dtype, is_timedelta64_dtype, is_unsigned_integer_dtype, pandas_dtype,
+        };
+        use crate::{DType, Scalar};
+
+        assert!(is_numeric_dtype(&DType::Int64));
+        assert!(is_numeric_dtype(&DType::Float64));
+        assert!(!is_numeric_dtype(&DType::Utf8));
+        assert!(!is_numeric_dtype(&DType::Bool));
+
+        assert!(is_integer_dtype(&DType::Int64));
+        assert!(is_integer_dtype(&DType::Int64Nullable));
+        assert!(!is_integer_dtype(&DType::Float64));
+
+        assert!(is_signed_integer_dtype(&DType::Int64));
+        assert!(!is_unsigned_integer_dtype(&DType::Int64));
+
+        assert!(is_float_dtype(&DType::Float64));
+        assert!(is_bool_dtype(&DType::Bool));
+        assert!(is_string_dtype(&DType::Utf8));
+        assert!(is_datetime64_any_dtype(&DType::Datetime64 { tz: None }));
+        assert!(is_timedelta64_dtype(&DType::Timedelta64));
+        assert!(is_categorical_dtype(&DType::Categorical));
+        assert!(is_period_dtype(&DType::Period));
+        assert!(is_interval_dtype(&DType::Interval));
+        assert!(is_sparse(&DType::Sparse));
+        assert!(is_extension_array_dtype(&DType::Categorical));
+        assert!(is_scalar(&Scalar::Int64(42)));
+
+        assert_eq!(pandas_dtype("float64").unwrap(), DType::Float64);
+        assert!(pandas_dtype("invalid_dtype_xyz").is_err());
+
+        let ints = vec![Scalar::Int64(1), Scalar::Int64(2)];
+        assert_eq!(infer_dtype(&ints, true), "integer");
+
+        let floats = vec![Scalar::Float64(1.0), Scalar::Float64(2.5)];
+        assert_eq!(infer_dtype(&floats, true), "floating");
+
+        let bools = vec![Scalar::Bool(true), Scalar::Bool(false)];
+        assert_eq!(infer_dtype(&bools, true), "boolean");
+
+        let strings = vec![Scalar::Utf8("a".to_string()), Scalar::Utf8("b".to_string())];
+        assert_eq!(infer_dtype(&strings, true), "string");
+
+        let mixed = vec![Scalar::Int64(1), Scalar::Utf8("a".to_string())];
+        assert_eq!(infer_dtype(&mixed, true), "mixed");
+
+        assert_eq!(infer_dtype(&[], true), "empty");
     }
 }
