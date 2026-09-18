@@ -83,9 +83,12 @@ pub use fp_frame::{
     concat_series_with_ignore_index,
 };
 pub use fp_frame::{
-    cut, qcut, timedelta_total_seconds, to_datetime, to_datetime_with_format,
-    to_datetime_with_options, to_datetime_with_unit, to_numeric, to_timedelta,
-    to_timedelta_with_options, to_timedelta_with_unit,
+    crosstab, crosstab_normalize, cut, factorize, factorize_with_options, from_dummies,
+    get_dummies, get_dummies_with_options, lreshape, melt, pivot, pivot_table,
+    pivot_table_with_dropna, qcut, show_versions, timedelta_total_seconds, to_datetime,
+    to_datetime_with_format, to_datetime_with_options, to_datetime_with_unit, to_numeric,
+    to_timedelta, to_timedelta_with_options, to_timedelta_with_unit, unique, value_counts,
+    value_counts_with_options,
 };
 pub use fp_frame::plotting;
 pub use fp_frame::testing;
@@ -389,8 +392,9 @@ pub use fp_runtime::{
     decision_to_card,
 };
 pub use fp_types::{
-    DType, NullKind, Scalar, SparseDType, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
-    count_na, dropna, fill_na, infer_dtype, isna, isnull, notna, notnull,
+    DType, NullKind, Scalar, SparseDType, TypeError, api, cast_scalar, cast_scalar_owned,
+    common_dtype, count_na, dropna, fill_na, infer_dtype, isna, isnull, notna, notnull,
+    pandas_dtype,
 };
 // fd90.263: pandas-equivalent helper types for Datetime64/Timedelta64/Period/Interval
 // scalar variants. Users typically interact via Scalar::Timedelta64(nanos) etc., but
@@ -656,12 +660,19 @@ pub mod prelude {
         concat_series_with_ignore_index,
         // fd90.262: Vec<Scalar> helpers matching pandas' top-level surface.
         count_na,
+        crosstab,
+        crosstab_normalize,
         // IO — datetime/numeric helpers (full module-level fn surface)
         cut,
         date_range,
         decision_to_card,
         dropna,
+        factorize,
+        factorize_with_options,
         fill_na,
+        from_dummies,
+        get_dummies,
+        get_dummies_with_options,
         // fd90.15: Index → DataFrame/Series conversion helpers (fd90.270).
         // Pair with Index being in the prelude.
         index_to_frame,
@@ -689,6 +700,8 @@ pub mod prelude {
         list_sql_tables,
         list_sql_unique_constraints,
         list_sql_views,
+        lreshape,
+        melt,
         merge_asof,
         merge_asof_with_options,
         merge_dataframes,
@@ -722,7 +735,11 @@ pub mod prelude {
         nanvar,
         notna,
         notnull,
+        pandas_dtype,
         period_range,
+        pivot,
+        pivot_table,
+        pivot_table_with_dropna,
         qcut,
         // IO — readers (in-memory + path; covers all 8 documented formats)
         read_csv,
@@ -779,6 +796,7 @@ pub mod prelude {
         // rest of the IO surface.
         series_from_arrow_array,
         series_to_arrow_array,
+        show_versions,
         sql_backend_caps,
         sql_max_identifier_length,
         sql_max_insert_rows,
@@ -800,6 +818,9 @@ pub mod prelude {
         to_timedelta_with_options,
         to_timedelta_with_unit,
         truncate_sql_table,
+        unique,
+        value_counts,
+        value_counts_with_options,
         // IO — writers (in-memory + path + sql; covers all 8 documented formats)
         write_csv,
         write_csv_string,
@@ -1274,6 +1295,25 @@ mod tests {
         let _ = cast_scalar_owned;
         let _ = read_csv_with_index_cols;
         let _ = read_csv_with_index_cols_path;
+
+        // Top-level pandas-parity functions
+        let _ = crosstab;
+        let _ = crosstab_normalize;
+        let _ = factorize;
+        let _ = factorize_with_options;
+        let _ = from_dummies;
+        let _ = get_dummies;
+        let _ = get_dummies_with_options;
+        let _ = lreshape;
+        let _ = melt;
+        let _ = pandas_dtype;
+        let _ = pivot;
+        let _ = pivot_table;
+        let _ = pivot_table_with_dropna;
+        let _ = show_versions;
+        let _ = unique;
+        let _ = value_counts;
+        let _ = value_counts_with_options;
     }
 
     #[cfg(feature = "sql-sqlite")]
@@ -1324,5 +1364,69 @@ mod tests {
         // Test plotting::plot_params
         let params = crate::plotting::plot_params();
         assert!(params.contains_key("xaxis.compat"));
+    }
+
+    #[test]
+    fn top_level_pandas_parity_functions_compile_and_run() {
+        use crate::prelude::*;
+        use std::collections::BTreeMap;
+
+        // Verify show_versions
+        let ver = show_versions();
+        assert!(ver.contains("frankenpandas:"));
+
+        // Verify pandas_dtype and api::types
+        assert_eq!(pandas_dtype("int64").unwrap(), DType::Int64);
+        assert!(crate::api::types::is_numeric_dtype(&DType::Float64));
+
+        // Create a Series and verify unique, value_counts, factorize
+        let s = Series::from_values(
+            "test",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)],
+            vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+        )
+        .unwrap();
+
+        let u = unique(&s);
+        assert_eq!(u.len(), 2);
+
+        let vc = value_counts(&s).unwrap();
+        assert_eq!(vc.len(), 2);
+
+        let (codes, uniques) = factorize(&s).unwrap();
+        assert_eq!(codes.len(), 3);
+        assert_eq!(uniques.len(), 2);
+
+        let (sorted_codes, sorted_uniques) = factorize_with_options(&s, true, true).unwrap();
+        assert_eq!(sorted_codes.len(), 3);
+        assert_eq!(sorted_uniques.len(), 2);
+
+        // Verify DataFrame top-level functions: melt, pivot, pivot_table, crosstab, get_dummies, from_dummies, lreshape
+        let df = read_csv_str("a,b,c,d\nfoo,one,1,10\nbar,two,2,20").unwrap();
+        let melted = melt(&df, &["a", "b"], &["c", "d"], None, None).unwrap();
+        assert_eq!(melted.index().len(), 4);
+
+        let p = pivot(&df, "a", "b", "c").unwrap();
+        assert_eq!(p.index().len(), 2);
+
+        let pt = pivot_table(&df, "c", "a", "b", "sum").unwrap();
+        assert_eq!(pt.index().len(), 2);
+
+        let ct = crosstab(&s, &s).unwrap();
+        assert_eq!(ct.index().len(), 2);
+
+        let df_dummy_input = read_csv_str("col\nfoo\nbar").unwrap();
+        let dummies = get_dummies(&df_dummy_input, &["col"]).unwrap();
+        assert!(dummies.column_names().iter().any(|c| c.starts_with("col_")));
+
+        // from_dummies test
+        let from_d = from_dummies(&dummies, Some("_"), None).unwrap();
+        assert!(from_d.column("col").is_some());
+
+        // lreshape test
+        let mut groups = BTreeMap::new();
+        groups.insert("nums".to_string(), vec!["c".to_string(), "d".to_string()]);
+        let lr = lreshape(&df, &groups, false).unwrap();
+        assert_eq!(lr.column("nums").unwrap().len(), 4);
     }
 }
