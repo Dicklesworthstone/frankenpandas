@@ -162,10 +162,18 @@ pub enum FrameError {
     LengthMismatch { index_len: usize, column_len: usize },
     #[error("compatibility gate rejected operation: {0}")]
     CompatibilityRejected(String),
+    #[error("assertion failed: {0}")]
+    AssertionFailed(String),
     #[error(transparent)]
     Column(#[from] ColumnError),
     #[error(transparent)]
     Index(#[from] IndexError),
+}
+
+impl From<testing::AssertionError> for FrameError {
+    fn from(err: testing::AssertionError) -> Self {
+        FrameError::AssertionFailed(err.message)
+    }
 }
 
 fn pandas_temporal_error_class(error: PandasTemporalError) -> &'static str {
@@ -436,6 +444,767 @@ pub mod plotting {
 
     /// Deregister pandas formatters and converters with matplotlib (no-op compatibility hook).
     pub fn deregister_matplotlib_converters() {}
+
+    /// Return default plotting parameters dictionary/map (matching `pandas.plotting.plot_params`).
+    #[must_use]
+    pub fn plot_params() -> std::collections::BTreeMap<String, String> {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("xaxis.compat".to_string(), "false".to_string());
+        map
+    }
+}
+
+/// Testing assertions matching `pandas.testing` (`assert_frame_equal`, `assert_series_equal`, `assert_index_equal`).
+pub mod testing {
+    use thiserror::Error;
+
+    use crate::{DataFrame, Index, IndexLabel, Scalar, Series};
+
+    /// Error raised when a testing assertion fails, matching pandas `AssertionError`.
+    #[derive(Debug, Clone, PartialEq, Eq, Error)]
+    #[error("AssertionError: {message}")]
+    pub struct AssertionError {
+        pub message: String,
+    }
+
+    impl AssertionError {
+        /// Create a new assertion error with the given message.
+        #[must_use]
+        pub fn new(message: impl Into<String>) -> Self {
+            Self {
+                message: message.into(),
+            }
+        }
+    }
+
+    /// Configuration options for testing assertions matching pandas `pandas.testing` kwargs.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct AssertEqualOptions {
+        /// Whether to check that dtypes match exactly (default: true).
+        pub check_dtype: bool,
+        /// Whether to check that index types match (default: true).
+        pub check_index_type: bool,
+        /// Whether to check column names and index/series names (default: true).
+        pub check_names: bool,
+        /// Whether to require exact float equality instead of using rtol/atol (default: false).
+        pub check_exact: bool,
+        /// Whether to ignore row and column order (default: false).
+        pub check_like: bool,
+        /// Relative tolerance for floating-point comparisons (default: 1e-5).
+        pub rtol: f64,
+        /// Absolute tolerance for floating-point comparisons (default: 1e-8).
+        pub atol: f64,
+    }
+
+    impl Default for AssertEqualOptions {
+        fn default() -> Self {
+            Self {
+                check_dtype: true,
+                check_index_type: true,
+                check_names: true,
+                check_exact: false,
+                check_like: false,
+                rtol: 1e-5,
+                atol: 1e-8,
+            }
+        }
+    }
+
+    impl AssertEqualOptions {
+        /// Create a new options instance with default pandas settings.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Create options requiring exact float comparisons (`check_exact = true`).
+        #[must_use]
+        pub fn exact() -> Self {
+            Self {
+                check_exact: true,
+                ..Self::default()
+            }
+        }
+
+        /// Configure whether to verify dtypes match.
+        #[must_use]
+        pub fn with_check_dtype(mut self, check: bool) -> Self {
+            self.check_dtype = check;
+            self
+        }
+
+        /// Configure whether to verify index types match.
+        #[must_use]
+        pub fn with_check_index_type(mut self, check: bool) -> Self {
+            self.check_index_type = check;
+            self
+        }
+
+        /// Configure whether to verify column/series/index names match.
+        #[must_use]
+        pub fn with_check_names(mut self, check: bool) -> Self {
+            self.check_names = check;
+            self
+        }
+
+        /// Configure whether to require exact floating-point equality.
+        #[must_use]
+        pub fn with_check_exact(mut self, check: bool) -> Self {
+            self.check_exact = check;
+            self
+        }
+
+        /// Configure whether to ignore row and column order.
+        #[must_use]
+        pub fn with_check_like(mut self, check: bool) -> Self {
+            self.check_like = check;
+            self
+        }
+
+        /// Set relative and absolute tolerances for float comparison.
+        #[must_use]
+        pub fn with_tolerance(mut self, rtol: f64, atol: f64) -> Self {
+            self.rtol = rtol;
+            self.atol = atol;
+            self
+        }
+
+        /// Set relative tolerance for float comparison.
+        #[must_use]
+        pub fn with_rtol(mut self, rtol: f64) -> Self {
+            self.rtol = rtol;
+            self
+        }
+
+        /// Set absolute tolerance for float comparison.
+        #[must_use]
+        pub fn with_atol(mut self, atol: f64) -> Self {
+            self.atol = atol;
+            self
+        }
+    }
+
+    #[allow(clippy::float_cmp)]
+    fn compare_floats(
+        first: f64,
+        second: f64,
+        check_exact: bool,
+        rtol: f64,
+        atol: f64,
+    ) -> Result<(), String> {
+        if first.is_nan() && second.is_nan() {
+            return Ok(());
+        }
+        if first.is_nan() || second.is_nan() {
+            return Err(format!("NaN mismatch: left={first}, right={second}"));
+        }
+        if first.is_infinite() || second.is_infinite() {
+            if first == second {
+                return Ok(());
+            }
+            return Err(format!(
+                "Infinite value mismatch: left={first}, right={second}"
+            ));
+        }
+        if check_exact {
+            if first == second {
+                Ok(())
+            } else {
+                Err(format!("Exact float mismatch: left={first}, right={second}"))
+            }
+        } else {
+            let diff = (first - second).abs();
+            let tol = atol + rtol * second.abs();
+            if diff <= tol {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Values differ: left={first}, right={second} (diff: {diff:e} > tol: {tol:e})"
+                ))
+            }
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn scalar_to_f64(scalar: &Scalar) -> Option<f64> {
+        match scalar {
+            Scalar::Float64(val) => Some(*val),
+            Scalar::Int64(val) => Some(*val as f64),
+            _ => None,
+        }
+    }
+
+    /// Compare two scalars according to the specified options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error message string if values differ.
+    pub fn compare_scalars(
+        left: &Scalar,
+        right: &Scalar,
+        check_dtype: bool,
+        check_exact: bool,
+        rtol: f64,
+        atol: f64,
+    ) -> Result<(), String> {
+        let left_missing = left.is_missing();
+        let right_missing = right.is_missing();
+        if left_missing && right_missing {
+            if check_dtype && left.dtype() != right.dtype() {
+                return Err(format!(
+                    "Dtype mismatch on missing values: left={:?}, right={:?}",
+                    left.dtype(),
+                    right.dtype()
+                ));
+            }
+            return Ok(());
+        }
+        if left_missing != right_missing {
+            return Err(format!(
+                "Missingness mismatch: left={left:?}, right={right:?}"
+            ));
+        }
+
+        if check_dtype && left.dtype() != right.dtype() {
+            return Err(format!(
+                "Dtype mismatch: left={:?}, right={:?}",
+                left.dtype(),
+                right.dtype()
+            ));
+        }
+
+        match (left, right) {
+            (Scalar::Float64(f1), Scalar::Float64(f2)) => {
+                compare_floats(*f1, *f2, check_exact, rtol, atol)
+            }
+            (Scalar::Int64(i1), Scalar::Int64(i2)) => {
+                if i1 == i2 {
+                    Ok(())
+                } else {
+                    Err(format!("{i1} != {i2}"))
+                }
+            }
+            (Scalar::Bool(b1), Scalar::Bool(b2)) => {
+                if b1 == b2 {
+                    Ok(())
+                } else {
+                    Err(format!("{b1} != {b2}"))
+                }
+            }
+            (Scalar::Utf8(s1), Scalar::Utf8(s2)) => {
+                if s1 == s2 {
+                    Ok(())
+                } else {
+                    Err(format!("\"{s1}\" != \"{s2}\""))
+                }
+            }
+            (Scalar::Timedelta64(t1), Scalar::Timedelta64(t2)) => {
+                if t1 == t2 {
+                    Ok(())
+                } else {
+                    Err(format!("Timedelta64({t1}) != Timedelta64({t2})"))
+                }
+            }
+            (Scalar::Datetime64(d1), Scalar::Datetime64(d2)) => {
+                if d1 == d2 {
+                    Ok(())
+                } else {
+                    Err(format!("Datetime64({d1}) != Datetime64({d2})"))
+                }
+            }
+            (Scalar::Period(p1), Scalar::Period(p2)) => {
+                if p1 == p2 {
+                    Ok(())
+                } else {
+                    Err(format!("{p1:?} != {p2:?}"))
+                }
+            }
+            (Scalar::Interval(v1), Scalar::Interval(v2)) => {
+                if v1 == v2 {
+                    Ok(())
+                } else {
+                    Err(format!("{v1:?} != {v2:?}"))
+                }
+            }
+            (Scalar::Null(n1), Scalar::Null(n2)) => {
+                if n1 == n2 {
+                    Ok(())
+                } else {
+                    Err(format!("{n1:?} != {n2:?}"))
+                }
+            }
+            (s1, s2) if !check_dtype => {
+                if let (Some(f1), Some(f2)) = (scalar_to_f64(s1), scalar_to_f64(s2)) {
+                    compare_floats(f1, f2, check_exact, rtol, atol)
+                } else if s1 == s2 {
+                    Ok(())
+                } else {
+                    Err(format!("{s1:?} != {s2:?}"))
+                }
+            }
+            (a, b) => {
+                if a == b {
+                    Ok(())
+                } else {
+                    Err(format!("{a:?} != {b:?}"))
+                }
+            }
+        }
+    }
+
+    /// Check that two Indexes are equal, matching `pandas.testing.assert_index_equal`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssertionError`] if the indexes are not equal according to the specified options.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn assert_index_equal(
+        left: &Index,
+        right: &Index,
+        options: &AssertEqualOptions,
+    ) -> Result<(), AssertionError> {
+        if left.len() != right.len() {
+            return Err(AssertionError::new(format!(
+                "Index length mismatch: left {}, right {}",
+                left.len(),
+                right.len()
+            )));
+        }
+        if options.check_names && left.name() != right.name() {
+            return Err(AssertionError::new(format!(
+                "Index name mismatch: left {:?}, right {:?}",
+                left.name(),
+                right.name()
+            )));
+        }
+        for row in 0..left.len() {
+            let left_label = &left.labels()[row];
+            let right_label = &right.labels()[row];
+            match (left_label, right_label) {
+                (IndexLabel::Float64(f1), IndexLabel::Float64(f2)) => {
+                    if let Err(reason) = compare_floats(
+                        f1.0,
+                        f2.0,
+                        options.check_exact,
+                        options.rtol,
+                        options.atol,
+                    ) {
+                        return Err(AssertionError::new(format!(
+                            "Index values differ at index {row}: {reason}"
+                        )));
+                    }
+                }
+                (IndexLabel::Int64(i1), IndexLabel::Int64(i2)) => {
+                    if i1 != i2 {
+                        return Err(AssertionError::new(format!(
+                            "Index values differ at index {row}: {i1} != {i2}"
+                        )));
+                    }
+                }
+                (IndexLabel::Int64(i), IndexLabel::Float64(f)) if !options.check_dtype => {
+                    if let Err(reason) = compare_floats(
+                        *i as f64,
+                        f.0,
+                        options.check_exact,
+                        options.rtol,
+                        options.atol,
+                    ) {
+                        return Err(AssertionError::new(format!(
+                            "Index values differ at index {row}: {reason}"
+                        )));
+                    }
+                }
+                (IndexLabel::Float64(f), IndexLabel::Int64(i)) if !options.check_dtype => {
+                    if let Err(reason) = compare_floats(
+                        f.0,
+                        *i as f64,
+                        options.check_exact,
+                        options.rtol,
+                        options.atol,
+                    ) {
+                        return Err(AssertionError::new(format!(
+                            "Index values differ at index {row}: {reason}"
+                        )));
+                    }
+                }
+                (a, b) => {
+                    if a != b {
+                        return Err(AssertionError::new(format!(
+                            "Index values differ at index {row}: {a:?} != {b:?}"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that two Series are equal, matching `pandas.testing.assert_series_equal`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssertionError`] if the series are not equal according to the specified options.
+    pub fn assert_series_equal(
+        left: &Series,
+        right: &Series,
+        options: &AssertEqualOptions,
+    ) -> Result<(), AssertionError> {
+        if options.check_like {
+            let left_sorted = left
+                .sort_index(true)
+                .map_err(|err| AssertionError::new(err.to_string()))?;
+            let right_sorted = right
+                .sort_index(true)
+                .map_err(|err| AssertionError::new(err.to_string()))?;
+            let mut opts = options.clone();
+            opts.check_like = false;
+            return assert_series_equal(&left_sorted, &right_sorted, &opts);
+        }
+
+        if left.len() != right.len() {
+            return Err(AssertionError::new(format!(
+                "Series length mismatch: left {}, right {}",
+                left.len(),
+                right.len()
+            )));
+        }
+        if options.check_names && left.name() != right.name() {
+            return Err(AssertionError::new(format!(
+                "Attribute \"name\" are different\n[left]:  {:?}\n[right]: {:?}",
+                left.name(),
+                right.name()
+            )));
+        }
+        if options.check_dtype && left.dtype() != right.dtype() {
+            return Err(AssertionError::new(format!(
+                "Attributes of Series are different\n\nAttribute \"dtype\" are different\n[left]:  {:?}\n[right]: {:?}",
+                left.dtype(),
+                right.dtype()
+            )));
+        }
+        assert_index_equal(left.index(), right.index(), options).map_err(|err| {
+            AssertionError::new(format!("Series.index are different: {}", err.message))
+        })?;
+
+        let left_values = left.values();
+        let right_values = right.values();
+        for row in 0..left.len() {
+            if let Err(reason) = compare_scalars(
+                &left_values[row],
+                &right_values[row],
+                options.check_dtype,
+                options.check_exact,
+                options.rtol,
+                options.atol,
+            ) {
+                return Err(AssertionError::new(format!(
+                    "Series values differ at row {row}: {reason}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that two DataFrames are equal, matching `pandas.testing.assert_frame_equal`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssertionError`] if the DataFrames are not equal according to the specified options.
+    pub fn assert_frame_equal(
+        left: &DataFrame,
+        right: &DataFrame,
+        options: &AssertEqualOptions,
+    ) -> Result<(), AssertionError> {
+        if options.check_like {
+            let left_sorted = left
+                .sort_index(true)
+                .and_then(|df| df.sort_index_axis1(true))
+                .map_err(|err| AssertionError::new(err.to_string()))?;
+            let right_sorted = right
+                .sort_index(true)
+                .and_then(|df| df.sort_index_axis1(true))
+                .map_err(|err| AssertionError::new(err.to_string()))?;
+            let mut opts = options.clone();
+            opts.check_like = false;
+            return assert_frame_equal(&left_sorted, &right_sorted, &opts);
+        }
+
+        if left.shape() != right.shape() {
+            return Err(AssertionError::new(format!(
+                "DataFrame shape mismatch: left {:?}, right {:?}",
+                left.shape(),
+                right.shape()
+            )));
+        }
+
+        let left_cols: Vec<String> = left.column_names().into_iter().cloned().collect();
+        let right_cols: Vec<String> = right.column_names().into_iter().cloned().collect();
+        if options.check_names && left_cols != right_cols {
+            return Err(AssertionError::new(format!(
+                "DataFrame columns mismatch: left {:?}, right {:?}",
+                left_cols, right_cols
+            )));
+        }
+
+        assert_index_equal(left.index(), right.index(), options).map_err(|err| {
+            AssertionError::new(format!("DataFrame.index are different: {}", err.message))
+        })?;
+
+        for (col_idx, col) in left_cols.iter().enumerate() {
+            let left_col = left.column(col).ok_or_else(|| {
+                AssertionError::new(format!("Column '{col}' not found in left DataFrame"))
+            })?;
+            let right_col = right.column(col).ok_or_else(|| {
+                AssertionError::new(format!("Column '{col}' not found in right DataFrame"))
+            })?;
+            if options.check_dtype && left_col.dtype() != right_col.dtype() {
+                return Err(AssertionError::new(format!(
+                    "Attributes of DataFrame.iloc[:, {col_idx}] (column '{col}') are different\n\nAttribute \"dtype\" are different\n[left]:  {:?}\n[right]: {:?}",
+                    left_col.dtype(),
+                    right_col.dtype()
+                )));
+            }
+            let left_vals = left_col.values();
+            let right_vals = right_col.values();
+            for row in 0..left_col.len() {
+                if let Err(reason) = compare_scalars(
+                    &left_vals[row],
+                    &right_vals[row],
+                    options.check_dtype,
+                    options.check_exact,
+                    options.rtol,
+                    options.atol,
+                ) {
+                    return Err(AssertionError::new(format!(
+                        "DataFrame.iloc[:, {col_idx}] (column '{col}') values differ at row {row}: {reason}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that two extension arrays or scalar slices are equal, matching `pandas.testing.assert_extension_array_equal`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssertionError`] if the slices are not equal according to the specified options.
+    pub fn assert_extension_array_equal(
+        left: &[Scalar],
+        right: &[Scalar],
+        options: &AssertEqualOptions,
+    ) -> Result<(), AssertionError> {
+        if left.len() != right.len() {
+            return Err(AssertionError::new(format!(
+                "Array length mismatch: left {}, right {}",
+                left.len(),
+                right.len()
+            )));
+        }
+        for row in 0..left.len() {
+            if let Err(reason) = compare_scalars(
+                &left[row],
+                &right[row],
+                options.check_dtype,
+                options.check_exact,
+                options.rtol,
+                options.atol,
+            ) {
+                return Err(AssertionError::new(format!(
+                    "Array values differ at index {row}: {reason}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check DataFrame equality with default options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssertionError`] if the DataFrames are not equal.
+    pub fn assert_frame_equal_default(
+        left: &DataFrame,
+        right: &DataFrame,
+    ) -> Result<(), AssertionError> {
+        assert_frame_equal(left, right, &AssertEqualOptions::default())
+    }
+
+    /// Check Series equality with default options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssertionError`] if the Series are not equal.
+    pub fn assert_series_equal_default(
+        left: &Series,
+        right: &Series,
+    ) -> Result<(), AssertionError> {
+        assert_series_equal(left, right, &AssertEqualOptions::default())
+    }
+
+    /// Check Index equality with default options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssertionError`] if the Indexes are not equal.
+    pub fn assert_index_equal_default(
+        left: &Index,
+        right: &Index,
+    ) -> Result<(), AssertionError> {
+        assert_index_equal(left, right, &AssertEqualOptions::default())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_assert_series_equal_basics() {
+            let s1 = Series::from_values(
+                "x",
+                vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap();
+            let s2 = Series::from_values(
+                "x",
+                vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap();
+            assert!(assert_series_equal_default(&s1, &s2).is_ok());
+
+            let s3 = Series::from_values(
+                "x",
+                vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.000_000_000_1)],
+            )
+            .unwrap();
+            assert!(assert_series_equal_default(&s1, &s3).is_ok());
+            assert!(assert_series_equal(&s1, &s3, &AssertEqualOptions::exact()).is_err());
+
+            let s4 = Series::from_values(
+                "y",
+                vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap();
+            assert!(assert_series_equal_default(&s1, &s4).is_err());
+            assert!(assert_series_equal(
+                &s1,
+                &s4,
+                &AssertEqualOptions::default().with_check_names(false)
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn test_assert_frame_equal_basics() {
+            let df1 = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                    ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ],
+            )
+            .unwrap();
+            let df2 = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                    ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ],
+            )
+            .unwrap();
+            assert!(assert_frame_equal_default(&df1, &df2).is_ok());
+
+            let df3 = DataFrame::from_dict(
+                &["b", "a"],
+                vec![
+                    ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                    ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ],
+            )
+            .unwrap();
+            assert!(assert_frame_equal_default(&df1, &df3).is_err());
+            assert!(assert_frame_equal(
+                &df1,
+                &df3,
+                &AssertEqualOptions::default().with_check_like(true)
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn test_assert_nan_and_null_equality() {
+            let s1 = Series::from_values(
+                "v",
+                vec![IndexLabel::Int64(0)],
+                vec![Scalar::Float64(f64::NAN)],
+            )
+            .unwrap();
+            let s2 = Series::from_values(
+                "v",
+                vec![IndexLabel::Int64(0)],
+                vec![Scalar::Float64(f64::NAN)],
+            )
+            .unwrap();
+            assert!(assert_series_equal_default(&s1, &s2).is_ok());
+
+            let s3 = Series::from_values(
+                "v",
+                vec![IndexLabel::Int64(0)],
+                vec![Scalar::Float64(1.0)],
+            )
+            .unwrap();
+            assert!(assert_series_equal_default(&s1, &s3).is_err());
+        }
+    }
+}
+
+/// Assert that two DataFrames are equal using default or custom options. Panics on failure.
+#[macro_export]
+macro_rules! assert_frame_eq {
+    ($left:expr, $right:expr) => {
+        if let Err(err) = $crate::testing::assert_frame_equal_default($left, $right) {
+            panic!("{}", err);
+        }
+    };
+    ($left:expr, $right:expr, $options:expr) => {
+        if let Err(err) = $crate::testing::assert_frame_equal($left, $right, $options) {
+            panic!("{}", err);
+        }
+    };
+}
+
+/// Assert that two Series are equal using default or custom options. Panics on failure.
+#[macro_export]
+macro_rules! assert_series_eq {
+    ($left:expr, $right:expr) => {
+        if let Err(err) = $crate::testing::assert_series_equal_default($left, $right) {
+            panic!("{}", err);
+        }
+    };
+    ($left:expr, $right:expr, $options:expr) => {
+        if let Err(err) = $crate::testing::assert_series_equal($left, $right, $options) {
+            panic!("{}", err);
+        }
+    };
+}
+
+/// Assert that two Indexes are equal using default or custom options. Panics on failure.
+#[macro_export]
+macro_rules! assert_index_eq {
+    ($left:expr, $right:expr) => {
+        if let Err(err) = $crate::testing::assert_index_equal_default($left, $right) {
+            panic!("{}", err);
+        }
+    };
+    ($left:expr, $right:expr, $options:expr) => {
+        if let Err(err) = $crate::testing::assert_index_equal($left, $right, $options) {
+            panic!("{}", err);
+        }
+    };
 }
 
 fn plot_series_spec(
@@ -11141,6 +11910,19 @@ impl Series {
             }
         }
         true
+    }
+
+    /// Assert that this Series is equal to another according to the specified options (matching `pandas.testing.assert_series_equal`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`testing::AssertionError`] if the Series are not equal according to the options.
+    pub fn assert_equals(
+        &self,
+        other: &Self,
+        options: &testing::AssertEqualOptions,
+    ) -> Result<(), testing::AssertionError> {
+        testing::assert_series_equal(self, other, options)
     }
 
     // --- Logical Boolean Operators ---
@@ -90629,6 +91411,19 @@ impl DataFrame {
             }
         }
         true
+    }
+
+    /// Assert that this DataFrame is equal to another according to the specified options (matching `pandas.testing.assert_frame_equal`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`testing::AssertionError`] if the DataFrames are not equal according to the options.
+    pub fn assert_equals(
+        &self,
+        other: &Self,
+        options: &testing::AssertEqualOptions,
+    ) -> Result<(), testing::AssertionError> {
+        testing::assert_frame_equal(self, other, options)
     }
 
     /// Return the index label of the first non-null row (checks all columns).
