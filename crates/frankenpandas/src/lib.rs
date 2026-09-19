@@ -371,6 +371,81 @@ pub use fp_join::{
     join_series_with_options, merge_asof, merge_asof_with_options, merge_dataframes,
     merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options, merge_ordered,
 };
+
+/// Target container types supported by the polymorphic [`concat`] entrypoint.
+pub trait ConcatTarget {
+    /// Output container type produced by concatenation.
+    type Output;
+    /// Concatenate a slice of references into a unified container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError`] if concatenation invariants fail.
+    fn concat_all(items: &[&Self]) -> Result<Self::Output, FrameError>;
+}
+
+impl ConcatTarget for DataFrame {
+    type Output = DataFrame;
+    #[inline]
+    fn concat_all(items: &[&Self]) -> Result<DataFrame, FrameError> {
+        concat_dataframes(items)
+    }
+}
+
+impl ConcatTarget for Series {
+    type Output = Series;
+    #[inline]
+    fn concat_all(items: &[&Self]) -> Result<Series, FrameError> {
+        concat_series(items)
+    }
+}
+
+/// Concatenate pandas objects along a particular axis (matches `pd.concat`).
+///
+/// Dispatches to [`concat_dataframes`] when called with `&[&DataFrame]`
+/// and to [`concat_series`] when called with `&[&Series]`.
+///
+/// # Errors
+///
+/// Returns [`FrameError`] if concatenation invariants fail.
+#[inline]
+pub fn concat<T: ConcatTarget>(items: &[&T]) -> Result<T::Output, FrameError> {
+    T::concat_all(items)
+}
+
+/// Merge two DataFrames on a single key column (matches `pd.merge`).
+///
+/// Equivalent to [`merge_dataframes`].
+///
+/// # Errors
+///
+/// Returns [`JoinError`] if join or key extraction fails.
+#[inline]
+pub fn merge(
+    left: &DataFrame,
+    right: &DataFrame,
+    on: &str,
+    join_type: JoinType,
+) -> Result<MergedDataFrame, JoinError> {
+    merge_dataframes(left, right, on, join_type)
+}
+
+/// Merge two DataFrames on multiple key columns (matches `pd.merge(..., on=[...])`).
+///
+/// Equivalent to [`merge_dataframes_on`].
+///
+/// # Errors
+///
+/// Returns [`JoinError`] if join or key extraction fails.
+#[inline]
+pub fn merge_on(
+    left: &DataFrame,
+    right: &DataFrame,
+    on: &[&str],
+    join_type: JoinType,
+) -> Result<MergedDataFrame, JoinError> {
+    merge_dataframes_on(left, right, on, join_type)
+}
 // outcome_to_action is gated behind the `asupersync` feature in fp-runtime.
 #[cfg(feature = "asupersync")]
 pub use fp_runtime::outcome_to_action;
@@ -535,6 +610,7 @@ pub mod prelude {
         // fd90.221: expose the types reachable via EvidenceLedger.records().
         CompatibilityIssue,
         ConcatJoin,
+        ConcatTarget,
         CsvOnBadLines,
         CsvReadOptions,
         CsvWriteOptions,
@@ -723,6 +799,7 @@ pub mod prelude {
         col,
         common_dtype,
         // Module-level functions (concat + join/merge family)
+        concat,
         concat_dataframes,
         concat_dataframes_with_axis,
         concat_dataframes_with_axis_join,
@@ -784,12 +861,14 @@ pub mod prelude {
         lit,
         lreshape,
         melt,
+        merge,
         merge_asof,
         merge_asof_with_options,
         merge_dataframes,
         merge_dataframes_on,
         merge_dataframes_on_with,
         merge_dataframes_on_with_options,
+        merge_on,
         merge_ordered,
         // NanOps — null-skipping aggregation primitives (matches README NanOps section)
         nanall,
@@ -1704,5 +1783,34 @@ mod tests {
 
         let v_idx = crate::api::indexers::VariableOffsetWindowIndexer::new(-1);
         assert_eq!(v_idx.index_offset, -1);
+
+        // Top-level concat and merge tests
+        let df1 = read_csv_str("key,val\n1,10\n2,20").unwrap();
+        let df2 = read_csv_str("key,val\n3,30\n4,40").unwrap();
+        let df_concat = concat(&[&df1, &df2]).unwrap();
+        assert_eq!(df_concat.len(), 4);
+
+        let s1 = Series::from_values(
+            "x",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "x",
+            vec![IndexLabel::Int64(2), IndexLabel::Int64(3)],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        )
+        .unwrap();
+        let s_concat = concat(&[&s1, &s2]).unwrap();
+        assert_eq!(s_concat.len(), 4);
+
+        let df_merge_left = read_csv_str("k,v1\na,1\nb,2").unwrap();
+        let df_merge_right = read_csv_str("k,v2\na,10\nb,20").unwrap();
+        let merged = merge(&df_merge_left, &df_merge_right, "k", JoinType::Inner).unwrap();
+        assert_eq!(merged.index.len(), 2);
+
+        let merged_on = merge_on(&df_merge_left, &df_merge_right, &["k"], JoinType::Inner).unwrap();
+        assert_eq!(merged_on.index.len(), 2);
     }
 }
