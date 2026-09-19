@@ -50,6 +50,7 @@ pub use fp_frame::{
     DropNaHow,
     Ewm,
     Expanding,
+    Flags,
     FrameError,
     GroupByResample,
     GroupByRolling,
@@ -114,6 +115,7 @@ pub use fp_index::{
     Index,
     IndexError,
     IndexLabel,
+    IndexSlice,
     MultiAlignmentPlan,
     MultiIndex,
     MultiIndexOrIndex,
@@ -396,9 +398,10 @@ pub use fp_runtime::{
     decision_to_card,
 };
 pub use fp_types::{
-    DType, NullKind, Scalar, SparseDType, TypeError, api, cast_scalar, cast_scalar_owned,
-    common_dtype, count_na, dropna, fill_na, infer_dtype, isna, isnull, notna, notnull,
-    pandas_dtype,
+    DType, NA, NAT, NaT, NullKind, Scalar, SparseDType, TypeError, api, cast_scalar,
+    cast_scalar_owned, common_dtype, count_na, dropna, eng_float_format, fill_na,
+    get_eng_float_format, infer_dtype, isna, isnull, notna, notnull, pandas_dtype,
+    reset_eng_float_format, set_eng_float_format,
 };
 // fd90.263: pandas-equivalent helper types for Datetime64/Timedelta64/Period/Interval
 // scalar variants. Users typically interact via Scalar::Timedelta64(nanos) etc., but
@@ -523,6 +526,7 @@ pub mod prelude {
         ExcelWriteOptions,
         Expanding,
         ExprError,
+        Flags,
         FrameError,
         GalaxyBrainCard,
         GroupByError,
@@ -537,6 +541,7 @@ pub mod prelude {
         Index,
         IndexError,
         IndexLabel,
+        IndexSlice,
         // fd90.14: pandas-equivalent helper types for the richer
         // Scalar::Datetime64 / Timedelta64 / Period / Interval
         // workflows (fd90.263 / fd90.271). Users typically interact via
@@ -559,6 +564,9 @@ pub mod prelude {
         MergedDataFrame,
         MultiIndex,
         MultiIndexOrIndex,
+        NA,
+        NAT,
+        NaT,
         NamedAgg,
         NullKind,
         Period,
@@ -676,12 +684,14 @@ pub mod prelude {
         date_range,
         decision_to_card,
         dropna,
+        eng_float_format,
         factorize,
         factorize_with_options,
         fill_na,
         from_dummies,
         get_dummies,
         get_dummies_with_options,
+        get_eng_float_format,
         // fd90.15: Index → DataFrame/Series conversion helpers (fd90.270).
         // Pair with Index being in the prelude.
         index_to_frame,
@@ -804,12 +814,14 @@ pub mod prelude {
         read_sql_with_options,
         read_stata,
         read_stata_bytes,
+        reset_eng_float_format,
         // fd90.12: Series ↔ Arrow array interop. README line 1580
         // documents Arrow interop as a public surface; fd90.264 added
         // the Series-level pair. Promote to the prelude alongside the
         // rest of the IO surface.
         series_from_arrow_array,
         series_to_arrow_array,
+        set_eng_float_format,
         show_versions,
         sql_backend_caps,
         sql_max_identifier_length,
@@ -1546,5 +1558,27 @@ mod tests {
         assert_eq!(na.column, "c");
         let grp = Grouper::new().with_key("d");
         assert_eq!(grp.key.as_deref(), Some("d"));
+
+        // Flags test
+        let flg = Flags::default();
+        assert!(flg.allows_duplicate_labels());
+
+        // IndexSlice test
+        let is: IndexSlice = IndexSlice::all();
+        assert_eq!(is.start, None);
+
+        // NA, NAT, NaT test
+        assert!(NA.is_null());
+        assert!(NAT.is_null());
+        assert_eq!(NAT, NaT);
+
+        // eng_float_format test
+        let eff = eng_float_format(1000.0, Some(2), false);
+        assert_eq!(eff, "1.00E+03");
+        reset_eng_float_format();
+        assert_eq!(get_eng_float_format(), None);
+        set_eng_float_format(2, false);
+        assert_eq!(get_eng_float_format(), Some((2, false)));
+        reset_eng_float_format();
     }
 }

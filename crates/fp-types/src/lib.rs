@@ -878,6 +878,16 @@ impl std::fmt::Display for Scalar {
     }
 }
 
+/// Pandas `pd.NA` singleton representing missing data in nullable dtypes.
+pub const NA: Scalar = Scalar::Null(NullKind::Null);
+
+/// Pandas `pd.NaT` singleton representing Not-a-Time in datetime/timedelta data.
+pub const NAT: Scalar = Scalar::Null(NullKind::NaT);
+
+/// Alias for [`NAT`] matching pandas capitalization `pd.NaT`.
+#[allow(non_upper_case_globals)]
+pub const NaT: Scalar = NAT;
+
 // Ergonomic From impls (br-frankenpandas-esjjy / fd90.182). Mirrors
 // IndexLabel's From<i64>/From<&str>/From<String> so users can write
 //   let v: Vec<Scalar> = vec![1i64.into(), 2.0.into(), "three".into()];
@@ -1876,6 +1886,99 @@ pub fn float_to_string_for_astype(value: f64) -> String {
         rendered.insert(digits_position, '0');
     }
     rendered
+}
+
+static ENG_FLOAT_ACCURACY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(3);
+static ENG_FLOAT_USE_PREFIX: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static ENG_FLOAT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Format float values according to engineering format, matching pandas `EngFormatter`.
+pub fn eng_float_format(num: f64, accuracy: Option<usize>, use_eng_prefix: bool) -> String {
+    if num.is_nan() {
+        return "NaN".to_string();
+    }
+    if num.is_infinite() {
+        return if num < 0.0 {
+            "-inf".to_string()
+        } else {
+            "inf".to_string()
+        };
+    }
+
+    let sign = if num < 0.0 { -1.0 } else { 1.0 };
+    let abs_num = num.abs();
+
+    let pow10 = if abs_num != 0.0 {
+        let p = (abs_num.log10() / 3.0).floor() as i32 * 3;
+        p.clamp(-24, 24)
+    } else {
+        0
+    };
+
+    let prefix = if use_eng_prefix {
+        match pow10 {
+            -24 => "y",
+            -21 => "z",
+            -18 => "a",
+            -15 => "f",
+            -12 => "p",
+            -9 => "n",
+            -6 => "u",
+            -3 => "m",
+            0 => "",
+            3 => "k",
+            6 => "M",
+            9 => "G",
+            12 => "T",
+            15 => "P",
+            18 => "E",
+            21 => "Z",
+            24 => "Y",
+            _ => "",
+        }
+        .to_string()
+    } else if pow10 < 0 {
+        format!("E-{:02}", -pow10)
+    } else {
+        format!("E+{:02}", pow10)
+    };
+
+    let mant = (sign * abs_num) / 10f64.powi(pow10);
+
+    if let Some(acc) = accuracy {
+        format!("{mant:.acc$}{prefix}", acc = acc)
+    } else {
+        format!("{mant}{prefix}")
+    }
+}
+
+/// Set pandas-compatible engineering float formatting option.
+/// Matches `pd.set_eng_float_format(accuracy=3, use_eng_prefix=False)`.
+pub fn set_eng_float_format(accuracy: usize, use_eng_prefix: bool) {
+    use std::sync::atomic::Ordering;
+    ENG_FLOAT_ACCURACY.store(accuracy, Ordering::Relaxed);
+    ENG_FLOAT_USE_PREFIX.store(use_eng_prefix, Ordering::Relaxed);
+    ENG_FLOAT_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Reset engineering float formatting back to default.
+pub fn reset_eng_float_format() {
+    use std::sync::atomic::Ordering;
+    ENG_FLOAT_ACTIVE.store(false, Ordering::Relaxed);
+}
+
+/// Get the current engineering float format configuration if active.
+pub fn get_eng_float_format() -> Option<(usize, bool)> {
+    use std::sync::atomic::Ordering;
+    if ENG_FLOAT_ACTIVE.load(Ordering::Relaxed) {
+        Some((
+            ENG_FLOAT_ACCURACY.load(Ordering::Relaxed),
+            ENG_FLOAT_USE_PREFIX.load(Ordering::Relaxed),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Cast a scalar reference to a target dtype (clones only when conversion is needed).
@@ -17751,5 +17854,48 @@ mod sparse_dtype_pandas_name_3gxc6 {
         assert_eq!(infer_dtype(&mixed, true), "mixed");
 
         assert_eq!(infer_dtype(&[], true), "empty");
+    }
+
+    #[test]
+    fn test_na_nat_sentinels_and_eng_float_format() {
+        use super::{
+            NA, NAT, NaT, eng_float_format, get_eng_float_format, reset_eng_float_format,
+            set_eng_float_format,
+        };
+
+        // NA and NAT sentinels
+        assert!(NA.is_null());
+        assert!(NAT.is_null());
+        assert_eq!(NAT, NaT);
+        assert_eq!(format!("{NA}"), "None");
+        assert_eq!(format!("{NAT}"), "NaT");
+
+        // Engineering float format tests
+        assert_eq!(eng_float_format(1000.0, Some(3), false), "1.000E+03");
+        assert_eq!(eng_float_format(0.005, Some(3), false), "5.000E-03");
+        assert_eq!(eng_float_format(1234567.0, Some(3), false), "1.235E+06");
+        assert_eq!(eng_float_format(-9876.54, Some(3), false), "-9.877E+03");
+        assert_eq!(eng_float_format(0.0, Some(3), false), "0.000E+00");
+
+        // With prefixes
+        assert_eq!(eng_float_format(1000.0, Some(3), true), "1.000k");
+        assert_eq!(eng_float_format(0.005, Some(3), true), "5.000m");
+        assert_eq!(eng_float_format(1234567.0, Some(3), true), "1.235M");
+        assert_eq!(eng_float_format(-9876.54, Some(3), true), "-9.877k");
+        assert_eq!(eng_float_format(0.0, Some(3), true), "0.000");
+        assert_eq!(eng_float_format(1.5, Some(3), true), "1.500");
+
+        // Special numbers
+        assert_eq!(eng_float_format(f64::NAN, Some(3), true), "NaN");
+        assert_eq!(eng_float_format(f64::INFINITY, Some(3), true), "inf");
+        assert_eq!(eng_float_format(f64::NEG_INFINITY, Some(3), true), "-inf");
+
+        // Configuration helpers
+        reset_eng_float_format();
+        assert_eq!(get_eng_float_format(), None);
+        set_eng_float_format(4, true);
+        assert_eq!(get_eng_float_format(), Some((4, true)));
+        reset_eng_float_format();
+        assert_eq!(get_eng_float_format(), None);
     }
 }

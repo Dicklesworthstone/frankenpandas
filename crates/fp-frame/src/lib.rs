@@ -1342,6 +1342,7 @@ fn describe_percentile_label(percentile: f64) -> String {
     format!("{label}%")
 }
 
+pub use fp_index::IndexSlice;
 pub use fp_types::CategoricalMetadata;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61994,10 +61995,28 @@ pub struct DataFrameFlags {
 
 impl DataFrameFlags {
     #[must_use]
+    pub const fn new(allows_duplicate_labels: bool) -> Self {
+        Self {
+            allows_duplicate_labels,
+        }
+    }
+
+    #[must_use]
     pub fn allows_duplicate_labels(&self) -> bool {
         self.allows_duplicate_labels
     }
 }
+
+impl Default for DataFrameFlags {
+    fn default() -> Self {
+        Self {
+            allows_duplicate_labels: true,
+        }
+    }
+}
+
+/// Alias for [`DataFrameFlags`] matching `pd.Flags`.
+pub type Flags = DataFrameFlags;
 
 /// Feature-gated lazy homogeneous transpose view.
 ///
@@ -217428,6 +217447,22 @@ mod test_top_level_and_reshaping {
         let arr_f = array(&[Scalar::Int64(1), Scalar::Int64(2)], Some(DType::Float64))?;
         assert_eq!(arr_f.len(), 2);
         assert_eq!(arr_f.dtype(), DType::Float64);
+
+        // Flags
+        let flags: Flags = Flags::new(true);
+        assert!(flags.allows_duplicate_labels());
+        let default_flags = Flags::default();
+        assert!(default_flags.allows_duplicate_labels());
+        assert_eq!(df.flags(), default_flags);
+
+        // df.t()
+        let transposed = df.t()?;
+        assert_eq!(transposed.len(), df.num_columns());
+        assert_eq!(transposed.num_columns(), df.len());
+
+        // IndexSlice
+        let is: IndexSlice = IndexSlice::all();
+        assert_eq!(is.start, None);
 
         Ok(())
     }
