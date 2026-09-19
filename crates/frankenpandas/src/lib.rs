@@ -158,6 +158,7 @@ pub use fp_io::{
     // Excel
     ExcelReadOptions,
     ExcelWriteOptions,
+    FwfReadOptions,
     // HDF5 / HTML
     HdfReadOptions,
     HdfWriteOptions,
@@ -193,6 +194,9 @@ pub use fp_io::{
     SqlWriteOptions,
     // Stata
     StataWriteOptions,
+    // XML
+    XmlReadOptions,
+    XmlWriteOptions,
     inspect,
     json_normalize,
     json_normalize_str,
@@ -470,6 +474,18 @@ pub fn to_pickle_with_options(
 ) -> Result<(), IoError> {
     write_pickle_with_options(df, path.as_ref(), options)
 }
+
+/// Evaluate a string expression against a DataFrame (matches `pd.eval`).
+///
+/// Dispatches to [`DataFrameExprExt::eval`].
+///
+/// # Errors
+///
+/// Returns [`ExprError`] if parsing or evaluation fails.
+#[inline]
+pub fn eval(expr: &str, frame: &DataFrame) -> Result<Series, ExprError> {
+    frame.eval(expr)
+}
 // outcome_to_action is gated behind the `asupersync` feature in fp-runtime.
 #[cfg(feature = "asupersync")]
 pub use fp_runtime::outcome_to_action;
@@ -685,6 +701,7 @@ pub mod prelude {
         ExprError,
         Flags,
         FrameError,
+        FwfReadOptions,
         GalaxyBrainCard,
         GroupByError,
         GroupByExecutionOptions,
@@ -807,6 +824,12 @@ pub mod prelude {
         // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
         // lists it among types deriving Serialize + Deserialize (line 1567).
         ValidityMask,
+        XmlReadOptions,
+        XmlWriteOptions,
+        align,
+        align_inner,
+        align_left,
+        align_union,
         // fd90.33: apply_date_offset is the primary use-site for
         // DateOffset (above). Without it in the prelude the user can
         // name the offset variant but can't apply it from prelude
@@ -855,6 +878,7 @@ pub mod prelude {
         dropna,
         eng_float_format,
         errors,
+        eval,
         factorize,
         factorize_with_options,
         fill_na,
@@ -868,6 +892,9 @@ pub mod prelude {
         index_to_frame,
         index_to_series,
         infer_dtype,
+        infer_freq,
+        infer_freq_from_nanos,
+        infer_freq_from_timestamps,
         // fd90.10: inspect() is the documented convenience constructor
         // for SqlInspector (fd90.38 / br-frankenpandas-szs9). It was
         // exported at the crate root but missed prelude promotion —
@@ -940,6 +967,8 @@ pub mod prelude {
         qcut,
         qcut_at_quantiles,
         // IO — readers (in-memory + path; covers all 8 documented formats)
+        read_clipboard,
+        read_clipboard_str,
         read_csv,
         read_csv_str,
         // fd90.16: index-cols readers pair with read_csv_with_options
@@ -959,9 +988,13 @@ pub mod prelude {
         read_excel_with_index_cols,
         read_feather,
         read_feather_bytes,
+        read_fwf,
+        read_fwf_str,
         read_hdf,
         read_hdf_key,
         read_hdf_with_options,
+        read_html,
+        read_html_str,
         read_ipc_stream_bytes,
         read_json,
         read_json_str,
@@ -992,6 +1025,10 @@ pub mod prelude {
         read_sql_with_options,
         read_stata,
         read_stata_bytes,
+        read_table,
+        read_table_str,
+        read_xml,
+        read_xml_str,
         reset_eng_float_format,
         reset_option,
         // fd90.12: Series ↔ Arrow array interop. README line 1580
@@ -1047,6 +1084,7 @@ pub mod prelude {
         write_hdf_key,
         write_hdf_with_options,
         // README Quick Example calls write_html_string via the prelude.
+        write_html,
         write_html_string,
         write_ipc_stream_bytes,
         write_json,
@@ -1077,6 +1115,10 @@ pub mod prelude {
         write_stata_bytes,
         write_stata_bytes_with_options,
         write_stata_with_options,
+        write_xml,
+        write_xml_string,
+        write_xml_string_with_options,
+        write_xml_with_options,
     };
 }
 
@@ -1897,5 +1939,41 @@ mod tests {
         assert_eq!(int_dt.as_dtype(), DType::Interval);
 
         let _proto = PickleProtocol::V3;
+
+        // Top-level eval
+        let eval_res = eval("key + val", &df1).expect("eval should succeed");
+        assert_eq!(eval_res.len(), 2);
+        assert_eq!(eval_res.values()[0], Scalar::Int64(11));
+
+        // Scalar null/not-null methods
+        let valid_sc = Scalar::Int64(42);
+        let null_sc = Scalar::Null(NullKind::NaN);
+        assert!(valid_sc.notna());
+        assert!(valid_sc.notnull());
+        assert!(valid_sc.not_na());
+        assert!(valid_sc.is_not_na());
+        assert!(!valid_sc.isna());
+        assert!(!valid_sc.isnull());
+
+        assert!(!null_sc.notna());
+        assert!(!null_sc.notnull());
+        assert!(!null_sc.not_na());
+        assert!(!null_sc.is_not_na());
+        assert!(null_sc.isna());
+        assert!(null_sc.isnull());
+
+        // Prelude IO re-exports smoke tests
+        let fwf_df = read_fwf_str("name age\nAmy  25 \nBob  30 ", &FwfReadOptions::default())
+            .expect("read_fwf_str");
+        assert_eq!(fwf_df.index().len(), 2);
+
+        let tsv_df = read_table_str("a\tb\n1\t2\n3\t4").expect("read_table_str");
+        assert_eq!(tsv_df.index().len(), 2);
+
+        let clip_df = read_clipboard_str("col1\tcol2\nx\ty").expect("read_clipboard_str");
+        assert_eq!(clip_df.index().len(), 1);
+
+        let xml_str = write_xml_string(&df1).expect("write_xml_string");
+        assert!(xml_str.contains("<row>"));
     }
 }

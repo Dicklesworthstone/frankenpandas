@@ -1435,6 +1435,42 @@ impl Scalar {
         self.is_missing()
     }
 
+    /// Return `true` if this scalar is NA/missing (alias for [`Self::is_na`]).
+    #[must_use]
+    pub fn isna(&self) -> bool {
+        self.is_missing()
+    }
+
+    /// Return `true` if this scalar is null (alias for [`Self::is_null`]).
+    #[must_use]
+    pub fn isnull(&self) -> bool {
+        self.is_null()
+    }
+
+    /// Return `true` if this scalar is not NA/missing (matches pandas `notna`).
+    #[must_use]
+    pub fn notna(&self) -> bool {
+        !self.is_missing()
+    }
+
+    /// Return `true` if this scalar is not null/missing (matches pandas `notnull`).
+    #[must_use]
+    pub fn notnull(&self) -> bool {
+        !self.is_missing()
+    }
+
+    /// Return `true` if this scalar is not NA/missing.
+    #[must_use]
+    pub fn is_not_na(&self) -> bool {
+        !self.is_missing()
+    }
+
+    /// Return `true` if this scalar is not NA/missing.
+    #[must_use]
+    pub fn not_na(&self) -> bool {
+        !self.is_missing()
+    }
+
     #[must_use]
     pub fn coalesce(&self, other: &Self) -> Self {
         if self.is_missing() {
@@ -12121,15 +12157,14 @@ mod tests {
             Scalar::Timedelta64(3 * one_hour),
         ];
         let std = super::nanstd(&vals, 0);
-        let Scalar::Timedelta64(ns) = std else {
-            assert!(false, "expected Timedelta64, got {std:?}");
-            return;
-        };
-        let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
-        assert!(
-            (ns as f64 - expected).abs() < 1e6,
-            "expected ~{expected} ns, got {ns}"
-        );
+        assert!(matches!(std, Scalar::Timedelta64(_)));
+        if let Scalar::Timedelta64(ns) = std {
+            let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
+            assert!(
+                (ns as f64 - expected).abs() < 1e6,
+                "expected ~{expected} ns, got {ns}"
+            );
+        }
     }
 
     #[test]
