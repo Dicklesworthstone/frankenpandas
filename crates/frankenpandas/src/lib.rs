@@ -2027,8 +2027,27 @@ mod tests {
         let coerced =
             to_numeric_with_options(&str_series, num_opts).expect("to_numeric_with_options");
         assert_eq!(coerced.len(), 2);
-        assert_eq!(coerced.values()[0].as_i64(), Some(123));
+        assert_eq!(coerced.values()[0].as_f64(), Some(123.0));
         assert!(coerced.values()[1].is_nan());
+
+        let int_str_series = Series::from_values(
+            "s_int",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("123".to_string()),
+                Scalar::Utf8("456".to_string()),
+            ],
+        )
+        .expect("int_str_series");
+        let parsed_ints = to_numeric_with_options(
+            &int_str_series,
+            ToNumericOptions {
+                errors: ToNumericErrors::Raise,
+            },
+        )
+        .expect("parsed_ints");
+        assert_eq!(parsed_ints.values()[0].as_i64(), Some(123));
+        assert_eq!(parsed_ints.values()[1].as_i64(), Some(456));
 
         // Resample options from prelude
         let _rc = ResampleClosed::Left;
