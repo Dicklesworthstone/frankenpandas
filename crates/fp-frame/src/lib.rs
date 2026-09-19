@@ -89871,6 +89871,20 @@ impl DataFrame {
         Ok(concatenated)
     }
 
+    /// Reshape wide DataFrame to long format.
+    ///
+    /// Matches `pd.wide_to_long(df, stubnames, i, j, sep, suffix)`.
+    pub fn wide_to_long(
+        &self,
+        stubnames: &[&str],
+        i: &[&str],
+        j: &str,
+        sep: &str,
+        suffix: &str,
+    ) -> Result<Self, FrameError> {
+        wide_to_long(self, stubnames, i, j, sep, suffix)
+    }
+
     /// Squeeze: pandas-named alias for `squeeze_to_series`.
     ///
     /// Matches `pd.DataFrame.squeeze(axis)`.
@@ -217207,6 +217221,21 @@ mod test_top_level_and_reshaping {
         let reshaped_empty = df.lreshape(&empty_groups, false)?;
         assert_eq!(reshaped_empty.len(), 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_wide_to_long_method() -> Result<(), FrameError> {
+        let s_id = Series::from_values("id", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(1), Scalar::Int64(2)])?;
+        let s_a1 = Series::from_values("A1", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(10), Scalar::Int64(20)])?;
+        let s_a2 = Series::from_values("A2", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(30), Scalar::Int64(40)])?;
+        let df = DataFrame::from_series(vec![s_id, s_a1, s_a2])?;
+
+        let long = df.wide_to_long(&["A"], &["id"], "year", "", r"\d+")?;
+        assert_eq!(long.len(), 4);
+        assert!(long.column("A").is_some());
+        assert!(long.column("id").is_some());
+        assert!(long.column("year").is_some());
         Ok(())
     }
 
