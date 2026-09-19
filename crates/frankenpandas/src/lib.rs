@@ -122,6 +122,7 @@ pub use fp_index::{
     IndexError,
     IndexLabel,
     IndexSlice,
+    IntervalIndex,
     MultiAlignmentPlan,
     MultiIndex,
     MultiIndexOrIndex,
@@ -756,6 +757,7 @@ pub mod prelude {
         IntervalClosed,
         IntervalDType,
         IntervalDtype,
+        IntervalIndex,
         IoError,
         IssueKind,
         JoinError,
@@ -2027,8 +2029,27 @@ mod tests {
         let coerced =
             to_numeric_with_options(&str_series, num_opts).expect("to_numeric_with_options");
         assert_eq!(coerced.len(), 2);
-        assert_eq!(coerced.values()[0].as_i64(), Some(123));
+        assert_eq!(coerced.values()[0].as_f64(), Some(123.0));
         assert!(coerced.values()[1].is_nan());
+
+        let int_str_series = Series::from_values(
+            "s_int",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("123".to_string()),
+                Scalar::Utf8("456".to_string()),
+            ],
+        )
+        .expect("int_str_series");
+        let parsed_ints = to_numeric_with_options(
+            &int_str_series,
+            ToNumericOptions {
+                errors: ToNumericErrors::Raise,
+            },
+        )
+        .expect("parsed_ints");
+        assert_eq!(parsed_ints.values()[0].as_i64(), Some(123));
+        assert_eq!(parsed_ints.values()[1].as_i64(), Some(456));
 
         // Resample options from prelude
         let _rc = ResampleClosed::Left;
@@ -2053,5 +2074,12 @@ mod tests {
         let _test_copy_warn_fn: fn(crate::errors::SettingWithCopyWarning) -> _ = |e| e;
         let _test_freq_err_fn: fn(crate::errors::NullFrequencyError) -> _ = |e| e;
         let _test_dtype_warn_fn: fn(crate::errors::DtypeWarning) -> _ = |e| e;
+
+        // IntervalIndex from prelude
+        let ii = IntervalIndex::from_breaks(&[0.0, 10.0, 20.0], IntervalClosed::Right)
+            .expect("from_breaks");
+        assert_eq!(ii.len(), 2);
+        assert_eq!(ii.closed(), IntervalClosed::Right);
+        assert_eq!(ii.get_loc(5.0).unwrap(), 0);
     }
 }

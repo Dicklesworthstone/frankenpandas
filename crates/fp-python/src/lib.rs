@@ -22871,6 +22871,63 @@ impl PyIntervalIndex {
             inner: Index::new(labels),
         }
     }
+
+    #[getter]
+    fn is_overlapping(&self) -> bool {
+        self.to_rust().is_overlapping()
+    }
+
+    fn contains(&self, point: f64) -> Vec<bool> {
+        self.to_rust().contains(point)
+    }
+
+    fn get_loc(&self, point: f64) -> PyResult<usize> {
+        self.to_rust()
+            .get_loc(point)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))
+    }
+
+    fn get_indexer(&self, target: Vec<f64>) -> Vec<Option<usize>> {
+        self.to_rust().get_indexer(&target)
+    }
+}
+
+impl PyIntervalIndex {
+    pub fn to_rust(&self) -> fp_index::IntervalIndex {
+        let values: Vec<fp_types::Interval> = self
+            .intervals
+            .iter()
+            .map(|iv| {
+                let closed = match iv.closed.as_str() {
+                    "left" => fp_types::IntervalClosed::Left,
+                    "both" => fp_types::IntervalClosed::Both,
+                    "neither" => fp_types::IntervalClosed::Neither,
+                    _ => fp_types::IntervalClosed::Right,
+                };
+                fp_types::Interval::new(iv.left, iv.right, closed)
+            })
+            .collect();
+        let closed = values
+            .first()
+            .map_or(fp_types::IntervalClosed::Right, |iv| iv.closed);
+        fp_index::IntervalIndex::new_with_options(values, closed, self.name.clone())
+    }
+
+    pub fn from_rust(rust_idx: &fp_index::IntervalIndex) -> Self {
+        let intervals = rust_idx
+            .values()
+            .iter()
+            .map(|iv| PyInterval {
+                left: iv.left,
+                right: iv.right,
+                closed: iv.closed.to_string(),
+            })
+            .collect();
+        Self {
+            intervals,
+            name: rust_idx.name().map(str::to_string),
+        }
+    }
 }
 
 #[pyclass(name = "Categorical", from_py_object)]
