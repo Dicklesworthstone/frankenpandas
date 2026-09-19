@@ -478,6 +478,15 @@ impl std::str::FromStr for DType {
             "interval" | "Interval" => Ok(Self::Interval),
             "sparse" | "Sparse" => Ok(Self::Sparse),
             "null" | "Null" => Ok(Self::Null),
+            _ if trimmed.starts_with("period[") || trimmed.starts_with("Period[") => {
+                Ok(Self::Period)
+            }
+            _ if trimmed.starts_with("interval[") || trimmed.starts_with("Interval[") => {
+                Ok(Self::Interval)
+            }
+            _ if trimmed.starts_with("sparse[") || trimmed.starts_with("Sparse[") => {
+                Ok(Self::Sparse)
+            }
             _ if trimmed.starts_with("datetime64")
                 || trimmed.starts_with("datetime")
                 || trimmed.starts_with("<M8") =>
@@ -907,6 +916,206 @@ impl SparseDType {
             self.value_dtype.name(),
             scalar_to_string_for_astype(self.fill_value.clone())
         )
+    }
+}
+
+impl AsDType for SparseDType {
+    fn as_dtype(&self) -> DType {
+        DType::Sparse
+    }
+}
+
+/// Pandas-equivalent categorical dtype descriptor (`pd.CategoricalDtype`).
+///
+/// Encapsulates the optional category vocabulary and ordering semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CategoricalDtype {
+    pub categories: Option<Vec<String>>,
+    pub ordered: bool,
+}
+
+pub type CategoricalDType = CategoricalDtype;
+
+impl CategoricalDtype {
+    /// Construct a new `CategoricalDtype`.
+    #[must_use]
+    pub const fn new(categories: Option<Vec<String>>, ordered: bool) -> Self {
+        Self { categories, ordered }
+    }
+
+    /// Return categories if known.
+    #[must_use]
+    pub fn categories(&self) -> Option<&[String]> {
+        self.categories.as_deref()
+    }
+
+    /// Return whether this categorical is ordered.
+    #[must_use]
+    pub const fn ordered(&self) -> bool {
+        self.ordered
+    }
+
+    /// Return the pandas dtype string name (`"category"`).
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        "category"
+    }
+
+    /// Return the pandas kind character (`"O"`).
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        "O"
+    }
+}
+
+impl Default for CategoricalDtype {
+    fn default() -> Self {
+        Self {
+            categories: None,
+            ordered: false,
+        }
+    }
+}
+
+impl AsDType for CategoricalDtype {
+    fn as_dtype(&self) -> DType {
+        DType::Categorical
+    }
+}
+
+impl std::fmt::Display for CategoricalDtype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ord_str = if self.ordered { "True" } else { "False" };
+        match &self.categories {
+            Some(cats) => write!(
+                f,
+                "CategoricalDtype(categories={cats:?}, ordered={ord_str})"
+            ),
+            None => write!(f, "CategoricalDtype(categories=None, ordered={ord_str})"),
+        }
+    }
+}
+
+/// Pandas-equivalent period dtype descriptor (`pd.PeriodDtype`).
+///
+/// Represents time period durations with a specific frequency (default `"D"`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PeriodDtype {
+    pub freq: String,
+}
+
+pub type PeriodDType = PeriodDtype;
+
+impl PeriodDtype {
+    /// Construct a new `PeriodDtype` with given frequency.
+    #[must_use]
+    pub fn new(freq: impl Into<String>) -> Self {
+        Self { freq: freq.into() }
+    }
+
+    /// Return the period frequency string.
+    #[must_use]
+    pub fn freq(&self) -> &str {
+        &self.freq
+    }
+
+    /// Return the pandas dtype string name (`period[<freq>]`).
+    #[must_use]
+    pub fn name(&self) -> String {
+        format!("period[{}]", self.freq)
+    }
+
+    /// Return the pandas kind character (`"O"`).
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        "O"
+    }
+}
+
+impl Default for PeriodDtype {
+    fn default() -> Self {
+        Self {
+            freq: "D".to_string(),
+        }
+    }
+}
+
+impl AsDType for PeriodDtype {
+    fn as_dtype(&self) -> DType {
+        DType::Period
+    }
+}
+
+impl std::fmt::Display for PeriodDtype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "period[{}]", self.freq)
+    }
+}
+
+/// Pandas-equivalent interval dtype descriptor (`pd.IntervalDtype`).
+///
+/// Encapsulates the interval subtype and endpoint closure behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntervalDtype {
+    pub subtype: DType,
+    pub closed: Option<IntervalClosed>,
+}
+
+pub type IntervalDType = IntervalDtype;
+
+impl IntervalDtype {
+    /// Construct a new `IntervalDtype`.
+    #[must_use]
+    pub const fn new(subtype: DType, closed: Option<IntervalClosed>) -> Self {
+        Self { subtype, closed }
+    }
+
+    /// Return the interval subtype.
+    #[must_use]
+    pub const fn subtype(&self) -> &DType {
+        &self.subtype
+    }
+
+    /// Return the endpoint closure convention.
+    #[must_use]
+    pub const fn closed(&self) -> Option<IntervalClosed> {
+        self.closed
+    }
+
+    /// Return the pandas dtype string name (`"interval"`).
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        "interval"
+    }
+
+    /// Return the pandas kind character (`"O"`).
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        "O"
+    }
+}
+
+impl Default for IntervalDtype {
+    fn default() -> Self {
+        Self {
+            subtype: DType::Float64,
+            closed: Some(IntervalClosed::Right),
+        }
+    }
+}
+
+impl AsDType for IntervalDtype {
+    fn as_dtype(&self) -> DType {
+        DType::Interval
+    }
+}
+
+impl std::fmt::Display for IntervalDtype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.closed {
+            Some(c) => write!(f, "interval[{}, {c}]", self.subtype.name()),
+            None => write!(f, "interval[{}]", self.subtype.name()),
+        }
     }
 }
 
@@ -18410,5 +18619,79 @@ mod sparse_dtype_pandas_name_3gxc6 {
 
         let var = indexers::VariableOffsetWindowIndexer::new(100);
         assert_eq!(var.index_offset, 100);
+    }
+
+    #[test]
+    fn test_extension_dtypes_and_parameterized_parsing() {
+        use super::api::types;
+        use super::{
+            AsDType, CategoricalDtype, DType, IntervalClosed, IntervalDtype, PeriodDtype,
+            Scalar, SparseDType, pandas_dtype,
+        };
+
+        // CategoricalDtype
+        let cat_default = CategoricalDtype::default();
+        assert_eq!(cat_default.name(), "category");
+        assert_eq!(cat_default.kind(), "O");
+        assert!(!cat_default.ordered());
+        assert_eq!(cat_default.categories(), None);
+        assert_eq!(cat_default.as_dtype(), DType::Categorical);
+        assert!(types::is_categorical_dtype(&cat_default));
+        assert_eq!(
+            cat_default.to_string(),
+            "CategoricalDtype(categories=None, ordered=False)"
+        );
+
+        let cat_custom = CategoricalDtype::new(
+            Some(vec!["low".to_string(), "high".to_string()]),
+            true,
+        );
+        assert!(cat_custom.ordered());
+        assert_eq!(
+            cat_custom.categories(),
+            Some(&["low".to_string(), "high".to_string()][..])
+        );
+        assert!(cat_custom.to_string().contains("ordered=True"));
+
+        // PeriodDtype
+        let per_default = PeriodDtype::default();
+        assert_eq!(per_default.freq(), "D");
+        assert_eq!(per_default.name(), "period[D]");
+        assert_eq!(per_default.kind(), "O");
+        assert_eq!(per_default.as_dtype(), DType::Period);
+        assert!(types::is_period_dtype(&per_default));
+        assert_eq!(per_default.to_string(), "period[D]");
+
+        let per_custom = PeriodDtype::new("M");
+        assert_eq!(per_custom.freq(), "M");
+        assert_eq!(per_custom.to_string(), "period[M]");
+
+        // IntervalDtype
+        let int_default = IntervalDtype::default();
+        assert_eq!(*int_default.subtype(), DType::Float64);
+        assert_eq!(int_default.closed(), Some(IntervalClosed::Right));
+        assert_eq!(int_default.name(), "interval");
+        assert_eq!(int_default.kind(), "O");
+        assert_eq!(int_default.as_dtype(), DType::Interval);
+        assert!(types::is_interval_dtype(&int_default));
+        assert_eq!(int_default.to_string(), "interval[float64, right]");
+
+        let int_custom = IntervalDtype::new(DType::Int64, Some(IntervalClosed::Both));
+        assert_eq!(*int_custom.subtype(), DType::Int64);
+        assert_eq!(int_custom.closed(), Some(IntervalClosed::Both));
+        assert_eq!(int_custom.to_string(), "interval[int64, both]");
+
+        // SparseDType AsDType
+        let sp = SparseDType::new(DType::Float64, Scalar::Float64(0.0)).unwrap();
+        assert_eq!(sp.as_dtype(), DType::Sparse);
+        assert!(types::is_sparse(&sp));
+
+        // Parameterized pandas_dtype parsing
+        assert_eq!(pandas_dtype("period[D]").unwrap(), DType::Period);
+        assert_eq!(pandas_dtype("Period[M]").unwrap(), DType::Period);
+        assert_eq!(pandas_dtype("interval[float64]").unwrap(), DType::Interval);
+        assert_eq!(pandas_dtype("Interval[int64]").unwrap(), DType::Interval);
+        assert_eq!(pandas_dtype("sparse[float64]").unwrap(), DType::Sparse);
+        assert_eq!(pandas_dtype("Sparse[int64, 0]").unwrap(), DType::Sparse);
     }
 }
