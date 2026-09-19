@@ -83,12 +83,13 @@ pub use fp_frame::{
     concat_series_with_ignore_index,
 };
 pub use fp_frame::{
-    crosstab, crosstab_normalize, cut, factorize, factorize_with_options, from_dummies,
+    crosstab, crosstab_normalize, cut, cut_bins, factorize, factorize_with_options, from_dummies,
     get_dummies, get_dummies_with_options, lreshape, melt, pivot, pivot_table,
-    pivot_table_with_dropna, qcut, show_versions, timedelta_total_seconds, to_datetime,
-    to_datetime_with_format, to_datetime_with_options, to_datetime_with_unit, to_numeric,
+    pivot_table_with_dropna, qcut, qcut_at_quantiles, show_versions, timedelta_total_seconds,
+    to_datetime, to_datetime_values_with_options, to_datetime_with_format,
+    to_datetime_with_options, to_datetime_with_unit, to_numeric, to_numeric_with_options,
     to_timedelta, to_timedelta_with_options, to_timedelta_with_unit, unique, value_counts,
-    value_counts_with_options,
+    value_counts_with_options, wide_to_long,
 };
 pub use fp_frame::plotting;
 pub use fp_frame::testing;
@@ -235,6 +236,8 @@ pub use fp_io::{
     read_ipc_stream_bytes,
     read_json,
     read_json_str,
+    json_normalize,
+    json_normalize_str,
     // JSONL
     read_jsonl,
     read_jsonl_str,
@@ -664,6 +667,7 @@ pub mod prelude {
         crosstab_normalize,
         // IO — datetime/numeric helpers (full module-level fn surface)
         cut,
+        cut_bins,
         date_range,
         decision_to_card,
         dropna,
@@ -689,6 +693,8 @@ pub mod prelude {
         isnull,
         join_series,
         join_series_with_options,
+        json_normalize,
+        json_normalize_str,
         // fd90.11: module-level SQL helpers (fd90.21-32). Free-function
         // counterparts to SqlInspector methods — paired surface, same
         // semantics. Promote alongside SqlInspector / inspect for
@@ -741,6 +747,7 @@ pub mod prelude {
         pivot_table,
         pivot_table_with_dropna,
         qcut,
+        qcut_at_quantiles,
         // IO — readers (in-memory + path; covers all 8 documented formats)
         read_csv,
         read_csv_str,
@@ -810,10 +817,12 @@ pub mod prelude {
         timedelta_range,
         timedelta_total_seconds,
         to_datetime,
+        to_datetime_values_with_options,
         to_datetime_with_format,
         to_datetime_with_options,
         to_datetime_with_unit,
         to_numeric,
+        to_numeric_with_options,
         to_timedelta,
         to_timedelta_with_options,
         to_timedelta_with_unit,
@@ -821,6 +830,7 @@ pub mod prelude {
         unique,
         value_counts,
         value_counts_with_options,
+        wide_to_long,
         // IO — writers (in-memory + path + sql; covers all 8 documented formats)
         write_csv,
         write_csv_string,
@@ -1428,5 +1438,37 @@ mod tests {
         groups.insert("nums".to_string(), vec!["c".to_string(), "d".to_string()]);
         let lr = lreshape(&df, &groups, false).unwrap();
         assert_eq!(lr.column("nums").unwrap().len(), 4);
+
+        // wide_to_long test
+        let s_id = Series::from_values("id", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap();
+        let s_a1 = Series::from_values("A1", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap();
+        let s_a2 = Series::from_values("A2", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(30), Scalar::Int64(40)]).unwrap();
+        let df_wide = DataFrame::from_series(vec![s_id, s_a1, s_a2]).unwrap();
+        let wtl = wide_to_long(&df_wide, &["A"], &["id"], "year", "", r"\d+").unwrap();
+        assert_eq!(wtl.len(), 4);
+        let wtl_m = df_wide.wide_to_long(&["A"], &["id"], "year", "", r"\d+").unwrap();
+        assert_eq!(wtl_m.len(), 4);
+
+        // cut_bins and qcut_at_quantiles test
+        let num_series = Series::from_values("nums", vec![0_i64.into(), 1_i64.into(), 2_i64.into()], vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(10.0)]).unwrap();
+        let cut_res = cut_bins(
+            &num_series,
+            &[Scalar::Float64(0.0), Scalar::Float64(5.0), Scalar::Float64(10.0)],
+            true,
+            None,
+            false,
+        ).unwrap();
+        assert_eq!(cut_res.len(), 3);
+        let qcut_res = qcut_at_quantiles(&num_series, &[0.0, 0.5, 1.0], None).unwrap();
+        assert_eq!(qcut_res.len(), 3);
+
+        // json_normalize_str test
+        let jn = json_normalize_str(r#"[{"x": {"y": 100}}]"#, None, None).unwrap();
+        assert_eq!(jn.column("x.y").unwrap().value(0), Some(&Scalar::Int64(100)));
+
+        // api::types test
+        assert!(crate::api::types::is_object_dtype(&DType::Utf8));
+        assert!(crate::api::types::is_int64_dtype(&DType::Int64));
+        assert!(crate::api::types::is_dtype_equal(&DType::Int64, &"int64"));
     }
 }
