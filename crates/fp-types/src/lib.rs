@@ -647,6 +647,24 @@ pub mod api {
             dtype.as_dtype().is_extension()
         }
 
+        /// Matches `pd.api.types.is_object_dtype`.
+        #[must_use]
+        pub fn is_object_dtype(dtype: &impl AsDType) -> bool {
+            dtype.as_dtype().is_object()
+        }
+
+        /// Matches `pd.api.types.is_int64_dtype`.
+        #[must_use]
+        pub fn is_int64_dtype(dtype: &impl AsDType) -> bool {
+            matches!(dtype.as_dtype(), DType::Int64 | DType::Int64Nullable)
+        }
+
+        /// Matches `pd.api.types.is_dtype_equal`.
+        #[must_use]
+        pub fn is_dtype_equal(source: &impl AsDType, target: &impl AsDType) -> bool {
+            source.as_dtype() == target.as_dtype()
+        }
+
         /// Matches `pd.api.types.is_scalar`.
         #[must_use]
         pub const fn is_scalar(_scalar: &Scalar) -> bool {
@@ -17509,9 +17527,10 @@ mod sparse_dtype_pandas_name_3gxc6 {
     fn test_api_types_inspection_and_infer_dtype() {
         use crate::api::types::{
             infer_dtype, is_bool_dtype, is_categorical_dtype, is_datetime64_any_dtype,
-            is_extension_array_dtype, is_float_dtype, is_integer_dtype, is_interval_dtype,
-            is_numeric_dtype, is_period_dtype, is_scalar, is_signed_integer_dtype, is_sparse,
-            is_string_dtype, is_timedelta64_dtype, is_unsigned_integer_dtype, pandas_dtype,
+            is_dtype_equal, is_extension_array_dtype, is_float_dtype, is_int64_dtype,
+            is_integer_dtype, is_interval_dtype, is_numeric_dtype, is_object_dtype,
+            is_period_dtype, is_scalar, is_signed_integer_dtype, is_sparse, is_string_dtype,
+            is_timedelta64_dtype, is_unsigned_integer_dtype, pandas_dtype,
         };
         use crate::{DType, Scalar};
 
@@ -17523,6 +17542,17 @@ mod sparse_dtype_pandas_name_3gxc6 {
         assert!(is_integer_dtype(&DType::Int64));
         assert!(is_integer_dtype(&DType::Int64Nullable));
         assert!(!is_integer_dtype(&DType::Float64));
+
+        assert!(is_int64_dtype(&DType::Int64));
+        assert!(is_int64_dtype(&DType::Int64Nullable));
+        assert!(!is_int64_dtype(&DType::Float64));
+
+        assert!(is_object_dtype(&DType::Utf8));
+        assert!(!is_object_dtype(&DType::Int64));
+
+        assert!(is_dtype_equal(&DType::Int64, &DType::Int64));
+        assert!(is_dtype_equal(&"int64", &DType::Int64));
+        assert!(!is_dtype_equal(&DType::Int64, &DType::Float64));
 
         assert!(is_signed_integer_dtype(&DType::Int64));
         assert!(!is_unsigned_integer_dtype(&DType::Int64));
