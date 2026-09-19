@@ -10442,12 +10442,37 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (before=None, after=None))]
+    #[pyo3(signature = (before=None, after=None, axis=None, copy=None))]
     fn truncate(
         &self,
         before: Option<&Bound<'_, PyAny>>,
         after: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        copy: Option<bool>,
     ) -> PyResult<PySeries> {
+        let _ = copy;
+        if let Some(a) = axis {
+            let valid = if let Ok(i) = a.extract::<i64>() {
+                i == 0
+            } else if let Ok(s) = a.extract::<String>() {
+                s == "index" || s == "rows"
+            } else {
+                false
+            };
+            if !valid {
+                let msg = a.to_string();
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {msg} for object type Series"
+                )));
+            }
+        }
+        let is_sorted = self.inner.index().is_monotonic_increasing()
+            || self.inner.index().is_monotonic_decreasing();
+        if !is_sorted {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "truncate requires a sorted index",
+            ));
+        }
         let b = match before {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
@@ -10456,6 +10481,13 @@ impl PySeries {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
         };
+        if let (Some(b_lbl), Some(a_lbl)) = (&b, &a) {
+            if self.inner.index().is_monotonic_increasing() && b_lbl > a_lbl {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Truncate: {a_lbl} must be after {b_lbl}"
+                )));
+            }
+        }
         let res = self
             .inner
             .truncate(b.as_ref(), a.as_ref())
@@ -10559,6 +10591,55 @@ impl PySeries {
             )?
             .into_any())
         }
+    }
+
+    #[pyo3(signature = (key, default=None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        default: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let def = default
+            .map(|d| d.clone().unbind())
+            .unwrap_or_else(|| py.None());
+        if let Ok(seq) = key.extract::<Vec<Bound<'_, PyAny>>>() {
+            let mut labels = Vec::with_capacity(seq.len());
+            for item in &seq {
+                if let Ok(label) = py_to_index_label(item) {
+                    if self.inner.index().position(&label).is_none() {
+                        return Ok(def);
+                    }
+                    labels.push(label);
+                } else {
+                    return Ok(def);
+                }
+            }
+            if let Ok(s) = self.inner.loc(&labels) {
+                return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+            }
+            return Ok(def);
+        }
+        if let Ok(label) = py_to_index_label(key) {
+            let positions: Vec<usize> = self
+                .inner
+                .index()
+                .labels()
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| *l == &label)
+                .map(|(i, _)| i)
+                .collect();
+            if positions.len() > 1 {
+                if let Ok(sub) = self.inner.loc(&[label]) {
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                }
+            } else if let Some(pos) = positions.first() {
+                let sc = &self.inner.column().values()[*pos];
+                return scalar_to_py(py, sc);
+            }
+        }
+        Ok(def)
     }
 
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -13818,25 +13899,117 @@ impl PyDataFrame {
         self.kurt()
     }
 
-    #[pyo3(signature = (before=None, after=None))]
+    #[pyo3(signature = (before=None, after=None, axis=None, copy=None))]
     fn truncate(
         &self,
         before: Option<&Bound<'_, PyAny>>,
         after: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let b = match before {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
+        let _ = copy;
+        let axis_idx = match axis {
+            None => 0,
+            Some(a) => {
+                if let Ok(i) = a.extract::<i64>() {
+                    match i {
+                        0 => 0,
+                        1 => 1,
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else if let Ok(s) = a.extract::<String>() {
+                    match s.as_str() {
+                        "index" | "rows" => 0,
+                        "columns" => 1,
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "axis must be 0, 1, 'index', or 'columns'",
+                    ));
+                }
+            }
         };
-        let a = match after {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        let res = self
-            .inner
-            .truncate(b.as_ref(), a.as_ref())
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+
+        if axis_idx == 0 {
+            let is_sorted = self.inner.index().is_monotonic_increasing()
+                || self.inner.index().is_monotonic_decreasing();
+            if !is_sorted {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "truncate requires a sorted index",
+                ));
+            }
+            let b = match before {
+                Some(obj) => Some(py_to_index_label(obj)?),
+                None => None,
+            };
+            let a = match after {
+                Some(obj) => Some(py_to_index_label(obj)?),
+                None => None,
+            };
+            if let (Some(b_lbl), Some(a_lbl)) = (&b, &a) {
+                if self.inner.index().is_monotonic_increasing() && b_lbl > a_lbl {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Truncate: {a_lbl} must be after {b_lbl}"
+                    )));
+                }
+            }
+            let res = self
+                .inner
+                .truncate(b.as_ref(), a.as_ref())
+                .map_err(frame_error_to_py)?;
+            Ok(PyDataFrame { inner: res })
+        } else {
+            let cols = self.inner.column_names();
+            let is_sorted = cols.windows(2).all(|w| w[0] <= w[1]);
+            if !is_sorted {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "truncate requires a sorted index",
+                ));
+            }
+            let b_str = before.map(|obj| obj.extract::<String>()).transpose()?;
+            let a_str = after.map(|obj| obj.extract::<String>()).transpose()?;
+            if let (Some(b), Some(a)) = (&b_str, &a_str) {
+                if b > a {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Truncate: {a} must be after {b}"
+                    )));
+                }
+            }
+            let start = match &b_str {
+                Some(b) => cols
+                    .iter()
+                    .position(|c| c.as_str() >= b.as_str())
+                    .unwrap_or(cols.len()),
+                None => 0,
+            };
+            let end = match &a_str {
+                Some(a) => cols
+                    .iter()
+                    .rposition(|c| c.as_str() <= a.as_str())
+                    .map(|i| i + 1)
+                    .unwrap_or(0),
+                None => cols.len(),
+            };
+            let selected_cols: Vec<&str> = if start >= end {
+                Vec::new()
+            } else {
+                cols[start..end].iter().map(|s| s.as_str()).collect()
+            };
+            let res = self
+                .inner
+                .select_columns(&selected_cols)
+                .map_err(frame_error_to_py)?;
+            Ok(PyDataFrame { inner: res })
+        }
     }
 
     #[pyo3(signature = (prefix, axis=None))]
@@ -14048,6 +14221,51 @@ impl PyDataFrame {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[pyo3(signature = (key, default=None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        default: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let def = default
+            .map(|d| d.clone().unbind())
+            .unwrap_or_else(|| py.None());
+        if let Ok(col) = key.extract::<String>() {
+            let col_names = self.inner.column_names();
+            let matches: Vec<&str> = col_names
+                .iter()
+                .filter(|c| c.as_str() == col.as_str())
+                .map(|s| s.as_str())
+                .collect();
+            if matches.len() > 1 {
+                let frame = self
+                    .inner
+                    .select_columns(&matches)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+            } else if matches.len() == 1 {
+                return Ok(Py::new(py, self.column_series(&col)?)?.into_any());
+            } else {
+                return Ok(def);
+            }
+        }
+        if let Ok(cols) = key.extract::<Vec<String>>() {
+            for col in &cols {
+                if self.inner.column(col).is_none() {
+                    return Ok(def);
+                }
+            }
+            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+            let frame = self
+                .inner
+                .select_columns(&refs)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        Ok(def)
     }
 
     fn keys(&self) -> Vec<String> {
@@ -14771,14 +14989,44 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (labels, axis=0, **kwargs))]
+    #[pyo3(signature = (labels, axis=None, **kwargs))]
     fn set_axis(
         &self,
         labels: &Bound<'_, PyAny>,
-        axis: usize,
+        axis: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         let _ = kwargs;
+        let axis_idx = match axis {
+            None => 0,
+            Some(a) => {
+                if let Ok(i) = a.extract::<i64>() {
+                    match i {
+                        0 => 0,
+                        1 => 1,
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else if let Ok(s) = a.extract::<String>() {
+                    match s.as_str() {
+                        "index" | "rows" => 0,
+                        "columns" => 1,
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "axis must be 0, 1, 'index', or 'columns'",
+                    ));
+                }
+            }
+        };
         let lbls = if let Ok(py_idx) = labels.extract::<PyRef<'_, PyIndex>>() {
             py_idx.inner.labels().to_vec()
         } else if let Ok(list) = labels.cast::<PyList>() {
@@ -14792,7 +15040,10 @@ impl PyDataFrame {
                 "set_axis expects Index or list of labels",
             ));
         };
-        let df = self.inner.set_axis(lbls, axis).map_err(frame_error_to_py)?;
+        let df = self
+            .inner
+            .set_axis(lbls, axis_idx)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
@@ -27369,5 +27620,99 @@ mod tests {
 
         let idx = pii.to_index();
         assert_eq!(idx.len(), 2);
+    }
+
+    #[test]
+    fn test_py_get_truncate_and_set_axis() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    (
+                        "a",
+                        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                    ),
+                    (
+                        "b",
+                        vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)],
+                    ),
+                ],
+            )
+            .expect("df");
+            let py_df = PyDataFrame { inner: df };
+
+            let key_a = pyo3::types::PyString::new(py, "a");
+            let got_a = py_df.get(py, key_a.as_any(), None).expect("get a");
+            assert!(got_a.bind(py).is_instance_of::<PySeries>());
+
+            let key_c = pyo3::types::PyString::new(py, "c");
+            let got_c = py_df.get(py, key_c.as_any(), None).expect("get c");
+            assert!(got_c.bind(py).is_none());
+
+            let def_val = pyo3::types::PyInt::new(py, 42);
+            let got_c_def = py_df
+                .get(py, key_c.as_any(), Some(def_val.as_any()))
+                .expect("get c def");
+            assert_eq!(got_c_def.extract::<i64>(py).expect("extract 42"), 42);
+
+            let key_list = pyo3::types::PyList::new(py, vec!["a", "b"]).expect("list");
+            let got_list = py_df.get(py, key_list.as_any(), None).expect("get list");
+            assert!(got_list.bind(py).is_instance_of::<PyDataFrame>());
+
+            let before_val = pyo3::types::PyInt::new(py, 1);
+            let trunc_row = py_df
+                .truncate(Some(before_val.as_any()), None, None, None)
+                .expect("trunc row");
+            assert_eq!(trunc_row.shape(), (2, 2));
+
+            let axis_col = pyo3::types::PyString::new(py, "columns");
+            let trunc_col = py_df
+                .truncate(
+                    Some(key_a.as_any()),
+                    Some(key_a.as_any()),
+                    Some(axis_col.as_any()),
+                    None,
+                )
+                .expect("trunc col");
+            assert_eq!(trunc_col.columns(), vec!["a"]);
+
+            let new_cols = pyo3::types::PyList::new(py, vec!["x", "y"]).expect("cols");
+            let axis_1 = pyo3::types::PyInt::new(py, 1);
+            let df_renamed = py_df
+                .set_axis(new_cols.as_any(), Some(axis_1.as_any()), None)
+                .expect("set_axis");
+            assert_eq!(df_renamed.columns(), vec!["x", "y"]);
+
+            let s = Series::from_scalars(
+                "s",
+                vec![Scalar::Int64(10), Scalar::Int64(20)],
+                vec![IndexLabel::Utf8("x".into()), IndexLabel::Utf8("y".into())],
+            )
+            .expect("s");
+            let py_s = PySeries { inner: s };
+
+            let key_x = pyo3::types::PyString::new(py, "x");
+            let got_x = py_s.get(py, key_x.as_any(), None).expect("get x");
+            assert_eq!(got_x.extract::<i64>(py).expect("extract 10"), 10);
+
+            let key_z = pyo3::types::PyString::new(py, "z");
+            let got_z = py_s.get(py, key_z.as_any(), None).expect("get z");
+            assert!(got_z.bind(py).is_none());
+
+            let got_z_def = py_s
+                .get(py, key_z.as_any(), Some(def_val.as_any()))
+                .expect("get z def");
+            assert_eq!(got_z_def.extract::<i64>(py).expect("extract 42"), 42);
+
+            let key_xy = pyo3::types::PyList::new(py, vec!["x", "y"]).expect("xy");
+            let got_xy = py_s.get(py, key_xy.as_any(), None).expect("get xy");
+            assert!(got_xy.bind(py).is_instance_of::<PySeries>());
+
+            let trunc_s = py_s
+                .truncate(Some(key_x.as_any()), Some(key_x.as_any()), None, None)
+                .expect("trunc s");
+            assert_eq!(trunc_s.shape(), (1,));
+        });
     }
 }
