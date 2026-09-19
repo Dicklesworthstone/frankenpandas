@@ -334,6 +334,208 @@ pub enum Expr {
     },
 }
 
+/// Helper to construct a column reference expression `Expr::Series`.
+pub fn col(name: impl Into<String>) -> Expr {
+    Expr::Series {
+        name: SeriesRef(name.into()),
+    }
+}
+
+/// Helper to construct a literal scalar expression `Expr::Literal`.
+pub fn lit(value: impl Into<Scalar>) -> Expr {
+    Expr::Literal {
+        value: value.into(),
+    }
+}
+
+impl Expr {
+    /// Construct a column reference expression.
+    #[must_use]
+    pub fn col(name: impl Into<String>) -> Self {
+        col(name)
+    }
+
+    /// Construct a literal scalar expression.
+    #[must_use]
+    pub fn lit(value: impl Into<Scalar>) -> Self {
+        lit(value)
+    }
+
+    /// Compare `self == other`.
+    #[must_use]
+    pub fn eq(self, other: Expr) -> Self {
+        Expr::Compare {
+            left: Box::new(self),
+            right: Box::new(other),
+            op: ComparisonOp::Eq,
+        }
+    }
+
+    /// Compare `self != other`.
+    #[must_use]
+    pub fn ne(self, other: Expr) -> Self {
+        Expr::Compare {
+            left: Box::new(self),
+            right: Box::new(other),
+            op: ComparisonOp::Ne,
+        }
+    }
+
+    /// Compare `self < other`.
+    #[must_use]
+    pub fn lt(self, other: Expr) -> Self {
+        Expr::Compare {
+            left: Box::new(self),
+            right: Box::new(other),
+            op: ComparisonOp::Lt,
+        }
+    }
+
+    /// Compare `self <= other`.
+    #[must_use]
+    pub fn le(self, other: Expr) -> Self {
+        Expr::Compare {
+            left: Box::new(self),
+            right: Box::new(other),
+            op: ComparisonOp::Le,
+        }
+    }
+
+    /// Compare `self > other`.
+    #[must_use]
+    pub fn gt(self, other: Expr) -> Self {
+        Expr::Compare {
+            left: Box::new(self),
+            right: Box::new(other),
+            op: ComparisonOp::Gt,
+        }
+    }
+
+    /// Compare `self >= other`.
+    #[must_use]
+    pub fn ge(self, other: Expr) -> Self {
+        Expr::Compare {
+            left: Box::new(self),
+            right: Box::new(other),
+            op: ComparisonOp::Ge,
+        }
+    }
+
+    /// Logical AND (`self and other`).
+    #[must_use]
+    pub fn and(self, other: Expr) -> Self {
+        Expr::And {
+            left: Box::new(self),
+            right: Box::new(other),
+        }
+    }
+
+    /// Logical OR (`self or other`).
+    #[must_use]
+    pub fn or(self, other: Expr) -> Self {
+        Expr::Or {
+            left: Box::new(self),
+            right: Box::new(other),
+        }
+    }
+
+    /// Check if values are null.
+    #[must_use]
+    pub fn is_null(self) -> Self {
+        Expr::IsNull {
+            expr: Box::new(self),
+            negated: false,
+        }
+    }
+
+    /// Check if values are not null.
+    #[must_use]
+    pub fn not_null(self) -> Self {
+        Expr::IsNull {
+            expr: Box::new(self),
+            negated: true,
+        }
+    }
+
+    /// Fill null values with a scalar.
+    #[must_use]
+    pub fn fillna(self, value: impl Into<Scalar>) -> Self {
+        Expr::FillNa {
+            expr: Box::new(self),
+            value: value.into(),
+        }
+    }
+}
+
+impl std::ops::Add for Expr {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Expr::Add {
+            left: Box::new(self),
+            right: Box::new(rhs),
+        }
+    }
+}
+
+impl std::ops::Sub for Expr {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Expr::Sub {
+            left: Box::new(self),
+            right: Box::new(rhs),
+        }
+    }
+}
+
+impl std::ops::Mul for Expr {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        Expr::Mul {
+            left: Box::new(self),
+            right: Box::new(rhs),
+        }
+    }
+}
+
+impl std::ops::Div for Expr {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self {
+        Expr::Div {
+            left: Box::new(self),
+            right: Box::new(rhs),
+        }
+    }
+}
+
+impl std::ops::Not for Expr {
+    type Output = Self;
+    fn not(self) -> Self {
+        Expr::Not {
+            expr: Box::new(self),
+        }
+    }
+}
+
+impl std::ops::BitAnd for Expr {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        Expr::And {
+            left: Box::new(self),
+            right: Box::new(rhs),
+        }
+    }
+}
+
+impl std::ops::BitOr for Expr {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Expr::Or {
+            left: Box::new(self),
+            right: Box::new(rhs),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EvalContext {
     series: BTreeMap<String, Series>,
@@ -4184,9 +4386,54 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        BetweenInclusive, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef,
-        evaluate,
+        BetweenInclusive, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, col,
+        evaluate, lit,
     };
+
+    #[test]
+    fn test_col_lit_operator_overloads() {
+        let e = (col("a") + col("b")) * lit(Scalar::Int64(2));
+        assert_eq!(
+            e,
+            Expr::Mul {
+                left: Box::new(Expr::Add {
+                    left: Box::new(col("a")),
+                    right: Box::new(col("b")),
+                }),
+                right: Box::new(lit(Scalar::Int64(2))),
+            }
+        );
+
+        let sub_div = (col("x") - col("y")) / col("z");
+        assert_eq!(
+            sub_div,
+            Expr::Div {
+                left: Box::new(Expr::Sub {
+                    left: Box::new(col("x")),
+                    right: Box::new(col("y")),
+                }),
+                right: Box::new(col("z")),
+            }
+        );
+
+        let cmp = col("a").gt(col("b")) | !col("c").is_null();
+        assert_eq!(
+            cmp,
+            Expr::Or {
+                left: Box::new(Expr::Compare {
+                    left: Box::new(col("a")),
+                    right: Box::new(col("b")),
+                    op: ComparisonOp::Gt,
+                }),
+                right: Box::new(Expr::Not {
+                    expr: Box::new(Expr::IsNull {
+                        expr: Box::new(col("c")),
+                        negated: false,
+                    }),
+                }),
+            }
+        );
+    }
 
     #[test]
     fn expression_add_works_through_series_refs() {

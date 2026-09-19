@@ -1694,7 +1694,11 @@ fn table_body(spec: &TablePlotSpec) -> Result<String, FrameError> {
 
     for row_idx in 0..n_rows {
         let row_y = rows_start_y + (row_idx as f64 * ROW_H);
-        let row_bg = if row_idx % 2 == 0 { "#ffffff" } else { "#f8fafc" };
+        let row_bg = if row_idx % 2 == 0 {
+            "#ffffff"
+        } else {
+            "#f8fafc"
+        };
         let mut curr_x = start_x;
 
         if has_row_labels {
@@ -3257,7 +3261,7 @@ mod tests {
 
     #[test]
     fn table_full_pipeline_and_error_modes() {
-        use crate::{plotting, DataFrame, IndexLabel, Series};
+        use crate::{DataFrame, IndexLabel, Series, plotting};
 
         let labels = vec![
             IndexLabel::Int64(0),
@@ -3309,7 +3313,9 @@ mod tests {
         assert!(html.contains("<svg"));
 
         // HTML page & markdown
-        let page = spec.to_html_page(Some("Custom Title")).expect("to_html_page");
+        let page = spec
+            .to_html_page(Some("Custom Title"))
+            .expect("to_html_page");
         assert!(page.contains("<title>Custom Title</title>"));
         assert!(page.contains("<svg"));
         let md = spec.to_markdown().expect("to_markdown");
@@ -3320,9 +3326,11 @@ mod tests {
         let _ = std::fs::create_dir_all(&temp_dir);
         let table_svg_file = temp_dir.join("table.svg");
         let table_html_file = temp_dir.join("table.html");
-        df.table_to_file(&table_svg_file, None, None).expect("table_to_file svg");
+        df.table_to_file(&table_svg_file, None, None)
+            .expect("table_to_file svg");
         assert!(table_svg_file.exists());
-        df.table_to_file(&table_html_file, None, None).expect("table_to_file html");
+        df.table_to_file(&table_html_file, None, None)
+            .expect("table_to_file html");
         assert!(table_html_file.exists());
 
         // Custom labels
@@ -3351,7 +3359,8 @@ mod tests {
         assert!(s_html.contains("<svg"));
 
         let table_s_svg_file = temp_dir.join("table_s.svg");
-        s1.table_to_file(&table_s_svg_file, None, None).expect("s.table_to_file");
+        s1.table_to_file(&table_s_svg_file, None, None)
+            .expect("s.table_to_file");
         assert!(table_s_svg_file.exists());
 
         // 3. plotting::table free functions
@@ -3360,7 +3369,8 @@ mod tests {
         let plot_df_custom = plotting::table_frame(&df, Some(&["r1", "r2", "r3"]), None)
             .expect("plotting::table_frame");
         assert_eq!(plot_df_custom.row_labels, vec!["r1", "r2", "r3"]);
-        let plot_s_spec = plotting::table_series(&s1, None, Some(&["val"])).expect("plotting::table_series");
+        let plot_s_spec =
+            plotting::table_series(&s1, None, Some(&["val"])).expect("plotting::table_series");
         assert_eq!(plot_s_spec.col_labels, vec!["val"]);
 
         // 4. Error modes

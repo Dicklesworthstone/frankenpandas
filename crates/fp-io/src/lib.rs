@@ -8707,9 +8707,7 @@ fn flatten_json_dict_for_normalize(
             Some(max_l) => current_level < max_l,
             None => true,
         };
-        if should_recurse
-            && let serde_json::Value::Object(nested) = v
-        {
+        if should_recurse && let serde_json::Value::Object(nested) = v {
             flatten_json_dict_for_normalize(
                 nested,
                 &full_key,
@@ -8756,9 +8754,9 @@ pub fn json_normalize(
     let mut col_set = std::collections::HashSet::new();
 
     for row_val in &rows_to_flatten {
-        let obj = row_val
-            .as_object()
-            .ok_or_else(|| IoError::JsonFormat("json_normalize requires objects in records".into()))?;
+        let obj = row_val.as_object().ok_or_else(|| {
+            IoError::JsonFormat("json_normalize requires objects in records".into())
+        })?;
         let mut row = Vec::new();
         flatten_json_dict_for_normalize(obj, "", sep_str, max_level, 0, &mut row);
         for (k, _) in &row {
@@ -37183,14 +37181,26 @@ mod merge_simple_numeric_csv_chunks_tests {
 
         let df = json_normalize_str(json_input, None, None).expect("json_normalize_str");
         assert_eq!(df.len(), 2);
-        assert_eq!(df.column_names(), vec!["id", "name.first", "name.last", "info.contact.email"]);
+        assert_eq!(
+            df.column_names(),
+            vec!["id", "name.first", "name.last", "info.contact.email"]
+        );
         assert_eq!(df.column("id").unwrap().value(0), Some(&Scalar::Int64(1)));
-        assert_eq!(df.column("name.first").unwrap().value(0), Some(&Scalar::Utf8("Alice".into())));
-        assert_eq!(df.column("info.contact.email").unwrap().value(1), Some(&Scalar::Utf8("bob@example.com".into())));
+        assert_eq!(
+            df.column("name.first").unwrap().value(0),
+            Some(&Scalar::Utf8("Alice".into()))
+        );
+        assert_eq!(
+            df.column("info.contact.email").unwrap().value(1),
+            Some(&Scalar::Utf8("bob@example.com".into()))
+        );
 
         // With custom separator
         let df_sep = json_normalize_str(json_input, Some("_"), None).expect("with sep");
-        assert_eq!(df_sep.column_names(), vec!["id", "name_first", "name_last", "info_contact_email"]);
+        assert_eq!(
+            df_sep.column_names(),
+            vec!["id", "name_first", "name_last", "info_contact_email"]
+        );
 
         // With max_level = 0 (only top level flattened)
         let df_l0 = json_normalize_str(json_input, None, Some(0)).expect("max_level 0");
@@ -37198,14 +37208,20 @@ mod merge_simple_numeric_csv_chunks_tests {
 
         // With max_level = 1
         let df_l1 = json_normalize_str(json_input, None, Some(1)).expect("max_level 1");
-        assert_eq!(df_l1.column_names(), vec!["id", "name.first", "name.last", "info.contact"]);
+        assert_eq!(
+            df_l1.column_names(),
+            vec!["id", "name.first", "name.last", "info.contact"]
+        );
 
         // Single object input
         let single_obj = r#"{"a": 10, "b": {"c": 20}}"#;
         let df_single = json_normalize_str(single_obj, None, None).expect("single obj");
         assert_eq!(df_single.len(), 1);
         assert_eq!(df_single.column_names(), vec!["a", "b.c"]);
-        assert_eq!(df_single.column("b.c").unwrap().value(0), Some(&Scalar::Int64(20)));
+        assert_eq!(
+            df_single.column("b.c").unwrap().value(0),
+            Some(&Scalar::Int64(20))
+        );
 
         // Empty array
         let empty_arr = "[]";

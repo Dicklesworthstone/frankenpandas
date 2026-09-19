@@ -16963,6 +16963,62 @@ pub fn bdate_range(
 
 // ── MultiIndex ──────────────────────────────────────────────────────────
 
+/// Slicing specification for index and MultiIndex selections, matching `pd.IndexSlice`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IndexSlice<T = IndexLabel> {
+    pub start: Option<T>,
+    pub stop: Option<T>,
+    pub step: Option<isize>,
+}
+
+impl<T> IndexSlice<T> {
+    /// Create a new `IndexSlice` with explicit start, stop, and step.
+    #[must_use]
+    pub const fn new(start: Option<T>, stop: Option<T>, step: Option<isize>) -> Self {
+        Self { start, stop, step }
+    }
+
+    /// Match a full slice `[:]`.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            start: None,
+            stop: None,
+            step: None,
+        }
+    }
+
+    /// Create an `IndexSlice` from start and stop bounds.
+    #[must_use]
+    pub const fn from_bounds(start: Option<T>, stop: Option<T>) -> Self {
+        Self {
+            start,
+            stop,
+            step: None,
+        }
+    }
+
+    /// Create an `IndexSlice` with only a start bound `[start:]`.
+    #[must_use]
+    pub const fn from_start(start: T) -> Self {
+        Self {
+            start: Some(start),
+            stop: None,
+            step: None,
+        }
+    }
+
+    /// Create an `IndexSlice` with only a stop bound `[:stop]`.
+    #[must_use]
+    pub const fn from_stop(stop: T) -> Self {
+        Self {
+            start: None,
+            stop: Some(stop),
+            step: None,
+        }
+    }
+}
+
 /// A hierarchical (multi-level) index for DataFrames and Series.
 ///
 /// Stores multiple levels of labels as separate vectors (columnar layout),
@@ -35847,5 +35903,35 @@ mod cached_parallelism_tests {
         for _ in 0..64 {
             assert_eq!(cached_available_parallelism(), first);
         }
+    }
+}
+
+#[cfg(test)]
+mod index_slice_tests {
+    use super::{IndexLabel, IndexSlice};
+
+    #[test]
+    fn test_index_slice_constructors() {
+        let s_all: IndexSlice = IndexSlice::all();
+        assert_eq!(s_all.start, None);
+        assert_eq!(s_all.stop, None);
+        assert_eq!(s_all.step, None);
+
+        let s_bounds =
+            IndexSlice::from_bounds(Some(IndexLabel::Int64(0)), Some(IndexLabel::Int64(10)));
+        assert_eq!(s_bounds.start, Some(IndexLabel::Int64(0)));
+        assert_eq!(s_bounds.stop, Some(IndexLabel::Int64(10)));
+        assert_eq!(s_bounds.step, None);
+
+        let s_start = IndexSlice::from_start(IndexLabel::Utf8("a".into()));
+        assert_eq!(s_start.start, Some(IndexLabel::Utf8("a".into())));
+        assert_eq!(s_start.stop, None);
+
+        let s_stop = IndexSlice::from_stop(IndexLabel::Utf8("z".into()));
+        assert_eq!(s_stop.start, None);
+        assert_eq!(s_stop.stop, Some(IndexLabel::Utf8("z".into())));
+
+        let s_step = IndexSlice::new(Some(0_i64), Some(20_i64), Some(2));
+        assert_eq!(s_step.step, Some(2));
     }
 }

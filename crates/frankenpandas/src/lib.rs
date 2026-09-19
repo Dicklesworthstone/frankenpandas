@@ -19,8 +19,9 @@
 pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityMask};
 // ── Expression engine ───────────────────────────────────────────────────
 pub use fp_expr::{
-    DataFrameExprExt, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, eval_str,
-    eval_str_with_locals, evaluate, evaluate_on_dataframe, evaluate_on_dataframe_with_locals,
+    DataFrameExprExt, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, col,
+    eval_str, eval_str_with_locals, evaluate, evaluate_on_dataframe,
+    evaluate_on_dataframe_with_locals, lit,
 };
 #[cfg(feature = "lazy-transpose-view")]
 pub use fp_frame::DataFrameTransposeView;
@@ -49,6 +50,7 @@ pub use fp_frame::{
     DropNaHow,
     Ewm,
     Expanding,
+    Flags,
     FrameError,
     GroupByResample,
     GroupByRolling,
@@ -60,11 +62,11 @@ pub use fp_frame::{
     Rolling,
     ScatterMatrixSpec,
     Series,
-    TablePlotSpec,
     SeriesGroupBy,
     SeriesResetIndexResult,
     SparseAccessor,
     StringAccessor,
+    TablePlotSpec,
     ToDatetimeOptions,
     ToDatetimeOrigin,
     ToTimedeltaErrors,
@@ -76,31 +78,31 @@ pub use fp_frame::{
     index_to_frame,
     index_to_series,
 };
+pub use fp_frame::{
+    array, assert_frame_eq, assert_index_eq, assert_series_eq, crosstab, crosstab_normalize, cut,
+    cut_bins, factorize, factorize_with_options, from_dummies, get_dummies,
+    get_dummies_with_options, lreshape, melt, pivot, pivot_table, pivot_table_with_dropna,
+    plotting, qcut, qcut_at_quantiles, show_versions, testing,
+    testing::{
+        AssertEqualOptions, AssertionError, assert_extension_array_equal, assert_frame_equal,
+        assert_frame_equal_default, assert_index_equal, assert_index_equal_default,
+        assert_series_equal, assert_series_equal_default,
+    },
+    timedelta_total_seconds, to_datetime, to_datetime_values_with_options, to_datetime_with_format,
+    to_datetime_with_options, to_datetime_with_unit, to_numeric, to_numeric_with_options,
+    to_timedelta, to_timedelta_with_options, to_timedelta_with_unit, unique, value_counts,
+    value_counts_with_options, wide_to_long,
+};
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
 pub use fp_frame::{
     concat_dataframes, concat_dataframes_with_axis, concat_dataframes_with_axis_join,
     concat_dataframes_with_ignore_index, concat_dataframes_with_keys, concat_series,
     concat_series_with_ignore_index,
 };
-pub use fp_frame::{
-    crosstab, crosstab_normalize, cut, cut_bins, factorize, factorize_with_options, from_dummies,
-    get_dummies, get_dummies_with_options, lreshape, melt, pivot, pivot_table,
-    pivot_table_with_dropna, qcut, qcut_at_quantiles, show_versions, timedelta_total_seconds,
-    to_datetime, to_datetime_values_with_options, to_datetime_with_format,
-    to_datetime_with_options, to_datetime_with_unit, to_numeric, to_numeric_with_options,
-    to_timedelta, to_timedelta_with_options, to_timedelta_with_unit, unique, value_counts,
-    value_counts_with_options, wide_to_long,
-};
-pub use fp_frame::plotting;
-pub use fp_frame::testing;
-pub use fp_frame::testing::{
-    AssertEqualOptions, AssertionError, assert_extension_array_equal, assert_frame_equal,
-    assert_frame_equal_default, assert_index_equal, assert_index_equal_default,
-    assert_series_equal, assert_series_equal_default,
-};
-pub use fp_frame::{assert_frame_eq, assert_index_eq, assert_series_eq};
 // ── GroupBy errors ──────────────────────────────────────────────────────
-pub use fp_groupby::{AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions};
+pub use fp_groupby::{
+    AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions, Grouper, NamedAgg,
+};
 pub use fp_index::{
     AlignMode,
     AlignmentPlan,
@@ -113,6 +115,7 @@ pub use fp_index::{
     Index,
     IndexError,
     IndexLabel,
+    IndexSlice,
     MultiAlignmentPlan,
     MultiIndex,
     MultiIndexOrIndex,
@@ -155,6 +158,7 @@ pub use fp_io::{
     // Excel
     ExcelReadOptions,
     ExcelWriteOptions,
+    FwfReadOptions,
     // HDF5 / HTML
     HdfReadOptions,
     HdfWriteOptions,
@@ -190,7 +194,12 @@ pub use fp_io::{
     SqlWriteOptions,
     // Stata
     StataWriteOptions,
+    // XML
+    XmlReadOptions,
+    XmlWriteOptions,
     inspect,
+    json_normalize,
+    json_normalize_str,
     list_sql_foreign_keys,
     list_sql_indexes,
     list_sql_schemas,
@@ -236,8 +245,6 @@ pub use fp_io::{
     read_ipc_stream_bytes,
     read_json,
     read_json_str,
-    json_normalize,
-    json_normalize_str,
     // JSONL
     read_jsonl,
     read_jsonl_str,
@@ -368,6 +375,117 @@ pub use fp_join::{
     join_series_with_options, merge_asof, merge_asof_with_options, merge_dataframes,
     merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options, merge_ordered,
 };
+
+/// Target container types supported by the polymorphic [`concat`] entrypoint.
+pub trait ConcatTarget {
+    /// Output container type produced by concatenation.
+    type Output;
+    /// Concatenate a slice of references into a unified container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError`] if concatenation invariants fail.
+    fn concat_all(items: &[&Self]) -> Result<Self::Output, FrameError>;
+}
+
+impl ConcatTarget for DataFrame {
+    type Output = DataFrame;
+    #[inline]
+    fn concat_all(items: &[&Self]) -> Result<DataFrame, FrameError> {
+        concat_dataframes(items)
+    }
+}
+
+impl ConcatTarget for Series {
+    type Output = Series;
+    #[inline]
+    fn concat_all(items: &[&Self]) -> Result<Series, FrameError> {
+        concat_series(items)
+    }
+}
+
+/// Concatenate pandas objects along a particular axis (matches `pd.concat`).
+///
+/// Dispatches to [`concat_dataframes`] when called with `&[&DataFrame]`
+/// and to [`concat_series`] when called with `&[&Series]`.
+///
+/// # Errors
+///
+/// Returns [`FrameError`] if concatenation invariants fail.
+#[inline]
+pub fn concat<T: ConcatTarget>(items: &[&T]) -> Result<T::Output, FrameError> {
+    T::concat_all(items)
+}
+
+/// Merge two DataFrames on a single key column (matches `pd.merge`).
+///
+/// Equivalent to [`merge_dataframes`].
+///
+/// # Errors
+///
+/// Returns [`JoinError`] if join or key extraction fails.
+#[inline]
+pub fn merge(
+    left: &DataFrame,
+    right: &DataFrame,
+    on: &str,
+    join_type: JoinType,
+) -> Result<MergedDataFrame, JoinError> {
+    merge_dataframes(left, right, on, join_type)
+}
+
+/// Merge two DataFrames on multiple key columns (matches `pd.merge(..., on=[...])`).
+///
+/// Equivalent to [`merge_dataframes_on`].
+///
+/// # Errors
+///
+/// Returns [`JoinError`] if join or key extraction fails.
+#[inline]
+pub fn merge_on(
+    left: &DataFrame,
+    right: &DataFrame,
+    on: &[&str],
+    join_type: JoinType,
+) -> Result<MergedDataFrame, JoinError> {
+    merge_dataframes_on(left, right, on, join_type)
+}
+
+/// Write a DataFrame to a Pickle file (matches `pd.to_pickle`).
+///
+/// # Errors
+///
+/// Returns [`IoError`] if serialization or file writing fails.
+#[inline]
+pub fn to_pickle(df: &DataFrame, path: impl AsRef<std::path::Path>) -> Result<(), IoError> {
+    write_pickle(df, path.as_ref())
+}
+
+/// Write a DataFrame to a Pickle file with options (matches `pd.to_pickle`).
+///
+/// # Errors
+///
+/// Returns [`IoError`] if serialization or file writing fails.
+#[inline]
+pub fn to_pickle_with_options(
+    df: &DataFrame,
+    path: impl AsRef<std::path::Path>,
+    options: &PickleWriteOptions,
+) -> Result<(), IoError> {
+    write_pickle_with_options(df, path.as_ref(), options)
+}
+
+/// Evaluate a string expression against a DataFrame (matches `pd.eval`).
+///
+/// Dispatches to [`DataFrameExprExt::eval`].
+///
+/// # Errors
+///
+/// Returns [`ExprError`] if parsing or evaluation fails.
+#[inline]
+pub fn eval(expr: &str, frame: &DataFrame) -> Result<Series, ExprError> {
+    frame.eval(expr)
+}
 // outcome_to_action is gated behind the `asupersync` feature in fp-runtime.
 #[cfg(feature = "asupersync")]
 pub use fp_runtime::outcome_to_action;
@@ -395,9 +513,12 @@ pub use fp_runtime::{
     decision_to_card,
 };
 pub use fp_types::{
-    DType, NullKind, Scalar, SparseDType, TypeError, api, cast_scalar, cast_scalar_owned,
-    common_dtype, count_na, dropna, fill_na, infer_dtype, isna, isnull, notna, notnull,
-    pandas_dtype,
+    AsDType, CategoricalDType, CategoricalDtype, DType, IntervalDType, IntervalDtype, NA, NAT, NaT,
+    NullKind, OptionContextGuard, OptionError, OptionValue, PeriodDType, PeriodDtype, Scalar,
+    SparseDType, TypeError, api, cast_scalar, cast_scalar_owned, common_dtype, count_na,
+    describe_option, dropna, eng_float_format, fill_na, get_eng_float_format, get_option,
+    infer_dtype, isna, isnull, notna, notnull, option_context, pandas_dtype,
+    reset_eng_float_format, reset_option, set_eng_float_format, set_option,
 };
 // fd90.263: pandas-equivalent helper types for Datetime64/Timedelta64/Period/Interval
 // scalar variants. Users typically interact via Scalar::Timedelta64(nanos) etc., but
@@ -412,6 +533,7 @@ pub use fp_types::{
     TimedeltaError,
     Timestamp,
     // fd90.271: pandas pd.interval_range equivalents (Vec<Interval> generators).
+    interval_range,
     interval_range_by_periods,
     interval_range_by_step,
     period_range,
@@ -434,6 +556,58 @@ pub use fp_types::{
 // backend can disable `sql-sqlite` and avoid the rusqlite dep entirely.
 #[cfg(feature = "sql-sqlite")]
 pub use rusqlite;
+
+// ── Errors module (pandas.errors parity) ─────────────────────────────────
+
+pub mod errors {
+    //! Common error types and pandas exception aliases (`pandas.errors`).
+    //!
+    //! Re-exports all workspace error types alongside standard pandas exception
+    //! aliases for drop-in compatibility.
+
+    pub use fp_columnar::ColumnError;
+    pub use fp_expr::ExprError;
+    pub use fp_frame::{FrameError, testing::AssertionError};
+    pub use fp_groupby::GroupByError;
+    pub use fp_index::{DateRangeError, IndexError, TimedeltaRangeError};
+    pub use fp_io::IoError;
+    pub use fp_join::JoinError;
+    pub use fp_runtime::RuntimeError;
+    pub use fp_types::{OptionError, TimedeltaError, TypeError};
+
+    // Pandas exception aliases:
+    /// Error raised when join/merge operations fail or merge validation fails.
+    /// Matches `pd.errors.MergeError`.
+    pub type MergeError = JoinError;
+
+    /// Error raised when parsing tabular or structured files fails.
+    /// Matches `pd.errors.ParserError`.
+    pub type ParserError = IoError;
+
+    /// Error raised when an empty file or buffer is passed to a parser.
+    /// Matches `pd.errors.EmptyDataError`.
+    pub type EmptyDataError = IoError;
+
+    /// Error raised when duplicate labels are found where disallowed.
+    /// Matches `pd.errors.DuplicateLabelError`.
+    pub type DuplicateLabelError = IndexError;
+
+    /// Error raised for invalid index operations or incompatible index types.
+    /// Matches `pd.errors.InvalidIndexError`.
+    pub type InvalidIndexError = IndexError;
+
+    /// Error raised when a date/datetime is out of bounds.
+    /// Matches `pd.errors.OutOfBoundsDatetime`.
+    pub type OutOfBoundsDatetime = DateRangeError;
+
+    /// Error raised when a timedelta is out of bounds.
+    /// Matches `pd.errors.OutOfBoundsTimedelta`.
+    pub type OutOfBoundsTimedelta = TimedeltaRangeError;
+
+    /// Error raised when evaluating an expression with an undefined variable.
+    /// Matches `pd.errors.UndefinedVariableError`.
+    pub type UndefinedVariableError = ExprError;
+}
 
 // ── Prelude ─────────────────────────────────────────────────────────────
 
@@ -460,12 +634,15 @@ pub mod prelude {
         // fd90.222: ArithmeticOp + ComparisonOp are parameter types for
         // Column.binary_numeric, DataFrame.compare_scalar, etc.
         ArithmeticOp,
-        AssertEqualOptions,
-        AssertionError,
+        AsDType,
         // Join (types + functions, matches README Recipes + Merge: Advanced Options)
         AsofDirection,
+        AssertEqualOptions,
+        AssertionError,
         BoxPlotSpec,
         CategoricalAccessor,
+        CategoricalDType,
+        CategoricalDtype,
         CategoricalIndex,
         CategoricalMetadata,
         Column,
@@ -477,6 +654,7 @@ pub mod prelude {
         // fd90.221: expose the types reachable via EvidenceLedger.records().
         CompatibilityIssue,
         ConcatJoin,
+        ConcatTarget,
         CsvOnBadLines,
         CsvReadOptions,
         CsvWriteOptions,
@@ -521,19 +699,23 @@ pub mod prelude {
         ExcelWriteOptions,
         Expanding,
         ExprError,
+        Flags,
         FrameError,
+        FwfReadOptions,
         GalaxyBrainCard,
         GroupByError,
         GroupByExecutionOptions,
         GroupByOptions,
         GroupByResample,
         GroupByRolling,
+        Grouper,
         HdfReadOptions,
         HdfWriteOptions,
         HistogramSpec,
         Index,
         IndexError,
         IndexLabel,
+        IndexSlice,
         // fd90.14: pandas-equivalent helper types for the richer
         // Scalar::Datetime64 / Timedelta64 / Period / Interval
         // workflows (fd90.263 / fd90.271). Users typically interact via
@@ -541,6 +723,8 @@ pub mod prelude {
         // ranges need the helper types named.
         Interval,
         IntervalClosed,
+        IntervalDType,
+        IntervalDtype,
         IoError,
         IssueKind,
         JoinError,
@@ -556,10 +740,22 @@ pub mod prelude {
         MergedDataFrame,
         MultiIndex,
         MultiIndexOrIndex,
+        NA,
+        NAT,
+        NaT,
+        NamedAgg,
         NullKind,
+        OptionContextGuard,
+        OptionError,
+        OptionValue,
         Period,
+        PeriodDType,
+        PeriodDtype,
         PeriodFreq,
         PeriodIndex,
+        PickleProtocol,
+        PickleReadOptions,
+        PickleWriteOptions,
         PlotKind,
         PlotSeriesSpec,
         PlotSpec,
@@ -571,7 +767,6 @@ pub mod prelude {
         Scalar,
         ScatterMatrixSpec,
         Series,
-        TablePlotSpec,
         SeriesGroupBy,
         SeriesIoExt,
         SeriesResetIndexResult,
@@ -607,6 +802,7 @@ pub mod prelude {
         SqlWriteOptions,
         StataWriteOptions,
         StringAccessor,
+        TablePlotSpec,
         Timedelta,
         TimedeltaComponents,
         TimedeltaError,
@@ -628,6 +824,18 @@ pub mod prelude {
         // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
         // lists it among types deriving Serialize + Deserialize (line 1567).
         ValidityMask,
+        XmlReadOptions,
+        XmlWriteOptions,
+        align,
+        align_inner,
+        align_left,
+        align_union,
+        // fd90.33: apply_date_offset is the primary use-site for
+        // DateOffset (above). Without it in the prelude the user can
+        // name the offset variant but can't apply it from prelude
+        // alone — paired-surface defect.
+        apply_date_offset,
+        array,
         assert_extension_array_equal,
         assert_frame_eq,
         assert_frame_equal,
@@ -638,12 +846,6 @@ pub mod prelude {
         assert_series_eq,
         assert_series_equal,
         assert_series_equal_default,
-        testing,
-        // fd90.33: apply_date_offset is the primary use-site for
-        // DateOffset (above). Without it in the prelude the user can
-        // name the offset variant but can't apply it from prelude
-        // alone — paired-surface defect.
-        apply_date_offset,
         // fd90.269: bdate_range pairs with date_range (pandas pd.bdate_range).
         bdate_range,
         // fd90.208: pandas-style top-level null checks + dtype helpers.
@@ -652,8 +854,10 @@ pub mod prelude {
         // fd90.16: cast_scalar_owned pairs with cast_scalar (above) for
         // owned-input flows where the caller can move rather than borrow.
         cast_scalar_owned,
+        col,
         common_dtype,
         // Module-level functions (concat + join/merge family)
+        concat,
         concat_dataframes,
         concat_dataframes_with_axis,
         concat_dataframes_with_axis_join,
@@ -670,23 +874,33 @@ pub mod prelude {
         cut_bins,
         date_range,
         decision_to_card,
+        describe_option,
         dropna,
+        eng_float_format,
+        errors,
+        eval,
         factorize,
         factorize_with_options,
         fill_na,
         from_dummies,
         get_dummies,
         get_dummies_with_options,
+        get_eng_float_format,
+        get_option,
         // fd90.15: Index → DataFrame/Series conversion helpers (fd90.270).
         // Pair with Index being in the prelude.
         index_to_frame,
         index_to_series,
         infer_dtype,
+        infer_freq,
+        infer_freq_from_nanos,
+        infer_freq_from_timestamps,
         // fd90.10: inspect() is the documented convenience constructor
         // for SqlInspector (fd90.38 / br-frankenpandas-szs9). It was
         // exported at the crate root but missed prelude promotion —
         // pairs with SqlInspector being in the prelude already.
         inspect,
+        interval_range,
         interval_range_by_periods,
         interval_range_by_step,
         isna,
@@ -706,14 +920,17 @@ pub mod prelude {
         list_sql_tables,
         list_sql_unique_constraints,
         list_sql_views,
+        lit,
         lreshape,
         melt,
+        merge,
         merge_asof,
         merge_asof_with_options,
         merge_dataframes,
         merge_dataframes_on,
         merge_dataframes_on_with,
         merge_dataframes_on_with_options,
+        merge_on,
         merge_ordered,
         // NanOps — null-skipping aggregation primitives (matches README NanOps section)
         nanall,
@@ -741,6 +958,7 @@ pub mod prelude {
         nanvar,
         notna,
         notnull,
+        option_context,
         pandas_dtype,
         period_range,
         pivot,
@@ -749,6 +967,8 @@ pub mod prelude {
         qcut,
         qcut_at_quantiles,
         // IO — readers (in-memory + path; covers all 8 documented formats)
+        read_clipboard,
+        read_clipboard_str,
         read_csv,
         read_csv_str,
         // fd90.16: index-cols readers pair with read_csv_with_options
@@ -768,9 +988,13 @@ pub mod prelude {
         read_excel_with_index_cols,
         read_feather,
         read_feather_bytes,
+        read_fwf,
+        read_fwf_str,
         read_hdf,
         read_hdf_key,
         read_hdf_with_options,
+        read_html,
+        read_html_str,
         read_ipc_stream_bytes,
         read_json,
         read_json_str,
@@ -780,6 +1004,10 @@ pub mod prelude {
         read_orc_bytes,
         read_parquet,
         read_parquet_bytes,
+        read_pickle,
+        read_pickle_bytes,
+        read_pickle_bytes_with_options,
+        read_pickle_with_options,
         read_sql,
         read_sql_chunks,
         // fd90.20: paired producer for SqlIndexedChunkIterator (above).
@@ -797,12 +1025,20 @@ pub mod prelude {
         read_sql_with_options,
         read_stata,
         read_stata_bytes,
+        read_table,
+        read_table_str,
+        read_xml,
+        read_xml_str,
+        reset_eng_float_format,
+        reset_option,
         // fd90.12: Series ↔ Arrow array interop. README line 1580
         // documents Arrow interop as a public surface; fd90.264 added
         // the Series-level pair. Promote to the prelude alongside the
         // rest of the IO surface.
         series_from_arrow_array,
         series_to_arrow_array,
+        set_eng_float_format,
+        set_option,
         show_versions,
         sql_backend_caps,
         sql_max_identifier_length,
@@ -814,6 +1050,7 @@ pub mod prelude {
         sql_supports_schemas,
         sql_table_comment,
         sql_table_schema,
+        testing,
         timedelta_range,
         timedelta_total_seconds,
         to_datetime,
@@ -823,6 +1060,8 @@ pub mod prelude {
         to_datetime_with_unit,
         to_numeric,
         to_numeric_with_options,
+        to_pickle,
+        to_pickle_with_options,
         to_timedelta,
         to_timedelta_with_options,
         to_timedelta_with_unit,
@@ -845,6 +1084,7 @@ pub mod prelude {
         write_hdf_key,
         write_hdf_with_options,
         // README Quick Example calls write_html_string via the prelude.
+        write_html,
         write_html_string,
         write_ipc_stream_bytes,
         write_json,
@@ -863,6 +1103,10 @@ pub mod prelude {
         write_orc_bytes,
         write_parquet,
         write_parquet_bytes,
+        write_pickle,
+        write_pickle_bytes,
+        write_pickle_bytes_with_options,
+        write_pickle_with_options,
         write_sql,
         // fd90.209: write_sql_with_options pairs with SqlWriteOptions
         // (which is in the prelude as of fd90.206).
@@ -871,6 +1115,10 @@ pub mod prelude {
         write_stata_bytes,
         write_stata_bytes_with_options,
         write_stata_with_options,
+        write_xml,
+        write_xml_string,
+        write_xml_string_with_options,
+        write_xml_with_options,
     };
 }
 
@@ -996,8 +1244,15 @@ mod tests {
         // CategoricalAccessor is borrowed-from-Series; just type-check name resolution.
         let _name_check_cat_accessor: fn(&CategoricalAccessor<'_>) = |_| {};
 
-        // Index-side enums (fd90.128).
         let _: DuplicateKeep = DuplicateKeep::First;
+
+        // Parity additions: NamedAgg, Grouper, array, col, lit, interval_range
+        let _: NamedAgg = NamedAgg::new("a", "sum");
+        let _: Grouper = Grouper::new();
+        let _ = array(&[], None);
+        let _ = col("a");
+        let _ = lit(Scalar::Int64(1));
+        let _ = interval_range(None, None, None, None, None);
         let _: ConcatJoin = ConcatJoin::Inner;
         let _: DropNaHow = DropNaHow::Any;
 
@@ -1378,8 +1633,9 @@ mod tests {
 
     #[test]
     fn top_level_pandas_parity_functions_compile_and_run() {
-        use crate::prelude::*;
         use std::collections::BTreeMap;
+
+        use crate::prelude::*;
 
         // Verify show_versions
         let ver = show_versions();
@@ -1392,8 +1648,16 @@ mod tests {
         // Create a Series and verify unique, value_counts, factorize
         let s = Series::from_values(
             "test",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)],
-            vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
         )
         .unwrap();
 
@@ -1440,35 +1704,276 @@ mod tests {
         assert_eq!(lr.column("nums").unwrap().len(), 4);
 
         // wide_to_long test
-        let s_id = Series::from_values("id", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap();
-        let s_a1 = Series::from_values("A1", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap();
-        let s_a2 = Series::from_values("A2", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(30), Scalar::Int64(40)]).unwrap();
+        let s_id = Series::from_values(
+            "id",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let s_a1 = Series::from_values(
+            "A1",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let s_a2 = Series::from_values(
+            "A2",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(30), Scalar::Int64(40)],
+        )
+        .unwrap();
         let df_wide = DataFrame::from_series(vec![s_id, s_a1, s_a2]).unwrap();
         let wtl = wide_to_long(&df_wide, &["A"], &["id"], "year", "", r"\d+").unwrap();
         assert_eq!(wtl.len(), 4);
-        let wtl_m = df_wide.wide_to_long(&["A"], &["id"], "year", "", r"\d+").unwrap();
+        let wtl_m = df_wide
+            .wide_to_long(&["A"], &["id"], "year", "", r"\d+")
+            .unwrap();
         assert_eq!(wtl_m.len(), 4);
 
         // cut_bins and qcut_at_quantiles test
-        let num_series = Series::from_values("nums", vec![0_i64.into(), 1_i64.into(), 2_i64.into()], vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(10.0)]).unwrap();
+        let num_series = Series::from_values(
+            "nums",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
         let cut_res = cut_bins(
             &num_series,
-            &[Scalar::Float64(0.0), Scalar::Float64(5.0), Scalar::Float64(10.0)],
+            &[
+                Scalar::Float64(0.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(10.0),
+            ],
             true,
             None,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cut_res.len(), 3);
         let qcut_res = qcut_at_quantiles(&num_series, &[0.0, 0.5, 1.0], None).unwrap();
         assert_eq!(qcut_res.len(), 3);
 
         // json_normalize_str test
         let jn = json_normalize_str(r#"[{"x": {"y": 100}}]"#, None, None).unwrap();
-        assert_eq!(jn.column("x.y").unwrap().value(0), Some(&Scalar::Int64(100)));
+        assert_eq!(
+            jn.column("x.y").unwrap().value(0),
+            Some(&Scalar::Int64(100))
+        );
 
         // api::types test
         assert!(crate::api::types::is_object_dtype(&DType::Utf8));
         assert!(crate::api::types::is_int64_dtype(&DType::Int64));
         assert!(crate::api::types::is_dtype_equal(&DType::Int64, &"int64"));
+
+        // array test
+        let arr = array(&[Scalar::Int64(1), Scalar::Int64(2)], None).unwrap();
+        assert_eq!(arr.len(), 2);
+
+        // col & lit test
+        let expr = (col("a") + col("b")) * lit(Scalar::Int64(2));
+        assert!(matches!(expr, crate::Expr::Mul { .. }));
+
+        // interval_range test
+        let ir = interval_range(Some(0.0), Some(10.0), Some(5), None, None).unwrap();
+        assert_eq!(ir.len(), 5);
+
+        // NamedAgg & Grouper test
+        let na = NamedAgg::new("c", "sum");
+        assert_eq!(na.column, "c");
+        let grp = Grouper::new().with_key("d");
+        assert_eq!(grp.key.as_deref(), Some("d"));
+
+        // Flags test
+        let flg = Flags::default();
+        assert!(flg.allows_duplicate_labels());
+
+        // IndexSlice test
+        let is: IndexSlice = IndexSlice::all();
+        assert_eq!(is.start, None);
+
+        // NA, NAT, NaT test
+        assert!(NA.is_null());
+        assert!(NAT.is_null());
+        assert_eq!(NAT, NaT);
+
+        // eng_float_format test
+        let eff = eng_float_format(1000.0, Some(2), false);
+        assert_eq!(eff, "1.00E+03");
+        reset_eng_float_format();
+        assert_eq!(get_eng_float_format(), None);
+        set_eng_float_format(2, false);
+        assert_eq!(get_eng_float_format(), Some((2, false)));
+        reset_eng_float_format();
+
+        // Options system test
+        reset_option(None).unwrap();
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(60));
+        set_option("display.max_rows", 80).unwrap();
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(80));
+        let _ = describe_option(Some("max_rows")).unwrap();
+        {
+            let _guard = option_context(&[("display.max_rows", OptionValue::Int(120))]).unwrap();
+            assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(120));
+        }
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(80));
+        reset_option(Some("display.max_rows")).unwrap();
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(60));
+
+        // Errors module test
+        let _: errors::MergeError = errors::JoinError::Frame(FrameError::LengthMismatch {
+            index_len: 0,
+            column_len: 1,
+        });
+        let _: errors::ParserError = errors::IoError::MissingHeaders;
+        let _: errors::EmptyDataError = errors::IoError::MissingHeaders;
+        let _: errors::DuplicateLabelError =
+            errors::IndexError::InvalidArgument("duplicate labels".into());
+        let _: errors::InvalidIndexError =
+            errors::IndexError::InvalidArgument("invalid index".into());
+        let _: errors::OutOfBoundsDatetime = errors::DateRangeError::InsufficientParams;
+        let _: errors::OutOfBoundsTimedelta = errors::TimedeltaRangeError::InsufficientParams;
+        let _: errors::UndefinedVariableError = errors::ExprError::UnknownSeries("x".into());
+
+        // api::types scalar and dtype inspectors
+        assert!(crate::api::types::is_number(&Scalar::Int64(42)));
+        assert!(crate::api::types::is_number(&Scalar::Float64(42.5)));
+        assert!(crate::api::types::is_number(&Scalar::Bool(true)));
+        assert!(!crate::api::types::is_number(&Scalar::Utf8(
+            "pandas".into()
+        )));
+        assert!(crate::api::types::is_bool(&Scalar::Bool(true)));
+        assert!(!crate::api::types::is_bool(&Scalar::Int64(1)));
+        assert!(crate::api::types::is_integer(&Scalar::Int64(99)));
+        assert!(!crate::api::types::is_integer(&Scalar::Float64(99.0)));
+        assert!(crate::api::types::is_float(&Scalar::Float64(99.0)));
+        assert!(!crate::api::types::is_float(&Scalar::Int64(99)));
+        assert!(crate::api::types::is_float64_dtype(&DType::Float64));
+        assert!(crate::api::types::is_float64_dtype(&DType::Float64Nullable));
+        assert!(!crate::api::types::is_float64_dtype(&DType::Int64));
+        assert!(!crate::api::types::is_int32_dtype(&DType::Int64));
+
+        // api::extensions and api::indexers
+        crate::api::extensions::register_dataframe_accessor("geo");
+        crate::api::extensions::register_series_accessor("geo");
+        crate::api::extensions::register_index_accessor("geo");
+
+        let b_idx = crate::api::indexers::BaseIndexer::new(10, 2);
+        assert_eq!(b_idx.window_size, 10);
+        assert_eq!(b_idx.step, 2);
+
+        let f_idx = crate::api::indexers::FixedForwardWindowIndexer::new(5);
+        assert_eq!(f_idx.window_size, 5);
+
+        let v_idx = crate::api::indexers::VariableOffsetWindowIndexer::new(-1);
+        assert_eq!(v_idx.index_offset, -1);
+
+        // Top-level concat and merge tests
+        let df1 = read_csv_str("key,val\n1,10\n2,20").unwrap();
+        let df2 = read_csv_str("key,val\n3,30\n4,40").unwrap();
+        let df_concat = concat(&[&df1, &df2]).unwrap();
+        assert_eq!(df_concat.len(), 4);
+
+        let s1 = Series::from_values(
+            "x",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "x",
+            vec![IndexLabel::Int64(2), IndexLabel::Int64(3)],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        )
+        .unwrap();
+        let s_concat = concat(&[&s1, &s2]).unwrap();
+        assert_eq!(s_concat.len(), 4);
+
+        let df_merge_left = read_csv_str("k,v1\na,1\nb,2").unwrap();
+        let df_merge_right = read_csv_str("k,v2\na,10\nb,20").unwrap();
+        let merged = merge(&df_merge_left, &df_merge_right, "k", JoinType::Inner).unwrap();
+        assert_eq!(merged.index.len(), 2);
+
+        let merged_on = merge_on(&df_merge_left, &df_merge_right, &["k"], JoinType::Inner).unwrap();
+        assert_eq!(merged_on.index.len(), 2);
+
+        // to_pickle, to_pickle_with_options, and read_pickle
+        let pkl_path = std::env::temp_dir().join(format!(
+            "fp_test_to_pickle_{}_{}.pkl",
+            std::process::id(),
+            line!()
+        ));
+        to_pickle(&df1, &pkl_path).expect("to_pickle should succeed");
+        let df_from_pkl = read_pickle(&pkl_path).expect("read_pickle should succeed");
+        assert_eq!(df_from_pkl.len(), df1.len());
+
+        let pkl_opts_path = std::env::temp_dir().join(format!(
+            "fp_test_to_pickle_opts_{}_{}.pkl",
+            std::process::id(),
+            line!()
+        ));
+        to_pickle_with_options(&df1, &pkl_opts_path, &PickleWriteOptions::default())
+            .expect("to_pickle_with_options should succeed");
+        let df_from_opts_pkl =
+            read_pickle(&pkl_opts_path).expect("read_pickle opts should succeed");
+        assert_eq!(df_from_opts_pkl.len(), df1.len());
+
+        let bytes = write_pickle_bytes(&df1).expect("write_pickle_bytes should succeed");
+        let df_from_bytes = read_pickle_bytes(&bytes).expect("read_pickle_bytes should succeed");
+        assert_eq!(df_from_bytes.len(), df1.len());
+
+        // Extension dtypes from prelude
+        let cat_dt = CategoricalDtype::default();
+        assert_eq!(cat_dt.name(), "category");
+        assert_eq!(cat_dt.as_dtype(), DType::Categorical);
+
+        let per_dt = PeriodDtype::default();
+        assert_eq!(per_dt.name(), "period[D]");
+        assert_eq!(per_dt.as_dtype(), DType::Period);
+
+        let int_dt = IntervalDtype::default();
+        assert_eq!(int_dt.name(), "interval");
+        assert_eq!(int_dt.as_dtype(), DType::Interval);
+
+        let _proto = PickleProtocol::V3;
+
+        // Top-level eval
+        let eval_res = eval("key + val", &df1).expect("eval should succeed");
+        assert_eq!(eval_res.len(), 2);
+        assert_eq!(eval_res.values()[0], Scalar::Int64(11));
+
+        // Scalar null/not-null methods
+        let valid_sc = Scalar::Int64(42);
+        let null_sc = Scalar::Null(NullKind::NaN);
+        assert!(valid_sc.notna());
+        assert!(valid_sc.notnull());
+        assert!(valid_sc.not_na());
+        assert!(valid_sc.is_not_na());
+        assert!(!valid_sc.isna());
+        assert!(!valid_sc.isnull());
+
+        assert!(!null_sc.notna());
+        assert!(!null_sc.notnull());
+        assert!(!null_sc.not_na());
+        assert!(!null_sc.is_not_na());
+        assert!(null_sc.isna());
+        assert!(null_sc.isnull());
+
+        // Prelude IO re-exports smoke tests
+        let fwf_df = read_fwf_str("name age\nAmy  25 \nBob  30 ", &FwfReadOptions::default())
+            .expect("read_fwf_str");
+        assert_eq!(fwf_df.index().len(), 2);
+
+        let tsv_df = read_table_str("a\tb\n1\t2\n3\t4").expect("read_table_str");
+        assert_eq!(tsv_df.index().len(), 2);
+
+        let clip_df = read_clipboard_str("col1\tcol2\nx\ty").expect("read_clipboard_str");
+        assert_eq!(clip_df.index().len(), 1);
+
+        let xml_str = write_xml_string(&df1).expect("write_xml_string");
+        assert!(xml_str.contains("<row>"));
     }
 }

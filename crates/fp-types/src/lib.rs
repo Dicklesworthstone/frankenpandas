@@ -478,6 +478,15 @@ impl std::str::FromStr for DType {
             "interval" | "Interval" => Ok(Self::Interval),
             "sparse" | "Sparse" => Ok(Self::Sparse),
             "null" | "Null" => Ok(Self::Null),
+            _ if trimmed.starts_with("period[") || trimmed.starts_with("Period[") => {
+                Ok(Self::Period)
+            }
+            _ if trimmed.starts_with("interval[") || trimmed.starts_with("Interval[") => {
+                Ok(Self::Interval)
+            }
+            _ if trimmed.starts_with("sparse[") || trimmed.starts_with("Sparse[") => {
+                Ok(Self::Sparse)
+            }
             _ if trimmed.starts_with("datetime64")
                 || trimmed.starts_with("datetime")
                 || trimmed.starts_with("<M8") =>
@@ -747,6 +756,99 @@ pub mod api {
             }
             "mixed"
         }
+
+        /// Matches `pd.api.types.is_float64_dtype`.
+        #[must_use]
+        pub fn is_float64_dtype(dtype: &impl AsDType) -> bool {
+            matches!(dtype.as_dtype(), DType::Float64 | DType::Float64Nullable)
+        }
+
+        /// Matches `pd.api.types.is_int32_dtype`.
+        #[must_use]
+        pub fn is_int32_dtype(_dtype: &impl AsDType) -> bool {
+            false
+        }
+
+        /// Matches `pd.api.types.is_number`.
+        #[must_use]
+        pub fn is_number(scalar: &Scalar) -> bool {
+            scalar.is_numeric() || matches!(scalar, Scalar::Bool(_))
+        }
+
+        /// Matches `pd.api.types.is_bool`.
+        #[must_use]
+        pub fn is_bool(scalar: &Scalar) -> bool {
+            matches!(scalar, Scalar::Bool(_))
+        }
+
+        /// Matches `pd.api.types.is_integer`.
+        #[must_use]
+        pub fn is_integer(scalar: &Scalar) -> bool {
+            matches!(scalar, Scalar::Int64(_))
+        }
+
+        /// Matches `pd.api.types.is_float`.
+        #[must_use]
+        pub fn is_float(scalar: &Scalar) -> bool {
+            matches!(scalar, Scalar::Float64(_))
+        }
+    }
+
+    pub mod extensions {
+        //! Extension arrays and accessor registration hooks (`pandas.api.extensions`).
+
+        /// Compatibility registration hook for DataFrame accessors matching `pd.api.extensions.register_dataframe_accessor`.
+        pub fn register_dataframe_accessor(_name: &str) {}
+
+        /// Compatibility registration hook for Series accessors matching `pd.api.extensions.register_series_accessor`.
+        pub fn register_series_accessor(_name: &str) {}
+
+        /// Compatibility registration hook for Index accessors matching `pd.api.extensions.register_index_accessor`.
+        pub fn register_index_accessor(_name: &str) {}
+    }
+
+    pub mod indexers {
+        //! Custom window and rolling indexers (`pandas.api.indexers`).
+
+        /// Base specification for window indexers, matching `pd.api.indexers.BaseIndexer`.
+        #[derive(Debug, Clone, PartialEq, Eq, Default)]
+        pub struct BaseIndexer {
+            pub window_size: usize,
+            pub step: usize,
+        }
+
+        impl BaseIndexer {
+            #[must_use]
+            pub const fn new(window_size: usize, step: usize) -> Self {
+                Self { window_size, step }
+            }
+        }
+
+        /// Fixed forward-looking window indexer, matching `pd.api.indexers.FixedForwardWindowIndexer`.
+        #[derive(Debug, Clone, PartialEq, Eq, Default)]
+        pub struct FixedForwardWindowIndexer {
+            pub window_size: usize,
+        }
+
+        impl FixedForwardWindowIndexer {
+            #[must_use]
+            pub const fn new(window_size: usize) -> Self {
+                Self { window_size }
+            }
+        }
+
+        /// Variable offset window indexer, matching `pd.api.indexers.VariableOffsetWindowIndexer`.
+        #[derive(Debug, Clone, PartialEq, Eq, Default)]
+        pub struct VariableOffsetWindowIndexer {
+            pub index_offset: i64,
+        }
+
+        impl VariableOffsetWindowIndexer {
+            #[must_use]
+            pub const fn new(index_offset: i64) -> Self {
+                Self { index_offset }
+            }
+        }
     }
 }
 
@@ -817,6 +919,200 @@ impl SparseDType {
     }
 }
 
+impl AsDType for SparseDType {
+    fn as_dtype(&self) -> DType {
+        DType::Sparse
+    }
+}
+
+/// Pandas-equivalent categorical dtype descriptor (`pd.CategoricalDtype`).
+///
+/// Encapsulates the optional category vocabulary and ordering semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct CategoricalDtype {
+    pub categories: Option<Vec<String>>,
+    pub ordered: bool,
+}
+
+pub type CategoricalDType = CategoricalDtype;
+
+impl CategoricalDtype {
+    /// Construct a new `CategoricalDtype`.
+    #[must_use]
+    pub const fn new(categories: Option<Vec<String>>, ordered: bool) -> Self {
+        Self {
+            categories,
+            ordered,
+        }
+    }
+
+    /// Return categories if known.
+    #[must_use]
+    pub fn categories(&self) -> Option<&[String]> {
+        self.categories.as_deref()
+    }
+
+    /// Return whether this categorical is ordered.
+    #[must_use]
+    pub const fn ordered(&self) -> bool {
+        self.ordered
+    }
+
+    /// Return the pandas dtype string name (`"category"`).
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        "category"
+    }
+
+    /// Return the pandas kind character (`"O"`).
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        "O"
+    }
+}
+
+impl AsDType for CategoricalDtype {
+    fn as_dtype(&self) -> DType {
+        DType::Categorical
+    }
+}
+
+impl std::fmt::Display for CategoricalDtype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ord_str = if self.ordered { "True" } else { "False" };
+        match &self.categories {
+            Some(cats) => write!(
+                f,
+                "CategoricalDtype(categories={cats:?}, ordered={ord_str})"
+            ),
+            None => write!(f, "CategoricalDtype(categories=None, ordered={ord_str})"),
+        }
+    }
+}
+
+/// Pandas-equivalent period dtype descriptor (`pd.PeriodDtype`).
+///
+/// Represents time period durations with a specific frequency (default `"D"`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PeriodDtype {
+    pub freq: String,
+}
+
+pub type PeriodDType = PeriodDtype;
+
+impl PeriodDtype {
+    /// Construct a new `PeriodDtype` with given frequency.
+    #[must_use]
+    pub fn new(freq: impl Into<String>) -> Self {
+        Self { freq: freq.into() }
+    }
+
+    /// Return the period frequency string.
+    #[must_use]
+    pub fn freq(&self) -> &str {
+        &self.freq
+    }
+
+    /// Return the pandas dtype string name (`period[<freq>]`).
+    #[must_use]
+    pub fn name(&self) -> String {
+        format!("period[{}]", self.freq)
+    }
+
+    /// Return the pandas kind character (`"O"`).
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        "O"
+    }
+}
+
+impl Default for PeriodDtype {
+    fn default() -> Self {
+        Self {
+            freq: "D".to_string(),
+        }
+    }
+}
+
+impl AsDType for PeriodDtype {
+    fn as_dtype(&self) -> DType {
+        DType::Period
+    }
+}
+
+impl std::fmt::Display for PeriodDtype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "period[{}]", self.freq)
+    }
+}
+
+/// Pandas-equivalent interval dtype descriptor (`pd.IntervalDtype`).
+///
+/// Encapsulates the interval subtype and endpoint closure behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntervalDtype {
+    pub subtype: DType,
+    pub closed: Option<IntervalClosed>,
+}
+
+pub type IntervalDType = IntervalDtype;
+
+impl IntervalDtype {
+    /// Construct a new `IntervalDtype`.
+    #[must_use]
+    pub const fn new(subtype: DType, closed: Option<IntervalClosed>) -> Self {
+        Self { subtype, closed }
+    }
+
+    /// Return the interval subtype.
+    #[must_use]
+    pub const fn subtype(&self) -> &DType {
+        &self.subtype
+    }
+
+    /// Return the endpoint closure convention.
+    #[must_use]
+    pub const fn closed(&self) -> Option<IntervalClosed> {
+        self.closed
+    }
+
+    /// Return the pandas dtype string name (`"interval"`).
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        "interval"
+    }
+
+    /// Return the pandas kind character (`"O"`).
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        "O"
+    }
+}
+
+impl Default for IntervalDtype {
+    fn default() -> Self {
+        Self {
+            subtype: DType::Float64,
+            closed: Some(IntervalClosed::Right),
+        }
+    }
+}
+
+impl AsDType for IntervalDtype {
+    fn as_dtype(&self) -> DType {
+        DType::Interval
+    }
+}
+
+impl std::fmt::Display for IntervalDtype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.closed {
+            Some(c) => write!(f, "interval[{}, {c}]", self.subtype.name()),
+            None => write!(f, "interval[{}]", self.subtype.name()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NullKind {
@@ -877,6 +1173,16 @@ impl std::fmt::Display for Scalar {
         }
     }
 }
+
+/// Pandas `pd.NA` singleton representing missing data in nullable dtypes.
+pub const NA: Scalar = Scalar::Null(NullKind::Null);
+
+/// Pandas `pd.NaT` singleton representing Not-a-Time in datetime/timedelta data.
+pub const NAT: Scalar = Scalar::Null(NullKind::NaT);
+
+/// Alias for [`NAT`] matching pandas capitalization `pd.NaT`.
+#[allow(non_upper_case_globals)]
+pub const NaT: Scalar = NAT;
 
 // Ergonomic From impls (br-frankenpandas-esjjy / fd90.182). Mirrors
 // IndexLabel's From<i64>/From<&str>/From<String> so users can write
@@ -1129,6 +1435,42 @@ impl Scalar {
         self.is_missing()
     }
 
+    /// Return `true` if this scalar is NA/missing (alias for [`Self::is_na`]).
+    #[must_use]
+    pub fn isna(&self) -> bool {
+        self.is_missing()
+    }
+
+    /// Return `true` if this scalar is null (alias for [`Self::is_null`]).
+    #[must_use]
+    pub fn isnull(&self) -> bool {
+        self.is_null()
+    }
+
+    /// Return `true` if this scalar is not NA/missing (matches pandas `notna`).
+    #[must_use]
+    pub fn notna(&self) -> bool {
+        !self.is_missing()
+    }
+
+    /// Return `true` if this scalar is not null/missing (matches pandas `notnull`).
+    #[must_use]
+    pub fn notnull(&self) -> bool {
+        !self.is_missing()
+    }
+
+    /// Return `true` if this scalar is not NA/missing.
+    #[must_use]
+    pub fn is_not_na(&self) -> bool {
+        !self.is_missing()
+    }
+
+    /// Return `true` if this scalar is not NA/missing.
+    #[must_use]
+    pub fn not_na(&self) -> bool {
+        !self.is_missing()
+    }
+
     #[must_use]
     pub fn coalesce(&self, other: &Self) -> Self {
         if self.is_missing() {
@@ -1333,6 +1675,8 @@ pub enum TypeError {
     InvalidIntervalStep { step: f64 },
     #[error("interval_range step {step} does not evenly divide range end-start={span}")]
     IntervalStepDoesNotDivide { step: f64, span: f64 },
+    #[error("interval_range requires exactly 3 of (start, end, periods, freq) to be specified")]
+    IntervalRangeParameterCount,
     #[error("cannot parse '{value}' as {target}")]
     ValueNotParseable { value: String, target: String },
 }
@@ -1874,6 +2218,394 @@ pub fn float_to_string_for_astype(value: f64) -> String {
         rendered.insert(digits_position, '0');
     }
     rendered
+}
+
+static ENG_FLOAT_ACCURACY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(3);
+static ENG_FLOAT_USE_PREFIX: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static ENG_FLOAT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Format float values according to engineering format, matching pandas `EngFormatter`.
+pub fn eng_float_format(num: f64, accuracy: Option<usize>, use_eng_prefix: bool) -> String {
+    if num.is_nan() {
+        return "NaN".to_string();
+    }
+    if num.is_infinite() {
+        return if num < 0.0 {
+            "-inf".to_string()
+        } else {
+            "inf".to_string()
+        };
+    }
+
+    let sign = if num < 0.0 { -1.0 } else { 1.0 };
+    let abs_num = num.abs();
+
+    let pow10 = if abs_num != 0.0 {
+        let p = (abs_num.log10() / 3.0).floor() as i32 * 3;
+        p.clamp(-24, 24)
+    } else {
+        0
+    };
+
+    let prefix = if use_eng_prefix {
+        match pow10 {
+            -24 => "y",
+            -21 => "z",
+            -18 => "a",
+            -15 => "f",
+            -12 => "p",
+            -9 => "n",
+            -6 => "u",
+            -3 => "m",
+            0 => "",
+            3 => "k",
+            6 => "M",
+            9 => "G",
+            12 => "T",
+            15 => "P",
+            18 => "E",
+            21 => "Z",
+            24 => "Y",
+            _ => "",
+        }
+        .to_string()
+    } else if pow10 < 0 {
+        format!("E-{:02}", -pow10)
+    } else {
+        format!("E+{:02}", pow10)
+    };
+
+    let mant = (sign * abs_num) / 10f64.powi(pow10);
+
+    if let Some(acc) = accuracy {
+        format!("{mant:.acc$}{prefix}", acc = acc)
+    } else {
+        format!("{mant}{prefix}")
+    }
+}
+
+/// Set pandas-compatible engineering float formatting option.
+/// Matches `pd.set_eng_float_format(accuracy=3, use_eng_prefix=False)`.
+pub fn set_eng_float_format(accuracy: usize, use_eng_prefix: bool) {
+    use std::sync::atomic::Ordering;
+    ENG_FLOAT_ACCURACY.store(accuracy, Ordering::Relaxed);
+    ENG_FLOAT_USE_PREFIX.store(use_eng_prefix, Ordering::Relaxed);
+    ENG_FLOAT_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Reset engineering float formatting back to default.
+pub fn reset_eng_float_format() {
+    use std::sync::atomic::Ordering;
+    ENG_FLOAT_ACTIVE.store(false, Ordering::Relaxed);
+}
+
+/// Get the current engineering float format configuration if active.
+pub fn get_eng_float_format() -> Option<(usize, bool)> {
+    use std::sync::atomic::Ordering;
+    if ENG_FLOAT_ACTIVE.load(Ordering::Relaxed) {
+        Some((
+            ENG_FLOAT_ACCURACY.load(Ordering::Relaxed),
+            ENG_FLOAT_USE_PREFIX.load(Ordering::Relaxed),
+        ))
+    } else {
+        None
+    }
+}
+
+// ── Global Configuration Options (matching pd.options) ───────────────────
+
+/// Error encountered when inspecting or modifying configuration options.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum OptionError {
+    #[error("no such option: '{pat}'")]
+    NotFound { pat: String },
+    #[error("option pattern '{pat}' matches multiple options: {matches:?}")]
+    Ambiguous { pat: String, matches: Vec<String> },
+    #[error("invalid option value for '{pat}': {reason}")]
+    InvalidValue { pat: String, reason: String },
+}
+
+/// Represents a configuration option value, matching pandas `pd.options`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum OptionValue {
+    None,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+impl OptionValue {
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    #[must_use]
+    pub const fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_float(&self) -> Option<f64> {
+        match self {
+            Self::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for OptionValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "None"),
+            Self::Int(i) => write!(f, "{i}"),
+            Self::Float(fl) => write!(f, "{fl}"),
+            Self::Bool(b) => write!(f, "{b}"),
+            Self::Str(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl From<i64> for OptionValue {
+    fn from(v: i64) -> Self {
+        Self::Int(v)
+    }
+}
+
+impl From<i32> for OptionValue {
+    fn from(v: i32) -> Self {
+        Self::Int(i64::from(v))
+    }
+}
+
+impl From<usize> for OptionValue {
+    fn from(v: usize) -> Self {
+        Self::Int(i64::try_from(v).unwrap_or(i64::MAX))
+    }
+}
+
+impl From<f64> for OptionValue {
+    fn from(v: f64) -> Self {
+        Self::Float(v)
+    }
+}
+
+impl From<bool> for OptionValue {
+    fn from(v: bool) -> Self {
+        Self::Bool(v)
+    }
+}
+
+impl From<&str> for OptionValue {
+    fn from(v: &str) -> Self {
+        Self::Str(v.to_string())
+    }
+}
+
+impl From<String> for OptionValue {
+    fn from(v: String) -> Self {
+        Self::Str(v)
+    }
+}
+
+fn default_options_map() -> std::collections::BTreeMap<String, OptionValue> {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("display.max_rows".to_string(), OptionValue::Int(60));
+    m.insert("display.min_rows".to_string(), OptionValue::Int(10));
+    m.insert("display.max_columns".to_string(), OptionValue::Int(0));
+    m.insert("display.width".to_string(), OptionValue::Int(80));
+    m.insert("display.precision".to_string(), OptionValue::Int(6));
+    m.insert("display.max_colwidth".to_string(), OptionValue::Int(50));
+    m.insert(
+        "display.show_dimensions".to_string(),
+        OptionValue::Bool(true),
+    );
+    m.insert("display.float_format".to_string(), OptionValue::None);
+    m.insert("mode.sim_interactive".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "mode.chained_assignment".to_string(),
+        OptionValue::Str("warn".to_string()),
+    );
+    m.insert("mode.use_inf_as_na".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "compute.use_bottleneck".to_string(),
+        OptionValue::Bool(true),
+    );
+    m.insert("compute.use_numba".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "io.excel.zip.reader".to_string(),
+        OptionValue::Str("zipfile".to_string()),
+    );
+    m
+}
+
+static GLOBAL_OPTIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, OptionValue>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(default_options_map()));
+
+fn resolve_option_key(
+    pat: &str,
+    map: &std::collections::BTreeMap<String, OptionValue>,
+) -> Result<String, OptionError> {
+    if map.contains_key(pat) {
+        return Ok(pat.to_string());
+    }
+    let matches: Vec<String> = map
+        .keys()
+        .filter(|k| k.ends_with(pat) || k.contains(pat))
+        .cloned()
+        .collect();
+    if matches.len() == 1 {
+        Ok(matches[0].clone())
+    } else if matches.is_empty() {
+        Err(OptionError::NotFound {
+            pat: pat.to_string(),
+        })
+    } else {
+        Err(OptionError::Ambiguous {
+            pat: pat.to_string(),
+            matches,
+        })
+    }
+}
+
+/// Retrieve the current value of a configuration option, matching `pd.get_option(pat)`.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] if `pat` does not match any known option,
+/// or [`OptionError::Ambiguous`] if it matches multiple options.
+pub fn get_option(pat: &str) -> Result<OptionValue, OptionError> {
+    let map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = resolve_option_key(pat, &map)?;
+    Ok(map.get(&key).cloned().unwrap_or(OptionValue::None))
+}
+
+/// Set the value of a configuration option, matching `pd.set_option(pat, value)`.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] if `pat` does not match any known option,
+/// or [`OptionError::Ambiguous`] if it matches multiple options.
+pub fn set_option(pat: &str, val: impl Into<OptionValue>) -> Result<(), OptionError> {
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = resolve_option_key(pat, &map)?;
+    let v = val.into();
+    map.insert(key, v);
+    Ok(())
+}
+
+/// Reset one or all configuration options to their defaults, matching `pd.reset_option(pat)`.
+///
+/// If `pat` is `None` or `"all"`, all options are reset to defaults.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] or [`OptionError::Ambiguous`] if `pat` does not uniquely match an option.
+pub fn reset_option(pat: Option<&str>) -> Result<(), OptionError> {
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let defaults = default_options_map();
+    let p = pat.unwrap_or("all");
+    if p == "all" {
+        *map = defaults;
+        return Ok(());
+    }
+    let key = resolve_option_key(p, &defaults)?;
+    if let Some(def_val) = defaults.get(&key) {
+        map.insert(key, def_val.clone());
+    }
+    Ok(())
+}
+
+/// Return formatted descriptions of one or all options, matching `pd.describe_option(pat)`.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] if `pat` is provided but matches no options.
+pub fn describe_option(pat: Option<&str>) -> Result<String, OptionError> {
+    use std::fmt::Write as _;
+    let map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut out = String::with_capacity(map.len() * 40);
+    let mut matched = 0;
+    for (k, v) in map.iter() {
+        if let Some(p) = pat
+            && !k.contains(p)
+        {
+            continue;
+        }
+        if matched > 0 {
+            out.push('\n');
+        }
+        let _ = write!(out, "{k} : [currently: {v}]");
+        matched += 1;
+    }
+    if matched == 0
+        && let Some(p) = pat
+    {
+        return Err(OptionError::NotFound { pat: p.to_string() });
+    }
+    Ok(out)
+}
+
+/// RAII scope guard that restores options to their prior values when dropped.
+#[derive(Debug)]
+pub struct OptionContextGuard {
+    saved: Vec<(String, OptionValue)>,
+}
+
+impl Drop for OptionContextGuard {
+    fn drop(&mut self) {
+        let mut map = GLOBAL_OPTIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (k, old) in self.saved.drain(..) {
+            map.insert(k, old);
+        }
+    }
+}
+
+/// Temporarily override options within a scoped context, matching `pd.option_context(...)`.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] or [`OptionError::Ambiguous`] if any pattern is invalid.
+pub fn option_context(entries: &[(&str, OptionValue)]) -> Result<OptionContextGuard, OptionError> {
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut saved = Vec::with_capacity(entries.len());
+    for (pat, new_val) in entries {
+        let key = resolve_option_key(pat, &map)?;
+        if let Some(old) = map.get(&key) {
+            saved.push((key.clone(), old.clone()));
+        }
+        map.insert(key, new_val.clone());
+    }
+    Ok(OptionContextGuard { saved })
 }
 
 /// Cast a scalar reference to a target dtype (clones only when conversion is needed).
@@ -6587,6 +7319,79 @@ pub fn interval_range_by_step(
         out.push(Interval::new(left, right, closed));
     }
     Ok(out)
+}
+
+/// Build equal-width intervals spanning a range, matching `pd.interval_range`.
+///
+/// Of the four parameters `start`, `end`, `periods`, and `freq`, exactly three must
+/// be specified (`Some`). `closed` defaults to `IntervalClosed::Right` when `None`.
+///
+/// # Errors
+/// Returns `TypeError::IntervalRangeParameterCount` if not exactly 3 of the 4 parameters
+/// are specified.
+/// Returns `TypeError::InvalidIntervalStep` if `freq` is not finite, not positive, or zero.
+/// Returns `TypeError::IntervalStepDoesNotDivide` if `start`, `end`, and `freq` are given
+/// but `(end - start)` is not an integer multiple of `freq`.
+pub fn interval_range(
+    start: Option<f64>,
+    end: Option<f64>,
+    periods: Option<usize>,
+    freq: Option<f64>,
+    closed: Option<IntervalClosed>,
+) -> Result<Vec<Interval>, TypeError> {
+    let count = usize::from(start.is_some())
+        + usize::from(end.is_some())
+        + usize::from(periods.is_some())
+        + usize::from(freq.is_some());
+    if count != 3 {
+        return Err(TypeError::IntervalRangeParameterCount);
+    }
+    let closed = closed.unwrap_or(IntervalClosed::Right);
+
+    match (start, end, periods, freq) {
+        (Some(start), Some(end), Some(periods), None) => {
+            Ok(interval_range_by_periods(start, end, periods, closed))
+        }
+        (Some(start), Some(end), None, Some(freq)) => {
+            interval_range_by_step(start, end, freq, closed)
+        }
+        (Some(start), None, Some(periods), Some(freq)) => {
+            if !freq.is_finite() || !freq.is_sign_positive() || freq == 0.0 {
+                return Err(TypeError::InvalidIntervalStep { step: freq });
+            }
+            if !start.is_finite() || periods == 0 {
+                return Ok(Vec::new());
+            }
+            let mut out = Vec::with_capacity(periods);
+            for i in 0..periods {
+                let left = start + freq * (i as f64);
+                let right = start + freq * ((i + 1) as f64);
+                out.push(Interval::new(left, right, closed));
+            }
+            Ok(out)
+        }
+        (None, Some(end), Some(periods), Some(freq)) => {
+            if !freq.is_finite() || !freq.is_sign_positive() || freq == 0.0 {
+                return Err(TypeError::InvalidIntervalStep { step: freq });
+            }
+            if !end.is_finite() || periods == 0 {
+                return Ok(Vec::new());
+            }
+            let start = end - freq * (periods as f64);
+            let mut out = Vec::with_capacity(periods);
+            for i in 0..periods {
+                let left = start + freq * (i as f64);
+                let right = if i + 1 == periods {
+                    end
+                } else {
+                    start + freq * ((i + 1) as f64)
+                };
+                out.push(Interval::new(left, right, closed));
+            }
+            Ok(out)
+        }
+        _ => Err(TypeError::IntervalRangeParameterCount),
+    }
 }
 
 // ── Period types (br-frankenpandas-epoj Phase 1) ────────────────────────
@@ -11352,15 +12157,13 @@ mod tests {
             Scalar::Timedelta64(3 * one_hour),
         ];
         let std = super::nanstd(&vals, 0);
-        match std {
-            Scalar::Timedelta64(ns) => {
-                let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
-                assert!(
-                    (ns as f64 - expected).abs() < 1e6,
-                    "expected ~{expected} ns, got {ns}"
-                );
-            }
-            other => panic!("expected Timedelta64, got {other:?}"),
+        assert!(matches!(std, Scalar::Timedelta64(_)));
+        if let Scalar::Timedelta64(ns) = std {
+            let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
+            assert!(
+                (ns as f64 - expected).abs() < 1e6,
+                "expected ~{expected} ns, got {ns}"
+            );
         }
     }
 
@@ -11369,14 +12172,8 @@ mod tests {
         let one_hour = 3_600 * 1_000_000_000_i64;
         let vals = vec![Scalar::Timedelta64(one_hour)];
         // ddof=1 with n=1 → underflow, returns NaT
-        match super::nanstd(&vals, 1) {
-            Scalar::Timedelta64(v) => assert_eq!(v, Timedelta::NAT),
-            other => panic!("expected Timedelta64 NAT, got {other:?}"),
-        }
-        match super::nansem(&vals, 1) {
-            Scalar::Timedelta64(v) => assert_eq!(v, Timedelta::NAT),
-            other => panic!("expected Timedelta64 NAT, got {other:?}"),
-        }
+        assert_eq!(super::nanstd(&vals, 1), Scalar::Timedelta64(Timedelta::NAT));
+        assert_eq!(super::nansem(&vals, 1), Scalar::Timedelta64(Timedelta::NAT));
     }
 
     #[test]
@@ -14314,7 +15111,7 @@ mod tests {
 
     // ── interval_range tests (br-frankenpandas-xaom) ────────────────────
 
-    use super::{TypeError, interval_range_by_periods, interval_range_by_step};
+    use super::{TypeError, interval_range, interval_range_by_periods, interval_range_by_step};
 
     #[test]
     fn interval_range_by_periods_matches_pandas_default_case() {
@@ -14416,6 +15213,75 @@ mod tests {
         let bins = interval_range_by_step(0.0, 1.0, 0.1, IntervalClosed::Right).expect("ok");
         assert_eq!(bins.len(), 10);
         assert_eq!(bins.last().unwrap().right, 1.0);
+    }
+
+    #[test]
+    fn interval_range_unified_api_tests() {
+        // Case 1: start, end, periods
+        let r1 = interval_range(Some(0.0), Some(10.0), Some(5), None, None).expect("ok");
+        assert_eq!(r1.len(), 5);
+        assert_eq!(r1[0].left, 0.0);
+        assert_eq!(r1[0].right, 2.0);
+        assert_eq!(r1[4].right, 10.0);
+        assert_eq!(r1[0].closed, IntervalClosed::Right);
+
+        // Case 2: start, end, freq
+        let r2 = interval_range(Some(0.0), Some(10.0), None, Some(2.0), None).expect("ok");
+        assert_eq!(r2.len(), 5);
+        assert_eq!(r2[0].left, 0.0);
+        assert_eq!(r2[4].right, 10.0);
+
+        // Case 3: start, periods, freq
+        let r3 = interval_range(
+            Some(0.0),
+            None,
+            Some(5),
+            Some(2.0),
+            Some(IntervalClosed::Both),
+        )
+        .expect("ok");
+        assert_eq!(r3.len(), 5);
+        assert_eq!(r3[0].left, 0.0);
+        assert_eq!(r3[4].right, 10.0);
+        assert_eq!(r3[0].closed, IntervalClosed::Both);
+
+        // Case 4: end, periods, freq
+        let r4 = interval_range(
+            None,
+            Some(10.0),
+            Some(5),
+            Some(2.0),
+            Some(IntervalClosed::Left),
+        )
+        .expect("ok");
+        assert_eq!(r4.len(), 5);
+        assert_eq!(r4[0].left, 0.0);
+        assert_eq!(r4[4].right, 10.0);
+        assert_eq!(r4[0].closed, IntervalClosed::Left);
+
+        // Errors: not exactly 3 arguments
+        assert!(matches!(
+            interval_range(None, None, None, None, None),
+            Err(TypeError::IntervalRangeParameterCount)
+        ));
+        assert!(matches!(
+            interval_range(Some(0.0), Some(10.0), None, None, None),
+            Err(TypeError::IntervalRangeParameterCount)
+        ));
+        assert!(matches!(
+            interval_range(Some(0.0), Some(10.0), Some(5), Some(2.0), None),
+            Err(TypeError::IntervalRangeParameterCount)
+        ));
+
+        // Errors: non-positive freq
+        assert!(matches!(
+            interval_range(Some(0.0), None, Some(5), Some(-1.0), None),
+            Err(TypeError::InvalidIntervalStep { .. })
+        ));
+        assert!(matches!(
+            interval_range(Some(0.0), None, Some(5), Some(0.0), None),
+            Err(TypeError::InvalidIntervalStep { .. })
+        ));
     }
 
     #[test]
@@ -17498,8 +18364,9 @@ mod sparse_dtype_pandas_name_3gxc6 {
 
     #[test]
     fn test_dtype_from_str_and_display() {
-        use crate::DType;
         use std::str::FromStr;
+
+        use crate::DType;
 
         assert_eq!(DType::from_str("int64").unwrap(), DType::Int64);
         assert_eq!(DType::from_str("Int64").unwrap(), DType::Int64Nullable);
@@ -17509,30 +18376,48 @@ mod sparse_dtype_pandas_name_3gxc6 {
         assert_eq!(DType::from_str("boolean").unwrap(), DType::BoolNullable);
         assert_eq!(DType::from_str("string").unwrap(), DType::Utf8);
         assert_eq!(DType::from_str("category").unwrap(), DType::Categorical);
-        assert_eq!(DType::from_str("timedelta64[ns]").unwrap(), DType::Timedelta64);
-        assert_eq!(DType::from_str("datetime64[ns]").unwrap(), DType::Datetime64 { tz: None });
+        assert_eq!(
+            DType::from_str("timedelta64[ns]").unwrap(),
+            DType::Timedelta64
+        );
+        assert_eq!(
+            DType::from_str("datetime64[ns]").unwrap(),
+            DType::Datetime64 { tz: None }
+        );
         assert_eq!(
             DType::from_str("datetime64[ns, UTC]").unwrap(),
-            DType::Datetime64 { tz: Some("UTC".to_string()) }
+            DType::Datetime64 {
+                tz: Some("UTC".to_string())
+            }
         );
         assert_eq!(DType::from_str("period").unwrap(), DType::Period);
         assert_eq!(DType::from_str("interval").unwrap(), DType::Interval);
         assert_eq!(DType::from_str("sparse").unwrap(), DType::Sparse);
 
         assert_eq!(format!("{}", DType::Int64), "int64");
-        assert_eq!(format!("{}", DType::Datetime64 { tz: Some("UTC".to_string()) }), "datetime64[ns, UTC]");
+        assert_eq!(
+            format!(
+                "{}",
+                DType::Datetime64 {
+                    tz: Some("UTC".to_string())
+                }
+            ),
+            "datetime64[ns, UTC]"
+        );
     }
 
     #[test]
     fn test_api_types_inspection_and_infer_dtype() {
-        use crate::api::types::{
-            infer_dtype, is_bool_dtype, is_categorical_dtype, is_datetime64_any_dtype,
-            is_dtype_equal, is_extension_array_dtype, is_float_dtype, is_int64_dtype,
-            is_integer_dtype, is_interval_dtype, is_numeric_dtype, is_object_dtype,
-            is_period_dtype, is_scalar, is_signed_integer_dtype, is_sparse, is_string_dtype,
-            is_timedelta64_dtype, is_unsigned_integer_dtype, pandas_dtype,
+        use crate::{
+            DType, Scalar,
+            api::types::{
+                infer_dtype, is_bool_dtype, is_categorical_dtype, is_datetime64_any_dtype,
+                is_dtype_equal, is_extension_array_dtype, is_float_dtype, is_int64_dtype,
+                is_integer_dtype, is_interval_dtype, is_numeric_dtype, is_object_dtype,
+                is_period_dtype, is_scalar, is_signed_integer_dtype, is_sparse, is_string_dtype,
+                is_timedelta64_dtype, is_unsigned_integer_dtype, pandas_dtype,
+            },
         };
-        use crate::{DType, Scalar};
 
         assert!(is_numeric_dtype(&DType::Int64));
         assert!(is_numeric_dtype(&DType::Float64));
@@ -17588,5 +18473,244 @@ mod sparse_dtype_pandas_name_3gxc6 {
         assert_eq!(infer_dtype(&mixed, true), "mixed");
 
         assert_eq!(infer_dtype(&[], true), "empty");
+    }
+
+    #[test]
+    fn test_na_nat_sentinels_and_eng_float_format() {
+        use super::{
+            NA, NAT, NaT, eng_float_format, get_eng_float_format, reset_eng_float_format,
+            set_eng_float_format,
+        };
+
+        // NA and NAT sentinels
+        assert!(NA.is_null());
+        assert!(NAT.is_null());
+        assert_eq!(NAT, NaT);
+        assert_eq!(format!("{NA}"), "None");
+        assert_eq!(format!("{NAT}"), "NaT");
+
+        // Engineering float format tests
+        assert_eq!(eng_float_format(1000.0, Some(3), false), "1.000E+03");
+        assert_eq!(eng_float_format(0.005, Some(3), false), "5.000E-03");
+        assert_eq!(eng_float_format(1234567.0, Some(3), false), "1.235E+06");
+        assert_eq!(eng_float_format(-9876.54, Some(3), false), "-9.877E+03");
+        assert_eq!(eng_float_format(0.0, Some(3), false), "0.000E+00");
+
+        // With prefixes
+        assert_eq!(eng_float_format(1000.0, Some(3), true), "1.000k");
+        assert_eq!(eng_float_format(0.005, Some(3), true), "5.000m");
+        assert_eq!(eng_float_format(1234567.0, Some(3), true), "1.235M");
+        assert_eq!(eng_float_format(-9876.54, Some(3), true), "-9.877k");
+        assert_eq!(eng_float_format(0.0, Some(3), true), "0.000");
+        assert_eq!(eng_float_format(1.5, Some(3), true), "1.500");
+
+        // Special numbers
+        assert_eq!(eng_float_format(f64::NAN, Some(3), true), "NaN");
+        assert_eq!(eng_float_format(f64::INFINITY, Some(3), true), "inf");
+        assert_eq!(eng_float_format(f64::NEG_INFINITY, Some(3), true), "-inf");
+
+        // Configuration helpers
+        reset_eng_float_format();
+        assert_eq!(get_eng_float_format(), None);
+        set_eng_float_format(4, true);
+        assert_eq!(get_eng_float_format(), Some((4, true)));
+        reset_eng_float_format();
+        assert_eq!(get_eng_float_format(), None);
+    }
+
+    #[test]
+    fn test_options_system() {
+        use super::{
+            OptionError, OptionValue, describe_option, get_option, option_context, reset_option,
+            set_option,
+        };
+
+        // Reset to clean state
+        reset_option(None).unwrap();
+
+        // 1. Default option checks
+        let max_rows = get_option("display.max_rows").unwrap();
+        assert_eq!(max_rows.as_int(), Some(60));
+        assert_eq!(max_rows, OptionValue::Int(60));
+        assert!(!max_rows.is_none());
+
+        // Partial key matching (suffix)
+        let min_rows = get_option("min_rows").unwrap();
+        assert_eq!(min_rows.as_int(), Some(10));
+
+        // 2. Setting options
+        set_option("display.max_rows", 100).unwrap();
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(100));
+
+        set_option("mode.sim_interactive", true).unwrap();
+        assert_eq!(
+            get_option("mode.sim_interactive").unwrap().as_bool(),
+            Some(true)
+        );
+
+        set_option("mode.chained_assignment", "raise").unwrap();
+        assert_eq!(
+            get_option("mode.chained_assignment").unwrap().as_str(),
+            Some("raise")
+        );
+
+        // 3. OptionError handling
+        assert!(matches!(
+            get_option("nonexistent.option"),
+            Err(OptionError::NotFound { .. })
+        ));
+        assert!(matches!(
+            get_option("display"),
+            Err(OptionError::Ambiguous { .. })
+        ));
+
+        // 4. describe_option
+        let desc = describe_option(Some("max_rows")).unwrap();
+        assert!(desc.contains("display.max_rows : [currently: 100]"));
+
+        let desc_all = describe_option(None).unwrap();
+        assert!(desc_all.contains("display.width"));
+        assert!(desc_all.contains("compute.use_bottleneck"));
+
+        // 5. Scoped option_context
+        {
+            let _guard = option_context(&[
+                ("display.max_rows", OptionValue::Int(999)),
+                ("display.precision", OptionValue::Int(2)),
+            ])
+            .unwrap();
+
+            assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(999));
+            assert_eq!(get_option("display.precision").unwrap().as_int(), Some(2));
+        }
+        // Restored after guard drop
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(100));
+        assert_eq!(get_option("display.precision").unwrap().as_int(), Some(6));
+
+        // 6. Reset single option and all options
+        reset_option(Some("display.max_rows")).unwrap();
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(60));
+
+        reset_option(Some("all")).unwrap();
+        assert_eq!(
+            get_option("mode.chained_assignment").unwrap().as_str(),
+            Some("warn")
+        );
+    }
+
+    #[test]
+    fn test_api_submodules_and_types_inspectors() {
+        use super::{
+            DType, Scalar,
+            api::{extensions, indexers, types},
+        };
+
+        // api::types scalar inspectors
+        assert!(types::is_number(&Scalar::Int64(42)));
+        assert!(types::is_number(&Scalar::Float64(42.5)));
+        assert!(types::is_number(&Scalar::Bool(true)));
+        assert!(!types::is_number(&Scalar::Utf8("pandas".into())));
+
+        assert!(types::is_bool(&Scalar::Bool(false)));
+        assert!(!types::is_bool(&Scalar::Int64(0)));
+
+        assert!(types::is_integer(&Scalar::Int64(10)));
+        assert!(!types::is_integer(&Scalar::Float64(10.0)));
+
+        assert!(types::is_float(&Scalar::Float64(10.0)));
+        assert!(!types::is_float(&Scalar::Int64(10)));
+
+        // api::types dtype inspectors
+        assert!(types::is_float64_dtype(&DType::Float64));
+        assert!(types::is_float64_dtype(&DType::Float64Nullable));
+        assert!(!types::is_float64_dtype(&DType::Int64));
+        assert!(!types::is_int32_dtype(&DType::Int64));
+
+        // api::extensions compatibility hooks
+        extensions::register_dataframe_accessor("geo");
+        extensions::register_series_accessor("geo");
+        extensions::register_index_accessor("geo");
+
+        // api::indexers
+        let base = indexers::BaseIndexer::new(5, 1);
+        assert_eq!(base.window_size, 5);
+        assert_eq!(base.step, 1);
+
+        let fwd = indexers::FixedForwardWindowIndexer::new(3);
+        assert_eq!(fwd.window_size, 3);
+
+        let var = indexers::VariableOffsetWindowIndexer::new(100);
+        assert_eq!(var.index_offset, 100);
+    }
+
+    #[test]
+    fn test_extension_dtypes_and_parameterized_parsing() {
+        use super::{
+            AsDType, CategoricalDtype, DType, IntervalClosed, IntervalDtype, PeriodDtype, Scalar,
+            SparseDType, api::types, pandas_dtype,
+        };
+
+        // CategoricalDtype
+        let cat_default = CategoricalDtype::default();
+        assert_eq!(cat_default.name(), "category");
+        assert_eq!(cat_default.kind(), "O");
+        assert!(!cat_default.ordered());
+        assert_eq!(cat_default.categories(), None);
+        assert_eq!(cat_default.as_dtype(), DType::Categorical);
+        assert!(types::is_categorical_dtype(&cat_default));
+        assert_eq!(
+            cat_default.to_string(),
+            "CategoricalDtype(categories=None, ordered=False)"
+        );
+
+        let cat_custom =
+            CategoricalDtype::new(Some(vec!["low".to_string(), "high".to_string()]), true);
+        assert!(cat_custom.ordered());
+        assert_eq!(
+            cat_custom.categories(),
+            Some(&["low".to_string(), "high".to_string()][..])
+        );
+        assert!(cat_custom.to_string().contains("ordered=True"));
+
+        // PeriodDtype
+        let per_default = PeriodDtype::default();
+        assert_eq!(per_default.freq(), "D");
+        assert_eq!(per_default.name(), "period[D]");
+        assert_eq!(per_default.kind(), "O");
+        assert_eq!(per_default.as_dtype(), DType::Period);
+        assert!(types::is_period_dtype(&per_default));
+        assert_eq!(per_default.to_string(), "period[D]");
+
+        let per_custom = PeriodDtype::new("M");
+        assert_eq!(per_custom.freq(), "M");
+        assert_eq!(per_custom.to_string(), "period[M]");
+
+        // IntervalDtype
+        let int_default = IntervalDtype::default();
+        assert_eq!(*int_default.subtype(), DType::Float64);
+        assert_eq!(int_default.closed(), Some(IntervalClosed::Right));
+        assert_eq!(int_default.name(), "interval");
+        assert_eq!(int_default.kind(), "O");
+        assert_eq!(int_default.as_dtype(), DType::Interval);
+        assert!(types::is_interval_dtype(&int_default));
+        assert_eq!(int_default.to_string(), "interval[float64, right]");
+
+        let int_custom = IntervalDtype::new(DType::Int64, Some(IntervalClosed::Both));
+        assert_eq!(*int_custom.subtype(), DType::Int64);
+        assert_eq!(int_custom.closed(), Some(IntervalClosed::Both));
+        assert_eq!(int_custom.to_string(), "interval[int64, both]");
+
+        // SparseDType AsDType
+        let sp = SparseDType::new(DType::Float64, Scalar::Float64(0.0)).unwrap();
+        assert_eq!(sp.as_dtype(), DType::Sparse);
+        assert!(types::is_sparse(&sp));
+
+        // Parameterized pandas_dtype parsing
+        assert_eq!(pandas_dtype("period[D]").unwrap(), DType::Period);
+        assert_eq!(pandas_dtype("Period[M]").unwrap(), DType::Period);
+        assert_eq!(pandas_dtype("interval[float64]").unwrap(), DType::Interval);
+        assert_eq!(pandas_dtype("Interval[int64]").unwrap(), DType::Interval);
+        assert_eq!(pandas_dtype("sparse[float64]").unwrap(), DType::Sparse);
+        assert_eq!(pandas_dtype("Sparse[int64, 0]").unwrap(), DType::Sparse);
     }
 }
