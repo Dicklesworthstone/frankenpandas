@@ -16,6 +16,7 @@ Usage:
     python3 scripts/gen_pandas_api_listing.py   # populate listing
     python3 scripts/gen_coverage_matrix.py      # emit COVERAGE_MATRIX.md
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,6 +28,7 @@ from pathlib import Path
 
 FIXTURE_GLOB = "crates/fp-conformance/fixtures/packets/*.json"
 OPERATION_RE = re.compile(r'"operation"\s*:\s*"([^"]+)"')
+DF_BINARY_METHOD_RE = re.compile(r'"dataframe_binary_method"\s*:\s*"([^"]+)"')
 
 
 def load_fixture_ops(repo_root: Path) -> set[str]:
@@ -37,6 +39,9 @@ def load_fixture_ops(repo_root: Path) -> set[str]:
         except OSError:
             continue
         ops.update(OPERATION_RE.findall(text))
+        for m in DF_BINARY_METHOD_RE.findall(text):
+            ops.add(f"dataframe_{m}")
+            ops.add(f"data_frame_{m}")
     return ops
 
 
