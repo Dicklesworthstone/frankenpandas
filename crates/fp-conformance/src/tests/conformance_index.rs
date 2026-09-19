@@ -5,7 +5,7 @@
 //! input: empty indexes, single labels, duplicate labels, mixed labels,
 //! NA-like string labels, and extreme integer labels.
 
-use fp_index::{IndexLabel, IntervalIndex};
+use fp_index::{IndexLabel, IntervalIndex, RangeIndex};
 use fp_types::IntervalClosed;
 
 use super::{
@@ -629,4 +629,337 @@ print(json.dumps(res))
     );
     assert_eq!(ii.closed_left(), oracle["closed_left"].as_bool().unwrap());
     assert_eq!(ii.closed_right(), oracle["closed_right"].as_bool().unwrap());
+}
+
+#[test]
+fn conformance_range_index_ascending_differential() {
+    let python_code = r#"
+import pandas as pd, json
+idx = pd.RangeIndex(2, 10, 2, name="my_range")
+res = {
+    "start": int(idx.start),
+    "stop": int(idx.stop),
+    "step": int(idx.step),
+    "name": idx.name,
+    "len": len(idx),
+    "is_monotonic_increasing": bool(idx.is_monotonic_increasing),
+    "is_monotonic_decreasing": bool(idx.is_monotonic_decreasing),
+    "is_unique": bool(idx.is_unique),
+    "has_duplicates": bool(idx.has_duplicates),
+    "min": int(idx.min()),
+    "max": int(idx.max()),
+    "argmax": int(idx.argmax()),
+    "argmin": int(idx.argmin()),
+    "argsort": [int(x) for x in idx.argsort()],
+    "all": bool(idx.all()),
+    "any": bool(idx.any()),
+    "hasnans": bool(idx.hasnans),
+    "nlevels": int(idx.nlevels),
+    "to_list": idx.tolist(),
+    "contains_2": bool(2 in idx),
+    "contains_6": bool(6 in idx),
+    "contains_8": bool(8 in idx),
+    "contains_0": bool(0 in idx),
+    "contains_10": bool(10 in idx),
+    "contains_5": bool(5 in idx),
+    "get_loc_2": int(idx.get_loc(2)),
+    "get_loc_6": int(idx.get_loc(6)),
+    "get_loc_8": int(idx.get_loc(8)),
+    "slice_bound_left": int(idx.get_slice_bound(4, "left")),
+    "slice_bound_right": int(idx.get_slice_bound(4, "right"))
+}
+print(json.dumps(res))
+"#;
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping RangeIndex differential test");
+            return;
+        }
+    };
+
+    let r = RangeIndex::from_range(2, 10, 2)
+        .expect("from_range")
+        .set_name("my_range");
+
+    assert_eq!(r.start(), oracle["start"].as_i64().unwrap());
+    assert_eq!(r.stop(), oracle["stop"].as_i64().unwrap());
+    assert_eq!(r.step(), oracle["step"].as_i64().unwrap());
+    assert_eq!(r.name(), Some("my_range"));
+    assert_eq!(r.len(), oracle["len"].as_u64().unwrap() as usize);
+    assert_eq!(
+        r.is_monotonic_increasing(),
+        oracle["is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r.is_monotonic_decreasing(),
+        oracle["is_monotonic_decreasing"].as_bool().unwrap()
+    );
+    assert_eq!(r.is_unique(), oracle["is_unique"].as_bool().unwrap());
+    assert_eq!(
+        r.has_duplicates(),
+        oracle["has_duplicates"].as_bool().unwrap()
+    );
+    assert_eq!(r.min().unwrap(), oracle["min"].as_i64().unwrap());
+    assert_eq!(r.max().unwrap(), oracle["max"].as_i64().unwrap());
+    assert_eq!(
+        r.argmax().unwrap(),
+        oracle["argmax"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.argmin().unwrap(),
+        oracle["argmin"].as_u64().unwrap() as usize
+    );
+    let argsort: Vec<usize> = oracle["argsort"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(r.argsort(), argsort);
+    assert_eq!(r.all(), oracle["all"].as_bool().unwrap());
+    assert_eq!(r.any(), oracle["any"].as_bool().unwrap());
+    assert_eq!(r.hasnans(), oracle["hasnans"].as_bool().unwrap());
+    assert_eq!(r.nlevels(), oracle["nlevels"].as_u64().unwrap() as usize);
+    let to_list: Vec<i64> = oracle["to_list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(r.to_list(), to_list);
+    assert_eq!(r.contains(2), oracle["contains_2"].as_bool().unwrap());
+    assert_eq!(r.contains(6), oracle["contains_6"].as_bool().unwrap());
+    assert_eq!(r.contains(8), oracle["contains_8"].as_bool().unwrap());
+    assert_eq!(r.contains(0), oracle["contains_0"].as_bool().unwrap());
+    assert_eq!(r.contains(10), oracle["contains_10"].as_bool().unwrap());
+    assert_eq!(r.contains(5), oracle["contains_5"].as_bool().unwrap());
+    assert_eq!(
+        r.get_loc(2).unwrap(),
+        oracle["get_loc_2"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.get_loc(6).unwrap(),
+        oracle["get_loc_6"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.get_loc(8).unwrap(),
+        oracle["get_loc_8"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.get_slice_bound(4, "left").unwrap(),
+        oracle["slice_bound_left"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.get_slice_bound(4, "right").unwrap(),
+        oracle["slice_bound_right"].as_u64().unwrap() as usize
+    );
+}
+
+#[test]
+fn conformance_range_index_descending_differential() {
+    let python_code = r#"
+import pandas as pd, json
+idx = pd.RangeIndex(10, 0, -2, name="desc")
+res = {
+    "start": int(idx.start),
+    "stop": int(idx.stop),
+    "step": int(idx.step),
+    "len": len(idx),
+    "is_monotonic_increasing": bool(idx.is_monotonic_increasing),
+    "is_monotonic_decreasing": bool(idx.is_monotonic_decreasing),
+    "min": int(idx.min()),
+    "max": int(idx.max()),
+    "argmax": int(idx.argmax()),
+    "argmin": int(idx.argmin()),
+    "argsort": [int(x) for x in idx.argsort()],
+    "to_list": idx.tolist(),
+    "contains_10": bool(10 in idx),
+    "contains_2": bool(2 in idx),
+    "contains_0": bool(0 in idx),
+    "contains_12": bool(12 in idx),
+    "get_loc_10": int(idx.get_loc(10)),
+    "get_loc_6": int(idx.get_loc(6)),
+    "get_loc_2": int(idx.get_loc(2))
+}
+print(json.dumps(res))
+"#;
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping RangeIndex differential test");
+            return;
+        }
+    };
+
+    let r = RangeIndex::new(10, 0, -2).expect("descending range");
+    assert_eq!(r.start(), oracle["start"].as_i64().unwrap());
+    assert_eq!(r.stop(), oracle["stop"].as_i64().unwrap());
+    assert_eq!(r.step(), oracle["step"].as_i64().unwrap());
+    assert_eq!(r.len(), oracle["len"].as_u64().unwrap() as usize);
+    assert_eq!(
+        r.is_monotonic_increasing(),
+        oracle["is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r.is_monotonic_decreasing(),
+        oracle["is_monotonic_decreasing"].as_bool().unwrap()
+    );
+    assert_eq!(r.min().unwrap(), oracle["min"].as_i64().unwrap());
+    assert_eq!(r.max().unwrap(), oracle["max"].as_i64().unwrap());
+    assert_eq!(
+        r.argmax().unwrap(),
+        oracle["argmax"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.argmin().unwrap(),
+        oracle["argmin"].as_u64().unwrap() as usize
+    );
+    let argsort: Vec<usize> = oracle["argsort"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(r.argsort(), argsort);
+    let to_list: Vec<i64> = oracle["to_list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(r.to_list(), to_list);
+    assert_eq!(r.contains(10), oracle["contains_10"].as_bool().unwrap());
+    assert_eq!(r.contains(2), oracle["contains_2"].as_bool().unwrap());
+    assert_eq!(r.contains(0), oracle["contains_0"].as_bool().unwrap());
+    assert_eq!(r.contains(12), oracle["contains_12"].as_bool().unwrap());
+    assert_eq!(
+        r.get_loc(10).unwrap(),
+        oracle["get_loc_10"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.get_loc(6).unwrap(),
+        oracle["get_loc_6"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.get_loc(2).unwrap(),
+        oracle["get_loc_2"].as_u64().unwrap() as usize
+    );
+}
+
+#[test]
+fn conformance_range_index_empty_and_zero_differential() {
+    let python_code = r#"
+import pandas as pd, json
+r_empty = pd.RangeIndex(0, 0)
+r_zero = pd.RangeIndex(0, 5)
+res = {
+    "empty_len": len(r_empty),
+    "empty_all": bool(r_empty.all()),
+    "empty_any": bool(r_empty.any()),
+    "empty_contains_0": bool(0 in r_empty),
+    "zero_len": len(r_zero),
+    "zero_all": bool(r_zero.all()),
+    "zero_any": bool(r_zero.any()),
+    "zero_contains_0": bool(0 in r_zero),
+    "zero_min": int(r_zero.min()),
+    "zero_max": int(r_zero.max()),
+    "zero_argmax": int(r_zero.argmax()),
+    "zero_argmin": int(r_zero.argmin())
+}
+print(json.dumps(res))
+"#;
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping RangeIndex differential test");
+            return;
+        }
+    };
+
+    let r_empty = RangeIndex::new(0, 0, 1).expect("empty range");
+    assert_eq!(
+        r_empty.len(),
+        oracle["empty_len"].as_u64().unwrap() as usize
+    );
+    assert_eq!(r_empty.all(), oracle["empty_all"].as_bool().unwrap());
+    assert_eq!(r_empty.any(), oracle["empty_any"].as_bool().unwrap());
+    assert_eq!(
+        r_empty.contains(0),
+        oracle["empty_contains_0"].as_bool().unwrap()
+    );
+    assert_eq!(r_empty.min(), None);
+    assert_eq!(r_empty.max(), None);
+    assert!(r_empty.argmax().is_err());
+    assert!(r_empty.argmin().is_err());
+
+    let r_zero = RangeIndex::new(0, 5, 1).expect("zero range");
+    assert_eq!(r_zero.len(), oracle["zero_len"].as_u64().unwrap() as usize);
+    assert_eq!(r_zero.all(), oracle["zero_all"].as_bool().unwrap());
+    assert_eq!(r_zero.any(), oracle["zero_any"].as_bool().unwrap());
+    assert_eq!(
+        r_zero.contains(0),
+        oracle["zero_contains_0"].as_bool().unwrap()
+    );
+    assert_eq!(r_zero.min().unwrap(), oracle["zero_min"].as_i64().unwrap());
+    assert_eq!(r_zero.max().unwrap(), oracle["zero_max"].as_i64().unwrap());
+    assert_eq!(
+        r_zero.argmax().unwrap(),
+        oracle["zero_argmax"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r_zero.argmin().unwrap(),
+        oracle["zero_argmin"].as_u64().unwrap() as usize
+    );
+}
+
+#[test]
+fn conformance_range_index_set_ops_differential() {
+    let python_code = r#"
+import pandas as pd, json
+r1 = pd.RangeIndex(0, 10, 2)
+r2 = pd.RangeIndex(4, 12, 2)
+inter = r1.intersection(r2)
+indexer = r1.get_indexer([0, 4, 8, 12])
+res = {
+    "intersection": inter.tolist(),
+    "get_indexer": [int(x) for x in indexer]
+}
+print(json.dumps(res))
+"#;
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping RangeIndex differential test");
+            return;
+        }
+    };
+
+    let r1 = RangeIndex::new(0, 10, 2).expect("r1");
+    let r2 = RangeIndex::new(4, 12, 2).expect("r2");
+    let inter = r1.intersection(&r2);
+    let inter_vals: Vec<i64> = inter
+        .labels()
+        .iter()
+        .filter_map(|l| match l {
+            IndexLabel::Int64(v) => Some(*v),
+            _ => None,
+        })
+        .collect();
+    let oracle_inter: Vec<i64> = oracle["intersection"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(inter_vals, oracle_inter);
+
+    let indexer: Vec<isize> = r1.get_indexer(&[0, 4, 8, 12]);
+    let oracle_indexer: Vec<isize> = oracle["get_indexer"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(indexer, oracle_indexer);
 }

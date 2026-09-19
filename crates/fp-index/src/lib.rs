@@ -12504,6 +12504,28 @@ impl RangeIndex {
         Some(first.max(last))
     }
 
+    /// Return whether `value` is present in this RangeIndex, matching `value in pd.RangeIndex`.
+    #[must_use]
+    pub fn contains(&self, value: i64) -> bool {
+        self.contains_value(value)
+    }
+
+    /// Bound for a value slice, matching `pd.RangeIndex.get_slice_bound(value, side)`.
+    pub fn get_slice_bound(&self, value: i64, side: &str) -> Result<usize, IndexError> {
+        self.searchsorted(value, side)
+    }
+
+    /// Create a RangeIndex matching `pd.RangeIndex.from_range`.
+    pub fn from_range(start: i64, stop: i64, step: i64) -> Result<Self, IndexError> {
+        Self::new(start, stop, step)
+    }
+
+    /// Return unique values, matching `pd.RangeIndex.unique()`.
+    #[must_use]
+    pub fn unique(&self) -> Self {
+        self.clone()
+    }
+
     /// Median value. Returns `None` for an empty range; for an even-length
     /// range, returns the average of the two middle values as f64.
     ///
@@ -30729,6 +30751,63 @@ mod tests {
         let m = [true, false, true, false, true];
         assert_eq!(vals(&desc.r#where(&m, 99).unwrap()), vec![10, 99, 6, 99, 2]);
         assert_eq!(vals(&desc.putmask(&m, 99).unwrap()), vec![99, 8, 99, 4, 99]);
+    }
+
+    #[test]
+    fn test_range_index_extended_parity_methods() {
+        let r = RangeIndex::from_range(2, 10, 2).unwrap();
+        assert_eq!(r.len(), 4);
+        assert!(r.contains(2));
+        assert!(r.contains(4));
+        assert!(r.contains(6));
+        assert!(r.contains(8));
+        assert!(!r.contains(0));
+        assert!(!r.contains(10));
+        assert!(!r.contains(3));
+
+        assert_eq!(r.get_slice_bound(4, "left").unwrap(), 1);
+        assert_eq!(r.get_slice_bound(4, "right").unwrap(), 2);
+
+        assert!(r.all());
+        assert!(r.any());
+        assert_eq!(r.argmax().unwrap(), 3);
+        assert_eq!(r.argmin().unwrap(), 0);
+        assert_eq!(r.argsort(), vec![0, 1, 2, 3]);
+
+        assert!(!r.hasnans());
+        assert_eq!(r.nlevels(), 1);
+        assert_eq!(r.isna(), vec![false, false, false, false]);
+        assert_eq!(r.isnull(), vec![false, false, false, false]);
+        assert_eq!(r.notna(), vec![true, true, true, true]);
+        assert_eq!(r.notnull(), vec![true, true, true, true]);
+        assert_eq!(r.unique(), r);
+        assert_eq!(r.drop_duplicates(), r);
+        assert_eq!(
+            r.duplicated(DuplicateKeep::First),
+            vec![false, false, false, false]
+        );
+
+        // Range containing 0
+        let r_with_zero = RangeIndex::new(0, 5, 1).unwrap();
+        assert!(!r_with_zero.all());
+        assert!(r_with_zero.any());
+
+        // Empty range
+        let r_empty = RangeIndex::new(0, 0, 1).unwrap();
+        assert!(r_empty.all());
+        assert!(!r_empty.any());
+        assert!(r_empty.argmax().is_err());
+        assert!(r_empty.argmin().is_err());
+        assert!(r_empty.argsort().is_empty());
+        assert!(!r_empty.contains(0));
+
+        // Descending range
+        let r_desc = RangeIndex::new(10, 0, -2).unwrap();
+        assert_eq!(r_desc.argmax().unwrap(), 0);
+        assert_eq!(r_desc.argmin().unwrap(), 4);
+        assert_eq!(r_desc.argsort(), vec![4, 3, 2, 1, 0]);
+        assert!(r_desc.all());
+        assert!(r_desc.any());
     }
 
     #[test]

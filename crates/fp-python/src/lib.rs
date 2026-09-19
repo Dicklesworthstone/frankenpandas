@@ -6536,15 +6536,26 @@ impl PyRangeIndex {
         )
     }
 
-    pub fn __contains__(&self, item: i64) -> bool {
-        let start = self.inner.start();
-        let stop = self.inner.stop();
-        let step = self.inner.step();
-        if step > 0 {
-            item >= start && item < stop && (item - start) % step == 0
+    pub fn __contains__(&self, item: &Bound<'_, PyAny>) -> bool {
+        if let Ok(val) = item.extract::<i64>() {
+            self.inner.contains(val)
+        } else if let Ok(val) = item.extract::<f64>() {
+            if val.is_finite()
+                && val.fract() == 0.0
+                && val >= (i64::MIN as f64)
+                && val <= (i64::MAX as f64)
+            {
+                self.inner.contains(val as i64)
+            } else {
+                false
+            }
         } else {
-            item <= start && item > stop && (start - item) % (-step) == 0
+            false
         }
+    }
+
+    pub fn contains(&self, item: i64) -> bool {
+        self.inner.contains(item)
     }
 
     pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -6665,6 +6676,24 @@ impl PyRangeIndex {
     }
 
     fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
+        if let Ok(val) = key.extract::<i64>() {
+            return self
+                .inner
+                .get_loc(val)
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")));
+        }
+        if let Ok(val) = key.extract::<f64>() {
+            if val.is_finite()
+                && val.fract() == 0.0
+                && val >= (i64::MIN as f64)
+                && val <= (i64::MAX as f64)
+            {
+                return self
+                    .inner
+                    .get_loc(val as i64)
+                    .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")));
+            }
+        }
         let label = py_to_index_label(key)?;
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
         idx.get_loc(&label)
@@ -6856,11 +6885,11 @@ impl PyRangeIndex {
     }
 
     fn all(&self) -> bool {
-        self.inner.to_index().all()
+        self.inner.all()
     }
 
     fn any(&self) -> bool {
-        self.inner.to_index().any()
+        self.inner.any()
     }
 
     fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
@@ -6877,37 +6906,15 @@ impl PyRangeIndex {
     }
 
     fn argmax(&self) -> PyResult<usize> {
-        if self.inner.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "attempt to get argmax of an empty sequence",
-            ));
-        }
-        if self.inner.step() > 0 {
-            Ok(self.inner.len() - 1)
-        } else {
-            Ok(0)
-        }
+        self.inner.argmax().map_err(index_error_to_py)
     }
 
     fn argmin(&self) -> PyResult<usize> {
-        if self.inner.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "attempt to get argmin of an empty sequence",
-            ));
-        }
-        if self.inner.step() > 0 {
-            Ok(0)
-        } else {
-            Ok(self.inner.len() - 1)
-        }
+        self.inner.argmin().map_err(index_error_to_py)
     }
 
     fn argsort(&self) -> Vec<usize> {
-        if self.inner.step() > 0 {
-            (0..self.inner.len()).collect()
-        } else {
-            (0..self.inner.len()).rev().collect()
-        }
+        self.inner.argsort()
     }
 
     fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -6991,9 +6998,23 @@ impl PyRangeIndex {
         data: &Bound<'_, PyAny>,
         name: Option<&str>,
     ) -> PyResult<Self> {
-        let start: i64 = data.getattr("start")?.extract()?;
-        let stop: i64 = data.getattr("stop")?.extract()?;
-        let step: i64 = data.getattr("step")?.extract()?;
+        let (start, stop, step) = if let Ok(py_rng) = data.extract::<PyRef<'_, PyRangeIndex>>() {
+            (
+                py_rng.inner.start(),
+                py_rng.inner.stop(),
+                py_rng.inner.step(),
+            )
+        } else if let (Ok(start), Ok(stop), Ok(step)) = (
+            data.getattr("start").and_then(|s| s.extract::<i64>()),
+            data.getattr("stop").and_then(|s| s.extract::<i64>()),
+            data.getattr("step").and_then(|s| s.extract::<i64>()),
+        ) {
+            (start, stop, step)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "data must be a range object or RangeIndex",
+            ));
+        };
         let mut inner = RangeIndex::new(start, stop, step)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         if let Some(n) = name {
@@ -7034,6 +7055,12 @@ impl PyRangeIndex {
     }
 
     fn get_slice_bound(&self, label: &Bound<'_, PyAny>, side: &str) -> PyResult<usize> {
+        if let Ok(val) = label.extract::<i64>() {
+            return self
+                .inner
+                .get_slice_bound(val, side)
+                .map_err(index_error_to_py);
+        }
         let lbl = py_to_index_label(label)?;
         self.inner
             .to_index()
@@ -7080,11 +7107,11 @@ impl PyRangeIndex {
     }
 
     fn isna(&self) -> Vec<bool> {
-        vec![false; self.inner.len()]
+        self.inner.isna()
     }
 
     fn isnull(&self) -> Vec<bool> {
-        vec![false; self.inner.len()]
+        self.inner.isnull()
     }
 
     fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -7118,11 +7145,11 @@ impl PyRangeIndex {
     }
 
     fn notna(&self) -> Vec<bool> {
-        vec![true; self.inner.len()]
+        self.inner.notna()
     }
 
     fn notnull(&self) -> Vec<bool> {
-        vec![true; self.inner.len()]
+        self.inner.notnull()
     }
 
     fn nunique(&self) -> usize {
@@ -26516,8 +26543,17 @@ mod tests {
         assert_eq!(ri.stop(), 10);
         assert_eq!(ri.step(), 2);
         assert_eq!(ri.name().as_deref(), Some("my_range"));
-        assert!(ri.__contains__(4));
-        assert!(!ri.__contains__(5));
+        assert!(ri.contains(4));
+        assert!(!ri.contains(5));
+        assert_eq!(ri.min(), Some(0));
+        assert_eq!(ri.max(), Some(8));
+        assert_eq!(ri.argmax().unwrap(), 4);
+        assert_eq!(ri.argmin().unwrap(), 0);
+        assert_eq!(ri.argsort(), vec![0, 1, 2, 3, 4]);
+        assert!(!ri.all());
+        assert!(ri.any());
+        assert!(!ri.hasnans());
+        assert_eq!(ri.nlevels(), 1);
         let vals = ri.tolist();
         assert_eq!(vals, vec![0, 2, 4, 6, 8]);
     }
