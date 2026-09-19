@@ -446,6 +446,30 @@ pub fn merge_on(
 ) -> Result<MergedDataFrame, JoinError> {
     merge_dataframes_on(left, right, on, join_type)
 }
+
+/// Write a DataFrame to a Pickle file (matches `pd.to_pickle`).
+///
+/// # Errors
+///
+/// Returns [`IoError`] if serialization or file writing fails.
+#[inline]
+pub fn to_pickle(df: &DataFrame, path: impl AsRef<std::path::Path>) -> Result<(), IoError> {
+    write_pickle(df, path.as_ref())
+}
+
+/// Write a DataFrame to a Pickle file with options (matches `pd.to_pickle`).
+///
+/// # Errors
+///
+/// Returns [`IoError`] if serialization or file writing fails.
+#[inline]
+pub fn to_pickle_with_options(
+    df: &DataFrame,
+    path: impl AsRef<std::path::Path>,
+    options: &PickleWriteOptions,
+) -> Result<(), IoError> {
+    write_pickle_with_options(df, path.as_ref(), options)
+}
 // outcome_to_action is gated behind the `asupersync` feature in fp-runtime.
 #[cfg(feature = "asupersync")]
 pub use fp_runtime::outcome_to_action;
@@ -473,7 +497,8 @@ pub use fp_runtime::{
     decision_to_card,
 };
 pub use fp_types::{
-    DType, NA, NAT, NaT, NullKind, OptionContextGuard, OptionError, OptionValue, Scalar,
+    AsDType, CategoricalDType, CategoricalDtype, DType, IntervalDType, IntervalDtype, NA, NAT, NaT,
+    NullKind, OptionContextGuard, OptionError, OptionValue, PeriodDType, PeriodDtype, Scalar,
     SparseDType, TypeError, api, cast_scalar, cast_scalar_owned, common_dtype, count_na,
     describe_option, dropna, eng_float_format, fill_na, get_eng_float_format, get_option,
     infer_dtype, isna, isnull, notna, notnull, option_context, pandas_dtype,
@@ -593,12 +618,15 @@ pub mod prelude {
         // fd90.222: ArithmeticOp + ComparisonOp are parameter types for
         // Column.binary_numeric, DataFrame.compare_scalar, etc.
         ArithmeticOp,
+        AsDType,
         // Join (types + functions, matches README Recipes + Merge: Advanced Options)
         AsofDirection,
         AssertEqualOptions,
         AssertionError,
         BoxPlotSpec,
         CategoricalAccessor,
+        CategoricalDType,
+        CategoricalDtype,
         CategoricalIndex,
         CategoricalMetadata,
         Column,
@@ -678,6 +706,8 @@ pub mod prelude {
         // ranges need the helper types named.
         Interval,
         IntervalClosed,
+        IntervalDType,
+        IntervalDtype,
         IoError,
         IssueKind,
         JoinError,
@@ -702,8 +732,13 @@ pub mod prelude {
         OptionError,
         OptionValue,
         Period,
+        PeriodDType,
+        PeriodDtype,
         PeriodFreq,
         PeriodIndex,
+        PickleProtocol,
+        PickleReadOptions,
+        PickleWriteOptions,
         PlotKind,
         PlotSeriesSpec,
         PlotSpec,
@@ -936,6 +971,10 @@ pub mod prelude {
         read_orc_bytes,
         read_parquet,
         read_parquet_bytes,
+        read_pickle,
+        read_pickle_bytes,
+        read_pickle_bytes_with_options,
+        read_pickle_with_options,
         read_sql,
         read_sql_chunks,
         // fd90.20: paired producer for SqlIndexedChunkIterator (above).
@@ -984,6 +1023,8 @@ pub mod prelude {
         to_datetime_with_unit,
         to_numeric,
         to_numeric_with_options,
+        to_pickle,
+        to_pickle_with_options,
         to_timedelta,
         to_timedelta_with_options,
         to_timedelta_with_unit,
@@ -1024,6 +1065,10 @@ pub mod prelude {
         write_orc_bytes,
         write_parquet,
         write_parquet_bytes,
+        write_pickle,
+        write_pickle_bytes,
+        write_pickle_bytes_with_options,
+        write_pickle_with_options,
         write_sql,
         // fd90.209: write_sql_with_options pairs with SqlWriteOptions
         // (which is in the prelude as of fd90.206).
@@ -1812,5 +1857,45 @@ mod tests {
 
         let merged_on = merge_on(&df_merge_left, &df_merge_right, &["k"], JoinType::Inner).unwrap();
         assert_eq!(merged_on.index.len(), 2);
+
+        // to_pickle, to_pickle_with_options, and read_pickle
+        let pkl_path = std::env::temp_dir().join(format!(
+            "fp_test_to_pickle_{}_{}.pkl",
+            std::process::id(),
+            line!()
+        ));
+        to_pickle(&df1, &pkl_path).expect("to_pickle should succeed");
+        let df_from_pkl = read_pickle(&pkl_path).expect("read_pickle should succeed");
+        assert_eq!(df_from_pkl.len(), df1.len());
+
+        let pkl_opts_path = std::env::temp_dir().join(format!(
+            "fp_test_to_pickle_opts_{}_{}.pkl",
+            std::process::id(),
+            line!()
+        ));
+        to_pickle_with_options(&df1, &pkl_opts_path, &PickleWriteOptions::default())
+            .expect("to_pickle_with_options should succeed");
+        let df_from_opts_pkl =
+            read_pickle(&pkl_opts_path).expect("read_pickle opts should succeed");
+        assert_eq!(df_from_opts_pkl.len(), df1.len());
+
+        let bytes = write_pickle_bytes(&df1).expect("write_pickle_bytes should succeed");
+        let df_from_bytes = read_pickle_bytes(&bytes).expect("read_pickle_bytes should succeed");
+        assert_eq!(df_from_bytes.len(), df1.len());
+
+        // Extension dtypes from prelude
+        let cat_dt = CategoricalDtype::default();
+        assert_eq!(cat_dt.name(), "category");
+        assert_eq!(cat_dt.as_dtype(), DType::Categorical);
+
+        let per_dt = PeriodDtype::default();
+        assert_eq!(per_dt.name(), "period[D]");
+        assert_eq!(per_dt.as_dtype(), DType::Period);
+
+        let int_dt = IntervalDtype::default();
+        assert_eq!(int_dt.name(), "interval");
+        assert_eq!(int_dt.as_dtype(), DType::Interval);
+
+        let _proto = PickleProtocol::V3;
     }
 }
