@@ -19,8 +19,9 @@
 pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityMask};
 // ── Expression engine ───────────────────────────────────────────────────
 pub use fp_expr::{
-    DataFrameExprExt, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, eval_str,
-    eval_str_with_locals, evaluate, evaluate_on_dataframe, evaluate_on_dataframe_with_locals,
+    DataFrameExprExt, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, col,
+    eval_str, eval_str_with_locals, evaluate, evaluate_on_dataframe,
+    evaluate_on_dataframe_with_locals, lit,
 };
 #[cfg(feature = "lazy-transpose-view")]
 pub use fp_frame::DataFrameTransposeView;
@@ -60,11 +61,11 @@ pub use fp_frame::{
     Rolling,
     ScatterMatrixSpec,
     Series,
-    TablePlotSpec,
     SeriesGroupBy,
     SeriesResetIndexResult,
     SparseAccessor,
     StringAccessor,
+    TablePlotSpec,
     ToDatetimeOptions,
     ToDatetimeOrigin,
     ToTimedeltaErrors,
@@ -76,31 +77,31 @@ pub use fp_frame::{
     index_to_frame,
     index_to_series,
 };
+pub use fp_frame::{
+    array, assert_frame_eq, assert_index_eq, assert_series_eq, crosstab, crosstab_normalize, cut,
+    cut_bins, factorize, factorize_with_options, from_dummies, get_dummies,
+    get_dummies_with_options, lreshape, melt, pivot, pivot_table, pivot_table_with_dropna,
+    plotting, qcut, qcut_at_quantiles, show_versions, testing,
+    testing::{
+        AssertEqualOptions, AssertionError, assert_extension_array_equal, assert_frame_equal,
+        assert_frame_equal_default, assert_index_equal, assert_index_equal_default,
+        assert_series_equal, assert_series_equal_default,
+    },
+    timedelta_total_seconds, to_datetime, to_datetime_values_with_options, to_datetime_with_format,
+    to_datetime_with_options, to_datetime_with_unit, to_numeric, to_numeric_with_options,
+    to_timedelta, to_timedelta_with_options, to_timedelta_with_unit, unique, value_counts,
+    value_counts_with_options, wide_to_long,
+};
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
 pub use fp_frame::{
     concat_dataframes, concat_dataframes_with_axis, concat_dataframes_with_axis_join,
     concat_dataframes_with_ignore_index, concat_dataframes_with_keys, concat_series,
     concat_series_with_ignore_index,
 };
-pub use fp_frame::{
-    crosstab, crosstab_normalize, cut, cut_bins, factorize, factorize_with_options, from_dummies,
-    get_dummies, get_dummies_with_options, lreshape, melt, pivot, pivot_table,
-    pivot_table_with_dropna, qcut, qcut_at_quantiles, show_versions, timedelta_total_seconds,
-    to_datetime, to_datetime_values_with_options, to_datetime_with_format,
-    to_datetime_with_options, to_datetime_with_unit, to_numeric, to_numeric_with_options,
-    to_timedelta, to_timedelta_with_options, to_timedelta_with_unit, unique, value_counts,
-    value_counts_with_options, wide_to_long,
-};
-pub use fp_frame::plotting;
-pub use fp_frame::testing;
-pub use fp_frame::testing::{
-    AssertEqualOptions, AssertionError, assert_extension_array_equal, assert_frame_equal,
-    assert_frame_equal_default, assert_index_equal, assert_index_equal_default,
-    assert_series_equal, assert_series_equal_default,
-};
-pub use fp_frame::{assert_frame_eq, assert_index_eq, assert_series_eq};
 // ── GroupBy errors ──────────────────────────────────────────────────────
-pub use fp_groupby::{AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions};
+pub use fp_groupby::{
+    AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions, Grouper, NamedAgg,
+};
 pub use fp_index::{
     AlignMode,
     AlignmentPlan,
@@ -191,6 +192,8 @@ pub use fp_io::{
     // Stata
     StataWriteOptions,
     inspect,
+    json_normalize,
+    json_normalize_str,
     list_sql_foreign_keys,
     list_sql_indexes,
     list_sql_schemas,
@@ -236,8 +239,6 @@ pub use fp_io::{
     read_ipc_stream_bytes,
     read_json,
     read_json_str,
-    json_normalize,
-    json_normalize_str,
     // JSONL
     read_jsonl,
     read_jsonl_str,
@@ -412,6 +413,7 @@ pub use fp_types::{
     TimedeltaError,
     Timestamp,
     // fd90.271: pandas pd.interval_range equivalents (Vec<Interval> generators).
+    interval_range,
     interval_range_by_periods,
     interval_range_by_step,
     period_range,
@@ -460,10 +462,10 @@ pub mod prelude {
         // fd90.222: ArithmeticOp + ComparisonOp are parameter types for
         // Column.binary_numeric, DataFrame.compare_scalar, etc.
         ArithmeticOp,
-        AssertEqualOptions,
-        AssertionError,
         // Join (types + functions, matches README Recipes + Merge: Advanced Options)
         AsofDirection,
+        AssertEqualOptions,
+        AssertionError,
         BoxPlotSpec,
         CategoricalAccessor,
         CategoricalIndex,
@@ -528,6 +530,7 @@ pub mod prelude {
         GroupByOptions,
         GroupByResample,
         GroupByRolling,
+        Grouper,
         HdfReadOptions,
         HdfWriteOptions,
         HistogramSpec,
@@ -556,6 +559,7 @@ pub mod prelude {
         MergedDataFrame,
         MultiIndex,
         MultiIndexOrIndex,
+        NamedAgg,
         NullKind,
         Period,
         PeriodFreq,
@@ -571,7 +575,6 @@ pub mod prelude {
         Scalar,
         ScatterMatrixSpec,
         Series,
-        TablePlotSpec,
         SeriesGroupBy,
         SeriesIoExt,
         SeriesResetIndexResult,
@@ -607,6 +610,7 @@ pub mod prelude {
         SqlWriteOptions,
         StataWriteOptions,
         StringAccessor,
+        TablePlotSpec,
         Timedelta,
         TimedeltaComponents,
         TimedeltaError,
@@ -628,6 +632,12 @@ pub mod prelude {
         // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
         // lists it among types deriving Serialize + Deserialize (line 1567).
         ValidityMask,
+        // fd90.33: apply_date_offset is the primary use-site for
+        // DateOffset (above). Without it in the prelude the user can
+        // name the offset variant but can't apply it from prelude
+        // alone — paired-surface defect.
+        apply_date_offset,
+        array,
         assert_extension_array_equal,
         assert_frame_eq,
         assert_frame_equal,
@@ -638,12 +648,6 @@ pub mod prelude {
         assert_series_eq,
         assert_series_equal,
         assert_series_equal_default,
-        testing,
-        // fd90.33: apply_date_offset is the primary use-site for
-        // DateOffset (above). Without it in the prelude the user can
-        // name the offset variant but can't apply it from prelude
-        // alone — paired-surface defect.
-        apply_date_offset,
         // fd90.269: bdate_range pairs with date_range (pandas pd.bdate_range).
         bdate_range,
         // fd90.208: pandas-style top-level null checks + dtype helpers.
@@ -652,6 +656,7 @@ pub mod prelude {
         // fd90.16: cast_scalar_owned pairs with cast_scalar (above) for
         // owned-input flows where the caller can move rather than borrow.
         cast_scalar_owned,
+        col,
         common_dtype,
         // Module-level functions (concat + join/merge family)
         concat_dataframes,
@@ -687,6 +692,7 @@ pub mod prelude {
         // exported at the crate root but missed prelude promotion —
         // pairs with SqlInspector being in the prelude already.
         inspect,
+        interval_range,
         interval_range_by_periods,
         interval_range_by_step,
         isna,
@@ -706,6 +712,7 @@ pub mod prelude {
         list_sql_tables,
         list_sql_unique_constraints,
         list_sql_views,
+        lit,
         lreshape,
         melt,
         merge_asof,
@@ -814,6 +821,7 @@ pub mod prelude {
         sql_supports_schemas,
         sql_table_comment,
         sql_table_schema,
+        testing,
         timedelta_range,
         timedelta_total_seconds,
         to_datetime,
@@ -996,8 +1004,15 @@ mod tests {
         // CategoricalAccessor is borrowed-from-Series; just type-check name resolution.
         let _name_check_cat_accessor: fn(&CategoricalAccessor<'_>) = |_| {};
 
-        // Index-side enums (fd90.128).
         let _: DuplicateKeep = DuplicateKeep::First;
+
+        // Parity additions: NamedAgg, Grouper, array, col, lit, interval_range
+        let _: NamedAgg = NamedAgg::new("a", "sum");
+        let _: Grouper = Grouper::new();
+        let _ = array(&[], None);
+        let _ = col("a");
+        let _ = lit(Scalar::Int64(1));
+        let _ = interval_range(None, None, None, None, None);
         let _: ConcatJoin = ConcatJoin::Inner;
         let _: DropNaHow = DropNaHow::Any;
 
@@ -1378,8 +1393,9 @@ mod tests {
 
     #[test]
     fn top_level_pandas_parity_functions_compile_and_run() {
-        use crate::prelude::*;
         use std::collections::BTreeMap;
+
+        use crate::prelude::*;
 
         // Verify show_versions
         let ver = show_versions();
@@ -1392,8 +1408,16 @@ mod tests {
         // Create a Series and verify unique, value_counts, factorize
         let s = Series::from_values(
             "test",
-            vec![IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)],
-            vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
         )
         .unwrap();
 
@@ -1440,35 +1464,87 @@ mod tests {
         assert_eq!(lr.column("nums").unwrap().len(), 4);
 
         // wide_to_long test
-        let s_id = Series::from_values("id", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap();
-        let s_a1 = Series::from_values("A1", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap();
-        let s_a2 = Series::from_values("A2", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(30), Scalar::Int64(40)]).unwrap();
+        let s_id = Series::from_values(
+            "id",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let s_a1 = Series::from_values(
+            "A1",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let s_a2 = Series::from_values(
+            "A2",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(30), Scalar::Int64(40)],
+        )
+        .unwrap();
         let df_wide = DataFrame::from_series(vec![s_id, s_a1, s_a2]).unwrap();
         let wtl = wide_to_long(&df_wide, &["A"], &["id"], "year", "", r"\d+").unwrap();
         assert_eq!(wtl.len(), 4);
-        let wtl_m = df_wide.wide_to_long(&["A"], &["id"], "year", "", r"\d+").unwrap();
+        let wtl_m = df_wide
+            .wide_to_long(&["A"], &["id"], "year", "", r"\d+")
+            .unwrap();
         assert_eq!(wtl_m.len(), 4);
 
         // cut_bins and qcut_at_quantiles test
-        let num_series = Series::from_values("nums", vec![0_i64.into(), 1_i64.into(), 2_i64.into()], vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(10.0)]).unwrap();
+        let num_series = Series::from_values(
+            "nums",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
         let cut_res = cut_bins(
             &num_series,
-            &[Scalar::Float64(0.0), Scalar::Float64(5.0), Scalar::Float64(10.0)],
+            &[
+                Scalar::Float64(0.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(10.0),
+            ],
             true,
             None,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cut_res.len(), 3);
         let qcut_res = qcut_at_quantiles(&num_series, &[0.0, 0.5, 1.0], None).unwrap();
         assert_eq!(qcut_res.len(), 3);
 
         // json_normalize_str test
         let jn = json_normalize_str(r#"[{"x": {"y": 100}}]"#, None, None).unwrap();
-        assert_eq!(jn.column("x.y").unwrap().value(0), Some(&Scalar::Int64(100)));
+        assert_eq!(
+            jn.column("x.y").unwrap().value(0),
+            Some(&Scalar::Int64(100))
+        );
 
         // api::types test
         assert!(crate::api::types::is_object_dtype(&DType::Utf8));
         assert!(crate::api::types::is_int64_dtype(&DType::Int64));
         assert!(crate::api::types::is_dtype_equal(&DType::Int64, &"int64"));
+
+        // array test
+        let arr = array(&[Scalar::Int64(1), Scalar::Int64(2)], None).unwrap();
+        assert_eq!(arr.len(), 2);
+
+        // col & lit test
+        let expr = (col("a") + col("b")) * lit(Scalar::Int64(2));
+        assert!(matches!(expr, crate::Expr::Mul { .. }));
+
+        // interval_range test
+        let ir = interval_range(Some(0.0), Some(10.0), Some(5), None, None).unwrap();
+        assert_eq!(ir.len(), 5);
+
+        // NamedAgg & Grouper test
+        let na = NamedAgg::new("c", "sum");
+        assert_eq!(na.column, "c");
+        let grp = Grouper::new().with_key("d");
+        assert_eq!(grp.key.as_deref(), Some("d"));
     }
 }

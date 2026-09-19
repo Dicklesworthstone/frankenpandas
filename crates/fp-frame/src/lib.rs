@@ -402,7 +402,9 @@ pub mod plotting {
     }
 
     /// Make box plots from DataFrameGroupBy (pandas `pandas.plotting.boxplot_frame_groupby`).
-    pub fn boxplot_frame_groupby(grouped: &DataFrameGroupBy<'_>) -> Result<BoxPlotSpec, FrameError> {
+    pub fn boxplot_frame_groupby(
+        grouped: &DataFrameGroupBy<'_>,
+    ) -> Result<BoxPlotSpec, FrameError> {
         grouped.boxplot()
     }
 
@@ -610,7 +612,9 @@ pub mod testing {
             if first == second {
                 Ok(())
             } else {
-                Err(format!("Exact float mismatch: left={first}, right={second}"))
+                Err(format!(
+                    "Exact float mismatch: left={first}, right={second}"
+                ))
             }
         } else {
             let diff = (first - second).abs();
@@ -782,13 +786,9 @@ pub mod testing {
             let right_label = &right.labels()[row];
             match (left_label, right_label) {
                 (IndexLabel::Float64(f1), IndexLabel::Float64(f2)) => {
-                    if let Err(reason) = compare_floats(
-                        f1.0,
-                        f2.0,
-                        options.check_exact,
-                        options.rtol,
-                        options.atol,
-                    ) {
+                    if let Err(reason) =
+                        compare_floats(f1.0, f2.0, options.check_exact, options.rtol, options.atol)
+                    {
                         return Err(AssertionError::new(format!(
                             "Index values differ at index {row}: {reason}"
                         )));
@@ -1047,10 +1047,7 @@ pub mod testing {
     /// # Errors
     ///
     /// Returns [`AssertionError`] if the Indexes are not equal.
-    pub fn assert_index_equal_default(
-        left: &Index,
-        right: &Index,
-    ) -> Result<(), AssertionError> {
+    pub fn assert_index_equal_default(left: &Index, right: &Index) -> Result<(), AssertionError> {
         assert_index_equal(left, right, &AssertEqualOptions::default())
     }
 
@@ -1090,12 +1087,14 @@ pub mod testing {
             )
             .unwrap();
             assert!(assert_series_equal_default(&s1, &s4).is_err());
-            assert!(assert_series_equal(
-                &s1,
-                &s4,
-                &AssertEqualOptions::default().with_check_names(false)
-            )
-            .is_ok());
+            assert!(
+                assert_series_equal(
+                    &s1,
+                    &s4,
+                    &AssertEqualOptions::default().with_check_names(false)
+                )
+                .is_ok()
+            );
         }
 
         #[test]
@@ -1127,12 +1126,14 @@ pub mod testing {
             )
             .unwrap();
             assert!(assert_frame_equal_default(&df1, &df3).is_err());
-            assert!(assert_frame_equal(
-                &df1,
-                &df3,
-                &AssertEqualOptions::default().with_check_like(true)
-            )
-            .is_ok());
+            assert!(
+                assert_frame_equal(
+                    &df1,
+                    &df3,
+                    &AssertEqualOptions::default().with_check_like(true)
+                )
+                .is_ok()
+            );
         }
 
         #[test]
@@ -1151,12 +1152,9 @@ pub mod testing {
             .unwrap();
             assert!(assert_series_equal_default(&s1, &s2).is_ok());
 
-            let s3 = Series::from_values(
-                "v",
-                vec![IndexLabel::Int64(0)],
-                vec![Scalar::Float64(1.0)],
-            )
-            .unwrap();
+            let s3 =
+                Series::from_values("v", vec![IndexLabel::Int64(0)], vec![Scalar::Float64(1.0)])
+                    .unwrap();
             assert!(assert_series_equal_default(&s1, &s3).is_err());
         }
     }
@@ -9291,11 +9289,7 @@ impl Series {
     }
 
     /// Return a backend-neutral bootstrap plot request assessing statistical uncertainty via resampling (pandas `pandas.plotting.bootstrap_plot(series, size=..., samples=...)`).
-    pub fn bootstrap_plot(
-        &self,
-        size: usize,
-        samples: usize,
-    ) -> Result<HistogramSpec, FrameError> {
+    pub fn bootstrap_plot(&self, size: usize, samples: usize) -> Result<HistogramSpec, FrameError> {
         if !self.column.dtype().is_numeric() {
             return Err(FrameError::CompatibilityRejected(format!(
                 "bootstrap_plot requires numeric values; found {:?}",
@@ -9347,9 +9341,7 @@ impl Series {
         }
 
         Ok(HistogramSpec {
-            method: format!(
-                "Series.plot.bootstrap(size={eff_size}, samples={num_samples})"
-            ),
+            method: format!("Series.plot.bootstrap(size={eff_size}, samples={num_samples})"),
             bins: 20,
             series: vec![plot_series_spec(
                 format!("{}_bootstrap_mean", self.name()),
@@ -9362,11 +9354,7 @@ impl Series {
     }
 
     /// Convenience helper: render series bootstrap plot directly to deterministic SVG string.
-    pub fn bootstrap_plot_to_svg(
-        &self,
-        size: usize,
-        samples: usize,
-    ) -> Result<String, FrameError> {
+    pub fn bootstrap_plot_to_svg(&self, size: usize, samples: usize) -> Result<String, FrameError> {
         self.bootstrap_plot(size, samples)?.to_svg()
     }
 
@@ -9416,7 +9404,11 @@ impl Series {
             }
             rl.iter().map(|s| (*s).to_string()).collect()
         } else {
-            self.index.labels().iter().map(format_plot_index_label).collect()
+            self.index
+                .labels()
+                .iter()
+                .map(format_plot_index_label)
+                .collect()
         };
 
         let c_labels: Vec<String> = if let Some(cl) = col_labels {
@@ -58609,6 +58601,21 @@ pub fn wide_to_long(
     flat.set_index_multi(&index_cols, true, "_")
 }
 
+/// Construct a 1D array / Series, matching `pd.array(data, dtype=None)`.
+///
+/// Creates a 1D Series from scalar data, optionally casting to the specified `DType`.
+pub fn array(data: &[Scalar], dtype: Option<DType>) -> Result<Series, FrameError> {
+    let labels = (0..data.len())
+        .map(|i| IndexLabel::Int64(i as i64))
+        .collect();
+    let s = Series::from_values("", labels, data.to_vec())?;
+    if let Some(dt) = dtype {
+        s.astype(dt)
+    } else {
+        Ok(s)
+    }
+}
+
 pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
     if bins == 0 {
         return Err(FrameError::CompatibilityRejected(
@@ -66429,10 +66436,9 @@ impl DataFrame {
         class_column: &str,
         cols: Option<&[&str]>,
     ) -> Result<PlotSpec, FrameError> {
-        let class_col = self
-            .columns
-            .get(class_column)
-            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{class_column}' not found")))?;
+        let class_col = self.columns.get(class_column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{class_column}' not found"))
+        })?;
 
         let target_cols: Vec<(&str, &crate::Column)> = if let Some(col_names) = cols {
             let mut list = Vec::with_capacity(col_names.len());
@@ -66489,11 +66495,20 @@ impl DataFrame {
 
         let mut series = Vec::with_capacity(num_rows);
         for r in 0..num_rows {
-            let class_val = class_col.values().get(r).cloned().unwrap_or(Scalar::Null(NullKind::Null));
+            let class_val = class_col
+                .values()
+                .get(r)
+                .cloned()
+                .unwrap_or(Scalar::Null(NullKind::Null));
             let class_label = scalar_plot_label(&class_val);
             let vals: Vec<Scalar> = target_cols
                 .iter()
-                .map(|(_, col)| col.values().get(r).cloned().unwrap_or(Scalar::Null(NullKind::NaN)))
+                .map(|(_, col)| {
+                    col.values()
+                        .get(r)
+                        .cloned()
+                        .unwrap_or(Scalar::Null(NullKind::NaN))
+                })
                 .collect();
             series.push(plot_series_spec(
                 format!("{class_label}_{r}"),
@@ -66545,10 +66560,9 @@ impl DataFrame {
         class_column: &str,
         samples: usize,
     ) -> Result<PlotSpec, FrameError> {
-        let class_col = self
-            .columns
-            .get(class_column)
-            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{class_column}' not found")))?;
+        let class_col = self.columns.get(class_column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{class_column}' not found"))
+        })?;
 
         let target_cols: Vec<(&str, &crate::Column)> = self
             .column_order
@@ -66585,7 +66599,11 @@ impl DataFrame {
 
         let mut series = Vec::with_capacity(num_rows);
         for r in 0..num_rows {
-            let class_val = class_col.values().get(r).cloned().unwrap_or(Scalar::Null(NullKind::Null));
+            let class_val = class_col
+                .values()
+                .get(r)
+                .cloned()
+                .unwrap_or(Scalar::Null(NullKind::Null));
             let class_label = scalar_plot_label(&class_val);
 
             let row_nums: Vec<f64> = target_cols
@@ -66632,7 +66650,9 @@ impl DataFrame {
         }
 
         Ok(PlotSpec {
-            method: format!("DataFrame.plot.andrews_curves(class_column='{class_column}', samples={num_samples})"),
+            method: format!(
+                "DataFrame.plot.andrews_curves(class_column='{class_column}', samples={num_samples})"
+            ),
             kind: PlotKind::Line,
             series,
         })
@@ -66672,10 +66692,9 @@ impl DataFrame {
         class_column: &str,
         cols: Option<&[&str]>,
     ) -> Result<PlotSpec, FrameError> {
-        let class_col = self
-            .columns
-            .get(class_column)
-            .ok_or_else(|| FrameError::CompatibilityRejected(format!("column '{class_column}' not found")))?;
+        let class_col = self.columns.get(class_column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{class_column}' not found"))
+        })?;
 
         let target_cols: Vec<(&str, &crate::Column)> = if let Some(col_names) = cols {
             let mut list = Vec::with_capacity(col_names.len());
@@ -66751,11 +66770,17 @@ impl DataFrame {
             .collect();
 
         let mut class_order = Vec::new();
-        let mut class_groups: std::collections::BTreeMap<String, (Scalar, Vec<IndexLabel>, Vec<Scalar>, Vec<Scalar>)> =
-            std::collections::BTreeMap::new();
+        let mut class_groups: std::collections::BTreeMap<
+            String,
+            (Scalar, Vec<IndexLabel>, Vec<Scalar>, Vec<Scalar>),
+        > = std::collections::BTreeMap::new();
 
         for r in 0..num_rows {
-            let class_val = class_col.values().get(r).cloned().unwrap_or(Scalar::Null(NullKind::Null));
+            let class_val = class_col
+                .values()
+                .get(r)
+                .cloned()
+                .unwrap_or(Scalar::Null(NullKind::Null));
             let class_label = scalar_plot_label(&class_val);
 
             let mut sum_norm = 0.0;
@@ -66785,14 +66810,19 @@ impl DataFrame {
                 (0.0, 0.0)
             };
 
-            let row_label = self.index.labels().get(r).cloned().unwrap_or(IndexLabel::Int64(r as i64));
+            let row_label = self
+                .index
+                .labels()
+                .get(r)
+                .cloned()
+                .unwrap_or(IndexLabel::Int64(r as i64));
 
             if !class_groups.contains_key(&class_label) {
                 class_order.push(class_label.clone());
             }
-            let entry = class_groups.entry(class_label).or_insert_with(|| {
-                (class_val.clone(), Vec::new(), Vec::new(), Vec::new())
-            });
+            let entry = class_groups
+                .entry(class_label)
+                .or_insert_with(|| (class_val.clone(), Vec::new(), Vec::new(), Vec::new()));
             entry.1.push(row_label);
             entry.2.push(Scalar::Float64(u));
             entry.3.push(Scalar::Float64(v));
@@ -66981,7 +67011,8 @@ impl DataFrame {
         diagonal: Option<&str>,
         range_padding: Option<f64>,
     ) -> Result<String, FrameError> {
-        self.scatter_matrix(alpha, diagonal, range_padding)?.to_svg()
+        self.scatter_matrix(alpha, diagonal, range_padding)?
+            .to_svg()
     }
 
     /// Convenience helper: render scatter matrix directly to HTML figure snippet.
@@ -66991,7 +67022,8 @@ impl DataFrame {
         diagonal: Option<&str>,
         range_padding: Option<f64>,
     ) -> Result<String, FrameError> {
-        self.scatter_matrix(alpha, diagonal, range_padding)?.to_html()
+        self.scatter_matrix(alpha, diagonal, range_padding)?
+            .to_html()
     }
 
     /// Convenience helper: save rendered scatter matrix plot directly to disk.
@@ -67002,7 +67034,8 @@ impl DataFrame {
         diagonal: Option<&str>,
         range_padding: Option<f64>,
     ) -> Result<(), FrameError> {
-        self.scatter_matrix(alpha, diagonal, range_padding)?.save(path)
+        self.scatter_matrix(alpha, diagonal, range_padding)?
+            .save(path)
     }
 
     /// Convenience helper: render scatter matrix with explicit columns directly to deterministic SVG string.
@@ -67013,7 +67046,8 @@ impl DataFrame {
         diagonal: Option<&str>,
         range_padding: Option<f64>,
     ) -> Result<String, FrameError> {
-        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?.to_svg()
+        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?
+            .to_svg()
     }
 
     /// Convenience helper: render scatter matrix with explicit columns directly to HTML figure snippet.
@@ -67024,7 +67058,8 @@ impl DataFrame {
         diagonal: Option<&str>,
         range_padding: Option<f64>,
     ) -> Result<String, FrameError> {
-        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?.to_html()
+        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?
+            .to_html()
     }
 
     /// Convenience helper: save rendered scatter matrix with explicit columns directly to disk.
@@ -67036,7 +67071,8 @@ impl DataFrame {
         diagonal: Option<&str>,
         range_padding: Option<f64>,
     ) -> Result<(), FrameError> {
-        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?.save(path)
+        self.scatter_matrix_with_cols(cols, alpha, diagonal, range_padding)?
+            .save(path)
     }
 
     /// Return a backend-neutral table plot request (pandas `pandas.plotting.table(ax, frame, ...)`).
@@ -67073,7 +67109,11 @@ impl DataFrame {
             }
             rl.iter().map(|s| (*s).to_string()).collect()
         } else {
-            self.index.labels().iter().map(format_plot_index_label).collect()
+            self.index
+                .labels()
+                .iter()
+                .map(format_plot_index_label)
+                .collect()
         };
 
         let c_labels: Vec<String> = if let Some(cl) = col_labels {
@@ -67085,7 +67125,10 @@ impl DataFrame {
             }
             cl.iter().map(|s| (*s).to_string()).collect()
         } else {
-            self.column_order.iter().map(|s| s.as_str().to_string()).collect()
+            self.column_order
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect()
         };
 
         let mut col_slices = Vec::with_capacity(n_cols);
@@ -89714,7 +89757,8 @@ impl DataFrame {
                                 result_cats.push(Scalar::Utf8(dc.to_string()));
                             } else {
                                 return Err(FrameError::CompatibilityRejected(
-                                    "from_dummies: Dummy DataFrame contains rows with no 1s".to_string(),
+                                    "from_dummies: Dummy DataFrame contains rows with no 1s"
+                                        .to_string(),
                                 ));
                             }
                         }
@@ -89742,7 +89786,8 @@ impl DataFrame {
                         if is_one {
                             if matched_cat.is_some() {
                                 return Err(FrameError::CompatibilityRejected(
-                                    "from_dummies: Dummy DataFrame contains rows with multiple 1s".to_string(),
+                                    "from_dummies: Dummy DataFrame contains rows with multiple 1s"
+                                        .to_string(),
                                 ));
                             }
                             matched_cat = Some(col_name.to_string());
@@ -89756,7 +89801,8 @@ impl DataFrame {
                             result_cats.push(Scalar::Utf8(dc.to_string()));
                         } else {
                             return Err(FrameError::CompatibilityRejected(
-                                "from_dummies: Dummy DataFrame contains rows with no 1s".to_string(),
+                                "from_dummies: Dummy DataFrame contains rows with no 1s"
+                                    .to_string(),
                             ));
                         }
                     }
@@ -97167,7 +97213,11 @@ impl DataFrameGroupBy<'_> {
     }
 
     /// Convenience helper: render grouped dataframe histogram for selected columns directly to HTML figure snippet.
-    pub fn hist_columns_to_html(&self, columns: &[&str], bins: usize) -> Result<String, FrameError> {
+    pub fn hist_columns_to_html(
+        &self,
+        columns: &[&str],
+        bins: usize,
+    ) -> Result<String, FrameError> {
         self.hist_columns(columns, bins)?.to_html()
     }
 
@@ -177930,11 +177980,18 @@ mod tests {
         assert_eq!(hist_bins.method, "DataFrameGroupBy.hist(bins=7)");
         assert_eq!(hist_bins.bins, 7);
         assert_eq!(hist_bins.series.len(), 6);
-        assert!(grouped.hist_with_bins_to_svg(7).unwrap().starts_with("<svg"));
-        assert!(grouped
-            .hist_with_bins_to_html(7)
-            .unwrap()
-            .contains("<div class=\"frankenpandas-plot\""));
+        assert!(
+            grouped
+                .hist_with_bins_to_svg(7)
+                .unwrap()
+                .starts_with("<svg")
+        );
+        assert!(
+            grouped
+                .hist_with_bins_to_html(7)
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
 
         let hist_cols = grouped.hist_columns(&["a", "b"], 5).unwrap();
         assert_eq!(
@@ -177943,14 +178000,18 @@ mod tests {
         );
         assert_eq!(hist_cols.bins, 5);
         assert_eq!(hist_cols.series.len(), 6);
-        assert!(grouped
-            .hist_columns_to_svg(&["a", "b"], 5)
-            .unwrap()
-            .starts_with("<svg"));
-        assert!(grouped
-            .hist_columns_to_html(&["a", "b"], 5)
-            .unwrap()
-            .contains("<div class=\"frankenpandas-plot\""));
+        assert!(
+            grouped
+                .hist_columns_to_svg(&["a", "b"], 5)
+                .unwrap()
+                .starts_with("<svg")
+        );
+        assert!(
+            grouped
+                .hist_columns_to_html(&["a", "b"], 5)
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
         assert!(grouped.hist_columns(&["nonexistent"], 5).is_err());
 
         let boxplot = grouped.boxplot().unwrap();
@@ -177958,19 +178019,20 @@ mod tests {
         assert_eq!(boxplot.series.len(), 6);
 
         let box_cols = grouped.boxplot_columns(&["a"]).unwrap();
-        assert_eq!(
-            box_cols.method,
-            "DataFrameGroupBy.boxplot(columns=[\"a\"])"
-        );
+        assert_eq!(box_cols.method, "DataFrameGroupBy.boxplot(columns=[\"a\"])");
         assert_eq!(box_cols.series.len(), 3);
-        assert!(grouped
-            .boxplot_columns_to_svg(&["a"])
-            .unwrap()
-            .starts_with("<svg"));
-        assert!(grouped
-            .boxplot_columns_to_html(&["a"])
-            .unwrap()
-            .contains("<div class=\"frankenpandas-plot\""));
+        assert!(
+            grouped
+                .boxplot_columns_to_svg(&["a"])
+                .unwrap()
+                .starts_with("<svg")
+        );
+        assert!(
+            grouped
+                .boxplot_columns_to_html(&["a"])
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
         assert!(grouped.boxplot_columns(&["nonexistent"]).is_err());
 
         let box_plot = grouped.box_plot().unwrap();
@@ -178050,11 +178112,18 @@ mod tests {
         assert_eq!(hist_bins.method, "SeriesGroupBy.hist(bins=5)");
         assert_eq!(hist_bins.bins, 5);
         assert_eq!(hist_bins.series.len(), 2);
-        assert!(grouped.hist_with_bins_to_svg(5).unwrap().starts_with("<svg"));
-        assert!(grouped
-            .hist_with_bins_to_html(5)
-            .unwrap()
-            .contains("<div class=\"frankenpandas-plot\""));
+        assert!(
+            grouped
+                .hist_with_bins_to_svg(5)
+                .unwrap()
+                .starts_with("<svg")
+        );
+        assert!(
+            grouped
+                .hist_with_bins_to_html(5)
+                .unwrap()
+                .contains("<div class=\"frankenpandas-plot\"")
+        );
 
         let boxplot = grouped.boxplot().unwrap();
         assert_eq!(boxplot.method, "SeriesGroupBy.boxplot");
@@ -217208,7 +217277,10 @@ mod test_top_level_and_reshaping {
 
         let reshaped = df.lreshape(&groups, false)?;
         assert_eq!(reshaped.len(), 4);
-        assert_eq!(reshaped.column_names(), vec![&"id".to_string(), &"e".to_string()]);
+        assert_eq!(
+            reshaped.column_names(),
+            vec![&"id".to_string(), &"e".to_string()]
+        );
 
         // Error: mismatched group lengths
         let mut bad_groups = BTreeMap::new();
@@ -217226,9 +217298,21 @@ mod test_top_level_and_reshaping {
 
     #[test]
     fn test_wide_to_long_method() -> Result<(), FrameError> {
-        let s_id = Series::from_values("id", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(1), Scalar::Int64(2)])?;
-        let s_a1 = Series::from_values("A1", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(10), Scalar::Int64(20)])?;
-        let s_a2 = Series::from_values("A2", vec![0_i64.into(), 1_i64.into()], vec![Scalar::Int64(30), Scalar::Int64(40)])?;
+        let s_id = Series::from_values(
+            "id",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )?;
+        let s_a1 = Series::from_values(
+            "A1",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )?;
+        let s_a2 = Series::from_values(
+            "A2",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(30), Scalar::Int64(40)],
+        )?;
         let df = DataFrame::from_series(vec![s_id, s_a1, s_a2])?;
 
         let long = df.wide_to_long(&["A"], &["id"], "year", "", r"\d+")?;
@@ -217291,7 +217375,13 @@ mod test_top_level_and_reshaping {
         let df = DataFrame::from_series(vec![s_a, s_b, s_c, s_d])?;
 
         // melt
-        let m = melt(&df, &["a", "b"], &["c", "d"], Some("variable"), Some("value"))?;
+        let m = melt(
+            &df,
+            &["a", "b"],
+            &["c", "d"],
+            Some("variable"),
+            Some("value"),
+        )?;
         assert_eq!(m.len(), 4);
 
         // pivot
@@ -217330,6 +217420,14 @@ mod test_top_level_and_reshaping {
         // show_versions
         let sv = show_versions();
         assert!(sv.contains("frankenpandas:"));
+
+        // array
+        let arr = array(&[Scalar::Int64(10), Scalar::Int64(20)], None)?;
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.dtype(), DType::Int64);
+        let arr_f = array(&[Scalar::Int64(1), Scalar::Int64(2)], Some(DType::Float64))?;
+        assert_eq!(arr_f.len(), 2);
+        assert_eq!(arr_f.dtype(), DType::Float64);
 
         Ok(())
     }

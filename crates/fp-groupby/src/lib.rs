@@ -93,6 +93,102 @@ impl Default for GroupByOptions {
     }
 }
 
+/// Specification for named aggregation in groupby, matching `pd.NamedAgg(column, aggfunc)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedAgg {
+    pub column: String,
+    pub aggfunc: String,
+}
+
+impl NamedAgg {
+    /// Construct a new `NamedAgg`.
+    #[must_use]
+    pub fn new(column: impl Into<String>, aggfunc: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            aggfunc: aggfunc.into(),
+        }
+    }
+}
+
+/// Specification for grouping rules, matching `pd.Grouper(...)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grouper {
+    pub key: Option<String>,
+    pub level: Option<usize>,
+    pub freq: Option<String>,
+    pub axis: i64,
+    pub sort: bool,
+    pub dropna: bool,
+    pub closed: Option<String>,
+    pub label: Option<String>,
+}
+
+impl Default for Grouper {
+    fn default() -> Self {
+        Self {
+            key: None,
+            level: None,
+            freq: None,
+            axis: 0,
+            sort: false,
+            dropna: true,
+            closed: None,
+            label: None,
+        }
+    }
+}
+
+impl Grouper {
+    /// Construct a default `Grouper`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the key column.
+    #[must_use]
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    /// Set the level index.
+    #[must_use]
+    pub fn with_level(mut self, level: usize) -> Self {
+        self.level = Some(level);
+        self
+    }
+
+    /// Set the frequency string.
+    #[must_use]
+    pub fn with_freq(mut self, freq: impl Into<String>) -> Self {
+        self.freq = Some(freq.into());
+        self
+    }
+
+    /// Set whether to sort keys.
+    #[must_use]
+    pub fn with_sort(mut self, sort: bool) -> Self {
+        self.sort = sort;
+        self
+    }
+
+    /// Set whether to drop NA values.
+    #[must_use]
+    pub fn with_dropna(mut self, dropna: bool) -> Self {
+        self.dropna = dropna;
+        self
+    }
+
+    /// Set the axis (default 0).
+    #[must_use]
+    pub fn with_axis(mut self, axis: i64) -> Self {
+        self.axis = axis;
+        self
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum GroupByError {
     #[error(transparent)]
@@ -3568,12 +3664,33 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        GroupByExecutionOptions, GroupByOptions, groupby_nunique, groupby_prod, groupby_size,
-        groupby_sum, groupby_sum_with_options, groupby_sum_with_trace, try_groupby_agg_dense_int64,
-        try_groupby_mean_dense_int64_slices, try_groupby_median_dense_int64,
-        try_groupby_median_numeric_vectors, try_groupby_sum_dense_int64_slices,
-        try_groupby_sum_dense_int64_values,
+        GroupByExecutionOptions, GroupByOptions, Grouper, NamedAgg, groupby_nunique, groupby_prod,
+        groupby_size, groupby_sum, groupby_sum_with_options, groupby_sum_with_trace,
+        try_groupby_agg_dense_int64, try_groupby_mean_dense_int64_slices,
+        try_groupby_median_dense_int64, try_groupby_median_numeric_vectors,
+        try_groupby_sum_dense_int64_slices, try_groupby_sum_dense_int64_values,
     };
+
+    #[test]
+    fn test_named_agg_and_grouper_specs() {
+        let na = NamedAgg::new("val", "sum");
+        assert_eq!(na.column, "val");
+        assert_eq!(na.aggfunc, "sum");
+
+        let grp = Grouper::new()
+            .with_key("date")
+            .with_freq("1D")
+            .with_level(0)
+            .with_sort(true)
+            .with_dropna(false)
+            .with_axis(0);
+        assert_eq!(grp.key.as_deref(), Some("date"));
+        assert_eq!(grp.freq.as_deref(), Some("1D"));
+        assert_eq!(grp.level, Some(0));
+        assert!(grp.sort);
+        assert!(!grp.dropna);
+        assert_eq!(grp.axis, 0);
+    }
 
     #[test]
     fn groupby_sum_dense_int64_keys_match_naive_reference_fuzz_xbrt8() {

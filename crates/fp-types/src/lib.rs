@@ -1333,6 +1333,8 @@ pub enum TypeError {
     InvalidIntervalStep { step: f64 },
     #[error("interval_range step {step} does not evenly divide range end-start={span}")]
     IntervalStepDoesNotDivide { step: f64, span: f64 },
+    #[error("interval_range requires exactly 3 of (start, end, periods, freq) to be specified")]
+    IntervalRangeParameterCount,
     #[error("cannot parse '{value}' as {target}")]
     ValueNotParseable { value: String, target: String },
 }
@@ -6587,6 +6589,79 @@ pub fn interval_range_by_step(
         out.push(Interval::new(left, right, closed));
     }
     Ok(out)
+}
+
+/// Build equal-width intervals spanning a range, matching `pd.interval_range`.
+///
+/// Of the four parameters `start`, `end`, `periods`, and `freq`, exactly three must
+/// be specified (`Some`). `closed` defaults to `IntervalClosed::Right` when `None`.
+///
+/// # Errors
+/// Returns `TypeError::IntervalRangeParameterCount` if not exactly 3 of the 4 parameters
+/// are specified.
+/// Returns `TypeError::InvalidIntervalStep` if `freq` is not finite, not positive, or zero.
+/// Returns `TypeError::IntervalStepDoesNotDivide` if `start`, `end`, and `freq` are given
+/// but `(end - start)` is not an integer multiple of `freq`.
+pub fn interval_range(
+    start: Option<f64>,
+    end: Option<f64>,
+    periods: Option<usize>,
+    freq: Option<f64>,
+    closed: Option<IntervalClosed>,
+) -> Result<Vec<Interval>, TypeError> {
+    let count = usize::from(start.is_some())
+        + usize::from(end.is_some())
+        + usize::from(periods.is_some())
+        + usize::from(freq.is_some());
+    if count != 3 {
+        return Err(TypeError::IntervalRangeParameterCount);
+    }
+    let closed = closed.unwrap_or(IntervalClosed::Right);
+
+    match (start, end, periods, freq) {
+        (Some(start), Some(end), Some(periods), None) => {
+            Ok(interval_range_by_periods(start, end, periods, closed))
+        }
+        (Some(start), Some(end), None, Some(freq)) => {
+            interval_range_by_step(start, end, freq, closed)
+        }
+        (Some(start), None, Some(periods), Some(freq)) => {
+            if !freq.is_finite() || !freq.is_sign_positive() || freq == 0.0 {
+                return Err(TypeError::InvalidIntervalStep { step: freq });
+            }
+            if !start.is_finite() || periods == 0 {
+                return Ok(Vec::new());
+            }
+            let mut out = Vec::with_capacity(periods);
+            for i in 0..periods {
+                let left = start + freq * (i as f64);
+                let right = start + freq * ((i + 1) as f64);
+                out.push(Interval::new(left, right, closed));
+            }
+            Ok(out)
+        }
+        (None, Some(end), Some(periods), Some(freq)) => {
+            if !freq.is_finite() || !freq.is_sign_positive() || freq == 0.0 {
+                return Err(TypeError::InvalidIntervalStep { step: freq });
+            }
+            if !end.is_finite() || periods == 0 {
+                return Ok(Vec::new());
+            }
+            let start = end - freq * (periods as f64);
+            let mut out = Vec::with_capacity(periods);
+            for i in 0..periods {
+                let left = start + freq * (i as f64);
+                let right = if i + 1 == periods {
+                    end
+                } else {
+                    start + freq * ((i + 1) as f64)
+                };
+                out.push(Interval::new(left, right, closed));
+            }
+            Ok(out)
+        }
+        _ => Err(TypeError::IntervalRangeParameterCount),
+    }
 }
 
 // ── Period types (br-frankenpandas-epoj Phase 1) ────────────────────────
@@ -14314,7 +14389,7 @@ mod tests {
 
     // ── interval_range tests (br-frankenpandas-xaom) ────────────────────
 
-    use super::{TypeError, interval_range_by_periods, interval_range_by_step};
+    use super::{TypeError, interval_range, interval_range_by_periods, interval_range_by_step};
 
     #[test]
     fn interval_range_by_periods_matches_pandas_default_case() {
@@ -14416,6 +14491,75 @@ mod tests {
         let bins = interval_range_by_step(0.0, 1.0, 0.1, IntervalClosed::Right).expect("ok");
         assert_eq!(bins.len(), 10);
         assert_eq!(bins.last().unwrap().right, 1.0);
+    }
+
+    #[test]
+    fn interval_range_unified_api_tests() {
+        // Case 1: start, end, periods
+        let r1 = interval_range(Some(0.0), Some(10.0), Some(5), None, None).expect("ok");
+        assert_eq!(r1.len(), 5);
+        assert_eq!(r1[0].left, 0.0);
+        assert_eq!(r1[0].right, 2.0);
+        assert_eq!(r1[4].right, 10.0);
+        assert_eq!(r1[0].closed, IntervalClosed::Right);
+
+        // Case 2: start, end, freq
+        let r2 = interval_range(Some(0.0), Some(10.0), None, Some(2.0), None).expect("ok");
+        assert_eq!(r2.len(), 5);
+        assert_eq!(r2[0].left, 0.0);
+        assert_eq!(r2[4].right, 10.0);
+
+        // Case 3: start, periods, freq
+        let r3 = interval_range(
+            Some(0.0),
+            None,
+            Some(5),
+            Some(2.0),
+            Some(IntervalClosed::Both),
+        )
+        .expect("ok");
+        assert_eq!(r3.len(), 5);
+        assert_eq!(r3[0].left, 0.0);
+        assert_eq!(r3[4].right, 10.0);
+        assert_eq!(r3[0].closed, IntervalClosed::Both);
+
+        // Case 4: end, periods, freq
+        let r4 = interval_range(
+            None,
+            Some(10.0),
+            Some(5),
+            Some(2.0),
+            Some(IntervalClosed::Left),
+        )
+        .expect("ok");
+        assert_eq!(r4.len(), 5);
+        assert_eq!(r4[0].left, 0.0);
+        assert_eq!(r4[4].right, 10.0);
+        assert_eq!(r4[0].closed, IntervalClosed::Left);
+
+        // Errors: not exactly 3 arguments
+        assert!(matches!(
+            interval_range(None, None, None, None, None),
+            Err(TypeError::IntervalRangeParameterCount)
+        ));
+        assert!(matches!(
+            interval_range(Some(0.0), Some(10.0), None, None, None),
+            Err(TypeError::IntervalRangeParameterCount)
+        ));
+        assert!(matches!(
+            interval_range(Some(0.0), Some(10.0), Some(5), Some(2.0), None),
+            Err(TypeError::IntervalRangeParameterCount)
+        ));
+
+        // Errors: non-positive freq
+        assert!(matches!(
+            interval_range(Some(0.0), None, Some(5), Some(-1.0), None),
+            Err(TypeError::InvalidIntervalStep { .. })
+        ));
+        assert!(matches!(
+            interval_range(Some(0.0), None, Some(5), Some(0.0), None),
+            Err(TypeError::InvalidIntervalStep { .. })
+        ));
     }
 
     #[test]
@@ -17498,8 +17642,9 @@ mod sparse_dtype_pandas_name_3gxc6 {
 
     #[test]
     fn test_dtype_from_str_and_display() {
-        use crate::DType;
         use std::str::FromStr;
+
+        use crate::DType;
 
         assert_eq!(DType::from_str("int64").unwrap(), DType::Int64);
         assert_eq!(DType::from_str("Int64").unwrap(), DType::Int64Nullable);
@@ -17509,30 +17654,48 @@ mod sparse_dtype_pandas_name_3gxc6 {
         assert_eq!(DType::from_str("boolean").unwrap(), DType::BoolNullable);
         assert_eq!(DType::from_str("string").unwrap(), DType::Utf8);
         assert_eq!(DType::from_str("category").unwrap(), DType::Categorical);
-        assert_eq!(DType::from_str("timedelta64[ns]").unwrap(), DType::Timedelta64);
-        assert_eq!(DType::from_str("datetime64[ns]").unwrap(), DType::Datetime64 { tz: None });
+        assert_eq!(
+            DType::from_str("timedelta64[ns]").unwrap(),
+            DType::Timedelta64
+        );
+        assert_eq!(
+            DType::from_str("datetime64[ns]").unwrap(),
+            DType::Datetime64 { tz: None }
+        );
         assert_eq!(
             DType::from_str("datetime64[ns, UTC]").unwrap(),
-            DType::Datetime64 { tz: Some("UTC".to_string()) }
+            DType::Datetime64 {
+                tz: Some("UTC".to_string())
+            }
         );
         assert_eq!(DType::from_str("period").unwrap(), DType::Period);
         assert_eq!(DType::from_str("interval").unwrap(), DType::Interval);
         assert_eq!(DType::from_str("sparse").unwrap(), DType::Sparse);
 
         assert_eq!(format!("{}", DType::Int64), "int64");
-        assert_eq!(format!("{}", DType::Datetime64 { tz: Some("UTC".to_string()) }), "datetime64[ns, UTC]");
+        assert_eq!(
+            format!(
+                "{}",
+                DType::Datetime64 {
+                    tz: Some("UTC".to_string())
+                }
+            ),
+            "datetime64[ns, UTC]"
+        );
     }
 
     #[test]
     fn test_api_types_inspection_and_infer_dtype() {
-        use crate::api::types::{
-            infer_dtype, is_bool_dtype, is_categorical_dtype, is_datetime64_any_dtype,
-            is_dtype_equal, is_extension_array_dtype, is_float_dtype, is_int64_dtype,
-            is_integer_dtype, is_interval_dtype, is_numeric_dtype, is_object_dtype,
-            is_period_dtype, is_scalar, is_signed_integer_dtype, is_sparse, is_string_dtype,
-            is_timedelta64_dtype, is_unsigned_integer_dtype, pandas_dtype,
+        use crate::{
+            DType, Scalar,
+            api::types::{
+                infer_dtype, is_bool_dtype, is_categorical_dtype, is_datetime64_any_dtype,
+                is_dtype_equal, is_extension_array_dtype, is_float_dtype, is_int64_dtype,
+                is_integer_dtype, is_interval_dtype, is_numeric_dtype, is_object_dtype,
+                is_period_dtype, is_scalar, is_signed_integer_dtype, is_sparse, is_string_dtype,
+                is_timedelta64_dtype, is_unsigned_integer_dtype, pandas_dtype,
+            },
         };
-        use crate::{DType, Scalar};
 
         assert!(is_numeric_dtype(&DType::Int64));
         assert!(is_numeric_dtype(&DType::Float64));
