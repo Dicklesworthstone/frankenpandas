@@ -1981,6 +1981,301 @@ pub fn get_eng_float_format() -> Option<(usize, bool)> {
     }
 }
 
+// ── Global Configuration Options (matching pd.options) ───────────────────
+
+/// Error encountered when inspecting or modifying configuration options.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum OptionError {
+    #[error("no such option: '{pat}'")]
+    NotFound { pat: String },
+    #[error("option pattern '{pat}' matches multiple options: {matches:?}")]
+    Ambiguous { pat: String, matches: Vec<String> },
+    #[error("invalid option value for '{pat}': {reason}")]
+    InvalidValue { pat: String, reason: String },
+}
+
+/// Represents a configuration option value, matching pandas `pd.options`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum OptionValue {
+    None,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+impl OptionValue {
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    #[must_use]
+    pub const fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_float(&self) -> Option<f64> {
+        match self {
+            Self::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for OptionValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "None"),
+            Self::Int(i) => write!(f, "{i}"),
+            Self::Float(fl) => write!(f, "{fl}"),
+            Self::Bool(b) => write!(f, "{b}"),
+            Self::Str(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl From<i64> for OptionValue {
+    fn from(v: i64) -> Self {
+        Self::Int(v)
+    }
+}
+
+impl From<i32> for OptionValue {
+    fn from(v: i32) -> Self {
+        Self::Int(i64::from(v))
+    }
+}
+
+impl From<usize> for OptionValue {
+    fn from(v: usize) -> Self {
+        Self::Int(i64::try_from(v).unwrap_or(i64::MAX))
+    }
+}
+
+impl From<f64> for OptionValue {
+    fn from(v: f64) -> Self {
+        Self::Float(v)
+    }
+}
+
+impl From<bool> for OptionValue {
+    fn from(v: bool) -> Self {
+        Self::Bool(v)
+    }
+}
+
+impl From<&str> for OptionValue {
+    fn from(v: &str) -> Self {
+        Self::Str(v.to_string())
+    }
+}
+
+impl From<String> for OptionValue {
+    fn from(v: String) -> Self {
+        Self::Str(v)
+    }
+}
+
+fn default_options_map() -> std::collections::BTreeMap<String, OptionValue> {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("display.max_rows".to_string(), OptionValue::Int(60));
+    m.insert("display.min_rows".to_string(), OptionValue::Int(10));
+    m.insert("display.max_columns".to_string(), OptionValue::Int(0));
+    m.insert("display.width".to_string(), OptionValue::Int(80));
+    m.insert("display.precision".to_string(), OptionValue::Int(6));
+    m.insert("display.max_colwidth".to_string(), OptionValue::Int(50));
+    m.insert(
+        "display.show_dimensions".to_string(),
+        OptionValue::Bool(true),
+    );
+    m.insert("display.float_format".to_string(), OptionValue::None);
+    m.insert("mode.sim_interactive".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "mode.chained_assignment".to_string(),
+        OptionValue::Str("warn".to_string()),
+    );
+    m.insert("mode.use_inf_as_na".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "compute.use_bottleneck".to_string(),
+        OptionValue::Bool(true),
+    );
+    m.insert("compute.use_numba".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "io.excel.zip.reader".to_string(),
+        OptionValue::Str("zipfile".to_string()),
+    );
+    m
+}
+
+static GLOBAL_OPTIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, OptionValue>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(default_options_map()));
+
+fn resolve_option_key(
+    pat: &str,
+    map: &std::collections::BTreeMap<String, OptionValue>,
+) -> Result<String, OptionError> {
+    if map.contains_key(pat) {
+        return Ok(pat.to_string());
+    }
+    let matches: Vec<String> = map
+        .keys()
+        .filter(|k| k.ends_with(pat) || k.contains(pat))
+        .cloned()
+        .collect();
+    if matches.len() == 1 {
+        Ok(matches[0].clone())
+    } else if matches.is_empty() {
+        Err(OptionError::NotFound {
+            pat: pat.to_string(),
+        })
+    } else {
+        Err(OptionError::Ambiguous {
+            pat: pat.to_string(),
+            matches,
+        })
+    }
+}
+
+/// Retrieve the current value of a configuration option, matching `pd.get_option(pat)`.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] if `pat` does not match any known option,
+/// or [`OptionError::Ambiguous`] if it matches multiple options.
+pub fn get_option(pat: &str) -> Result<OptionValue, OptionError> {
+    let map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = resolve_option_key(pat, &map)?;
+    Ok(map.get(&key).cloned().unwrap_or(OptionValue::None))
+}
+
+/// Set the value of a configuration option, matching `pd.set_option(pat, value)`.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] if `pat` does not match any known option,
+/// or [`OptionError::Ambiguous`] if it matches multiple options.
+pub fn set_option(pat: &str, val: impl Into<OptionValue>) -> Result<(), OptionError> {
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = resolve_option_key(pat, &map)?;
+    let v = val.into();
+    map.insert(key, v);
+    Ok(())
+}
+
+/// Reset one or all configuration options to their defaults, matching `pd.reset_option(pat)`.
+///
+/// If `pat` is `None` or `"all"`, all options are reset to defaults.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] or [`OptionError::Ambiguous`] if `pat` does not uniquely match an option.
+pub fn reset_option(pat: Option<&str>) -> Result<(), OptionError> {
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let defaults = default_options_map();
+    let p = pat.unwrap_or("all");
+    if p == "all" {
+        *map = defaults;
+        return Ok(());
+    }
+    let key = resolve_option_key(p, &defaults)?;
+    if let Some(def_val) = defaults.get(&key) {
+        map.insert(key, def_val.clone());
+    }
+    Ok(())
+}
+
+/// Return formatted descriptions of one or all options, matching `pd.describe_option(pat)`.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] if `pat` is provided but matches no options.
+pub fn describe_option(pat: Option<&str>) -> Result<String, OptionError> {
+    use std::fmt::Write as _;
+    let map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut out = String::with_capacity(map.len() * 40);
+    let mut matched = 0;
+    for (k, v) in map.iter() {
+        if let Some(p) = pat
+            && !k.contains(p)
+        {
+            continue;
+        }
+        if matched > 0 {
+            out.push('\n');
+        }
+        let _ = write!(out, "{k} : [currently: {v}]");
+        matched += 1;
+    }
+    if matched == 0
+        && let Some(p) = pat
+    {
+        return Err(OptionError::NotFound { pat: p.to_string() });
+    }
+    Ok(out)
+}
+
+/// RAII scope guard that restores options to their prior values when dropped.
+#[derive(Debug)]
+pub struct OptionContextGuard {
+    saved: Vec<(String, OptionValue)>,
+}
+
+impl Drop for OptionContextGuard {
+    fn drop(&mut self) {
+        let mut map = GLOBAL_OPTIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (k, old) in self.saved.drain(..) {
+            map.insert(k, old);
+        }
+    }
+}
+
+/// Temporarily override options within a scoped context, matching `pd.option_context(...)`.
+///
+/// # Errors
+/// Returns [`OptionError::NotFound`] or [`OptionError::Ambiguous`] if any pattern is invalid.
+pub fn option_context(entries: &[(&str, OptionValue)]) -> Result<OptionContextGuard, OptionError> {
+    let mut map = GLOBAL_OPTIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut saved = Vec::with_capacity(entries.len());
+    for (pat, new_val) in entries {
+        let key = resolve_option_key(pat, &map)?;
+        if let Some(old) = map.get(&key) {
+            saved.push((key.clone(), old.clone()));
+        }
+        map.insert(key, new_val.clone());
+    }
+    Ok(OptionContextGuard { saved })
+}
+
 /// Cast a scalar reference to a target dtype (clones only when conversion is needed).
 pub fn cast_scalar(value: &Scalar, target: DType) -> Result<Scalar, TypeError> {
     cast_scalar_owned(value.clone(), target)
@@ -17897,5 +18192,85 @@ mod sparse_dtype_pandas_name_3gxc6 {
         assert_eq!(get_eng_float_format(), Some((4, true)));
         reset_eng_float_format();
         assert_eq!(get_eng_float_format(), None);
+    }
+
+    #[test]
+    fn test_options_system() {
+        use super::{
+            OptionError, OptionValue, describe_option, get_option, option_context, reset_option,
+            set_option,
+        };
+
+        // Reset to clean state
+        reset_option(None).unwrap();
+
+        // 1. Default option checks
+        let max_rows = get_option("display.max_rows").unwrap();
+        assert_eq!(max_rows.as_int(), Some(60));
+        assert_eq!(max_rows, OptionValue::Int(60));
+        assert!(!max_rows.is_none());
+
+        // Partial key matching (suffix)
+        let min_rows = get_option("min_rows").unwrap();
+        assert_eq!(min_rows.as_int(), Some(10));
+
+        // 2. Setting options
+        set_option("display.max_rows", 100).unwrap();
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(100));
+
+        set_option("mode.sim_interactive", true).unwrap();
+        assert_eq!(
+            get_option("mode.sim_interactive").unwrap().as_bool(),
+            Some(true)
+        );
+
+        set_option("mode.chained_assignment", "raise").unwrap();
+        assert_eq!(
+            get_option("mode.chained_assignment").unwrap().as_str(),
+            Some("raise")
+        );
+
+        // 3. OptionError handling
+        assert!(matches!(
+            get_option("nonexistent.option"),
+            Err(OptionError::NotFound { .. })
+        ));
+        assert!(matches!(
+            get_option("display"),
+            Err(OptionError::Ambiguous { .. })
+        ));
+
+        // 4. describe_option
+        let desc = describe_option(Some("max_rows")).unwrap();
+        assert!(desc.contains("display.max_rows : [currently: 100]"));
+
+        let desc_all = describe_option(None).unwrap();
+        assert!(desc_all.contains("display.width"));
+        assert!(desc_all.contains("compute.use_bottleneck"));
+
+        // 5. Scoped option_context
+        {
+            let _guard = option_context(&[
+                ("display.max_rows", OptionValue::Int(999)),
+                ("display.precision", OptionValue::Int(2)),
+            ])
+            .unwrap();
+
+            assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(999));
+            assert_eq!(get_option("display.precision").unwrap().as_int(), Some(2));
+        }
+        // Restored after guard drop
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(100));
+        assert_eq!(get_option("display.precision").unwrap().as_int(), Some(6));
+
+        // 6. Reset single option and all options
+        reset_option(Some("display.max_rows")).unwrap();
+        assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(60));
+
+        reset_option(Some("all")).unwrap();
+        assert_eq!(
+            get_option("mode.chained_assignment").unwrap().as_str(),
+            Some("warn")
+        );
     }
 }
