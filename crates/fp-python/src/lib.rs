@@ -10593,55 +10593,6 @@ impl PySeries {
         }
     }
 
-    #[pyo3(signature = (key, default=None))]
-    fn get(
-        &self,
-        py: Python<'_>,
-        key: &Bound<'_, PyAny>,
-        default: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let def = default
-            .map(|d| d.clone().unbind())
-            .unwrap_or_else(|| py.None());
-        if let Ok(seq) = key.extract::<Vec<Bound<'_, PyAny>>>() {
-            let mut labels = Vec::with_capacity(seq.len());
-            for item in &seq {
-                if let Ok(label) = py_to_index_label(item) {
-                    if self.inner.index().position(&label).is_none() {
-                        return Ok(def);
-                    }
-                    labels.push(label);
-                } else {
-                    return Ok(def);
-                }
-            }
-            if let Ok(s) = self.inner.loc(&labels) {
-                return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-            }
-            return Ok(def);
-        }
-        if let Ok(label) = py_to_index_label(key) {
-            let positions: Vec<usize> = self
-                .inner
-                .index()
-                .labels()
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| *l == &label)
-                .map(|(i, _)| i)
-                .collect();
-            if positions.len() > 1 {
-                if let Ok(sub) = self.inner.loc(&[label]) {
-                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
-                }
-            } else if let Some(pos) = positions.first() {
-                let sc = &self.inner.column().values()[*pos];
-                return scalar_to_py(py, sc);
-            }
-        }
-        Ok(def)
-    }
-
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let labels = self.inner.index().labels();
         let values = self.inner.column().values();
@@ -11054,14 +11005,45 @@ impl PySeries {
         key: &Bound<'py, PyAny>,
         default: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if let Ok(seq) = key.extract::<Vec<Bound<'py, PyAny>>>() {
+            let mut labels = Vec::with_capacity(seq.len());
+            for item in &seq {
+                if let Ok(label) = py_to_index_label(item) {
+                    if self.inner.index().position(&label).is_none() {
+                        return Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)));
+                    }
+                    labels.push(label);
+                } else {
+                    return Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)));
+                }
+            }
+            if let Ok(s) = self.inner.loc(&labels) {
+                let py_s = Py::new(py, PySeries { inner: s })?;
+                return Ok(py_s.into_bound(py).into_any());
+            }
+            return Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)));
+        }
         let label = match py_to_index_label(key) {
             Ok(l) => l,
             Err(_) => return Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py))),
         };
-        if let Some(pos) = self.inner.index().get_loc(&label)
-            && let Ok(val) = self.inner.iat(pos as i64)
-        {
-            let py_val = scalar_to_py(py, &val)?;
+        let positions: Vec<usize> = self
+            .inner
+            .index()
+            .labels()
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| *l == &label)
+            .map(|(i, _)| i)
+            .collect();
+        if positions.len() > 1 {
+            if let Ok(sub) = self.inner.loc(&[label]) {
+                let py_s = Py::new(py, PySeries { inner: sub })?;
+                return Ok(py_s.into_bound(py).into_any());
+            }
+        } else if let Some(pos) = positions.first() {
+            let sc = &self.inner.column().values()[*pos];
+            let py_val = scalar_to_py(py, sc)?;
             return Ok(py_val.into_bound(py));
         }
         Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)))
@@ -14223,51 +14205,6 @@ impl PyDataFrame {
         }
     }
 
-    #[pyo3(signature = (key, default=None))]
-    fn get(
-        &self,
-        py: Python<'_>,
-        key: &Bound<'_, PyAny>,
-        default: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let def = default
-            .map(|d| d.clone().unbind())
-            .unwrap_or_else(|| py.None());
-        if let Ok(col) = key.extract::<String>() {
-            let col_names = self.inner.column_names();
-            let matches: Vec<&str> = col_names
-                .iter()
-                .filter(|c| c.as_str() == col.as_str())
-                .map(|s| s.as_str())
-                .collect();
-            if matches.len() > 1 {
-                let frame = self
-                    .inner
-                    .select_columns(&matches)
-                    .map_err(frame_error_to_py)?;
-                return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
-            } else if matches.len() == 1 {
-                return Ok(Py::new(py, self.column_series(&col)?)?.into_any());
-            } else {
-                return Ok(def);
-            }
-        }
-        if let Ok(cols) = key.extract::<Vec<String>>() {
-            for col in &cols {
-                if self.inner.column(col).is_none() {
-                    return Ok(def);
-                }
-            }
-            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-            let frame = self
-                .inner
-                .select_columns(&refs)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
-        }
-        Ok(def)
-    }
-
     fn keys(&self) -> Vec<String> {
         self.columns()
     }
@@ -14625,13 +14562,45 @@ impl PyDataFrame {
         key: &Bound<'py, PyAny>,
         default: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if let Ok(col_name) = key.extract::<String>()
-            && let Some(col) = self.inner.column(&col_name)
-        {
-            let s = Series::new(col_name, self.inner.index().clone(), col.clone())
-                .map_err(frame_error_to_py)?;
-            let py_s = Py::new(py, PySeries { inner: s })?;
-            return Ok(py_s.into_bound(py).into_any());
+        if let Ok(col_name) = key.extract::<String>() {
+            let col_names = self.inner.column_names();
+            let matches: Vec<&str> = col_names
+                .iter()
+                .filter(|c| c.as_str() == col_name.as_str())
+                .map(|s| s.as_str())
+                .collect();
+            if matches.len() > 1 {
+                let frame = self
+                    .inner
+                    .select_columns(&matches)
+                    .map_err(frame_error_to_py)?;
+                let py_df = Py::new(py, PyDataFrame { inner: frame })?;
+                return Ok(py_df.into_bound(py).into_any());
+            } else if matches.len() == 1 {
+                if let Some(col) = self.inner.column(&col_name) {
+                    let s = Series::new(col_name, self.inner.index().clone(), col.clone())
+                        .map_err(frame_error_to_py)?;
+                    let py_s = Py::new(py, PySeries { inner: s })?;
+                    return Ok(py_s.into_bound(py).into_any());
+                }
+            }
+        } else if let Ok(cols) = key.extract::<Vec<String>>() {
+            let mut all_exist = true;
+            for col in &cols {
+                if self.inner.column(col).is_none() {
+                    all_exist = false;
+                    break;
+                }
+            }
+            if all_exist {
+                let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+                let frame = self
+                    .inner
+                    .select_columns(&refs)
+                    .map_err(frame_error_to_py)?;
+                let py_df = Py::new(py, PyDataFrame { inner: frame })?;
+                return Ok(py_df.into_bound(py).into_any());
+            }
         }
         Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)))
     }
@@ -27644,21 +27613,21 @@ mod tests {
 
             let key_a = pyo3::types::PyString::new(py, "a");
             let got_a = py_df.get(py, key_a.as_any(), None).expect("get a");
-            assert!(got_a.bind(py).is_instance_of::<PySeries>());
+            assert!(got_a.is_instance_of::<PySeries>());
 
             let key_c = pyo3::types::PyString::new(py, "c");
             let got_c = py_df.get(py, key_c.as_any(), None).expect("get c");
-            assert!(got_c.bind(py).is_none());
+            assert!(got_c.is_none());
 
             let def_val = pyo3::types::PyInt::new(py, 42);
             let got_c_def = py_df
                 .get(py, key_c.as_any(), Some(def_val.as_any()))
                 .expect("get c def");
-            assert_eq!(got_c_def.extract::<i64>(py).expect("extract 42"), 42);
+            assert_eq!(got_c_def.extract::<i64>().expect("extract 42"), 42);
 
             let key_list = pyo3::types::PyList::new(py, vec!["a", "b"]).expect("list");
             let got_list = py_df.get(py, key_list.as_any(), None).expect("get list");
-            assert!(got_list.bind(py).is_instance_of::<PyDataFrame>());
+            assert!(got_list.is_instance_of::<PyDataFrame>());
 
             let before_val = pyo3::types::PyInt::new(py, 1);
             let trunc_row = py_df
@@ -27684,30 +27653,30 @@ mod tests {
                 .expect("set_axis");
             assert_eq!(df_renamed.columns(), vec!["x", "y"]);
 
-            let s = Series::from_scalars(
+            let s = Series::from_values(
                 "s",
-                vec![Scalar::Int64(10), Scalar::Int64(20)],
                 vec![IndexLabel::Utf8("x".into()), IndexLabel::Utf8("y".into())],
+                vec![Scalar::Int64(10), Scalar::Int64(20)],
             )
             .expect("s");
             let py_s = PySeries { inner: s };
 
             let key_x = pyo3::types::PyString::new(py, "x");
             let got_x = py_s.get(py, key_x.as_any(), None).expect("get x");
-            assert_eq!(got_x.extract::<i64>(py).expect("extract 10"), 10);
+            assert_eq!(got_x.extract::<i64>().expect("extract 10"), 10);
 
             let key_z = pyo3::types::PyString::new(py, "z");
             let got_z = py_s.get(py, key_z.as_any(), None).expect("get z");
-            assert!(got_z.bind(py).is_none());
+            assert!(got_z.is_none());
 
             let got_z_def = py_s
                 .get(py, key_z.as_any(), Some(def_val.as_any()))
                 .expect("get z def");
-            assert_eq!(got_z_def.extract::<i64>(py).expect("extract 42"), 42);
+            assert_eq!(got_z_def.extract::<i64>().expect("extract 42"), 42);
 
             let key_xy = pyo3::types::PyList::new(py, vec!["x", "y"]).expect("xy");
             let got_xy = py_s.get(py, key_xy.as_any(), None).expect("get xy");
-            assert!(got_xy.bind(py).is_instance_of::<PySeries>());
+            assert!(got_xy.is_instance_of::<PySeries>());
 
             let trunc_s = py_s
                 .truncate(Some(key_x.as_any()), Some(key_x.as_any()), None, None)

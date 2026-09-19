@@ -2202,3 +2202,140 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_vals, oracle_vals);
 }
+
+#[test]
+fn conformance_dataframe_set_axis_and_rename_axis_differential() {
+    use fp_frame::DataFrame;
+    use fp_index::IndexLabel;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]}, index=["r0", "r1"])
+renamed_rows = df.set_axis(["row_x", "row_y"], axis=0)
+renamed_cols = df.set_axis(["col_u", "col_v"], axis=1)
+renamed_ax = df.rename_axis("sample_id")
+res = {
+    "rows_idx": [str(x) for x in renamed_rows.index],
+    "cols_names": renamed_cols.columns.tolist(),
+    "ax_name": renamed_ax.index.name,
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame set_axis/rename_axis differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict_with_index(
+        vec![
+            ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+        ],
+        vec![IndexLabel::Utf8("r0".into()), IndexLabel::Utf8("r1".into())],
+    )
+    .expect("df");
+
+    let renamed_rows = df
+        .set_axis(
+            vec![
+                IndexLabel::Utf8("row_x".into()),
+                IndexLabel::Utf8("row_y".into()),
+            ],
+            0,
+        )
+        .expect("set_axis 0");
+    let actual_rows_idx: Vec<String> = renamed_rows
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_rows_idx: Vec<String> = oracle["rows_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_rows_idx, oracle_rows_idx);
+
+    let renamed_cols = df
+        .set_axis(
+            vec![
+                IndexLabel::Utf8("col_u".into()),
+                IndexLabel::Utf8("col_v".into()),
+            ],
+            1,
+        )
+        .expect("set_axis 1");
+    let actual_cols: Vec<String> = renamed_cols.column_names().into_iter().cloned().collect();
+    let oracle_cols: Vec<String> = oracle["cols_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_cols, oracle_cols);
+
+    let renamed_ax = df.rename_axis("sample_id").expect("rename_axis");
+    assert_eq!(renamed_ax.index().name(), oracle["ax_name"].as_str());
+}
+
+#[test]
+fn conformance_dataframe_get_differential() {
+    use fp_frame::DataFrame;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
+got_a = df.get("a")
+got_missing = df.get("missing", default="fallback")
+res = {
+    "a_vals": got_a.tolist(),
+    "missing": str(got_missing),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame get differential test");
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+        ],
+    )
+    .expect("df");
+
+    let got_a = df.get("a").expect("get a").expect("some");
+    let actual_a_vals: Vec<f64> = got_a
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let oracle_a_vals: Vec<f64> = oracle["a_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_a_vals, oracle_a_vals);
+
+    let got_missing = df.get("missing").expect("get missing");
+    assert!(got_missing.is_none());
+}
