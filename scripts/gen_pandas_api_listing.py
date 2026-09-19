@@ -32,6 +32,7 @@ CLASSES_TO_ENUMERATE = [
     ("pandas.MultiIndex", "MultiIndex"),
     ("pandas.DatetimeIndex", "DatetimeIndex"),
     ("pandas.CategoricalIndex", "CategoricalIndex"),
+    ("pandas.IntervalIndex", "IntervalIndex"),
     ("pandas.TimedeltaIndex", "TimedeltaIndex"),
     ("pandas.PeriodIndex", "PeriodIndex"),
     ("pandas.RangeIndex", "RangeIndex"),
