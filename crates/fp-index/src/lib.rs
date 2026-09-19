@@ -16236,6 +16236,54 @@ impl IntervalIndex {
             name: self.name.clone(),
         })
     }
+
+    /// Check whether intervals are closed on the left endpoint (`pd.IntervalIndex.closed_left`).
+    #[must_use]
+    pub fn closed_left(&self) -> bool {
+        self.closed.left_closed()
+    }
+
+    /// Check whether intervals are closed on the right endpoint (`pd.IntervalIndex.closed_right`).
+    #[must_use]
+    pub fn closed_right(&self) -> bool {
+        self.closed.right_closed()
+    }
+
+    /// Check whether intervals are open on the left endpoint (`pd.IntervalIndex.open_left`).
+    #[must_use]
+    pub fn open_left(&self) -> bool {
+        !self.closed.left_closed()
+    }
+
+    /// Check whether intervals are open on the right endpoint (`pd.IntervalIndex.open_right`).
+    #[must_use]
+    pub fn open_right(&self) -> bool {
+        !self.closed.right_closed()
+    }
+
+    /// Return a boolean whether the IntervalIndex is non-overlapping and monotonic (`pd.IntervalIndex.is_non_overlapping_monotonic`).
+    #[must_use]
+    pub fn is_non_overlapping_monotonic(&self) -> bool {
+        (self.is_monotonic_increasing() || self.is_monotonic_decreasing()) && !self.is_overlapping()
+    }
+
+    /// Return intervals as a vector of (left, right) tuples (`pd.IntervalIndex.to_tuples`).
+    #[must_use]
+    pub fn to_tuples(&self) -> Vec<(f64, f64)> {
+        self.values.iter().map(|iv| (iv.left, iv.right)).collect()
+    }
+
+    /// Return intervals as a vector of `Interval` values.
+    #[must_use]
+    pub fn to_list(&self) -> Vec<Interval> {
+        self.values.clone()
+    }
+
+    /// Alias for `to_list`.
+    #[must_use]
+    pub fn tolist(&self) -> Vec<Interval> {
+        self.to_list()
+    }
 }
 
 impl From<IntervalIndex> for Index {
@@ -36635,5 +36683,51 @@ mod interval_index_tests {
         // From<IntervalIndex> for Index
         let idx_from: Index = ii.into();
         assert_eq!(idx_from.len(), 4);
+    }
+
+    #[test]
+    fn test_interval_index_closed_and_tuples() {
+        let ii_right = IntervalIndex::from_breaks(&[0.0, 1.5, 3.0], IntervalClosed::Right)
+            .expect("from_breaks");
+        assert!(!ii_right.closed_left());
+        assert!(ii_right.closed_right());
+        assert!(ii_right.open_left());
+        assert!(!ii_right.open_right());
+        assert!(ii_right.is_non_overlapping_monotonic());
+        assert_eq!(ii_right.to_tuples(), vec![(0.0, 1.5), (1.5, 3.0)]);
+        assert_eq!(ii_right.to_list().len(), 2);
+        assert_eq!(ii_right.tolist().len(), 2);
+
+        let ii_both = IntervalIndex::from_breaks(&[0.0, 1.5, 3.0], IntervalClosed::Both)
+            .expect("from_breaks");
+        assert!(ii_both.closed_left());
+        assert!(ii_both.closed_right());
+        assert!(!ii_both.open_left());
+        assert!(!ii_both.open_right());
+        // Touching endpoints with Both are overlapping at 1.5
+        assert!(ii_both.is_overlapping());
+        assert!(!ii_both.is_non_overlapping_monotonic());
+
+        let ii_left =
+            IntervalIndex::from_breaks(&[0.0, 1.0], IntervalClosed::Left).expect("from_breaks");
+        assert!(ii_left.closed_left());
+        assert!(!ii_left.closed_right());
+        assert!(!ii_left.open_left());
+        assert!(ii_left.open_right());
+
+        let ii_neither =
+            IntervalIndex::from_breaks(&[0.0, 1.0], IntervalClosed::Neither).expect("from_breaks");
+        assert!(!ii_neither.closed_left());
+        assert!(!ii_neither.closed_right());
+        assert!(ii_neither.open_left());
+        assert!(ii_neither.open_right());
+
+        // Decreasing non-overlapping
+        let ii_dec =
+            IntervalIndex::from_tuples(&[(3.0, 5.0), (1.0, 3.0), (0.0, 1.0)], IntervalClosed::Left);
+        assert!(ii_dec.is_monotonic_decreasing());
+        assert!(!ii_dec.is_monotonic_increasing());
+        assert!(!ii_dec.is_overlapping());
+        assert!(ii_dec.is_non_overlapping_monotonic());
     }
 }

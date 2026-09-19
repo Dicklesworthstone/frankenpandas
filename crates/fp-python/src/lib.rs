@@ -22807,6 +22807,31 @@ impl PyIntervalIndex {
         })
     }
 
+    #[classmethod]
+    #[pyo3(signature = (left, right, closed="right", name=None))]
+    fn from_arrays(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        left: Vec<f64>,
+        right: Vec<f64>,
+        closed: Option<&str>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let closed_str = closed.unwrap_or("right");
+        if left.len() != right.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "left and right arrays must have equal length",
+            ));
+        }
+        let mut intervals = Vec::with_capacity(left.len());
+        for (l, r) in left.into_iter().zip(right) {
+            intervals.push(PyInterval::new(l, r, Some(closed_str))?);
+        }
+        Ok(Self {
+            intervals,
+            name: name.map(str::to_string),
+        })
+    }
+
     #[getter]
     fn name(&self) -> Option<String> {
         self.name.clone()
@@ -22834,6 +22859,59 @@ impl PyIntervalIndex {
 
     fn __repr__(&self) -> String {
         format!("IntervalIndex({:?})", self.intervals)
+    }
+
+    #[getter]
+    fn closed(&self) -> String {
+        self.intervals
+            .first()
+            .map_or("right", |iv| iv.closed.as_str())
+            .to_string()
+    }
+
+    #[getter]
+    fn closed_left(&self) -> bool {
+        self.to_rust().closed_left()
+    }
+
+    #[getter]
+    fn closed_right(&self) -> bool {
+        self.to_rust().closed_right()
+    }
+
+    #[getter]
+    fn open_left(&self) -> bool {
+        self.to_rust().open_left()
+    }
+
+    #[getter]
+    fn open_right(&self) -> bool {
+        self.to_rust().open_right()
+    }
+
+    #[getter]
+    fn is_non_overlapping_monotonic(&self) -> bool {
+        self.to_rust().is_non_overlapping_monotonic()
+    }
+
+    #[getter]
+    fn dtype(&self) -> String {
+        self.to_rust().dtype()
+    }
+
+    #[getter]
+    fn is_unique(&self) -> bool {
+        self.to_rust().is_unique()
+    }
+
+    #[getter]
+    fn is_monotonic_increasing(&self) -> bool {
+        self.to_rust().is_monotonic_increasing()
+    }
+
+    #[getter]
+    fn is_monotonic_decreasing(&self) -> bool {
+        self.to_rust().is_monotonic_decreasing()
     }
 
     #[getter]
@@ -22887,8 +22965,72 @@ impl PyIntervalIndex {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))
     }
 
-    fn get_indexer(&self, target: Vec<f64>) -> Vec<Option<usize>> {
-        self.to_rust().get_indexer(&target)
+    #[pyo3(signature = (target))]
+    fn get_indexer(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+        let rust_idx = self.to_rust();
+        let points: Vec<f64> = if let Ok(v) = target.extract::<Vec<f64>>() {
+            v
+        } else if let Ok(seq) = target.cast::<pyo3::types::PySequence>() {
+            let len = seq.len()?;
+            let mut pts = Vec::with_capacity(len);
+            for i in 0..len {
+                pts.push(seq.get_item(i)?.extract::<f64>()?);
+            }
+            pts
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "target must be a sequence of floats",
+            ));
+        };
+        Ok(rust_idx
+            .get_indexer(&points)
+            .into_iter()
+            .map(|opt| opt.map_or(-1, |u| u as i64))
+            .collect())
+    }
+
+    fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+        self.get_indexer(target)
+    }
+
+    fn to_tuples(&self) -> Vec<(f64, f64)> {
+        self.to_rust().to_tuples()
+    }
+
+    fn to_list(&self) -> Vec<PyInterval> {
+        self.intervals.clone()
+    }
+
+    fn tolist(&self) -> Vec<PyInterval> {
+        self.intervals.clone()
+    }
+
+    fn set_closed(&self, closed: &str) -> PyResult<Self> {
+        let mut intervals = Vec::with_capacity(self.intervals.len());
+        for iv in &self.intervals {
+            intervals.push(PyInterval::new(iv.left, iv.right, Some(closed))?);
+        }
+        Ok(Self {
+            intervals,
+            name: self.name.clone(),
+        })
+    }
+
+    fn overlaps(&self, other: &PyInterval) -> Vec<bool> {
+        let other_closed = match other.closed.as_str() {
+            "left" => fp_types::IntervalClosed::Left,
+            "both" => fp_types::IntervalClosed::Both,
+            "neither" => fp_types::IntervalClosed::Neither,
+            _ => fp_types::IntervalClosed::Right,
+        };
+        let other_iv = fp_types::Interval::new(other.left, other.right, other_closed);
+        self.to_rust().overlaps(&other_iv)
+    }
+
+    fn to_index(&self) -> PyIndex {
+        PyIndex {
+            inner: self.to_rust().to_index(),
+        }
     }
 }
 
@@ -26767,5 +26909,70 @@ mod tests {
 
         let empty = empty_dataframe();
         assert_eq!(empty.shape(), (0, 0));
+    }
+
+    #[test]
+    fn test_py_interval_index() {
+        let pii = PyIntervalIndex {
+            intervals: vec![
+                PyInterval {
+                    left: 0.0,
+                    right: 1.5,
+                    closed: "right".to_string(),
+                },
+                PyInterval {
+                    left: 1.5,
+                    right: 3.0,
+                    closed: "right".to_string(),
+                },
+            ],
+            name: Some("iv_idx".to_string()),
+        };
+
+        assert_eq!(pii.closed(), "right");
+        assert!(!pii.closed_left());
+        assert!(pii.closed_right());
+        assert!(pii.open_left());
+        assert!(!pii.open_right());
+        assert!(pii.is_non_overlapping_monotonic());
+        assert_eq!(pii.dtype(), "interval[float64, right]");
+        assert!(pii.is_unique());
+        assert!(pii.is_monotonic_increasing());
+        assert!(!pii.is_monotonic_decreasing());
+        assert_eq!(pii.to_tuples(), vec![(0.0, 1.5), (1.5, 3.0)]);
+        assert_eq!(pii.to_list().len(), 2);
+        assert_eq!(pii.tolist().len(), 2);
+        assert_eq!(pii.name(), Some("iv_idx".to_string()));
+
+        let left = pii.left();
+        assert_eq!(left.len(), 2);
+        let right = pii.right();
+        assert_eq!(right.len(), 2);
+        let mid = pii.mid();
+        assert_eq!(mid.len(), 2);
+
+        assert_eq!(pii.contains(1.0), vec![true, false]);
+        assert_eq!(pii.contains(2.0), vec![false, true]);
+        assert_eq!(pii.get_loc(1.0).unwrap(), 0);
+
+        let converted = pii.to_rust();
+        assert_eq!(converted.len(), 2);
+        let back = PyIntervalIndex::from_rust(&converted);
+        assert_eq!(back.intervals.len(), 2);
+
+        let other = PyInterval {
+            left: 1.0,
+            right: 2.0,
+            closed: "both".to_string(),
+        };
+        assert_eq!(pii.overlaps(&other), vec![true, true]);
+
+        let closed_both = pii.set_closed("both").unwrap();
+        assert_eq!(closed_both.closed(), "both");
+        assert!(closed_both.closed_left());
+        assert!(closed_both.closed_right());
+
+        let idx = pii.to_index();
+        assert_eq!(idx.len(), 2);
     }
 }

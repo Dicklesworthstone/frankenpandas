@@ -5,6 +5,9 @@
 //! input: empty indexes, single labels, duplicate labels, mixed labels,
 //! NA-like string labels, and extreme integer labels.
 
+use fp_index::{IndexLabel, IntervalIndex};
+use fp_types::IntervalClosed;
+
 use super::{
     CaseStatus, HarnessConfig, HarnessError, OracleMode, PacketFixture, ResolvedExpected,
     SuiteOptions, capture_live_oracle_expected,
@@ -305,4 +308,325 @@ fn conformance_index_monotonic_decreasing_extreme_ints() {
     }))
     .expect("fixture");
     check_index_fixture(fixture);
+}
+
+fn run_pandas_oracle_eval(code: &str) -> Option<serde_json::Value> {
+    use std::io::Write;
+    let cfg = strict_config();
+    let python = &cfg.python_bin;
+    let mut child = std::process::Command::new(python)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(code.as_bytes());
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn index_to_f64_vec(idx: &fp_index::Index) -> Vec<f64> {
+    idx.labels()
+        .iter()
+        .filter_map(|l| match l {
+            IndexLabel::Float64(f) => Some(f.0),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn conformance_interval_index_breaks_differential() {
+    let python_code = r#"
+import pandas as pd, json
+idx = pd.IntervalIndex.from_breaks([0.0, 1.5, 3.0, 5.0], closed='right')
+res = {
+    'left': idx.left.tolist(),
+    'right': idx.right.tolist(),
+    'mid': idx.mid.tolist(),
+    'length': idx.length.tolist(),
+    'closed_left': bool(idx.closed_left),
+    'closed_right': bool(idx.closed_right),
+    'open_left': bool(idx.open_left),
+    'open_right': bool(idx.open_right),
+    'is_overlapping': bool(idx.is_overlapping),
+    'is_unique': bool(idx.is_unique),
+    'is_monotonic_increasing': bool(idx.is_monotonic_increasing),
+    'is_monotonic_decreasing': bool(idx.is_monotonic_decreasing),
+    'is_non_overlapping_monotonic': bool(idx.is_non_overlapping_monotonic),
+    'contains_1_5': idx.contains(1.5).tolist(),
+    'contains_2_0': idx.contains(2.0).tolist(),
+    'get_loc_2_0': int(idx.get_loc(2.0)),
+    'get_indexer': [int(x) for x in idx.get_indexer([0.5, 2.0, 4.0, 6.0])],
+    'to_tuples': [list(t) for t in idx.to_tuples()]
+}
+print(json.dumps(res))
+"#;
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping IntervalIndex differential test");
+            return;
+        }
+    };
+
+    let ii = IntervalIndex::from_breaks(&[0.0, 1.5, 3.0, 5.0], IntervalClosed::Right)
+        .expect("from_breaks");
+
+    let left_vals = index_to_f64_vec(&ii.left());
+    let oracle_left: Vec<f64> = oracle["left"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(left_vals, oracle_left);
+
+    let right_vals = index_to_f64_vec(&ii.right());
+    let oracle_right: Vec<f64> = oracle["right"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(right_vals, oracle_right);
+
+    let mid_vals = index_to_f64_vec(&ii.mid());
+    let oracle_mid: Vec<f64> = oracle["mid"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(mid_vals, oracle_mid);
+
+    let len_vals = index_to_f64_vec(&ii.length());
+    let oracle_len: Vec<f64> = oracle["length"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(len_vals, oracle_len);
+
+    assert_eq!(ii.closed_left(), oracle["closed_left"].as_bool().unwrap());
+    assert_eq!(ii.closed_right(), oracle["closed_right"].as_bool().unwrap());
+    assert_eq!(ii.open_left(), oracle["open_left"].as_bool().unwrap());
+    assert_eq!(ii.open_right(), oracle["open_right"].as_bool().unwrap());
+    assert_eq!(
+        ii.is_overlapping(),
+        oracle["is_overlapping"].as_bool().unwrap()
+    );
+    assert_eq!(ii.is_unique(), oracle["is_unique"].as_bool().unwrap());
+    assert_eq!(
+        ii.is_monotonic_increasing(),
+        oracle["is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.is_monotonic_decreasing(),
+        oracle["is_monotonic_decreasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.is_non_overlapping_monotonic(),
+        oracle["is_non_overlapping_monotonic"].as_bool().unwrap()
+    );
+
+    let contains_1_5 = ii.contains(1.5);
+    let oracle_contains_1_5: Vec<bool> = oracle["contains_1_5"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(contains_1_5, oracle_contains_1_5);
+
+    let contains_2_0 = ii.contains(2.0);
+    let oracle_contains_2_0: Vec<bool> = oracle["contains_2_0"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(contains_2_0, oracle_contains_2_0);
+
+    assert_eq!(
+        ii.get_loc(2.0).unwrap(),
+        oracle["get_loc_2_0"].as_u64().unwrap() as usize
+    );
+
+    let indexer_vals: Vec<i64> = ii
+        .get_indexer(&[0.5, 2.0, 4.0, 6.0])
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as i64))
+        .collect();
+    let oracle_indexer: Vec<i64> = oracle["get_indexer"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(indexer_vals, oracle_indexer);
+
+    let tuples = ii.to_tuples();
+    let oracle_tuples: Vec<(f64, f64)> = oracle["to_tuples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pair| {
+            let arr = pair.as_array().unwrap();
+            (arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap())
+        })
+        .collect();
+    assert_eq!(tuples, oracle_tuples);
+}
+
+#[test]
+fn conformance_interval_index_tuples_overlapping_both_differential() {
+    let python_code = r#"
+import pandas as pd, json
+idx = pd.IntervalIndex.from_tuples([(0.0, 2.0), (1.0, 3.0)], closed='both')
+res = {
+    'is_overlapping': bool(idx.is_overlapping),
+    'is_unique': bool(idx.is_unique),
+    'is_monotonic_increasing': bool(idx.is_monotonic_increasing),
+    'is_monotonic_decreasing': bool(idx.is_monotonic_decreasing),
+    'is_non_overlapping_monotonic': bool(idx.is_non_overlapping_monotonic),
+    'to_tuples': [list(t) for t in idx.to_tuples()]
+}
+print(json.dumps(res))
+"#;
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping IntervalIndex differential test");
+            return;
+        }
+    };
+
+    let ii = IntervalIndex::from_tuples(&[(0.0, 2.0), (1.0, 3.0)], IntervalClosed::Both);
+    assert_eq!(
+        ii.is_overlapping(),
+        oracle["is_overlapping"].as_bool().unwrap()
+    );
+    assert_eq!(ii.is_unique(), oracle["is_unique"].as_bool().unwrap());
+    assert_eq!(
+        ii.is_monotonic_increasing(),
+        oracle["is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.is_monotonic_decreasing(),
+        oracle["is_monotonic_decreasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.is_non_overlapping_monotonic(),
+        oracle["is_non_overlapping_monotonic"].as_bool().unwrap()
+    );
+
+    let tuples = ii.to_tuples();
+    let oracle_tuples: Vec<(f64, f64)> = oracle["to_tuples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pair| {
+            let arr = pair.as_array().unwrap();
+            (arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap())
+        })
+        .collect();
+    assert_eq!(tuples, oracle_tuples);
+}
+
+#[test]
+fn conformance_interval_index_arrays_neither_differential() {
+    let python_code = r#"
+import pandas as pd, json
+idx = pd.IntervalIndex.from_arrays([0.0, 2.0], [2.0, 4.0], closed='neither')
+res = {
+    'closed_left': bool(idx.closed_left),
+    'closed_right': bool(idx.closed_right),
+    'open_left': bool(idx.open_left),
+    'open_right': bool(idx.open_right),
+    'dtype': str(idx.dtype),
+    'to_tuples': [list(t) for t in idx.to_tuples()]
+}
+print(json.dumps(res))
+"#;
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping IntervalIndex differential test");
+            return;
+        }
+    };
+
+    let ii = IntervalIndex::from_arrays(&[0.0, 2.0], &[2.0, 4.0], IntervalClosed::Neither)
+        .expect("from_arrays");
+    assert_eq!(ii.closed_left(), oracle["closed_left"].as_bool().unwrap());
+    assert_eq!(ii.closed_right(), oracle["closed_right"].as_bool().unwrap());
+    assert_eq!(ii.open_left(), oracle["open_left"].as_bool().unwrap());
+    assert_eq!(ii.open_right(), oracle["open_right"].as_bool().unwrap());
+    assert_eq!(ii.dtype(), oracle["dtype"].as_str().unwrap());
+
+    let tuples = ii.to_tuples();
+    let oracle_tuples: Vec<(f64, f64)> = oracle["to_tuples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pair| {
+            let arr = pair.as_array().unwrap();
+            (arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap())
+        })
+        .collect();
+    assert_eq!(tuples, oracle_tuples);
+}
+
+#[test]
+fn conformance_interval_index_decreasing_differential() {
+    let python_code = r#"
+import pandas as pd, json
+idx = pd.IntervalIndex.from_tuples([(3.0, 5.0), (1.0, 3.0), (0.0, 1.0)], closed='left')
+res = {
+    'is_overlapping': bool(idx.is_overlapping),
+    'is_unique': bool(idx.is_unique),
+    'is_monotonic_increasing': bool(idx.is_monotonic_increasing),
+    'is_monotonic_decreasing': bool(idx.is_monotonic_decreasing),
+    'is_non_overlapping_monotonic': bool(idx.is_non_overlapping_monotonic),
+    'closed_left': bool(idx.closed_left),
+    'closed_right': bool(idx.closed_right)
+}
+print(json.dumps(res))
+"#;
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping IntervalIndex differential test");
+            return;
+        }
+    };
+
+    let ii =
+        IntervalIndex::from_tuples(&[(3.0, 5.0), (1.0, 3.0), (0.0, 1.0)], IntervalClosed::Left);
+    assert_eq!(
+        ii.is_overlapping(),
+        oracle["is_overlapping"].as_bool().unwrap()
+    );
+    assert_eq!(ii.is_unique(), oracle["is_unique"].as_bool().unwrap());
+    assert_eq!(
+        ii.is_monotonic_increasing(),
+        oracle["is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.is_monotonic_decreasing(),
+        oracle["is_monotonic_decreasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.is_non_overlapping_monotonic(),
+        oracle["is_non_overlapping_monotonic"].as_bool().unwrap()
+    );
+    assert_eq!(ii.closed_left(), oracle["closed_left"].as_bool().unwrap());
+    assert_eq!(ii.closed_right(), oracle["closed_right"].as_bool().unwrap());
 }
