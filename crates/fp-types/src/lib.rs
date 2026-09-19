@@ -1325,6 +1325,90 @@ impl Scalar {
         matches!(self, Self::Interval(_))
     }
 
+    /// Returns the wrapped i64 if this is an [`Scalar::Int64`] variant.
+    #[must_use]
+    pub const fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Alias for [`Scalar::as_i64`].
+    #[must_use]
+    pub const fn as_int(&self) -> Option<i64> {
+        self.as_i64()
+    }
+
+    /// Returns the wrapped f64 if this is a [`Scalar::Float64`] variant.
+    #[must_use]
+    pub const fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Float64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Alias for [`Scalar::as_f64`].
+    #[must_use]
+    pub const fn as_float(&self) -> Option<f64> {
+        self.as_f64()
+    }
+
+    /// Returns the wrapped bool if this is a [`Scalar::Bool`] variant.
+    #[must_use]
+    pub const fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Returns a string slice if this is a [`Scalar::Utf8`] variant.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Utf8(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns the raw nanoseconds timestamp if this is a [`Scalar::Datetime64`] variant.
+    #[must_use]
+    pub const fn as_datetime_nanos(&self) -> Option<i64> {
+        match self {
+            Self::Datetime64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Returns the raw nanoseconds duration if this is a [`Scalar::Timedelta64`] variant.
+    #[must_use]
+    pub const fn as_timedelta_nanos(&self) -> Option<i64> {
+        match self {
+            Self::Timedelta64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Returns the period ordinal if this is a [`Scalar::Period`] variant.
+    #[must_use]
+    pub const fn as_period_ordinal(&self) -> Option<i64> {
+        match self {
+            Self::Period(p) => Some(p.ordinal),
+            _ => None,
+        }
+    }
+
+    /// Returns the [`Interval`] if this is a [`Scalar::Interval`] variant.
+    #[must_use]
+    pub const fn as_interval(&self) -> Option<Interval> {
+        match self {
+            Self::Interval(i) => Some(*i),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn missing_for_dtype(dtype: DType) -> Self {
         match dtype {
@@ -2429,6 +2513,12 @@ impl From<String> for OptionValue {
     }
 }
 
+impl From<()> for OptionValue {
+    fn from(_: ()) -> Self {
+        Self::None
+    }
+}
+
 fn default_options_map() -> std::collections::BTreeMap<String, OptionValue> {
     let mut m = std::collections::BTreeMap::new();
     m.insert("display.max_rows".to_string(), OptionValue::Int(60));
@@ -2442,12 +2532,47 @@ fn default_options_map() -> std::collections::BTreeMap<String, OptionValue> {
         OptionValue::Bool(true),
     );
     m.insert("display.float_format".to_string(), OptionValue::None);
+    m.insert(
+        "display.large_repr".to_string(),
+        OptionValue::Str("truncate".to_string()),
+    );
+    m.insert(
+        "display.max_info_columns".to_string(),
+        OptionValue::Int(100),
+    );
+    m.insert(
+        "display.max_info_rows".to_string(),
+        OptionValue::Int(1690785),
+    );
+    m.insert("display.memory_usage".to_string(), OptionValue::Bool(true));
+    m.insert(
+        "display.colheader_justify".to_string(),
+        OptionValue::Str("right".to_string()),
+    );
+    m.insert("display.chop_threshold".to_string(), OptionValue::None);
+    m.insert(
+        "display.date_dayfirst".to_string(),
+        OptionValue::Bool(false),
+    );
+    m.insert(
+        "display.date_yearfirst".to_string(),
+        OptionValue::Bool(false),
+    );
+    m.insert(
+        "display.encoding".to_string(),
+        OptionValue::Str("utf-8".to_string()),
+    );
     m.insert("mode.sim_interactive".to_string(), OptionValue::Bool(false));
     m.insert(
         "mode.chained_assignment".to_string(),
         OptionValue::Str("warn".to_string()),
     );
     m.insert("mode.use_inf_as_na".to_string(), OptionValue::Bool(false));
+    m.insert("mode.copy_on_write".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "mode.data_manager".to_string(),
+        OptionValue::Str("block".to_string()),
+    );
     m.insert(
         "compute.use_bottleneck".to_string(),
         OptionValue::Bool(true),
@@ -2456,6 +2581,22 @@ fn default_options_map() -> std::collections::BTreeMap<String, OptionValue> {
     m.insert(
         "io.excel.zip.reader".to_string(),
         OptionValue::Str("zipfile".to_string()),
+    );
+    m.insert(
+        "io.parquet.engine".to_string(),
+        OptionValue::Str("auto".to_string()),
+    );
+    m.insert(
+        "io.sql.engine".to_string(),
+        OptionValue::Str("auto".to_string()),
+    );
+    m.insert(
+        "plotting.backend".to_string(),
+        OptionValue::Str("matplotlib".to_string()),
+    );
+    m.insert(
+        "plotting.matplotlib.register_converters".to_string(),
+        OptionValue::Bool(true),
     );
     m
 }
@@ -18595,6 +18736,95 @@ mod sparse_dtype_pandas_name_3gxc6 {
         assert_eq!(
             get_option("mode.chained_assignment").unwrap().as_str(),
             Some("warn")
+        );
+
+        // 7. Expanded standard options
+        assert_eq!(
+            get_option("mode.copy_on_write").unwrap().as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            get_option("mode.data_manager").unwrap().as_str(),
+            Some("block")
+        );
+        assert_eq!(
+            get_option("display.large_repr").unwrap().as_str(),
+            Some("truncate")
+        );
+        assert_eq!(
+            get_option("display.max_info_columns").unwrap().as_int(),
+            Some(100)
+        );
+        assert_eq!(
+            get_option("display.memory_usage").unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            get_option("display.colheader_justify").unwrap().as_str(),
+            Some("right")
+        );
+        assert!(get_option("display.chop_threshold").unwrap().is_none());
+        assert_eq!(
+            get_option("io.parquet.engine").unwrap().as_str(),
+            Some("auto")
+        );
+        assert_eq!(
+            get_option("plotting.backend").unwrap().as_str(),
+            Some("matplotlib")
+        );
+        assert_eq!(
+            get_option("plotting.matplotlib.register_converters")
+                .unwrap()
+                .as_bool(),
+            Some(true)
+        );
+
+        // From<()> for OptionValue
+        set_option("display.chop_threshold", ()).unwrap();
+        assert!(get_option("display.chop_threshold").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_scalar_typed_accessors() {
+        use super::{Interval, IntervalClosed, Period, PeriodFreq, Scalar};
+
+        let s_i64 = Scalar::Int64(42);
+        assert_eq!(s_i64.as_i64(), Some(42));
+        assert_eq!(s_i64.as_int(), Some(42));
+        assert_eq!(s_i64.as_f64(), None);
+        assert_eq!(s_i64.as_float(), None);
+        assert_eq!(s_i64.as_bool(), None);
+        assert_eq!(s_i64.as_str(), None);
+
+        let s_f64 = Scalar::Float64(2.75);
+        assert_eq!(s_f64.as_f64(), Some(2.75));
+        assert_eq!(s_f64.as_float(), Some(2.75));
+        assert_eq!(s_f64.as_i64(), None);
+        assert_eq!(s_f64.as_int(), None);
+
+        let s_bool = Scalar::Bool(true);
+        assert_eq!(s_bool.as_bool(), Some(true));
+        assert_eq!(s_bool.as_int(), None);
+
+        let s_str = Scalar::Utf8("pandas".to_string());
+        assert_eq!(s_str.as_str(), Some("pandas"));
+        assert_eq!(s_str.as_bool(), None);
+
+        let s_dt = Scalar::Datetime64(1_000_000_000);
+        assert_eq!(s_dt.as_datetime_nanos(), Some(1_000_000_000));
+        assert_eq!(s_dt.as_str(), None);
+
+        let s_td = Scalar::Timedelta64(500_000);
+        assert_eq!(s_td.as_timedelta_nanos(), Some(500_000));
+        assert_eq!(s_td.as_int(), None);
+
+        let s_per = Scalar::Period(Period::new(2024, PeriodFreq::Daily));
+        assert_eq!(s_per.as_period_ordinal(), Some(2024));
+
+        let s_iv = Scalar::Interval(Interval::new(0.0, 10.0, IntervalClosed::Both));
+        assert_eq!(
+            s_iv.as_interval(),
+            Some(Interval::new(0.0, 10.0, IntervalClosed::Both))
         );
     }
 
