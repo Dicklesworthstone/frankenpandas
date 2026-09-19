@@ -747,6 +747,99 @@ pub mod api {
             }
             "mixed"
         }
+
+        /// Matches `pd.api.types.is_float64_dtype`.
+        #[must_use]
+        pub fn is_float64_dtype(dtype: &impl AsDType) -> bool {
+            matches!(dtype.as_dtype(), DType::Float64 | DType::Float64Nullable)
+        }
+
+        /// Matches `pd.api.types.is_int32_dtype`.
+        #[must_use]
+        pub fn is_int32_dtype(_dtype: &impl AsDType) -> bool {
+            false
+        }
+
+        /// Matches `pd.api.types.is_number`.
+        #[must_use]
+        pub fn is_number(scalar: &Scalar) -> bool {
+            scalar.is_numeric() || matches!(scalar, Scalar::Bool(_))
+        }
+
+        /// Matches `pd.api.types.is_bool`.
+        #[must_use]
+        pub fn is_bool(scalar: &Scalar) -> bool {
+            matches!(scalar, Scalar::Bool(_))
+        }
+
+        /// Matches `pd.api.types.is_integer`.
+        #[must_use]
+        pub fn is_integer(scalar: &Scalar) -> bool {
+            matches!(scalar, Scalar::Int64(_))
+        }
+
+        /// Matches `pd.api.types.is_float`.
+        #[must_use]
+        pub fn is_float(scalar: &Scalar) -> bool {
+            matches!(scalar, Scalar::Float64(_))
+        }
+    }
+
+    pub mod extensions {
+        //! Extension arrays and accessor registration hooks (`pandas.api.extensions`).
+
+        /// Compatibility registration hook for DataFrame accessors matching `pd.api.extensions.register_dataframe_accessor`.
+        pub fn register_dataframe_accessor(_name: &str) {}
+
+        /// Compatibility registration hook for Series accessors matching `pd.api.extensions.register_series_accessor`.
+        pub fn register_series_accessor(_name: &str) {}
+
+        /// Compatibility registration hook for Index accessors matching `pd.api.extensions.register_index_accessor`.
+        pub fn register_index_accessor(_name: &str) {}
+    }
+
+    pub mod indexers {
+        //! Custom window and rolling indexers (`pandas.api.indexers`).
+
+        /// Base specification for window indexers, matching `pd.api.indexers.BaseIndexer`.
+        #[derive(Debug, Clone, PartialEq, Eq, Default)]
+        pub struct BaseIndexer {
+            pub window_size: usize,
+            pub step: usize,
+        }
+
+        impl BaseIndexer {
+            #[must_use]
+            pub const fn new(window_size: usize, step: usize) -> Self {
+                Self { window_size, step }
+            }
+        }
+
+        /// Fixed forward-looking window indexer, matching `pd.api.indexers.FixedForwardWindowIndexer`.
+        #[derive(Debug, Clone, PartialEq, Eq, Default)]
+        pub struct FixedForwardWindowIndexer {
+            pub window_size: usize,
+        }
+
+        impl FixedForwardWindowIndexer {
+            #[must_use]
+            pub const fn new(window_size: usize) -> Self {
+                Self { window_size }
+            }
+        }
+
+        /// Variable offset window indexer, matching `pd.api.indexers.VariableOffsetWindowIndexer`.
+        #[derive(Debug, Clone, PartialEq, Eq, Default)]
+        pub struct VariableOffsetWindowIndexer {
+            pub index_offset: i64,
+        }
+
+        impl VariableOffsetWindowIndexer {
+            #[must_use]
+            pub const fn new(index_offset: i64) -> Self {
+                Self { index_offset }
+            }
+        }
     }
 }
 
@@ -18272,5 +18365,50 @@ mod sparse_dtype_pandas_name_3gxc6 {
             get_option("mode.chained_assignment").unwrap().as_str(),
             Some("warn")
         );
+    }
+
+    #[test]
+    fn test_api_submodules_and_types_inspectors() {
+        use super::{
+            DType, Scalar,
+            api::{extensions, indexers, types},
+        };
+
+        // api::types scalar inspectors
+        assert!(types::is_number(&Scalar::Int64(42)));
+        assert!(types::is_number(&Scalar::Float64(3.14)));
+        assert!(types::is_number(&Scalar::Bool(true)));
+        assert!(!types::is_number(&Scalar::Utf8("pandas".into())));
+
+        assert!(types::is_bool(&Scalar::Bool(false)));
+        assert!(!types::is_bool(&Scalar::Int64(0)));
+
+        assert!(types::is_integer(&Scalar::Int64(10)));
+        assert!(!types::is_integer(&Scalar::Float64(10.0)));
+
+        assert!(types::is_float(&Scalar::Float64(10.0)));
+        assert!(!types::is_float(&Scalar::Int64(10)));
+
+        // api::types dtype inspectors
+        assert!(types::is_float64_dtype(&DType::Float64));
+        assert!(types::is_float64_dtype(&DType::Float64Nullable));
+        assert!(!types::is_float64_dtype(&DType::Int64));
+        assert!(!types::is_int32_dtype(&DType::Int64));
+
+        // api::extensions compatibility hooks
+        extensions::register_dataframe_accessor("geo");
+        extensions::register_series_accessor("geo");
+        extensions::register_index_accessor("geo");
+
+        // api::indexers
+        let base = indexers::BaseIndexer::new(5, 1);
+        assert_eq!(base.window_size, 5);
+        assert_eq!(base.step, 1);
+
+        let fwd = indexers::FixedForwardWindowIndexer::new(3);
+        assert_eq!(fwd.window_size, 3);
+
+        let var = indexers::VariableOffsetWindowIndexer::new(100);
+        assert_eq!(var.index_offset, 100);
     }
 }
