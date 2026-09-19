@@ -1658,18 +1658,23 @@ mod tests {
         assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(60));
 
         // Errors module test
-        let _: errors::MergeError = errors::JoinError::EmptyInputs;
-        let _: errors::ParserError = errors::IoError::EmptyDataFrame;
-        let _: errors::EmptyDataError = errors::IoError::EmptyDataFrame;
-        let _: errors::DuplicateLabelError = errors::IndexError::DuplicateLabels;
-        let _: errors::InvalidIndexError = errors::IndexError::DuplicateLabels;
-        let _: errors::OutOfBoundsDatetime = errors::DateRangeError::ZeroPeriods;
-        let _: errors::OutOfBoundsTimedelta = errors::TimedeltaRangeError::ZeroPeriods;
-        let _: errors::UndefinedVariableError = errors::ExprError::UnresolvedVariable("x".into());
+        let _: errors::MergeError = errors::JoinError::Frame(FrameError::LengthMismatch {
+            index_len: 0,
+            column_len: 1,
+        });
+        let _: errors::ParserError = errors::IoError::MissingHeaders;
+        let _: errors::EmptyDataError = errors::IoError::MissingHeaders;
+        let _: errors::DuplicateLabelError =
+            errors::IndexError::InvalidArgument("duplicate labels".into());
+        let _: errors::InvalidIndexError =
+            errors::IndexError::InvalidArgument("invalid index".into());
+        let _: errors::OutOfBoundsDatetime = errors::DateRangeError::InsufficientParams;
+        let _: errors::OutOfBoundsTimedelta = errors::TimedeltaRangeError::InsufficientParams;
+        let _: errors::UndefinedVariableError = errors::ExprError::UnknownSeries("x".into());
 
         // api::types scalar and dtype inspectors
         assert!(crate::api::types::is_number(&Scalar::Int64(42)));
-        assert!(crate::api::types::is_number(&Scalar::Float64(2.718)));
+        assert!(crate::api::types::is_number(&Scalar::Float64(42.5)));
         assert!(crate::api::types::is_number(&Scalar::Bool(true)));
         assert!(!crate::api::types::is_number(&Scalar::Utf8(
             "pandas".into()

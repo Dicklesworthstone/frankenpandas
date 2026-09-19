@@ -18376,7 +18376,7 @@ mod sparse_dtype_pandas_name_3gxc6 {
 
         // api::types scalar inspectors
         assert!(types::is_number(&Scalar::Int64(42)));
-        assert!(types::is_number(&Scalar::Float64(3.14)));
+        assert!(types::is_number(&Scalar::Float64(42.5)));
         assert!(types::is_number(&Scalar::Bool(true)));
         assert!(!types::is_number(&Scalar::Utf8("pandas".into())));
 
