@@ -49,11 +49,14 @@ def load_fixture_ops(repo_root: Path) -> set[str]:
 # and oracle dispatch might carry. Multiple alias forms are common
 # (e.g. "series_add", "data_frame_add"). Heuristic normalization handles
 # the two dominant spellings.
-def candidate_op_strings(class_alias: str, member_name: str) -> set[str]:
+def candidate_op_strings(
+    class_alias: str, member_name: str, fixture_ops: set[str] | None = None
+) -> set[str]:
     cls_snake = _camel_to_snake(class_alias)
+    no_underscore = cls_snake.replace("_", "")
     forms = {
         f"{cls_snake}_{member_name}",
-        f"{cls_snake.replace('_', '')}_{member_name}",
+        f"{no_underscore}_{member_name}",
     }
     # GroupBy packets use the oracle dispatch spellings rather than the
     # literal pandas class names.
@@ -64,7 +67,11 @@ def candidate_op_strings(class_alias: str, member_name: str) -> set[str]:
                 f"data_frame_groupby_{member_name}",
             }
         )
-    if cls_snake == "series_group_by":
+        if member_name in ("agg", "aggregate"):
+            forms.add("dataframe_groupby_agg_multi")
+        if member_name == "rolling" and fixture_ops:
+            forms.update({o for o in fixture_ops if o.startswith("dataframe_groupby_rolling_")})
+    elif cls_snake == "series_group_by":
         forms.update(
             {
                 f"groupby_{member_name}",
@@ -72,10 +79,42 @@ def candidate_op_strings(class_alias: str, member_name: str) -> set[str]:
                 f"series_group_by_{member_name}",
             }
         )
-    if cls_snake == "series":
+    elif cls_snake == "series":
         forms.add(f"series_{member_name}")
-    if cls_snake == "data_frame":
+        if member_name == "rolling" and fixture_ops:
+            forms.update({o for o in fixture_ops if o.startswith("series_rolling_")})
+        elif member_name == "expanding" and fixture_ops:
+            forms.update({o for o in fixture_ops if o.startswith("series_expanding_")})
+        elif member_name == "resample" and fixture_ops:
+            forms.update({o for o in fixture_ops if o.startswith("series_resample_")})
+        elif member_name == "ewm" and fixture_ops:
+            forms.update({o for o in fixture_ops if o.startswith("series_ewm_")})
+    elif cls_snake == "data_frame":
         forms.add(f"dataframe_{member_name}")
+        if member_name == "rename":
+            forms.add("dataframe_rename_columns")
+        elif member_name == "drop":
+            forms.add("dataframe_drop_columns")
+        elif member_name == "to_json":
+            forms.add("dataframe_to_json_records")
+        elif member_name == "apply" and fixture_ops:
+            forms.update({o for o in fixture_ops if o.startswith("dataframe_apply_")})
+        elif member_name == "rolling" and fixture_ops:
+            forms.update({o for o in fixture_ops if o.startswith("dataframe_rolling_")})
+        elif member_name == "resample" and fixture_ops:
+            forms.update({o for o in fixture_ops if o.startswith("dataframe_resample_")})
+    elif cls_snake == "rolling":
+        forms.add(f"series_rolling_{member_name}")
+        forms.add(f"dataframe_rolling_{member_name}")
+    elif cls_snake == "expanding":
+        forms.add(f"series_expanding_{member_name}")
+        forms.add(f"dataframe_expanding_{member_name}")
+    elif cls_snake == "resampler":
+        forms.add(f"series_resample_{member_name}")
+        forms.add(f"dataframe_resample_{member_name}")
+    elif cls_snake == "exponential_moving_window":
+        forms.add(f"series_ewm_{member_name}")
+        forms.add(f"dataframe_ewm_{member_name}")
     return forms
 
 
@@ -104,7 +143,7 @@ def classify(
         if not isinstance(entry, dict) or "members" not in entry:
             continue
         for member in entry["members"]:
-            cands = candidate_op_strings(class_alias, member["name"])
+            cands = candidate_op_strings(class_alias, member["name"], fixture_ops)
             hit = bool(cands & fixture_ops)
             bucket = "full" if hit else "zero"
             breakdown[class_alias][bucket].append(member["name"])
