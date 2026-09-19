@@ -441,6 +441,58 @@ pub use fp_types::{
 #[cfg(feature = "sql-sqlite")]
 pub use rusqlite;
 
+// ── Errors module (pandas.errors parity) ─────────────────────────────────
+
+pub mod errors {
+    //! Common error types and pandas exception aliases (`pandas.errors`).
+    //!
+    //! Re-exports all workspace error types alongside standard pandas exception
+    //! aliases for drop-in compatibility.
+
+    pub use fp_columnar::ColumnError;
+    pub use fp_expr::ExprError;
+    pub use fp_frame::{FrameError, testing::AssertionError};
+    pub use fp_groupby::GroupByError;
+    pub use fp_index::{DateRangeError, IndexError, TimedeltaRangeError};
+    pub use fp_io::IoError;
+    pub use fp_join::JoinError;
+    pub use fp_runtime::RuntimeError;
+    pub use fp_types::{OptionError, TimedeltaError, TypeError};
+
+    // Pandas exception aliases:
+    /// Error raised when join/merge operations fail or merge validation fails.
+    /// Matches `pd.errors.MergeError`.
+    pub type MergeError = JoinError;
+
+    /// Error raised when parsing tabular or structured files fails.
+    /// Matches `pd.errors.ParserError`.
+    pub type ParserError = IoError;
+
+    /// Error raised when an empty file or buffer is passed to a parser.
+    /// Matches `pd.errors.EmptyDataError`.
+    pub type EmptyDataError = IoError;
+
+    /// Error raised when duplicate labels are found where disallowed.
+    /// Matches `pd.errors.DuplicateLabelError`.
+    pub type DuplicateLabelError = IndexError;
+
+    /// Error raised for invalid index operations or incompatible index types.
+    /// Matches `pd.errors.InvalidIndexError`.
+    pub type InvalidIndexError = IndexError;
+
+    /// Error raised when a date/datetime is out of bounds.
+    /// Matches `pd.errors.OutOfBoundsDatetime`.
+    pub type OutOfBoundsDatetime = DateRangeError;
+
+    /// Error raised when a timedelta is out of bounds.
+    /// Matches `pd.errors.OutOfBoundsTimedelta`.
+    pub type OutOfBoundsTimedelta = TimedeltaRangeError;
+
+    /// Error raised when evaluating an expression with an undefined variable.
+    /// Matches `pd.errors.UndefinedVariableError`.
+    pub type UndefinedVariableError = ExprError;
+}
+
 // ── Prelude ─────────────────────────────────────────────────────────────
 
 /// Convenience prelude that imports the most commonly used types and traits.
@@ -690,6 +742,7 @@ pub mod prelude {
         describe_option,
         dropna,
         eng_float_format,
+        errors,
         factorize,
         factorize_with_options,
         fill_na,
@@ -1603,5 +1656,48 @@ mod tests {
         assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(80));
         reset_option(Some("display.max_rows")).unwrap();
         assert_eq!(get_option("display.max_rows").unwrap().as_int(), Some(60));
+
+        // Errors module test
+        let _: errors::MergeError = errors::JoinError::EmptyInputs;
+        let _: errors::ParserError = errors::IoError::EmptyDataFrame;
+        let _: errors::EmptyDataError = errors::IoError::EmptyDataFrame;
+        let _: errors::DuplicateLabelError = errors::IndexError::DuplicateLabels;
+        let _: errors::InvalidIndexError = errors::IndexError::DuplicateLabels;
+        let _: errors::OutOfBoundsDatetime = errors::DateRangeError::ZeroPeriods;
+        let _: errors::OutOfBoundsTimedelta = errors::TimedeltaRangeError::ZeroPeriods;
+        let _: errors::UndefinedVariableError = errors::ExprError::UnresolvedVariable("x".into());
+
+        // api::types scalar and dtype inspectors
+        assert!(crate::api::types::is_number(&Scalar::Int64(42)));
+        assert!(crate::api::types::is_number(&Scalar::Float64(2.718)));
+        assert!(crate::api::types::is_number(&Scalar::Bool(true)));
+        assert!(!crate::api::types::is_number(&Scalar::Utf8(
+            "pandas".into()
+        )));
+        assert!(crate::api::types::is_bool(&Scalar::Bool(true)));
+        assert!(!crate::api::types::is_bool(&Scalar::Int64(1)));
+        assert!(crate::api::types::is_integer(&Scalar::Int64(99)));
+        assert!(!crate::api::types::is_integer(&Scalar::Float64(99.0)));
+        assert!(crate::api::types::is_float(&Scalar::Float64(99.0)));
+        assert!(!crate::api::types::is_float(&Scalar::Int64(99)));
+        assert!(crate::api::types::is_float64_dtype(&DType::Float64));
+        assert!(crate::api::types::is_float64_dtype(&DType::Float64Nullable));
+        assert!(!crate::api::types::is_float64_dtype(&DType::Int64));
+        assert!(!crate::api::types::is_int32_dtype(&DType::Int64));
+
+        // api::extensions and api::indexers
+        crate::api::extensions::register_dataframe_accessor("geo");
+        crate::api::extensions::register_series_accessor("geo");
+        crate::api::extensions::register_index_accessor("geo");
+
+        let b_idx = crate::api::indexers::BaseIndexer::new(10, 2);
+        assert_eq!(b_idx.window_size, 10);
+        assert_eq!(b_idx.step, 2);
+
+        let f_idx = crate::api::indexers::FixedForwardWindowIndexer::new(5);
+        assert_eq!(f_idx.window_size, 5);
+
+        let v_idx = crate::api::indexers::VariableOffsetWindowIndexer::new(-1);
+        assert_eq!(v_idx.index_offset, -1);
     }
 }
