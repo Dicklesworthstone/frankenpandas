@@ -757,13 +757,13 @@ pub mod api {
             "mixed"
         }
 
-        /// Matches `pd.api.types.is_float64_dtype`.
+        /// Convenience helper for 64-bit float types (`pd.api.types.is_float64_dtype` does NOT exist in pandas; see [`is_float_dtype`]).
         #[must_use]
         pub fn is_float64_dtype(dtype: &impl AsDType) -> bool {
             matches!(dtype.as_dtype(), DType::Float64 | DType::Float64Nullable)
         }
 
-        /// Matches `pd.api.types.is_int32_dtype`.
+        /// Convenience helper for 32-bit integer types (`pd.api.types.is_int32_dtype` does NOT exist in pandas; see [`is_integer_dtype`]).
         #[must_use]
         pub fn is_int32_dtype(_dtype: &impl AsDType) -> bool {
             false
