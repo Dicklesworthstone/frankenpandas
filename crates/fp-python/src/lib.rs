@@ -13161,22 +13161,117 @@ impl PyDataFrame {
         }
     }
 
-    /// Export to a column-oriented dict `{column: [values]}` (pandas
-    /// `DataFrame.to_dict(orient="list")`).
-    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let out = PyDict::new(py);
-        for name in self.inner.column_names() {
-            let col = self.inner.column(name).ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
-            })?;
-            let values: Vec<Py<PyAny>> = col
-                .values()
-                .iter()
-                .map(|s| scalar_to_py(py, s))
-                .collect::<PyResult<Vec<_>>>()?;
-            out.set_item(name, PyList::new(py, values)?)?;
+    /// Export to a Python dictionary (pandas `DataFrame.to_dict(orient=...)`).
+    #[pyo3(signature = (orient="dict"))]
+    fn to_dict(&self, py: Python<'_>, orient: &str) -> PyResult<Py<PyAny>> {
+        let n_rows = self.inner.len();
+        let col_names = self.inner.column_names();
+        let idx_labels = self.inner.index().labels();
+
+        if self.inner.index().has_duplicates() && (orient == "dict" || orient == "index") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "DataFrame.index must be unique for orient='{orient}'"
+            )));
         }
-        Ok(out.into_any().unbind())
+
+        match orient {
+            "dict" => {
+                let out = PyDict::new(py);
+                for name in col_names {
+                    let col = self.inner.column(name).ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                    })?;
+                    let inner_dict = PyDict::new(py);
+                    for (i, val) in col.values().iter().enumerate() {
+                        let k = index_label_to_py(py, &idx_labels[i])?;
+                        let v = scalar_to_py(py, val)?;
+                        inner_dict.set_item(k, v)?;
+                    }
+                    out.set_item(name, inner_dict)?;
+                }
+                Ok(out.into_any().unbind())
+            }
+            "list" => {
+                let out = PyDict::new(py);
+                for name in col_names {
+                    let col = self.inner.column(name).ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                    })?;
+                    let values: Vec<Py<PyAny>> = col
+                        .values()
+                        .iter()
+                        .map(|s| scalar_to_py(py, s))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    out.set_item(name, PyList::new(py, values)?)?;
+                }
+                Ok(out.into_any().unbind())
+            }
+            "records" => {
+                let mut rows_list = Vec::with_capacity(n_rows);
+                for row_idx in 0..n_rows {
+                    let row_dict = PyDict::new(py);
+                    for name in &col_names {
+                        let col = self.inner.column(name).ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                        })?;
+                        let v = scalar_to_py(py, &col.values()[row_idx])?;
+                        row_dict.set_item(*name, v)?;
+                    }
+                    rows_list.push(row_dict);
+                }
+                Ok(PyList::new(py, rows_list)?.into_any().unbind())
+            }
+            "index" => {
+                let out = PyDict::new(py);
+                for row_idx in 0..n_rows {
+                    let k = index_label_to_py(py, &idx_labels[row_idx])?;
+                    let row_dict = PyDict::new(py);
+                    for name in &col_names {
+                        let col = self.inner.column(name).ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                        })?;
+                        let v = scalar_to_py(py, &col.values()[row_idx])?;
+                        row_dict.set_item(*name, v)?;
+                    }
+                    out.set_item(k, row_dict)?;
+                }
+                Ok(out.into_any().unbind())
+            }
+            "series" => {
+                let out = PyDict::new(py);
+                for name in col_names {
+                    let col_series = self.column_series(name)?;
+                    out.set_item(name, Py::new(py, col_series)?)?;
+                }
+                Ok(out.into_any().unbind())
+            }
+            "split" => {
+                let out = PyDict::new(py);
+                let idx_list: Vec<Py<PyAny>> = idx_labels
+                    .iter()
+                    .map(|l| index_label_to_py(py, l))
+                    .collect::<PyResult<Vec<_>>>()?;
+                out.set_item("index", PyList::new(py, idx_list)?)?;
+                let cols_list = PyList::new(py, col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+                out.set_item("columns", cols_list)?;
+                let mut data_rows = Vec::with_capacity(n_rows);
+                for row_idx in 0..n_rows {
+                    let mut row_vals = Vec::with_capacity(col_names.len());
+                    for name in &col_names {
+                        let col = self.inner.column(name).ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                        })?;
+                        row_vals.push(scalar_to_py(py, &col.values()[row_idx])?);
+                    }
+                    data_rows.push(PyList::new(py, row_vals)?);
+                }
+                out.set_item("data", PyList::new(py, data_rows)?)?;
+                Ok(out.into_any().unbind())
+            }
+            other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "orient '{other}' not understood"
+            ))),
+        }
     }
 
     /// Render the DataFrame as an HTML table (pandas `DataFrame.to_html`).
@@ -14988,7 +15083,7 @@ impl PyDataFrame {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let _ = (index, kwargs);
-        self.to_dict(py)
+        self.to_dict(py, "records")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -15143,11 +15238,11 @@ impl PyDataFrame {
 
     fn to_xarray(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Ok(xr) = py.import("xarray")
-            && let Ok(ds) = xr.call_method1("Dataset", (self.to_dict(py)?,))
+            && let Ok(ds) = xr.call_method1("Dataset", (self.to_dict(py, "list")?,))
         {
             return Ok(ds.into_any().unbind());
         }
-        self.to_dict(py)
+        self.to_dict(py, "list")
     }
 
     #[pyo3(signature = (path_or_buffer=None, **kwargs))]
@@ -26748,6 +26843,26 @@ mod tests {
         assert_eq!(popped.name(), "a");
         assert_eq!(mod_df.columns(), vec!["b"]);
         assert!(mod_df.pop("nonexistent").is_err());
+
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let dict_obj = py_df.to_dict(py, "dict").expect("to_dict dict"); // ubs:ignore — test fixture
+            assert!(dict_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
+
+            let list_obj = py_df.to_dict(py, "list").expect("to_dict list"); // ubs:ignore — test fixture
+            assert!(list_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
+
+            let records_obj = py_df.to_dict(py, "records").expect("to_dict records"); // ubs:ignore — test fixture
+            assert!(records_obj.bind(py).is_instance_of::<pyo3::types::PyList>());
+
+            let index_obj = py_df.to_dict(py, "index").expect("to_dict index"); // ubs:ignore — test fixture
+            assert!(index_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
+
+            let split_obj = py_df.to_dict(py, "split").expect("to_dict split"); // ubs:ignore — test fixture
+            assert!(split_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
+
+            assert!(py_df.to_dict(py, "invalid_orient").is_err());
+        });
     }
 
     #[test]
