@@ -9166,7 +9166,11 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                     PyErrorKind::NotImplemented,
                     format!("compatibility gate rejected operation: {msg}"),
                 )
-            } else if lower.contains("column not found") || lower.contains("key not found") {
+            } else if (lower.contains("column") && lower.contains("not found"))
+                || lower.contains("key not found")
+                || (lower.contains("label") && lower.contains("not found"))
+                || lower.contains("not found in index")
+            {
                 (
                     PyErrorKind::Key,
                     format!("compatibility gate rejected operation: {msg}"),
@@ -10459,12 +10463,44 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    fn add_prefix(&self, prefix: &str) -> PyResult<PySeries> {
+    #[pyo3(signature = (prefix, axis=None))]
+    fn add_prefix(&self, prefix: &str, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        if let Some(a) = axis {
+            let valid = if let Ok(i) = a.extract::<i64>() {
+                i == 0
+            } else if let Ok(s) = a.extract::<String>() {
+                s == "index" || s == "rows"
+            } else {
+                false
+            };
+            if !valid {
+                let msg = a.to_string();
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {msg} for object type Series"
+                )));
+            }
+        }
         let res = self.inner.add_prefix(prefix).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
-    fn add_suffix(&self, suffix: &str) -> PyResult<PySeries> {
+    #[pyo3(signature = (suffix, axis=None))]
+    fn add_suffix(&self, suffix: &str, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        if let Some(a) = axis {
+            let valid = if let Ok(i) = a.extract::<i64>() {
+                i == 0
+            } else if let Ok(s) = a.extract::<String>() {
+                s == "index" || s == "rows"
+            } else {
+                false
+            };
+            if !valid {
+                let msg = a.to_string();
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {msg} for object type Series"
+                )));
+            }
+        }
         let res = self.inner.add_suffix(suffix).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
@@ -10494,7 +10530,23 @@ impl PySeries {
         scalar_to_py(py, &scalar)
     }
 
-    fn squeeze(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None))]
+    fn squeeze(&self, py: Python<'_>, axis: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        if let Some(a) = axis {
+            let valid = if let Ok(i) = a.extract::<i64>() {
+                i == 0
+            } else if let Ok(s) = a.extract::<String>() {
+                s == "index" || s == "rows"
+            } else {
+                false
+            };
+            if !valid {
+                let msg = a.to_string();
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {msg} for object type Series"
+                )));
+            }
+        }
         if self.inner.len() == 1 {
             let s = self.inner.column().values()[0].clone();
             scalar_to_py(py, &s)
@@ -13681,13 +13733,81 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    fn add_prefix(&self, prefix: &str) -> PyResult<PyDataFrame> {
-        let res = self.inner.add_prefix(prefix).map_err(frame_error_to_py)?;
+    #[pyo3(signature = (prefix, axis=None))]
+    fn add_prefix(&self, prefix: &str, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let axis_idx = match axis {
+            None => 1,
+            Some(a) => {
+                if let Ok(i) = a.extract::<i64>() {
+                    match i {
+                        0 => 0,
+                        1 => 1,
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else if let Ok(s) = a.extract::<String>() {
+                    match s.as_str() {
+                        "index" | "rows" => 0,
+                        "columns" => 1,
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "axis must be 0, 1, 'index', or 'columns'",
+                    ));
+                }
+            }
+        };
+        let res = self
+            .inner
+            .add_prefix_axis(prefix, axis_idx)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
-    fn add_suffix(&self, suffix: &str) -> PyResult<PyDataFrame> {
-        let res = self.inner.add_suffix(suffix).map_err(frame_error_to_py)?;
+    #[pyo3(signature = (suffix, axis=None))]
+    fn add_suffix(&self, suffix: &str, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let axis_idx = match axis {
+            None => 1,
+            Some(a) => {
+                if let Ok(i) = a.extract::<i64>() {
+                    match i {
+                        0 => 0,
+                        1 => 1,
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else if let Ok(s) = a.extract::<String>() {
+                    match s.as_str() {
+                        "index" | "rows" => 0,
+                        "columns" => 1,
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "axis must be 0, 1, 'index', or 'columns'",
+                    ));
+                }
+            }
+        };
+        let res = self
+            .inner
+            .add_suffix_axis(suffix, axis_idx)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
@@ -13715,23 +13835,112 @@ impl PyDataFrame {
         Ok(PySeries { inner: series })
     }
 
-    fn squeeze(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if self.inner.column_names().len() == 1 {
-            let col = self.column_series(self.inner.column_names()[0])?;
-            if col.inner.len() == 1 {
-                let s = col.inner.column().values()[0].clone();
-                scalar_to_py(py, &s)
-            } else {
-                Ok(Py::new(py, col)?.into_any())
+    #[pyo3(signature = (axis=None))]
+    fn squeeze(&self, py: Python<'_>, axis: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let parsed_axis = match axis {
+            None => None,
+            Some(a) => {
+                if let Ok(i) = a.extract::<i64>() {
+                    match i {
+                        0 => Some(0),
+                        1 => Some(1),
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else if let Ok(s) = a.extract::<String>() {
+                    match s.as_str() {
+                        "index" | "rows" => Some(0),
+                        "columns" => Some(1),
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "No axis named {other} for object type DataFrame"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "axis must be 0, 1, 'index', or 'columns'",
+                    ));
+                }
             }
-        } else {
-            Ok(Py::new(
-                py,
-                PyDataFrame {
-                    inner: self.inner.clone(),
-                },
-            )?
-            .into_any())
+        };
+
+        let num_rows = self.inner.len();
+        let num_cols = self.inner.column_names().len();
+
+        match parsed_axis {
+            None => {
+                if num_rows == 1 && num_cols == 1 {
+                    let col_name = self.inner.column_names()[0];
+                    let col = self.column_series(col_name)?;
+                    let s = col.inner.column().values()[0].clone();
+                    scalar_to_py(py, &s)
+                } else if num_cols == 1 {
+                    let col_name = self.inner.column_names()[0];
+                    let col = self.column_series(col_name)?;
+                    Ok(Py::new(py, col)?.into_any())
+                } else if num_rows == 1 {
+                    match self.inner.squeeze_to_series(0) {
+                        Ok(s) => Ok(Py::new(py, PySeries { inner: s })?.into_any()),
+                        Err(_) => Ok(Py::new(
+                            py,
+                            PyDataFrame {
+                                inner: self.inner.clone(),
+                            },
+                        )?
+                        .into_any()),
+                    }
+                } else {
+                    Ok(Py::new(
+                        py,
+                        PyDataFrame {
+                            inner: self.inner.clone(),
+                        },
+                    )?
+                    .into_any())
+                }
+            }
+            Some(0) => {
+                if num_rows == 1 {
+                    match self.inner.squeeze_to_series(0) {
+                        Ok(s) => Ok(Py::new(py, PySeries { inner: s })?.into_any()),
+                        Err(_) => Ok(Py::new(
+                            py,
+                            PyDataFrame {
+                                inner: self.inner.clone(),
+                            },
+                        )?
+                        .into_any()),
+                    }
+                } else {
+                    Ok(Py::new(
+                        py,
+                        PyDataFrame {
+                            inner: self.inner.clone(),
+                        },
+                    )?
+                    .into_any())
+                }
+            }
+            Some(1) => {
+                if num_cols == 1 {
+                    let col_name = self.inner.column_names()[0];
+                    let col = self.column_series(col_name)?;
+                    Ok(Py::new(py, col)?.into_any())
+                } else {
+                    Ok(Py::new(
+                        py,
+                        PyDataFrame {
+                            inner: self.inner.clone(),
+                        },
+                    )?
+                    .into_any())
+                }
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -26234,6 +26443,17 @@ mod tests {
         let (kind, msg) = classify_frame_error(&key_err);
         assert_eq!(kind, PyErrorKind::Key);
         assert!(msg.contains("column not found"));
+
+        let pop_missing_col = FrameError::CompatibilityRejected("column 'foo' not found".into());
+        let (kind, msg) = classify_frame_error(&pop_missing_col);
+        assert_eq!(kind, PyErrorKind::Key);
+        assert!(msg.contains("column 'foo' not found"));
+
+        let pop_missing_label =
+            FrameError::CompatibilityRejected("pop: label Int64(42) not found in index".into());
+        let (kind, msg) = classify_frame_error(&pop_missing_label);
+        assert_eq!(kind, PyErrorKind::Key);
+        assert!(msg.contains("not found in index"));
     }
 
     #[test]
@@ -26471,8 +26691,8 @@ mod tests {
         assert_eq!(py_df.ndim(), 2);
         assert_eq!(py_df.size(), 6);
 
-        let cp = py_df.copy();
-        assert_eq!(cp.shape(), (3, 2));
+        let df_copy = py_df.copy();
+        assert_eq!(df_copy.shape(), (3, 2));
 
         let isna_df = py_df.isna().expect("isna"); // ubs:ignore — test fixture
         assert_eq!(isna_df.shape(), (3, 2));
@@ -26515,6 +26735,19 @@ mod tests {
             .drop_duplicates(None, None, false)
             .expect("drop_duplicates"); // ubs:ignore — test fixture
         assert_eq!(dedup.shape(), (3, 2));
+
+        let p_df = py_df.add_prefix("col_", None).expect("add_prefix"); // ubs:ignore — test fixture
+        assert_eq!(p_df.columns(), vec!["col_a", "col_b"]);
+        let s_df = py_df.add_suffix("_end", None).expect("add_suffix"); // ubs:ignore — test fixture
+        assert_eq!(s_df.columns(), vec!["a_end", "b_end"]);
+
+        assert!(py_df.equals(&df_copy));
+
+        let mut mod_df = py_df.clone();
+        let popped = mod_df.pop("a").expect("pop"); // ubs:ignore — test fixture
+        assert_eq!(popped.name(), "a");
+        assert_eq!(mod_df.columns(), vec!["b"]);
+        assert!(mod_df.pop("nonexistent").is_err());
     }
 
     #[test]

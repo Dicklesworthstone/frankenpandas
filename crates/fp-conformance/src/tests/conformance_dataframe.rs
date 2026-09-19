@@ -22,6 +22,26 @@ fn strict_config() -> HarnessConfig {
     cfg
 }
 
+fn run_pandas_oracle_eval(code: &str) -> Option<serde_json::Value> {
+    use std::io::Write;
+    let cfg = strict_config();
+    let python = &cfg.python_bin;
+    let mut child = std::process::Command::new(python)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(code.as_bytes());
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
 fn live_oracle_available(cfg: &HarnessConfig, fixture: &PacketFixture) -> Result<bool, String> {
     match capture_live_oracle_expected(cfg, fixture) {
         Ok(ResolvedExpected::Frame(_) | ResolvedExpected::Series(_)) => Ok(true),
@@ -911,4 +931,728 @@ fn dataframe_apply_alias_packets_run_green_offline_7p5r3() -> Result<(), Box<dyn
         "FP-P2D-483: expected all fixtures green, got {report:?}"
     );
     Ok(())
+}
+
+#[test]
+fn conformance_dataframe_add_prefix_suffix_differential() {
+    use fp_frame::DataFrame;
+    use fp_index::IndexLabel;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({"val1": [1.0, 2.0], "val2": [3.0, 4.0]}, index=["r1", "r2"])
+p_col = df.add_prefix("col_")
+p_idx = df.add_prefix("idx_", axis=0)
+s_col = df.add_suffix("_end")
+s_idx = df.add_suffix("_row", axis=0)
+res = {
+    "p_cols": p_col.columns.tolist(),
+    "p_col_idx": p_col.index.tolist(),
+    "p_idx_cols": p_idx.columns.tolist(),
+    "p_idx_idx": p_idx.index.tolist(),
+    "s_cols": s_col.columns.tolist(),
+    "s_col_idx": s_col.index.tolist(),
+    "s_idx_cols": s_idx.columns.tolist(),
+    "s_idx_idx": s_idx.index.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame add_prefix/suffix differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict_with_index(
+        vec![
+            ("val1", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ("val2", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+        ],
+        vec![IndexLabel::Utf8("r1".into()), IndexLabel::Utf8("r2".into())],
+    )
+    .expect("df");
+
+    let p_col = df.add_prefix("col_").expect("add_prefix");
+    let p_idx = df.add_prefix_axis("idx_", 0).expect("add_prefix_axis");
+    let s_col = df.add_suffix("_end").expect("add_suffix");
+    let s_idx = df.add_suffix_axis("_row", 0).expect("add_suffix_axis");
+
+    let p_cols_oracle: Vec<String> = oracle["p_cols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let p_cols_actual: Vec<String> = p_col.column_names().into_iter().cloned().collect();
+    assert_eq!(p_cols_actual, p_cols_oracle);
+
+    let p_idx_oracle: Vec<String> = oracle["p_idx_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let p_idx_labels: Vec<String> = p_idx
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(p_idx_labels, p_idx_oracle);
+
+    let s_cols_oracle: Vec<String> = oracle["s_cols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let s_cols_actual: Vec<String> = s_col.column_names().into_iter().cloned().collect();
+    assert_eq!(s_cols_actual, s_cols_oracle);
+
+    let s_idx_oracle: Vec<String> = oracle["s_idx_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let s_idx_labels: Vec<String> = s_idx
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(s_idx_labels, s_idx_oracle);
+}
+
+#[test]
+fn conformance_dataframe_squeeze_differential() {
+    use fp_frame::DataFrame;
+    use fp_index::IndexLabel;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df_1x1 = pd.DataFrame({"a": [42.0]})
+df_1x2 = pd.DataFrame({"a": [1.0], "b": [2.0]}, index=["row0"])
+df_2x1 = pd.DataFrame({"a": [10.0, 20.0]}, index=["r1", "r2"])
+
+s_1x2_ax0 = df_1x2.squeeze(axis=0)
+s_2x1_ax1 = df_2x1.squeeze(axis=1)
+
+res = {
+    "df_1x1_val": float(df_1x1.squeeze()),
+    "s_1x2_name": str(s_1x2_ax0.name),
+    "s_1x2_index": s_1x2_ax0.index.tolist(),
+    "s_1x2_values": s_1x2_ax0.tolist(),
+    "s_2x1_name": str(s_2x1_ax1.name),
+    "s_2x1_index": s_2x1_ax1.index.tolist(),
+    "s_2x1_values": s_2x1_ax1.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame squeeze differential test");
+            return;
+        }
+    };
+
+    let df_1x1 =
+        DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Float64(42.0)])]).expect("df_1x1");
+    let s_1x1 = df_1x1.squeeze(1).expect("squeeze 1x1");
+    assert_eq!(
+        s_1x1.column().values()[0].to_f64().unwrap(),
+        oracle["df_1x1_val"].as_f64().unwrap()
+    );
+
+    let df_1x2 = DataFrame::from_dict_with_index(
+        vec![
+            ("a", vec![Scalar::Float64(1.0)]),
+            ("b", vec![Scalar::Float64(2.0)]),
+        ],
+        vec![IndexLabel::Utf8("row0".into())],
+    )
+    .expect("df_1x2");
+    let s_1x2 = df_1x2.squeeze(0).expect("squeeze axis 0");
+    assert_eq!(s_1x2.name(), oracle["s_1x2_name"].as_str().unwrap());
+    let s_1x2_idx: Vec<String> = s_1x2
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let s_1x2_idx_oracle: Vec<String> = oracle["s_1x2_index"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(s_1x2_idx, s_1x2_idx_oracle);
+    let s_1x2_vals: Vec<f64> = s_1x2
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let s_1x2_vals_oracle: Vec<f64> = oracle["s_1x2_values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(s_1x2_vals, s_1x2_vals_oracle);
+
+    let df_2x1 = DataFrame::from_dict_with_index(
+        vec![("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)])],
+        vec![IndexLabel::Utf8("r1".into()), IndexLabel::Utf8("r2".into())],
+    )
+    .expect("df_2x1");
+    let s_2x1 = df_2x1.squeeze(1).expect("squeeze axis 1");
+    assert_eq!(s_2x1.name(), oracle["s_2x1_name"].as_str().unwrap());
+    let s_2x1_idx: Vec<String> = s_2x1
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let s_2x1_idx_oracle: Vec<String> = oracle["s_2x1_index"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(s_2x1_idx, s_2x1_idx_oracle);
+    let s_2x1_vals: Vec<f64> = s_2x1
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let s_2x1_vals_oracle: Vec<f64> = oracle["s_2x1_values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(s_2x1_vals, s_2x1_vals_oracle);
+
+    let df_2x2 = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+        ],
+    )
+    .expect("df_2x2");
+    assert!(df_2x2.squeeze(0).is_err());
+    assert!(df_2x2.squeeze(1).is_err());
+}
+
+#[test]
+fn conformance_dataframe_truncate_differential() {
+    use fp_frame::DataFrame;
+    use fp_index::IndexLabel;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [10.0, 20.0, 30.0, 40.0, 50.0]}, index=["a", "b", "c", "d", "e"])
+t1 = df.truncate(before="b", after="d")
+t2 = df.truncate(after="c")
+t3 = df.truncate(before="c")
+t4 = df.truncate(before="z")
+res = {
+    "t1_idx": t1.index.tolist(),
+    "t1_x": t1["x"].tolist(),
+    "t2_idx": t2.index.tolist(),
+    "t2_x": t2["x"].tolist(),
+    "t3_idx": t3.index.tolist(),
+    "t3_x": t3["x"].tolist(),
+    "t4_len": len(t4),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame truncate differential test");
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict_with_index(
+        vec![
+            (
+                "x",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(5.0),
+                ],
+            ),
+            (
+                "y",
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                    Scalar::Float64(50.0),
+                ],
+            ),
+        ],
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("e".into()),
+        ],
+    )
+    .expect("df");
+
+    let b_label = IndexLabel::Utf8("b".into());
+    let c_label = IndexLabel::Utf8("c".into());
+    let d_label = IndexLabel::Utf8("d".into());
+    let z_label = IndexLabel::Utf8("z".into());
+
+    let t1 = df
+        .truncate(Some(&b_label), Some(&d_label))
+        .expect("truncate t1");
+    let t1_idx: Vec<String> = t1.index().labels().iter().map(|l| l.to_string()).collect();
+    let t1_idx_oracle: Vec<String> = oracle["t1_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(t1_idx, t1_idx_oracle);
+    let t1_x: Vec<f64> = t1
+        .column("x")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let t1_x_oracle: Vec<f64> = oracle["t1_x"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(t1_x, t1_x_oracle);
+
+    let t2 = df.truncate(None, Some(&c_label)).expect("truncate t2");
+    let t2_idx: Vec<String> = t2.index().labels().iter().map(|l| l.to_string()).collect();
+    let t2_idx_oracle: Vec<String> = oracle["t2_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(t2_idx, t2_idx_oracle);
+
+    let t3 = df.truncate(Some(&c_label), None).expect("truncate t3");
+    let t3_idx: Vec<String> = t3.index().labels().iter().map(|l| l.to_string()).collect();
+    let t3_idx_oracle: Vec<String> = oracle["t3_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(t3_idx, t3_idx_oracle);
+
+    let t4 = df.truncate(Some(&z_label), None).expect("truncate t4");
+    assert_eq!(t4.len(), oracle["t4_len"].as_u64().unwrap() as usize);
+}
+
+#[test]
+fn conformance_dataframe_select_dtypes_differential() {
+    use fp_frame::DataFrame;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({"int_c": [1, 2], "float_c": [1.5, 2.5], "utf8_c": ["x", "y"], "bool_c": [True, False]})
+res = {
+    "num": df.select_dtypes(include="number").columns.tolist(),
+    "int": df.select_dtypes(include="int").columns.tolist(),
+    "float": df.select_dtypes(include="float").columns.tolist(),
+    "no_obj": df.select_dtypes(exclude="object").columns.tolist(),
+    "bool_int": df.select_dtypes(include=["bool", "int"]).columns.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame select_dtypes differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["int_c", "float_c", "utf8_c", "bool_c"],
+        vec![
+            ("int_c", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ("float_c", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
+            (
+                "utf8_c",
+                vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+            ),
+            ("bool_c", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+        ],
+    )
+    .expect("df");
+
+    let num_df = df.select_dtypes_by_name(&["number"], &[]).expect("num");
+    let num_cols_oracle: Vec<String> = oracle["num"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let num_cols_actual: Vec<String> = num_df.column_names().into_iter().cloned().collect();
+    assert_eq!(num_cols_actual, num_cols_oracle);
+
+    let int_df = df.select_dtypes_by_name(&["int"], &[]).expect("int");
+    let int_cols_oracle: Vec<String> = oracle["int"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let int_cols_actual: Vec<String> = int_df.column_names().into_iter().cloned().collect();
+    assert_eq!(int_cols_actual, int_cols_oracle);
+
+    let float_df = df.select_dtypes_by_name(&["float"], &[]).expect("float");
+    let float_cols_oracle: Vec<String> = oracle["float"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let float_cols_actual: Vec<String> = float_df.column_names().into_iter().cloned().collect();
+    assert_eq!(float_cols_actual, float_cols_oracle);
+
+    let no_obj_df = df.select_dtypes_by_name(&[], &["object"]).expect("no_obj");
+    let no_obj_cols_oracle: Vec<String> = oracle["no_obj"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let no_obj_cols_actual: Vec<String> = no_obj_df.column_names().into_iter().cloned().collect();
+    assert_eq!(no_obj_cols_actual, no_obj_cols_oracle);
+
+    let bool_int_df = df
+        .select_dtypes_by_name(&["bool", "int"], &[])
+        .expect("bool_int");
+    let bool_int_cols_oracle: Vec<String> = oracle["bool_int"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let bool_int_cols_actual: Vec<String> =
+        bool_int_df.column_names().into_iter().cloned().collect();
+    assert_eq!(bool_int_cols_actual, bool_int_cols_oracle);
+}
+
+#[test]
+fn conformance_dataframe_update_differential() {
+    use fp_frame::DataFrame;
+    use fp_types::{NullKind, Scalar};
+
+    let python_code = r#"
+import json, pandas as pd
+df1 = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [10.0, 20.0, 30.0]})
+df2 = pd.DataFrame({"a": [float("nan"), 99.0, float("nan")], "b": [100.0, float("nan"), 300.0]})
+df1.update(df2)
+res = {
+    "a": df1["a"].tolist(),
+    "b": df1["b"].tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame update differential test");
+            return;
+        }
+    };
+
+    let df1 = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                ],
+            ),
+        ],
+    )
+    .expect("df1");
+
+    let df2 = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(99.0),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(300.0),
+                ],
+            ),
+        ],
+    )
+    .expect("df2");
+
+    let updated = df1.update(&df2).expect("update");
+    let a_vals: Vec<f64> = updated
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let a_oracle: Vec<f64> = oracle["a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(a_vals, a_oracle);
+
+    let b_vals: Vec<f64> = updated
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let b_oracle: Vec<f64> = oracle["b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(b_vals, b_oracle);
+}
+
+#[test]
+fn conformance_dataframe_reindex_like_differential() {
+    use fp_frame::DataFrame;
+    use fp_index::IndexLabel;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df1 = pd.DataFrame({"val": [10.0, 20.0, 30.0]}, index=[0, 1, 2])
+other = pd.DataFrame({"marker": [1, 2, 3]}, index=[2, 0, 5])
+reindexed = df1.reindex(other.index)
+res = {
+    "idx": [int(x) for x in reindexed.index],
+    "val": [None if pd.isna(x) else float(x) for x in reindexed["val"]],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame reindex_like differential test"
+            );
+            return;
+        }
+    };
+
+    let df1 = DataFrame::from_dict_with_index(
+        vec![(
+            "val",
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )],
+        vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ],
+    )
+    .expect("df1");
+
+    let other = DataFrame::from_dict_with_index(
+        vec![(
+            "marker",
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )],
+        vec![
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(5),
+        ],
+    )
+    .expect("other");
+
+    let reindexed = df1.reindex_like(&other).expect("reindex_like");
+    let idx_vals: Vec<i64> = reindexed
+        .index()
+        .labels()
+        .iter()
+        .filter_map(|l| match l {
+            IndexLabel::Int64(i) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    let idx_oracle: Vec<i64> = oracle["idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(idx_vals, idx_oracle);
+
+    assert_eq!(
+        reindexed.column("val").unwrap().values()[0],
+        Scalar::Float64(30.0)
+    );
+    assert_eq!(
+        reindexed.column("val").unwrap().values()[1],
+        Scalar::Float64(10.0)
+    );
+    assert!(reindexed.column("val").unwrap().values()[2].is_missing());
+}
+
+#[test]
+fn conformance_dataframe_pop_and_equals_differential() {
+    use fp_frame::DataFrame;
+    use fp_types::{NullKind, Scalar};
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({"col1": [1.0, 2.0], "col2": [3.0, 4.0]})
+df_copy = df.copy()
+popped = df.pop("col1")
+df_with_nan1 = pd.DataFrame({"a": [1.0, float("nan")]})
+df_with_nan2 = pd.DataFrame({"a": [1.0, float("nan")]})
+df_diff = pd.DataFrame({"a": [1.0, 99.0]})
+
+res = {
+    "popped_name": str(popped.name),
+    "popped_vals": popped.tolist(),
+    "remaining_cols": df.columns.tolist(),
+    "equals_self": df_copy.equals(df_copy),
+    "equals_nan": df_with_nan1.equals(df_with_nan2),
+    "equals_diff": df_with_nan1.equals(df_diff),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame pop and equals differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["col1", "col2"],
+        vec![
+            ("col1", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ("col2", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+        ],
+    )
+    .expect("df");
+
+    let df_copy = df.copy();
+    assert_eq!(
+        df.equals(&df_copy),
+        oracle["equals_self"].as_bool().unwrap()
+    );
+
+    let (popped, remaining) = df.pop("col1").expect("pop");
+    assert_eq!(popped.name(), oracle["popped_name"].as_str().unwrap());
+    let popped_vals: Vec<f64> = popped
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let popped_oracle: Vec<f64> = oracle["popped_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(popped_vals, popped_oracle);
+    let remaining_cols: Vec<String> = remaining.column_names().into_iter().cloned().collect();
+    assert_eq!(remaining_cols, vec!["col2".to_string()]);
+
+    let df_with_nan1 = DataFrame::from_dict(
+        &["a"],
+        vec![("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)])],
+    )
+    .expect("df_nan1");
+    let df_with_nan2 = DataFrame::from_dict(
+        &["a"],
+        vec![("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)])],
+    )
+    .expect("df_nan2");
+    let df_diff = DataFrame::from_dict(
+        &["a"],
+        vec![("a", vec![Scalar::Float64(1.0), Scalar::Float64(99.0)])],
+    )
+    .expect("df_diff");
+
+    assert_eq!(
+        df_with_nan1.equals(&df_with_nan2),
+        oracle["equals_nan"].as_bool().unwrap()
+    );
+    assert_eq!(
+        df_with_nan1.equals(&df_diff),
+        oracle["equals_diff"].as_bool().unwrap()
+    );
 }
