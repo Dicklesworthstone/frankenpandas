@@ -1686,7 +1686,9 @@ print(json.dumps(res))
     let oracle = match run_pandas_oracle_eval(python_code) {
         Some(val) => val,
         None => {
-            eprintln!("pandas oracle unavailable; skipping DataFrame ffill/bfill differential test");
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame ffill/bfill differential test"
+            );
             return;
         }
     };
@@ -1864,11 +1866,7 @@ print(json.dumps(res))
     .expect("df");
 
     let isin_df = df
-        .isin(&[
-            Scalar::Int64(2),
-            Scalar::Int64(4),
-            Scalar::Utf8("b".into()),
-        ])
+        .isin(&[Scalar::Int64(2), Scalar::Int64(4), Scalar::Utf8("b".into())])
         .expect("isin");
 
     let num_actual: Vec<bool> = isin_df
@@ -1930,7 +1928,9 @@ print(json.dumps(res))
     let oracle = match run_pandas_oracle_eval(python_code) {
         Some(val) => val,
         None => {
-            eprintln!("pandas oracle unavailable; skipping DataFrame first/last valid index differential test");
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame first/last valid index differential test"
+            );
             return;
         }
     };
@@ -2165,7 +2165,9 @@ print(json.dumps(res))
     let oracle = match run_pandas_oracle_eval(python_code) {
         Some(val) => val,
         None => {
-            eprintln!("pandas oracle unavailable; skipping DataFrame interpolate differential test");
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame interpolate differential test"
+            );
             return;
         }
     };

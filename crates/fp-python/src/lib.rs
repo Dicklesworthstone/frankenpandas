@@ -13179,7 +13179,9 @@ impl PyDataFrame {
                 let out = PyDict::new(py);
                 for name in col_names {
                     let col = self.inner.column(name).ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                            "column {name:?} missing"
+                        ))
                     })?;
                     let inner_dict = PyDict::new(py);
                     for (i, val) in col.values().iter().enumerate() {
@@ -13195,7 +13197,9 @@ impl PyDataFrame {
                 let out = PyDict::new(py);
                 for name in col_names {
                     let col = self.inner.column(name).ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                            "column {name:?} missing"
+                        ))
                     })?;
                     let values: Vec<Py<PyAny>> = col
                         .values()
@@ -13212,7 +13216,9 @@ impl PyDataFrame {
                     let row_dict = PyDict::new(py);
                     for name in &col_names {
                         let col = self.inner.column(name).ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                                "column {name:?} missing"
+                            ))
                         })?;
                         let v = scalar_to_py(py, &col.values()[row_idx])?;
                         row_dict.set_item(*name, v)?;
@@ -13228,7 +13234,9 @@ impl PyDataFrame {
                     let row_dict = PyDict::new(py);
                     for name in &col_names {
                         let col = self.inner.column(name).ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                                "column {name:?} missing"
+                            ))
                         })?;
                         let v = scalar_to_py(py, &col.values()[row_idx])?;
                         row_dict.set_item(*name, v)?;
@@ -13252,14 +13260,17 @@ impl PyDataFrame {
                     .map(|l| index_label_to_py(py, l))
                     .collect::<PyResult<Vec<_>>>()?;
                 out.set_item("index", PyList::new(py, idx_list)?)?;
-                let cols_list = PyList::new(py, col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+                let cols_list =
+                    PyList::new(py, col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
                 out.set_item("columns", cols_list)?;
                 let mut data_rows = Vec::with_capacity(n_rows);
                 for row_idx in 0..n_rows {
                     let mut row_vals = Vec::with_capacity(col_names.len());
                     for name in &col_names {
                         let col = self.inner.column(name).ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("column {name:?} missing"))
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                                "column {name:?} missing"
+                            ))
                         })?;
                         row_vals.push(scalar_to_py(py, &col.values()[row_idx])?);
                     }
