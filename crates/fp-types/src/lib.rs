@@ -928,7 +928,7 @@ impl AsDType for SparseDType {
 /// Pandas-equivalent categorical dtype descriptor (`pd.CategoricalDtype`).
 ///
 /// Encapsulates the optional category vocabulary and ordering semantics.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct CategoricalDtype {
     pub categories: Option<Vec<String>>,
     pub ordered: bool,
@@ -940,7 +940,10 @@ impl CategoricalDtype {
     /// Construct a new `CategoricalDtype`.
     #[must_use]
     pub const fn new(categories: Option<Vec<String>>, ordered: bool) -> Self {
-        Self { categories, ordered }
+        Self {
+            categories,
+            ordered,
+        }
     }
 
     /// Return categories if known.
@@ -965,15 +968,6 @@ impl CategoricalDtype {
     #[must_use]
     pub const fn kind(&self) -> &'static str {
         "O"
-    }
-}
-
-impl Default for CategoricalDtype {
-    fn default() -> Self {
-        Self {
-            categories: None,
-            ordered: false,
-        }
     }
 }
 
@@ -12127,16 +12121,15 @@ mod tests {
             Scalar::Timedelta64(3 * one_hour),
         ];
         let std = super::nanstd(&vals, 0);
-        match std {
-            Scalar::Timedelta64(ns) => {
-                let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
-                assert!(
-                    (ns as f64 - expected).abs() < 1e6,
-                    "expected ~{expected} ns, got {ns}"
-                );
-            }
-            other => panic!("expected Timedelta64, got {other:?}"),
-        }
+        let Scalar::Timedelta64(ns) = std else {
+            assert!(false, "expected Timedelta64, got {std:?}");
+            return;
+        };
+        let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
+        assert!(
+            (ns as f64 - expected).abs() < 1e6,
+            "expected ~{expected} ns, got {ns}"
+        );
     }
 
     #[test]
@@ -12144,14 +12137,8 @@ mod tests {
         let one_hour = 3_600 * 1_000_000_000_i64;
         let vals = vec![Scalar::Timedelta64(one_hour)];
         // ddof=1 with n=1 → underflow, returns NaT
-        match super::nanstd(&vals, 1) {
-            Scalar::Timedelta64(v) => assert_eq!(v, Timedelta::NAT),
-            other => panic!("expected Timedelta64 NAT, got {other:?}"),
-        }
-        match super::nansem(&vals, 1) {
-            Scalar::Timedelta64(v) => assert_eq!(v, Timedelta::NAT),
-            other => panic!("expected Timedelta64 NAT, got {other:?}"),
-        }
+        assert_eq!(super::nanstd(&vals, 1), Scalar::Timedelta64(Timedelta::NAT));
+        assert_eq!(super::nansem(&vals, 1), Scalar::Timedelta64(Timedelta::NAT));
     }
 
     #[test]
@@ -18623,10 +18610,9 @@ mod sparse_dtype_pandas_name_3gxc6 {
 
     #[test]
     fn test_extension_dtypes_and_parameterized_parsing() {
-        use super::api::types;
         use super::{
-            AsDType, CategoricalDtype, DType, IntervalClosed, IntervalDtype, PeriodDtype,
-            Scalar, SparseDType, pandas_dtype,
+            AsDType, CategoricalDtype, DType, IntervalClosed, IntervalDtype, PeriodDtype, Scalar,
+            SparseDType, api::types, pandas_dtype,
         };
 
         // CategoricalDtype
@@ -18642,10 +18628,8 @@ mod sparse_dtype_pandas_name_3gxc6 {
             "CategoricalDtype(categories=None, ordered=False)"
         );
 
-        let cat_custom = CategoricalDtype::new(
-            Some(vec!["low".to_string(), "high".to_string()]),
-            true,
-        );
+        let cat_custom =
+            CategoricalDtype::new(Some(vec!["low".to_string(), "high".to_string()]), true);
         assert!(cat_custom.ordered());
         assert_eq!(
             cat_custom.categories(),
