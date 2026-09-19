@@ -33,7 +33,9 @@ pub use fp_frame::{
     BoxPlotSpec,
     CategoricalAccessor,
     CategoricalMetadata,
+    ColumnSelection,
     ConcatJoin,
+    CsvQuoting,
     DataFrame,
     DataFrameColumnInput,
     DataFrameDictAxisLabels,
@@ -59,6 +61,8 @@ pub use fp_frame::{
     PlotSeriesSpec,
     PlotSpec,
     Resample,
+    ResampleClosed,
+    ResampleLabel,
     Rolling,
     ScatterMatrixSpec,
     Series,
@@ -69,6 +73,8 @@ pub use fp_frame::{
     TablePlotSpec,
     ToDatetimeOptions,
     ToDatetimeOrigin,
+    ToNumericErrors,
+    ToNumericOptions,
     ToTimedeltaErrors,
     ToTimedeltaOptions,
     TzAmbiguousPolicy,
@@ -607,6 +613,30 @@ pub mod errors {
     /// Error raised when evaluating an expression with an undefined variable.
     /// Matches `pd.errors.UndefinedVariableError`.
     pub type UndefinedVariableError = ExprError;
+
+    /// Error raised when chained assignment is detected or configured to raise.
+    /// Matches `pd.errors.ChainedAssignmentError`.
+    pub type ChainedAssignmentError = OptionError;
+
+    /// Error raised for invalid data operations or incompatible data shapes.
+    /// Matches `pd.errors.DataError`.
+    pub type DataError = FrameError;
+
+    /// Warning/error emitted when performance degradation or expensive fallback occurs.
+    /// Matches `pd.errors.PerformanceWarning`.
+    pub type PerformanceWarning = RuntimeError;
+
+    /// Warning/error raised when setting values on a copy slice.
+    /// Matches `pd.errors.SettingWithCopyWarning`.
+    pub type SettingWithCopyWarning = FrameError;
+
+    /// Error raised when date/time frequency cannot be inferred or is null.
+    /// Matches `pd.errors.NullFrequencyError`.
+    pub type NullFrequencyError = DateRangeError;
+
+    /// Warning/error raised when column data types are mixed during parsing.
+    /// Matches `pd.errors.DtypeWarning`.
+    pub type DtypeWarning = IoError;
 }
 
 // ── Prelude ─────────────────────────────────────────────────────────────
@@ -656,6 +686,7 @@ pub mod prelude {
         ConcatJoin,
         ConcatTarget,
         CsvOnBadLines,
+        CsvQuoting,
         CsvReadOptions,
         CsvWriteOptions,
         DEFAULT_HDF5_KEY,
@@ -761,6 +792,8 @@ pub mod prelude {
         PlotSpec,
         RangeIndex,
         Resample,
+        ResampleClosed,
+        ResampleLabel,
         Rolling,
         RuntimeMode,
         RuntimePolicy,
@@ -813,6 +846,8 @@ pub mod prelude {
         // to_datetime_with_options function (already in the prelude).
         ToDatetimeOptions,
         ToDatetimeOrigin,
+        ToNumericErrors,
+        ToNumericOptions,
         // fd90.218: timedelta + tz option surfaces.
         ToTimedeltaErrors,
         ToTimedeltaOptions,
@@ -1975,5 +2010,48 @@ mod tests {
 
         let xml_str = write_xml_string(&df1).expect("write_xml_string");
         assert!(xml_str.contains("<row>"));
+
+        // ToNumericOptions and ToNumericErrors from prelude
+        let num_opts = ToNumericOptions {
+            errors: ToNumericErrors::Coerce,
+        };
+        let str_series = Series::from_values(
+            "s",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("123".to_string()),
+                Scalar::Utf8("invalid".to_string()),
+            ],
+        )
+        .expect("str_series");
+        let coerced =
+            to_numeric_with_options(&str_series, num_opts).expect("to_numeric_with_options");
+        assert_eq!(coerced.len(), 2);
+        assert_eq!(coerced.values()[0].as_i64(), Some(123));
+        assert!(coerced.values()[1].is_nan());
+
+        // Resample options from prelude
+        let _rc = ResampleClosed::Left;
+        let _rl = ResampleLabel::Right;
+        let _quoting = CsvQuoting::Minimal;
+
+        // Scalar typed accessors
+        assert_eq!(valid_sc.as_i64(), Some(42));
+        assert_eq!(valid_sc.as_int(), Some(42));
+        assert_eq!(valid_sc.as_f64(), None);
+        assert_eq!(valid_sc.as_float(), None);
+        assert_eq!(valid_sc.as_bool(), None);
+        assert_eq!(valid_sc.as_str(), None);
+
+        let str_sc = Scalar::Utf8("hello".to_string());
+        assert_eq!(str_sc.as_str(), Some("hello"));
+
+        // Pandas error aliases check
+        let _test_err_fn: fn(crate::errors::ChainedAssignmentError) -> _ = |e| e;
+        let _test_data_err_fn: fn(crate::errors::DataError) -> _ = |e| e;
+        let _test_perf_warn_fn: fn(crate::errors::PerformanceWarning) -> _ = |e| e;
+        let _test_copy_warn_fn: fn(crate::errors::SettingWithCopyWarning) -> _ = |e| e;
+        let _test_freq_err_fn: fn(crate::errors::NullFrequencyError) -> _ = |e| e;
+        let _test_dtype_warn_fn: fn(crate::errors::DtypeWarning) -> _ = |e| e;
     }
 }
