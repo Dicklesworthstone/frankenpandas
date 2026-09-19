@@ -8687,6 +8687,130 @@ pub fn write_json(frame: &DataFrame, path: &Path, orient: JsonOrient) -> Result<
     Ok(())
 }
 
+// ── JSON Normalize ─────────────────────────────────────────────────────
+
+fn flatten_json_dict_for_normalize(
+    map: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+    sep: &str,
+    max_level: Option<usize>,
+    current_level: usize,
+    out: &mut Vec<(String, Scalar)>,
+) {
+    for (k, v) in map {
+        let full_key = if prefix.is_empty() {
+            k.clone()
+        } else {
+            format!("{prefix}{sep}{k}")
+        };
+        let should_recurse = match max_level {
+            Some(max_l) => current_level < max_l,
+            None => true,
+        };
+        if should_recurse
+            && let serde_json::Value::Object(nested) = v
+        {
+            flatten_json_dict_for_normalize(
+                nested,
+                &full_key,
+                sep,
+                max_level,
+                current_level + 1,
+                out,
+            );
+            continue;
+        }
+        out.push((full_key, json_value_to_scalar(v)));
+    }
+}
+
+/// Normalize semi-structured JSON data into a flat DataFrame.
+///
+/// Matches `pd.json_normalize(data, sep, max_level)`.
+///
+/// # Errors
+///
+/// Returns [`IoError::JsonFormat`] if the input data cannot be normalized (e.g. not an object or array of objects).
+pub fn json_normalize(
+    data: &serde_json::Value,
+    sep: Option<&str>,
+    max_level: Option<usize>,
+) -> Result<DataFrame, IoError> {
+    let sep_str = sep.unwrap_or(".");
+    let rows_to_flatten: Vec<&serde_json::Value> = match data {
+        serde_json::Value::Array(arr) => arr.iter().collect(),
+        serde_json::Value::Object(_) => vec![data],
+        _ => {
+            return Err(IoError::JsonFormat(
+                "json_normalize requires a JSON object or array of objects".into(),
+            ));
+        }
+    };
+
+    if rows_to_flatten.is_empty() {
+        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new()).map_err(IoError::from);
+    }
+
+    let mut records: Vec<Vec<(String, Scalar)>> = Vec::with_capacity(rows_to_flatten.len());
+    let mut all_col_names: Vec<String> = Vec::new();
+    let mut col_set = std::collections::HashSet::new();
+
+    for row_val in &rows_to_flatten {
+        let obj = row_val
+            .as_object()
+            .ok_or_else(|| IoError::JsonFormat("json_normalize requires objects in records".into()))?;
+        let mut row = Vec::new();
+        flatten_json_dict_for_normalize(obj, "", sep_str, max_level, 0, &mut row);
+        for (k, _) in &row {
+            if col_set.insert(k.clone()) {
+                all_col_names.push(k.clone());
+            }
+        }
+        records.push(row);
+    }
+
+    let mut col_map: BTreeMap<String, Column> = BTreeMap::new();
+    for col_name in &all_col_names {
+        let mut col_values: Vec<Scalar> = Vec::with_capacity(records.len());
+        for row in &records {
+            let mut found = None;
+            for (k, v) in row {
+                if k == col_name {
+                    found = Some(v.clone());
+                    break;
+                }
+            }
+            if let Some(val) = found {
+                col_values.push(val);
+            } else {
+                col_values.push(Scalar::Null(NullKind::NaN));
+            }
+        }
+        let col = column_from_json_values(col_values)?;
+        col_map.insert(col_name.clone(), col);
+    }
+
+    let row_count = records.len() as i64;
+    let index = Index::from_i64((0..row_count).collect());
+    DataFrame::new_with_column_order(index, col_map, all_col_names).map_err(IoError::from)
+}
+
+/// Parse and normalize semi-structured JSON string into a flat DataFrame.
+///
+/// Matches `pd.json_normalize(...)`.
+///
+/// # Errors
+///
+/// Returns [`IoError`] if JSON parsing fails or data is invalid.
+pub fn json_normalize_str(
+    input: &str,
+    sep: Option<&str>,
+    max_level: Option<usize>,
+) -> Result<DataFrame, IoError> {
+    let parsed = parse_json_value_allowing_pandas_nan(input)?;
+    json_normalize(&parsed, sep, max_level)
+}
+
 // ── File-based Pickle ──────────────────────────────────────────────────
 
 /// Read a DataFrame from a Pickle file.
@@ -37046,5 +37170,47 @@ mod merge_simple_numeric_csv_chunks_tests {
             write_json_string(&frame, JsonOrient::Records).expect("serde fallback"),
             r#"[{"n":1,"s":"hi"},{"n":2,"s":"x"}]"#
         );
+    }
+
+    #[test]
+    fn test_json_normalize_nested_and_max_level() {
+        use super::json_normalize_str;
+
+        let json_input = r#"[
+            {"id": 1, "name": {"first": "Alice", "last": "Smith"}, "info": {"contact": {"email": "alice@example.com"}}},
+            {"id": 2, "name": {"first": "Bob", "last": "Jones"}, "info": {"contact": {"email": "bob@example.com"}}}
+        ]"#;
+
+        let df = json_normalize_str(json_input, None, None).expect("json_normalize_str");
+        assert_eq!(df.len(), 2);
+        assert_eq!(df.column_names(), vec!["id", "name.first", "name.last", "info.contact.email"]);
+        assert_eq!(df.column("id").unwrap().value(0), Some(&Scalar::Int64(1)));
+        assert_eq!(df.column("name.first").unwrap().value(0), Some(&Scalar::Utf8("Alice".into())));
+        assert_eq!(df.column("info.contact.email").unwrap().value(1), Some(&Scalar::Utf8("bob@example.com".into())));
+
+        // With custom separator
+        let df_sep = json_normalize_str(json_input, Some("_"), None).expect("with sep");
+        assert_eq!(df_sep.column_names(), vec!["id", "name_first", "name_last", "info_contact_email"]);
+
+        // With max_level = 0 (only top level flattened)
+        let df_l0 = json_normalize_str(json_input, None, Some(0)).expect("max_level 0");
+        assert_eq!(df_l0.column_names(), vec!["id", "name", "info"]);
+
+        // With max_level = 1
+        let df_l1 = json_normalize_str(json_input, None, Some(1)).expect("max_level 1");
+        assert_eq!(df_l1.column_names(), vec!["id", "name.first", "name.last", "info.contact"]);
+
+        // Single object input
+        let single_obj = r#"{"a": 10, "b": {"c": 20}}"#;
+        let df_single = json_normalize_str(single_obj, None, None).expect("single obj");
+        assert_eq!(df_single.len(), 1);
+        assert_eq!(df_single.column_names(), vec!["a", "b.c"]);
+        assert_eq!(df_single.column("b.c").unwrap().value(0), Some(&Scalar::Int64(20)));
+
+        // Empty array
+        let empty_arr = "[]";
+        let df_empty = json_normalize_str(empty_arr, None, None).expect("empty array");
+        assert_eq!(df_empty.len(), 0);
+        assert_eq!(df_empty.column_names().len(), 0);
     }
 }
