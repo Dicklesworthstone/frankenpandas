@@ -12121,14 +12121,15 @@ mod tests {
             Scalar::Timedelta64(3 * one_hour),
         ];
         let std = super::nanstd(&vals, 0);
-        assert!(matches!(std, Scalar::Timedelta64(_)));
-        if let Scalar::Timedelta64(ns) = std {
-            let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
-            assert!(
-                (ns as f64 - expected).abs() < 1e6,
-                "expected ~{expected} ns, got {ns}"
-            );
-        }
+        let Scalar::Timedelta64(ns) = std else {
+            assert!(false, "expected Timedelta64, got {std:?}");
+            return;
+        };
+        let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
+        assert!(
+            (ns as f64 - expected).abs() < 1e6,
+            "expected ~{expected} ns, got {ns}"
+        );
     }
 
     #[test]
