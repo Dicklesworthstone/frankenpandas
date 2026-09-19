@@ -87,7 +87,10 @@ use std::{
 };
 
 use chrono::Datelike;
-use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
+use fp_types::{
+    Interval, IntervalClosed, Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents,
+    interval_range,
+};
 // Dedup / set-op seen-sets key on &IndexLabel and read output order from the
 // INPUT scan (first-seen filter / positional bool), never from map iteration —
 // so the hasher is observationally invisible. FxHash (rustc-hash, pure safe
@@ -15731,6 +15734,519 @@ impl CategoricalIndex {
             return self.factorize_by_category_rank();
         }
         self.factorize_by_hash()
+    }
+}
+
+// ── IntervalIndex ──────────────────────────────────────────────────────────
+
+/// An index of `Interval` objects (`pd.IntervalIndex`).
+///
+/// An immutable index of half-open, closed, or open intervals.
+/// Backed by float64 endpoints with configurable closed semantics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntervalIndex {
+    values: Vec<Interval>,
+    closed: IntervalClosed,
+    name: Option<String>,
+}
+
+impl IntervalIndex {
+    /// Construct a new `IntervalIndex` from a vector of `Interval`s.
+    #[must_use]
+    pub fn new(values: Vec<Interval>) -> Self {
+        let closed = values.first().map_or(IntervalClosed::Right, |iv| iv.closed);
+        Self {
+            values,
+            closed,
+            name: None,
+        }
+    }
+
+    /// Construct a new `IntervalIndex` with explicit closed policy and name.
+    #[must_use]
+    pub fn new_with_options(
+        values: Vec<Interval>,
+        closed: IntervalClosed,
+        name: Option<String>,
+    ) -> Self {
+        Self {
+            values,
+            closed,
+            name,
+        }
+    }
+
+    /// Construct an `IntervalIndex` from endpoint breaks (`pd.IntervalIndex.from_breaks`).
+    ///
+    /// # Errors
+    /// Returns `IndexError::InvalidArgument` if breaks has fewer than 2 elements.
+    pub fn from_breaks(breaks: &[f64], closed: IntervalClosed) -> Result<Self, IndexError> {
+        if breaks.len() < 2 {
+            return Err(IndexError::InvalidArgument(
+                "breaks must have at least 2 elements".to_string(),
+            ));
+        }
+        let mut values = Vec::with_capacity(breaks.len() - 1);
+        for i in 0..(breaks.len() - 1) {
+            values.push(Interval::new(breaks[i], breaks[i + 1], closed));
+        }
+        Ok(Self {
+            values,
+            closed,
+            name: None,
+        })
+    }
+
+    /// Construct an `IntervalIndex` from (left, right) tuples (`pd.IntervalIndex.from_tuples`).
+    #[must_use]
+    pub fn from_tuples(tuples: &[(f64, f64)], closed: IntervalClosed) -> Self {
+        let mut values = Vec::with_capacity(tuples.len());
+        for &(left, right) in tuples {
+            values.push(Interval::new(left, right, closed));
+        }
+        Self {
+            values,
+            closed,
+            name: None,
+        }
+    }
+
+    /// Construct an `IntervalIndex` from separate left and right arrays (`pd.IntervalIndex.from_arrays`).
+    ///
+    /// # Errors
+    /// Returns `IndexError::LengthMismatch` if left and right arrays have different lengths.
+    pub fn from_arrays(
+        left: &[f64],
+        right: &[f64],
+        closed: IntervalClosed,
+    ) -> Result<Self, IndexError> {
+        if left.len() != right.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: left.len(),
+                actual: right.len(),
+                context: "IntervalIndex.from_arrays left and right arrays must have equal length"
+                    .to_string(),
+            });
+        }
+        let mut values = Vec::with_capacity(left.len());
+        for (&l, &r) in left.iter().zip(right.iter()) {
+            values.push(Interval::new(l, r, closed));
+        }
+        Ok(Self {
+            values,
+            closed,
+            name: None,
+        })
+    }
+
+    /// Construct an `IntervalIndex` from a range specification (`pd.interval_range`).
+    ///
+    /// # Errors
+    /// Returns `IndexError::InvalidArgument` if parameters are invalid.
+    pub fn from_range(
+        start: Option<f64>,
+        end: Option<f64>,
+        periods: Option<usize>,
+        freq: Option<f64>,
+        closed: Option<IntervalClosed>,
+    ) -> Result<Self, IndexError> {
+        let closed_val = closed.unwrap_or(IntervalClosed::Right);
+        let values = interval_range(start, end, periods, freq, closed)
+            .map_err(|e| IndexError::InvalidArgument(e.to_string()))?;
+        Ok(Self {
+            values,
+            closed: closed_val,
+            name: None,
+        })
+    }
+
+    #[must_use]
+    pub fn values(&self) -> &[Interval] {
+        &self.values
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    #[must_use]
+    pub fn closed(&self) -> IntervalClosed {
+        self.closed
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    #[must_use]
+    pub fn set_name(&self, name: &str) -> Self {
+        let mut out = self.clone();
+        out.name = Some(name.to_owned());
+        out
+    }
+
+    #[must_use]
+    pub fn set_names(&self, name: Option<&str>) -> Self {
+        let mut out = self.clone();
+        out.name = name.map(str::to_owned);
+        out
+    }
+
+    #[must_use]
+    pub fn rename_index(&self, name: Option<&str>) -> Self {
+        self.set_names(name)
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Vec<Option<String>> {
+        vec![self.name.clone()]
+    }
+
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        (self.len(),)
+    }
+
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    #[must_use]
+    pub fn dtype(&self) -> String {
+        format!("interval[float64, {}]", self.closed)
+    }
+
+    #[must_use]
+    pub fn dtypes(&self) -> Vec<String> {
+        vec![self.dtype()]
+    }
+
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn isna(&self) -> Vec<bool> {
+        vec![false; self.len()]
+    }
+
+    #[must_use]
+    pub fn isnull(&self) -> Vec<bool> {
+        self.isna()
+    }
+
+    #[must_use]
+    pub fn notna(&self) -> Vec<bool> {
+        vec![true; self.len()]
+    }
+
+    #[must_use]
+    pub fn notnull(&self) -> Vec<bool> {
+        self.notna()
+    }
+
+    #[must_use]
+    pub fn dropna(&self) -> Self {
+        self.clone()
+    }
+
+    /// Return an `Index` containing the left endpoints of each interval.
+    #[must_use]
+    pub fn left(&self) -> Index {
+        let labels = self
+            .values
+            .iter()
+            .map(|iv| IndexLabel::Float64(OrderedF64(iv.left)))
+            .collect();
+        Index::new(labels)
+    }
+
+    /// Return an `Index` containing the right endpoints of each interval.
+    #[must_use]
+    pub fn right(&self) -> Index {
+        let labels = self
+            .values
+            .iter()
+            .map(|iv| IndexLabel::Float64(OrderedF64(iv.right)))
+            .collect();
+        Index::new(labels)
+    }
+
+    /// Return an `Index` containing the midpoint `(left + right) / 2` of each interval.
+    #[must_use]
+    pub fn mid(&self) -> Index {
+        let labels = self
+            .values
+            .iter()
+            .map(|iv| IndexLabel::Float64(OrderedF64(iv.mid())))
+            .collect();
+        Index::new(labels)
+    }
+
+    /// Return an `Index` containing the length `right - left` of each interval.
+    #[must_use]
+    pub fn length(&self) -> Index {
+        let labels = self
+            .values
+            .iter()
+            .map(|iv| IndexLabel::Float64(OrderedF64(iv.length())))
+            .collect();
+        Index::new(labels)
+    }
+
+    /// True if any two intervals in the index overlap.
+    #[must_use]
+    pub fn is_overlapping(&self) -> bool {
+        let len = self.values.len();
+        if len < 2 {
+            return false;
+        }
+        for i in 0..len {
+            for j in (i + 1)..len {
+                if self.values[i].overlaps(&self.values[j]) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if each interval overlaps with the given interval.
+    #[must_use]
+    pub fn overlaps(&self, other: &Interval) -> Vec<bool> {
+        self.values.iter().map(|iv| iv.overlaps(other)).collect()
+    }
+
+    /// Check if each interval contains the given scalar point.
+    #[must_use]
+    pub fn contains(&self, point: f64) -> Vec<bool> {
+        self.values.iter().map(|iv| iv.contains(point)).collect()
+    }
+
+    /// Return the integer position of the interval containing the query scalar point.
+    ///
+    /// # Errors
+    /// Returns `IndexError::InvalidArgument` if no interval contains `point`, or if
+    /// multiple overlapping intervals contain `point`.
+    pub fn get_loc(&self, point: f64) -> Result<usize, IndexError> {
+        let mut found = None;
+        for (i, iv) in self.values.iter().enumerate() {
+            if iv.contains(point) {
+                if found.is_some() {
+                    return Err(IndexError::InvalidArgument(format!(
+                        "point {point} overlaps multiple intervals"
+                    )));
+                }
+                found = Some(i);
+            }
+        }
+        found.ok_or_else(|| {
+            IndexError::InvalidArgument(format!("point {point} not found in IntervalIndex"))
+        })
+    }
+
+    /// Return the integer position of an exact matching `Interval`.
+    ///
+    /// # Errors
+    /// Returns `IndexError::InvalidArgument` if target interval is not in the index.
+    pub fn get_loc_interval(&self, target: &Interval) -> Result<usize, IndexError> {
+        self.values
+            .iter()
+            .position(|iv| {
+                OrderedF64(iv.left) == OrderedF64(target.left)
+                    && OrderedF64(iv.right) == OrderedF64(target.right)
+                    && iv.closed == target.closed
+            })
+            .ok_or_else(|| {
+                IndexError::InvalidArgument(format!(
+                    "interval {target:?} not found in IntervalIndex"
+                ))
+            })
+    }
+
+    /// Compute positional indexer for target points.
+    #[must_use]
+    pub fn get_indexer(&self, target: &[f64]) -> Vec<Option<usize>> {
+        target.iter().map(|&pt| self.get_loc(pt).ok()).collect()
+    }
+
+    /// Return a new `IntervalIndex` with specified `closed` semantics.
+    #[must_use]
+    pub fn set_closed(&self, closed: IntervalClosed) -> Self {
+        let values = self
+            .values
+            .iter()
+            .map(|iv| Interval::new(iv.left, iv.right, closed))
+            .collect();
+        Self {
+            values,
+            closed,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Convert to a standard `Index` with string representations.
+    #[must_use]
+    pub fn to_index(&self) -> Index {
+        let labels = self
+            .values
+            .iter()
+            .map(|iv| IndexLabel::Utf8(format!("{iv}")))
+            .collect();
+        let mut idx = Index::new(labels);
+        if let Some(name) = &self.name {
+            idx = idx.set_name(name);
+        }
+        idx
+    }
+
+    #[must_use]
+    pub fn is_unique(&self) -> bool {
+        let len = self.values.len();
+        if len < 2 {
+            return true;
+        }
+        for i in 0..len {
+            for j in (i + 1)..len {
+                if OrderedF64(self.values[i].left) == OrderedF64(self.values[j].left)
+                    && OrderedF64(self.values[i].right) == OrderedF64(self.values[j].right)
+                    && self.values[i].closed == self.values[j].closed
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        if self.values.len() < 2 {
+            return true;
+        }
+        for w in self.values.windows(2) {
+            let left_cmp = OrderedF64(w[0].left).cmp(&OrderedF64(w[1].left));
+            if left_cmp.is_gt() {
+                return false;
+            }
+            if left_cmp.is_eq() && OrderedF64(w[0].right).cmp(&OrderedF64(w[1].right)).is_gt() {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        if self.values.len() < 2 {
+            return true;
+        }
+        for w in self.values.windows(2) {
+            let left_cmp = OrderedF64(w[0].left).cmp(&OrderedF64(w[1].left));
+            if left_cmp.is_lt() {
+                return false;
+            }
+            if left_cmp.is_eq() && OrderedF64(w[0].right).cmp(&OrderedF64(w[1].right)).is_lt() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Get interval at integer position (supports negative indexing).
+    ///
+    /// # Errors
+    /// Returns `IndexError::OutOfBounds` if `idx` is out of range.
+    pub fn get_item(&self, idx: isize) -> Result<Interval, IndexError> {
+        let len = self.values.len() as isize;
+        let pos = if idx < 0 { idx + len } else { idx };
+        if pos < 0 || pos >= len {
+            return Err(IndexError::OutOfBounds {
+                position: if idx < 0 {
+                    idx.unsigned_abs()
+                } else {
+                    idx as usize
+                },
+                length: self.values.len(),
+            });
+        }
+        Ok(self.values[pos as usize])
+    }
+
+    #[must_use]
+    pub fn slice(&self, start: usize, end: usize) -> Self {
+        let end = end.min(self.values.len());
+        let start = start.min(end);
+        Self {
+            values: self.values[start..end].to_vec(),
+            closed: self.closed,
+            name: self.name.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn head(&self, n: usize) -> Self {
+        self.slice(0, n)
+    }
+
+    #[must_use]
+    pub fn tail(&self, n: usize) -> Self {
+        let len = self.values.len();
+        let start = len.saturating_sub(n);
+        self.slice(start, len)
+    }
+
+    /// Take values at indices.
+    ///
+    /// # Errors
+    /// Returns `IndexError::OutOfBounds` if any index is out of bounds.
+    pub fn take(&self, indices: &[usize]) -> Result<Self, IndexError> {
+        let mut values = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            if idx >= self.values.len() {
+                return Err(IndexError::OutOfBounds {
+                    position: idx,
+                    length: self.values.len(),
+                });
+            }
+            values.push(self.values[idx]);
+        }
+        Ok(Self {
+            values,
+            closed: self.closed,
+            name: self.name.clone(),
+        })
+    }
+}
+
+impl From<IntervalIndex> for Index {
+    fn from(ii: IntervalIndex) -> Self {
+        ii.to_index()
+    }
+}
+
+impl From<&IntervalIndex> for Index {
+    fn from(ii: &IntervalIndex) -> Self {
+        ii.to_index()
     }
 }
 
@@ -35933,5 +36449,191 @@ mod index_slice_tests {
 
         let s_step = IndexSlice::new(Some(0_i64), Some(20_i64), Some(2));
         assert_eq!(s_step.step, Some(2));
+    }
+}
+
+#[cfg(test)]
+mod interval_index_tests {
+    use fp_types::{Interval, IntervalClosed};
+
+    use super::{Index, IndexLabel, IntervalIndex, OrderedF64};
+
+    #[test]
+    fn test_interval_index_constructors() {
+        // from_breaks
+        let ii = IntervalIndex::from_breaks(&[0.0, 1.0, 2.0, 3.0], IntervalClosed::Right)
+            .expect("from_breaks");
+        assert_eq!(ii.len(), 3);
+        assert_eq!(ii.closed(), IntervalClosed::Right);
+        assert!(!ii.is_empty());
+        assert_eq!(ii.shape(), (3,));
+        assert_eq!(ii.dtype(), "interval[float64, right]");
+
+        // Invalid breaks (< 2)
+        assert!(IntervalIndex::from_breaks(&[0.0], IntervalClosed::Right).is_err());
+
+        // from_tuples
+        let ii_tuples = IntervalIndex::from_tuples(&[(0.0, 1.0), (1.0, 2.0)], IntervalClosed::Both);
+        assert_eq!(ii_tuples.len(), 2);
+        assert_eq!(ii_tuples.closed(), IntervalClosed::Both);
+
+        // from_arrays
+        let ii_arrays = IntervalIndex::from_arrays(&[0.0, 5.0], &[5.0, 10.0], IntervalClosed::Left)
+            .expect("from_arrays");
+        assert_eq!(ii_arrays.len(), 2);
+        assert_eq!(ii_arrays.closed(), IntervalClosed::Left);
+
+        // Mismatched arrays length
+        assert!(IntervalIndex::from_arrays(&[0.0], &[1.0, 2.0], IntervalClosed::Right).is_err());
+
+        // from_range
+        let ii_range = IntervalIndex::from_range(
+            Some(0.0),
+            Some(10.0),
+            Some(5),
+            None,
+            Some(IntervalClosed::Right),
+        )
+        .expect("from_range");
+        assert_eq!(ii_range.len(), 5);
+        assert_eq!(ii_range.values()[0].left, 0.0);
+        assert_eq!(ii_range.values()[0].right, 2.0);
+    }
+
+    #[test]
+    fn test_interval_index_accessors_and_properties() {
+        let ii = IntervalIndex::from_breaks(&[0.0, 2.0, 5.0], IntervalClosed::Right)
+            .expect("from_breaks")
+            .set_name("my_intervals");
+
+        assert_eq!(ii.name(), Some("my_intervals"));
+        assert_eq!(ii.names(), vec![Some("my_intervals".to_string())]);
+
+        let left_idx = ii.left();
+        assert_eq!(left_idx.len(), 2);
+        assert_eq!(left_idx.labels()[0], IndexLabel::Float64(OrderedF64(0.0)));
+        assert_eq!(left_idx.labels()[1], IndexLabel::Float64(OrderedF64(2.0)));
+
+        let right_idx = ii.right();
+        assert_eq!(right_idx.labels()[0], IndexLabel::Float64(OrderedF64(2.0)));
+        assert_eq!(right_idx.labels()[1], IndexLabel::Float64(OrderedF64(5.0)));
+
+        let mid_idx = ii.mid();
+        assert_eq!(mid_idx.labels()[0], IndexLabel::Float64(OrderedF64(1.0)));
+        assert_eq!(mid_idx.labels()[1], IndexLabel::Float64(OrderedF64(3.5)));
+
+        let len_idx = ii.length();
+        assert_eq!(len_idx.labels()[0], IndexLabel::Float64(OrderedF64(2.0)));
+        assert_eq!(len_idx.labels()[1], IndexLabel::Float64(OrderedF64(3.0)));
+
+        // Monotonicity and uniqueness
+        assert!(ii.is_unique());
+        assert!(ii.is_monotonic_increasing());
+        assert!(!ii.is_monotonic_decreasing());
+        assert!(!ii.is_overlapping());
+
+        // Null masks
+        assert!(!ii.hasnans());
+        assert_eq!(ii.isna(), vec![false, false]);
+        assert_eq!(ii.isnull(), vec![false, false]);
+        assert_eq!(ii.notna(), vec![true, true]);
+        assert_eq!(ii.notnull(), vec![true, true]);
+        assert_eq!(ii.dropna(), ii);
+
+        // Rename
+        let renamed = ii.rename_index(Some("new_name"));
+        assert_eq!(renamed.name(), Some("new_name"));
+    }
+
+    #[test]
+    fn test_interval_index_loc_and_contains() {
+        let ii = IntervalIndex::from_breaks(&[0.0, 10.0, 20.0], IntervalClosed::Right)
+            .expect("from_breaks");
+
+        // contains point
+        assert_eq!(ii.contains(5.0), vec![true, false]);
+        assert_eq!(ii.contains(15.0), vec![false, true]);
+        assert_eq!(ii.contains(0.0), vec![false, false]); // right closed: (0, 10]
+        assert_eq!(ii.contains(10.0), vec![true, false]);
+
+        // get_loc
+        assert_eq!(ii.get_loc(5.0).unwrap(), 0);
+        assert_eq!(ii.get_loc(15.0).unwrap(), 1);
+        assert!(ii.get_loc(25.0).is_err());
+
+        // get_indexer
+        let idxs = ii.get_indexer(&[5.0, 15.0, 25.0]);
+        assert_eq!(idxs, vec![Some(0), Some(1), None]);
+
+        // get_loc_interval
+        let target = Interval::new(0.0, 10.0, IntervalClosed::Right);
+        assert_eq!(ii.get_loc_interval(&target).unwrap(), 0);
+        let missing_target = Interval::new(0.0, 10.0, IntervalClosed::Left);
+        assert!(ii.get_loc_interval(&missing_target).is_err());
+
+        // Overlapping detection
+        let overlapping_ii = IntervalIndex::new(vec![
+            Interval::new(0.0, 10.0, IntervalClosed::Both),
+            Interval::new(5.0, 15.0, IntervalClosed::Both),
+        ]);
+        assert!(overlapping_ii.is_overlapping());
+        // get_loc on overlapping point 7.0 should return error
+        assert!(overlapping_ii.get_loc(7.0).is_err());
+    }
+
+    #[test]
+    fn test_interval_index_slicing_and_conversion() {
+        let ii = IntervalIndex::from_breaks(&[0.0, 1.0, 2.0, 3.0, 4.0], IntervalClosed::Right)
+            .expect("from_breaks")
+            .set_name("sample");
+
+        assert_eq!(
+            ii.get_item(0).unwrap(),
+            Interval::new(0.0, 1.0, IntervalClosed::Right)
+        );
+        assert_eq!(
+            ii.get_item(-1).unwrap(),
+            Interval::new(3.0, 4.0, IntervalClosed::Right)
+        );
+        assert!(ii.get_item(10).is_err());
+
+        let h = ii.head(2);
+        assert_eq!(h.len(), 2);
+        assert_eq!(
+            h.get_item(1).unwrap(),
+            Interval::new(1.0, 2.0, IntervalClosed::Right)
+        );
+
+        let t = ii.tail(2);
+        assert_eq!(t.len(), 2);
+        assert_eq!(
+            t.get_item(0).unwrap(),
+            Interval::new(2.0, 3.0, IntervalClosed::Right)
+        );
+
+        let taken = ii.take(&[0, 2]).expect("take");
+        assert_eq!(taken.len(), 2);
+        assert_eq!(
+            taken.get_item(0).unwrap(),
+            Interval::new(0.0, 1.0, IntervalClosed::Right)
+        );
+        assert_eq!(
+            taken.get_item(1).unwrap(),
+            Interval::new(2.0, 3.0, IntervalClosed::Right)
+        );
+
+        // set_closed
+        let both = ii.set_closed(IntervalClosed::Both);
+        assert_eq!(both.closed(), IntervalClosed::Both);
+        assert_eq!(both.get_item(0).unwrap().closed, IntervalClosed::Both);
+
+        // to_index
+        let idx = ii.to_index();
+        assert_eq!(idx.len(), 4);
+        assert_eq!(idx.name(), Some("sample"));
+
+        // From<IntervalIndex> for Index
+        let idx_from: Index = ii.into();
+        assert_eq!(idx_from.len(), 4);
     }
 }
