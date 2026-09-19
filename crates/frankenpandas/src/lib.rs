@@ -122,6 +122,7 @@ pub use fp_index::{
     IndexError,
     IndexLabel,
     IndexSlice,
+    IntervalIndex,
     MultiAlignmentPlan,
     MultiIndex,
     MultiIndexOrIndex,
@@ -756,6 +757,7 @@ pub mod prelude {
         IntervalClosed,
         IntervalDType,
         IntervalDtype,
+        IntervalIndex,
         IoError,
         IssueKind,
         JoinError,
@@ -2072,5 +2074,12 @@ mod tests {
         let _test_copy_warn_fn: fn(crate::errors::SettingWithCopyWarning) -> _ = |e| e;
         let _test_freq_err_fn: fn(crate::errors::NullFrequencyError) -> _ = |e| e;
         let _test_dtype_warn_fn: fn(crate::errors::DtypeWarning) -> _ = |e| e;
+
+        // IntervalIndex from prelude
+        let ii = IntervalIndex::from_breaks(&[0.0, 10.0, 20.0], IntervalClosed::Right)
+            .expect("from_breaks");
+        assert_eq!(ii.len(), 2);
+        assert_eq!(ii.closed(), IntervalClosed::Right);
+        assert_eq!(ii.get_loc(5.0).unwrap(), 0);
     }
 }
