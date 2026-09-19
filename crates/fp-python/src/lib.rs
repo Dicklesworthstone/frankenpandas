@@ -22304,12 +22304,47 @@ fn default_options_map() -> HashMap<String, OptionValue> {
         OptionValue::Bool(true),
     );
     m.insert("display.float_format".to_string(), OptionValue::None);
+    m.insert(
+        "display.large_repr".to_string(),
+        OptionValue::Str("truncate".to_string()),
+    );
+    m.insert(
+        "display.max_info_columns".to_string(),
+        OptionValue::Int(100),
+    );
+    m.insert(
+        "display.max_info_rows".to_string(),
+        OptionValue::Int(1690785),
+    );
+    m.insert("display.memory_usage".to_string(), OptionValue::Bool(true));
+    m.insert(
+        "display.colheader_justify".to_string(),
+        OptionValue::Str("right".to_string()),
+    );
+    m.insert("display.chop_threshold".to_string(), OptionValue::None);
+    m.insert(
+        "display.date_dayfirst".to_string(),
+        OptionValue::Bool(false),
+    );
+    m.insert(
+        "display.date_yearfirst".to_string(),
+        OptionValue::Bool(false),
+    );
+    m.insert(
+        "display.encoding".to_string(),
+        OptionValue::Str("utf-8".to_string()),
+    );
     m.insert("mode.sim_interactive".to_string(), OptionValue::Bool(false));
     m.insert(
         "mode.chained_assignment".to_string(),
         OptionValue::Str("warn".to_string()),
     );
     m.insert("mode.use_inf_as_na".to_string(), OptionValue::Bool(false));
+    m.insert("mode.copy_on_write".to_string(), OptionValue::Bool(false));
+    m.insert(
+        "mode.data_manager".to_string(),
+        OptionValue::Str("block".to_string()),
+    );
     m.insert(
         "compute.use_bottleneck".to_string(),
         OptionValue::Bool(true),
@@ -22318,6 +22353,22 @@ fn default_options_map() -> HashMap<String, OptionValue> {
     m.insert(
         "io.excel.zip.reader".to_string(),
         OptionValue::Str("zipfile".to_string()),
+    );
+    m.insert(
+        "io.parquet.engine".to_string(),
+        OptionValue::Str("auto".to_string()),
+    );
+    m.insert(
+        "io.sql.engine".to_string(),
+        OptionValue::Str("auto".to_string()),
+    );
+    m.insert(
+        "plotting.backend".to_string(),
+        OptionValue::Str("matplotlib".to_string()),
+    );
+    m.insert(
+        "plotting.matplotlib.register_converters".to_string(),
+        OptionValue::Bool(true),
     );
     m
 }
