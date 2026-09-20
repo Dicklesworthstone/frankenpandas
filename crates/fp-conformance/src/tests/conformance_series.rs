@@ -492,3 +492,783 @@ fn conformance_series_struct_json_accessor_contract_zzbqc() {
         matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("nested JSON arrays/objects"))
     );
 }
+
+fn run_pandas_oracle_eval(code: &str) -> Option<serde_json::Value> {
+    use std::io::Write;
+    let cfg = strict_config();
+    let python = &cfg.python_bin;
+    let mut child = std::process::Command::new(python)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(code.as_bytes());
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+#[test]
+fn conformance_series_get_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([10.5, 20.0, 35.5], index=["x", "y", "z"], name="nums")
+val_x = s.get("x")
+val_missing = s.get("missing", default="fallback")
+res = {
+    "x": float(val_x),
+    "missing": str(val_missing),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series get differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "nums",
+        vec![
+            IndexLabel::Utf8("x".into()),
+            IndexLabel::Utf8("y".into()),
+            IndexLabel::Utf8("z".into()),
+        ],
+        vec![
+            Scalar::Float64(10.5),
+            Scalar::Float64(20.0),
+            Scalar::Float64(35.5),
+        ],
+    )
+    .expect("s");
+
+    let val_x = s.get(&IndexLabel::Utf8("x".into())).expect("val_x");
+    assert_eq!(val_x.to_f64().unwrap(), oracle["x"].as_f64().unwrap());
+
+    let val_missing = s.get(&IndexLabel::Utf8("missing".into()));
+    assert!(val_missing.is_none());
+
+    let val_fallback = s.get_or(
+        &IndexLabel::Utf8("missing".into()),
+        Scalar::Utf8("fallback".into()),
+    );
+    assert_eq!(
+        val_fallback,
+        Scalar::Utf8(oracle["missing"].as_str().unwrap().into())
+    );
+}
+
+#[test]
+fn conformance_series_truncate_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0], index=["a", "b", "c", "d", "e"], name="data")
+t1 = s.truncate(before="b", after="d")
+t2 = s.truncate(before="c")
+t3 = s.truncate(after="b")
+res = {
+    "t1_idx": [str(x) for x in t1.index],
+    "t1_vals": t1.tolist(),
+    "t2_idx": [str(x) for x in t2.index],
+    "t2_vals": t2.tolist(),
+    "t3_idx": [str(x) for x in t3.index],
+    "t3_vals": t3.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series truncate differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "data",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("e".into()),
+        ],
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+        ],
+    )
+    .expect("s");
+
+    let t1 = s
+        .truncate(
+            Some(&IndexLabel::Utf8("b".into())),
+            Some(&IndexLabel::Utf8("d".into())),
+        )
+        .expect("truncate t1");
+    let actual_t1_idx: Vec<String> = t1.index().labels().iter().map(|l| l.to_string()).collect();
+    let oracle_t1_idx: Vec<String> = oracle["t1_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_t1_idx, oracle_t1_idx);
+    let actual_t1_vals: Vec<f64> = t1
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let oracle_t1_vals: Vec<f64> = oracle["t1_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_t1_vals, oracle_t1_vals);
+
+    let t2 = s
+        .truncate(Some(&IndexLabel::Utf8("c".into())), None)
+        .expect("truncate t2");
+    let actual_t2_idx: Vec<String> = t2.index().labels().iter().map(|l| l.to_string()).collect();
+    let oracle_t2_idx: Vec<String> = oracle["t2_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_t2_idx, oracle_t2_idx);
+    let actual_t2_vals: Vec<f64> = t2
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let oracle_t2_vals: Vec<f64> = oracle["t2_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_t2_vals, oracle_t2_vals);
+
+    let t3 = s
+        .truncate(None, Some(&IndexLabel::Utf8("b".into())))
+        .expect("truncate t3");
+    let actual_t3_idx: Vec<String> = t3.index().labels().iter().map(|l| l.to_string()).collect();
+    let oracle_t3_idx: Vec<String> = oracle["t3_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_t3_idx, oracle_t3_idx);
+    let actual_t3_vals: Vec<f64> = t3
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let oracle_t3_vals: Vec<f64> = oracle["t3_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_t3_vals, oracle_t3_vals);
+}
+
+#[test]
+fn conformance_series_set_axis_and_rename_axis_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([100, 200, 300], index=["i0", "i1", "i2"], name="s")
+s_new_axis = s.set_axis(["k0", "k1", "k2"])
+s_renamed_axis = s.rename_axis("new_axis_name")
+res = {
+    "new_axis_idx": [str(x) for x in s_new_axis.index],
+    "renamed_axis_idx": [str(x) for x in s_renamed_axis.index],
+    "renamed_axis_name": s_renamed_axis.index.name,
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping Series set_axis/rename_axis differential test"
+            );
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("i0".into()),
+            IndexLabel::Utf8("i1".into()),
+            IndexLabel::Utf8("i2".into()),
+        ],
+        vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+    )
+    .expect("s");
+
+    let s_new_axis = s
+        .set_axis(vec![
+            IndexLabel::Utf8("k0".into()),
+            IndexLabel::Utf8("k1".into()),
+            IndexLabel::Utf8("k2".into()),
+        ])
+        .expect("set_axis");
+    let actual_new_idx: Vec<String> = s_new_axis
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_new_idx: Vec<String> = oracle["new_axis_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_new_idx, oracle_new_idx);
+
+    let s_renamed_axis = s.rename_axis("new_axis_name").expect("rename_axis");
+    let actual_renamed_idx: Vec<String> = s_renamed_axis
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_renamed_idx: Vec<String> = oracle["renamed_axis_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_renamed_idx, oracle_renamed_idx);
+    assert_eq!(
+        s_renamed_axis.index().name(),
+        oracle["renamed_axis_name"].as_str()
+    );
+}
+
+#[test]
+fn conformance_series_first_last_valid_index_differential() {
+    let python_code = r#"
+import json, pandas as pd, numpy as np
+s = pd.Series([np.nan, 2.0, np.nan, 4.0, np.nan], index=["a", "b", "c", "d", "e"])
+s_all_nan = pd.Series([np.nan, np.nan], index=["x", "y"])
+res = {
+    "first": str(s.first_valid_index()),
+    "last": str(s.last_valid_index()),
+    "all_nan_first": s_all_nan.first_valid_index(),
+    "all_nan_last": s_all_nan.last_valid_index(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping Series first/last_valid_index differential test"
+            );
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "data",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("e".into()),
+        ],
+        vec![
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(2.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+            Scalar::Null(NullKind::NaN),
+        ],
+    )
+    .expect("s");
+
+    let first = s.first_valid_index().expect("first valid index");
+    let last = s.last_valid_index().expect("last valid index");
+    assert_eq!(first.to_string(), oracle["first"].as_str().unwrap());
+    assert_eq!(last.to_string(), oracle["last"].as_str().unwrap());
+
+    let s_all_nan = Series::from_values(
+        "nan_data",
+        vec![IndexLabel::Utf8("x".into()), IndexLabel::Utf8("y".into())],
+        vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+    )
+    .expect("s_all_nan");
+
+    assert!(s_all_nan.first_valid_index().is_none());
+    assert!(s_all_nan.last_valid_index().is_none());
+    assert!(oracle["all_nan_first"].is_null());
+    assert!(oracle["all_nan_last"].is_null());
+}
+
+#[test]
+fn conformance_series_isin_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([10, 20, 30, 40, 20], index=["r0", "r1", "r2", "r3", "r4"])
+isin_res = s.isin([20, 40, 99])
+res = {
+    "isin_vals": isin_res.tolist(),
+    "isin_idx": [str(x) for x in isin_res.index],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series isin differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "nums",
+        vec![
+            IndexLabel::Utf8("r0".into()),
+            IndexLabel::Utf8("r1".into()),
+            IndexLabel::Utf8("r2".into()),
+            IndexLabel::Utf8("r3".into()),
+            IndexLabel::Utf8("r4".into()),
+        ],
+        vec![
+            Scalar::Int64(10),
+            Scalar::Int64(20),
+            Scalar::Int64(30),
+            Scalar::Int64(40),
+            Scalar::Int64(20),
+        ],
+    )
+    .expect("s");
+
+    let isin_res = s
+        .isin(&[Scalar::Int64(20), Scalar::Int64(40), Scalar::Int64(99)])
+        .expect("isin");
+    let actual_vals: Vec<bool> = isin_res
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_bool().unwrap_or(false))
+        .collect();
+    let oracle_vals: Vec<bool> = oracle["isin_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(actual_vals, oracle_vals);
+
+    let actual_idx: Vec<String> = isin_res
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_idx: Vec<String> = oracle["isin_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_idx, oracle_idx);
+}
+
+#[test]
+fn conformance_series_add_prefix_suffix_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([1, 2, 3], index=["x", "y", "z"])
+p = s.add_prefix("pre_")
+suf = s.add_suffix("_post")
+res = {
+    "pre_idx": [str(x) for x in p.index],
+    "suf_idx": [str(x) for x in suf.index],
+    "pre_vals": p.tolist(),
+    "suf_vals": suf.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping Series add_prefix/suffix differential test"
+            );
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("x".into()),
+            IndexLabel::Utf8("y".into()),
+            IndexLabel::Utf8("z".into()),
+        ],
+        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+    )
+    .expect("s");
+
+    let p = s.add_prefix("pre_").expect("prefix");
+    let suf = s.add_suffix("_post").expect("suffix");
+
+    let actual_pre_idx: Vec<String> = p.index().labels().iter().map(|l| l.to_string()).collect();
+    let oracle_pre_idx: Vec<String> = oracle["pre_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_pre_idx, oracle_pre_idx);
+
+    let actual_suf_idx: Vec<String> = suf.index().labels().iter().map(|l| l.to_string()).collect();
+    let oracle_suf_idx: Vec<String> = oracle["suf_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_suf_idx, oracle_suf_idx);
+
+    let actual_pre_vals: Vec<i64> = p
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(0))
+        .collect();
+    let oracle_pre_vals: Vec<i64> = oracle["pre_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_pre_vals, oracle_pre_vals);
+}
+
+#[test]
+fn conformance_series_pop_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([10.0, 20.0, 30.0], index=["a", "b", "c"], name="target")
+s.index.name = "idx_name"
+val = s.pop("b")
+res = {
+    "popped_val": float(val),
+    "remainder_idx": [str(x) for x in s.index],
+    "remainder_vals": s.tolist(),
+    "remainder_name": s.name,
+    "remainder_idx_name": s.index.name,
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series pop differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "target",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+        ],
+        vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(30.0),
+        ],
+    )
+    .expect("s")
+    .rename_axis("idx_name")
+    .expect("rename_axis");
+
+    let (popped_val, remainder) = s.pop(&IndexLabel::Utf8("b".into())).expect("pop");
+    assert_eq!(
+        popped_val.to_f64().unwrap(),
+        oracle["popped_val"].as_f64().unwrap()
+    );
+
+    let actual_idx: Vec<String> = remainder
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_idx: Vec<String> = oracle["remainder_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_idx, oracle_idx);
+
+    let actual_vals: Vec<f64> = remainder
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let oracle_vals: Vec<f64> = oracle["remainder_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_vals, oracle_vals);
+
+    assert_eq!(remainder.name(), oracle["remainder_name"].as_str().unwrap());
+    assert_eq!(
+        remainder.index().name(),
+        oracle["remainder_idx_name"].as_str()
+    );
+}
+
+#[test]
+fn conformance_series_clip_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([1.0, 5.0, 10.0, 15.0, 20.0], index=["a", "b", "c", "d", "e"])
+clipped = s.clip(lower=5.0, upper=15.0)
+res = {
+    "clipped_vals": clipped.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series clip differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "nums",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("e".into()),
+        ],
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(5.0),
+            Scalar::Float64(10.0),
+            Scalar::Float64(15.0),
+            Scalar::Float64(20.0),
+        ],
+    )
+    .expect("s");
+
+    let clipped = s.clip(Some(5.0), Some(15.0)).expect("clip");
+    let actual_vals: Vec<f64> = clipped
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    let oracle_vals: Vec<f64> = oracle["clipped_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_vals, oracle_vals);
+}
+
+#[test]
+fn conformance_series_between_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([1.0, 5.0, 10.0, 15.0, 20.0], index=["a", "b", "c", "d", "e"])
+b_both = s.between(5.0, 15.0, inclusive="both")
+b_neither = s.between(5.0, 15.0, inclusive="neither")
+res = {
+    "both_vals": b_both.tolist(),
+    "neither_vals": b_neither.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series between differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "nums",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("e".into()),
+        ],
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(5.0),
+            Scalar::Float64(10.0),
+            Scalar::Float64(15.0),
+            Scalar::Float64(20.0),
+        ],
+    )
+    .expect("s");
+
+    let b_both = s
+        .between(&Scalar::Float64(5.0), &Scalar::Float64(15.0), "both")
+        .expect("between both");
+    let actual_both_vals: Vec<bool> = b_both
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_bool().unwrap_or(false))
+        .collect();
+    let oracle_both_vals: Vec<bool> = oracle["both_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(actual_both_vals, oracle_both_vals);
+
+    let b_neither = s
+        .between(&Scalar::Float64(5.0), &Scalar::Float64(15.0), "neither")
+        .expect("between neither");
+    let actual_neither_vals: Vec<bool> = b_neither
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_bool().unwrap_or(false))
+        .collect();
+    let oracle_neither_vals: Vec<bool> = oracle["neither_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(actual_neither_vals, oracle_neither_vals);
+}
+
+#[test]
+fn conformance_series_diff_and_pct_change_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([10.0, 20.0, 50.0, 100.0], index=["p0", "p1", "p2", "p3"])
+diff_res = s.diff(1)
+pct_res = s.pct_change(1)
+res = {
+    "diff_vals": [None if pd.isna(x) else float(x) for x in diff_res],
+    "pct_vals": [None if pd.isna(x) else float(x) for x in pct_res],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping Series diff/pct_change differential test"
+            );
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "series",
+        vec![
+            IndexLabel::Utf8("p0".into()),
+            IndexLabel::Utf8("p1".into()),
+            IndexLabel::Utf8("p2".into()),
+            IndexLabel::Utf8("p3".into()),
+        ],
+        vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(50.0),
+            Scalar::Float64(100.0),
+        ],
+    )
+    .expect("s");
+
+    let diff_res = s.diff(1).expect("diff");
+    let actual_diff_vals: Vec<Option<f64>> = diff_res
+        .column()
+        .values()
+        .iter()
+        .map(|v| {
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        })
+        .collect();
+    let oracle_diff_vals: Vec<Option<f64>> = oracle["diff_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_diff_vals, oracle_diff_vals);
+
+    let pct_res = s.pct_change(1).expect("pct_change");
+    let actual_pct_vals: Vec<Option<f64>> = pct_res
+        .column()
+        .values()
+        .iter()
+        .map(|v| {
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        })
+        .collect();
+    let oracle_pct_vals: Vec<Option<f64>> = oracle["pct_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_pct_vals, oracle_pct_vals);
+}
