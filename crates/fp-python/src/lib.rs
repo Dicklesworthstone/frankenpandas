@@ -9258,6 +9258,27 @@ fn parse_axis_param(axis: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
     parse_axis_param_for_type(axis, "DataFrame").map(|opt| opt.unwrap_or(0))
 }
 
+fn parse_ascending_bool(ascending: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+    match ascending {
+        None => Ok(true),
+        Some(obj) => {
+            if let Ok(b) = obj.extract::<bool>() {
+                Ok(b)
+            } else if let Ok(list) = obj.extract::<Vec<bool>>() {
+                if list.is_empty() {
+                    Ok(true)
+                } else {
+                    Ok(list[0])
+                }
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "ascending must be a bool or sequence of bools",
+                ))
+            }
+        }
+    }
+}
+
 fn fill_column_with_other(
     col: &Column,
     other: &Column,
@@ -10522,14 +10543,59 @@ impl PySeries {
         Ok(PySeries { inner: r })
     }
 
-    /// Sort by the index, returning a new Series.
-    #[pyo3(signature = (ascending=true))]
-    fn sort_index(&self, ascending: bool) -> PyResult<PySeries> {
-        let r = self
+    /// Sort Series by index labels.
+    ///
+    /// Matches `s.sort_index(axis=0, level=None, ascending=True, inplace=False, kind='quicksort', na_position='last', sort_remaining=True, ignore_index=False, key=None)`.
+    #[pyo3(signature = (
+        axis = None,
+        level = None,
+        ascending = None,
+        inplace = false,
+        kind = None,
+        na_position = "last",
+        sort_remaining = true,
+        ignore_index = false,
+        key = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn sort_index(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        ascending: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        kind: Option<&str>,
+        na_position: &str,
+        sort_remaining: bool,
+        ignore_index: bool,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = (level, kind, sort_remaining, key);
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        let asc = parse_ascending_bool(ascending)?;
+        let sorted = self
             .inner
-            .sort_index(ascending)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
+            .sort_index_na(asc, na_position)
+            .map_err(frame_error_to_py)?;
+        let out = if ignore_index {
+            match sorted.reset_index(true).map_err(frame_error_to_py)? {
+                fp_frame::SeriesResetIndexResult::Series(s) => s,
+                fp_frame::SeriesResetIndexResult::DataFrame(_) => unreachable!(),
+            }
+        } else {
+            sorted
+        };
+        Ok(PySeries { inner: out })
     }
 
     /// Return a copy of the Series renamed to `name`.
@@ -10894,14 +10960,42 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    fn idxmax(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let label = self.inner.idxmax().map_err(frame_error_to_py)?;
-        index_label_to_py(py, &label)
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn idxmax(
+        &self,
+        py: Python<'_>,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        match self.inner.idxmax_ext(skipna).map_err(frame_error_to_py)? {
+            Some(label) => index_label_to_py(py, &label),
+            None => Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind()),
+        }
     }
 
-    fn idxmin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let label = self.inner.idxmin().map_err(frame_error_to_py)?;
-        index_label_to_py(py, &label)
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn idxmin(
+        &self,
+        py: Python<'_>,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        match self.inner.idxmin_ext(skipna).map_err(frame_error_to_py)? {
+            Some(label) => index_label_to_py(py, &label),
+            None => Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind()),
+        }
     }
 
     fn argmax(&self) -> PyResult<i64> {
@@ -10990,9 +11084,43 @@ impl PySeries {
         Ok(PyDataFrame { inner: res })
     }
 
-    #[pyo3(signature = (drop=false))]
-    fn reset_index(&self, py: Python<'_>, drop: bool) -> PyResult<Py<PyAny>> {
-        match self.inner.reset_index(drop).map_err(frame_error_to_py)? {
+    #[pyo3(signature = (
+        level = None,
+        drop = false,
+        name = None,
+        inplace = false,
+        allow_duplicates = false
+    ))]
+    fn reset_index(
+        &self,
+        py: Python<'_>,
+        level: Option<&Bound<'_, PyAny>>,
+        drop: bool,
+        name: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        allow_duplicates: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (level, allow_duplicates);
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let name_str = match name {
+            Some(obj) if !obj.is_none() => {
+                if let Ok(s) = obj.extract::<String>() {
+                    Some(s)
+                } else {
+                    Some(obj.to_string())
+                }
+            }
+            _ => None,
+        };
+        match self
+            .inner
+            .reset_index_with_name(drop, name_str.as_deref())
+            .map_err(frame_error_to_py)?
+        {
             fp_frame::SeriesResetIndexResult::Series(s) => {
                 Ok(Py::new(py, PySeries { inner: s })?.into_any())
             }
@@ -14001,23 +14129,119 @@ impl PyDataFrame {
     }
 
     /// Reset the index to a default integer range, returning a new DataFrame.
-    #[pyo3(signature = (drop=false))]
-    fn reset_index(&self, drop: bool) -> PyResult<PyDataFrame> {
-        let result = self
-            .inner
-            .reset_index(drop)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[pyo3(signature = (
+        level = None,
+        drop = false,
+        inplace = false,
+        col_level = 0,
+        col_fill = None,
+        names = None
+    ))]
+    fn reset_index(
+        &self,
+        level: Option<&Bound<'_, PyAny>>,
+        drop: bool,
+        inplace: bool,
+        col_level: usize,
+        col_fill: Option<&Bound<'_, PyAny>>,
+        names: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (level, col_level, col_fill);
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let mut result = self.inner.reset_index(drop).map_err(frame_error_to_py)?;
+        if !drop
+            && let Some(n) = names
+            && !n.is_none()
+        {
+            let custom_name: Option<String> = if let Ok(s) = n.extract::<String>() {
+                Some(s)
+            } else if let Ok(list) = n.extract::<Vec<String>>() {
+                list.into_iter().next()
+            } else {
+                None
+            };
+            if let Some(cname) = custom_name {
+                if let Some(old_name) = result.column_names().first().map(|s| (*s).clone()) {
+                    result = result
+                        .rename_columns(&[(old_name.as_str(), cname.as_str())])
+                        .map_err(frame_error_to_py)?;
+                }
+            }
+        }
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Sort by the row index, returning a new DataFrame.
-    #[pyo3(signature = (ascending=true))]
-    fn sort_index(&self, ascending: bool) -> PyResult<PyDataFrame> {
-        let result = self
-            .inner
-            .sort_index(ascending)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// Sort DataFrame by index labels.
+    ///
+    /// Matches `df.sort_index(axis=0, level=None, ascending=True, inplace=False, kind='quicksort', na_position='last', sort_remaining=True, ignore_index=False, key=None)`.
+    #[pyo3(signature = (
+        axis = None,
+        level = None,
+        ascending = None,
+        inplace = false,
+        kind = None,
+        na_position = "last",
+        sort_remaining = true,
+        ignore_index = false,
+        key = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn sort_index(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        ascending: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        kind: Option<&str>,
+        na_position: &str,
+        sort_remaining: bool,
+        ignore_index: bool,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (level, kind, sort_remaining, key);
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let asc = parse_ascending_bool(ascending)?;
+        let sorted = match ax {
+            0 => {
+                let s = self
+                    .inner
+                    .sort_index_na(asc, na_position)
+                    .map_err(frame_error_to_py)?;
+                if ignore_index {
+                    s.reset_index(true).map_err(frame_error_to_py)?
+                } else {
+                    s
+                }
+            }
+            1 => {
+                let s = self
+                    .inner
+                    .sort_index_axis1(asc)
+                    .map_err(frame_error_to_py)?;
+                if ignore_index {
+                    let n_cols = s.num_columns();
+                    let labels = (0..n_cols).map(|i| IndexLabel::Int64(i as i64)).collect();
+                    s.set_axis(labels, 1).map_err(frame_error_to_py)?
+                } else {
+                    s
+                }
+            }
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {other} for object type DataFrame"
+                )));
+            }
+        };
+        Ok(PyDataFrame { inner: sorted })
     }
 
     /// Transpose: swap rows and columns, returning a new DataFrame.
@@ -15222,21 +15446,27 @@ impl PyDataFrame {
     }
 
     /// Return index of first occurrence of maximum over requested axis.
-    fn idxmax(&self) -> PyResult<PySeries> {
-        let res = self
-            .inner
-            .idxmax()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: res })
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    fn idxmax(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.inner.idxmax_ext(ax, skipna, numeric_only))
     }
 
     /// Return index of first occurrence of minimum over requested axis.
-    fn idxmin(&self) -> PyResult<PySeries> {
-        let res = self
-            .inner
-            .idxmin()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: res })
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    fn idxmin(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.inner.idxmin_ext(ax, skipna, numeric_only))
     }
 
     /// First discrete difference of element.
@@ -28799,9 +29029,9 @@ mod tests {
         let notnull_df = py_df.notnull().expect("notnull"); // ubs:ignore — test fixture
         assert_eq!(notnull_df.shape(), (3, 2));
 
-        let idxmax_s = py_df.idxmax().expect("idxmax"); // ubs:ignore — test fixture
+        let idxmax_s = py_df.idxmax(None, true, false).expect("idxmax"); // ubs:ignore — test fixture
         assert_eq!(idxmax_s.inner.len(), 2);
-        let idxmin_s = py_df.idxmin().expect("idxmin"); // ubs:ignore — test fixture
+        let idxmin_s = py_df.idxmin(None, true, false).expect("idxmin"); // ubs:ignore — test fixture
         assert_eq!(idxmin_s.inner.len(), 2);
 
         let diff_df = py_df.diff(1).expect("diff"); // ubs:ignore — test fixture
@@ -30382,6 +30612,183 @@ mod tests {
                         false,
                         None
                     )
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn test_py_sort_index() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            // Series setup
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Int64(30),
+                    IndexLabel::Int64(10),
+                    IndexLabel::Int64(20),
+                ],
+                vec![
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                ],
+            )
+            .expect("s");
+            let py_s = PySeries { inner: s };
+
+            // 1. Series sort_index ascending=True (default)
+            let s_asc = py_s
+                .sort_index(None, None, None, false, None, "last", true, false, None)
+                .expect("sort_index asc");
+            assert_eq!(
+                s_asc.inner.index().labels(),
+                &[
+                    IndexLabel::Int64(10),
+                    IndexLabel::Int64(20),
+                    IndexLabel::Int64(30),
+                ]
+            );
+            assert_eq!(
+                s_asc.inner.column().values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ]
+            );
+
+            // 2. Series sort_index ascending=False
+            let asc_false = false.into_bound_py_any(py).unwrap();
+            let s_desc = py_s
+                .sort_index(
+                    None,
+                    None,
+                    Some(&asc_false),
+                    false,
+                    None,
+                    "last",
+                    true,
+                    false,
+                    None,
+                )
+                .expect("sort_index desc");
+            assert_eq!(
+                s_desc.inner.index().labels(),
+                &[
+                    IndexLabel::Int64(30),
+                    IndexLabel::Int64(20),
+                    IndexLabel::Int64(10),
+                ]
+            );
+
+            // 3. Series sort_index ignore_index=True
+            let s_ign = py_s
+                .sort_index(None, None, None, false, None, "last", true, true, None)
+                .expect("sort_index ign");
+            assert_eq!(
+                s_ign.inner.index().labels(),
+                &[
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                ]
+            );
+
+            // 4. Series sort_index inplace=True error
+            assert!(
+                py_s.sort_index(None, None, None, true, None, "last", true, false, None)
+                    .is_err()
+            );
+
+            // 5. Series sort_index axis=1 error
+            let ax1 = 1.into_bound_py_any(py).unwrap();
+            assert!(
+                py_s.sort_index(
+                    Some(&ax1),
+                    None,
+                    None,
+                    false,
+                    None,
+                    "last",
+                    true,
+                    false,
+                    None,
+                )
+                .is_err()
+            );
+
+            // DataFrame setup
+            let df = DataFrame::from_dict_with_index(
+                vec![
+                    (
+                        "col_b",
+                        vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)],
+                    ),
+                    (
+                        "col_a",
+                        vec![Scalar::Int64(300), Scalar::Int64(100), Scalar::Int64(200)],
+                    ),
+                ],
+                vec![
+                    IndexLabel::Utf8("r2".into()),
+                    IndexLabel::Utf8("r0".into()),
+                    IndexLabel::Utf8("r1".into()),
+                ],
+            )
+            .expect("df");
+            let py_df = PyDataFrame { inner: df };
+
+            // 6. DataFrame sort_index axis=0 ascending=True
+            let df_asc = py_df
+                .sort_index(None, None, None, false, None, "last", true, false, None)
+                .expect("df sort_index asc");
+            assert_eq!(
+                df_asc.inner.index().labels(),
+                &[
+                    IndexLabel::Utf8("r0".into()),
+                    IndexLabel::Utf8("r1".into()),
+                    IndexLabel::Utf8("r2".into()),
+                ]
+            );
+
+            // 7. DataFrame sort_index axis=1 ascending=True
+            let df_ax1 = py_df
+                .sort_index(
+                    Some(&ax1),
+                    None,
+                    None,
+                    false,
+                    None,
+                    "last",
+                    true,
+                    false,
+                    None,
+                )
+                .expect("df sort_index axis 1");
+            assert_eq!(df_ax1.columns(), vec!["col_a", "col_b"]);
+
+            // 8. DataFrame sort_index axis=1 ignore_index=True
+            let df_ax1_ign = py_df
+                .sort_index(
+                    Some(&ax1),
+                    None,
+                    None,
+                    false,
+                    None,
+                    "last",
+                    true,
+                    true,
+                    None,
+                )
+                .expect("df sort_index axis 1 ign");
+            assert_eq!(df_ax1_ign.columns(), vec!["0", "1"]);
+
+            // 9. DataFrame sort_index inplace=True error
+            assert!(
+                py_df
+                    .sort_index(None, None, None, true, None, "last", true, false, None)
                     .is_err()
             );
         });

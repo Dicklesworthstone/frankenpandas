@@ -3611,3 +3611,208 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_last_idx, oracle_last_idx);
 }
+
+#[test]
+fn conformance_dataframe_sort_index_differential() {
+    use fp_frame::DataFrame;
+    use fp_index::IndexLabel;
+    use fp_types::{NullKind, Scalar};
+
+    let python_code = r#"
+import json, pandas as pd, numpy as np
+df = pd.DataFrame({
+    'col_z': [1, 2, 3],
+    'col_a': [4, 5, 6],
+}, index=['r2', 'r0', 'r1'])
+
+df_nan = pd.DataFrame({
+    'v': [10, 20, 30],
+}, index=['b', np.nan, 'a'])
+
+# 1. sort_index axis=0 ascending=True
+df_asc = df.sort_index(axis=0, ascending=True)
+# 2. sort_index axis=0 ascending=False
+df_desc = df.sort_index(axis=0, ascending=False)
+# 3. sort_index axis=0 ignore_index=True
+df_ign = df.sort_index(axis=0, ignore_index=True)
+# 4. sort_index axis=1 ascending=True
+df_axis1_asc = df.sort_index(axis=1, ascending=True)
+# 5. sort_index axis=1 ascending=False
+df_axis1_desc = df.sort_index(axis=1, ascending=False)
+# 6. sort_index axis=0 na_position='first' vs 'last'
+df_na_first = df_nan.sort_index(axis=0, ascending=True, na_position='first')
+df_na_last = df_nan.sort_index(axis=0, ascending=True, na_position='last')
+
+res = {
+    'asc_idx': list(df_asc.index),
+    'desc_idx': list(df_desc.index),
+    'ign_idx': [int(x) for x in df_ign.index],
+    'axis1_asc_cols': list(df_axis1_asc.columns),
+    'axis1_desc_cols': list(df_axis1_desc.columns),
+    'na_first_idx': [None if pd.isna(x) else str(x) for x in df_na_first.index],
+    'na_last_idx': [None if pd.isna(x) else str(x) for x in df_na_last.index],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame sort_index differential test");
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict_with_index(
+        vec![
+            (
+                "col_z",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            ),
+            (
+                "col_a",
+                vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)],
+            ),
+        ],
+        vec![
+            IndexLabel::Utf8("r2".into()),
+            IndexLabel::Utf8("r0".into()),
+            IndexLabel::Utf8("r1".into()),
+        ],
+    )
+    .expect("df");
+
+    let df_nan = DataFrame::from_dict_with_index(
+        vec![(
+            "v",
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )],
+        vec![
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Null(NullKind::NaN),
+            IndexLabel::Utf8("a".into()),
+        ],
+    )
+    .expect("df_nan");
+
+    // 1. sort_index axis=0 ascending=True
+    let df_asc = df.sort_index_na(true, "last").expect("sort_index asc");
+    let actual_asc_idx: Vec<String> = df_asc
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_asc_idx: Vec<String> = oracle["asc_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_asc_idx, oracle_asc_idx);
+
+    // 2. sort_index axis=0 ascending=False
+    let df_desc = df.sort_index_na(false, "last").expect("sort_index desc");
+    let actual_desc_idx: Vec<String> = df_desc
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_desc_idx: Vec<String> = oracle["desc_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_desc_idx, oracle_desc_idx);
+
+    // 3. sort_index axis=0 ignore_index=True
+    let df_ign = df
+        .sort_index_na(true, "last")
+        .expect("sort_index ign")
+        .reset_index(true)
+        .expect("reset");
+    let actual_ign_idx: Vec<i64> = df_ign
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => *i,
+            _ => -1,
+        })
+        .collect();
+    let oracle_ign_idx: Vec<i64> = oracle["ign_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_ign_idx, oracle_ign_idx);
+
+    // 4. sort_index axis=1 ascending=True
+    let df_axis1_asc = df.sort_index_axis1(true).expect("sort_index axis1 asc");
+    let actual_axis1_asc_cols: Vec<String> =
+        df_axis1_asc.column_names().into_iter().cloned().collect();
+    let oracle_axis1_asc_cols: Vec<String> = oracle["axis1_asc_cols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_axis1_asc_cols, oracle_axis1_asc_cols);
+
+    // 5. sort_index axis=1 ascending=False
+    let df_axis1_desc = df.sort_index_axis1(false).expect("sort_index axis1 desc");
+    let actual_axis1_desc_cols: Vec<String> =
+        df_axis1_desc.column_names().into_iter().cloned().collect();
+    let oracle_axis1_desc_cols: Vec<String> = oracle["axis1_desc_cols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_axis1_desc_cols, oracle_axis1_desc_cols);
+
+    // 6. sort_index axis=0 na_position='first'
+    let df_na_first = df_nan
+        .sort_index_na(true, "first")
+        .expect("sort_index na_first");
+    let actual_na_first_idx: Vec<Option<String>> = df_na_first
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Null(_) => None,
+            other => Some(other.to_string()),
+        })
+        .collect();
+    let oracle_na_first_idx: Vec<Option<String>> = oracle["na_first_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(actual_na_first_idx, oracle_na_first_idx);
+
+    // 7. sort_index axis=0 na_position='last'
+    let df_na_last = df_nan
+        .sort_index_na(true, "last")
+        .expect("sort_index na_last");
+    let actual_na_last_idx: Vec<Option<String>> = df_na_last
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Null(_) => None,
+            other => Some(other.to_string()),
+        })
+        .collect();
+    let oracle_na_last_idx: Vec<Option<String>> = oracle["na_last_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(actual_na_last_idx, oracle_na_last_idx);
+}

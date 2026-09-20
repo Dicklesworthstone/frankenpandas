@@ -12534,21 +12534,54 @@ impl Series {
     /// Matches `s.sort_index(ascending=...)` for the current 1D IndexLabel
     /// model.
     pub fn sort_index(&self, ascending: bool) -> Result<Self, FrameError> {
-        // Radix fast path (br-frankenpandas-d9joc, mirror of y5s15): an all-Int64
-        // index sorts its i64 label keys with the comparison-free O(n) stable
-        // radix. Bit-identical — every label is Int64 so `IndexLabel::cmp`
-        // reduces to `i64::cmp`; stable radix keeps duplicate-label ties in
-        // original order (exactly the stable `sort_by`); descending flips the key.
-        if let Some(values) = self.index.int64_label_values() {
+        self.sort_index_na(ascending, "last")
+    }
+
+    /// Return a new Series sorted by index labels with explicit NA position.
+    ///
+    /// Matches `s.sort_index(ascending=..., na_position='first'|'last')`.
+    pub fn sort_index_na(&self, ascending: bool, na_position: &str) -> Result<Self, FrameError> {
+        match na_position {
+            "first" | "last" => {}
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sort_index: na_position must be 'first' or 'last', got '{other}'"
+                )));
+            }
+        }
+        let na_first = na_position == "first";
+        if !na_first && let Some(values) = self.index.int64_label_values() {
             let order = fp_columnar::radix_argsort_i64(&values, ascending);
             return self.reorder_by_positions(&order);
         }
         let mut order = (0..self.len()).collect::<Vec<_>>();
+        let labels = self.index.labels();
         order.sort_by(|&left, &right| {
-            if ascending {
-                self.index.labels()[left].cmp(&self.index.labels()[right])
-            } else {
-                self.index.labels()[right].cmp(&self.index.labels()[left])
+            let left_na = labels[left].is_missing();
+            let right_na = labels[right].is_missing();
+            match (left_na, right_na) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => {
+                    if na_first {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
+                (false, true) => {
+                    if na_first {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    }
+                }
+                (false, false) => {
+                    if ascending {
+                        labels[left].cmp(&labels[right])
+                    } else {
+                        labels[right].cmp(&labels[left])
+                    }
+                }
             }
         });
         self.reorder_by_positions(&order)
@@ -22289,6 +22322,48 @@ impl Series {
         best_idx.map(|i| self.index_label_at(i)).ok_or_else(|| {
             FrameError::CompatibilityRejected("idxmax of empty or all-null series".to_owned())
         })
+    }
+
+    /// Return index label of maximum value with skipna control.
+    ///
+    /// Matches `s.idxmax(skipna=...)`.
+    pub fn idxmax_ext(&self, skipna: bool) -> Result<Option<IndexLabel>, FrameError> {
+        if self.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "attempt to get argmax of an empty sequence".to_string(),
+            ));
+        }
+        if !skipna && self.hasnans() {
+            return Ok(None);
+        }
+        match self.idxmax() {
+            Ok(label) => Ok(Some(label)),
+            Err(FrameError::CompatibilityRejected(msg)) if msg.contains("empty or all-null") => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Return index label of minimum value with skipna control.
+    ///
+    /// Matches `s.idxmin(skipna=...)`.
+    pub fn idxmin_ext(&self, skipna: bool) -> Result<Option<IndexLabel>, FrameError> {
+        if self.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "attempt to get argmin of an empty sequence".to_string(),
+            ));
+        }
+        if !skipna && self.hasnans() {
+            return Ok(None);
+        }
+        match self.idxmin() {
+            Ok(label) => Ok(Some(label)),
+            Err(FrameError::CompatibilityRejected(msg)) if msg.contains("empty or all-null") => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Return the `n` largest values as a new Series, sorted descending.
@@ -70771,39 +70846,64 @@ impl DataFrame {
     ///
     /// Matches `df.sort_index(ascending=...)` for 1D index labels.
     pub fn sort_index(&self, ascending: bool) -> Result<Self, FrameError> {
-        // Already-sorted short-circuit (matches pandas, which returns a copy
-        // near-instantly for a monotonic index instead of materializing the
-        // label keys, argsorting, and gathering every row). A STABLE sort of an
-        // already-ordered index is the identity permutation — ties keep input
-        // order — so the result equals `self`. The monotonic check is O(1) for
-        // an affine/RangeIndex backing (no label materialization). This is the
-        // common case: a default RangeIndex is always ascending-monotonic, so
-        // `df.sort_index()` was paying a full radix-sort + 10-column gather to
-        // reproduce its own rows.
-        if (ascending && self.index.is_monotonic_increasing())
-            || (!ascending && self.index.is_monotonic_decreasing())
-        {
-            return Ok(self.clone());
+        self.sort_index_na(ascending, "last")
+    }
+
+    /// Return a new DataFrame sorted by index labels with explicit NA position.
+    ///
+    /// Matches `df.sort_index(ascending=..., na_position='first'|'last')`.
+    pub fn sort_index_na(&self, ascending: bool, na_position: &str) -> Result<Self, FrameError> {
+        match na_position {
+            "first" | "last" => {}
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sort_index: na_position must be 'first' or 'last', got '{other}'"
+                )));
+            }
         }
-        // Radix fast path (br-frankenpandas-y5s15): an all-Int64 index sorts its
-        // i64 label keys with the comparison-free O(n) stable radix instead of
-        // the O(n log n) IndexLabel comparator. Bit-identical — every label is
-        // Int64, so `IndexLabel::cmp` reduces to `i64::cmp`; the stable radix
-        // keeps duplicate-label ties in original order (exactly the stable
-        // `sort_by`), and descending flips the key without reordering ties.
-        if let Some(values) = self.index.int64_label_values() {
-            let order = fp_columnar::radix_argsort_i64(&values, ascending);
-            return self.reorder_rows_by_positions_unchecked(&order);
+        let na_first = na_position == "first";
+        if !na_first {
+            // Already-sorted short-circuit
+            if (ascending && self.index.is_monotonic_increasing())
+                || (!ascending && self.index.is_monotonic_decreasing())
+            {
+                return Ok(self.clone());
+            }
+            if let Some(values) = self.index.int64_label_values() {
+                let order = fp_columnar::radix_argsort_i64(&values, ascending);
+                return self.reorder_rows_by_positions_unchecked(&order);
+            }
         }
         let mut order = (0..self.len()).collect::<Vec<_>>();
+        let labels = self.index.labels();
         order.sort_by(|&left, &right| {
-            if ascending {
-                self.index.labels()[left].cmp(&self.index.labels()[right])
-            } else {
-                self.index.labels()[right].cmp(&self.index.labels()[left])
+            let left_na = labels[left].is_missing();
+            let right_na = labels[right].is_missing();
+            match (left_na, right_na) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => {
+                    if na_first {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
+                (false, true) => {
+                    if na_first {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    }
+                }
+                (false, false) => {
+                    if ascending {
+                        labels[left].cmp(&labels[right])
+                    } else {
+                        labels[right].cmp(&labels[left])
+                    }
+                }
             }
         });
-        // order is a permutation of 0..len(), always valid
         self.reorder_rows_by_positions_unchecked(&order)
     }
 
@@ -84193,77 +84293,192 @@ impl DataFrame {
         }
     }
 
+    /// Return index label of minimum value over requested axis.
+    ///
+    /// Matches `pd.DataFrame.idxmin()`.
     pub fn idxmin(&self) -> Result<Series, FrameError> {
-        let labels: Vec<IndexLabel> = self
-            .column_order
-            .iter()
-            .map(|n| n.as_str().into())
-            .collect();
-        let mut values = Vec::with_capacity(labels.len());
-        for name in &self.column_order {
-            // The claim previously here — "pandas treats non-numeric
-            // (object/Utf8) columns as having no computable idxmin and returns
-            // NaN for them ... Match the oracle behavior (FP-P2D-148)" — is
-            // FALSE, and it was written against the oracle rather than pandas.
-            // MEASURED, live pandas 2.2.3, index ['r0','r1','r2']:
-            //   {'c': ['x','z','y']}          idxmin -> 'r0'   idxmax -> 'r1'
-            //   {'c': [False,True,False]}     idxmin -> 'r0'   idxmax -> 'r1'
-            //   {'c': datetimes}              idxmin -> 'r0'   idxmax -> 'r1'
-            //   {'c': ['x', 2, 'y']}          RAISES TypeError (mixed types)
-            //   {'c': ['x', nan, 'y']}        RAISES TypeError (nan vs str)
-            // A homogeneous comparable column IS answered, lexicographically
-            // for strings. Only an incomparable one refuses, and it refuses
-            // rather than yielding NaN. Datetime64 was excluded by the old gate
-            // too, which was a second miss.
-            // (br-frankenpandas-fixture-divergence-triage-9s0c4)
-            if Self::idx_extreme_is_all_missing(&self.columns[name]) {
-                values.push(Scalar::Null(NullKind::NaN));
-                continue;
-            }
-            if !Self::idx_extreme_is_comparable(&self.columns[name]) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "idxmin cannot compare column '{name}': its values are not \
-                     mutually orderable"
-                )));
-            }
-            let s = self.column_as_series(name)?;
-            match s.idxmin() {
-                Ok(label) => values.push(index_label_to_scalar(&label)),
-                Err(_) => values.push(Scalar::Null(NullKind::NaN)),
-            }
-        }
-        Series::from_values("idxmin".to_string(), labels, values)
+        self.idxmin_ext(0, true, false)
     }
 
-    /// Index label of the maximum value per numeric column.
+    /// Return index label of maximum value over requested axis.
     ///
     /// Matches `pd.DataFrame.idxmax()`.
     pub fn idxmax(&self) -> Result<Series, FrameError> {
-        let labels: Vec<IndexLabel> = self
-            .column_order
-            .iter()
-            .map(|n| n.as_str().into())
-            .collect();
-        let mut values = Vec::with_capacity(labels.len());
-        for name in &self.column_order {
-            // Sister to idxmin above, same measured rule.
-            if Self::idx_extreme_is_all_missing(&self.columns[name]) {
-                values.push(Scalar::Null(NullKind::NaN));
-                continue;
+        self.idxmax_ext(0, true, false)
+    }
+
+    /// Return index of first occurrence of maximum over requested axis.
+    ///
+    /// Matches `df.idxmax(axis=..., skipna=..., numeric_only=...)`.
+    pub fn idxmax_ext(
+        &self,
+        axis: usize,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        self.idx_extreme_ext(true, axis, skipna, numeric_only)
+    }
+
+    /// Return index of first occurrence of minimum over requested axis.
+    ///
+    /// Matches `df.idxmin(axis=..., skipna=..., numeric_only=...)`.
+    pub fn idxmin_ext(
+        &self,
+        axis: usize,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        self.idx_extreme_ext(false, axis, skipna, numeric_only)
+    }
+
+    fn idx_extreme_ext(
+        &self,
+        is_max: bool,
+        axis: usize,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        let op_name = if is_max { "idxmax" } else { "idxmin" };
+        let candidate_cols: Vec<&String> = if numeric_only {
+            self.column_order
+                .iter()
+                .filter(|name| {
+                    let dt = self.columns[*name].dtype();
+                    dt.is_numeric() || dt == DType::Bool
+                })
+                .collect()
+        } else {
+            self.column_order.iter().collect()
+        };
+
+        match axis {
+            0 => {
+                if candidate_cols.is_empty() {
+                    return Series::from_values(op_name, vec![], vec![]);
+                }
+                if self.is_empty() {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "attempt to get arg{} of an empty sequence",
+                        if is_max { "max" } else { "min" }
+                    )));
+                }
+
+                let labels: Vec<IndexLabel> =
+                    candidate_cols.iter().map(|n| n.as_str().into()).collect();
+                let mut values = Vec::with_capacity(labels.len());
+
+                for name in &candidate_cols {
+                    let col = &self.columns[*name];
+                    if Self::idx_extreme_is_all_missing(col) {
+                        values.push(Scalar::Null(NullKind::NaN));
+                        continue;
+                    }
+                    if !Self::idx_extreme_is_comparable(col) {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "{op_name} cannot compare column '{name}': its values are not \
+                             mutually orderable"
+                        )));
+                    }
+                    let s = self.column_as_series(name)?;
+                    let res = if is_max {
+                        s.idxmax_ext(skipna)
+                    } else {
+                        s.idxmin_ext(skipna)
+                    };
+                    match res? {
+                        Some(label) => values.push(index_label_to_scalar(&label)),
+                        None => values.push(Scalar::Null(NullKind::NaN)),
+                    }
+                }
+
+                // If missing was introduced into an otherwise integer series, promote to Float64
+                if values.iter().any(Scalar::is_missing)
+                    && values.iter().any(|v| matches!(v, Scalar::Int64(_)))
+                {
+                    values = values
+                        .into_iter()
+                        .map(|v| match v {
+                            Scalar::Int64(i) => Scalar::Float64(i as f64),
+                            Scalar::Null(_) => Scalar::Float64(f64::NAN),
+                            other => other,
+                        })
+                        .collect();
+                }
+
+                Series::from_values(op_name.to_string(), labels, values)
             }
-            if !Self::idx_extreme_is_comparable(&self.columns[name]) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "idxmax cannot compare column '{name}': its values are not \
-                     mutually orderable"
-                )));
+            1 => {
+                if self.is_empty() {
+                    return Series::new(
+                        op_name.to_string(),
+                        self.index.clone(),
+                        Column::from_values(vec![])?,
+                    );
+                }
+                if candidate_cols.is_empty() {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "attempt to get arg{} of an empty sequence",
+                        if is_max { "max" } else { "min" }
+                    )));
+                }
+                if skipna && !numeric_only {
+                    return if is_max {
+                        self.idxmax_axis1()
+                    } else {
+                        self.idxmin_axis1()
+                    };
+                }
+
+                let mut values = Vec::with_capacity(self.len());
+                for row_idx in 0..self.len() {
+                    if !skipna
+                        && candidate_cols
+                            .iter()
+                            .any(|col_name| self.columns[*col_name].values()[row_idx].is_missing())
+                    {
+                        values.push(Scalar::Null(NullKind::NaN));
+                        continue;
+                    }
+
+                    let mut best_col: Option<&str> = None;
+                    let mut best_val: Option<&Scalar> = None;
+
+                    for col_name in &candidate_cols {
+                        let val = &self.columns[*col_name].values()[row_idx];
+                        if val.is_missing() {
+                            continue;
+                        }
+                        let is_better = match best_val {
+                            None => true,
+                            Some(bv) => {
+                                let ord = val.semantic_cmp(bv);
+                                if is_max {
+                                    ord == std::cmp::Ordering::Greater
+                                } else {
+                                    ord == std::cmp::Ordering::Less
+                                }
+                            }
+                        };
+                        if is_better {
+                            best_val = Some(val);
+                            best_col = Some(col_name.as_str());
+                        }
+                    }
+
+                    match best_col {
+                        Some(name) => values.push(Scalar::Utf8(name.to_string())),
+                        None => values.push(Scalar::Null(NullKind::NaN)),
+                    }
+                }
+
+                let index = self.index.clone();
+                let column = Column::from_values(values)?;
+                Series::new(op_name.to_string(), index, column)
             }
-            let s = self.column_as_series(name)?;
-            match s.idxmax() {
-                Ok(label) => values.push(index_label_to_scalar(&label)),
-                Err(_) => values.push(Scalar::Null(NullKind::NaN)),
-            }
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "No axis named {other} for object type DataFrame"
+            ))),
         }
-        Series::from_values("idxmax".to_string(), labels, values)
     }
 
     /// Parallel CONTIGUOUS-Utf8 builder for the typed-f64 axis=1 arg-extrema fast
@@ -217337,8 +217552,10 @@ mod test_top_level_and_reshaping {
         let long = df.wide_to_long(&["A"], &["id"], "year", "", r"\d+")?;
         assert_eq!(long.len(), 4);
         assert!(long.column("A").is_some());
-        assert!(long.column("id").is_some());
-        assert!(long.column("year").is_some());
+        assert!(long.row_multiindex().is_some());
+        let reset = long.reset_index(false)?;
+        assert!(reset.column("id").is_some());
+        assert!(reset.column("year").is_some());
         Ok(())
     }
 

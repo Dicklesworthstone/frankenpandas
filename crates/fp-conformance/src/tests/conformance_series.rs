@@ -2417,3 +2417,206 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_dup_none, oracle_dup_none);
 }
+
+#[test]
+fn conformance_series_sort_index_differential() {
+    let python_code = r#"
+import json, pandas as pd, numpy as np
+s = pd.Series([10.0, 20.0, 30.0, 40.0], index=['d', 'b', 'a', 'c'])
+s_nan = pd.Series([1.0, 2.0, 3.0], index=['b', np.nan, 'a'])
+
+s_asc = s.sort_index(ascending=True)
+s_desc = s.sort_index(ascending=False)
+s_ign = s.sort_index(ascending=True, ignore_index=True)
+s_na_last = s_nan.sort_index(ascending=True, na_position='last')
+s_na_first = s_nan.sort_index(ascending=True, na_position='first')
+
+res = {
+    'asc_idx': list(s_asc.index),
+    'asc_vals': [float(x) for x in s_asc],
+    'desc_idx': list(s_desc.index),
+    'desc_vals': [float(x) for x in s_desc],
+    'ign_idx': [int(x) for x in s_ign.index],
+    'ign_vals': [float(x) for x in s_ign],
+    'na_last_idx': [None if pd.isna(x) else str(x) for x in s_na_last.index],
+    'na_last_vals': [float(x) for x in s_na_last],
+    'na_first_idx': [None if pd.isna(x) else str(x) for x in s_na_first.index],
+    'na_first_vals': [float(x) for x in s_na_first],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series sort_index differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "vals",
+        vec![
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("c".into()),
+        ],
+        vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(30.0),
+            Scalar::Float64(40.0),
+        ],
+    )
+    .expect("s");
+
+    let s_nan = Series::from_values(
+        "vals_nan",
+        vec![
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Null(NullKind::NaN),
+            IndexLabel::Utf8("a".into()),
+        ],
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+        ],
+    )
+    .expect("s_nan");
+
+    // 1. sort_index ascending
+    let s_asc = s.sort_index_na(true, "last").expect("sort asc");
+    let actual_asc_idx: Vec<String> = s_asc
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_asc_idx: Vec<String> = oracle["asc_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_asc_idx, oracle_asc_idx);
+    let actual_asc_vals: Vec<Option<f64>> = s_asc
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_asc_vals: Vec<Option<f64>> = oracle["asc_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_asc_vals, oracle_asc_vals);
+
+    // 2. sort_index descending
+    let s_desc = s.sort_index_na(false, "last").expect("sort desc");
+    let actual_desc_idx: Vec<String> = s_desc
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_desc_idx: Vec<String> = oracle["desc_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_desc_idx, oracle_desc_idx);
+    let actual_desc_vals: Vec<Option<f64>> = s_desc
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_desc_vals: Vec<Option<f64>> = oracle["desc_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_desc_vals, oracle_desc_vals);
+
+    // 3. sort_index ignore_index
+    let s_ign = s
+        .sort_index_na(true, "last")
+        .expect("sort ign")
+        .reset_index(true)
+        .expect("reset")
+        .into_series()
+        .expect("into_series");
+    let actual_ign_idx: Vec<i64> = s_ign
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => *i,
+            _ => -1,
+        })
+        .collect();
+    let oracle_ign_idx: Vec<i64> = oracle["ign_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_ign_idx, oracle_ign_idx);
+    let actual_ign_vals: Vec<Option<f64>> = s_ign
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_ign_vals: Vec<Option<f64>> = oracle["ign_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_ign_vals, oracle_ign_vals);
+
+    // 4. na_position='last'
+    let s_last = s_nan.sort_index_na(true, "last").expect("sort na last");
+    let actual_last_idx: Vec<Option<String>> = s_last
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Null(_) => None,
+            other => Some(other.to_string()),
+        })
+        .collect();
+    let oracle_last_idx: Vec<Option<String>> = oracle["na_last_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(actual_last_idx, oracle_last_idx);
+
+    // 5. na_position='first'
+    let s_first = s_nan.sort_index_na(true, "first").expect("sort na first");
+    let actual_first_idx: Vec<Option<String>> = s_first
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Null(_) => None,
+            other => Some(other.to_string()),
+        })
+        .collect();
+    let oracle_first_idx: Vec<Option<String>> = oracle["na_first_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(actual_first_idx, oracle_first_idx);
+}

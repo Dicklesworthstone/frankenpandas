@@ -195,7 +195,7 @@ impl From<String> for IndexLabel {
 
 impl IndexLabel {
     #[must_use]
-    fn is_missing(&self) -> bool {
+    pub fn is_missing(&self) -> bool {
         match self {
             Self::Timedelta64(value) => *value == Timedelta::NAT,
             Self::Datetime64(value) => *value == i64::MIN,
