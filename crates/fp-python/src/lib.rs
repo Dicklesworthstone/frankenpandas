@@ -9258,6 +9258,102 @@ fn parse_axis_param(axis: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
     parse_axis_param_for_type(axis, "DataFrame").map(|opt| opt.unwrap_or(0))
 }
 
+fn fill_column_with_other(
+    col: &Column,
+    other: &Column,
+    limit: Option<usize>,
+) -> Result<Column, fp_frame::FrameError> {
+    if let Some(lim) = limit {
+        let filled = col
+            .fillna_with_column(other)
+            .map_err(fp_frame::FrameError::Column)?;
+        let vals = col.values();
+        let filled_vals = filled.values();
+        let mut out = Vec::with_capacity(vals.len());
+        let mut consecutive = 0;
+        for (i, v) in vals.iter().enumerate() {
+            if v.is_missing() {
+                consecutive += 1;
+                if consecutive <= lim && i < filled_vals.len() {
+                    out.push(filled_vals[i].clone());
+                } else {
+                    out.push(v.clone());
+                }
+            } else {
+                consecutive = 0;
+                out.push(v.clone());
+            }
+        }
+        Column::new(col.dtype().clone(), out).map_err(fp_frame::FrameError::Column)
+    } else {
+        col.fillna_with_column(other)
+            .map_err(fp_frame::FrameError::Column)
+    }
+}
+
+fn fill_column_with_scalar(
+    col: &Column,
+    scalar: &Scalar,
+    limit: Option<usize>,
+) -> Result<Column, fp_frame::FrameError> {
+    if let Some(lim) = limit {
+        let filled = col.fillna(scalar).map_err(fp_frame::FrameError::Column)?;
+        let vals = col.values();
+        let filled_vals = filled.values();
+        let mut out = Vec::with_capacity(vals.len());
+        let mut consecutive = 0;
+        for (i, v) in vals.iter().enumerate() {
+            if v.is_missing() {
+                consecutive += 1;
+                if consecutive <= lim && i < filled_vals.len() {
+                    out.push(filled_vals[i].clone());
+                } else {
+                    out.push(v.clone());
+                }
+            } else {
+                consecutive = 0;
+                out.push(v.clone());
+            }
+        }
+        Column::new(col.dtype().clone(), out).map_err(fp_frame::FrameError::Column)
+    } else {
+        col.fillna(scalar).map_err(fp_frame::FrameError::Column)
+    }
+}
+
+fn py_dict_to_series_fill_column(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+    labels: &[IndexLabel],
+) -> PyResult<Column> {
+    let mut fill_scalars = Vec::with_capacity(labels.len());
+    for label in labels {
+        let item = match label {
+            IndexLabel::Utf8(s) => dict.get_item(s.as_str())?,
+            IndexLabel::Int64(i) => {
+                let res = dict.get_item(*i)?;
+                if res.is_none() {
+                    dict.get_item(i.to_string().as_str())?
+                } else {
+                    res
+                }
+            }
+            other => dict.get_item(other.to_string().as_str())?,
+        };
+        if let Some(it) = item {
+            if !it.is_none() {
+                fill_scalars.push(py_to_scalar(py, &it)?);
+            } else {
+                fill_scalars.push(Scalar::Null(NullKind::NaN));
+            }
+        } else {
+            fill_scalars.push(Scalar::Null(NullKind::NaN));
+        }
+    }
+    Column::from_values(fill_scalars)
+        .map_err(|e| frame_error_to_py(fp_frame::FrameError::Column(e)))
+}
+
 enum SeriesOrScalarBound {
     Scalar(f64),
     Series(Box<Series>),
@@ -10033,14 +10129,108 @@ impl PySeries {
         Ok(PySeries { inner: r })
     }
 
-    /// Fill missing values with `value`, returning a new Series.
-    fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        let fill = py_to_scalar(py, value)?;
-        let r = self
-            .inner
-            .fillna(&fill)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
+    /// Fill missing values with `value` or using `method`, returning a new Series.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (value=None, method=None, axis=None, inplace=false, limit=None, downcast=None))]
+    fn fillna(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<usize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = downcast;
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+
+        if value.is_none() && method.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Must specify a fill 'value' or 'method'.",
+            ));
+        }
+
+        if value.is_some() && method.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot specify both 'value' and 'method'.",
+            ));
+        }
+
+        if self.inner.is_empty() {
+            return Ok(PySeries {
+                inner: self.inner.clone(),
+            });
+        }
+
+        if let Some(m) = method {
+            let res = match m {
+                "ffill" | "pad" => self.inner.ffill(limit).map_err(frame_error_to_py)?,
+                "bfill" | "backfill" => self.inner.bfill(limit).map_err(frame_error_to_py)?,
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid fill method. Expecting pad (ffill) or backfill (bfill). Got {other}"
+                    )));
+                }
+            };
+            return Ok(PySeries { inner: res });
+        }
+
+        let val = value.expect("value is some");
+
+        // 1. Value is a Series
+        if let Ok(other_s) = val.extract::<PyRef<PySeries>>() {
+            let aligned = other_s
+                .inner
+                .reindex(self.inner.index().labels().to_vec())
+                .map_err(frame_error_to_py)?;
+            let new_col = fill_column_with_other(self.inner.column(), aligned.column(), limit)
+                .map_err(frame_error_to_py)?;
+            let out_s = Series::new(
+                self.inner.name().to_string(),
+                self.inner.index().clone(),
+                new_col,
+            )
+            .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: out_s });
+        }
+
+        // 2. Value is a Dict
+        if let Ok(dict) = val.cast::<PyDict>() {
+            let fill_col = py_dict_to_series_fill_column(py, dict, self.inner.index().labels())?;
+            let new_col = fill_column_with_other(self.inner.column(), &fill_col, limit)
+                .map_err(frame_error_to_py)?;
+            let out_s = Series::new(
+                self.inner.name().to_string(),
+                self.inner.index().clone(),
+                new_col,
+            )
+            .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: out_s });
+        }
+
+        // 3. Scalar fill
+        let fill_val = py_to_scalar(py, val)?;
+        let new_col = fill_column_with_scalar(self.inner.column(), &fill_val, limit)
+            .map_err(frame_error_to_py)?;
+        let out_s = Series::new(
+            self.inner.name().to_string(),
+            self.inner.index().clone(),
+            new_col,
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: out_s })
     }
 
     /// Drop missing values, returning a new Series.
@@ -13068,14 +13258,283 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Fill missing values with `value`, returning a new DataFrame.
-    fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let fill = py_to_scalar(py, value)?;
-        let result = self
-            .inner
-            .fillna(&fill)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// Fill missing values with `value` or using `method`, returning a new DataFrame.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (value=None, method=None, axis=None, inplace=false, limit=None, downcast=None))]
+    fn fillna(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<usize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = downcast;
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        if ax != 0 && ax != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type DataFrame"
+            )));
+        }
+
+        if value.is_none() && method.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Must specify a fill 'value' or 'method'.",
+            ));
+        }
+
+        if value.is_some() && method.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot specify both 'value' and 'method'.",
+            ));
+        }
+
+        if self.inner.is_empty() || self.inner.num_columns() == 0 {
+            return Ok(PyDataFrame {
+                inner: self.inner.clone(),
+            });
+        }
+
+        if let Some(m) = method {
+            let res = if ax == 0 {
+                match m {
+                    "ffill" | "pad" => self.inner.ffill(limit).map_err(frame_error_to_py)?,
+                    "bfill" | "backfill" => self.inner.bfill(limit).map_err(frame_error_to_py)?,
+                    other => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Invalid fill method. Expecting pad (ffill) or backfill (bfill). Got {other}"
+                        )));
+                    }
+                }
+            } else {
+                match m {
+                    "ffill" | "pad" => self.inner.ffill_axis1(limit).map_err(frame_error_to_py)?,
+                    "bfill" | "backfill" => {
+                        self.inner.bfill_axis1(limit).map_err(frame_error_to_py)?
+                    }
+                    other => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Invalid fill method. Expecting pad (ffill) or backfill (bfill). Got {other}"
+                        )));
+                    }
+                }
+            };
+            return Ok(PyDataFrame { inner: res });
+        }
+
+        let val = value.expect("value is some");
+
+        // 1. Value is a DataFrame
+        if let Ok(other_df) = val.extract::<PyRef<PyDataFrame>>() {
+            let aligned = other_df
+                .inner
+                .reindex_like(&self.inner)
+                .map_err(frame_error_to_py)?;
+            let mut col_map = BTreeMap::new();
+            let mut column_order = Vec::with_capacity(self.inner.num_columns());
+            for pos in 0..self.inner.num_columns() {
+                let name = self.inner.column_name_at(pos).expect("col in bounds");
+                let col = self.inner.column_at(pos).expect("col in bounds");
+                column_order.push(name.clone());
+                if let Some(other_col) = aligned.column(&name) {
+                    let new_col =
+                        fill_column_with_other(col, other_col, limit).map_err(frame_error_to_py)?;
+                    col_map.insert(name, new_col);
+                } else {
+                    col_map.insert(name, col.clone());
+                }
+            }
+            let df =
+                DataFrame::new_with_column_order(self.inner.index().clone(), col_map, column_order)
+                    .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: df });
+        }
+
+        // 2. Value is a Dict
+        if let Ok(dict) = val.cast::<PyDict>() {
+            if ax == 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "Currently only can fill with dict/Series column by column",
+                ));
+            }
+            let mut col_map = BTreeMap::new();
+            let mut column_order = Vec::with_capacity(self.inner.num_columns());
+            for pos in 0..self.inner.num_columns() {
+                let name = self.inner.column_name_at(pos).expect("col in bounds");
+                let col = self.inner.column_at(pos).expect("col in bounds");
+                column_order.push(name.clone());
+
+                let item = if let Some(it) = dict.get_item(name.as_str())? {
+                    Some(it)
+                } else if let Ok(i) = name.parse::<i64>() {
+                    dict.get_item(i)?
+                } else {
+                    None
+                };
+
+                if let Some(it) = item {
+                    if it.is_none() {
+                        col_map.insert(name, col.clone());
+                    } else if let Ok(py_ser) = it.extract::<PyRef<PySeries>>() {
+                        let aligned = py_ser
+                            .inner
+                            .reindex(self.inner.index().labels().to_vec())
+                            .map_err(frame_error_to_py)?;
+                        let new_col = fill_column_with_other(col, aligned.column(), limit)
+                            .map_err(frame_error_to_py)?;
+                        col_map.insert(name, new_col);
+                    } else if let Ok(sub_dict) = it.cast::<PyDict>() {
+                        let fill_col = py_dict_to_series_fill_column(
+                            py,
+                            sub_dict,
+                            self.inner.index().labels(),
+                        )?;
+                        let new_col = fill_column_with_other(col, &fill_col, limit)
+                            .map_err(frame_error_to_py)?;
+                        col_map.insert(name, new_col);
+                    } else {
+                        let scalar = py_to_scalar(py, &it)?;
+                        let new_col = fill_column_with_scalar(col, &scalar, limit)
+                            .map_err(frame_error_to_py)?;
+                        col_map.insert(name, new_col);
+                    }
+                } else {
+                    col_map.insert(name, col.clone());
+                }
+            }
+            let df =
+                DataFrame::new_with_column_order(self.inner.index().clone(), col_map, column_order)
+                    .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: df });
+        }
+
+        // 3. Value is a Series
+        if let Ok(py_ser) = val.extract::<PyRef<PySeries>>() {
+            if ax == 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "Currently only can fill with dict/Series column by column",
+                ));
+            }
+            let mut col_map = BTreeMap::new();
+            let mut column_order = Vec::with_capacity(self.inner.num_columns());
+            for pos in 0..self.inner.num_columns() {
+                let name = self.inner.column_name_at(pos).expect("col in bounds");
+                let col = self.inner.column_at(pos).expect("col in bounds");
+                column_order.push(name.clone());
+
+                let label = IndexLabel::Utf8(name.clone());
+                let loc = py_ser.inner.index().get_loc(&label).or_else(|| {
+                    name.parse::<i64>()
+                        .ok()
+                        .and_then(|i| py_ser.inner.index().get_loc(&IndexLabel::Int64(i)))
+                });
+                if let Some(loc_pos) = loc {
+                    let scalar = &py_ser.inner.column().values()[loc_pos];
+                    if !scalar.is_missing() {
+                        let new_col = fill_column_with_scalar(col, scalar, limit)
+                            .map_err(frame_error_to_py)?;
+                        col_map.insert(name, new_col);
+                    } else {
+                        col_map.insert(name, col.clone());
+                    }
+                } else {
+                    col_map.insert(name, col.clone());
+                }
+            }
+            let df =
+                DataFrame::new_with_column_order(self.inner.index().clone(), col_map, column_order)
+                    .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: df });
+        }
+
+        // 4. Scalar fill
+        let fill_val = py_to_scalar(py, val)?;
+        if ax == 0 {
+            if let Some(lim) = limit {
+                let mut col_map = BTreeMap::new();
+                let mut column_order = Vec::with_capacity(self.inner.num_columns());
+                for pos in 0..self.inner.num_columns() {
+                    let name = self.inner.column_name_at(pos).expect("col in bounds");
+                    let col = self.inner.column_at(pos).expect("col in bounds");
+                    column_order.push(name.clone());
+                    let new_col = fill_column_with_scalar(col, &fill_val, Some(lim))
+                        .map_err(frame_error_to_py)?;
+                    col_map.insert(name, new_col);
+                }
+                let df = DataFrame::new_with_column_order(
+                    self.inner.index().clone(),
+                    col_map,
+                    column_order,
+                )
+                .map_err(frame_error_to_py)?;
+                Ok(PyDataFrame { inner: df })
+            } else {
+                let df = self.inner.fillna(&fill_val).map_err(frame_error_to_py)?;
+                Ok(PyDataFrame { inner: df })
+            }
+        } else {
+            // ax == 1
+            if let Some(lim) = limit {
+                let nrows = self.inner.len();
+                let ncols = self.inner.num_columns();
+                let mut col_vectors: Vec<Vec<Scalar>> = (0..ncols)
+                    .map(|pos| {
+                        self.inner
+                            .column_at(pos)
+                            .expect("col in bounds")
+                            .values()
+                            .to_vec()
+                    })
+                    .collect();
+                for r in 0..nrows {
+                    let mut consecutive = 0;
+                    for c in 0..ncols {
+                        if col_vectors[c][r].is_missing() {
+                            consecutive += 1;
+                            if consecutive <= lim {
+                                col_vectors[c][r] = fp_types::cast_scalar(
+                                    &fill_val,
+                                    self.inner.column_at(c).unwrap().dtype().clone(),
+                                )
+                                .map_err(|e| {
+                                    PyErr::new::<pyo3::exceptions::PyTypeError, _>(e.to_string())
+                                })?;
+                            }
+                        } else {
+                            consecutive = 0;
+                        }
+                    }
+                }
+                let mut col_map = BTreeMap::new();
+                let mut column_order = Vec::with_capacity(ncols);
+                for (pos, col_vals) in col_vectors.into_iter().enumerate() {
+                    let name = self.inner.column_name_at(pos).expect("col in bounds");
+                    let dtype = self.inner.column_at(pos).unwrap().dtype().clone();
+                    let col = Column::new(dtype, col_vals)
+                        .map_err(|e| frame_error_to_py(fp_frame::FrameError::Column(e)))?;
+                    column_order.push(name.clone());
+                    col_map.insert(name, col);
+                }
+                let df = DataFrame::new_with_column_order(
+                    self.inner.index().clone(),
+                    col_map,
+                    column_order,
+                )
+                .map_err(frame_error_to_py)?;
+                Ok(PyDataFrame { inner: df })
+            } else {
+                let df = self.inner.fillna(&fill_val).map_err(frame_error_to_py)?;
+                Ok(PyDataFrame { inner: df })
+            }
+        }
     }
 
     /// Drop rows or columns containing missing values, returning a new DataFrame.
@@ -28565,6 +29024,217 @@ mod tests {
                 py_df
                     .dropna(None, Some("any"), Some(2), None, false)
                     .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn test_py_fillna_options() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            // Series tests
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Utf8("a".into()),
+                    IndexLabel::Utf8("b".into()),
+                    IndexLabel::Utf8("c".into()),
+                    IndexLabel::Utf8("d".into()),
+                ],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .expect("s");
+            let py_s = PySeries { inner: s };
+
+            // Neither value nor method
+            assert!(
+                py_s.fillna(py, None, None, None, false, None, None)
+                    .is_err()
+            );
+            // Both value and method
+            let val_0 = pyo3::types::PyFloat::new(py, 0.0);
+            assert!(
+                py_s.fillna(
+                    py,
+                    Some(val_0.as_any()),
+                    Some("ffill"),
+                    None,
+                    false,
+                    None,
+                    None
+                )
+                .is_err()
+            );
+            // Axis 1 on Series
+            let ax1 = pyo3::types::PyInt::new(py, 1);
+            assert!(
+                py_s.fillna(
+                    py,
+                    Some(val_0.as_any()),
+                    None,
+                    Some(ax1.as_any()),
+                    false,
+                    None,
+                    None
+                )
+                .is_err()
+            );
+
+            // 1. Scalar fill
+            let filled_sc = py_s
+                .fillna(py, Some(val_0.as_any()), None, None, false, None, None)
+                .expect("scalar fill");
+            assert_eq!(
+                filled_sc.inner.column().values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(4.0)
+                ]
+            );
+
+            // 2. Scalar fill with limit=1
+            let filled_lim = py_s
+                .fillna(py, Some(val_0.as_any()), None, None, false, Some(1), None)
+                .expect("limit fill");
+            assert_eq!(
+                filled_lim.inner.column().values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(0.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(4.0)
+                ]
+            );
+
+            // 3. ffill
+            let filled_ffill = py_s
+                .fillna(py, None, Some("ffill"), None, false, None, None)
+                .expect("ffill");
+            assert_eq!(
+                filled_ffill.inner.column().values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(4.0)
+                ]
+            );
+
+            // 4. bfill
+            let filled_bfill = py_s
+                .fillna(py, None, Some("bfill"), None, false, None, None)
+                .expect("bfill");
+            assert_eq!(
+                filled_bfill.inner.column().values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(4.0)
+                ]
+            );
+
+            // 5. Dict fill
+            let dict_fill = pyo3::types::PyDict::new(py);
+            dict_fill.set_item("b", 20.0).unwrap();
+            let filled_dict = py_s
+                .fillna(py, Some(dict_fill.as_any()), None, None, false, None, None)
+                .expect("dict fill");
+            assert_eq!(
+                filled_dict.inner.column().values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(4.0)
+                ]
+            );
+
+            // DataFrame tests
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]),
+                    ("b", vec![Scalar::Null(NullKind::NaN), Scalar::Float64(2.0)]),
+                ],
+            )
+            .expect("df");
+            let py_df = PyDataFrame { inner: df };
+
+            // 1. DataFrame scalar fill
+            let df_sc = py_df
+                .fillna(py, Some(val_0.as_any()), None, None, false, None, None)
+                .expect("df scalar fill");
+            assert_eq!(
+                df_sc.inner.column("a").unwrap().values(),
+                &[Scalar::Float64(1.0), Scalar::Float64(0.0)]
+            );
+            assert_eq!(
+                df_sc.inner.column("b").unwrap().values(),
+                &[Scalar::Float64(0.0), Scalar::Float64(2.0)]
+            );
+
+            // 2. DataFrame dict fill
+            let df_dict = pyo3::types::PyDict::new(py);
+            df_dict.set_item("a", 99.0).unwrap();
+            df_dict.set_item("b", 88.0).unwrap();
+            let df_filled_dict = py_df
+                .fillna(py, Some(df_dict.as_any()), None, None, false, None, None)
+                .expect("df dict fill");
+            assert_eq!(
+                df_filled_dict.inner.column("a").unwrap().values(),
+                &[Scalar::Float64(1.0), Scalar::Float64(99.0)]
+            );
+            assert_eq!(
+                df_filled_dict.inner.column("b").unwrap().values(),
+                &[Scalar::Float64(88.0), Scalar::Float64(2.0)]
+            );
+
+            // 3. DataFrame dict fill on axis 1 should fail with NotImplementedError
+            assert!(
+                py_df
+                    .fillna(
+                        py,
+                        Some(df_dict.as_any()),
+                        None,
+                        Some(ax1.as_any()),
+                        false,
+                        None,
+                        None
+                    )
+                    .is_err()
+            );
+
+            // 4. DataFrame method ffill axis 0 and 1
+            let df_ffill0 = py_df
+                .fillna(py, None, Some("ffill"), None, false, None, None)
+                .expect("df ffill 0");
+            assert_eq!(
+                df_ffill0.inner.column("a").unwrap().values(),
+                &[Scalar::Float64(1.0), Scalar::Float64(1.0)]
+            );
+
+            let df_ffill1 = py_df
+                .fillna(
+                    py,
+                    None,
+                    Some("ffill"),
+                    Some(ax1.as_any()),
+                    false,
+                    None,
+                    None,
+                )
+                .expect("df ffill 1");
+            assert_eq!(
+                df_ffill1.inner.column("b").unwrap().values(),
+                &[Scalar::Float64(1.0), Scalar::Float64(2.0)]
             );
         });
     }

@@ -1820,3 +1820,144 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_ign_idx, oracle_ign_idx);
 }
+
+#[test]
+fn conformance_series_fillna_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([1.0, float('nan'), float('nan'), 4.0], index=['a', 'b', 'c', 'd'])
+other_s = pd.Series([99.0, 88.0, 77.0, 66.0], index=['d', 'c', 'b', 'a'])
+res = {
+    'fill_sc': [float(x) for x in s.fillna(0.0)],
+    'fill_lim': [None if pd.isna(x) else float(x) for x in s.fillna(0.0, limit=1)],
+    'fill_ffill': [float(x) for x in s.ffill()],
+    'fill_bfill': [float(x) for x in s.bfill()],
+    'fill_other': [float(x) for x in s.fillna(other_s)],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series fillna differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+        ],
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+        ],
+    )
+    .expect("s");
+
+    // 1. scalar fill
+    let f_sc = s.fillna(&Scalar::Float64(0.0)).expect("fill sc");
+    let actual_f_sc: Vec<f64> = f_sc
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(-1.0))
+        .collect();
+    let oracle_f_sc: Vec<f64> = oracle["fill_sc"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_f_sc, oracle_f_sc);
+
+    // 2. limit fill
+    let f_lim = s.fillna_limit(&Scalar::Float64(0.0), 1).expect("fill lim");
+    let actual_f_lim: Vec<Option<f64>> = f_lim
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_f_lim: Vec<Option<f64>> = oracle["fill_lim"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_f_lim, oracle_f_lim);
+
+    // 3. ffill
+    let f_ffill = s.ffill(None).expect("ffill");
+    let actual_f_ffill: Vec<f64> = f_ffill
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(-1.0))
+        .collect();
+    let oracle_f_ffill: Vec<f64> = oracle["fill_ffill"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_f_ffill, oracle_f_ffill);
+
+    // 4. bfill
+    let f_bfill = s.bfill(None).expect("bfill");
+    let actual_f_bfill: Vec<f64> = f_bfill
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(-1.0))
+        .collect();
+    let oracle_f_bfill: Vec<f64> = oracle["fill_bfill"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_f_bfill, oracle_f_bfill);
+
+    // 5. other series fill (aligned)
+    let other_s = Series::from_values(
+        "other",
+        vec![
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("a".into()),
+        ],
+        vec![
+            Scalar::Float64(99.0),
+            Scalar::Float64(88.0),
+            Scalar::Float64(77.0),
+            Scalar::Float64(66.0),
+        ],
+    )
+    .expect("other_s");
+    let aligned_other = other_s
+        .reindex(s.index().labels().to_vec())
+        .expect("reindex");
+    let f_other = s.fillna_with_series(&aligned_other).expect("fill other");
+    let actual_f_other: Vec<f64> = f_other
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(-1.0))
+        .collect();
+    let oracle_f_other: Vec<f64> = oracle["fill_other"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_f_other, oracle_f_other);
+}

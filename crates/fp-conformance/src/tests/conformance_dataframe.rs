@@ -3033,3 +3033,168 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_ign_idx, oracle_ign_idx);
 }
+
+#[test]
+fn conformance_dataframe_fillna_differential() {
+    use std::collections::BTreeMap;
+
+    use fp_frame::DataFrame;
+    use fp_types::{NullKind, Scalar};
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({
+    'a': [1.0, float('nan'), float('nan'), 4.0],
+    'b': [float('nan'), 2.0, float('nan'), 5.0],
+})
+res = {
+    'fill_sc_a': [float(x) for x in df.fillna(0.0)['a']],
+    'fill_sc_b': [float(x) for x in df.fillna(0.0)['b']],
+    'fill_lim_a': [None if pd.isna(x) else float(x) for x in df.fillna(0.0, limit=1)['a']],
+    'fill_dict_a': [float(x) for x in df.fillna({'a': 99.0, 'b': 88.0})['a']],
+    'fill_dict_b': [float(x) for x in df.fillna({'a': 99.0, 'b': 88.0})['b']],
+    'fill_ffill_a': [float(x) for x in df.ffill()['a']],
+    'fill_bfill_a': [float(x) for x in df.bfill()['a']],
+    'fill_ffill_ax1_b': [None if pd.isna(x) else float(x) for x in df.ffill(axis=1)['b']],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame fillna differential test");
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(4.0),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(2.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(5.0),
+                ],
+            ),
+        ],
+    )
+    .expect("df");
+
+    // 1. scalar fill
+    let f_sc = df.fillna(&Scalar::Float64(0.0)).expect("fill sc");
+    let actual_f_sc_a: Vec<f64> = f_sc
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(-1.0))
+        .collect();
+    let oracle_f_sc_a: Vec<f64> = oracle["fill_sc_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_f_sc_a, oracle_f_sc_a);
+
+    // 2. limit fill
+    let f_lim = df.fillna_limit(&Scalar::Float64(0.0), 1).expect("fill lim");
+    let actual_f_lim_a: Vec<Option<f64>> = f_lim
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_f_lim_a: Vec<Option<f64>> = oracle["fill_lim_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_f_lim_a, oracle_f_lim_a);
+
+    // 3. dict fill
+    let mut fill_map = BTreeMap::new();
+    fill_map.insert("a".to_string(), Scalar::Float64(99.0));
+    fill_map.insert("b".to_string(), Scalar::Float64(88.0));
+    let f_dict = df.fillna_dict(&fill_map).expect("fill dict");
+    let actual_f_dict_a: Vec<f64> = f_dict
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(-1.0))
+        .collect();
+    let oracle_f_dict_a: Vec<f64> = oracle["fill_dict_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_f_dict_a, oracle_f_dict_a);
+
+    // 4. ffill axis 0
+    let f_ffill0 = df.ffill(None).expect("ffill 0");
+    let actual_f_ffill_a: Vec<f64> = f_ffill0
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(-1.0))
+        .collect();
+    let oracle_f_ffill_a: Vec<f64> = oracle["fill_ffill_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_f_ffill_a, oracle_f_ffill_a);
+
+    // 5. bfill axis 0
+    let f_bfill0 = df.bfill(None).expect("bfill 0");
+    let actual_f_bfill_a: Vec<f64> = f_bfill0
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(-1.0))
+        .collect();
+    let oracle_f_bfill_a: Vec<f64> = oracle["fill_bfill_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_f_bfill_a, oracle_f_bfill_a);
+
+    // 6. ffill axis 1
+    let f_ffill1 = df.ffill_axis1(None).expect("ffill 1");
+    let actual_f_ffill_ax1_b: Vec<Option<f64>> = f_ffill1
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_f_ffill_ax1_b: Vec<Option<f64>> = oracle["fill_ffill_ax1_b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_f_ffill_ax1_b, oracle_f_ffill_ax1_b);
+}
