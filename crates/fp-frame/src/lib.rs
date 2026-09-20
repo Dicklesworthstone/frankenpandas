@@ -87878,6 +87878,17 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.shift(periods, axis=1)`.
     pub fn shift_axis1(&self, periods: i64) -> Result<Self, FrameError> {
+        self.shift_axis1_with_fill_value(periods, fp_types::Scalar::Null(fp_types::NullKind::NaN))
+    }
+
+    /// Shift index horizontally by desired number of periods, filling vacated positions with `fill_value`.
+    ///
+    /// Matches `pd.DataFrame.shift(periods, axis=1, fill_value=...)`.
+    pub fn shift_axis1_with_fill_value(
+        &self,
+        periods: i64,
+        fill_value: Scalar,
+    ) -> Result<Self, FrameError> {
         let n_cols = self.num_columns();
         if n_cols == 0 {
             return Ok(self.clone());
@@ -87885,17 +87896,16 @@ impl DataFrame {
 
         let mut pairs = Vec::with_capacity(n_cols);
         let mut column_order = Vec::with_capacity(n_cols);
-        let missing_val = fp_types::Scalar::Null(fp_types::NullKind::NaN);
 
         for i in 0..n_cols {
-            let name = self.column_name_at(i).expect("column in bounds");
+            let name = self.column_name_at(i).expect("column in bounds"); // ubs:ignore — bounded index traversal
             let src_idx = i as i64 - periods;
             let col = if src_idx >= 0 && (src_idx as usize) < n_cols {
                 self.column_at(src_idx as usize)
-                    .expect("column in bounds")
+                    .expect("column in bounds") // ubs:ignore — bounded index traversal
                     .clone()
             } else {
-                Column::from_values(vec![missing_val.clone(); self.len()])?
+                Column::from_values(vec![fill_value.clone(); self.len()])?
             };
             pairs.push((name.clone(), col));
             column_order.push(name);
@@ -90423,6 +90433,18 @@ impl DataFrame {
     /// Matches `pd.DataFrame.pct_change(periods)`.
     pub fn pct_change(&self, periods: i64) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.pct_change(periods))
+    }
+
+    /// Percentage change per column with fill options.
+    ///
+    /// Matches `pd.DataFrame.pct_change(periods, fill_method=..., limit=...)`.
+    pub fn pct_change_with_fill(
+        &self,
+        periods: i64,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.pct_change_with_fill(periods, fill_method, limit))
     }
 
     /// Forward-fill missing values per column.

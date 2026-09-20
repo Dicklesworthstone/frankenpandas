@@ -2620,3 +2620,127 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_first_idx, oracle_first_idx);
 }
+
+#[test]
+fn conformance_series_shift_diff_pct_change_differential() {
+    let python_code = r#"
+import json, pandas as pd, numpy as np
+s = pd.Series([10.0, 20.0, 50.0, 80.0], index=['a', 'b', 'c', 'd'])
+
+s_shift1 = s.shift(1)
+s_shift_neg1 = s.shift(-1)
+s_shift_fill = s.shift(1, fill_value=99.0)
+s_diff1 = s.diff(1)
+s_diff2 = s.diff(2)
+s_pct1 = s.pct_change(1)
+s_pct2 = s.pct_change(2)
+
+def to_list(ser):
+    return [None if pd.isna(x) else float(x) for x in ser]
+
+res = {
+    'shift1': to_list(s_shift1),
+    'shift_neg1': to_list(s_shift_neg1),
+    'shift_fill': to_list(s_shift_fill),
+    'diff1': to_list(s_diff1),
+    'diff2': to_list(s_diff2),
+    'pct1': to_list(s_pct1),
+    'pct2': to_list(s_pct2),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping Series shift/diff/pct_change differential test"
+            );
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+        ],
+        vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(50.0),
+            Scalar::Float64(80.0),
+        ],
+    )
+    .expect("s");
+
+    let extract_vals = |ser: &Series| -> Vec<Option<f64>> {
+        ser.column()
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Null(_) => None,
+                Scalar::Float64(f) if f.is_nan() => None,
+                _ => v.to_f64().ok(),
+            })
+            .collect()
+    };
+
+    let extract_oracle = |key: &str| -> Vec<Option<f64>> {
+        oracle[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64())
+            .collect()
+    };
+
+    // 1. shift(1)
+    let s_shift1 = s.shift(1).expect("shift 1");
+    assert_eq!(extract_vals(&s_shift1), extract_oracle("shift1"));
+
+    // 2. shift(-1)
+    let s_shift_neg1 = s.shift(-1).expect("shift -1");
+    assert_eq!(extract_vals(&s_shift_neg1), extract_oracle("shift_neg1"));
+
+    // 3. shift(1, fill_value=99.0)
+    let s_shift_fill = s
+        .shift_with_fill_value(1, Scalar::Float64(99.0))
+        .expect("shift fill");
+    assert_eq!(extract_vals(&s_shift_fill), extract_oracle("shift_fill"));
+
+    // 4. diff(1)
+    let s_diff1 = s.diff(1).expect("diff 1");
+    assert_eq!(extract_vals(&s_diff1), extract_oracle("diff1"));
+
+    // 5. diff(2)
+    let s_diff2 = s.diff(2).expect("diff 2");
+    assert_eq!(extract_vals(&s_diff2), extract_oracle("diff2"));
+
+    // 6. pct_change(1)
+    let s_pct1 = s.pct_change(1).expect("pct 1");
+    let actual_pct1 = extract_vals(&s_pct1);
+    let oracle_pct1 = extract_oracle("pct1");
+    for (a, o) in actual_pct1.iter().zip(oracle_pct1.iter()) {
+        match (a, o) {
+            (Some(va), Some(vo)) => assert!((va - vo).abs() < 1e-9),
+            (None, None) => {}
+            _ => panic!("pct1 mismatch: {a:?} vs {o:?}"),
+        }
+    }
+
+    // 7. pct_change(2)
+    let s_pct2 = s.pct_change(2).expect("pct 2");
+    let actual_pct2 = extract_vals(&s_pct2);
+    let oracle_pct2 = extract_oracle("pct2");
+    for (a, o) in actual_pct2.iter().zip(oracle_pct2.iter()) {
+        match (a, o) {
+            (Some(va), Some(vo)) => assert!((va - vo).abs() < 1e-9),
+            (None, None) => {}
+            _ => panic!("pct2 mismatch: {a:?} vs {o:?}"),
+        }
+    }
+}

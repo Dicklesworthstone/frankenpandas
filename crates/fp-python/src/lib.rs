@@ -10465,22 +10465,32 @@ impl PySeries {
     }
 
     /// Return the discrete first difference over `periods`.
-    #[pyo3(signature = (periods=1))]
-    fn diff(&self, periods: i64) -> PyResult<PySeries> {
-        let r = self
-            .inner
-            .diff(periods)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[pyo3(signature = (periods=1, axis=None))]
+    fn diff(&self, periods: i64, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        let r = self.inner.diff(periods).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
     /// Return the fractional change over `periods`.
-    #[pyo3(signature = (periods=1))]
-    fn pct_change(&self, periods: i64) -> PyResult<PySeries> {
+    #[pyo3(signature = (periods=1, fill_method=None, limit=None, freq=None))]
+    fn pct_change(
+        &self,
+        periods: i64,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+        freq: Option<&str>,
+    ) -> PyResult<PySeries> {
+        let _ = freq;
         let r = self
             .inner
-            .pct_change(periods)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .pct_change_with_fill(periods, fill_method, limit)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
@@ -11006,9 +11016,32 @@ impl PySeries {
         self.inner.argmin().map_err(frame_error_to_py)
     }
 
-    #[pyo3(signature = (periods=1))]
-    fn shift(&self, periods: i64) -> PyResult<PySeries> {
-        let res = self.inner.shift(periods).map_err(frame_error_to_py)?;
+    /// Shift index by desired number of periods.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (periods=1, freq=None, axis=None, fill_value=None, suffix=None))]
+    fn shift(
+        &self,
+        periods: i64,
+        freq: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        suffix: Option<&str>,
+    ) -> PyResult<PySeries> {
+        let _ = (freq, suffix);
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        let res = if let Some(fv) = fill_value {
+            let sc = py_to_scalar(fv.py(), fv)?;
+            self.inner
+                .shift_with_fill_value(periods, sc)
+                .map_err(frame_error_to_py)?
+        } else {
+            self.inner.shift(periods).map_err(frame_error_to_py)?
+        };
         Ok(PySeries { inner: res })
     }
 
@@ -15470,22 +15503,48 @@ impl PyDataFrame {
     }
 
     /// First discrete difference of element.
-    #[pyo3(signature = (periods=1))]
-    fn diff(&self, periods: i64) -> PyResult<PyDataFrame> {
-        let res = self
-            .inner
-            .diff(periods)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[pyo3(signature = (periods=1, axis=None))]
+    fn diff(&self, periods: i64, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let res = match ax {
+            0 => self.inner.diff(periods).map_err(frame_error_to_py)?,
+            1 => self.inner.diff_axis1(periods).map_err(frame_error_to_py)?,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {other} for object type DataFrame"
+                )));
+            }
+        };
         Ok(PyDataFrame { inner: res })
     }
 
     /// Percentage change between the current and a prior element.
-    #[pyo3(signature = (periods=1))]
-    fn pct_change(&self, periods: i64) -> PyResult<PyDataFrame> {
-        let res = self
-            .inner
-            .pct_change(periods)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[pyo3(signature = (periods=1, fill_method=None, limit=None, freq=None, axis=None))]
+    fn pct_change(
+        &self,
+        periods: i64,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+        freq: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = freq;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let res = match ax {
+            0 => self
+                .inner
+                .pct_change_with_fill(periods, fill_method, limit)
+                .map_err(frame_error_to_py)?,
+            1 => self
+                .inner
+                .pct_change_axis1(periods)
+                .map_err(frame_error_to_py)?,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {other} for object type DataFrame"
+                )));
+            }
+        };
         Ok(PyDataFrame { inner: res })
     }
 
@@ -15542,12 +15601,47 @@ impl PyDataFrame {
     }
 
     /// Shift index by desired number of periods.
-    #[pyo3(signature = (periods=1))]
-    fn shift(&self, periods: i64) -> PyResult<PyDataFrame> {
-        let res = self
-            .inner
-            .shift(periods)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (periods=1, freq=None, axis=None, fill_value=None, suffix=None))]
+    fn shift(
+        &self,
+        periods: i64,
+        freq: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        suffix: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (freq, suffix);
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let fill_sc = match fill_value {
+            Some(fv) => Some(py_to_scalar(fv.py(), fv)?),
+            None => None,
+        };
+        let res = match ax {
+            0 => {
+                if let Some(sc) = fill_sc {
+                    self.inner
+                        .shift_with_fill_value(periods, sc)
+                        .map_err(frame_error_to_py)?
+                } else {
+                    self.inner.shift(periods).map_err(frame_error_to_py)?
+                }
+            }
+            1 => {
+                if let Some(sc) = fill_sc {
+                    self.inner
+                        .shift_axis1_with_fill_value(periods, sc)
+                        .map_err(frame_error_to_py)?
+                } else {
+                    self.inner.shift_axis1(periods).map_err(frame_error_to_py)?
+                }
+            }
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {other} for object type DataFrame"
+                )));
+            }
+        };
         Ok(PyDataFrame { inner: res })
     }
 
@@ -28965,7 +29059,7 @@ mod tests {
         assert_eq!(py_s.inner.idxmax().expect("idxmax"), IndexLabel::Int64(1)); // ubs:ignore — test fixture
         assert_eq!(py_s.inner.idxmin().expect("idxmin"), IndexLabel::Int64(0)); // ubs:ignore — test fixture
 
-        let shifted = py_s.shift(1).expect("shift"); // ubs:ignore — test fixture
+        let shifted = py_s.shift(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
         assert_eq!(shifted.inner.len(), 4);
 
         let nlg = py_s.nlargest(2).expect("nlargest"); // ubs:ignore — test fixture
@@ -29034,10 +29128,12 @@ mod tests {
         let idxmin_s = py_df.idxmin(None, true, false).expect("idxmin"); // ubs:ignore — test fixture
         assert_eq!(idxmin_s.inner.len(), 2);
 
-        let diff_df = py_df.diff(1).expect("diff"); // ubs:ignore — test fixture
+        let diff_df = py_df.diff(1, None).expect("diff"); // ubs:ignore — test fixture
         assert_eq!(diff_df.shape(), (3, 2));
 
-        let pct_df = py_df.pct_change(1).expect("pct_change"); // ubs:ignore — test fixture
+        let pct_df = py_df
+            .pct_change(1, None, None, None, None)
+            .expect("pct_change"); // ubs:ignore — test fixture
         assert_eq!(pct_df.shape(), (3, 2));
 
         let cs = py_df.cumsum(None, true).expect("cumsum"); // ubs:ignore — test fixture
@@ -29049,7 +29145,7 @@ mod tests {
         let cmax = py_df.cummax(None, true).expect("cummax"); // ubs:ignore — test fixture
         assert_eq!(cmax.shape(), (3, 2));
 
-        let sh = py_df.shift(1).expect("shift"); // ubs:ignore — test fixture
+        let sh = py_df.shift(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
         assert_eq!(sh.shape(), (3, 2));
 
         let queried = py_df.query("a > 1").expect("query"); // ubs:ignore — test fixture
@@ -30791,6 +30887,156 @@ mod tests {
                     .sort_index(None, None, None, true, None, "last", true, false, None)
                     .is_err()
             );
+        });
+    }
+
+    #[test]
+    fn test_py_shift_diff_pct_change_parity() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            // Setup Series
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                ],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(50.0),
+                ],
+            )
+            .expect("series");
+            let py_s = PySeries { inner: s };
+
+            let ax0 = 0.into_bound_py_any(py).unwrap();
+            let ax1 = 1.into_bound_py_any(py).unwrap();
+            let ax_str0 = "index".into_bound_py_any(py).unwrap();
+            let ax_str1 = "columns".into_bound_py_any(py).unwrap();
+            let fill_99 = 99.0.into_bound_py_any(py).unwrap();
+
+            // 1. Series diff
+            let s_diff = py_s.diff(1, None).expect("series diff default");
+            assert!(s_diff.inner.values()[0].is_nan() || s_diff.inner.values()[0].is_null());
+            assert_eq!(s_diff.inner.values()[1], Scalar::Float64(10.0));
+            assert_eq!(s_diff.inner.values()[2], Scalar::Float64(30.0));
+
+            let s_diff_ax0 = py_s.diff(1, Some(&ax0)).expect("series diff axis 0");
+            assert_eq!(s_diff_ax0.inner.values()[1], Scalar::Float64(10.0));
+
+            let s_diff_ax_str0 = py_s
+                .diff(1, Some(&ax_str0))
+                .expect("series diff axis index");
+            assert_eq!(s_diff_ax_str0.inner.values()[1], Scalar::Float64(10.0));
+
+            // Series diff axis 1 error
+            assert!(py_s.diff(1, Some(&ax1)).is_err());
+            assert!(py_s.diff(1, Some(&ax_str1)).is_err());
+
+            // 2. Series pct_change
+            let s_pct = py_s
+                .pct_change(1, None, None, None)
+                .expect("series pct_change");
+            assert!(s_pct.inner.values()[0].is_nan() || s_pct.inner.values()[0].is_null());
+            assert_eq!(s_pct.inner.values()[1], Scalar::Float64(1.0)); // (20-10)/10 = 1.0
+            assert_eq!(s_pct.inner.values()[2], Scalar::Float64(1.5)); // (50-20)/20 = 1.5
+
+            // 3. Series shift
+            let s_shift = py_s
+                .shift(1, None, None, None, None)
+                .expect("series shift default");
+            assert!(s_shift.inner.values()[0].is_nan() || s_shift.inner.values()[0].is_null());
+            assert_eq!(s_shift.inner.values()[1], Scalar::Float64(10.0));
+
+            let s_shift_fill = py_s
+                .shift(1, None, None, Some(&fill_99), None)
+                .expect("series shift fill_value");
+            assert_eq!(s_shift_fill.inner.values()[0], Scalar::Float64(99.0));
+            assert_eq!(s_shift_fill.inner.values()[1], Scalar::Float64(10.0));
+
+            // Series shift axis 1 error
+            assert!(py_s.shift(1, None, Some(&ax1), None, None).is_err());
+            assert!(py_s.shift(1, None, Some(&ax_str1), None, None).is_err());
+
+            // Setup DataFrame
+            let df = DataFrame::from_dict(
+                &["a", "b", "c"],
+                vec![
+                    ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                    ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                    ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+                ],
+            )
+            .expect("dataframe");
+            let py_df = PyDataFrame { inner: df };
+
+            // 4. DataFrame diff
+            let df_diff0 = py_df.diff(1, None).expect("df diff axis 0");
+            let col_a = df_diff0.inner.column("a").unwrap();
+            assert!(col_a.values()[0].is_nan() || col_a.values()[0].is_null());
+            assert_eq!(col_a.values()[1], Scalar::Float64(1.0));
+
+            let df_diff1 = py_df.diff(1, Some(&ax1)).expect("df diff axis 1");
+            let col_a_diff1 = df_diff1.inner.column("a").unwrap();
+            let col_b_diff1 = df_diff1.inner.column("b").unwrap();
+            assert!(col_a_diff1.values()[0].is_nan() || col_a_diff1.values()[0].is_null());
+            assert_eq!(col_b_diff1.values()[0], Scalar::Float64(9.0)); // 10.0 - 1.0
+
+            let ax2 = 2.into_bound_py_any(py).unwrap();
+            assert!(py_df.diff(1, Some(&ax2)).is_err());
+
+            // 5. DataFrame pct_change
+            let df_pct0 = py_df
+                .pct_change(1, None, None, None, None)
+                .expect("df pct_change axis 0");
+            let col_a_pct0 = df_pct0.inner.column("a").unwrap();
+            assert!(col_a_pct0.values()[0].is_nan() || col_a_pct0.values()[0].is_null());
+            assert_eq!(col_a_pct0.values()[1], Scalar::Float64(1.0)); // (2-1)/1 = 1.0
+
+            let df_pct1 = py_df
+                .pct_change(1, None, None, None, Some(&ax1))
+                .expect("df pct_change axis 1");
+            let col_a_pct1 = df_pct1.inner.column("a").unwrap();
+            let col_b_pct1 = df_pct1.inner.column("b").unwrap();
+            assert!(col_a_pct1.values()[0].is_nan() || col_a_pct1.values()[0].is_null());
+            assert_eq!(col_b_pct1.values()[0], Scalar::Float64(9.0)); // (10-1)/1 = 9.0
+
+            assert!(py_df.pct_change(1, None, None, None, Some(&ax2)).is_err());
+
+            // 6. DataFrame shift
+            let df_shift0 = py_df
+                .shift(1, None, None, None, None)
+                .expect("df shift axis 0");
+            let col_a_s0 = df_shift0.inner.column("a").unwrap();
+            assert!(col_a_s0.values()[0].is_nan() || col_a_s0.values()[0].is_null());
+            assert_eq!(col_a_s0.values()[1], Scalar::Float64(1.0));
+
+            let df_shift0_fill = py_df
+                .shift(1, None, None, Some(&fill_99), None)
+                .expect("df shift axis 0 fill");
+            let col_a_s0_f = df_shift0_fill.inner.column("a").unwrap();
+            assert_eq!(col_a_s0_f.values()[0], Scalar::Float64(99.0));
+            assert_eq!(col_a_s0_f.values()[1], Scalar::Float64(1.0));
+
+            let df_shift1 = py_df
+                .shift(1, None, Some(&ax1), None, None)
+                .expect("df shift axis 1");
+            let col_a_s1 = df_shift1.inner.column("a").unwrap();
+            let col_b_s1 = df_shift1.inner.column("b").unwrap();
+            assert!(col_a_s1.values()[0].is_nan() || col_a_s1.values()[0].is_null());
+            assert_eq!(col_b_s1.values()[0], Scalar::Float64(1.0));
+
+            let df_shift1_fill = py_df
+                .shift(1, None, Some(&ax1), Some(&fill_99), None)
+                .expect("df shift axis 1 fill");
+            let col_a_s1_f = df_shift1_fill.inner.column("a").unwrap();
+            let col_b_s1_f = df_shift1_fill.inner.column("b").unwrap();
+            assert_eq!(col_a_s1_f.values()[0], Scalar::Float64(99.0));
+            assert_eq!(col_b_s1_f.values()[0], Scalar::Float64(1.0));
+
+            assert!(py_df.shift(1, None, Some(&ax2), None, None).is_err());
         });
     }
 }

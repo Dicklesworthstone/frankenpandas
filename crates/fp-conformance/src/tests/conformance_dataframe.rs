@@ -5,6 +5,9 @@
 //! edge-case input: empty frames, single-row frames, NaN-heavy columns,
 //! duplicate row labels, mixed dtypes, and larger ordered slices.
 
+use fp_frame::DataFrame;
+use fp_types::Scalar;
+
 use super::{
     CaseStatus, HarnessConfig, HarnessError, OracleMode, PacketFixture, ResolvedExpected,
     SuiteOptions, capture_live_oracle_expected,
@@ -3815,4 +3818,155 @@ print(json.dumps(res))
         .map(|v| v.as_str().map(|s| s.to_string()))
         .collect();
     assert_eq!(actual_na_last_idx, oracle_na_last_idx);
+}
+
+#[test]
+fn conformance_dataframe_shift_diff_pct_change_differential() {
+    let python_code = r#"
+import json, pandas as pd, numpy as np
+df = pd.DataFrame({
+    'a': [1.0, 2.0, 4.0],
+    'b': [10.0, 20.0, 40.0],
+    'c': [100.0, 200.0, 400.0],
+})
+
+def df_to_dict(d):
+    return {col: [None if pd.isna(x) else float(x) for x in d[col]] for col in d.columns}
+
+res = {
+    'shift_ax0': df_to_dict(df.shift(1, axis=0)),
+    'shift_ax0_fill': df_to_dict(df.shift(1, axis=0, fill_value=99.0)),
+    'shift_ax1': df_to_dict(df.shift(1, axis=1)),
+    'shift_ax1_neg': df_to_dict(df.shift(-1, axis=1)),
+    'shift_ax1_fill': df_to_dict(df.shift(1, axis=1, fill_value=99.0)),
+    'diff_ax0': df_to_dict(df.diff(1, axis=0)),
+    'diff_ax1': df_to_dict(df.diff(1, axis=1)),
+    'diff_ax1_neg': df_to_dict(df.diff(-1, axis=1)),
+    'pct_ax0': df_to_dict(df.pct_change(1, axis=0)),
+    'pct_ax1': df_to_dict(df.pct_change(1, axis=1)),
+    'pct_ax1_neg': df_to_dict(df.pct_change(-1, axis=1)),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame shift/diff/pct_change differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b", "c"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(4.0),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(40.0),
+                ],
+            ),
+            (
+                "c",
+                vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(200.0),
+                    Scalar::Float64(400.0),
+                ],
+            ),
+        ],
+    )
+    .expect("df");
+
+    let check_df = |actual: &DataFrame, key: &str| {
+        let expected = &oracle[key];
+        for col in &["a", "b", "c"] {
+            let actual_col = actual.column(col).expect("col");
+            let actual_vals: Vec<Option<f64>> = actual_col
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Null(_) => None,
+                    Scalar::Float64(f) if f.is_nan() => None,
+                    _ => v.to_f64().ok(),
+                })
+                .collect();
+            let oracle_vals: Vec<Option<f64>> = expected[*col]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64())
+                .collect();
+            assert_eq!(actual_vals.len(), oracle_vals.len());
+            for (va, vo) in actual_vals.iter().zip(oracle_vals.iter()) {
+                match (va, vo) {
+                    (Some(a), Some(o)) => {
+                        assert!((a - o).abs() < 1e-9, "col {col} mismatch: {a} vs {o}")
+                    }
+                    (None, None) => {}
+                    _ => panic!("col {col} nullness mismatch: {va:?} vs {vo:?}"),
+                }
+            }
+        }
+    };
+
+    // 1. shift axis 0
+    let df_s0 = df.shift(1).expect("shift axis 0");
+    check_df(&df_s0, "shift_ax0");
+
+    // 2. shift axis 0 fill_value
+    let df_s0_fill = df
+        .shift_with_fill_value(1, Scalar::Float64(99.0))
+        .expect("shift axis 0 fill");
+    check_df(&df_s0_fill, "shift_ax0_fill");
+
+    // 3. shift axis 1
+    let df_s1 = df.shift_axis1(1).expect("shift axis 1");
+    check_df(&df_s1, "shift_ax1");
+
+    // 4. shift axis 1 negative
+    let df_s1_neg = df.shift_axis1(-1).expect("shift axis 1 neg");
+    check_df(&df_s1_neg, "shift_ax1_neg");
+
+    // 5. shift axis 1 fill_value
+    let df_s1_fill = df
+        .shift_axis1_with_fill_value(1, Scalar::Float64(99.0))
+        .expect("shift axis 1 fill");
+    check_df(&df_s1_fill, "shift_ax1_fill");
+
+    // 6. diff axis 0
+    let df_d0 = df.diff(1).expect("diff axis 0");
+    check_df(&df_d0, "diff_ax0");
+
+    // 7. diff axis 1
+    let df_d1 = df.diff_axis1(1).expect("diff axis 1");
+    check_df(&df_d1, "diff_ax1");
+
+    // 8. diff axis 1 negative
+    let df_d1_neg = df.diff_axis1(-1).expect("diff axis 1 neg");
+    check_df(&df_d1_neg, "diff_ax1_neg");
+
+    // 9. pct_change axis 0
+    let df_p0 = df.pct_change(1).expect("pct axis 0");
+    check_df(&df_p0, "pct_ax0");
+
+    // 10. pct_change axis 1
+    let df_p1 = df.pct_change_axis1(1).expect("pct axis 1");
+    check_df(&df_p1, "pct_ax1");
+
+    // 11. pct_change axis 1 negative
+    let df_p1_neg = df.pct_change_axis1(-1).expect("pct axis 1 neg");
+    check_df(&df_p1_neg, "pct_ax1_neg");
 }
