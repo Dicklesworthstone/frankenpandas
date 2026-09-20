@@ -2121,3 +2121,299 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_reg, oracle_reg);
 }
+
+#[test]
+fn conformance_series_sort_values_and_duplicates_differential() {
+    let python_code = r#"
+import json, pandas as pd, numpy as np
+s = pd.Series([2.0, 1.0, 2.0, np.nan], index=['a', 'b', 'c', 'd'], name='vals')
+
+s_sort_asc = s.sort_values(ascending=True, na_position='last')
+s_sort_desc_na_first = s.sort_values(ascending=False, na_position='first')
+s_sort_ign_idx = s.sort_values(ascending=True, ignore_index=True)
+
+s_dedup_first = s.drop_duplicates(keep='first')
+s_dedup_last = s.drop_duplicates(keep='last')
+s_dedup_none = s.drop_duplicates(keep=False, ignore_index=True)
+
+s_dup_first = s.duplicated(keep='first')
+s_dup_none = s.duplicated(keep=False)
+
+res = {
+    'sort_asc_idx': list(s_sort_asc.index),
+    'sort_asc_vals': [None if pd.isna(x) else float(x) for x in s_sort_asc],
+    'sort_desc_na_first_idx': list(s_sort_desc_na_first.index),
+    'sort_desc_na_first_vals': [None if pd.isna(x) else float(x) for x in s_sort_desc_na_first],
+    'sort_ign_idx': [int(x) for x in s_sort_ign_idx.index],
+    'sort_ign_vals': [None if pd.isna(x) else float(x) for x in s_sort_ign_idx],
+    'dedup_first_idx': list(s_dedup_first.index),
+    'dedup_first_vals': [None if pd.isna(x) else float(x) for x in s_dedup_first],
+    'dedup_last_idx': list(s_dedup_last.index),
+    'dedup_last_vals': [None if pd.isna(x) else float(x) for x in s_dedup_last],
+    'dedup_none_idx': [int(x) for x in s_dedup_none.index],
+    'dedup_none_vals': [None if pd.isna(x) else float(x) for x in s_dedup_none],
+    'dup_first': [bool(x) for x in s_dup_first],
+    'dup_none': [bool(x) for x in s_dup_none],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping Series sort_values/duplicates differential test"
+            );
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "vals",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+        ],
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Null(NullKind::NaN),
+        ],
+    )
+    .expect("s");
+
+    // 1. sort_values ascending na_position='last'
+    let s_asc = s.sort_values_na(true, "last").expect("sort asc");
+    let actual_asc_idx: Vec<String> = s_asc
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_asc_idx: Vec<String> = oracle["sort_asc_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_asc_idx, oracle_asc_idx);
+    let actual_asc_vals: Vec<Option<f64>> = s_asc
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_asc_vals: Vec<Option<f64>> = oracle["sort_asc_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_asc_vals, oracle_asc_vals);
+
+    // 2. sort_values descending na_position='first'
+    let s_desc = s.sort_values_na(false, "first").expect("sort desc");
+    let actual_desc_idx: Vec<String> = s_desc
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_desc_idx: Vec<String> = oracle["sort_desc_na_first_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_desc_idx, oracle_desc_idx);
+    let actual_desc_vals: Vec<Option<f64>> = s_desc
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_desc_vals: Vec<Option<f64>> = oracle["sort_desc_na_first_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_desc_vals, oracle_desc_vals);
+
+    // 3. sort_values ignore_index
+    let s_ign = s
+        .sort_values_na(true, "last")
+        .expect("sort ign")
+        .reset_index(true)
+        .expect("reset")
+        .into_series()
+        .expect("into_series");
+    let actual_ign_idx: Vec<i64> = s_ign
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => *i,
+            _ => -1,
+        })
+        .collect();
+    let oracle_ign_idx: Vec<i64> = oracle["sort_ign_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_ign_idx, oracle_ign_idx);
+    let actual_ign_vals: Vec<Option<f64>> = s_ign
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_ign_vals: Vec<Option<f64>> = oracle["sort_ign_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_ign_vals, oracle_ign_vals);
+
+    // 4. drop_duplicates keep='first'
+    let s_dedup_first = s
+        .drop_duplicates_keep(fp_index::DuplicateKeep::First)
+        .expect("dedup first");
+    let actual_df_idx: Vec<String> = s_dedup_first
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_df_idx: Vec<String> = oracle["dedup_first_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_df_idx, oracle_df_idx);
+    let actual_df_vals: Vec<Option<f64>> = s_dedup_first
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_df_vals: Vec<Option<f64>> = oracle["dedup_first_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_df_vals, oracle_df_vals);
+
+    // 5. drop_duplicates keep='last'
+    let s_dedup_last = s
+        .drop_duplicates_keep(fp_index::DuplicateKeep::Last)
+        .expect("dedup last");
+    let actual_dl_idx: Vec<String> = s_dedup_last
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_dl_idx: Vec<String> = oracle["dedup_last_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_dl_idx, oracle_dl_idx);
+    let actual_dl_vals: Vec<Option<f64>> = s_dedup_last
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_dl_vals: Vec<Option<f64>> = oracle["dedup_last_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_dl_vals, oracle_dl_vals);
+
+    // 6. drop_duplicates keep=False, ignore_index=True
+    let s_dedup_none = s
+        .drop_duplicates_keep(fp_index::DuplicateKeep::None)
+        .expect("dedup none")
+        .reset_index(true)
+        .expect("reset")
+        .into_series()
+        .expect("into_series");
+    let actual_dn_idx: Vec<i64> = s_dedup_none
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => *i,
+            _ => -1,
+        })
+        .collect();
+    let oracle_dn_idx: Vec<i64> = oracle["dedup_none_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_dn_idx, oracle_dn_idx);
+    let actual_dn_vals: Vec<Option<f64>> = s_dedup_none
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().ok())
+        .collect();
+    let oracle_dn_vals: Vec<Option<f64>> = oracle["dedup_none_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_dn_vals, oracle_dn_vals);
+
+    // 7. duplicated keep='first'
+    let s_dup_first = s
+        .duplicated_keep(fp_index::DuplicateKeep::First)
+        .expect("dup first");
+    let actual_dup_first: Vec<bool> = s_dup_first
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_bool().unwrap())
+        .collect();
+    let oracle_dup_first: Vec<bool> = oracle["dup_first"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(actual_dup_first, oracle_dup_first);
+
+    // 8. duplicated keep=False
+    let s_dup_none = s
+        .duplicated_keep(fp_index::DuplicateKeep::None)
+        .expect("dup none");
+    let actual_dup_none: Vec<bool> = s_dup_none
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_bool().unwrap())
+        .collect();
+    let oracle_dup_none: Vec<bool> = oracle["dup_none"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(actual_dup_none, oracle_dup_none);
+}

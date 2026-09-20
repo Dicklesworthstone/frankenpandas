@@ -3386,3 +3386,228 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_reg_c, oracle_reg_c);
 }
+
+#[test]
+fn conformance_dataframe_sort_values_and_drop_duplicates_differential() {
+    use fp_frame::DataFrame;
+    use fp_index::{DuplicateKeep, IndexLabel};
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({
+    'a': [1, 2, 1, 2],
+    'b': [10, 20, 10, 30],
+}, index=['r0', 'r1', 'r2', 'r3'])
+
+# 1. sort_values single column
+df_sort_a = df.sort_values(by='a', ascending=False)
+# 2. sort_values multi-column with per-column ascending
+df_sort_multi = df.sort_values(by=['a', 'b'], ascending=[True, False], ignore_index=True)
+# 3. drop_duplicates subset=['a'], keep='first'
+df_dedup_subset = df.drop_duplicates(subset=['a'], keep='first')
+# 4. drop_duplicates keep='last', ignore_index=True
+df_dedup_last = df.drop_duplicates(keep='last', ignore_index=True)
+
+res = {
+    'sort_a_idx': list(df_sort_a.index),
+    'sort_a_col_a': [int(x) for x in df_sort_a['a']],
+    'sort_multi_col_b': [int(x) for x in df_sort_multi['b']],
+    'sort_multi_idx': [int(x) for x in df_sort_multi.index],
+    'dedup_subset_idx': list(df_dedup_subset.index),
+    'dedup_subset_a': [int(x) for x in df_dedup_subset['a']],
+    'dedup_last_col_a': [int(x) for x in df_dedup_last['a']],
+    'dedup_last_col_b': [int(x) for x in df_dedup_last['b']],
+    'dedup_last_idx': [int(x) for x in df_dedup_last.index],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame sort_values/drop_duplicates differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict_with_index(
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(10),
+                    Scalar::Int64(30),
+                ],
+            ),
+        ],
+        vec![
+            IndexLabel::Utf8("r0".into()),
+            IndexLabel::Utf8("r1".into()),
+            IndexLabel::Utf8("r2".into()),
+            IndexLabel::Utf8("r3".into()),
+        ],
+    )
+    .expect("df");
+
+    // 1. sort_values single column
+    let df_sort_a = df.sort_values("a", false).expect("sort_values a");
+    let actual_sort_a_idx: Vec<String> = df_sort_a
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_sort_a_idx: Vec<String> = oracle["sort_a_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_sort_a_idx, oracle_sort_a_idx);
+    let actual_sort_a_col_a: Vec<i64> = df_sort_a
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap())
+        .collect();
+    let oracle_sort_a_col_a: Vec<i64> = oracle["sort_a_col_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_sort_a_col_a, oracle_sort_a_col_a);
+
+    // 2. sort_values multi-column with per-column ascending & ignore_index
+    let df_sort_multi = df
+        .sort_values_multi(&["a", "b"], &[true, false], "last")
+        .expect("sort multi")
+        .reset_index(true)
+        .expect("reset");
+    let actual_multi_b: Vec<i64> = df_sort_multi
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap())
+        .collect();
+    let oracle_multi_b: Vec<i64> = oracle["sort_multi_col_b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_multi_b, oracle_multi_b);
+    let actual_multi_idx: Vec<i64> = df_sort_multi
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => *i,
+            _ => -1,
+        })
+        .collect();
+    let oracle_multi_idx: Vec<i64> = oracle["sort_multi_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_multi_idx, oracle_multi_idx);
+
+    // 3. drop_duplicates subset=['a'], keep='first'
+    let df_dedup_subset = df
+        .drop_duplicates(Some(&["a".to_string()]), DuplicateKeep::First, false)
+        .expect("dedup subset");
+    let actual_subset_idx: Vec<String> = df_dedup_subset
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_subset_idx: Vec<String> = oracle["dedup_subset_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_subset_idx, oracle_subset_idx);
+    let actual_subset_a: Vec<i64> = df_dedup_subset
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap())
+        .collect();
+    let oracle_subset_a: Vec<i64> = oracle["dedup_subset_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_subset_a, oracle_subset_a);
+
+    // 4. drop_duplicates keep='last', ignore_index=True
+    let df_dedup_last = df
+        .drop_duplicates(None, DuplicateKeep::Last, true)
+        .expect("dedup last");
+    let actual_last_a: Vec<i64> = df_dedup_last
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap())
+        .collect();
+    let oracle_last_a: Vec<i64> = oracle["dedup_last_col_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_last_a, oracle_last_a);
+    let actual_last_b: Vec<i64> = df_dedup_last
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap())
+        .collect();
+    let oracle_last_b: Vec<i64> = oracle["dedup_last_col_b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_last_b, oracle_last_b);
+    let actual_last_idx: Vec<i64> = df_dedup_last
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => *i,
+            _ => -1,
+        })
+        .collect();
+    let oracle_last_idx: Vec<i64> = oracle["dedup_last_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_last_idx, oracle_last_idx);
+}

@@ -10230,13 +10230,46 @@ impl PySeries {
     }
 
     /// Sort the Series by value, returning a new Series.
-    #[pyo3(signature = (ascending=true))]
-    fn sort_values(&self, ascending: bool) -> PyResult<PySeries> {
-        let r = self
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (axis=None, ascending=true, inplace=false, kind=None, na_position="last", ignore_index=false, key=None))]
+    fn sort_values(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        ascending: bool,
+        inplace: bool,
+        kind: Option<&str>,
+        na_position: &str,
+        ignore_index: bool,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = kind;
+        let _ = key;
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        let sorted = self
             .inner
-            .sort_values(ascending)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
+            .sort_values_na(ascending, na_position)
+            .map_err(frame_error_to_py)?;
+        let final_series = if ignore_index {
+            match sorted.reset_index(true).map_err(frame_error_to_py)? {
+                fp_frame::SeriesResetIndexResult::Series(s) => s,
+                fp_frame::SeriesResetIndexResult::DataFrame(_) => unreachable!(),
+            }
+        } else {
+            sorted
+        };
+        Ok(PySeries {
+            inner: final_series,
+        })
     }
 
     /// Fill missing values with `value` or using `method`, returning a new Series.
@@ -10885,13 +10918,45 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    fn drop_duplicates(&self) -> PyResult<PySeries> {
-        let res = self.inner.drop_duplicates().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+    /// Return Series with duplicate values removed.
+    #[pyo3(signature = (keep=None, inplace=false, ignore_index=false))]
+    fn drop_duplicates(
+        &self,
+        keep: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        ignore_index: bool,
+    ) -> PyResult<PySeries> {
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let keep_enum = parse_duplicate_keep(keep)?;
+        let res = self
+            .inner
+            .drop_duplicates_keep(keep_enum)
+            .map_err(frame_error_to_py)?;
+        let final_series = if ignore_index {
+            match res.reset_index(true).map_err(frame_error_to_py)? {
+                fp_frame::SeriesResetIndexResult::Series(s) => s,
+                fp_frame::SeriesResetIndexResult::DataFrame(_) => unreachable!(),
+            }
+        } else {
+            res
+        };
+        Ok(PySeries {
+            inner: final_series,
+        })
     }
 
-    fn duplicated(&self) -> PyResult<PySeries> {
-        let res = self.inner.duplicated().map_err(frame_error_to_py)?;
+    /// Indicate duplicate Series values.
+    #[pyo3(signature = (keep=None))]
+    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        let keep_enum = parse_duplicate_keep(keep)?;
+        let res = self
+            .inner
+            .duplicated_keep(keep_enum)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
@@ -14673,14 +14738,88 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Sort by a column.
-    fn sort_values(&self, by: &str, ascending: Option<bool>) -> PyResult<PyDataFrame> {
-        let asc = ascending.unwrap_or(true);
-        let result = self
-            .inner
-            .sort_values(by, asc)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// Sort DataFrame by one or more columns.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (by, axis=None, ascending=None, inplace=false, kind=None, na_position="last", ignore_index=false, key=None))]
+    fn sort_values(
+        &self,
+        by: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        ascending: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        kind: Option<&str>,
+        na_position: &str,
+        ignore_index: bool,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = kind;
+        let _ = key;
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type DataFrame (axis=1 sort not supported)"
+            )));
+        }
+
+        let by_cols: Vec<String> = if let Ok(single) = by.extract::<String>() {
+            vec![single]
+        } else if let Ok(list) = by.extract::<Vec<String>>() {
+            if list.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Must pass at least one column to sort by",
+                ));
+            }
+            list
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "by must be a string or list of strings",
+            ));
+        };
+
+        let asc_flags: Vec<bool> = match ascending {
+            None => vec![true; by_cols.len()],
+            Some(asc_obj) => {
+                if let Ok(b) = asc_obj.extract::<bool>() {
+                    vec![b; by_cols.len()]
+                } else if let Ok(bool_list) = asc_obj.extract::<Vec<bool>>() {
+                    if bool_list.len() != by_cols.len() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Length of ascending ({}) must match the length of by ({})",
+                            bool_list.len(),
+                            by_cols.len()
+                        )));
+                    }
+                    bool_list
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "ascending must be a bool or list of bools",
+                    ));
+                }
+            }
+        };
+
+        let by_refs: Vec<&str> = by_cols.iter().map(String::as_str).collect();
+        let sorted = if by_refs.len() == 1 {
+            self.inner
+                .sort_values_na(by_refs[0], asc_flags[0], na_position)
+                .map_err(frame_error_to_py)?
+        } else {
+            self.inner
+                .sort_values_multi(&by_refs, &asc_flags, na_position)
+                .map_err(frame_error_to_py)?
+        };
+
+        let out = if ignore_index {
+            sorted.reset_index(true).map_err(frame_error_to_py)?
+        } else {
+            sorted
+        };
+        Ok(PyDataFrame { inner: out })
     }
 
     /// Return boolean Series denoting duplicate rows.
@@ -14713,13 +14852,19 @@ impl PyDataFrame {
     }
 
     /// Drop duplicate rows.
-    #[pyo3(signature = (subset=None, keep=None, ignore_index=false))]
+    #[pyo3(signature = (subset=None, keep=None, inplace=false, ignore_index=false))]
     fn drop_duplicates(
         &self,
         subset: Option<&Bound<'_, PyAny>>,
         keep: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
         ignore_index: bool,
     ) -> PyResult<PyDataFrame> {
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
         let keep_enum = parse_duplicate_keep(keep)?;
         let subset_vec: Option<Vec<String>> = match subset {
             None => None,
@@ -28598,9 +28743,11 @@ mod tests {
         let nsm = py_s.nsmallest(2).expect("nsmallest"); // ubs:ignore — test fixture
         assert_eq!(nsm.inner.len(), 2);
 
-        let dedup = py_s.drop_duplicates().expect("drop_duplicates"); // ubs:ignore — test fixture
+        let dedup = py_s
+            .drop_duplicates(None, false, false)
+            .expect("drop_duplicates"); // ubs:ignore — test fixture
         assert_eq!(dedup.inner.len(), 3);
-        let dups = py_s.duplicated().expect("duplicated"); // ubs:ignore — test fixture
+        let dups = py_s.duplicated(None).expect("duplicated"); // ubs:ignore — test fixture
         assert_eq!(dups.inner.len(), 4);
 
         let reset = py_s.inner.reset_index(false).expect("reset_index"); // ubs:ignore — test fixture
@@ -28681,7 +28828,7 @@ mod tests {
         let dups = py_df.duplicated(None, None).expect("duplicated"); // ubs:ignore — test fixture
         assert_eq!(dups.inner.len(), 3);
         let dedup = py_df
-            .drop_duplicates(None, None, false)
+            .drop_duplicates(None, None, false, false)
             .expect("drop_duplicates"); // ubs:ignore — test fixture
         assert_eq!(dedup.shape(), (3, 2));
 
@@ -30078,6 +30225,164 @@ mod tests {
             assert_eq!(
                 df_col_spec.inner.column("b").unwrap().values(),
                 &[Scalar::Int64(3), Scalar::Int64(99)]
+            );
+        });
+    }
+
+    #[test]
+    fn test_py_sort_values_and_drop_duplicates() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            // Series setup with duplicates and null
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Int64(10),
+                    IndexLabel::Int64(20),
+                    IndexLabel::Int64(30),
+                    IndexLabel::Int64(40),
+                ],
+                vec![
+                    Scalar::Int64(2),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )
+            .expect("s");
+            let py_s = PySeries { inner: s };
+
+            // 1. Series drop_duplicates keep='last'
+            let keep_last = "last".into_bound_py_any(py).unwrap();
+            let s_last = py_s
+                .drop_duplicates(Some(&keep_last), false, false)
+                .expect("drop_duplicates last");
+            assert_eq!(s_last.inner.len(), 3);
+            assert_eq!(s_last.inner.index().labels()[0], IndexLabel::Int64(20));
+            assert_eq!(s_last.inner.index().labels()[1], IndexLabel::Int64(30));
+
+            // 2. Series drop_duplicates keep=False and ignore_index=True
+            let keep_false = false.into_bound_py_any(py).unwrap();
+            let s_dedup_none = py_s
+                .drop_duplicates(Some(&keep_false), false, true)
+                .expect("drop_duplicates none");
+            assert_eq!(s_dedup_none.inner.len(), 2);
+            assert_eq!(s_dedup_none.inner.index().labels()[0], IndexLabel::Int64(0));
+            assert_eq!(s_dedup_none.inner.index().labels()[1], IndexLabel::Int64(1));
+
+            // 3. Series duplicated keep=False
+            let s_dups = py_s.duplicated(Some(&keep_false)).expect("duplicated");
+            assert_eq!(
+                s_dups.inner.column().values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false)
+                ]
+            );
+
+            // 4. Series sort_values na_position='first', ascending=true, ignore_index=true
+            let s_sorted = py_s
+                .sort_values(None, true, false, None, "first", true, None)
+                .expect("sort_values");
+            assert_eq!(
+                s_sorted.inner.column().values(),
+                &[
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(2)
+                ]
+            );
+            assert_eq!(s_sorted.inner.index().labels()[0], IndexLabel::Int64(0));
+
+            assert!(
+                py_s.sort_values(None, true, true, None, "last", false, None)
+                    .is_err()
+            );
+
+            // DataFrame setup
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    (
+                        "a",
+                        vec![
+                            Scalar::Int64(1),
+                            Scalar::Int64(2),
+                            Scalar::Int64(1),
+                            Scalar::Int64(2),
+                        ],
+                    ),
+                    (
+                        "b",
+                        vec![
+                            Scalar::Int64(10),
+                            Scalar::Int64(20),
+                            Scalar::Int64(10),
+                            Scalar::Int64(30),
+                        ],
+                    ),
+                ],
+            )
+            .expect("df");
+            let py_df = PyDataFrame { inner: df };
+
+            // 6. DataFrame drop_duplicates subset=['a'], keep='first', ignore_index=True
+            let subset_a = pyo3::types::PyList::new(py, ["a"]).unwrap();
+            let df_dedup = py_df
+                .drop_duplicates(Some(subset_a.as_any()), None, false, true)
+                .expect("df drop_duplicates");
+            assert_eq!(df_dedup.shape(), (2, 2));
+            assert_eq!(
+                df_dedup.inner.column("a").unwrap().values(),
+                &[Scalar::Int64(1), Scalar::Int64(2)]
+            );
+            assert_eq!(df_dedup.inner.index().labels()[0], IndexLabel::Int64(0));
+            assert_eq!(df_dedup.inner.index().labels()[1], IndexLabel::Int64(1));
+
+            // 7. DataFrame sort_values multi-column by=['a', 'b'], ascending=[True, False]
+            let by_cols = pyo3::types::PyList::new(py, ["a", "b"]).unwrap();
+            let asc_list = pyo3::types::PyList::new(py, [true, false]).unwrap();
+            let df_sorted = py_df
+                .sort_values(
+                    by_cols.as_any(),
+                    None,
+                    Some(asc_list.as_any()),
+                    false,
+                    None,
+                    "last",
+                    true,
+                    None,
+                )
+                .expect("df sort_values");
+            assert_eq!(df_sorted.shape(), (4, 2));
+            assert_eq!(
+                df_sorted.inner.column("b").unwrap().values(),
+                &[
+                    Scalar::Int64(10),
+                    Scalar::Int64(10),
+                    Scalar::Int64(30),
+                    Scalar::Int64(20)
+                ]
+            );
+
+            // 8. DataFrame sort_values empty by rejected
+            let empty_by = pyo3::types::PyList::new(py, Vec::<String>::new()).unwrap();
+            assert!(
+                py_df
+                    .sort_values(
+                        empty_by.as_any(),
+                        None,
+                        None,
+                        false,
+                        None,
+                        "last",
+                        false,
+                        None
+                    )
+                    .is_err()
             );
         });
     }
