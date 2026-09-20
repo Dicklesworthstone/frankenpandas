@@ -9222,6 +9222,36 @@ fn wrap_frame(result: Result<DataFrame, fp_frame::FrameError>) -> PyResult<PyDat
         .map_err(frame_error_to_py)
 }
 
+fn parse_axis_param(axis: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
+    match axis {
+        None => Ok(0),
+        Some(a) => {
+            if let Ok(i) = a.extract::<i64>() {
+                match i {
+                    0 => Ok(0),
+                    1 => Ok(1),
+                    other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "No axis named {other} for object type DataFrame"
+                    ))),
+                }
+            } else if let Ok(s) = a.extract::<String>() {
+                match s.as_str() {
+                    "index" | "rows" => Ok(0),
+                    "columns" => Ok(1),
+                    other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "No axis named {other} for object type DataFrame"
+                    ))),
+                }
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "axis must be 0, 1, 'index', or 'columns'",
+                ))
+            }
+        }
+    }
+}
+
+
 /// The right-hand side of a Series dunder: another Series as-is, or a Python
 /// scalar broadcast over `like`'s index (what pandas does for `s + 1`).
 fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> PyResult<Series> {
@@ -9945,11 +9975,13 @@ impl PySeries {
     }
 
     /// Return the cumulative sum as a new Series.
-    fn cumsum(&self) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn cumsum(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
+        let _ = axis;
         let r = self
             .inner
-            .cumsum()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .cumsum_with_skipna(skipna)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
@@ -10010,29 +10042,35 @@ impl PySeries {
     }
 
     /// Return the cumulative product as a new Series.
-    fn cumprod(&self) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn cumprod(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
+        let _ = axis;
         let r = self
             .inner
-            .cumprod()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .cumprod_with_skipna(skipna)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
     /// Return the cumulative minimum as a new Series.
-    fn cummin(&self) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn cummin(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
+        let _ = axis;
         let r = self
             .inner
-            .cummin()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .cummin_with_skipna(skipna)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
     /// Return the cumulative maximum as a new Series.
-    fn cummax(&self) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn cummax(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
+        let _ = axis;
         let r = self
             .inner
-            .cummax()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .cummax_with_skipna(skipna)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
@@ -13566,42 +13604,54 @@ impl PyDataFrame {
     }
 
     /// Return cumulative sum over a DataFrame or Series axis.
-    #[pyo3(signature = (skipna=true))]
-    fn cumsum(&self, skipna: bool) -> PyResult<PyDataFrame> {
-        let res = self
-            .inner
-            .cumsum_with_skipna(skipna)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn cumsum(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PyDataFrame> {
+        let ax = parse_axis_param(axis)?;
+        let res = if ax == 0 {
+            self.inner.cumsum_with_skipna(skipna)
+        } else {
+            self.inner.cumsum_axis1()
+        }
+        .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
     /// Return cumulative product over a DataFrame or Series axis.
-    #[pyo3(signature = (skipna=true))]
-    fn cumprod(&self, skipna: bool) -> PyResult<PyDataFrame> {
-        let res = self
-            .inner
-            .cumprod_with_skipna(skipna)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn cumprod(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PyDataFrame> {
+        let ax = parse_axis_param(axis)?;
+        let res = if ax == 0 {
+            self.inner.cumprod_with_skipna(skipna)
+        } else {
+            self.inner.cumprod_axis1()
+        }
+        .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
     /// Return cumulative minimum over a DataFrame or Series axis.
-    #[pyo3(signature = (skipna=true))]
-    fn cummin(&self, skipna: bool) -> PyResult<PyDataFrame> {
-        let res = self
-            .inner
-            .cummin_with_skipna(skipna)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn cummin(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PyDataFrame> {
+        let ax = parse_axis_param(axis)?;
+        let res = if ax == 0 {
+            self.inner.cummin_with_skipna(skipna)
+        } else {
+            self.inner.cummin_axis1()
+        }
+        .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
     /// Return cumulative maximum over a DataFrame or Series axis.
-    #[pyo3(signature = (skipna=true))]
-    fn cummax(&self, skipna: bool) -> PyResult<PyDataFrame> {
-        let res = self
-            .inner
-            .cummax_with_skipna(skipna)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn cummax(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PyDataFrame> {
+        let ax = parse_axis_param(axis)?;
+        let res = if ax == 0 {
+            self.inner.cummax_with_skipna(skipna)
+        } else {
+            self.inner.cummax_axis1()
+        }
+        .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
@@ -13897,36 +13947,7 @@ impl PyDataFrame {
         copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
         let _ = copy;
-        let axis_idx = match axis {
-            None => 0,
-            Some(a) => {
-                if let Ok(i) = a.extract::<i64>() {
-                    match i {
-                        0 => 0,
-                        1 => 1,
-                        other => {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "No axis named {other} for object type DataFrame"
-                            )));
-                        }
-                    }
-                } else if let Ok(s) = a.extract::<String>() {
-                    match s.as_str() {
-                        "index" | "rows" => 0,
-                        "columns" => 1,
-                        other => {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "No axis named {other} for object type DataFrame"
-                            )));
-                        }
-                    }
-                } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "axis must be 0, 1, 'index', or 'columns'",
-                    ));
-                }
-            }
-        };
+        let axis_idx = parse_axis_param(axis)?;
 
         if axis_idx == 0 {
             let is_sorted = self.inner.index().is_monotonic_increasing()
@@ -27810,6 +27831,81 @@ mod tests {
                 .value_counts(None, true, true, false, true)
                 .expect("df value_counts norm");
             assert_eq!(df_counts_norm.shape(), (2,));
+
+            // Test cumulative operations on PySeries
+            let s_cum = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                ],
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .expect("s_cum");
+            let py_s_cum = PySeries { inner: s_cum };
+            let cs = py_s_cum.cumsum(None, true).expect("cumsum");
+            assert_eq!(cs.shape(), (3,));
+            let cp = py_s_cum.cumprod(None, true).expect("cumprod");
+            assert_eq!(cp.shape(), (3,));
+            let cmin = py_s_cum.cummin(None, true).expect("cummin");
+            assert_eq!(cmin.shape(), (3,));
+            let cmax = py_s_cum.cummax(None, true).expect("cummax");
+            assert_eq!(cmax.shape(), (3,));
+
+            // Test cumulative operations on PyDataFrame (axis 0 and axis 1)
+            let df_cum = DataFrame::from_dict(
+                &["x", "y"],
+                vec![
+                    (
+                        "x",
+                        vec![
+                            Scalar::Float64(1.0),
+                            Scalar::Float64(2.0),
+                            Scalar::Float64(3.0),
+                        ],
+                    ),
+                    (
+                        "y",
+                        vec![
+                            Scalar::Float64(4.0),
+                            Scalar::Float64(5.0),
+                            Scalar::Float64(6.0),
+                        ],
+                    ),
+                ],
+            )
+            .expect("df_cum");
+            let py_df_cum = PyDataFrame { inner: df_cum };
+
+            let df_cs0 = py_df_cum.cumsum(None, true).expect("df cumsum axis 0");
+            assert_eq!(df_cs0.shape(), (3, 2));
+
+            let axis_1 = pyo3::types::PyInt::new(py, 1);
+            let df_cs1 = py_df_cum
+                .cumsum(Some(axis_1.as_any()), true)
+                .expect("df cumsum axis 1");
+            assert_eq!(df_cs1.shape(), (3, 2));
+
+            let df_cp1 = py_df_cum
+                .cumprod(Some(axis_1.as_any()), true)
+                .expect("df cumprod axis 1");
+            assert_eq!(df_cp1.shape(), (3, 2));
+
+            let df_cmin1 = py_df_cum
+                .cummin(Some(axis_1.as_any()), true)
+                .expect("df cummin axis 1");
+            assert_eq!(df_cmin1.shape(), (3, 2));
+
+            let df_cmax1 = py_df_cum
+                .cummax(Some(axis_1.as_any()), true)
+                .expect("df cummax axis 1");
+            assert_eq!(df_cmax1.shape(), (3, 2));
         });
     }
 }
+

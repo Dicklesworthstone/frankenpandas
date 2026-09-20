@@ -1380,3 +1380,172 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_asc_vals, oracle_asc_vals);
 }
+
+#[test]
+fn conformance_series_cumulative_differential() {
+    let python_code = r#"
+import json, pandas as pd, numpy as np
+s = pd.Series([2.0, np.nan, 4.0, 1.0])
+res = {
+    "cs_skip": [None if pd.isna(x) else float(x) for x in s.cumsum(skipna=True)],
+    "cp_skip": [None if pd.isna(x) else float(x) for x in s.cumprod(skipna=True)],
+    "cmin_skip": [None if pd.isna(x) else float(x) for x in s.cummin(skipna=True)],
+    "cmax_skip": [None if pd.isna(x) else float(x) for x in s.cummax(skipna=True)],
+    "cs_noskip": [None if pd.isna(x) else float(x) for x in s.cumsum(skipna=False)],
+    "cp_noskip": [None if pd.isna(x) else float(x) for x in s.cumprod(skipna=False)],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series cumulative differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+        ],
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+            Scalar::Float64(1.0),
+        ],
+    )
+    .expect("s");
+
+    let cs_skip = s.cumsum_with_skipna(true).expect("cs skip");
+    let actual_cs_skip: Vec<Option<f64>> = cs_skip
+        .column()
+        .values()
+        .iter()
+        .map(|v| {
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        })
+        .collect();
+    let oracle_cs_skip: Vec<Option<f64>> = oracle["cs_skip"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_cs_skip, oracle_cs_skip);
+
+    let cp_skip = s.cumprod_with_skipna(true).expect("cp skip");
+    let actual_cp_skip: Vec<Option<f64>> = cp_skip
+        .column()
+        .values()
+        .iter()
+        .map(|v| {
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        })
+        .collect();
+    let oracle_cp_skip: Vec<Option<f64>> = oracle["cp_skip"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_cp_skip, oracle_cp_skip);
+
+    let cmin_skip = s.cummin_with_skipna(true).expect("cmin skip");
+    let actual_cmin_skip: Vec<Option<f64>> = cmin_skip
+        .column()
+        .values()
+        .iter()
+        .map(|v| {
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        })
+        .collect();
+    let oracle_cmin_skip: Vec<Option<f64>> = oracle["cmin_skip"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_cmin_skip, oracle_cmin_skip);
+
+    let cmax_skip = s.cummax_with_skipna(true).expect("cmax skip");
+    let actual_cmax_skip: Vec<Option<f64>> = cmax_skip
+        .column()
+        .values()
+        .iter()
+        .map(|v| {
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        })
+        .collect();
+    let oracle_cmax_skip: Vec<Option<f64>> = oracle["cmax_skip"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_cmax_skip, oracle_cmax_skip);
+
+    let cs_noskip = s.cumsum_with_skipna(false).expect("cs noskip");
+    let actual_cs_noskip: Vec<Option<f64>> = cs_noskip
+        .column()
+        .values()
+        .iter()
+        .map(|v| {
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        })
+        .collect();
+    let oracle_cs_noskip: Vec<Option<f64>> = oracle["cs_noskip"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_cs_noskip, oracle_cs_noskip);
+
+    let cp_noskip = s.cumprod_with_skipna(false).expect("cp noskip");
+    let actual_cp_noskip: Vec<Option<f64>> = cp_noskip
+        .column()
+        .values()
+        .iter()
+        .map(|v| {
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        })
+        .collect();
+    let oracle_cp_noskip: Vec<Option<f64>> = oracle["cp_noskip"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64())
+        .collect();
+    assert_eq!(actual_cp_noskip, oracle_cp_noskip);
+}
+

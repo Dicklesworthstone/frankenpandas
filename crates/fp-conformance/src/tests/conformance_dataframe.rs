@@ -2422,3 +2422,157 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_sub_vals, oracle_sub_vals);
 }
+
+#[test]
+fn conformance_dataframe_cumulative_differential() {
+    use fp_frame::DataFrame;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({"a": [2.0, 3.0, 1.0], "b": [4.0, 1.0, 5.0]})
+res = {
+    "cs0_a": df.cumsum(axis=0)["a"].tolist(),
+    "cs0_b": df.cumsum(axis=0)["b"].tolist(),
+    "cp0_a": df.cumprod(axis=0)["a"].tolist(),
+    "cp0_b": df.cumprod(axis=0)["b"].tolist(),
+    "cmin0_a": df.cummin(axis=0)["a"].tolist(),
+    "cmax0_a": df.cummax(axis=0)["a"].tolist(),
+    "cs1_a": df.cumsum(axis=1)["a"].tolist(),
+    "cs1_b": df.cumsum(axis=1)["b"].tolist(),
+    "cp1_a": df.cumprod(axis=1)["a"].tolist(),
+    "cp1_b": df.cumprod(axis=1)["b"].tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame cumulative differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(1.0),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(5.0),
+                ],
+            ),
+        ],
+    )
+    .expect("df");
+
+    let cs0 = df.cumsum_with_skipna(true).expect("cumsum 0");
+    let actual_cs0_a: Vec<f64> = cs0
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_cs0_a: Vec<f64> = oracle["cs0_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_cs0_a, oracle_cs0_a);
+
+    let cp0 = df.cumprod_with_skipna(true).expect("cumprod 0");
+    let actual_cp0_a: Vec<f64> = cp0
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_cp0_a: Vec<f64> = oracle["cp0_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_cp0_a, oracle_cp0_a);
+
+    let cmin0 = df.cummin_with_skipna(true).expect("cummin 0");
+    let actual_cmin0_a: Vec<f64> = cmin0
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_cmin0_a: Vec<f64> = oracle["cmin0_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_cmin0_a, oracle_cmin0_a);
+
+    let cmax0 = df.cummax_with_skipna(true).expect("cummax 0");
+    let actual_cmax0_a: Vec<f64> = cmax0
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_cmax0_a: Vec<f64> = oracle["cmax0_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_cmax0_a, oracle_cmax0_a);
+
+    let cs1 = df.cumsum_axis1().expect("cumsum 1");
+    let actual_cs1_b: Vec<f64> = cs1
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_cs1_b: Vec<f64> = oracle["cs1_b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_cs1_b, oracle_cs1_b);
+
+    let cp1 = df.cumprod_axis1().expect("cumprod 1");
+    let actual_cp1_b: Vec<f64> = cp1
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_cp1_b: Vec<f64> = oracle["cp1_b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_cp1_b, oracle_cp1_b);
+}
+
