@@ -4102,3 +4102,113 @@ print(json.dumps(res))
     let df_bf1_lim1 = df.bfill_axis1(Some(1)).expect("bfill axis 1 lim 1");
     check_df(&df_bf1_lim1, "bf_ax1_lim1");
 }
+
+#[test]
+fn conformance_dataframe_cumops_differential() {
+    let python_code = r#"
+import pandas as pd
+import json
+
+df = pd.DataFrame({
+    'a': [2.0, None, 3.0, 4.0],
+    'b': [10.0, 20.0, None, 30.0],
+}, index=['r0', 'r1', 'r2', 'r3'])
+
+def df_to_dict(d):
+    return {col: [None if pd.isna(x) else float(x) for x in d[col]] for col in d.columns}
+
+res = {
+    'cumsum_ax0': df_to_dict(df.cumsum(axis=0)),
+    'cumsum_ax1': df_to_dict(df.cumsum(axis=1)),
+    'cumprod_ax0': df_to_dict(df.cumprod(axis=0)),
+    'cumprod_ax1': df_to_dict(df.cumprod(axis=1)),
+    'cummin_ax0': df_to_dict(df.cummin(axis=0)),
+    'cummax_ax0': df_to_dict(df.cummax(axis=0)),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame cumops differential test");
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Float64(30.0),
+                ],
+            ),
+        ],
+    )
+    .expect("df");
+
+    let check_df = |actual: &DataFrame, oracle_key: &str| {
+        let expected_obj = oracle[oracle_key].as_object().unwrap();
+        for col in ["a", "b"] {
+            let actual_col: Vec<Option<f64>> = actual
+                .column(col)
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Null(_) => None,
+                    Scalar::Float64(f) if f.is_nan() => None,
+                    _ => v.to_f64().ok(),
+                })
+                .collect();
+            let oracle_col: Vec<Option<f64>> = expected_obj[col]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64())
+                .collect();
+            assert_eq!(
+                actual_col, oracle_col,
+                "mismatch in {oracle_key}, col {col}"
+            );
+        }
+    };
+
+    // 1. cumsum axis 0
+    let df_cs0 = df.cumsum_with_skipna(true).expect("cumsum axis 0");
+    check_df(&df_cs0, "cumsum_ax0");
+
+    // 2. cumsum axis 1
+    let df_cs1 = df.cumsum_axis1().expect("cumsum axis 1");
+    check_df(&df_cs1, "cumsum_ax1");
+
+    // 3. cumprod axis 0
+    let df_cp0 = df.cumprod_with_skipna(true).expect("cumprod axis 0");
+    check_df(&df_cp0, "cumprod_ax0");
+
+    // 4. cumprod axis 1
+    let df_cp1 = df.cumprod_axis1().expect("cumprod axis 1");
+    check_df(&df_cp1, "cumprod_ax1");
+
+    // 5. cummin axis 0
+    let df_cm0 = df.cummin_with_skipna(true).expect("cummin axis 0");
+    check_df(&df_cm0, "cummin_ax0");
+
+    // 6. cummax axis 0
+    let df_cx0 = df.cummax_with_skipna(true).expect("cummax axis 0");
+    check_df(&df_cx0, "cummax_ax0");
+}

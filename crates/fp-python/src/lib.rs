@@ -10215,7 +10215,12 @@ impl PySeries {
     /// Return the cumulative sum as a new Series.
     #[pyo3(signature = (axis=None, skipna=true))]
     fn cumsum(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
-        let _ = axis;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         let r = self
             .inner
             .cumsum_with_skipna(skipna)
@@ -10434,7 +10439,12 @@ impl PySeries {
     /// Return the cumulative product as a new Series.
     #[pyo3(signature = (axis=None, skipna=true))]
     fn cumprod(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
-        let _ = axis;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         let r = self
             .inner
             .cumprod_with_skipna(skipna)
@@ -10445,7 +10455,12 @@ impl PySeries {
     /// Return the cumulative minimum as a new Series.
     #[pyo3(signature = (axis=None, skipna=true))]
     fn cummin(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
-        let _ = axis;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         let r = self
             .inner
             .cummin_with_skipna(skipna)
@@ -10456,7 +10471,12 @@ impl PySeries {
     /// Return the cumulative maximum as a new Series.
     #[pyo3(signature = (axis=None, skipna=true))]
     fn cummax(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
-        let _ = axis;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         let r = self
             .inner
             .cummax_with_skipna(skipna)
@@ -10636,13 +10656,19 @@ impl PySeries {
     }
 
     /// Clip values to the `[lower, upper]` range (either bound optional).
-    #[pyo3(signature = (lower=None, upper=None, axis=None))]
+    #[pyo3(signature = (lower=None, upper=None, axis=None, inplace=false))]
     fn clip(
         &self,
         lower: Option<&Bound<'_, PyAny>>,
         upper: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
     ) -> PyResult<PySeries> {
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
         let ax_opt = parse_axis_param_for_type(axis, "Series")?;
         if let Some(ax) = ax_opt {
             if ax != 0 {
@@ -14506,13 +14532,19 @@ impl PyDataFrame {
     }
 
     /// Clip values to the `[lower, upper]` range (either bound optional).
-    #[pyo3(signature = (lower=None, upper=None, axis=None))]
+    #[pyo3(signature = (lower=None, upper=None, axis=None, inplace=false))]
     fn clip(
         &self,
         lower: Option<&Bound<'_, PyAny>>,
         upper: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
     ) -> PyResult<PyDataFrame> {
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
         let ax_opt = parse_axis_param_for_type(axis, "DataFrame")?;
 
         let extract_bound = |b: &Bound<'_, PyAny>| -> PyResult<SeriesOrScalarBound> {
@@ -29504,7 +29536,7 @@ mod tests {
             let lo = pyo3::types::PyFloat::new(py, 2.0);
             let hi = pyo3::types::PyFloat::new(py, 5.0);
             let clip_df = py_df
-                .clip(Some(lo.as_any()), Some(hi.as_any()), None)
+                .clip(Some(lo.as_any()), Some(hi.as_any()), None, false)
                 .expect("clip"); // ubs:ignore — test fixture
             assert_eq!(clip_df.shape(), (3, 2));
         });
@@ -30152,7 +30184,12 @@ mod tests {
             let lo = pyo3::types::PyFloat::new(py, 2.0);
             let hi = pyo3::types::PyFloat::new(py, 3.0);
             let clipped_s = py_s
-                .clip(Some(lo.as_any()), Some(hi.as_any()), Some(ax0.as_any()))
+                .clip(
+                    Some(lo.as_any()),
+                    Some(hi.as_any()),
+                    Some(ax0.as_any()),
+                    false,
+                )
                 .expect("clip s");
             assert_eq!(
                 clipped_s.inner.column().values(),
@@ -30214,7 +30251,7 @@ mod tests {
             clip_dict.set_item("a", 2.0).expect("set clip a");
             clip_dict.set_item("b", 3.0).expect("set clip b");
             let clipped_df = py_df
-                .clip(Some(clip_dict.as_any()), None, None)
+                .clip(Some(clip_dict.as_any()), None, None, false)
                 .expect("clip df dict");
             assert_eq!(
                 clipped_df.inner.columns()["a"].values(),
@@ -31345,6 +31382,73 @@ mod tests {
             assert!(py_df.ffill(None, false, Some(-1), None, None).is_err());
             assert!(py_df.bfill(None, false, Some(0), None, None).is_err());
             assert!(py_df.bfill(None, false, Some(-1), None, None).is_err());
+        });
+    }
+
+    #[test]
+    fn test_py_cumops_and_clip_inplace_parity() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                ],
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .expect("series"); // ubs:ignore — test fixture
+            let py_s = PySeries { inner: s };
+
+            let ax0 = 0.into_bound_py_any(py).expect("ax0"); // ubs:ignore — test fixture
+            let ax1 = 1.into_bound_py_any(py).expect("ax1"); // ubs:ignore — test fixture
+            let ax2 = 2.into_bound_py_any(py).expect("ax2"); // ubs:ignore — test fixture
+
+            // Series cumsum
+            let s_cumsum = py_s.cumsum(None, true).expect("cumsum"); // ubs:ignore — test fixture
+            assert_eq!(s_cumsum.inner.values()[2], Scalar::Float64(9.0));
+            assert!(py_s.cumsum(Some(&ax0), true).is_ok());
+            assert!(py_s.cumsum(Some(&ax1), true).is_err());
+
+            // Series cumprod
+            let s_cumprod = py_s.cumprod(None, true).expect("cumprod"); // ubs:ignore — test fixture
+            assert_eq!(s_cumprod.inner.values()[2], Scalar::Float64(24.0));
+            assert!(py_s.cumprod(Some(&ax0), true).is_ok());
+            assert!(py_s.cumprod(Some(&ax1), true).is_err());
+
+            // Series cummin
+            let s_cummin = py_s.cummin(None, true).expect("cummin"); // ubs:ignore — test fixture
+            assert_eq!(s_cummin.inner.values()[2], Scalar::Float64(2.0));
+            assert!(py_s.cummin(Some(&ax0), true).is_ok());
+            assert!(py_s.cummin(Some(&ax1), true).is_err());
+
+            // Series cummax
+            let s_cummax = py_s.cummax(None, true).expect("cummax"); // ubs:ignore — test fixture
+            assert_eq!(s_cummax.inner.values()[2], Scalar::Float64(4.0));
+            assert!(py_s.cummax(Some(&ax0), true).is_ok());
+            assert!(py_s.cummax(Some(&ax1), true).is_err());
+
+            // Series clip inplace
+            assert!(py_s.clip(None, None, None, true).is_err());
+            assert!(py_s.clip(None, None, Some(&ax1), false).is_err());
+
+            // DataFrame clip inplace
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                    ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ],
+            )
+            .expect("df"); // ubs:ignore — test fixture
+            let py_df = PyDataFrame { inner: df };
+            assert!(py_df.clip(None, None, None, true).is_err());
+            assert!(py_df.clip(None, None, Some(&ax2), false).is_err());
         });
     }
 }

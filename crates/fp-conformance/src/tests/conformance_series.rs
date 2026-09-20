@@ -2836,3 +2836,96 @@ print(json.dumps(res))
     let s_bf_lim1 = s.bfill(Some(1)).expect("bfill limit 1");
     assert_eq!(extract_vals(&s_bf_lim1), extract_oracle("bf_lim1"));
 }
+
+#[test]
+fn conformance_series_cumops_differential() {
+    let python_code = r#"
+import pandas as pd
+import json
+
+s = pd.Series([2.0, None, 3.0, 4.0], index=['a', 'b', 'c', 'd'])
+
+def to_list(ser):
+    return [None if pd.isna(x) else float(x) for x in ser]
+
+res = {
+    'cumsum_skip': to_list(s.cumsum(skipna=True)),
+    'cumsum_noskip': to_list(s.cumsum(skipna=False)),
+    'cumprod_skip': to_list(s.cumprod(skipna=True)),
+    'cumprod_noskip': to_list(s.cumprod(skipna=False)),
+    'cummin_skip': to_list(s.cummin(skipna=True)),
+    'cummax_skip': to_list(s.cummax(skipna=True)),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series cumops differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+        ],
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Null(fp_types::NullKind::NaN),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+        ],
+    )
+    .expect("s");
+
+    let extract_vals = |ser: &Series| -> Vec<Option<f64>> {
+        ser.column()
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Null(_) => None,
+                Scalar::Float64(f) if f.is_nan() => None,
+                _ => v.to_f64().ok(),
+            })
+            .collect()
+    };
+
+    let extract_oracle = |key: &str| -> Vec<Option<f64>> {
+        oracle[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64())
+            .collect()
+    };
+
+    // 1. cumsum skipna=true
+    let cs_skip = s.cumsum_with_skipna(true).expect("cumsum skip");
+    assert_eq!(extract_vals(&cs_skip), extract_oracle("cumsum_skip"));
+
+    // 2. cumsum skipna=false
+    let cs_noskip = s.cumsum_with_skipna(false).expect("cumsum noskip");
+    assert_eq!(extract_vals(&cs_noskip), extract_oracle("cumsum_noskip"));
+
+    // 3. cumprod skipna=true
+    let cp_skip = s.cumprod_with_skipna(true).expect("cumprod skip");
+    assert_eq!(extract_vals(&cp_skip), extract_oracle("cumprod_skip"));
+
+    // 4. cumprod skipna=false
+    let cp_noskip = s.cumprod_with_skipna(false).expect("cumprod noskip");
+    assert_eq!(extract_vals(&cp_noskip), extract_oracle("cumprod_noskip"));
+
+    // 5. cummin skipna=true
+    let cm_skip = s.cummin_with_skipna(true).expect("cummin skip");
+    assert_eq!(extract_vals(&cm_skip), extract_oracle("cummin_skip"));
+
+    // 6. cummax skipna=true
+    let cx_skip = s.cummax_with_skipna(true).expect("cummax skip");
+    assert_eq!(extract_vals(&cx_skip), extract_oracle("cummax_skip"));
+}
