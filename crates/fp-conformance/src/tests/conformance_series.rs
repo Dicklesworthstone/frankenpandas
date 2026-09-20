@@ -2728,7 +2728,7 @@ print(json.dumps(res))
         match (a, o) {
             (Some(va), Some(vo)) => assert!((va - vo).abs() < 1e-9),
             (None, None) => {}
-            _ => panic!("pct1 mismatch: {a:?} vs {o:?}"),
+            _ => assert_eq!(a, o, "pct1 mismatch"),
         }
     }
 
@@ -2740,7 +2740,99 @@ print(json.dumps(res))
         match (a, o) {
             (Some(va), Some(vo)) => assert!((va - vo).abs() < 1e-9),
             (None, None) => {}
-            _ => panic!("pct2 mismatch: {a:?} vs {o:?}"),
+            _ => assert_eq!(a, o, "pct2 mismatch"),
         }
     }
+}
+
+#[test]
+fn conformance_series_ffill_bfill_differential() {
+    let python_code = r#"
+import pandas as pd
+import json
+
+s = pd.Series([None, 10.0, None, None, 50.0, None], index=['a', 'b', 'c', 'd', 'e', 'f'])
+
+s_ff_default = s.ffill()
+s_ff_lim1 = s.ffill(limit=1)
+s_bf_default = s.bfill()
+s_bf_lim1 = s.bfill(limit=1)
+
+def to_list(ser):
+    return [None if pd.isna(x) else float(x) for x in ser]
+
+res = {
+    'ff_default': to_list(s_ff_default),
+    'ff_lim1': to_list(s_ff_lim1),
+    'bf_default': to_list(s_bf_default),
+    'bf_lim1': to_list(s_bf_lim1),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series ffill/bfill differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("e".into()),
+            IndexLabel::Utf8("f".into()),
+        ],
+        vec![
+            Scalar::Null(fp_types::NullKind::NaN),
+            Scalar::Float64(10.0),
+            Scalar::Null(fp_types::NullKind::NaN),
+            Scalar::Null(fp_types::NullKind::NaN),
+            Scalar::Float64(50.0),
+            Scalar::Null(fp_types::NullKind::NaN),
+        ],
+    )
+    .expect("s");
+
+    let extract_vals = |ser: &Series| -> Vec<Option<f64>> {
+        ser.column()
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Null(_) => None,
+                Scalar::Float64(f) if f.is_nan() => None,
+                _ => v.to_f64().ok(),
+            })
+            .collect()
+    };
+
+    let extract_oracle = |key: &str| -> Vec<Option<f64>> {
+        oracle[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64())
+            .collect()
+    };
+
+    // 1. ffill default
+    let s_ff = s.ffill(None).expect("ffill default");
+    assert_eq!(extract_vals(&s_ff), extract_oracle("ff_default"));
+
+    // 2. ffill limit=1
+    let s_ff_lim1 = s.ffill(Some(1)).expect("ffill limit 1");
+    assert_eq!(extract_vals(&s_ff_lim1), extract_oracle("ff_lim1"));
+
+    // 3. bfill default
+    let s_bf = s.bfill(None).expect("bfill default");
+    assert_eq!(extract_vals(&s_bf), extract_oracle("bf_default"));
+
+    // 4. bfill limit=1
+    let s_bf_lim1 = s.bfill(Some(1)).expect("bfill limit 1");
+    assert_eq!(extract_vals(&s_bf_lim1), extract_oracle("bf_lim1"));
 }

@@ -3916,7 +3916,7 @@ print(json.dumps(res))
                         assert!((a - o).abs() < 1e-9, "col {col} mismatch: {a} vs {o}")
                     }
                     (None, None) => {}
-                    _ => panic!("col {col} nullness mismatch: {va:?} vs {vo:?}"),
+                    _ => assert_eq!(va, vo, "col {col} nullness mismatch"),
                 }
             }
         }
@@ -3969,4 +3969,136 @@ print(json.dumps(res))
     // 11. pct_change axis 1 negative
     let df_p1_neg = df.pct_change_axis1(-1).expect("pct axis 1 neg");
     check_df(&df_p1_neg, "pct_ax1_neg");
+}
+
+#[test]
+fn conformance_dataframe_ffill_bfill_axis1_and_limits_differential() {
+    let python_code = r#"
+import pandas as pd
+import json
+
+df = pd.DataFrame({
+    'a': [None, 10.0, None, 40.0],
+    'b': [1.0, None, None, 4.0],
+    'c': [None, None, 300.0, None],
+}, index=['r0', 'r1', 'r2', 'r3'])
+
+def df_to_dict(d):
+    return {col: [None if pd.isna(x) else float(x) for x in d[col]] for col in d.columns}
+
+res = {
+    'ff_ax0': df_to_dict(df.ffill(axis=0)),
+    'ff_ax0_lim1': df_to_dict(df.ffill(axis=0, limit=1)),
+    'ff_ax1': df_to_dict(df.ffill(axis=1)),
+    'ff_ax1_lim1': df_to_dict(df.ffill(axis=1, limit=1)),
+    'bf_ax0': df_to_dict(df.bfill(axis=0)),
+    'bf_ax0_lim1': df_to_dict(df.bfill(axis=0, limit=1)),
+    'bf_ax1': df_to_dict(df.bfill(axis=1)),
+    'bf_ax1_lim1': df_to_dict(df.bfill(axis=1, limit=1)),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame ffill/bfill differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b", "c"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Float64(10.0),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Float64(40.0),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Float64(4.0),
+                ],
+            ),
+            (
+                "c",
+                vec![
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Float64(300.0),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                ],
+            ),
+        ],
+    )
+    .expect("df");
+
+    let check_df = |actual: &DataFrame, oracle_key: &str| {
+        let expected_obj = oracle[oracle_key].as_object().unwrap();
+        for col in ["a", "b", "c"] {
+            let actual_col: Vec<Option<f64>> = actual
+                .column(col)
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Null(_) => None,
+                    Scalar::Float64(f) if f.is_nan() => None,
+                    _ => v.to_f64().ok(),
+                })
+                .collect();
+            let oracle_col: Vec<Option<f64>> = expected_obj[col]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64())
+                .collect();
+            assert_eq!(
+                actual_col, oracle_col,
+                "mismatch in {oracle_key}, col {col}"
+            );
+        }
+    };
+
+    // 1. ffill axis 0
+    let df_ff0 = df.ffill(None).expect("ffill axis 0");
+    check_df(&df_ff0, "ff_ax0");
+
+    // 2. ffill axis 0 limit=1
+    let df_ff0_lim1 = df.ffill(Some(1)).expect("ffill axis 0 lim 1");
+    check_df(&df_ff0_lim1, "ff_ax0_lim1");
+
+    // 3. ffill axis 1
+    let df_ff1 = df.ffill_axis1(None).expect("ffill axis 1");
+    check_df(&df_ff1, "ff_ax1");
+
+    // 4. ffill axis 1 limit=1
+    let df_ff1_lim1 = df.ffill_axis1(Some(1)).expect("ffill axis 1 lim 1");
+    check_df(&df_ff1_lim1, "ff_ax1_lim1");
+
+    // 5. bfill axis 0
+    let df_bf0 = df.bfill(None).expect("bfill axis 0");
+    check_df(&df_bf0, "bf_ax0");
+
+    // 6. bfill axis 0 limit=1
+    let df_bf0_lim1 = df.bfill(Some(1)).expect("bfill axis 0 lim 1");
+    check_df(&df_bf0_lim1, "bf_ax0_lim1");
+
+    // 7. bfill axis 1
+    let df_bf1 = df.bfill_axis1(None).expect("bfill axis 1");
+    check_df(&df_bf1, "bf_ax1");
+
+    // 8. bfill axis 1 limit=1
+    let df_bf1_lim1 = df.bfill_axis1(Some(1)).expect("bfill axis 1 lim 1");
+    check_df(&df_bf1_lim1, "bf_ax1_lim1");
 }

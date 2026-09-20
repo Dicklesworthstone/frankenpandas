@@ -11204,15 +11204,73 @@ impl PySeries {
         }
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn ffill(&self, limit: Option<usize>) -> PyResult<PySeries> {
-        let res = self.inner.ffill(limit).map_err(frame_error_to_py)?;
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None, limit_area=None))]
+    fn ffill(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<isize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+        limit_area: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = (downcast, limit_area);
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        let limit_usize = match limit {
+            Some(l) if l <= 0 => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Limit must be greater than 0",
+                ));
+            }
+            Some(l) => Some(l as usize),
+            None => None,
+        };
+        let res = self.inner.ffill(limit_usize).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn bfill(&self, limit: Option<usize>) -> PyResult<PySeries> {
-        let res = self.inner.bfill(limit).map_err(frame_error_to_py)?;
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None, limit_area=None))]
+    fn bfill(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<isize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+        limit_area: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = (downcast, limit_area);
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        let limit_usize = match limit {
+            Some(l) if l <= 0 => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Limit must be greater than 0",
+                ));
+            }
+            Some(l) => Some(l as usize),
+            None => None,
+        };
+        let res = self.inner.bfill(limit_usize).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
@@ -11522,14 +11580,26 @@ impl PySeries {
         }
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn pad(&self, limit: Option<usize>) -> PyResult<PySeries> {
-        self.ffill(limit)
+    #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None))]
+    fn pad(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<isize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.ffill(axis, inplace, limit, downcast, None)
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn backfill(&self, limit: Option<usize>) -> PyResult<PySeries> {
-        self.bfill(limit)
+    #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None))]
+    fn backfill(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<isize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.bfill(axis, inplace, limit, downcast, None)
     }
 
     fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -15738,15 +15808,85 @@ impl PyDataFrame {
         }
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn ffill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
-        let res = self.inner.ffill(limit).map_err(frame_error_to_py)?;
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None, limit_area=None))]
+    fn ffill(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<isize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+        limit_area: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (downcast, limit_area);
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let limit_usize = match limit {
+            Some(l) if l <= 0 => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Limit must be greater than 0",
+                ));
+            }
+            Some(l) => Some(l as usize),
+            None => None,
+        };
+        let res = match ax {
+            0 => self.inner.ffill(limit_usize).map_err(frame_error_to_py)?,
+            1 => self
+                .inner
+                .ffill_axis1(limit_usize)
+                .map_err(frame_error_to_py)?,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {other} for object type DataFrame"
+                )));
+            }
+        };
         Ok(PyDataFrame { inner: res })
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn bfill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
-        let res = self.inner.bfill(limit).map_err(frame_error_to_py)?;
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None, limit_area=None))]
+    fn bfill(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<isize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+        limit_area: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (downcast, limit_area);
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let limit_usize = match limit {
+            Some(l) if l <= 0 => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Limit must be greater than 0",
+                ));
+            }
+            Some(l) => Some(l as usize),
+            None => None,
+        };
+        let res = match ax {
+            0 => self.inner.bfill(limit_usize).map_err(frame_error_to_py)?,
+            1 => self
+                .inner
+                .bfill_axis1(limit_usize)
+                .map_err(frame_error_to_py)?,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {other} for object type DataFrame"
+                )));
+            }
+        };
         Ok(PyDataFrame { inner: res })
     }
 
@@ -16292,14 +16432,26 @@ impl PyDataFrame {
         Ok(PyList::new(py, list)?.into_any().unbind())
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn pad(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
-        self.ffill(limit)
+    #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None))]
+    fn pad(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<isize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.ffill(axis, inplace, limit, downcast, None)
     }
 
-    #[pyo3(signature = (limit=None))]
-    fn backfill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
-        self.bfill(limit)
+    #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None))]
+    fn backfill(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<isize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.bfill(axis, inplace, limit, downcast, None)
     }
 
     fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -29300,7 +29452,7 @@ mod tests {
         let c = py_s.corr(&s2).expect("corr"); // ubs:ignore — test fixture
         assert!((c - 1.0).abs() < 1e-6);
 
-        let ffilled = py_s.ffill(None).expect("ffill"); // ubs:ignore — test fixture
+        let ffilled = py_s.ffill(None, false, None, None, None).expect("ffill"); // ubs:ignore — test fixture
         assert_eq!(ffilled.inner.len(), 4);
     }
 
@@ -29492,9 +29644,9 @@ mod tests {
         assert_eq!(t_s.inner.len(), 3);
         let keys_s = py_s.keys();
         assert_eq!(keys_s.inner.len(), 3);
-        let pad_s = py_s.pad(None).expect("pad"); // ubs:ignore — test fixture
+        let pad_s = py_s.pad(None, false, None, None).expect("pad"); // ubs:ignore — test fixture
         assert_eq!(pad_s.inner.len(), 3);
-        let backfill_s = py_s.backfill(None).expect("backfill"); // ubs:ignore — test fixture
+        let backfill_s = py_s.backfill(None, false, None, None).expect("backfill"); // ubs:ignore — test fixture
         assert_eq!(backfill_s.inner.len(), 3);
 
         let df = DataFrame::from_dict(
@@ -31037,6 +31189,162 @@ mod tests {
             assert_eq!(col_b_s1_f.values()[0], Scalar::Float64(1.0));
 
             assert!(py_df.shift(1, None, Some(&ax2), None, None).is_err());
+        });
+    }
+
+    #[test]
+    fn test_py_ffill_bfill_parity() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                    IndexLabel::Int64(3),
+                ],
+                vec![
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Float64(10.0),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Float64(30.0),
+                ],
+            )
+            .expect("series"); // ubs:ignore — test fixture
+            let py_s = PySeries { inner: s };
+
+            let ax0 = 0.into_bound_py_any(py).expect("ax0"); // ubs:ignore — test fixture
+            let ax1 = 1.into_bound_py_any(py).expect("ax1"); // ubs:ignore — test fixture
+            let ax_str = "columns".into_bound_py_any(py).expect("ax_str"); // ubs:ignore — test fixture
+
+            // 1. Series ffill
+            let s_ff = py_s.ffill(None, false, None, None, None).expect("s ffill"); // ubs:ignore — test fixture
+            assert!(s_ff.inner.values()[0].is_nan() || s_ff.inner.values()[0].is_null());
+            assert_eq!(s_ff.inner.values()[1], Scalar::Float64(10.0));
+            assert_eq!(s_ff.inner.values()[2], Scalar::Float64(10.0));
+            assert_eq!(s_ff.inner.values()[3], Scalar::Float64(30.0));
+
+            // Series ffill with axis 0
+            let s_ff0 = py_s
+                .ffill(Some(&ax0), false, None, None, None)
+                .expect("s ffill axis 0"); // ubs:ignore — test fixture
+            assert_eq!(s_ff0.inner.values()[2], Scalar::Float64(10.0));
+
+            // Series ffill axis 1 error
+            assert!(py_s.ffill(Some(&ax1), false, None, None, None).is_err());
+            assert!(py_s.ffill(Some(&ax_str), false, None, None, None).is_err());
+
+            // Series ffill inplace=True error
+            assert!(py_s.ffill(None, true, None, None, None).is_err());
+
+            // Series ffill limit <= 0 error
+            assert!(py_s.ffill(None, false, Some(0), None, None).is_err());
+            assert!(py_s.ffill(None, false, Some(-1), None, None).is_err());
+
+            // Series pad alias
+            let s_pad = py_s.pad(None, false, None, None).expect("s pad"); // ubs:ignore — test fixture
+            assert_eq!(s_pad.inner.values()[2], Scalar::Float64(10.0));
+
+            // 2. Series bfill
+            let s_bf = py_s.bfill(None, false, None, None, None).expect("s bfill"); // ubs:ignore — test fixture
+            assert_eq!(s_bf.inner.values()[0], Scalar::Float64(10.0));
+            assert_eq!(s_bf.inner.values()[1], Scalar::Float64(10.0));
+            assert_eq!(s_bf.inner.values()[2], Scalar::Float64(30.0));
+            assert_eq!(s_bf.inner.values()[3], Scalar::Float64(30.0));
+
+            // Series backfill alias
+            let s_backfill = py_s.backfill(None, false, None, None).expect("s backfill"); // ubs:ignore — test fixture
+            assert_eq!(s_backfill.inner.values()[0], Scalar::Float64(10.0));
+
+            // DataFrame setup
+            let df = DataFrame::from_dict(
+                &["a", "b", "c"],
+                vec![
+                    (
+                        "a",
+                        vec![Scalar::Float64(1.0), Scalar::Null(fp_types::NullKind::NaN)],
+                    ),
+                    (
+                        "b",
+                        vec![Scalar::Null(fp_types::NullKind::NaN), Scalar::Float64(20.0)],
+                    ),
+                    (
+                        "c",
+                        vec![
+                            Scalar::Float64(100.0),
+                            Scalar::Null(fp_types::NullKind::NaN),
+                        ],
+                    ),
+                ],
+            )
+            .expect("dataframe"); // ubs:ignore — test fixture
+            let py_df = PyDataFrame { inner: df };
+
+            // 3. DataFrame ffill axis 0
+            let df_ff0 = py_df
+                .ffill(None, false, None, None, None)
+                .expect("df ffill axis 0"); // ubs:ignore — test fixture
+            assert_eq!(
+                df_ff0.inner.column("a").unwrap().values()[1], // ubs:ignore — test fixture
+                Scalar::Float64(1.0)
+            );
+
+            // 4. DataFrame ffill axis 1
+            let df_ff1 = py_df
+                .ffill(Some(&ax1), false, None, None, None)
+                .expect("df ffill axis 1"); // ubs:ignore — test fixture
+            assert_eq!(
+                df_ff1.inner.column("b").unwrap().values()[0], // ubs:ignore — test fixture
+                Scalar::Float64(1.0)
+            );
+
+            // DataFrame ffill axis "columns"
+            let df_ff_cols = py_df
+                .ffill(Some(&ax_str), false, None, None, None)
+                .expect("df ffill columns"); // ubs:ignore — test fixture
+            assert_eq!(
+                df_ff_cols.inner.column("b").unwrap().values()[0], // ubs:ignore — test fixture
+                Scalar::Float64(1.0)
+            );
+
+            // 5. DataFrame bfill axis 1
+            let df_bf1 = py_df
+                .bfill(Some(&ax1), false, None, None, None)
+                .expect("df bfill axis 1"); // ubs:ignore — test fixture
+            assert_eq!(
+                df_bf1.inner.column("a").unwrap().values()[1], // ubs:ignore — test fixture
+                Scalar::Float64(20.0)
+            );
+
+            // DataFrame pad / backfill aliases
+            let df_pad = py_df.pad(Some(&ax1), false, None, None).expect("df pad"); // ubs:ignore — test fixture
+            assert_eq!(
+                df_pad.inner.column("b").unwrap().values()[0], // ubs:ignore — test fixture
+                Scalar::Float64(1.0)
+            );
+            let df_backfill = py_df
+                .backfill(Some(&ax1), false, None, None)
+                .expect("df backfill"); // ubs:ignore — test fixture
+            assert_eq!(
+                df_backfill.inner.column("a").unwrap().values()[1], // ubs:ignore — test fixture
+                Scalar::Float64(20.0)
+            );
+
+            // Invalid axis
+            let ax2 = 2.into_bound_py_any(py).expect("ax2"); // ubs:ignore — test fixture
+            assert!(py_df.ffill(Some(&ax2), false, None, None, None).is_err());
+            assert!(py_df.bfill(Some(&ax2), false, None, None, None).is_err());
+
+            // inplace=True error
+            assert!(py_df.ffill(None, true, None, None, None).is_err());
+            assert!(py_df.bfill(None, true, None, None, None).is_err());
+
+            // limit <= 0 error
+            assert!(py_df.ffill(None, false, Some(0), None, None).is_err());
+            assert!(py_df.ffill(None, false, Some(-1), None, None).is_err());
+            assert!(py_df.bfill(None, false, Some(0), None, None).is_err());
+            assert!(py_df.bfill(None, false, Some(-1), None, None).is_err());
         });
     }
 }
