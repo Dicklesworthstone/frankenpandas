@@ -29,7 +29,7 @@ use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
 };
-use fp_types::{NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp};
+use fp_types::{DType, NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp};
 use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
@@ -9222,35 +9222,46 @@ fn wrap_frame(result: Result<DataFrame, fp_frame::FrameError>) -> PyResult<PyDat
         .map_err(frame_error_to_py)
 }
 
-fn parse_axis_param(axis: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
+fn parse_axis_param_for_type(
+    axis: Option<&Bound<'_, PyAny>>,
+    type_name: &str,
+) -> PyResult<Option<usize>> {
     match axis {
-        None => Ok(0),
+        None => Ok(None),
         Some(a) => {
             if let Ok(i) = a.extract::<i64>() {
                 match i {
-                    0 => Ok(0),
-                    1 => Ok(1),
+                    0 => Ok(Some(0)),
+                    1 if type_name != "Series" => Ok(Some(1)),
                     other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "No axis named {other} for object type DataFrame"
+                        "No axis named {other} for object type {type_name}"
                     ))),
                 }
             } else if let Ok(s) = a.extract::<String>() {
                 match s.as_str() {
-                    "index" | "rows" => Ok(0),
-                    "columns" => Ok(1),
+                    "index" | "rows" => Ok(Some(0)),
+                    "columns" if type_name != "Series" => Ok(Some(1)),
                     other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "No axis named {other} for object type DataFrame"
+                        "No axis named {other} for object type {type_name}"
                     ))),
                 }
             } else {
-                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "axis must be 0, 1, 'index', or 'columns'",
-                ))
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {a} for object type {type_name}"
+                )))
             }
         }
     }
 }
 
+fn parse_axis_param(axis: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
+    parse_axis_param_for_type(axis, "DataFrame").map(|opt| opt.unwrap_or(0))
+}
+
+enum SeriesOrScalarBound {
+    Scalar(f64),
+    Series(Box<Series>),
+}
 
 /// The right-hand side of a Series dunder: another Series as-is, or a Python
 /// scalar broadcast over `like`'s index (what pandas does for `s + 1`).
@@ -10097,20 +10108,59 @@ impl PySeries {
     /// Round each value to `decimals` places, returning a new Series.
     #[pyo3(signature = (decimals=0))]
     fn round(&self, decimals: i32) -> PyResult<PySeries> {
-        let r = self
-            .inner
-            .round(decimals)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let r = self.inner.round(decimals).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
     /// Compute numerical data ranks (pandas `Series.rank`).
-    #[pyo3(signature = (method="average", ascending=true, na_option="keep"))]
-    fn rank(&self, method: &str, ascending: bool, na_option: &str) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, method=None, numeric_only=false, na_option=None, ascending=None, pct=false))]
+    fn rank(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+        numeric_only: bool,
+        na_option: Option<&str>,
+        ascending: Option<bool>,
+        pct: bool,
+    ) -> PyResult<PySeries> {
+        let mut m = method.unwrap_or("average");
+        if let Some(a) = axis {
+            if let Ok(s) = a.extract::<&str>() {
+                if matches!(s, "average" | "min" | "max" | "first" | "dense") && method.is_none() {
+                    m = s;
+                } else {
+                    let parsed = parse_axis_param_for_type(Some(a), "Series")?.unwrap_or(0);
+                    if parsed != 0 {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "No axis named {parsed} for object type Series"
+                        )));
+                    }
+                }
+            } else {
+                let parsed = parse_axis_param_for_type(Some(a), "Series")?.unwrap_or(0);
+                if parsed != 0 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "No axis named {parsed} for object type Series"
+                    )));
+                }
+            }
+        }
+        if numeric_only
+            && !matches!(
+                self.inner.dtype(),
+                DType::Int64 | DType::Float64 | DType::Bool
+            )
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Series.rank does not allow numeric_only=True with non-numeric dtype.",
+            ));
+        }
+        let asc = ascending.unwrap_or(true);
+        let na = na_option.unwrap_or("keep");
         let r = self
             .inner
-            .rank(method, ascending, na_option)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .rank_with_pct(m, asc, na, pct)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
@@ -10152,13 +10202,81 @@ impl PySeries {
     }
 
     /// Clip values to the `[lower, upper]` range (either bound optional).
-    #[pyo3(signature = (lower=None, upper=None))]
-    fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PySeries> {
-        let r = self
-            .inner
-            .clip(lower, upper)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
+    #[pyo3(signature = (lower=None, upper=None, axis=None))]
+    fn clip(
+        &self,
+        lower: Option<&Bound<'_, PyAny>>,
+        upper: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let ax_opt = parse_axis_param_for_type(axis, "Series")?;
+        if let Some(ax) = ax_opt {
+            if ax != 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {ax} for object type Series"
+                )));
+            }
+        }
+
+        let extract_bound = |b: &Bound<'_, PyAny>| -> PyResult<SeriesOrScalarBound> {
+            if let Ok(py_s) = b.extract::<PyRef<'_, PySeries>>() {
+                Ok(SeriesOrScalarBound::Series(Box::new(py_s.inner.clone())))
+            } else if let Ok(f) = b.extract::<f64>() {
+                Ok(SeriesOrScalarBound::Scalar(f))
+            } else if b.is_none() {
+                Ok(SeriesOrScalarBound::Scalar(f64::NAN))
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "bound must be a number or Series",
+                ))
+            }
+        };
+
+        let lo = match lower {
+            Some(b) if !b.is_none() => Some(extract_bound(b)?),
+            _ => None,
+        };
+        let hi = match upper {
+            Some(b) if !b.is_none() => Some(extract_bound(b)?),
+            _ => None,
+        };
+
+        let has_series_bound = matches!(lo, Some(SeriesOrScalarBound::Series(_)))
+            || matches!(hi, Some(SeriesOrScalarBound::Series(_)));
+
+        if has_series_bound {
+            let to_bound_series = |bound: Option<SeriesOrScalarBound>| -> PyResult<Option<Series>> {
+                match bound {
+                    None => Ok(None),
+                    Some(SeriesOrScalarBound::Series(s)) => Ok(Some(*s)),
+                    Some(SeriesOrScalarBound::Scalar(v)) => {
+                        let labels = self.inner.index().labels().to_vec();
+                        let vals = vec![Scalar::Float64(v); labels.len()];
+                        let s = Series::from_values("bounds", labels, vals)
+                            .map_err(frame_error_to_py)?;
+                        Ok(Some(s))
+                    }
+                }
+            };
+            let lo_s = to_bound_series(lo)?;
+            let hi_s = to_bound_series(hi)?;
+            let r = self
+                .inner
+                .clip_with_series(lo_s.as_ref(), hi_s.as_ref())
+                .map_err(frame_error_to_py)?;
+            Ok(PySeries { inner: r })
+        } else {
+            let lo_f64 = match lo {
+                Some(SeriesOrScalarBound::Scalar(v)) => Some(v),
+                _ => None,
+            };
+            let hi_f64 = match hi {
+                Some(SeriesOrScalarBound::Scalar(v)) => Some(v),
+                _ => None,
+            };
+            let r = self.inner.clip(lo_f64, hi_f64).map_err(frame_error_to_py)?;
+            Ok(PySeries { inner: r })
+        }
     }
 
     /// Replace values via an `{old: new}` dict (pandas `Series.replace`).
@@ -13123,23 +13241,169 @@ impl PyDataFrame {
     }
 
     /// Clip values to the `[lower, upper]` range (either bound optional).
-    #[pyo3(signature = (lower=None, upper=None))]
-    fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PyDataFrame> {
-        let result = self
-            .inner
-            .clip(lower, upper)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (lower=None, upper=None, axis=None))]
+    fn clip(
+        &self,
+        lower: Option<&Bound<'_, PyAny>>,
+        upper: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let ax_opt = parse_axis_param_for_type(axis, "DataFrame")?;
+
+        let extract_bound = |b: &Bound<'_, PyAny>| -> PyResult<SeriesOrScalarBound> {
+            if let Ok(py_s) = b.extract::<PyRef<'_, PySeries>>() {
+                Ok(SeriesOrScalarBound::Series(Box::new(py_s.inner.clone())))
+            } else if let Ok(dict) = b.cast::<PyDict>() {
+                let mut labels = Vec::new();
+                let mut vals = Vec::new();
+                for (k, v) in dict.iter() {
+                    let col_name = k.extract::<String>()?;
+                    let val = v.extract::<f64>()?;
+                    labels.push(IndexLabel::Utf8(col_name));
+                    vals.push(Scalar::Float64(val));
+                }
+                let s = Series::from_values("bounds", labels, vals).map_err(frame_error_to_py)?;
+                Ok(SeriesOrScalarBound::Series(Box::new(s)))
+            } else if let Ok(f) = b.extract::<f64>() {
+                Ok(SeriesOrScalarBound::Scalar(f))
+            } else if b.is_none() {
+                Ok(SeriesOrScalarBound::Scalar(f64::NAN))
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "bound must be a number, Series, or dict",
+                ))
+            }
+        };
+
+        let lo = match lower {
+            Some(b) if !b.is_none() => Some(extract_bound(b)?),
+            _ => None,
+        };
+        let hi = match upper {
+            Some(b) if !b.is_none() => Some(extract_bound(b)?),
+            _ => None,
+        };
+
+        let has_series_bound = matches!(lo, Some(SeriesOrScalarBound::Series(_)))
+            || matches!(hi, Some(SeriesOrScalarBound::Series(_)));
+
+        if has_series_bound {
+            let is_dict_bound = lower.is_some_and(|b| b.is_instance_of::<pyo3::types::PyDict>())
+                || upper.is_some_and(|b| b.is_instance_of::<pyo3::types::PyDict>());
+
+            let ax = match ax_opt {
+                Some(a) => a,
+                None => {
+                    if is_dict_bound {
+                        1
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "Must specify axis=0 or 1",
+                        ));
+                    }
+                }
+            };
+
+            let to_bound_series = |eb: Option<SeriesOrScalarBound>| -> PyResult<Option<Series>> {
+                match eb {
+                    None => Ok(None),
+                    Some(SeriesOrScalarBound::Series(s)) => Ok(Some(*s)),
+                    Some(SeriesOrScalarBound::Scalar(v)) => {
+                        if ax == 0 {
+                            let labels = self.inner.index().labels().to_vec();
+                            let vals = vec![Scalar::Float64(v); labels.len()];
+                            let s = Series::from_values("bounds", labels, vals)
+                                .map_err(frame_error_to_py)?;
+                            Ok(Some(s))
+                        } else {
+                            let labels: Vec<IndexLabel> =
+                                self.columns().into_iter().map(IndexLabel::Utf8).collect();
+                            let vals = vec![Scalar::Float64(v); labels.len()];
+                            let s = Series::from_values("bounds", labels, vals)
+                                .map_err(frame_error_to_py)?;
+                            Ok(Some(s))
+                        }
+                    }
+                }
+            };
+
+            let lo_series = to_bound_series(lo)?;
+            let hi_series = to_bound_series(hi)?;
+
+            let res = if ax == 0 {
+                self.inner
+                    .clip_with_row_bounds(lo_series.as_ref(), hi_series.as_ref())
+                    .map_err(frame_error_to_py)?
+            } else {
+                self.inner
+                    .clip_with_column_bounds(lo_series.as_ref(), hi_series.as_ref())
+                    .map_err(frame_error_to_py)?
+            };
+            Ok(PyDataFrame { inner: res })
+        } else {
+            let lo_f64 = match lo {
+                Some(SeriesOrScalarBound::Scalar(v)) => Some(v),
+                _ => None,
+            };
+            let hi_f64 = match hi {
+                Some(SeriesOrScalarBound::Scalar(v)) => Some(v),
+                _ => None,
+            };
+            let res = self.inner.clip(lo_f64, hi_f64).map_err(frame_error_to_py)?;
+            Ok(PyDataFrame { inner: res })
+        }
     }
 
     /// Round each numeric value to `decimals` places, returning a new DataFrame.
-    #[pyo3(signature = (decimals=0))]
-    fn round(&self, decimals: i32) -> PyResult<PyDataFrame> {
-        let result = self
-            .inner
-            .round(decimals)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (decimals=None))]
+    fn round(&self, decimals: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        match decimals {
+            None => {
+                let res = self.inner.round(0).map_err(frame_error_to_py)?;
+                Ok(PyDataFrame { inner: res })
+            }
+            Some(d) => {
+                if let Ok(n) = d.extract::<i32>() {
+                    let res = self.inner.round(n).map_err(frame_error_to_py)?;
+                    Ok(PyDataFrame { inner: res })
+                } else if let Ok(dict) = d.cast::<PyDict>() {
+                    let mut btree = BTreeMap::new();
+                    for (k, v) in dict.iter() {
+                        let name = k.extract::<String>()?;
+                        let dec = v.extract::<i32>()?;
+                        btree.insert(name, dec);
+                    }
+                    let res = self
+                        .inner
+                        .round_columns(&btree)
+                        .map_err(frame_error_to_py)?;
+                    Ok(PyDataFrame { inner: res })
+                } else if let Ok(py_s) = d.extract::<PyRef<'_, PySeries>>() {
+                    let mut btree = BTreeMap::new();
+                    for (idx_label, val) in py_s
+                        .inner
+                        .index()
+                        .labels()
+                        .iter()
+                        .zip(py_s.inner.column().values().iter())
+                    {
+                        let name = idx_label.to_string();
+                        if let Ok(dec) = val.to_i64() {
+                            btree.insert(name, dec as i32);
+                        }
+                    }
+                    let res = self
+                        .inner
+                        .round_columns(&btree)
+                        .map_err(frame_error_to_py)?;
+                    Ok(PyDataFrame { inner: res })
+                } else {
+                    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "decimals must be an integer, dict, or Series",
+                    ))
+                }
+            }
+        }
     }
 
     /// Replace values via an `{old: new}` dict (pandas `DataFrame.replace`).
@@ -13905,17 +14169,49 @@ impl PyDataFrame {
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    #[pyo3(signature = (axis=None, method=None, numeric_only=false, na_option=None, ascending=None, pct=false))]
     fn rank(
         &self,
+        axis: Option<&Bound<'_, PyAny>>,
         method: Option<&str>,
-        ascending: Option<bool>,
+        numeric_only: bool,
         na_option: Option<&str>,
+        ascending: Option<bool>,
+        pct: bool,
     ) -> PyResult<PyDataFrame> {
-        let m = method.unwrap_or("average");
+        let mut m = method.unwrap_or("average");
+        let mut ax = 0;
+        if let Some(a) = axis {
+            if let Ok(s) = a.extract::<&str>() {
+                if matches!(s, "average" | "min" | "max" | "first" | "dense") && method.is_none() {
+                    m = s;
+                } else {
+                    ax = parse_axis_param_for_type(Some(a), "DataFrame")?.unwrap_or(0);
+                }
+            } else {
+                ax = parse_axis_param_for_type(Some(a), "DataFrame")?.unwrap_or(0);
+            }
+        }
         let asc = ascending.unwrap_or(true);
         let na = na_option.unwrap_or("keep");
-        let res = self.inner.rank(m, asc, na).map_err(frame_error_to_py)?;
+
+        let target_df = if numeric_only {
+            self.inner
+                .select_dtypes(&[DType::Int64, DType::Float64, DType::Bool], &[])
+                .map_err(frame_error_to_py)?
+        } else {
+            self.inner.clone()
+        };
+
+        let res = if ax == 0 {
+            target_df
+                .rank_with_pct(m, asc, na, pct)
+                .map_err(frame_error_to_py)?
+        } else {
+            target_df
+                .rank_axis1_with_pct(m, asc, na, pct)
+                .map_err(frame_error_to_py)?
+        };
         Ok(PyDataFrame { inner: res })
     }
 
@@ -27120,13 +27416,13 @@ mod tests {
         let pct_df = py_df.pct_change(1).expect("pct_change"); // ubs:ignore — test fixture
         assert_eq!(pct_df.shape(), (3, 2));
 
-        let cs = py_df.cumsum(true).expect("cumsum"); // ubs:ignore — test fixture
+        let cs = py_df.cumsum(None, true).expect("cumsum"); // ubs:ignore — test fixture
         assert_eq!(cs.shape(), (3, 2));
-        let cp = py_df.cumprod(true).expect("cumprod"); // ubs:ignore — test fixture
+        let cp = py_df.cumprod(None, true).expect("cumprod"); // ubs:ignore — test fixture
         assert_eq!(cp.shape(), (3, 2));
-        let cmin = py_df.cummin(true).expect("cummin"); // ubs:ignore — test fixture
+        let cmin = py_df.cummin(None, true).expect("cummin"); // ubs:ignore — test fixture
         assert_eq!(cmin.shape(), (3, 2));
-        let cmax = py_df.cummax(true).expect("cummax"); // ubs:ignore — test fixture
+        let cmax = py_df.cummax(None, true).expect("cummax"); // ubs:ignore — test fixture
         assert_eq!(cmax.shape(), (3, 2));
 
         let sh = py_df.shift(1).expect("shift"); // ubs:ignore — test fixture
@@ -27290,49 +27586,56 @@ mod tests {
 
     #[test]
     fn test_py_dataframe_windowing_and_transformations() {
-        let df = DataFrame::from_dict(
-            &["a", "b"],
-            vec![
-                (
-                    "a",
-                    vec![
-                        Scalar::Float64(1.0),
-                        Scalar::Float64(2.0),
-                        Scalar::Float64(3.0),
-                    ],
-                ),
-                (
-                    "b",
-                    vec![
-                        Scalar::Float64(4.0),
-                        Scalar::Float64(5.0),
-                        Scalar::Float64(6.0),
-                    ],
-                ),
-            ],
-        )
-        .expect("df"); // ubs:ignore — test fixture
-        let py_df = PyDataFrame { inner: df };
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    (
+                        "a",
+                        vec![
+                            Scalar::Float64(1.0),
+                            Scalar::Float64(2.0),
+                            Scalar::Float64(3.0),
+                        ],
+                    ),
+                    (
+                        "b",
+                        vec![
+                            Scalar::Float64(4.0),
+                            Scalar::Float64(5.0),
+                            Scalar::Float64(6.0),
+                        ],
+                    ),
+                ],
+            )
+            .expect("df"); // ubs:ignore — test fixture
+            let py_df = PyDataFrame { inner: df };
 
-        let roll = py_df.rolling(2, None, false);
-        assert_eq!(roll.window, 2);
-        assert!(!roll.center);
+            let roll = py_df.rolling(2, None, false);
+            assert_eq!(roll.window, 2);
+            assert!(!roll.center);
 
-        let tr = py_df.transpose().expect("transpose"); // ubs:ignore — test fixture
-        assert_eq!(tr.shape(), (2, 3));
-        let t_prop = py_df.T().expect("T property"); // ubs:ignore — test fixture
-        assert_eq!(t_prop.shape(), (2, 3));
+            let tr = py_df.transpose().expect("transpose"); // ubs:ignore — test fixture
+            assert_eq!(tr.shape(), (2, 3));
+            let t_prop = py_df.T().expect("T property"); // ubs:ignore — test fixture
+            assert_eq!(t_prop.shape(), (2, 3));
 
-        let melted = py_df
-            .melt(Some(vec!["a".to_string()]), None, None, None)
-            .expect("melt"); // ubs:ignore — test fixture
-        assert_eq!(melted.shape(), (3, 3));
+            let melted = py_df
+                .melt(Some(vec!["a".to_string()]), None, None, None)
+                .expect("melt"); // ubs:ignore — test fixture
+            assert_eq!(melted.shape(), (3, 3));
 
-        let abs_df = py_df.abs().expect("abs"); // ubs:ignore — test fixture
-        assert_eq!(abs_df.shape(), (3, 2));
+            let abs_df = py_df.abs().expect("abs"); // ubs:ignore — test fixture
+            assert_eq!(abs_df.shape(), (3, 2));
 
-        let clip_df = py_df.clip(Some(2.0), Some(5.0)).expect("clip"); // ubs:ignore — test fixture
-        assert_eq!(clip_df.shape(), (3, 2));
+            let lo = pyo3::types::PyFloat::new(py, 2.0);
+            let hi = pyo3::types::PyFloat::new(py, 5.0);
+            let clip_df = py_df
+                .clip(Some(lo.as_any()), Some(hi.as_any()), None)
+                .expect("clip"); // ubs:ignore — test fixture
+            assert_eq!(clip_df.shape(), (3, 2));
+        });
     }
 
     #[test]
@@ -27907,5 +28210,144 @@ mod tests {
             assert_eq!(df_cmax1.shape(), (3, 2));
         });
     }
-}
 
+    #[test]
+    fn test_py_round_rank_and_clip() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            // Series tests
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                ],
+                vec![
+                    Scalar::Float64(1.234),
+                    Scalar::Float64(3.456),
+                    Scalar::Float64(2.345),
+                ],
+            )
+            .expect("series");
+            let py_s = PySeries { inner: s };
+
+            // Series round
+            let rounded = py_s.round(1).expect("round 1");
+            assert_eq!(
+                rounded.inner.column().values(),
+                &[
+                    Scalar::Float64(1.2),
+                    Scalar::Float64(3.5),
+                    Scalar::Float64(2.3)
+                ]
+            );
+
+            // Series rank
+            let ax0 = pyo3::types::PyInt::new(py, 0);
+            let ax1 = pyo3::types::PyInt::new(py, 1);
+            let rk_asc = py_s
+                .rank(
+                    Some(ax0.as_any()),
+                    Some("average"),
+                    false,
+                    None,
+                    Some(true),
+                    false,
+                )
+                .expect("rank asc");
+            assert_eq!(
+                rk_asc.inner.column().values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(2.0)
+                ]
+            );
+
+            let rk_pct = py_s
+                .rank(None, Some("average"), false, None, Some(true), true)
+                .expect("rank pct");
+            assert_eq!(rk_pct.inner.len(), 3);
+
+            // Series rank invalid axis
+            assert!(
+                py_s.rank(Some(ax1.as_any()), None, false, None, None, false)
+                    .is_err()
+            );
+
+            // Series clip scalar
+            let lo = pyo3::types::PyFloat::new(py, 2.0);
+            let hi = pyo3::types::PyFloat::new(py, 3.0);
+            let clipped_s = py_s
+                .clip(Some(lo.as_any()), Some(hi.as_any()), Some(ax0.as_any()))
+                .expect("clip s");
+            assert_eq!(
+                clipped_s.inner.column().values(),
+                &[
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(2.345)
+                ]
+            );
+
+            // DataFrame tests
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", vec![Scalar::Float64(1.234), Scalar::Float64(5.678)]),
+                    ("b", vec![Scalar::Float64(2.345), Scalar::Float64(4.567)]),
+                ],
+            )
+            .expect("df");
+            let py_df = PyDataFrame { inner: df };
+
+            // DataFrame round with int
+            let dec_int = pyo3::types::PyInt::new(py, 1);
+            let rd_int = py_df.round(Some(dec_int.as_any())).expect("round df int");
+            assert_eq!(
+                rd_int.inner.columns()["a"].values(),
+                &[Scalar::Float64(1.2), Scalar::Float64(5.7)]
+            );
+
+            // DataFrame round with dict
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("a", 1).expect("set item a");
+            dict.set_item("b", 0).expect("set item b");
+            let rd_dict = py_df.round(Some(dict.as_any())).expect("round df dict");
+            assert_eq!(
+                rd_dict.inner.columns()["b"].values(),
+                &[Scalar::Float64(2.0), Scalar::Float64(5.0)]
+            );
+
+            // DataFrame rank axis 0 and 1
+            let rk_df0 = py_df
+                .rank(Some(ax0.as_any()), None, false, None, None, false)
+                .expect("rank df 0");
+            assert_eq!(
+                rk_df0.inner.columns()["a"].values(),
+                &[Scalar::Float64(1.0), Scalar::Float64(2.0)]
+            );
+
+            let rk_df1 = py_df
+                .rank(Some(ax1.as_any()), None, false, None, None, false)
+                .expect("rank df 1");
+            assert_eq!(
+                rk_df1.inner.columns()["a"].values(),
+                &[Scalar::Float64(1.0), Scalar::Float64(2.0)]
+            );
+
+            // DataFrame clip with dict
+            let clip_dict = pyo3::types::PyDict::new(py);
+            clip_dict.set_item("a", 2.0).expect("set clip a");
+            clip_dict.set_item("b", 3.0).expect("set clip b");
+            let clipped_df = py_df
+                .clip(Some(clip_dict.as_any()), None, None)
+                .expect("clip df dict");
+            assert_eq!(
+                clipped_df.inner.columns()["a"].values(),
+                &[Scalar::Float64(2.0), Scalar::Float64(5.678)]
+            );
+        });
+    }
+}

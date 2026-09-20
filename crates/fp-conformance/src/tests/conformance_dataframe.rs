@@ -2449,9 +2449,7 @@ print(json.dumps(res))
     let oracle = match run_pandas_oracle_eval(python_code) {
         Some(val) => val,
         None => {
-            eprintln!(
-                "pandas oracle unavailable; skipping DataFrame cumulative differential test"
-            );
+            eprintln!("pandas oracle unavailable; skipping DataFrame cumulative differential test");
             return;
         }
     };
@@ -2576,3 +2574,230 @@ print(json.dumps(res))
     assert_eq!(actual_cp1_b, oracle_cp1_b);
 }
 
+#[test]
+fn conformance_dataframe_round_rank_clip_differential() {
+    use fp_frame::{DataFrame, Series};
+    use fp_index::IndexLabel;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({
+    'a': [1.234, 5.678, 9.876],
+    'b': [10.456, 20.654, 30.222],
+}, index=['r0', 'r1', 'r2'])
+res = {
+    'rd_int_a': [float(x) for x in df.round(1)['a']],
+    'rd_int_b': [float(x) for x in df.round(1)['b']],
+    'rd_dict_a': [float(x) for x in df.round({'a': 1, 'b': 2})['a']],
+    'rd_dict_b': [float(x) for x in df.round({'a': 1, 'b': 2})['b']],
+    'rk_ax0_a': [float(x) for x in df.rank(axis=0)['a']],
+    'rk_ax1_a': [float(x) for x in df.rank(axis=1)['a']],
+    'rk_ax1_b': [float(x) for x in df.rank(axis=1)['b']],
+    'rk_pct_a': [float(x) for x in df.rank(axis=0, pct=True)['a']],
+    'clip_scalar_a': [float(x) for x in df.clip(lower=2.0, upper=25.0)['a']],
+    'clip_scalar_b': [float(x) for x in df.clip(lower=2.0, upper=25.0)['b']],
+    'clip_dict_a': [float(x) for x in df.clip(lower={'a': 5.0, 'b': 15.0}, axis=1)['a']],
+    'clip_dict_b': [float(x) for x in df.clip(lower={'a': 5.0, 'b': 15.0}, axis=1)['b']],
+    'clip_row_a': [float(x) for x in df.clip(lower=pd.Series([2.0, 6.0, 10.0], index=['r0', 'r1', 'r2']), axis=0)['a']],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame round/rank/clip differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Float64(1.234),
+                    Scalar::Float64(5.678),
+                    Scalar::Float64(9.876),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(10.456),
+                    Scalar::Float64(20.654),
+                    Scalar::Float64(30.222),
+                ],
+            ),
+        ],
+    )
+    .expect("df");
+
+    // 1. round with int
+    let rd_int = df.round(1).expect("round int");
+    let actual_rd_int_a: Vec<f64> = rd_int
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rd_int_a: Vec<f64> = oracle["rd_int_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rd_int_a, oracle_rd_int_a);
+
+    // 2. round with dict/BTreeMap
+    let mut round_map = std::collections::BTreeMap::new();
+    round_map.insert("a".to_string(), 1);
+    round_map.insert("b".to_string(), 2);
+    let rd_dict = df.round_columns(&round_map).expect("round columns");
+    let actual_rd_dict_b: Vec<f64> = rd_dict
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rd_dict_b: Vec<f64> = oracle["rd_dict_b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rd_dict_b, oracle_rd_dict_b);
+
+    // 3. rank axis 0 and 1
+    let rk0 = df.rank("average", true, "keep").expect("rank 0");
+    let actual_rk0_a: Vec<f64> = rk0
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rk0_a: Vec<f64> = oracle["rk_ax0_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rk0_a, oracle_rk0_a);
+
+    let rk1 = df.rank_axis1("average", true, "keep").expect("rank 1");
+    let actual_rk1_a: Vec<f64> = rk1
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rk1_a: Vec<f64> = oracle["rk_ax1_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rk1_a, oracle_rk1_a);
+
+    // 4. rank with pct
+    let rk_pct = df
+        .rank_with_pct("average", true, "keep", true)
+        .expect("rank pct");
+    let actual_rk_pct_a: Vec<f64> = rk_pct
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rk_pct_a: Vec<f64> = oracle["rk_pct_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rk_pct_a, oracle_rk_pct_a);
+
+    // 5. clip scalar
+    let clip_sc = df.clip(Some(2.0), Some(25.0)).expect("clip scalar");
+    let actual_clip_sc_a: Vec<f64> = clip_sc
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_clip_sc_a: Vec<f64> = oracle["clip_scalar_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_clip_sc_a, oracle_clip_sc_a);
+
+    // 6. clip column bounds (axis=1)
+    let col_bounds = Series::from_values(
+        "lower",
+        vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+        vec![Scalar::Float64(5.0), Scalar::Float64(15.0)],
+    )
+    .expect("col bounds");
+    let clip_col = df
+        .clip_with_column_bounds(Some(&col_bounds), None)
+        .expect("clip col");
+    let actual_clip_col_a: Vec<f64> = clip_col
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_clip_col_a: Vec<f64> = oracle["clip_dict_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_clip_col_a, oracle_clip_col_a);
+
+    // 7. clip row bounds (axis=0)
+    let row_bounds = Series::from_values(
+        "lower",
+        vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ],
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Float64(6.0),
+            Scalar::Float64(10.0),
+        ],
+    )
+    .expect("row bounds");
+    let clip_row = df
+        .clip_with_row_bounds(Some(&row_bounds), None)
+        .expect("clip row");
+    let actual_clip_row_a: Vec<f64> = clip_row
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_clip_row_a: Vec<f64> = oracle["clip_row_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_clip_row_a, oracle_clip_row_a);
+}

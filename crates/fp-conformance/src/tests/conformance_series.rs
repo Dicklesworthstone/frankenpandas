@@ -1549,3 +1549,180 @@ print(json.dumps(res))
     assert_eq!(actual_cp_noskip, oracle_cp_noskip);
 }
 
+#[test]
+fn conformance_series_round_rank_clip_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([1.234, 5.678, 3.456, 5.678], index=['s0', 's1', 's2', 's3'])
+s_lo = pd.Series([2.0, 2.0, 2.0, 2.0], index=['s0', 's1', 's2', 's3'])
+s_hi = pd.Series([4.0, 4.0, 4.0, 4.0], index=['s0', 's1', 's2', 's3'])
+res = {
+    'round_1': [float(x) for x in s.round(1)],
+    'rank_avg': [float(x) for x in s.rank(method='average')],
+    'rank_dense_desc': [float(x) for x in s.rank(method='dense', ascending=False)],
+    'rank_pct': [float(x) for x in s.rank(pct=True)],
+    'clip_scalar': [float(x) for x in s.clip(lower=2.0, upper=4.0)],
+    'clip_series': [float(x) for x in s.clip(lower=s_lo, upper=s_hi)],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping Series round/rank/clip differential test"
+            );
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("s0".into()),
+            IndexLabel::Utf8("s1".into()),
+            IndexLabel::Utf8("s2".into()),
+            IndexLabel::Utf8("s3".into()),
+        ],
+        vec![
+            Scalar::Float64(1.234),
+            Scalar::Float64(5.678),
+            Scalar::Float64(3.456),
+            Scalar::Float64(5.678),
+        ],
+    )
+    .expect("s");
+
+    // 1. round
+    let rd = s.round(1).expect("round");
+    let actual_rd: Vec<f64> = rd
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rd: Vec<f64> = oracle["round_1"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rd, oracle_rd);
+
+    // 2. rank average
+    let rk_avg = s.rank("average", true, "keep").expect("rank avg");
+    let actual_rk_avg: Vec<f64> = rk_avg
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rk_avg: Vec<f64> = oracle["rank_avg"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rk_avg, oracle_rk_avg);
+
+    // 3. rank dense descending
+    let rk_dense = s.rank("dense", false, "keep").expect("rank dense desc");
+    let actual_rk_dense: Vec<f64> = rk_dense
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rk_dense: Vec<f64> = oracle["rank_dense_desc"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rk_dense, oracle_rk_dense);
+
+    // 4. rank pct
+    let rk_pct = s
+        .rank_with_pct("average", true, "keep", true)
+        .expect("rank pct");
+    let actual_rk_pct: Vec<f64> = rk_pct
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_rk_pct: Vec<f64> = oracle["rank_pct"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_rk_pct, oracle_rk_pct);
+
+    // 5. clip scalar
+    let cl_sc = s.clip(Some(2.0), Some(4.0)).expect("clip scalar");
+    let actual_cl_sc: Vec<f64> = cl_sc
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_cl_sc: Vec<f64> = oracle["clip_scalar"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_cl_sc, oracle_cl_sc);
+
+    // 6. clip with series
+    let s_lo = Series::from_values(
+        "s_lo",
+        vec![
+            IndexLabel::Utf8("s0".into()),
+            IndexLabel::Utf8("s1".into()),
+            IndexLabel::Utf8("s2".into()),
+            IndexLabel::Utf8("s3".into()),
+        ],
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(2.0),
+        ],
+    )
+    .expect("s_lo");
+    let s_hi = Series::from_values(
+        "s_hi",
+        vec![
+            IndexLabel::Utf8("s0".into()),
+            IndexLabel::Utf8("s1".into()),
+            IndexLabel::Utf8("s2".into()),
+            IndexLabel::Utf8("s3".into()),
+        ],
+        vec![
+            Scalar::Float64(4.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(4.0),
+        ],
+    )
+    .expect("s_hi");
+    let cl_ser = s
+        .clip_with_series(Some(&s_lo), Some(&s_hi))
+        .expect("clip series");
+    let actual_cl_ser: Vec<f64> = cl_ser
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_cl_ser: Vec<f64> = oracle["clip_series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_cl_ser, oracle_cl_ser);
+}
