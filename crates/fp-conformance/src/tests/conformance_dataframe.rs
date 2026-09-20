@@ -2801,3 +2801,235 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_clip_row_a, oracle_clip_row_a);
 }
+
+#[test]
+fn conformance_dataframe_dropna_differential() {
+    use fp_frame::{DataFrame, DropNaHow};
+    use fp_index::IndexLabel;
+    use fp_types::{NullKind, Scalar};
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({
+    'a': [1.0, float('nan'), float('nan'), 4.0],
+    'b': [2.0, 3.0, float('nan'), 5.0],
+    'c': [6.0, 7.0, 8.0, 9.0],
+}, index=['r0', 'r1', 'r2', 'r3'])
+res = {
+    'd_default_a': [float(x) for x in df.dropna()['a']],
+    'd_default_idx': list(df.dropna().index),
+    'd_all_idx': list(df.dropna(how='all').index),
+    'd_sub_b_idx': list(df.dropna(subset=['b']).index),
+    'd_thresh2_idx': list(df.dropna(thresh=2).index),
+    'd_ax1_cols': list(df.dropna(axis=1, how='any').columns),
+    'd_ax1_thresh3_cols': list(df.dropna(axis=1, thresh=3).columns),
+    'd_ax1_sub_cols': list(df.dropna(axis=1, subset=['r0', 'r1']).columns),
+    'd_ign_idx': list(df.dropna(ignore_index=True).index),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame dropna differential test");
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict_with_index(
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(4.0),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(5.0),
+                ],
+            ),
+            (
+                "c",
+                vec![
+                    Scalar::Float64(6.0),
+                    Scalar::Float64(7.0),
+                    Scalar::Float64(8.0),
+                    Scalar::Float64(9.0),
+                ],
+            ),
+        ],
+        vec![
+            IndexLabel::Utf8("r0".into()),
+            IndexLabel::Utf8("r1".into()),
+            IndexLabel::Utf8("r2".into()),
+            IndexLabel::Utf8("r3".into()),
+        ],
+    )
+    .expect("df");
+
+    // 1. default dropna (axis=0, how=any)
+    let d_def = df.dropna().expect("dropna default");
+    let actual_def_a: Vec<f64> = d_def
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_def_a: Vec<f64> = oracle["d_default_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_def_a, oracle_def_a);
+
+    let actual_def_idx: Vec<String> = d_def
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Utf8(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect();
+    let oracle_def_idx: Vec<String> = oracle["d_default_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_def_idx, oracle_def_idx);
+
+    // 2. dropna how='all'
+    let d_all = df
+        .dropna_with_options(DropNaHow::All, None)
+        .expect("dropna all");
+    let actual_all_idx: Vec<String> = d_all
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Utf8(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect();
+    let oracle_all_idx: Vec<String> = oracle["d_all_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_all_idx, oracle_all_idx);
+
+    // 3. dropna subset=['b']
+    let d_sub_b = df
+        .dropna_with_options(DropNaHow::Any, Some(&["b".to_string()]))
+        .expect("dropna sub b");
+    let actual_sub_b_idx: Vec<String> = d_sub_b
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Utf8(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect();
+    let oracle_sub_b_idx: Vec<String> = oracle["d_sub_b_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_sub_b_idx, oracle_sub_b_idx);
+
+    // 4. dropna thresh=2
+    let d_thresh2 = df.dropna_with_threshold(2, None).expect("dropna thresh 2");
+    let actual_thresh2_idx: Vec<String> = d_thresh2
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Utf8(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect();
+    let oracle_thresh2_idx: Vec<String> = oracle["d_thresh2_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_thresh2_idx, oracle_thresh2_idx);
+
+    // 5. dropna axis=1, how='any'
+    let d_ax1 = df.dropna_columns().expect("dropna cols");
+    let actual_ax1_cols: Vec<String> = d_ax1.column_names().into_iter().cloned().collect();
+    let oracle_ax1_cols: Vec<String> = oracle["d_ax1_cols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_ax1_cols, oracle_ax1_cols);
+
+    // 6. dropna axis=1, thresh=3
+    let d_ax1_thresh3 = df
+        .dropna_columns_with_threshold(3, None)
+        .expect("dropna cols thresh 3");
+    let actual_ax1_thresh3_cols: Vec<String> =
+        d_ax1_thresh3.column_names().into_iter().cloned().collect();
+    let oracle_ax1_thresh3_cols: Vec<String> = oracle["d_ax1_thresh3_cols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_ax1_thresh3_cols, oracle_ax1_thresh3_cols);
+
+    // 7. dropna axis=1, subset=['r0', 'r1']
+    let subset_rows = vec![IndexLabel::Utf8("r0".into()), IndexLabel::Utf8("r1".into())];
+    let d_ax1_sub = df
+        .dropna_columns_with_options(DropNaHow::Any, Some(&subset_rows))
+        .expect("dropna cols subset");
+    let actual_ax1_sub_cols: Vec<String> = d_ax1_sub.column_names().into_iter().cloned().collect();
+    let oracle_ax1_sub_cols: Vec<String> = oracle["d_ax1_sub_cols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_ax1_sub_cols, oracle_ax1_sub_cols);
+
+    // 8. dropna ignore_index=True
+    let d_ign = df
+        .dropna()
+        .expect("dropna ign")
+        .reset_index(true)
+        .expect("reset idx");
+    let actual_ign_idx: Vec<i64> = d_ign
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => *i,
+            _ => -1,
+        })
+        .collect();
+    let oracle_ign_idx: Vec<i64> = oracle["d_ign_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_ign_idx, oracle_ign_idx);
+}

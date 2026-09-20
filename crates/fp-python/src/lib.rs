@@ -24,7 +24,7 @@ use std::{
 
 use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
-use fp_frame::{DataFrame, Series, concat_dataframes, concat_series};
+use fp_frame::{DataFrame, DropNaHow, Series, concat_dataframes, concat_series};
 use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
@@ -10044,12 +10044,37 @@ impl PySeries {
     }
 
     /// Drop missing values, returning a new Series.
-    fn dropna(&self) -> PyResult<PySeries> {
-        let r = self
-            .inner
-            .dropna()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
+    #[pyo3(signature = (axis=None, how=None, ignore_index=false))]
+    fn dropna(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        how: Option<&str>,
+        ignore_index: bool,
+    ) -> PyResult<PySeries> {
+        let ax_opt = parse_axis_param_for_type(axis, "Series")?;
+        if let Some(ax) = ax_opt {
+            if ax != 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {ax} for object type Series"
+                )));
+            }
+        }
+        if let Some(h) = how {
+            if !matches!(h, "any" | "all") {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "invalid how option: {h}"
+                )));
+            }
+        }
+
+        let mut res = self.inner.dropna().map_err(frame_error_to_py)?;
+        if ignore_index {
+            match res.reset_index(true).map_err(frame_error_to_py)? {
+                fp_frame::SeriesResetIndexResult::Series(s) => res = s,
+                fp_frame::SeriesResetIndexResult::DataFrame(_) => unreachable!(),
+            }
+        }
+        Ok(PySeries { inner: res })
     }
 
     /// Return the cumulative product as a new Series.
@@ -13053,13 +13078,95 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Drop rows containing any missing value, returning a new DataFrame.
-    fn dropna(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .inner
-            .dropna()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// Drop rows or columns containing missing values, returning a new DataFrame.
+    #[pyo3(signature = (axis=None, how=None, thresh=None, subset=None, ignore_index=false))]
+    fn dropna(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        how: Option<&str>,
+        thresh: Option<usize>,
+        subset: Option<&Bound<'_, PyAny>>,
+        ignore_index: bool,
+    ) -> PyResult<PyDataFrame> {
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+
+        if how.is_some() && thresh.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "You cannot set both the how and thresh arguments at the same time.",
+            ));
+        }
+
+        let how_enum = match how {
+            None | Some("any") => DropNaHow::Any,
+            Some("all") => DropNaHow::All,
+            Some(other) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "invalid how option: {other}"
+                )));
+            }
+        };
+
+        let mut res = if ax == 0 {
+            // row-wise dropna: subset selects column names
+            let subset_cols: Option<Vec<String>> = if let Some(s) = subset {
+                if let Ok(col_name) = s.extract::<String>() {
+                    Some(vec![col_name])
+                } else if let Ok(col_list) = s.extract::<Vec<String>>() {
+                    Some(col_list)
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "subset must be a string or list of strings",
+                    ));
+                }
+            } else {
+                None
+            };
+
+            if let Some(t) = thresh {
+                self.inner
+                    .dropna_with_threshold(t, subset_cols.as_deref())
+                    .map_err(frame_error_to_py)?
+            } else {
+                self.inner
+                    .dropna_with_options(how_enum, subset_cols.as_deref())
+                    .map_err(frame_error_to_py)?
+            }
+        } else {
+            // col-wise dropna (axis=1): subset selects row labels
+            let subset_rows: Option<Vec<IndexLabel>> = if let Some(s) = subset {
+                if let Ok(label_str) = s.extract::<String>() {
+                    Some(vec![IndexLabel::Utf8(label_str)])
+                } else if let Ok(label_int) = s.extract::<i64>() {
+                    Some(vec![IndexLabel::Int64(label_int)])
+                } else if let Ok(label_list) = s.extract::<Vec<String>>() {
+                    Some(label_list.into_iter().map(IndexLabel::Utf8).collect())
+                } else if let Ok(label_list) = s.extract::<Vec<i64>>() {
+                    Some(label_list.into_iter().map(IndexLabel::Int64).collect())
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "subset must be a label or list of labels",
+                    ));
+                }
+            } else {
+                None
+            };
+
+            if let Some(t) = thresh {
+                self.inner
+                    .dropna_columns_with_threshold(t, subset_rows.as_deref())
+                    .map_err(frame_error_to_py)?
+            } else {
+                self.inner
+                    .dropna_columns_with_options(how_enum, subset_rows.as_deref())
+                    .map_err(frame_error_to_py)?
+            }
+        };
+
+        if ignore_index {
+            res = res.reset_index(true).map_err(frame_error_to_py)?;
+        }
+
+        Ok(PyDataFrame { inner: res })
     }
 
     /// Reset the index to a default integer range, returning a new DataFrame.
@@ -28347,6 +28454,117 @@ mod tests {
             assert_eq!(
                 clipped_df.inner.columns()["a"].values(),
                 &[Scalar::Float64(2.0), Scalar::Float64(5.678)]
+            );
+        });
+    }
+
+    #[test]
+    fn test_py_dropna_options() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Utf8("x0".into()),
+                    IndexLabel::Utf8("x1".into()),
+                    IndexLabel::Utf8("x2".into()),
+                ],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .expect("series");
+            let py_s = PySeries { inner: s };
+
+            let dropped_s = py_s.dropna(None, None, false).expect("dropna s");
+            assert_eq!(dropped_s.inner.len(), 2);
+            assert_eq!(
+                dropped_s.inner.index().labels(),
+                &[IndexLabel::Utf8("x0".into()), IndexLabel::Utf8("x2".into())]
+            );
+
+            let dropped_s_ign = py_s.dropna(None, None, true).expect("dropna s ign");
+            assert_eq!(dropped_s_ign.inner.len(), 2);
+            assert_eq!(
+                dropped_s_ign.inner.index().labels(),
+                &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+            );
+
+            let ax1 = pyo3::types::PyInt::new(py, 1);
+            assert!(py_s.dropna(Some(ax1.as_any()), None, false).is_err());
+
+            let df = DataFrame::from_dict(
+                &["a", "b", "c"],
+                vec![
+                    (
+                        "a",
+                        vec![
+                            Scalar::Float64(1.0),
+                            Scalar::Null(NullKind::NaN),
+                            Scalar::Null(NullKind::NaN),
+                        ],
+                    ),
+                    (
+                        "b",
+                        vec![
+                            Scalar::Float64(2.0),
+                            Scalar::Float64(3.0),
+                            Scalar::Null(NullKind::NaN),
+                        ],
+                    ),
+                    (
+                        "c",
+                        vec![
+                            Scalar::Float64(4.0),
+                            Scalar::Float64(5.0),
+                            Scalar::Float64(6.0),
+                        ],
+                    ),
+                ],
+            )
+            .expect("df");
+            let py_df = PyDataFrame { inner: df };
+
+            let d0 = py_df
+                .dropna(None, None, None, None, false)
+                .expect("df dropna default");
+            assert_eq!(d0.shape(), (1, 3));
+
+            let d_all = py_df
+                .dropna(None, Some("all"), None, None, false)
+                .expect("df dropna all");
+            assert_eq!(d_all.shape(), (3, 3));
+
+            let sub_a = pyo3::types::PyString::new(py, "a");
+            let d_sub = py_df
+                .dropna(None, None, None, Some(sub_a.as_any()), false)
+                .expect("df dropna sub");
+            assert_eq!(d_sub.shape(), (1, 3));
+
+            let d_thresh = py_df
+                .dropna(None, None, Some(2), None, false)
+                .expect("df dropna thresh 2");
+            assert_eq!(d_thresh.shape(), (2, 3));
+
+            let d_ax1 = py_df
+                .dropna(Some(ax1.as_any()), Some("any"), None, None, false)
+                .expect("df dropna ax1");
+            assert_eq!(d_ax1.shape(), (3, 1));
+            assert_eq!(d_ax1.columns(), vec!["c"]);
+
+            let d_ax1_thresh = py_df
+                .dropna(Some(ax1.as_any()), None, Some(2), None, false)
+                .expect("df dropna ax1 thresh 2");
+            assert_eq!(d_ax1_thresh.shape(), (3, 2));
+            assert_eq!(d_ax1_thresh.columns(), vec!["b", "c"]);
+
+            // Both how and thresh should fail
+            assert!(
+                py_df
+                    .dropna(None, Some("any"), Some(2), None, false)
+                    .is_err()
             );
         });
     }

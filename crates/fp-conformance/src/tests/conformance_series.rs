@@ -1726,3 +1726,97 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_cl_ser, oracle_cl_ser);
 }
+
+#[test]
+fn conformance_series_dropna_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([1.0, float('nan'), 3.0, float('nan'), 5.0], index=['a', 'b', 'c', 'd', 'e'])
+res = {
+    'dropna_vals': [float(x) for x in s.dropna()],
+    'dropna_idx': list(s.dropna().index),
+    'dropna_ign_idx': list(s.dropna(ignore_index=True).index),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series dropna differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("e".into()),
+        ],
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(5.0),
+        ],
+    )
+    .expect("s");
+
+    let dropped = s.dropna().expect("dropna");
+    let actual_vals: Vec<f64> = dropped
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_vals: Vec<f64> = oracle["dropna_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_vals, oracle_vals);
+
+    let actual_idx: Vec<String> = dropped
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Utf8(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect();
+    let oracle_idx: Vec<String> = oracle["dropna_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_idx, oracle_idx);
+
+    let dropped_ign = match dropped.reset_index(true).expect("reset index") {
+        fp_frame::SeriesResetIndexResult::Series(ser) => ser,
+        fp_frame::SeriesResetIndexResult::DataFrame(_) => unreachable!(),
+    };
+    let actual_ign_idx: Vec<i64> = dropped_ign
+        .index()
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => *i,
+            _ => -1,
+        })
+        .collect();
+    let oracle_ign_idx: Vec<i64> = oracle["dropna_ign_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_ign_idx, oracle_ign_idx);
+}
