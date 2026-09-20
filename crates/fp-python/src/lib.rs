@@ -34,7 +34,7 @@ use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
     prelude::*,
-    types::{PyDict, PyList, PyTuple},
+    types::{PyDict, PyFrozenSet, PyList, PySet, PyTuple},
 };
 
 #[global_allocator]
@@ -9354,6 +9354,116 @@ fn py_dict_to_series_fill_column(
         .map_err(|e| frame_error_to_py(fp_frame::FrameError::Column(e)))
 }
 
+fn is_py_collection(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<PyList>()
+        || obj.is_instance_of::<PyTuple>()
+        || obj.is_instance_of::<PySet>()
+        || obj.is_instance_of::<PyFrozenSet>()
+}
+
+fn py_sequence_to_scalars(py: Python<'_>, seq: &Bound<'_, PyAny>) -> PyResult<Vec<Scalar>> {
+    let mut scalars = Vec::new();
+    for item in seq.try_iter()? {
+        scalars.push(py_to_scalar(py, &item?)?);
+    }
+    Ok(scalars)
+}
+
+fn python_repl_to_rust_regex_repl(repl: &str) -> String {
+    let mut out = String::with_capacity(repl.len());
+    let mut chars = repl.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('\\') => {
+                    out.push('\\');
+                    out.push('\\');
+                    chars.next();
+                }
+                Some(&next_c) if next_c.is_ascii_digit() && next_c != '0' => {
+                    out.push('$');
+                    out.push(next_c);
+                    chars.next();
+                }
+                Some('g') => {
+                    chars.next();
+                    if chars.peek() == Some(&'<') {
+                        chars.next();
+                        let mut name = String::new();
+                        for nc in chars.by_ref() {
+                            if nc == '>' {
+                                break;
+                            }
+                            name.push(nc);
+                        }
+                        out.push_str(&format!("${{{name}}}"));
+                    } else {
+                        out.push('\\');
+                        out.push('g');
+                    }
+                }
+                _ => {
+                    out.push('\\');
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn series_replace_with_method(
+    series: &Series,
+    targets: &[Scalar],
+    is_ffill: bool,
+    limit: Option<usize>,
+) -> Result<Series, fp_frame::FrameError> {
+    let vals = series.column().values();
+    let n = vals.len();
+    let mut out = vals.to_vec();
+    if is_ffill {
+        let mut last_valid: Option<Scalar> = None;
+        let mut consecutive = 0usize;
+        for i in 0..n {
+            let is_target = targets.iter().any(|t| t.semantic_eq(&vals[i]));
+            if is_target {
+                if let Some(lv) = &last_valid {
+                    if limit.is_none_or(|lim| consecutive < lim) {
+                        out[i] = lv.clone();
+                        consecutive += 1;
+                    }
+                }
+            } else {
+                last_valid = Some(vals[i].clone());
+                consecutive = 0;
+            }
+        }
+    } else {
+        let mut last_valid: Option<Scalar> = None;
+        let mut consecutive = 0usize;
+        for i in (0..n).rev() {
+            let is_target = targets.iter().any(|t| t.semantic_eq(&vals[i]));
+            if is_target {
+                if let Some(lv) = &last_valid {
+                    if limit.is_none_or(|lim| consecutive < lim) {
+                        out[i] = lv.clone();
+                        consecutive += 1;
+                    }
+                }
+            } else {
+                last_valid = Some(vals[i].clone());
+                consecutive = 0;
+            }
+        }
+    }
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        Column::from_values(out).map_err(fp_frame::FrameError::Column)?,
+    )
+}
+
 enum SeriesOrScalarBound {
     Scalar(f64),
     Series(Box<Series>),
@@ -10494,14 +10604,211 @@ impl PySeries {
         }
     }
 
-    /// Replace values via an `{old: new}` dict (pandas `Series.replace`).
-    fn replace(&self, py: Python<'_>, mapping: &Bound<'_, PyDict>) -> PyResult<PySeries> {
-        let pairs = py_dict_to_scalar_pairs(py, mapping)?;
-        let r = self
-            .inner
-            .replace(&pairs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
+    /// Replace values dynamically or via an `{old: new}` mapping (pandas `Series.replace`).
+    #[pyo3(signature = (to_replace=None, value=None, inplace=false, limit=None, regex=None, method=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn replace(
+        &self,
+        py: Python<'_>,
+        to_replace: Option<&Bound<'_, PyAny>>,
+        value: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<usize>,
+        regex: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+    ) -> PyResult<PySeries> {
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+
+        let mut is_regex = false;
+        let mut effective_to_replace = to_replace;
+
+        if let Some(reg) = regex {
+            if let Ok(b) = reg.extract::<bool>() {
+                is_regex = b;
+            } else if reg.extract::<String>().is_ok() || reg.cast::<PyDict>().is_ok() {
+                is_regex = true;
+                if effective_to_replace.is_none() {
+                    effective_to_replace = Some(reg);
+                }
+            }
+        }
+
+        let Some(to_repl) = effective_to_replace else {
+            return Ok(PySeries {
+                inner: self.inner.clone(),
+            });
+        };
+
+        if let Some(m) = method {
+            let is_ffill = match m {
+                "pad" | "ffill" => true,
+                "backfill" | "bfill" => false,
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid fill method. Expecting pad (ffill) or backfill (bfill). Got {other}"
+                    )));
+                }
+            };
+            let targets = if is_py_collection(to_repl) {
+                py_sequence_to_scalars(py, to_repl)?
+            } else {
+                vec![py_to_scalar(py, to_repl)?]
+            };
+            let res = series_replace_with_method(&self.inner, &targets, is_ffill, limit)
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: res });
+        }
+
+        if is_regex {
+            if let Ok(dict) = to_repl.cast::<PyDict>() {
+                let mut current = self.inner.clone();
+                for (pat_obj, repl_obj) in dict.iter() {
+                    let pat: String = pat_obj.extract()?;
+                    let repl: String = if let Ok(s) = repl_obj.extract::<&str>() {
+                        python_repl_to_rust_regex_repl(s)
+                    } else {
+                        let sc = py_to_scalar(py, &repl_obj)?;
+                        match sc {
+                            Scalar::Utf8(s) => python_repl_to_rust_regex_repl(&s),
+                            Scalar::Int64(i) => i.to_string(),
+                            Scalar::Float64(f) => f.to_string(),
+                            Scalar::Bool(b) => b.to_string(),
+                            _ => repl_obj.to_string(),
+                        }
+                    };
+                    current = current
+                        .replace_regex(&pat, &repl)
+                        .map_err(frame_error_to_py)?;
+                }
+                return Ok(PySeries { inner: current });
+            } else if let Ok(pat) = to_repl.extract::<String>() {
+                let repl = if let Some(val_obj) = value {
+                    if let Ok(s) = val_obj.extract::<&str>() {
+                        python_repl_to_rust_regex_repl(s)
+                    } else {
+                        let sc = py_to_scalar(py, val_obj)?;
+                        match sc {
+                            Scalar::Utf8(s) => python_repl_to_rust_regex_repl(&s),
+                            Scalar::Int64(i) => i.to_string(),
+                            Scalar::Float64(f) => f.to_string(),
+                            Scalar::Bool(b) => b.to_string(),
+                            _ => val_obj.to_string(),
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+                let res = self
+                    .inner
+                    .replace_regex(&pat, &repl)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner: res });
+            } else if is_py_collection(to_repl) {
+                let mut pat_list = Vec::new();
+                for item in to_repl.try_iter()? {
+                    pat_list.push(item?.extract::<String>()?);
+                }
+                let mut current = self.inner.clone();
+                if let Some(val_obj) = value {
+                    if is_py_collection(val_obj) {
+                        let mut repl_list = Vec::new();
+                        for item in val_obj.try_iter()? {
+                            repl_list.push(item?.extract::<String>()?);
+                        }
+                        if pat_list.len() != repl_list.len() {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Replacement lists must match in length. Expecting {} got {}",
+                                pat_list.len(),
+                                repl_list.len()
+                            )));
+                        }
+                        for (pat, repl) in pat_list.iter().zip(repl_list.iter()) {
+                            let repl_conv = python_repl_to_rust_regex_repl(repl);
+                            current = current
+                                .replace_regex(pat, &repl_conv)
+                                .map_err(frame_error_to_py)?;
+                        }
+                    } else {
+                        let repl_str = val_obj.extract::<String>()?;
+                        let repl_conv = python_repl_to_rust_regex_repl(&repl_str);
+                        for pat in &pat_list {
+                            current = current
+                                .replace_regex(pat, &repl_conv)
+                                .map_err(frame_error_to_py)?;
+                        }
+                    }
+                }
+                return Ok(PySeries { inner: current });
+            }
+        }
+
+        // Literal replacement (regex=false)
+        if let Ok(dict) = to_repl.cast::<PyDict>() {
+            let pairs = py_dict_to_scalar_pairs(py, dict)?;
+            let r = self.inner.replace(&pairs).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: r });
+        }
+
+        if let Ok(py_s) = to_repl.extract::<PyRef<PySeries>>() {
+            let s = &py_s.inner;
+            let idx_labels = s.index().labels();
+            let col_vals = s.column().values();
+            let pairs: Vec<(Scalar, Scalar)> = idx_labels
+                .iter()
+                .zip(col_vals.iter())
+                .map(|(label, val)| (index_label_to_scalar(label), val.clone()))
+                .collect();
+            let r = self.inner.replace(&pairs).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: r });
+        }
+
+        if is_py_collection(to_repl) {
+            let from_scalars = py_sequence_to_scalars(py, to_repl)?;
+            let pairs: Vec<(Scalar, Scalar)> = if let Some(val_obj) = value {
+                if is_py_collection(val_obj) {
+                    let to_scalars = py_sequence_to_scalars(py, val_obj)?;
+                    if from_scalars.len() != to_scalars.len() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Replacement lists must match in length. Expecting {} got {}",
+                            from_scalars.len(),
+                            to_scalars.len()
+                        )));
+                    }
+                    from_scalars.into_iter().zip(to_scalars).collect()
+                } else {
+                    let to_s = py_to_scalar(py, val_obj)?;
+                    from_scalars
+                        .into_iter()
+                        .map(|s| (s, to_s.clone()))
+                        .collect()
+                }
+            } else {
+                return Ok(PySeries {
+                    inner: self.inner.clone(),
+                });
+            };
+            let r = self.inner.replace(&pairs).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: r });
+        }
+
+        // Single scalar
+        if let Some(val_obj) = value {
+            let from_s = py_to_scalar(py, to_repl)?;
+            let to_s = py_to_scalar(py, val_obj)?;
+            let r = self
+                .inner
+                .replace(&[(from_s, to_s)])
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: r });
+        }
+
+        Ok(PySeries {
+            inner: self.inner.clone(),
+        })
     }
 
     /// Cast to a dtype (int64/float64/str/bool/datetime64/timedelta64).
@@ -13972,14 +14279,388 @@ impl PyDataFrame {
         }
     }
 
-    /// Replace values via an `{old: new}` dict (pandas `DataFrame.replace`).
-    fn replace(&self, py: Python<'_>, mapping: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
-        let pairs = py_dict_to_scalar_pairs(py, mapping)?;
-        let result = self
-            .inner
-            .replace(&pairs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// Replace values dynamically or via mappings (pandas `DataFrame.replace`).
+    #[pyo3(signature = (to_replace=None, value=None, inplace=false, limit=None, regex=None, method=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn replace(
+        &self,
+        py: Python<'_>,
+        to_replace: Option<&Bound<'_, PyAny>>,
+        value: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<usize>,
+        regex: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+
+        let mut is_regex = false;
+        let mut effective_to_replace = to_replace;
+
+        if let Some(reg) = regex {
+            if let Ok(b) = reg.extract::<bool>() {
+                is_regex = b;
+            } else if reg.extract::<String>().is_ok() || reg.cast::<PyDict>().is_ok() {
+                is_regex = true;
+                if effective_to_replace.is_none() {
+                    effective_to_replace = Some(reg);
+                }
+            }
+        }
+
+        let Some(to_repl) = effective_to_replace else {
+            return Ok(PyDataFrame {
+                inner: self.inner.clone(),
+            });
+        };
+
+        if let Some(m) = method {
+            let is_ffill = match m {
+                "pad" | "ffill" => true,
+                "backfill" | "bfill" => false,
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid fill method. Expecting pad (ffill) or backfill (bfill). Got {other}"
+                    )));
+                }
+            };
+            let targets = if is_py_collection(to_repl) {
+                py_sequence_to_scalars(py, to_repl)?
+            } else {
+                vec![py_to_scalar(py, to_repl)?]
+            };
+            let n_cols = self.inner.num_columns();
+            let mut col_map = BTreeMap::new();
+            let mut column_order = Vec::with_capacity(n_cols);
+            for pos in 0..n_cols {
+                if let (Some(name), Some(col)) =
+                    (self.inner.column_name_at(pos), self.inner.column_at(pos))
+                {
+                    let s = Series::new(name.clone(), self.inner.index().clone(), col.clone())
+                        .map_err(frame_error_to_py)?;
+                    let replaced_s = series_replace_with_method(&s, &targets, is_ffill, limit)
+                        .map_err(frame_error_to_py)?;
+                    col_map.insert(name.clone(), replaced_s.column().clone());
+                    column_order.push(name.clone());
+                }
+            }
+            let out =
+                DataFrame::new_with_column_order(self.inner.index().clone(), col_map, column_order)
+                    .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: out });
+        }
+
+        if is_regex {
+            if let Ok(dict) = to_repl.cast::<PyDict>() {
+                let mut has_nested_dict = false;
+                for (_, v) in dict.iter() {
+                    if v.cast::<PyDict>().is_ok() {
+                        has_nested_dict = true;
+                        break;
+                    }
+                }
+                if has_nested_dict {
+                    let n_cols = self.inner.num_columns();
+                    let mut col_map = BTreeMap::new();
+                    let mut column_order = Vec::with_capacity(n_cols);
+                    for pos in 0..n_cols {
+                        if let (Some(name), Some(col)) =
+                            (self.inner.column_name_at(pos), self.inner.column_at(pos))
+                        {
+                            column_order.push(name.clone());
+                            if let Ok(Some(inner_obj)) = dict.get_item(&name) {
+                                if let Ok(inner_dict) = inner_obj.cast::<PyDict>() {
+                                    let mut s = Series::new(
+                                        name.clone(),
+                                        self.inner.index().clone(),
+                                        col.clone(),
+                                    )
+                                    .map_err(frame_error_to_py)?;
+                                    for (pat_obj, repl_obj) in inner_dict.iter() {
+                                        let pat: &str = pat_obj.extract()?;
+                                        let repl: &str = repl_obj.extract()?;
+                                        let repl_conv = python_repl_to_rust_regex_repl(repl);
+                                        s = s
+                                            .replace_regex(pat, &repl_conv)
+                                            .map_err(frame_error_to_py)?;
+                                    }
+                                    col_map.insert(name.clone(), s.column().clone());
+                                    continue;
+                                }
+                            }
+                            col_map.insert(name.clone(), col.clone());
+                        }
+                    }
+                    let out = DataFrame::new_with_column_order(
+                        self.inner.index().clone(),
+                        col_map,
+                        column_order,
+                    )
+                    .map_err(frame_error_to_py)?;
+                    return Ok(PyDataFrame { inner: out });
+                }
+
+                let all_keys_are_columns = !dict.is_empty()
+                    && dict.keys().iter().all(|k| {
+                        k.extract::<&str>()
+                            .is_ok_and(|col: &str| self.inner.column(col).is_some())
+                    });
+                if all_keys_are_columns && value.is_some() {
+                    let n_cols = self.inner.num_columns();
+                    let mut col_map = BTreeMap::new();
+                    let mut column_order = Vec::with_capacity(n_cols);
+                    for pos in 0..n_cols {
+                        if let (Some(name), Some(col)) =
+                            (self.inner.column_name_at(pos), self.inner.column_at(pos))
+                        {
+                            column_order.push(name.clone());
+                            if let Ok(Some(pat_obj)) = dict.get_item(&name) {
+                                let mut s = Series::new(
+                                    name.clone(),
+                                    self.inner.index().clone(),
+                                    col.clone(),
+                                )
+                                .map_err(frame_error_to_py)?;
+                                let repl_str: String = if let Some(val_obj) = value {
+                                    if let Ok(val_dict) = val_obj.cast::<PyDict>() {
+                                        if let Ok(Some(col_repl)) = val_dict.get_item(&name) {
+                                            col_repl.extract::<String>()?
+                                        } else {
+                                            col_map.insert(name.clone(), col.clone());
+                                            continue;
+                                        }
+                                    } else {
+                                        val_obj.extract::<String>()?
+                                    }
+                                } else {
+                                    String::new()
+                                };
+                                let repl_conv = python_repl_to_rust_regex_repl(&repl_str);
+                                if is_py_collection(&pat_obj) {
+                                    for item in pat_obj.try_iter()? {
+                                        let pat_str: String = item?.extract()?;
+                                        s = s
+                                            .replace_regex(&pat_str, &repl_conv)
+                                            .map_err(frame_error_to_py)?;
+                                    }
+                                } else {
+                                    let pat_str: String = pat_obj.extract()?;
+                                    s = s
+                                        .replace_regex(&pat_str, &repl_conv)
+                                        .map_err(frame_error_to_py)?;
+                                }
+                                col_map.insert(name.clone(), s.column().clone());
+                            } else {
+                                col_map.insert(name.clone(), col.clone());
+                            }
+                        }
+                    }
+                    let out = DataFrame::new_with_column_order(
+                        self.inner.index().clone(),
+                        col_map,
+                        column_order,
+                    )
+                    .map_err(frame_error_to_py)?;
+                    return Ok(PyDataFrame { inner: out });
+                }
+
+                // Global pattern dict
+                let mut df = self.inner.clone();
+                for (pat_obj, repl_obj) in dict.iter() {
+                    let pat: &str = pat_obj.extract()?;
+                    let repl: &str = repl_obj.extract()?;
+                    let repl_conv = python_repl_to_rust_regex_repl(repl);
+                    df = df
+                        .replace_regex(pat, &repl_conv)
+                        .map_err(frame_error_to_py)?;
+                }
+                return Ok(PyDataFrame { inner: df });
+            } else if let Ok(pat) = to_repl.extract::<&str>() {
+                let repl = if let Some(val_obj) = value {
+                    val_obj.extract::<&str>()?
+                } else {
+                    ""
+                };
+                let repl_conv = python_repl_to_rust_regex_repl(repl);
+                let res = self
+                    .inner
+                    .replace_regex(pat, &repl_conv)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PyDataFrame { inner: res });
+            } else if is_py_collection(to_repl) {
+                let mut pat_list = Vec::new();
+                for item in to_repl.try_iter()? {
+                    pat_list.push(item?.extract::<String>()?);
+                }
+                let mut df = self.inner.clone();
+                if let Some(val_obj) = value {
+                    if is_py_collection(val_obj) {
+                        let mut repl_list = Vec::new();
+                        for item in val_obj.try_iter()? {
+                            repl_list.push(item?.extract::<String>()?);
+                        }
+                        if pat_list.len() != repl_list.len() {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Replacement lists must match in length. Expecting {} got {}",
+                                pat_list.len(),
+                                repl_list.len()
+                            )));
+                        }
+                        for (pat, repl) in pat_list.iter().zip(repl_list.iter()) {
+                            let repl_conv = python_repl_to_rust_regex_repl(repl);
+                            df = df
+                                .replace_regex(pat, &repl_conv)
+                                .map_err(frame_error_to_py)?;
+                        }
+                    } else {
+                        let repl_str = val_obj.extract::<&str>()?;
+                        let repl_conv = python_repl_to_rust_regex_repl(repl_str);
+                        for pat in &pat_list {
+                            df = df
+                                .replace_regex(pat, &repl_conv)
+                                .map_err(frame_error_to_py)?;
+                        }
+                    }
+                }
+                return Ok(PyDataFrame { inner: df });
+            }
+        }
+
+        // Literal replacement (regex=false)
+        if let Ok(dict) = to_repl.cast::<PyDict>() {
+            let mut has_nested_dict = false;
+            for (_, v) in dict.iter() {
+                if v.cast::<PyDict>().is_ok() {
+                    has_nested_dict = true;
+                    break;
+                }
+            }
+            if has_nested_dict {
+                let mut per_col: BTreeMap<String, Vec<(Scalar, Scalar)>> = BTreeMap::new();
+                for (k, v) in dict.iter() {
+                    let col_name: String = k.extract()?;
+                    if self.inner.column(&col_name).is_some() {
+                        if let Ok(inner_dict) = v.cast::<PyDict>() {
+                            let pairs = py_dict_to_scalar_pairs(py, inner_dict)?;
+                            per_col.insert(col_name, pairs);
+                        }
+                    }
+                }
+                let res = self
+                    .inner
+                    .replace_dict(&per_col)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PyDataFrame { inner: res });
+            }
+
+            let all_keys_are_columns = !dict.is_empty()
+                && dict.keys().iter().all(|k| {
+                    k.extract::<&str>()
+                        .is_ok_and(|col: &str| self.inner.column(col).is_some())
+                });
+            if all_keys_are_columns && value.is_some() {
+                let mut per_col: BTreeMap<String, Vec<(Scalar, Scalar)>> = BTreeMap::new();
+                for (k, v) in dict.iter() {
+                    let col_name: String = k.extract()?;
+                    if self.inner.column(&col_name).is_some() {
+                        let targets = if is_py_collection(&v) {
+                            py_sequence_to_scalars(py, &v)?
+                        } else {
+                            vec![py_to_scalar(py, &v)?]
+                        };
+                        let repl_scalar = if let Some(val_obj) = value {
+                            if let Ok(val_dict) = val_obj.cast::<PyDict>() {
+                                if let Ok(Some(col_repl)) = val_dict.get_item(&col_name) {
+                                    py_to_scalar(py, &col_repl)?
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                py_to_scalar(py, val_obj)?
+                            }
+                        } else {
+                            continue;
+                        };
+                        let pairs: Vec<(Scalar, Scalar)> = targets
+                            .into_iter()
+                            .map(|t| (t, repl_scalar.clone()))
+                            .collect();
+                        per_col.insert(col_name, pairs);
+                    }
+                }
+                let res = self
+                    .inner
+                    .replace_dict(&per_col)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PyDataFrame { inner: res });
+            }
+
+            // Global flat {old: new} dict
+            let pairs = py_dict_to_scalar_pairs(py, dict)?;
+            let res = self.inner.replace(&pairs).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: res });
+        }
+
+        if let Ok(py_s) = to_repl.extract::<PyRef<PySeries>>() {
+            let s = &py_s.inner;
+            let idx_labels = s.index().labels();
+            let col_vals = s.column().values();
+            let pairs: Vec<(Scalar, Scalar)> = idx_labels
+                .iter()
+                .zip(col_vals.iter())
+                .map(|(label, val)| (index_label_to_scalar(label), val.clone()))
+                .collect();
+            let res = self.inner.replace(&pairs).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: res });
+        }
+
+        if is_py_collection(to_repl) {
+            let from_scalars = py_sequence_to_scalars(py, to_repl)?;
+            let pairs: Vec<(Scalar, Scalar)> = if let Some(val_obj) = value {
+                if is_py_collection(val_obj) {
+                    let to_scalars = py_sequence_to_scalars(py, val_obj)?;
+                    if from_scalars.len() != to_scalars.len() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Replacement lists must match in length. Expecting {} got {}",
+                            from_scalars.len(),
+                            to_scalars.len()
+                        )));
+                    }
+                    from_scalars.into_iter().zip(to_scalars).collect()
+                } else {
+                    let to_s = py_to_scalar(py, val_obj)?;
+                    from_scalars
+                        .into_iter()
+                        .map(|s| (s, to_s.clone()))
+                        .collect()
+                }
+            } else {
+                return Ok(PyDataFrame {
+                    inner: self.inner.clone(),
+                });
+            };
+            let res = self.inner.replace(&pairs).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: res });
+        }
+
+        // Single scalar
+        if let Some(val_obj) = value {
+            let from_s = py_to_scalar(py, to_repl)?;
+            let to_s = py_to_scalar(py, val_obj)?;
+            let res = self
+                .inner
+                .replace(&[(from_s, to_s)])
+                .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: res });
+        }
+
+        Ok(PyDataFrame {
+            inner: self.inner.clone(),
+        })
     }
 
     /// Cast every column to a dtype (int64/float64/str/bool/datetime64/timedelta64).
@@ -29235,6 +29916,168 @@ mod tests {
             assert_eq!(
                 df_ffill1.inner.column("b").unwrap().values(),
                 &[Scalar::Float64(1.0), Scalar::Float64(2.0)]
+            );
+        });
+    }
+
+    #[test]
+    fn test_py_replace_options() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            // Series replace options
+            let s = Series::from_values(
+                "s",
+                vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                    IndexLabel::Int64(3),
+                ],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .expect("s");
+            let py_s = PySeries { inner: s };
+
+            // 1. Scalar replace
+            let val_1 = 1_i64.into_bound_py_any(py).unwrap();
+            let val_10 = 10_i64.into_bound_py_any(py).unwrap();
+            let s_sc = py_s
+                .replace(py, Some(&val_1), Some(&val_10), false, None, None, None)
+                .expect("replace scalar");
+            assert_eq!(
+                s_sc.inner.column().values(),
+                &[
+                    Scalar::Int64(10),
+                    Scalar::Int64(2),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3)
+                ]
+            );
+
+            // 2. List to scalar replace
+            let list_targets = pyo3::types::PyList::new(py, [1_i64, 2_i64]).unwrap();
+            let val_99 = 99_i64.into_bound_py_any(py).unwrap();
+            let s_list = py_s
+                .replace(
+                    py,
+                    Some(list_targets.as_any()),
+                    Some(&val_99),
+                    false,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("replace list");
+            assert_eq!(
+                s_list.inner.column().values(),
+                &[
+                    Scalar::Int64(99),
+                    Scalar::Int64(99),
+                    Scalar::Int64(99),
+                    Scalar::Int64(3)
+                ]
+            );
+
+            // 3. Method ffill with limit
+            let val_2 = 2_i64.into_bound_py_any(py).unwrap();
+            let s_ffill = py_s
+                .replace(py, Some(&val_2), None, false, Some(1), None, Some("ffill"))
+                .expect("replace ffill");
+            assert_eq!(
+                s_ffill.inner.column().values(),
+                &[
+                    Scalar::Int64(1),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3)
+                ]
+            );
+
+            // 4. Series regex replace
+            let s_str = Series::from_values(
+                "s",
+                vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+                vec![Scalar::Utf8("cat1".into()), Scalar::Utf8("dog2".into())],
+            )
+            .expect("s_str");
+            let py_s_str = PySeries { inner: s_str };
+            let reg_pat = "^([a-z]+)(\\d)$".into_bound_py_any(py).unwrap();
+            let reg_repl = "animal_\\1".into_bound_py_any(py).unwrap();
+            let reg_flag = true.into_bound_py_any(py).unwrap();
+            let s_reg = py_s_str
+                .replace(
+                    py,
+                    Some(&reg_pat),
+                    Some(&reg_repl),
+                    false,
+                    None,
+                    Some(&reg_flag),
+                    None,
+                )
+                .expect("replace regex");
+            assert_eq!(
+                s_reg.inner.column().values(),
+                &[
+                    Scalar::Utf8("animal_cat".into()),
+                    Scalar::Utf8("animal_dog".into()),
+                ]
+            );
+
+            // DataFrame replace options
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                    ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+                ],
+            )
+            .expect("df");
+            let py_df = PyDataFrame { inner: df };
+
+            // 5. DataFrame column-nested dict replace
+            let col_a_dict = pyo3::types::PyDict::new(py);
+            col_a_dict.set_item(1, 10).unwrap();
+            let nest_dict = pyo3::types::PyDict::new(py);
+            nest_dict.set_item("a", col_a_dict).unwrap();
+            let df_nest = py_df
+                .replace(py, Some(nest_dict.as_any()), None, false, None, None, None)
+                .expect("df nest replace");
+            assert_eq!(
+                df_nest.inner.column("a").unwrap().values(),
+                &[Scalar::Int64(10), Scalar::Int64(2)]
+            );
+            assert_eq!(
+                df_nest.inner.column("b").unwrap().values(),
+                &[Scalar::Int64(3), Scalar::Int64(4)]
+            );
+
+            // 6. DataFrame column-scalar dict replace
+            let col_spec_dict = pyo3::types::PyDict::new(py);
+            col_spec_dict.set_item("a", 1).unwrap();
+            col_spec_dict.set_item("b", 4).unwrap();
+            let df_col_spec = py_df
+                .replace(
+                    py,
+                    Some(col_spec_dict.as_any()),
+                    Some(&val_99),
+                    false,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("df col spec replace");
+            assert_eq!(
+                df_col_spec.inner.column("a").unwrap().values(),
+                &[Scalar::Int64(99), Scalar::Int64(2)]
+            );
+            assert_eq!(
+                df_col_spec.inner.column("b").unwrap().values(),
+                &[Scalar::Int64(3), Scalar::Int64(99)]
             );
         });
     }

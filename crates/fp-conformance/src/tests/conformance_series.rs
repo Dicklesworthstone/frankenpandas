@@ -1961,3 +1961,163 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_f_other, oracle_f_other);
 }
+
+#[test]
+fn conformance_series_replace_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series([1, 2, 3, 2, 1], index=['a', 'b', 'c', 'd', 'e'])
+s_str = pd.Series(['apple1', 'banana2', 'apricot3', 'cherry4'], index=['w', 'x', 'y', 'z'])
+res = {
+    'scalar_repl': [int(x) for x in s.replace(1, 10)],
+    'list_to_list': [int(x) for x in s.replace([1, 2], [10, 20])],
+    'list_to_scalar': [int(x) for x in s.replace([1, 2], 99)],
+    'dict_repl': [int(x) for x in s.replace({1: 10, 2: 20})],
+    'regex_repl': [str(x) for x in s_str.replace(r'^([a-z]+)(\d)$', r'fruit_\1', regex=True)],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series replace differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "s",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("e".into()),
+        ],
+        vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+            Scalar::Int64(2),
+            Scalar::Int64(1),
+        ],
+    )
+    .expect("s");
+
+    let s_str = Series::from_values(
+        "s_str",
+        vec![
+            IndexLabel::Utf8("w".into()),
+            IndexLabel::Utf8("x".into()),
+            IndexLabel::Utf8("y".into()),
+            IndexLabel::Utf8("z".into()),
+        ],
+        vec![
+            Scalar::Utf8("apple1".into()),
+            Scalar::Utf8("banana2".into()),
+            Scalar::Utf8("apricot3".into()),
+            Scalar::Utf8("cherry4".into()),
+        ],
+    )
+    .expect("s_str");
+
+    // 1. scalar replace
+    let r_sc = s
+        .replace(&[(Scalar::Int64(1), Scalar::Int64(10))])
+        .expect("sc replace");
+    let actual_sc: Vec<i64> = r_sc
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_sc: Vec<i64> = oracle["scalar_repl"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_sc, oracle_sc);
+
+    // 2. list to list replace
+    let r_l2l = s
+        .replace(&[
+            (Scalar::Int64(1), Scalar::Int64(10)),
+            (Scalar::Int64(2), Scalar::Int64(20)),
+        ])
+        .expect("l2l replace");
+    let actual_l2l: Vec<i64> = r_l2l
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_l2l: Vec<i64> = oracle["list_to_list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_l2l, oracle_l2l);
+
+    // 3. list to scalar replace
+    let r_l2s = s
+        .replace(&[
+            (Scalar::Int64(1), Scalar::Int64(99)),
+            (Scalar::Int64(2), Scalar::Int64(99)),
+        ])
+        .expect("l2s replace");
+    let actual_l2s: Vec<i64> = r_l2s
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_l2s: Vec<i64> = oracle["list_to_scalar"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_l2s, oracle_l2s);
+
+    // 4. dict replace
+    let r_dict = s
+        .replace(&[
+            (Scalar::Int64(1), Scalar::Int64(10)),
+            (Scalar::Int64(2), Scalar::Int64(20)),
+        ])
+        .expect("dict replace");
+    let actual_dict: Vec<i64> = r_dict
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_dict: Vec<i64> = oracle["dict_repl"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_dict, oracle_dict);
+
+    // 5. regex replace
+    let r_reg = s_str
+        .replace_regex(r"^([a-z]+)(\d)$", "fruit_$1")
+        .expect("regex replace");
+    let actual_reg: Vec<String> = r_reg
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    let oracle_reg: Vec<String> = oracle["regex_repl"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_reg, oracle_reg);
+}

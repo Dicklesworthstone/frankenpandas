@@ -3198,3 +3198,191 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_f_ffill_ax1_b, oracle_f_ffill_ax1_b);
 }
+
+#[test]
+fn conformance_dataframe_replace_differential() {
+    use std::collections::BTreeMap;
+
+    use fp_frame::DataFrame;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({
+    'a': [1, 2, 3, 2],
+    'b': [4, 5, 6, 5],
+    'c': ['apple1', 'banana2', 'apricot3', 'cherry4'],
+})
+res = {
+    'scalar_repl_a': [int(x) for x in df.replace(2, 20)['a']],
+    'list_repl_b': [int(x) for x in df.replace([4, 5], [40, 50])['b']],
+    'col_nest_dict_a': [int(x) for x in df.replace({'a': {1: 10, 2: 20}})['a']],
+    'col_spec_dict_a': [int(x) for x in df.replace({'a': 2, 'b': 5}, 99)['a']],
+    'col_spec_dict_b': [int(x) for x in df.replace({'a': 2, 'b': 5}, 99)['b']],
+    'regex_repl_c': [str(x) for x in df.replace(r'^([a-z]+)(\d)$', r'fruit_\1', regex=True)['c']],
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping DataFrame replace differential test");
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b", "c"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Int64(2),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Int64(4),
+                    Scalar::Int64(5),
+                    Scalar::Int64(6),
+                    Scalar::Int64(5),
+                ],
+            ),
+            (
+                "c",
+                vec![
+                    Scalar::Utf8("apple1".into()),
+                    Scalar::Utf8("banana2".into()),
+                    Scalar::Utf8("apricot3".into()),
+                    Scalar::Utf8("cherry4".into()),
+                ],
+            ),
+        ],
+    )
+    .expect("df");
+
+    // 1. global scalar replace
+    let r_sc = df
+        .replace(&[(Scalar::Int64(2), Scalar::Int64(20))])
+        .expect("sc replace");
+    let actual_sc_a: Vec<i64> = r_sc
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_sc_a: Vec<i64> = oracle["scalar_repl_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_sc_a, oracle_sc_a);
+
+    // 2. global list replace
+    let r_list = df
+        .replace(&[
+            (Scalar::Int64(4), Scalar::Int64(40)),
+            (Scalar::Int64(5), Scalar::Int64(50)),
+        ])
+        .expect("list replace");
+    let actual_list_b: Vec<i64> = r_list
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_list_b: Vec<i64> = oracle["list_repl_b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_list_b, oracle_list_b);
+
+    // 3. column nested dict replace
+    let mut nest_map = BTreeMap::new();
+    nest_map.insert(
+        "a".to_string(),
+        vec![
+            (Scalar::Int64(1), Scalar::Int64(10)),
+            (Scalar::Int64(2), Scalar::Int64(20)),
+        ],
+    );
+    let r_nest = df.replace_dict(&nest_map).expect("nest dict replace");
+    let actual_nest_a: Vec<i64> = r_nest
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_nest_a: Vec<i64> = oracle["col_nest_dict_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_nest_a, oracle_nest_a);
+
+    // 4. column specific replace
+    let mut spec_map = BTreeMap::new();
+    spec_map.insert("a".to_string(), vec![(Scalar::Int64(2), Scalar::Int64(99))]);
+    spec_map.insert("b".to_string(), vec![(Scalar::Int64(5), Scalar::Int64(99))]);
+    let r_spec = df.replace_dict(&spec_map).expect("spec dict replace");
+    let actual_spec_a: Vec<i64> = r_spec
+        .column("a")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_spec_a: Vec<i64> = oracle["col_spec_dict_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_spec_a, oracle_spec_a);
+
+    let actual_spec_b: Vec<i64> = r_spec
+        .column("b")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(-1))
+        .collect();
+    let oracle_spec_b: Vec<i64> = oracle["col_spec_dict_b"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_spec_b, oracle_spec_b);
+
+    // 5. regex replace across columns
+    let r_reg = df
+        .replace_regex(r"^([a-z]+)(\d)$", "fruit_$1")
+        .expect("regex replace");
+    let actual_reg_c: Vec<String> = r_reg
+        .column("c")
+        .unwrap()
+        .values()
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    let oracle_reg_c: Vec<String> = oracle["regex_repl_c"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_reg_c, oracle_reg_c);
+}
