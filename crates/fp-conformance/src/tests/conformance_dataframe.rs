@@ -2339,3 +2339,86 @@ print(json.dumps(res))
     let got_missing = df.get("missing").expect("get missing");
     assert!(got_missing.is_none());
 }
+
+#[test]
+fn conformance_dataframe_value_counts_differential() {
+    use fp_frame::DataFrame;
+    use fp_types::Scalar;
+
+    let python_code = r#"
+import json, pandas as pd
+df = pd.DataFrame({"a": [1, 2, 1, 1], "b": [10, 20, 10, 10]})
+vc_all = df.value_counts()
+vc_sub = df.value_counts(subset=["a"])
+res = {
+    "all_vals": vc_all.tolist(),
+    "sub_vals": vc_sub.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!(
+                "pandas oracle unavailable; skipping DataFrame value_counts differential test"
+            );
+            return;
+        }
+    };
+
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            (
+                "a",
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(1),
+                    Scalar::Int64(1),
+                ],
+            ),
+            (
+                "b",
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(10),
+                    Scalar::Int64(10),
+                ],
+            ),
+        ],
+    )
+    .expect("df");
+
+    let vc_all = df.value_counts().expect("value_counts");
+    let actual_all_vals: Vec<i64> = vc_all
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(0))
+        .collect();
+    let oracle_all_vals: Vec<i64> = oracle["all_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_all_vals, oracle_all_vals);
+
+    let vc_sub = df.value_counts_subset(&["a"]).expect("value_counts_subset");
+    let actual_sub_vals: Vec<i64> = vc_sub
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(0))
+        .collect();
+    let oracle_sub_vals: Vec<i64> = oracle["sub_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_sub_vals, oracle_sub_vals);
+}

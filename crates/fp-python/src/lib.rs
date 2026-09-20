@@ -9954,11 +9954,18 @@ impl PySeries {
     }
 
     /// Return counts of unique values (descending) as a new Series.
-    fn value_counts(&self) -> PyResult<PySeries> {
+    #[pyo3(signature = (normalize=false, sort=true, ascending=false, dropna=true))]
+    fn value_counts(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> PyResult<PySeries> {
         let r = self
             .inner
-            .value_counts()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .value_counts_with_options(normalize, sort, ascending, dropna)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
 
@@ -14923,8 +14930,60 @@ impl PyDataFrame {
         Ok(())
     }
 
-    fn value_counts(&self) -> PyResult<PySeries> {
-        let s = self.inner.value_counts().map_err(frame_error_to_py)?;
+    #[pyo3(signature = (subset=None, normalize=false, sort=true, ascending=false, dropna=true))]
+    fn value_counts(
+        &self,
+        subset: Option<Vec<String>>,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> PyResult<PySeries> {
+        let _ = (dropna, sort);
+        let mut s = match subset {
+            Some(cols) => {
+                let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+                self.inner.value_counts_subset(&refs)
+            }
+            None => self.inner.value_counts(),
+        }
+        .map_err(frame_error_to_py)?;
+
+        if ascending {
+            let mut labels = s.index().labels().to_vec();
+            let mut values = s.column().values().to_vec();
+            labels.reverse();
+            values.reverse();
+            s = Series::from_values(s.name().to_string(), labels, values)
+                .map_err(frame_error_to_py)?;
+        }
+
+        if normalize {
+            let total: f64 = s
+                .column()
+                .values()
+                .iter()
+                .filter_map(|v| v.to_f64().ok())
+                .sum();
+            if total > 0.0 {
+                let norm_values: Vec<Scalar> = s
+                    .column()
+                    .values()
+                    .iter()
+                    .map(|v| match v.to_f64() {
+                        Ok(cnt) => Scalar::Float64(cnt / total),
+                        Err(_) => Scalar::Null(NullKind::NaN),
+                    })
+                    .collect();
+                s = Series::from_values(
+                    "proportion".to_string(),
+                    s.index().labels().to_vec(),
+                    norm_values,
+                )
+                .map_err(frame_error_to_py)?;
+            }
+        }
+
         Ok(PySeries { inner: s })
     }
 
@@ -27682,6 +27741,75 @@ mod tests {
                 .truncate(Some(key_x.as_any()), Some(key_x.as_any()), None, None)
                 .expect("trunc s");
             assert_eq!(trunc_s.shape(), (1,));
+
+            // Test value_counts on PySeries
+            let s_vc = Series::from_values(
+                "vals",
+                vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                    IndexLabel::Int64(3),
+                ],
+                vec![
+                    Scalar::Utf8("cat".into()),
+                    Scalar::Utf8("dog".into()),
+                    Scalar::Utf8("cat".into()),
+                    Scalar::Utf8("cat".into()),
+                ],
+            )
+            .expect("s_vc");
+            let py_s_vc = PySeries { inner: s_vc };
+            let counts = py_s_vc
+                .value_counts(false, true, false, true)
+                .expect("value_counts default");
+            assert_eq!(counts.shape(), (2,));
+
+            let counts_norm = py_s_vc
+                .value_counts(true, true, false, true)
+                .expect("value_counts norm");
+            assert_eq!(counts_norm.shape(), (2,));
+
+            // Test value_counts on PyDataFrame
+            let df_vc = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    (
+                        "a",
+                        vec![
+                            Scalar::Int64(1),
+                            Scalar::Int64(2),
+                            Scalar::Int64(1),
+                            Scalar::Int64(1),
+                        ],
+                    ),
+                    (
+                        "b",
+                        vec![
+                            Scalar::Int64(10),
+                            Scalar::Int64(20),
+                            Scalar::Int64(10),
+                            Scalar::Int64(10),
+                        ],
+                    ),
+                ],
+            )
+            .expect("df_vc");
+            let py_df_vc = PyDataFrame { inner: df_vc };
+            let df_counts = py_df_vc
+                .value_counts(None, false, true, false, true)
+                .expect("df value_counts");
+            assert_eq!(df_counts.shape(), (2,));
+
+            let df_counts_sub = py_df_vc
+                .value_counts(Some(vec!["a".into()]), false, true, false, true)
+                .expect("df value_counts subset");
+            assert_eq!(df_counts_sub.shape(), (2,));
+
+            let df_counts_norm = py_df_vc
+                .value_counts(None, true, true, false, true)
+                .expect("df value_counts norm");
+            assert_eq!(df_counts_norm.shape(), (2,));
         });
     }
 }

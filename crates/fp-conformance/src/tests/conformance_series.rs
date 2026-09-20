@@ -1272,3 +1272,111 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_pct_vals, oracle_pct_vals);
 }
+
+#[test]
+fn conformance_series_value_counts_differential() {
+    let python_code = r#"
+import json, pandas as pd
+s = pd.Series(["cat", "dog", "cat", "cat"], index=[0, 1, 2, 3])
+vc_default = s.value_counts()
+vc_norm = s.value_counts(normalize=True)
+vc_asc = s.value_counts(ascending=True)
+res = {
+    "default_idx": [str(x) for x in vc_default.index],
+    "default_vals": vc_default.tolist(),
+    "norm_vals": vc_norm.tolist(),
+    "asc_vals": vc_asc.tolist(),
+}
+print(json.dumps(res))
+"#;
+
+    let oracle = match run_pandas_oracle_eval(python_code) {
+        Some(val) => val,
+        None => {
+            eprintln!("pandas oracle unavailable; skipping Series value_counts differential test");
+            return;
+        }
+    };
+
+    let s = Series::from_values(
+        "animals",
+        vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+        ],
+        vec![
+            Scalar::Utf8("cat".into()),
+            Scalar::Utf8("dog".into()),
+            Scalar::Utf8("cat".into()),
+            Scalar::Utf8("cat".into()),
+        ],
+    )
+    .expect("s");
+
+    let vc_default = s
+        .value_counts_with_options(false, true, false, true)
+        .expect("vc default");
+    let actual_default_idx: Vec<String> = vc_default
+        .index()
+        .labels()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    let oracle_default_idx: Vec<String> = oracle["default_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(actual_default_idx, oracle_default_idx);
+
+    let actual_default_vals: Vec<i64> = vc_default
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(0))
+        .collect();
+    let oracle_default_vals: Vec<i64> = oracle["default_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_default_vals, oracle_default_vals);
+
+    let vc_norm = s
+        .value_counts_with_options(true, true, false, true)
+        .expect("vc norm");
+    let actual_norm_vals: Vec<f64> = vc_norm
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(0.0))
+        .collect();
+    let oracle_norm_vals: Vec<f64> = oracle["norm_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(actual_norm_vals, oracle_norm_vals);
+
+    let vc_asc = s
+        .value_counts_with_options(false, true, true, true)
+        .expect("vc asc");
+    let actual_asc_vals: Vec<i64> = vc_asc
+        .column()
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap_or(0))
+        .collect();
+    let oracle_asc_vals: Vec<i64> = oracle["asc_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(actual_asc_vals, oracle_asc_vals);
+}
