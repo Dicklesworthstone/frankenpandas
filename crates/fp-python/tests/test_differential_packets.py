@@ -1660,7 +1660,252 @@ def test_rolling_expanding_ewm_df_differential():
         df_fp.expanding(2).cov("invalid")
     with pytest.raises(TypeError):
         df_fp.ewm(span=2).corr([1, 2, 3])
+def test_where_mask_combine_parity():
+    if fpd is None:
+        pytest.skip("frankenpandas not installed")
+
+    # 1. Series where/mask with scalar cond/other
+    s_pd = pd.Series([1, 2, 3, 4], index=["a", "b", "c", "d"], name="foo")
+    s_fp = fpd.Series([1, 2, 3, 4], index=["a", "b", "c", "d"], name="foo")
+
+    r_pd = s_pd.where(s_pd > 2, -1)
+    r_fp = s_fp.where(s_fp > 2, -1)
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    r_pd = s_pd.mask(s_pd > 2, -1)
+    r_fp = s_fp.mask(s_fp > 2, -1)
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    # 2. Series where/mask with callable cond and callable other
+    r_pd = s_pd.where(lambda s: s % 2 == 0, lambda s: s * 100)
+    r_fp = s_fp.where(lambda s: s % 2 == 0, lambda s: s * 100)
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    r_pd = s_pd.mask(lambda s: s % 2 == 0, lambda s: s * 100)
+    r_fp = s_fp.mask(lambda s: s % 2 == 0, lambda s: s * 100)
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    # 3. Series where with array/list cond and other
+    r_pd = s_pd.where([True, False, True, False], [10, 20, 30, 40])
+    r_fp = s_fp.where([True, False, True, False], [10, 20, 30, 40])
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    # 4. Series where inplace
+    s_pd_in = s_pd.copy()
+    s_fp_in = s_fp.copy()
+    ret_pd = s_pd_in.where(s_pd_in > 2, -99, inplace=True)
+    ret_fp = s_fp_in.where(s_fp_in > 2, -99, inplace=True)
+    assert ret_pd is None and ret_fp is None
+    assert s_fp_in.to_dict() == s_pd_in.to_dict()
+
+    # 5. Series where axis validation
+    with pytest.raises(ValueError):
+        s_fp.where(s_fp > 2, -1, axis=1)
+
+    # 6. Series combine with outer alignment and fill_value
+    s1_pd = pd.Series([1, 2], index=["a", "b"], name="x")
+    s2_pd = pd.Series([10, 20], index=["b", "c"], name="x")
+    s1_fp = fpd.Series([1, 2], index=["a", "b"], name="x")
+    s2_fp = fpd.Series([10, 20], index=["b", "c"], name="x")
+
+    c_pd = s1_pd.combine(s2_pd, lambda x, y: x + y, fill_value=0)
+    c_fp = s1_fp.combine(s2_fp, lambda x, y: x + y, fill_value=0)
+    assert c_fp.to_dict() == c_pd.to_dict()
+    assert c_fp.name == c_pd.name
+
+    # 7. DataFrame where/mask with scalar other and callable cond
+    df_pd = pd.DataFrame({"A": [1, 2, 3], "B": [4, 5, 6]}, index=["r1", "r2", "r3"])
+    df_fp = fpd.DataFrame({"A": [1, 2, 3], "B": [4, 5, 6]}, index=["r1", "r2", "r3"])
+
+    r_df_pd = df_pd.where(lambda df: df > 3, -1)
+    r_df_fp = df_fp.where(lambda df: df > 3, -1)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    r_df_pd = df_pd.mask(lambda df: df > 3, -1)
+    r_df_fp = df_fp.mask(lambda df: df > 3, -1)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    # 8. DataFrame where with callable other
+    r_df_pd = df_pd.where(df_pd > 3, lambda df: df * 10)
+    r_df_fp = df_fp.where(df_fp > 3, lambda df: df * 10)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    # 9. DataFrame where with Series other (axis=0 and axis=1)
+    s_axis0_pd = pd.Series([100, 200, 300], index=["r1", "r2", "r3"])
+    s_axis0_fp = fpd.Series([100, 200, 300], index=["r1", "r2", "r3"])
+    r_df_pd = df_pd.where(df_pd > 3, s_axis0_pd, axis=0)
+    r_df_fp = df_fp.where(df_fp > 3, s_axis0_fp, axis=0)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    s_axis1_pd = pd.Series([10, 20], index=["A", "B"])
+    s_axis1_fp = fpd.Series([10, 20], index=["A", "B"])
+    r_df_pd = df_pd.where(df_pd > 3, s_axis1_pd, axis=1)
+    r_df_fp = df_fp.where(df_fp > 3, s_axis1_fp, axis=1)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    # Series other without axis raises ValueError
+    with pytest.raises(ValueError, match="Must specify axis=0 or 1"):
+        df_fp.where(df_fp > 3, s_axis0_fp)
+
+    # 10. DataFrame where with DataFrame cond and DataFrame other
+    df_cond_pd = pd.DataFrame({"A": [True, False, True], "B": [False, True, False]}, index=["r1", "r2", "r3"])
+    df_cond_fp = fpd.DataFrame({"A": [True, False, True], "B": [False, True, False]}, index=["r1", "r2", "r3"])
+    df_other_pd = pd.DataFrame({"A": [9, 8, 7], "B": [6, 5, 4]}, index=["r1", "r2", "r3"])
+    df_other_fp = fpd.DataFrame({"A": [9, 8, 7], "B": [6, 5, 4]}, index=["r1", "r2", "r3"])
+    r_df_pd = df_pd.where(df_cond_pd, df_other_pd)
+    r_df_fp = df_fp.where(df_cond_fp, df_other_fp)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    # 11. DataFrame where inplace
+    df_pd_in = df_pd.copy()
+    df_fp_in = df_fp.copy()
+    ret_pd = df_pd_in.where(df_pd_in > 3, -1, inplace=True)
+    ret_fp = df_fp_in.where(df_fp_in > 3, -1, inplace=True)
+    assert ret_pd is None and ret_fp is None
+    assert df_fp_in.to_dict() == df_pd_in.to_dict()
+
+    # 12. DataFrame combine with column union, row alignment, fill_value, and overwrite
+    df1_pd = pd.DataFrame({"A": [1, 2], "B": [3, 4]}, index=[0, 1])
+    df2_pd = pd.DataFrame({"B": [30, 40], "C": [50, 60]}, index=[1, 2])
+    df1_fp = fpd.DataFrame({"A": [1, 2], "B": [3, 4]}, index=[0, 1])
+    df2_fp = fpd.DataFrame({"B": [30, 40], "C": [50, 60]}, index=[1, 2])
+
+    c_df_pd = df1_pd.combine(df2_pd, lambda s1, s2: s1 + s2, fill_value=0)
+    c_df_fp = df1_fp.combine(df2_fp, lambda s1, s2: s1 + s2, fill_value=0)
+    for col in ["A", "B", "C"]:
+        pd.testing.assert_series_equal(pd.Series(c_df_fp[col].to_list(), index=c_df_pd.index, name=col), c_df_pd[col])
+
+    c_df_ow_pd = df1_pd.combine(df2_pd, lambda s1, s2: s1 + s2, fill_value=0, overwrite=False)
+    c_df_ow_fp = df1_fp.combine(df2_fp, lambda s1, s2: s1 + s2, fill_value=0, overwrite=False)
+    for col in ["A", "B", "C"]:
+        pd.testing.assert_series_equal(pd.Series(c_df_ow_fp[col].to_list(), index=c_df_ow_pd.index, name=col), c_df_ow_pd[col])
 
 
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_ddof_cov_reductions_parity():
+    # 1. Series std, var, sem with ddof=0, 1, 2, 3
+    s_vals = [1.0, 2.0, 4.0]
+    s_pd = pd.Series(s_vals)
+    s_fp = fpd.Series(s_vals)
+    for d in [0, 1, 2, 3]:
+        r_std_pd = s_pd.std(ddof=d)
+        r_std_fp = s_fp.std(ddof=d)
+        if np.isnan(r_std_pd):
+            assert np.isnan(r_std_fp)
+        else:
+            assert np.isclose(r_std_fp, r_std_pd)
+
+        r_var_pd = s_pd.var(ddof=d)
+        r_var_fp = s_fp.var(ddof=d)
+        if np.isnan(r_var_pd):
+            assert np.isnan(r_var_fp)
+        else:
+            assert np.isclose(r_var_fp, r_var_pd)
+
+        r_sem_pd = s_pd.sem(ddof=d)
+        r_sem_fp = s_fp.sem(ddof=d)
+        if np.isnan(r_sem_pd):
+            assert np.isnan(r_sem_fp)
+        else:
+            assert np.isclose(r_sem_fp, r_sem_pd)
+
+    # 2. Series std, var, sem with skipna=False
+    s_nan_pd = pd.Series([1.0, 2.0, np.nan, 4.0])
+    s_nan_fp = fpd.Series([1.0, 2.0, np.nan, 4.0])
+    assert np.isnan(s_nan_fp.std(skipna=False)) and np.isnan(s_nan_pd.std(skipna=False))
+    assert np.isnan(s_nan_fp.var(skipna=False)) and np.isnan(s_nan_pd.var(skipna=False))
+    assert np.isnan(s_nan_fp.sem(skipna=False)) and np.isnan(s_nan_pd.sem(skipna=False))
+
+    # 3. Series std on Timedelta, and var/sem raising TypeError
+    td_vals = [pd.Timedelta(days=1), pd.Timedelta(days=2), pd.Timedelta(days=4)]
+    td_pd = pd.Series(td_vals)
+    td_fp = fpd.Series(td_vals)
+    assert td_fp.std() == td_pd.std()
+    with pytest.raises(TypeError):
+        td_fp.var()
+    with pytest.raises(TypeError):
+        td_fp.sem()
+
+    # 4. Series cov with ddof and min_periods
+    s1_pd = pd.Series([1.0, 2.0, 3.0])
+    s1_fp = fpd.Series([1.0, 2.0, 3.0])
+    s2_pd = pd.Series([4.0, 5.0, 6.0])
+    s2_fp = fpd.Series([4.0, 5.0, 6.0])
+    assert np.isclose(s1_fp.cov(s2_fp, ddof=0), s1_pd.cov(s2_pd, ddof=0))
+    assert np.isclose(s1_fp.cov(s2_fp, ddof=1), s1_pd.cov(s2_pd, ddof=1))
+    assert np.isnan(s1_fp.cov(s2_fp, min_periods=4)) and np.isnan(s1_pd.cov(s2_pd, min_periods=4))
+
+    # 5. Series cov with missing values
+    s_m1_pd = pd.Series([1.0, 2.0, np.nan, 4.0])
+    s_m1_fp = fpd.Series([1.0, 2.0, np.nan, 4.0])
+    s_m2_pd = pd.Series([10.0, np.nan, 30.0, 40.0])
+    s_m2_fp = fpd.Series([10.0, np.nan, 30.0, 40.0])
+    assert np.isclose(s_m1_fp.cov(s_m2_fp, ddof=0), s_m1_pd.cov(s_m2_pd, ddof=0))
+    assert np.isclose(s_m1_fp.cov(s_m2_fp, ddof=1), s_m1_pd.cov(s_m2_pd, ddof=1))
+
+    # 6. DataFrame std, var, sem on axis=0 with ddof=0, 1 and skipna
+    df_data = {"a": [1.0, 2.0, np.nan, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
+    df_pd = pd.DataFrame(df_data)
+    df_fp = fpd.DataFrame(df_data)
+    for d in [0, 1]:
+        for sk in [True, False]:
+            res_std_pd = df_pd.std(axis=0, ddof=d, skipna=sk)
+            res_std_fp = df_fp.std(axis=0, ddof=d, skipna=sk)
+            pd.testing.assert_series_equal(pd.Series(res_std_fp.to_dict()), res_std_pd)
+
+            res_var_pd = df_pd.var(axis=0, ddof=d, skipna=sk)
+            res_var_fp = df_fp.var(axis=0, ddof=d, skipna=sk)
+            pd.testing.assert_series_equal(pd.Series(res_var_fp.to_dict()), res_var_pd)
+
+            res_sem_pd = df_pd.sem(axis=0, ddof=d, skipna=sk)
+            res_sem_fp = df_fp.sem(axis=0, ddof=d, skipna=sk)
+            pd.testing.assert_series_equal(pd.Series(res_sem_fp.to_dict()), res_sem_pd)
+
+    # 7. DataFrame std, var, sem on axis=1 with ddof=0, 1 and skipna
+    for d in [0, 1]:
+        for sk in [True, False]:
+            res_std_pd = df_pd.std(axis=1, ddof=d, skipna=sk)
+            res_std_fp = df_fp.std(axis=1, ddof=d, skipna=sk)
+            pd.testing.assert_series_equal(pd.Series(res_std_fp.to_dict()), res_std_pd)
+
+            res_var_pd = df_pd.var(axis=1, ddof=d, skipna=sk)
+            res_var_fp = df_fp.var(axis=1, ddof=d, skipna=sk)
+            pd.testing.assert_series_equal(pd.Series(res_var_fp.to_dict()), res_var_pd)
+
+            res_sem_pd = df_pd.sem(axis=1, ddof=d, skipna=sk)
+            res_sem_fp = df_fp.sem(axis=1, ddof=d, skipna=sk)
+            pd.testing.assert_series_equal(pd.Series(res_sem_fp.to_dict()), res_sem_pd)
+
+    # 8. DataFrame std on axis=1 with all-Timedelta rows
+    df_td_pd = pd.DataFrame({"a": [pd.Timedelta(days=1), pd.Timedelta(days=2)], "b": [pd.Timedelta(days=3), pd.Timedelta(days=4)]})
+    df_td_fp = fpd.DataFrame({"a": [pd.Timedelta(days=1), pd.Timedelta(days=2)], "b": [pd.Timedelta(days=3), pd.Timedelta(days=4)]})
+    res_td_fp = [pd.Timedelta(v.value, unit="ns") for v in df_td_fp.std(axis=1).to_list()]
+    pd.testing.assert_series_equal(pd.Series(res_td_fp), df_td_pd.std(axis=1))
+
+    # 9. DataFrame cov with ddof=0 and ddof=1 on all-valid data
+    df_clean_pd = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
+    df_clean_fp = fpd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
+    cov0_pd = df_clean_pd.cov(ddof=0)
+    cov0_fp = df_clean_fp.cov(ddof=0)
+    assert cov0_fp.to_dict() == cov0_pd.to_dict()
+    cov1_pd = df_clean_pd.cov(ddof=1)
+    cov1_fp = df_clean_fp.cov(ddof=1)
+    assert cov1_fp.to_dict() == cov1_pd.to_dict()
+
+    # 10. DataFrame cov with min_periods
+    cov_mp_pd = df_clean_pd.cov(min_periods=4)
+    cov_mp_fp = df_clean_fp.cov(min_periods=4)
+    for col in ["a", "b"]:
+        pd.testing.assert_series_equal(pd.Series(cov_mp_fp[col].to_list(), index=cov_mp_pd.index, name=col), cov_mp_pd[col])
+
+    # 11. DataFrame cov with non-numeric column and numeric_only=False raises TypeError
+    df_str_fp = fpd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+    with pytest.raises(TypeError):
+        df_str_fp.cov(numeric_only=False)
+
+    # 12. DataFrame std, var, sem with numeric_only=True drops non-numeric column
+    assert list(df_str_fp.std(numeric_only=True).to_dict().keys()) == ["a"]
+    assert list(df_str_fp.var(numeric_only=True).to_dict().keys()) == ["a"]
+    assert list(df_str_fp.sem(numeric_only=True).to_dict().keys()) == ["a"]
 
 
