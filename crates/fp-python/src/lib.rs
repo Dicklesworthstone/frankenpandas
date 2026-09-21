@@ -465,13 +465,58 @@ impl PyTimedelta {
                 pyo3::class::basic::CompareOp::Ne => return Ok(true),
                 _ => return Ok(false),
             }
+        } else if let Ok(val) = other.getattr("value") {
+            if let Ok(ns) = val.extract::<i64>() {
+                ns
+            } else {
+                match op {
+                    pyo3::class::basic::CompareOp::Eq => return Ok(false),
+                    pyo3::class::basic::CompareOp::Ne => return Ok(true),
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "Cannot compare Timedelta with non-timedelta value",
+                        ));
+                    }
+                }
+            }
+        } else if let Ok(sec) = other.call_method0("total_seconds") {
+            if let Ok(s) = sec.extract::<f64>() {
+                (s * 1_000_000_000.0).round() as i64
+            } else {
+                match op {
+                    pyo3::class::basic::CompareOp::Eq => return Ok(false),
+                    pyo3::class::basic::CompareOp::Ne => return Ok(true),
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "Cannot compare Timedelta with non-timedelta value",
+                        ));
+                    }
+                }
+            }
         } else if let Ok(s) = other.extract::<String>() {
-            Timedelta::parse(&s)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            if let Ok(nanos) = Timedelta::parse(&s) {
+                nanos
+            } else {
+                match op {
+                    pyo3::class::basic::CompareOp::Eq => return Ok(false),
+                    pyo3::class::basic::CompareOp::Ne => return Ok(true),
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "Cannot compare Timedelta with non-timedelta value",
+                        ));
+                    }
+                }
+            }
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Cannot compare Timedelta with non-timedelta value",
-            ));
+            match op {
+                pyo3::class::basic::CompareOp::Eq => return Ok(false),
+                pyo3::class::basic::CompareOp::Ne => return Ok(true),
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Cannot compare Timedelta with non-timedelta value",
+                    ));
+                }
+            }
         };
 
         if self.nanos == Timedelta::NAT || other_nanos == Timedelta::NAT {
@@ -1389,6 +1434,20 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     }
     if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
         return Ok(Scalar::Timedelta64(td.nanos));
+    }
+    if let Ok(type_name) = obj.get_type().name() {
+        if type_name == "Timedelta"
+            && let Ok(val) = obj.getattr("value")
+            && let Ok(ns) = val.extract::<i64>()
+        {
+            return Ok(Scalar::Timedelta64(ns));
+        }
+        if type_name == "Timestamp"
+            && let Ok(val) = obj.getattr("value")
+            && let Ok(ns) = val.extract::<i64>()
+        {
+            return Ok(Scalar::Datetime64(ns));
+        }
     }
     if let Ok(p) = obj.extract::<PyRef<'_, PyPeriod>>() {
         return Ok(Scalar::Period(p.inner));
@@ -9811,13 +9870,27 @@ impl PySeries {
     }
 
     fn require_numeric(&self, name: &str) -> PyResult<()> {
-        if !matches!(
-            self.inner.dtype(),
-            DType::Int64 | DType::Float64 | DType::Bool
-        ) {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                "Could not convert non-numeric series to float for Series.{name}"
-            )))
+        let is_valid = if name == "std" {
+            matches!(
+                self.inner.dtype(),
+                DType::Int64 | DType::Float64 | DType::Bool | DType::Timedelta64
+            )
+        } else {
+            matches!(
+                self.inner.dtype(),
+                DType::Int64 | DType::Float64 | DType::Bool
+            )
+        };
+        if !is_valid {
+            if matches!(self.inner.dtype(), DType::Timedelta64) {
+                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "'TimedeltaArray' with dtype timedelta64[ns] does not support reduction '{name}'"
+                )))
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "Could not convert non-numeric series to float for Series.{name}"
+                )))
+            }
         } else {
             Ok(())
         }
@@ -10583,22 +10656,16 @@ impl PySeries {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (ddof, kwargs);
+        let _ = kwargs;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("std")?;
         } else {
             self.require_numeric("std")?;
         }
-        Python::attach(|py| {
-            let result = if !skipna {
-                self.inner.std_skipna(false)
-            } else {
-                self.inner.std()
-            }
-            .map_err(frame_error_to_py)?;
-            scalar_to_py(py, &result)
-        })
+        let ddof_val = ddof.unwrap_or(1);
+        let result = self.inner.column().std_skipna(ddof_val, skipna);
+        Python::attach(|py| scalar_to_py(py, &result))
     }
 
     /// Return the first n elements.
@@ -10670,22 +10737,16 @@ impl PySeries {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (ddof, kwargs);
+        let _ = kwargs;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("var")?;
         } else {
             self.require_numeric("var")?;
         }
-        Python::attach(|py| {
-            let r = if !skipna {
-                self.inner.var_skipna(false)
-            } else {
-                self.inner.var()
-            }
-            .map_err(frame_error_to_py)?;
-            scalar_to_py(py, &r)
-        })
+        let ddof_val = ddof.unwrap_or(1);
+        let result = self.inner.column().var_skipna(ddof_val, skipna);
+        Python::attach(|py| scalar_to_py(py, &result))
     }
 
     /// Return the product of the values.
@@ -11937,8 +11998,10 @@ impl PySeries {
         min_periods: Option<usize>,
         ddof: Option<usize>,
     ) -> PyResult<f64> {
-        let _ = (min_periods, ddof);
-        self.inner.cov(&other.inner).map_err(frame_error_to_py)
+        let ddof_val = ddof.unwrap_or(1);
+        self.inner
+            .cov_with_options(&other.inner, min_periods, ddof_val)
+            .map_err(frame_error_to_py)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -12074,15 +12137,16 @@ impl PySeries {
         skipna: bool,
         ddof: Option<usize>,
         numeric_only: bool,
-    ) -> PyResult<f64> {
-        let _ = (skipna, ddof);
+    ) -> PyResult<Py<PyAny>> {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("sem")?;
         } else {
             self.require_numeric("sem")?;
         }
-        self.inner.sem().map_err(frame_error_to_py)
+        let ddof_val = ddof.unwrap_or(1);
+        let result = self.inner.column().sem_skipna(ddof_val, skipna);
+        Python::attach(|py| scalar_to_py(py, &result))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
@@ -13760,66 +13824,303 @@ impl PyDataFrame {
         }
     }
 
+    fn get_reduction_columns(
+        &self,
+        stat: &str,
+        numeric_only: bool,
+    ) -> Result<Vec<String>, FrameError> {
+        let mut cols = Vec::new();
+        for name in self.inner.column_names() {
+            if let Some(col) = self.inner.column(name) {
+                let dtype = col.dtype();
+                if matches!(dtype, DType::Int64 | DType::Float64 | DType::Bool) {
+                    cols.push(name.clone());
+                } else if dtype == DType::Timedelta64 {
+                    if !numeric_only {
+                        if stat == "std" {
+                            cols.push(name.clone());
+                        } else {
+                            return Err(FrameError::CompatibilityRejected(format!(
+                                "'TimedeltaArray' with dtype timedelta64[ns] does not support reduction '{stat}'"
+                            )));
+                        }
+                    }
+                } else if !numeric_only {
+                    let witness = col
+                        .values()
+                        .iter()
+                        .find(|v| !v.is_missing())
+                        .map(|v| match v {
+                            Scalar::Utf8(text) => text.clone(),
+                            other => format!("{other:?}"),
+                        })
+                        .unwrap_or_default();
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "could not convert string to float: '{witness}'"
+                    )));
+                }
+            }
+        }
+        Ok(cols)
+    }
+
+    fn moment_reducer_internal(
+        &self,
+        stat: &str,
+        axis: usize,
+        skipna: bool,
+        ddof: usize,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        let candidate_cols = self.get_reduction_columns(stat, numeric_only)?;
+
+        if axis == 1 {
+            let row_count = self.inner.len();
+            if candidate_cols.is_empty() {
+                let out_values = vec![Scalar::Null(NullKind::NaN); row_count];
+                let col = Column::from_values(out_values).map_err(FrameError::Column)?;
+                return Series::new("".to_string(), self.inner.index().clone(), col);
+            }
+
+            let has_td = candidate_cols.iter().any(|name| {
+                self.inner
+                    .column(name)
+                    .is_some_and(|c| c.dtype() == DType::Timedelta64)
+            });
+            let has_num = candidate_cols.iter().any(|name| {
+                self.inner
+                    .column(name)
+                    .is_some_and(|c| c.dtype() != DType::Timedelta64)
+            });
+            if has_td && has_num {
+                return Err(FrameError::CompatibilityRejected(
+                    "float() argument must be a string or a real number, not 'Timedelta'".into(),
+                ));
+            }
+
+            let is_all_td = has_td;
+            let columns: Vec<&Column> = candidate_cols
+                .iter()
+                .filter_map(|name| self.inner.column(name))
+                .collect();
+
+            let mut out_values = Vec::with_capacity(row_count);
+            for r in 0..row_count {
+                let mut row_has_missing = false;
+                let mut valid_nums = Vec::with_capacity(columns.len());
+
+                for col in &columns {
+                    let val = &col.values()[r];
+                    if val.is_missing() {
+                        row_has_missing = true;
+                        if !skipna {
+                            break;
+                        }
+                    } else {
+                        let num_opt = match val {
+                            Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                            _ => val.to_f64().ok(),
+                        };
+                        if let Some(num) = num_opt {
+                            valid_nums.push(num);
+                        }
+                    }
+                }
+
+                if !skipna && row_has_missing {
+                    if is_all_td {
+                        out_values.push(Scalar::Timedelta64(Timedelta::NAT));
+                    } else {
+                        out_values.push(Scalar::Null(NullKind::NaN));
+                    }
+                    continue;
+                }
+
+                let n = valid_nums.len();
+                if n <= ddof {
+                    if is_all_td {
+                        out_values.push(Scalar::Timedelta64(Timedelta::NAT));
+                    } else {
+                        out_values.push(Scalar::Null(NullKind::NaN));
+                    }
+                } else {
+                    let n_f = n as f64;
+                    let mean = valid_nums.iter().sum::<f64>() / n_f;
+                    let m2: f64 = valid_nums.iter().map(|x| (x - mean).powi(2)).sum();
+                    let var = m2 / (n_f - ddof as f64);
+                    let res = match stat {
+                        "var" => var,
+                        "std" => var.sqrt(),
+                        "sem" => var.sqrt() / n_f.sqrt(),
+                        _ => f64::NAN,
+                    };
+                    if is_all_td {
+                        if res.is_nan() {
+                            out_values.push(Scalar::Timedelta64(Timedelta::NAT));
+                        } else {
+                            let clamped = res.clamp(i64::MIN as f64, i64::MAX as f64);
+                            out_values.push(Scalar::Timedelta64(clamped.round() as i64));
+                        }
+                    } else if res.is_nan() {
+                        out_values.push(Scalar::Null(NullKind::NaN));
+                    } else {
+                        out_values.push(Scalar::Float64(res));
+                    }
+                }
+            }
+
+            let col = Column::from_values(out_values).map_err(FrameError::Column)?;
+            Series::new("".to_string(), self.inner.index().clone(), col)
+        } else {
+            // axis == 0
+            let mut labels = Vec::with_capacity(candidate_cols.len());
+            let mut values = Vec::with_capacity(candidate_cols.len());
+
+            for name in candidate_cols {
+                labels.push(IndexLabel::Utf8(name.clone()));
+                if let Some(col) = self.inner.column(&name) {
+                    let val = match stat {
+                        "var" => col.var_skipna(ddof, skipna),
+                        "std" => col.std_skipna(ddof, skipna),
+                        "sem" => col.sem_skipna(ddof, skipna),
+                        _ => Scalar::Null(NullKind::NaN),
+                    };
+                    values.push(val);
+                } else {
+                    values.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+
+            Series::from_values("".to_string(), labels, values)
+        }
+    }
+
     pub fn std_internal(
         &self,
         axis: usize,
         skipna: bool,
+        ddof: usize,
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
-        if axis == 1 {
-            if numeric_only {
-                self.numeric_inner()?.std_axis1()
-            } else if self.has_non_numeric() {
-                Err(FrameError::CompatibilityRejected(
-                    "std cannot reduce non-numeric columns across axis=1 without numeric_only=True"
-                        .into(),
-                ))
-            } else {
-                self.inner.std_axis1()
-            }
-        } else {
-            let df = if numeric_only {
-                self.numeric_inner()?
-            } else {
-                self.inner.clone()
-            };
-            if !skipna {
-                df.std_agg_skipna(false)
-            } else {
-                df.std()
-            }
-        }
+        self.moment_reducer_internal("std", axis, skipna, ddof, numeric_only)
     }
 
     pub fn var_internal(
         &self,
         axis: usize,
         skipna: bool,
+        ddof: usize,
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
-        if axis == 1 {
-            if numeric_only {
-                self.numeric_inner()?.var_axis1()
-            } else if self.has_non_numeric() {
-                Err(FrameError::CompatibilityRejected(
-                    "var cannot reduce non-numeric columns across axis=1 without numeric_only=True"
-                        .into(),
-                ))
-            } else {
-                self.inner.var_axis1()
-            }
-        } else {
-            let df = if numeric_only {
-                self.numeric_inner()?
-            } else {
-                self.inner.clone()
-            };
-            if !skipna {
-                df.var_agg_skipna(false)
-            } else {
-                df.var()
+        self.moment_reducer_internal("var", axis, skipna, ddof, numeric_only)
+    }
+
+    pub fn sem_internal(
+        &self,
+        axis: usize,
+        skipna: bool,
+        ddof: usize,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        self.moment_reducer_internal("sem", axis, skipna, ddof, numeric_only)
+    }
+
+    pub fn cov_internal(
+        &self,
+        min_periods: Option<usize>,
+        ddof: usize,
+        numeric_only: bool,
+    ) -> Result<DataFrame, FrameError> {
+        let mut candidate_cols = Vec::new();
+        for name in self.inner.column_names() {
+            if let Some(col) = self.inner.column(name) {
+                if matches!(
+                    col.dtype(),
+                    DType::Int64 | DType::Float64 | DType::Bool | DType::Timedelta64
+                ) {
+                    candidate_cols.push(name.clone());
+                } else if !numeric_only {
+                    let witness = col
+                        .values()
+                        .iter()
+                        .find(|v| !v.is_missing())
+                        .map(|v| match v {
+                            Scalar::Utf8(text) => text.clone(),
+                            other => format!("{other:?}"),
+                        })
+                        .unwrap_or_default();
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "could not convert string to float: '{witness}'"
+                    )));
+                }
             }
         }
+
+        if candidate_cols.is_empty() {
+            return DataFrame::new_with_column_order(
+                Index::new(Vec::<IndexLabel>::new()),
+                BTreeMap::new(),
+                Vec::new(),
+            );
+        }
+
+        let len = self.inner.len();
+        let n = candidate_cols.len();
+
+        let mut has_nans = false;
+        let mut series_list = Vec::with_capacity(n);
+        for col_name in &candidate_cols {
+            let col = self.inner.column(col_name).unwrap().clone();
+            let s = Series::new(col_name.clone(), self.inner.index().clone(), col)?;
+            if s.hasnans() {
+                has_nans = true;
+            }
+            series_list.push(s);
+        }
+
+        let effective_ddof = if has_nans { 1 } else { ddof };
+
+        let mut matrix = vec![vec![f64::NAN; n]; n];
+
+        if len == 0 || (min_periods.is_some() && min_periods.unwrap() > len && !has_nans) {
+            // Leave as all NaN
+        } else {
+            for i in 0..n {
+                for j in i..n {
+                    let val = series_list[i].cov_with_options(
+                        &series_list[j],
+                        min_periods,
+                        effective_ddof,
+                    )?;
+                    matrix[i][j] = val;
+                    matrix[j][i] = val;
+                }
+            }
+        }
+
+        let labels: Vec<IndexLabel> = candidate_cols
+            .iter()
+            .map(|s| IndexLabel::Utf8(s.clone()))
+            .collect();
+        let idx = Index::new(labels);
+
+        let mut columns_map = BTreeMap::new();
+        for (j, name) in candidate_cols.iter().enumerate() {
+            let col_vals: Vec<Scalar> = (0..n)
+                .map(|i| {
+                    let v = matrix[i][j];
+                    if v.is_nan() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(v)
+                    }
+                })
+                .collect();
+            let col = Column::from_values(col_vals).map_err(FrameError::Column)?;
+            columns_map.insert(name.clone(), col);
+        }
+
+        DataFrame::new_with_column_order(idx, columns_map, candidate_cols)
     }
 
     pub fn min_internal(
@@ -13918,28 +14219,6 @@ impl PyDataFrame {
             self.numeric_inner()?.count()
         } else {
             self.inner.count()
-        }
-    }
-
-    pub fn sem_internal(&self, axis: usize, numeric_only: bool) -> Result<Series, FrameError> {
-        if axis == 1 {
-            if numeric_only {
-                self.numeric_inner()?.sem_axis1()
-            } else if self.has_non_numeric() {
-                Err(FrameError::CompatibilityRejected(
-                    "sem cannot reduce non-numeric columns across axis=1 without numeric_only=True"
-                        .into(),
-                ))
-            } else {
-                self.inner.sem_axis1()
-            }
-        } else {
-            let df = if numeric_only {
-                self.numeric_inner()?
-            } else {
-                self.inner.clone()
-            };
-            df.sem()
         }
     }
 
@@ -15543,9 +15822,10 @@ impl PyDataFrame {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = (ddof, kwargs);
+        let _ = kwargs;
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.std_internal(ax, skipna, numeric_only))
+        let ddof_val = ddof.unwrap_or(1);
+        wrap_series(self.std_internal(ax, skipna, ddof_val, numeric_only))
     }
 
     /// Return the variance of each column or row.
@@ -15558,9 +15838,10 @@ impl PyDataFrame {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = (ddof, kwargs);
+        let _ = kwargs;
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.var_internal(ax, skipna, numeric_only))
+        let ddof_val = ddof.unwrap_or(1);
+        wrap_series(self.var_internal(ax, skipna, ddof_val, numeric_only))
     }
 
     /// Return the count of non-missing values per column or row.
@@ -17651,10 +17932,8 @@ impl PyDataFrame {
         ddof: Option<usize>,
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = (min_periods, ddof);
         let res = self
-            .inner
-            .cov_with_numeric_only(numeric_only)
+            .cov_internal(min_periods, ddof.unwrap_or(1), numeric_only)
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
@@ -18143,9 +18422,9 @@ impl PyDataFrame {
         ddof: Option<usize>,
         numeric_only: bool,
     ) -> PyResult<PySeries> {
-        let _ = (skipna, ddof);
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.sem_internal(ax, numeric_only))
+        let ddof_val = ddof.unwrap_or(1);
+        wrap_series(self.sem_internal(ax, skipna, ddof_val, numeric_only))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
@@ -18629,7 +18908,7 @@ impl PyDataFrame {
                     py,
                     PySeries {
                         inner: self
-                            .std_internal(0, true, false)
+                            .std_internal(0, true, 1, false)
                             .map_err(frame_error_to_py)?,
                     },
                 )?
@@ -18638,7 +18917,7 @@ impl PyDataFrame {
                     py,
                     PySeries {
                         inner: self
-                            .var_internal(0, true, false)
+                            .var_internal(0, true, 1, false)
                             .map_err(frame_error_to_py)?,
                     },
                 )?
@@ -18671,7 +18950,9 @@ impl PyDataFrame {
                 "sem" => Ok(Py::new(
                     py,
                     PySeries {
-                        inner: self.sem_internal(0, false).map_err(frame_error_to_py)?,
+                        inner: self
+                            .sem_internal(0, true, 1, false)
+                            .map_err(frame_error_to_py)?,
                     },
                 )?
                 .into_any()),
