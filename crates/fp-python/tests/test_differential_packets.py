@@ -1660,7 +1660,123 @@ def test_rolling_expanding_ewm_df_differential():
         df_fp.expanding(2).cov("invalid")
     with pytest.raises(TypeError):
         df_fp.ewm(span=2).corr([1, 2, 3])
+def test_where_mask_combine_parity():
+    if fpd is None:
+        pytest.skip("frankenpandas not installed")
 
+    # 1. Series where/mask with scalar cond/other
+    s_pd = pd.Series([1, 2, 3, 4], index=["a", "b", "c", "d"], name="foo")
+    s_fp = fpd.Series([1, 2, 3, 4], index=["a", "b", "c", "d"], name="foo")
 
+    r_pd = s_pd.where(s_pd > 2, -1)
+    r_fp = s_fp.where(s_fp > 2, -1)
+    assert r_fp.to_dict() == r_pd.to_dict()
 
+    r_pd = s_pd.mask(s_pd > 2, -1)
+    r_fp = s_fp.mask(s_fp > 2, -1)
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    # 2. Series where/mask with callable cond and callable other
+    r_pd = s_pd.where(lambda s: s % 2 == 0, lambda s: s * 100)
+    r_fp = s_fp.where(lambda s: s % 2 == 0, lambda s: s * 100)
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    r_pd = s_pd.mask(lambda s: s % 2 == 0, lambda s: s * 100)
+    r_fp = s_fp.mask(lambda s: s % 2 == 0, lambda s: s * 100)
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    # 3. Series where with array/list cond and other
+    r_pd = s_pd.where([True, False, True, False], [10, 20, 30, 40])
+    r_fp = s_fp.where([True, False, True, False], [10, 20, 30, 40])
+    assert r_fp.to_dict() == r_pd.to_dict()
+
+    # 4. Series where inplace
+    s_pd_in = s_pd.copy()
+    s_fp_in = s_fp.copy()
+    ret_pd = s_pd_in.where(s_pd_in > 2, -99, inplace=True)
+    ret_fp = s_fp_in.where(s_fp_in > 2, -99, inplace=True)
+    assert ret_pd is None and ret_fp is None
+    assert s_fp_in.to_dict() == s_pd_in.to_dict()
+
+    # 5. Series where axis validation
+    with pytest.raises(ValueError):
+        s_fp.where(s_fp > 2, -1, axis=1)
+
+    # 6. Series combine with outer alignment and fill_value
+    s1_pd = pd.Series([1, 2], index=["a", "b"], name="x")
+    s2_pd = pd.Series([10, 20], index=["b", "c"], name="x")
+    s1_fp = fpd.Series([1, 2], index=["a", "b"], name="x")
+    s2_fp = fpd.Series([10, 20], index=["b", "c"], name="x")
+
+    c_pd = s1_pd.combine(s2_pd, lambda x, y: x + y, fill_value=0)
+    c_fp = s1_fp.combine(s2_fp, lambda x, y: x + y, fill_value=0)
+    assert c_fp.to_dict() == c_pd.to_dict()
+    assert c_fp.name == c_pd.name
+
+    # 7. DataFrame where/mask with scalar other and callable cond
+    df_pd = pd.DataFrame({"A": [1, 2, 3], "B": [4, 5, 6]}, index=["r1", "r2", "r3"])
+    df_fp = fpd.DataFrame({"A": [1, 2, 3], "B": [4, 5, 6]}, index=["r1", "r2", "r3"])
+
+    r_df_pd = df_pd.where(lambda df: df > 3, -1)
+    r_df_fp = df_fp.where(lambda df: df > 3, -1)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    r_df_pd = df_pd.mask(lambda df: df > 3, -1)
+    r_df_fp = df_fp.mask(lambda df: df > 3, -1)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    # 8. DataFrame where with callable other
+    r_df_pd = df_pd.where(df_pd > 3, lambda df: df * 10)
+    r_df_fp = df_fp.where(df_fp > 3, lambda df: df * 10)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    # 9. DataFrame where with Series other (axis=0 and axis=1)
+    s_axis0_pd = pd.Series([100, 200, 300], index=["r1", "r2", "r3"])
+    s_axis0_fp = fpd.Series([100, 200, 300], index=["r1", "r2", "r3"])
+    r_df_pd = df_pd.where(df_pd > 3, s_axis0_pd, axis=0)
+    r_df_fp = df_fp.where(df_fp > 3, s_axis0_fp, axis=0)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    s_axis1_pd = pd.Series([10, 20], index=["A", "B"])
+    s_axis1_fp = fpd.Series([10, 20], index=["A", "B"])
+    r_df_pd = df_pd.where(df_pd > 3, s_axis1_pd, axis=1)
+    r_df_fp = df_fp.where(df_fp > 3, s_axis1_fp, axis=1)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    # Series other without axis raises ValueError
+    with pytest.raises(ValueError, match="Must specify axis=0 or 1"):
+        df_fp.where(df_fp > 3, s_axis0_fp)
+
+    # 10. DataFrame where with DataFrame cond and DataFrame other
+    df_cond_pd = pd.DataFrame({"A": [True, False, True], "B": [False, True, False]}, index=["r1", "r2", "r3"])
+    df_cond_fp = fpd.DataFrame({"A": [True, False, True], "B": [False, True, False]}, index=["r1", "r2", "r3"])
+    df_other_pd = pd.DataFrame({"A": [9, 8, 7], "B": [6, 5, 4]}, index=["r1", "r2", "r3"])
+    df_other_fp = fpd.DataFrame({"A": [9, 8, 7], "B": [6, 5, 4]}, index=["r1", "r2", "r3"])
+    r_df_pd = df_pd.where(df_cond_pd, df_other_pd)
+    r_df_fp = df_fp.where(df_cond_fp, df_other_fp)
+    assert r_df_fp.to_dict() == r_df_pd.to_dict()
+
+    # 11. DataFrame where inplace
+    df_pd_in = df_pd.copy()
+    df_fp_in = df_fp.copy()
+    ret_pd = df_pd_in.where(df_pd_in > 3, -1, inplace=True)
+    ret_fp = df_fp_in.where(df_fp_in > 3, -1, inplace=True)
+    assert ret_pd is None and ret_fp is None
+    assert df_fp_in.to_dict() == df_pd_in.to_dict()
+
+    # 12. DataFrame combine with column union, row alignment, fill_value, and overwrite
+    df1_pd = pd.DataFrame({"A": [1, 2], "B": [3, 4]}, index=[0, 1])
+    df2_pd = pd.DataFrame({"B": [30, 40], "C": [50, 60]}, index=[1, 2])
+    df1_fp = fpd.DataFrame({"A": [1, 2], "B": [3, 4]}, index=[0, 1])
+    df2_fp = fpd.DataFrame({"B": [30, 40], "C": [50, 60]}, index=[1, 2])
+
+    c_df_pd = df1_pd.combine(df2_pd, lambda s1, s2: s1 + s2, fill_value=0)
+    c_df_fp = df1_fp.combine(df2_fp, lambda s1, s2: s1 + s2, fill_value=0)
+    for col in ["A", "B", "C"]:
+        pd.testing.assert_series_equal(pd.Series(c_df_fp[col].to_list(), index=c_df_pd.index, name=col), c_df_pd[col])
+
+    c_df_ow_pd = df1_pd.combine(df2_pd, lambda s1, s2: s1 + s2, fill_value=0, overwrite=False)
+    c_df_ow_fp = df1_fp.combine(df2_fp, lambda s1, s2: s1 + s2, fill_value=0, overwrite=False)
+    for col in ["A", "B", "C"]:
+        pd.testing.assert_series_equal(pd.Series(c_df_ow_fp[col].to_list(), index=c_df_ow_pd.index, name=col), c_df_ow_pd[col])
 

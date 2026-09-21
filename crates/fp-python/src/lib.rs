@@ -9824,6 +9824,145 @@ impl PySeries {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
+enum SeriesOrScalar {
+    Scalar(Scalar),
+    Series(Series),
+}
+
+fn normalize_series_cond(
+    py: Python<'_>,
+    inner: &Series,
+    cond_obj: &Bound<'_, PyAny>,
+) -> PyResult<Series> {
+    if cond_obj.is_callable() {
+        let py_s = Py::new(
+            py,
+            PySeries {
+                inner: inner.clone(),
+            },
+        )?;
+        let called = cond_obj.call1((py_s,))?;
+        return normalize_series_cond(py, inner, &called);
+    }
+    if let Ok(py_s) = cond_obj.extract::<PyRef<'_, PySeries>>() {
+        return Ok(py_s.inner.clone());
+    }
+    if let Ok(b) = cond_obj.extract::<bool>() {
+        let s = Series::from_values(
+            "",
+            inner.index().labels().to_vec(),
+            vec![Scalar::Bool(b); inner.len()],
+        )
+        .map_err(frame_error_to_py)?;
+        return Ok(s);
+    }
+    if let Ok(b_vec) = cond_obj.extract::<Vec<bool>>() {
+        if b_vec.len() != inner.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Array conditional must be same shape as self ({} vs {})",
+                b_vec.len(),
+                inner.len()
+            )));
+        }
+        let s = Series::from_values(
+            "",
+            inner.index().labels().to_vec(),
+            b_vec.into_iter().map(Scalar::Bool).collect(),
+        )
+        .map_err(frame_error_to_py)?;
+        return Ok(s);
+    }
+    let tolist = if let Ok(tl) = cond_obj.getattr("tolist") {
+        tl.call0()?
+    } else {
+        cond_obj.clone()
+    };
+    if let Ok(py_list) = tolist.cast::<pyo3::types::PyList>() {
+        if py_list.len() != inner.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Array conditional must be same shape as self ({} vs {})",
+                py_list.len(),
+                inner.len()
+            )));
+        }
+        let mut b_vec = Vec::with_capacity(py_list.len());
+        for item in py_list.iter() {
+            b_vec.push(Scalar::Bool(item.is_truthy()?));
+        }
+        let s = Series::from_values("", inner.index().labels().to_vec(), b_vec)
+            .map_err(frame_error_to_py)?;
+        return Ok(s);
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Cannot use {} as boolean condition for Series",
+        cond_obj.get_type().name()?
+    )))
+}
+
+fn normalize_series_other(
+    py: Python<'_>,
+    inner: &Series,
+    other_obj: Option<&Bound<'_, PyAny>>,
+) -> PyResult<SeriesOrScalar> {
+    let Some(obj) = other_obj else {
+        return Ok(SeriesOrScalar::Scalar(Scalar::Null(NullKind::NaN)));
+    };
+    if obj.is_none() {
+        return Ok(SeriesOrScalar::Scalar(Scalar::Null(NullKind::NaN)));
+    }
+    if obj.is_callable() {
+        let py_s = Py::new(
+            py,
+            PySeries {
+                inner: inner.clone(),
+            },
+        )?;
+        let called = obj.call1((py_s,))?;
+        return normalize_series_other(py, inner, Some(&called));
+    }
+    if let Ok(py_s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return Ok(SeriesOrScalar::Series(py_s.inner.clone()));
+    }
+    if let Ok(sc) = py_to_scalar(py, obj) {
+        return Ok(SeriesOrScalar::Scalar(sc));
+    }
+    let tolist = if let Ok(tl) = obj.getattr("tolist") {
+        tl.call0()?
+    } else {
+        obj.clone()
+    };
+    if let Ok(py_list) = tolist.cast::<pyo3::types::PyList>() {
+        if py_list.len() != inner.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "operands could not be broadcast together with shapes ({}) ({})",
+                inner.len(),
+                py_list.len()
+            )));
+        }
+        let mut scalars = Vec::with_capacity(py_list.len());
+        for item in py_list.iter() {
+            scalars.push(py_to_scalar(py, &item)?);
+        }
+        let s = Series::from_values("", inner.index().labels().to_vec(), scalars)
+            .map_err(frame_error_to_py)?;
+        return Ok(SeriesOrScalar::Series(s));
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Cannot use {} as other value in Series where/mask",
+        obj.get_type().name()?
+    )))
+}
+
+fn execute_series_where(inner: &Series, cond: &Series, other: &SeriesOrScalar) -> PyResult<Series> {
+    match other {
+        SeriesOrScalar::Scalar(sc) => inner.where_cond(cond, Some(sc)).map_err(frame_error_to_py),
+        SeriesOrScalar::Series(other_s) => inner
+            .where_cond_series(cond, other_s)
+            .map_err(frame_error_to_py),
+    }
+}
+
 #[pymethods]
 impl PySeries {
     /// Create a new Series from various data structures (list, tuple, dict, Series, Index, scalar).
@@ -12502,44 +12641,61 @@ impl PySeries {
         self.inner.dot(&other.inner).map_err(frame_error_to_py)
     }
 
-    #[pyo3(signature = (cond, other=None))]
+    #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
     fn r#where(
-        &self,
+        &mut self,
         py: Python<'_>,
-        cond: &PySeries,
+        cond: &Bound<'_, PyAny>,
         other: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PySeries> {
-        let s = match other {
-            Some(o) if !o.is_none() => {
-                if let Ok(py_s) = o.extract::<PyRef<'_, PySeries>>() {
-                    self.inner.where_cond_series(&cond.inner, &py_s.inner)
-                } else {
-                    let sc = py_to_scalar(py, o)?;
-                    self.inner.r#where(&cond.inner, Some(&sc))
-                }
-            }
-            _ => self.inner.r#where(&cond.inner, None),
+        inplace: Option<bool>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<PySeries>> {
+        let _ = level;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
         }
-        .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        let cond_series = normalize_series_cond(py, &self.inner, cond)?;
+        let other_val = normalize_series_other(py, &self.inner, other)?;
+        let res_inner = execute_series_where(&self.inner, &cond_series, &other_val)?;
+        if inplace.unwrap_or(false) {
+            self.inner = res_inner;
+            Ok(None)
+        } else {
+            Ok(Some(PySeries { inner: res_inner }))
+        }
     }
 
-    #[pyo3(signature = (cond, other=None))]
+    #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
     fn mask(
-        &self,
+        &mut self,
         py: Python<'_>,
-        cond: &PySeries,
+        cond: &Bound<'_, PyAny>,
         other: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PySeries> {
-        let other_scalar = match other {
-            Some(o) if !o.is_none() => Some(py_to_scalar(py, o)?),
-            _ => None,
-        };
-        let s = self
-            .inner
-            .mask(&cond.inner, other_scalar.as_ref())
-            .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        inplace: Option<bool>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<PySeries>> {
+        let _ = level;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        let cond_series = normalize_series_cond(py, &self.inner, cond)?;
+        let not_cond_series = cond_series.not().map_err(frame_error_to_py)?;
+        let other_val = normalize_series_other(py, &self.inner, other)?;
+        let res_inner = execute_series_where(&self.inner, &not_cond_series, &other_val)?;
+        if inplace.unwrap_or(false) {
+            self.inner = res_inner;
+            Ok(None)
+        } else {
+            Ok(Some(PySeries { inner: res_inner }))
+        }
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]
@@ -12937,24 +13093,44 @@ impl PySeries {
         func: &Bound<'_, PyAny>,
         fill_value: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = fill_value;
-        let v1_vals = self.inner.column().values();
-        let v2_vals = other.inner.column().values();
-        let len = v1_vals.len().min(v2_vals.len());
-        let mut res_vals = Vec::with_capacity(len);
-        for i in 0..len {
-            let v1 = scalar_to_py(py, &v1_vals[i])?;
-            let v2 = scalar_to_py(py, &v2_vals[i])?;
-            let out = func.call1((v1, v2))?;
-            res_vals.push(py_to_scalar(py, &out)?);
+        let fill_scalar = match fill_value {
+            Some(fv) if !fv.is_none() => Some(py_to_scalar(py, fv)?),
+            _ => None,
+        };
+        let (s1_aligned, s2_aligned) = self
+            .inner
+            .align(&other.inner, AlignMode::Outer)
+            .map_err(frame_error_to_py)?;
+        let plan = fp_index::align(self.inner.index(), other.inner.index(), AlignMode::Outer);
+        let n = plan.union_index.len();
+        let mut res_vals = Vec::with_capacity(n);
+        for i in 0..n {
+            let v1 = if plan.left_positions[i].is_none() {
+                fill_scalar.clone().unwrap_or(Scalar::Null(NullKind::NaN))
+            } else {
+                s1_aligned.column().values()[i].clone()
+            };
+            let v2 = if plan.right_positions[i].is_none() {
+                fill_scalar.clone().unwrap_or(Scalar::Null(NullKind::NaN))
+            } else {
+                s2_aligned.column().values()[i].clone()
+            };
+            let py_v1 = scalar_to_py(py, &v1)?;
+            let py_v2 = scalar_to_py(py, &v2)?;
+            let out = func.call1((py_v1, py_v2))?;
+            let sc = py_to_scalar(py, &out)?;
+            res_vals.push(sc);
         }
-        let s = Series::from_values(
-            self.inner.name(),
-            self.inner.index().labels().to_vec(),
-            res_vals,
-        )
-        .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        let col = Column::from_values(res_vals)
+            .map_err(fp_frame::FrameError::Column)
+            .map_err(frame_error_to_py)?;
+        let res_name = if self.inner.name() == other.inner.name() {
+            self.inner.name().to_string()
+        } else {
+            String::new()
+        };
+        let res_series = Series::new(res_name, plan.union_index, col).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: res_series })
     }
 
     #[getter]
@@ -13818,6 +13994,501 @@ fn empty_dataframe() -> DataFrame {
         BTreeMap::<String, Column>::new(),
     )
     .unwrap()
+}
+
+#[allow(clippy::large_enum_variant)]
+enum DfCond {
+    DataFrame(DataFrame),
+    Series(Series),
+}
+
+#[allow(clippy::large_enum_variant)]
+enum DfOther {
+    Scalar(Scalar),
+    Series(Series),
+    DataFrame(DataFrame),
+}
+
+fn df_col_to_series(df: &DataFrame, name: &str) -> PyResult<Series> {
+    let col = df
+        .column(name)
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.to_string()))?;
+    Series::new(name, df.index().clone(), col.clone()).map_err(frame_error_to_py)
+}
+
+fn normalize_df_cond(
+    py: Python<'_>,
+    inner: &DataFrame,
+    cond_obj: &Bound<'_, PyAny>,
+) -> PyResult<DfCond> {
+    if cond_obj.is_callable() {
+        let py_df = Py::new(
+            py,
+            PyDataFrame {
+                inner: inner.clone(),
+            },
+        )?;
+        let called = cond_obj.call1((py_df,))?;
+        return normalize_df_cond(py, inner, &called);
+    }
+    if let Ok(py_df) = cond_obj.extract::<PyRef<'_, PyDataFrame>>() {
+        return Ok(DfCond::DataFrame(py_df.inner.clone()));
+    }
+    if let Ok(py_s) = cond_obj.extract::<PyRef<'_, PySeries>>() {
+        return Ok(DfCond::Series(py_s.inner.clone()));
+    }
+    if let Ok(b) = cond_obj.extract::<bool>() {
+        let n_rows = inner.len();
+        let mut cols = BTreeMap::new();
+        let col_names: Vec<String> = inner.column_names().into_iter().cloned().collect();
+        for name in &col_names {
+            let col = Column::from_bool_values(vec![b; n_rows]);
+            cols.insert(name.clone(), col);
+        }
+        let df = DataFrame::new_with_column_order(inner.index().clone(), cols, col_names)
+            .map_err(frame_error_to_py)?;
+        return Ok(DfCond::DataFrame(df));
+    }
+    let tolist = if let Ok(tl) = cond_obj.getattr("tolist") {
+        tl.call0()?
+    } else {
+        cond_obj.clone()
+    };
+    if let Ok(outer_list) = tolist.cast::<pyo3::types::PyList>() {
+        if outer_list.len() > 0
+            && let Ok(first_item) = outer_list.get_item(0)
+            && let Ok(first_row) = first_item.cast::<pyo3::types::PyList>()
+        {
+            // 2D list
+            let n_rows = outer_list.len();
+            let n_cols = first_row.len();
+            if n_rows != inner.len() || n_cols != inner.num_columns() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Array conditional must be same shape as self (({}, {}) vs ({}, {}))",
+                    n_rows,
+                    n_cols,
+                    inner.len(),
+                    inner.num_columns()
+                )));
+            }
+            let mut col_data: Vec<Vec<bool>> = vec![Vec::with_capacity(n_rows); n_cols];
+            for row in outer_list.iter() {
+                let row_list = row.cast::<pyo3::types::PyList>()?;
+                for (j, item) in row_list.iter().enumerate() {
+                    if j < n_cols {
+                        col_data[j].push(item.is_truthy()?);
+                    }
+                }
+            }
+            let mut cols = BTreeMap::new();
+            let col_names: Vec<String> = inner.column_names().into_iter().cloned().collect();
+            for (j, name) in col_names.iter().enumerate() {
+                let col = Column::from_bool_values(col_data[j].clone());
+                cols.insert(name.clone(), col);
+            }
+            let df = DataFrame::new_with_column_order(inner.index().clone(), cols, col_names)
+                .map_err(frame_error_to_py)?;
+            return Ok(DfCond::DataFrame(df));
+        } else {
+            // 1D list
+            let n_rows = outer_list.len();
+            if n_rows != inner.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Array conditional must be same shape as self ({} vs {})",
+                    n_rows,
+                    inner.len()
+                )));
+            }
+            let mut b_vec = Vec::with_capacity(n_rows);
+            for item in outer_list.iter() {
+                b_vec.push(Scalar::Bool(item.is_truthy()?));
+            }
+            let s = Series::from_values("", inner.index().labels().to_vec(), b_vec)
+                .map_err(frame_error_to_py)?;
+            return Ok(DfCond::Series(s));
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Cannot use {} as boolean condition for DataFrame",
+        cond_obj.get_type().name()?
+    )))
+}
+
+fn normalize_df_other(
+    py: Python<'_>,
+    inner: &DataFrame,
+    other_obj: Option<&Bound<'_, PyAny>>,
+) -> PyResult<DfOther> {
+    let Some(obj) = other_obj else {
+        return Ok(DfOther::Scalar(Scalar::Null(NullKind::NaN)));
+    };
+    if obj.is_none() {
+        return Ok(DfOther::Scalar(Scalar::Null(NullKind::NaN)));
+    }
+    if obj.is_callable() {
+        let py_df = Py::new(
+            py,
+            PyDataFrame {
+                inner: inner.clone(),
+            },
+        )?;
+        let called = obj.call1((py_df,))?;
+        return normalize_df_other(py, inner, Some(&called));
+    }
+    if let Ok(py_df) = obj.extract::<PyRef<'_, PyDataFrame>>() {
+        return Ok(DfOther::DataFrame(py_df.inner.clone()));
+    }
+    if let Ok(py_s) = obj.extract::<PyRef<'_, PySeries>>() {
+        return Ok(DfOther::Series(py_s.inner.clone()));
+    }
+    if let Ok(sc) = py_to_scalar(py, obj) {
+        return Ok(DfOther::Scalar(sc));
+    }
+    let tolist = if let Ok(tl) = obj.getattr("tolist") {
+        tl.call0()?
+    } else {
+        obj.clone()
+    };
+    if let Ok(outer_list) = tolist.cast::<pyo3::types::PyList>() {
+        if outer_list.len() > 0
+            && let Ok(first_item) = outer_list.get_item(0)
+            && let Ok(first_row) = first_item.cast::<pyo3::types::PyList>()
+        {
+            // 2D list
+            let n_rows = outer_list.len();
+            let n_cols = first_row.len();
+            let mut col_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(n_rows); n_cols];
+            for row in outer_list.iter() {
+                let row_list = row.cast::<pyo3::types::PyList>()?;
+                for (j, item) in row_list.iter().enumerate() {
+                    if j < n_cols {
+                        col_data[j].push(py_to_scalar(py, &item)?);
+                    }
+                }
+            }
+            let mut cols = BTreeMap::new();
+            let col_names: Vec<String> = inner.column_names().into_iter().cloned().collect();
+            for (j, name) in col_names.iter().enumerate() {
+                if j < n_cols {
+                    let col = Column::from_values(col_data[j].clone())
+                        .map_err(fp_frame::FrameError::Column)
+                        .map_err(frame_error_to_py)?;
+                    cols.insert(name.clone(), col);
+                }
+            }
+            let df = DataFrame::new_with_column_order(inner.index().clone(), cols, col_names)
+                .map_err(frame_error_to_py)?;
+            return Ok(DfOther::DataFrame(df));
+        } else {
+            // 1D list
+            let mut scalars = Vec::with_capacity(outer_list.len());
+            for item in outer_list.iter() {
+                scalars.push(py_to_scalar(py, &item)?);
+            }
+            let s = Series::from_values("", inner.index().labels().to_vec(), scalars)
+                .map_err(frame_error_to_py)?;
+            return Ok(DfOther::Series(s));
+        }
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Cannot use {} as other value in DataFrame where/mask",
+        obj.get_type().name()?
+    )))
+}
+
+fn execute_df_where(
+    df: &DataFrame,
+    cond: &DfCond,
+    other: &DfOther,
+    axis: Option<usize>,
+) -> PyResult<DataFrame> {
+    let col_names: Vec<String> = df.column_names().into_iter().cloned().collect();
+    match cond {
+        DfCond::DataFrame(cond_df) => match other {
+            DfOther::Scalar(sc) => df.r#where(cond_df, Some(sc)).map_err(frame_error_to_py),
+            DfOther::DataFrame(other_df) => df
+                .where_cond_df(cond_df, other_df)
+                .map_err(frame_error_to_py),
+            DfOther::Series(other_s) => {
+                let ax = axis.ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Must specify axis=0 or 1")
+                })?;
+                if ax == 1 {
+                    let mut cols = BTreeMap::new();
+                    for name in &col_names {
+                        let col_s = df_col_to_series(df, name)?;
+                        let col_cond = if let Ok(c) = df_col_to_series(cond_df, name) {
+                            c
+                        } else {
+                            Series::from_values(
+                                name.as_str(),
+                                df.index().labels().to_vec(),
+                                vec![Scalar::Bool(false); df.len()],
+                            )
+                            .map_err(frame_error_to_py)?
+                        };
+                        let other_val = other_s
+                            .get(&IndexLabel::Utf8(name.clone()))
+                            .unwrap_or(Scalar::Null(NullKind::NaN));
+                        let new_col = col_s
+                            .where_cond(&col_cond, Some(&other_val))
+                            .map_err(frame_error_to_py)?;
+                        cols.insert(name.clone(), new_col.column().clone());
+                    }
+                    DataFrame::new_with_column_order(df.index().clone(), cols, col_names)
+                        .map_err(frame_error_to_py)
+                } else {
+                    let mut cols = BTreeMap::new();
+                    for name in &col_names {
+                        let col_s = df_col_to_series(df, name)?;
+                        let col_cond = if let Ok(c) = df_col_to_series(cond_df, name) {
+                            c
+                        } else {
+                            Series::from_values(
+                                name.as_str(),
+                                df.index().labels().to_vec(),
+                                vec![Scalar::Bool(false); df.len()],
+                            )
+                            .map_err(frame_error_to_py)?
+                        };
+                        let new_col = col_s
+                            .where_cond_series(&col_cond, other_s)
+                            .map_err(frame_error_to_py)?;
+                        cols.insert(name.clone(), new_col.column().clone());
+                    }
+                    DataFrame::new_with_column_order(df.index().clone(), cols, col_names)
+                        .map_err(frame_error_to_py)
+                }
+            }
+        },
+        DfCond::Series(cond_s) => {
+            let ax = axis.unwrap_or(0);
+            if ax == 1 {
+                let mut cols = BTreeMap::new();
+                for name in &col_names {
+                    let keep = cond_s
+                        .get(&IndexLabel::Utf8(name.clone()))
+                        .is_some_and(|sc| matches!(sc, Scalar::Bool(true)));
+                    if keep {
+                        let col = df.column(name).ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone())
+                        })?;
+                        cols.insert(name.clone(), col.clone());
+                    } else {
+                        match other {
+                            DfOther::Scalar(sc) => {
+                                let col = Column::from_values(vec![sc.clone(); df.len()])
+                                    .map_err(fp_frame::FrameError::Column)
+                                    .map_err(frame_error_to_py)?;
+                                cols.insert(name.clone(), col);
+                            }
+                            DfOther::Series(other_s) => {
+                                let other_val = other_s
+                                    .get(&IndexLabel::Utf8(name.clone()))
+                                    .unwrap_or(Scalar::Null(NullKind::NaN));
+                                let col = Column::from_values(vec![other_val; df.len()])
+                                    .map_err(fp_frame::FrameError::Column)
+                                    .map_err(frame_error_to_py)?;
+                                cols.insert(name.clone(), col);
+                            }
+                            DfOther::DataFrame(other_df) => {
+                                if let Some(oc) = other_df.column(name) {
+                                    cols.insert(name.clone(), oc.clone());
+                                } else {
+                                    let col = Column::from_values(vec![
+                                        Scalar::Null(NullKind::NaN);
+                                        df.len()
+                                    ])
+                                    .map_err(fp_frame::FrameError::Column)
+                                    .map_err(frame_error_to_py)?;
+                                    cols.insert(name.clone(), col);
+                                }
+                            }
+                        }
+                    }
+                }
+                DataFrame::new_with_column_order(df.index().clone(), cols, col_names)
+                    .map_err(frame_error_to_py)
+            } else {
+                let mut cols = BTreeMap::new();
+                for name in &col_names {
+                    let col_s = df_col_to_series(df, name)?;
+                    let new_col = match other {
+                        DfOther::Scalar(sc) => col_s
+                            .where_cond(cond_s, Some(sc))
+                            .map_err(frame_error_to_py)?,
+                        DfOther::Series(other_s) => col_s
+                            .where_cond_series(cond_s, other_s)
+                            .map_err(frame_error_to_py)?,
+                        DfOther::DataFrame(other_df) => {
+                            if let Ok(oc_s) = df_col_to_series(other_df, name) {
+                                col_s
+                                    .where_cond_series(cond_s, &oc_s)
+                                    .map_err(frame_error_to_py)?
+                            } else {
+                                col_s
+                                    .where_cond(cond_s, Some(&Scalar::Null(NullKind::NaN)))
+                                    .map_err(frame_error_to_py)?
+                            }
+                        }
+                    };
+                    cols.insert(name.clone(), new_col.column().clone());
+                }
+                DataFrame::new_with_column_order(df.index().clone(), cols, col_names)
+                    .map_err(frame_error_to_py)
+            }
+        }
+    }
+}
+
+fn execute_df_mask(
+    df: &DataFrame,
+    cond: &DfCond,
+    other: &DfOther,
+    axis: Option<usize>,
+) -> PyResult<DataFrame> {
+    let col_names: Vec<String> = df.column_names().into_iter().cloned().collect();
+    match cond {
+        DfCond::DataFrame(cond_df) => match other {
+            DfOther::Scalar(sc) => df.mask(cond_df, Some(sc)).map_err(frame_error_to_py),
+            DfOther::DataFrame(other_df) => df
+                .mask_df_other(cond_df, other_df)
+                .map_err(frame_error_to_py),
+            DfOther::Series(other_s) => {
+                let ax = axis.ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Must specify axis=0 or 1")
+                })?;
+                if ax == 1 {
+                    let mut cols = BTreeMap::new();
+                    for name in &col_names {
+                        let col_s = df_col_to_series(df, name)?;
+                        let col_cond = if let Ok(c) = df_col_to_series(cond_df, name) {
+                            c
+                        } else {
+                            Series::from_values(
+                                name.as_str(),
+                                df.index().labels().to_vec(),
+                                vec![Scalar::Bool(false); df.len()],
+                            )
+                            .map_err(frame_error_to_py)?
+                        };
+                        let other_val = other_s
+                            .get(&IndexLabel::Utf8(name.clone()))
+                            .unwrap_or(Scalar::Null(NullKind::NaN));
+                        let new_col = col_s
+                            .mask(&col_cond, Some(&other_val))
+                            .map_err(frame_error_to_py)?;
+                        cols.insert(name.clone(), new_col.column().clone());
+                    }
+                    DataFrame::new_with_column_order(df.index().clone(), cols, col_names)
+                        .map_err(frame_error_to_py)
+                } else {
+                    let mut cols = BTreeMap::new();
+                    for name in &col_names {
+                        let col_s = df_col_to_series(df, name)?;
+                        let col_cond = if let Ok(c) = df_col_to_series(cond_df, name) {
+                            c
+                        } else {
+                            Series::from_values(
+                                name.as_str(),
+                                df.index().labels().to_vec(),
+                                vec![Scalar::Bool(false); df.len()],
+                            )
+                            .map_err(frame_error_to_py)?
+                        };
+                        let not_cond = col_cond.not().map_err(frame_error_to_py)?;
+                        let new_col = col_s
+                            .where_cond_series(&not_cond, other_s)
+                            .map_err(frame_error_to_py)?;
+                        cols.insert(name.clone(), new_col.column().clone());
+                    }
+                    DataFrame::new_with_column_order(df.index().clone(), cols, col_names)
+                        .map_err(frame_error_to_py)
+                }
+            }
+        },
+        DfCond::Series(cond_s) => {
+            let ax = axis.unwrap_or(0);
+            if ax == 1 {
+                let mut cols = BTreeMap::new();
+                for name in &col_names {
+                    let is_masked = cond_s
+                        .get(&IndexLabel::Utf8(name.clone()))
+                        .is_some_and(|sc| matches!(sc, Scalar::Bool(true)));
+                    if !is_masked {
+                        let col = df.column(name).ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone())
+                        })?;
+                        cols.insert(name.clone(), col.clone());
+                    } else {
+                        match other {
+                            DfOther::Scalar(sc) => {
+                                let col = Column::from_values(vec![sc.clone(); df.len()])
+                                    .map_err(fp_frame::FrameError::Column)
+                                    .map_err(frame_error_to_py)?;
+                                cols.insert(name.clone(), col);
+                            }
+                            DfOther::Series(other_s) => {
+                                let other_val = other_s
+                                    .get(&IndexLabel::Utf8(name.clone()))
+                                    .unwrap_or(Scalar::Null(NullKind::NaN));
+                                let col = Column::from_values(vec![other_val; df.len()])
+                                    .map_err(fp_frame::FrameError::Column)
+                                    .map_err(frame_error_to_py)?;
+                                cols.insert(name.clone(), col);
+                            }
+                            DfOther::DataFrame(other_df) => {
+                                if let Some(oc) = other_df.column(name) {
+                                    cols.insert(name.clone(), oc.clone());
+                                } else {
+                                    let col = Column::from_values(vec![
+                                        Scalar::Null(NullKind::NaN);
+                                        df.len()
+                                    ])
+                                    .map_err(fp_frame::FrameError::Column)
+                                    .map_err(frame_error_to_py)?;
+                                    cols.insert(name.clone(), col);
+                                }
+                            }
+                        }
+                    }
+                }
+                DataFrame::new_with_column_order(df.index().clone(), cols, col_names)
+                    .map_err(frame_error_to_py)
+            } else {
+                let mut cols = BTreeMap::new();
+                for name in &col_names {
+                    let col_s = df_col_to_series(df, name)?;
+                    let new_col = match other {
+                        DfOther::Scalar(sc) => {
+                            col_s.mask(cond_s, Some(sc)).map_err(frame_error_to_py)?
+                        }
+                        DfOther::Series(other_s) => {
+                            let not_cond = cond_s.not().map_err(frame_error_to_py)?;
+                            col_s
+                                .where_cond_series(&not_cond, other_s)
+                                .map_err(frame_error_to_py)?
+                        }
+                        DfOther::DataFrame(other_df) => {
+                            let not_cond = cond_s.not().map_err(frame_error_to_py)?;
+                            if let Ok(oc_s) = df_col_to_series(other_df, name) {
+                                col_s
+                                    .where_cond_series(&not_cond, &oc_s)
+                                    .map_err(frame_error_to_py)?
+                            } else {
+                                col_s
+                                    .where_cond(&not_cond, Some(&Scalar::Null(NullKind::NaN)))
+                                    .map_err(frame_error_to_py)?
+                            }
+                        }
+                    };
+                    cols.insert(name.clone(), new_col.column().clone());
+                }
+                DataFrame::new_with_column_order(df.index().clone(), cols, col_names)
+                    .map_err(frame_error_to_py)
+            }
+        }
+    }
 }
 
 #[pymethods]
@@ -18671,40 +19342,50 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (cond, other=None))]
+    #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
     fn r#where(
-        &self,
+        &mut self,
         py: Python<'_>,
-        cond: &PyDataFrame,
+        cond: &Bound<'_, PyAny>,
         other: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        let other_scalar = match other {
-            Some(o) if !o.is_none() => Some(py_to_scalar(py, o)?),
-            _ => None,
-        };
-        let df = self
-            .inner
-            .r#where(&cond.inner, other_scalar.as_ref())
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+        inplace: Option<bool>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<PyDataFrame>> {
+        let _ = level;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?;
+        let cond_norm = normalize_df_cond(py, &self.inner, cond)?;
+        let other_norm = normalize_df_other(py, &self.inner, other)?;
+        let res_inner = execute_df_where(&self.inner, &cond_norm, &other_norm, ax)?;
+        if inplace.unwrap_or(false) {
+            self.inner = res_inner;
+            Ok(None)
+        } else {
+            Ok(Some(PyDataFrame { inner: res_inner }))
+        }
     }
 
-    #[pyo3(signature = (cond, other=None))]
+    #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
     fn mask(
-        &self,
+        &mut self,
         py: Python<'_>,
-        cond: &PyDataFrame,
+        cond: &Bound<'_, PyAny>,
         other: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        let other_scalar = match other {
-            Some(o) if !o.is_none() => Some(py_to_scalar(py, o)?),
-            _ => None,
-        };
-        let df = self
-            .inner
-            .mask(&cond.inner, other_scalar.as_ref())
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+        inplace: Option<bool>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<PyDataFrame>> {
+        let _ = level;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?;
+        let cond_norm = normalize_df_cond(py, &self.inner, cond)?;
+        let other_norm = normalize_df_other(py, &self.inner, other)?;
+        let res_inner = execute_df_mask(&self.inner, &cond_norm, &other_norm, ax)?;
+        if inplace.unwrap_or(false) {
+            self.inner = res_inner;
+            Ok(None)
+        } else {
+            Ok(Some(PyDataFrame { inner: res_inner }))
+        }
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]
@@ -19355,25 +20036,139 @@ impl PyDataFrame {
     #[pyo3(signature = (other, func, fill_value=None, overwrite=true))]
     fn combine(
         &self,
+        py: Python<'_>,
         other: &PyDataFrame,
         func: &Bound<'_, PyAny>,
         fill_value: Option<&Bound<'_, PyAny>>,
         overwrite: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (fill_value, overwrite);
-        let mut new_df = self.inner.clone();
-        for name in self.inner.column_names() {
-            if let (Ok(p1), Ok(p2)) = (self.column_series(name), other.column_series(name))
-                && let Ok(res) = func.call1((p1, p2))
-                && let Ok(py_s) = res.extract::<PySeries>()
-            {
-                let vals = py_s.inner.column().values().to_vec();
-                new_df = new_df
-                    .assign_column(name, vals)
+        if self.inner.is_empty() && !other.inner.is_empty() {
+            return Ok(PyDataFrame {
+                inner: other.inner.clone(),
+            });
+        }
+        let fill_scalar = match fill_value {
+            Some(fv) if !fv.is_none() => Some(py_to_scalar(py, fv)?),
+            _ => None,
+        };
+        let overwrite_val = overwrite.unwrap_or(true);
+
+        let (aligned_left, aligned_right) = self
+            .inner
+            .align(&other.inner, AlignMode::Outer)
+            .map_err(frame_error_to_py)?;
+
+        let new_columns: Vec<String> = if self.inner.column_names() == other.inner.column_names() {
+            self.inner.column_names().into_iter().cloned().collect()
+        } else {
+            let mut cols_set = std::collections::BTreeSet::new();
+            for col in self.inner.column_names() {
+                cols_set.insert((*col).clone());
+            }
+            for col in other.inner.column_names() {
+                cols_set.insert((*col).clone());
+            }
+            cols_set.into_iter().collect::<Vec<_>>()
+        };
+
+        let mut result_cols: BTreeMap<String, Column> = BTreeMap::new();
+        for col in &new_columns {
+            let left_col = aligned_left.column(col).unwrap();
+            let right_col = aligned_right.column(col).unwrap();
+
+            let other_all_missing = right_col.values().iter().all(Scalar::is_missing);
+            if !overwrite_val && other_all_missing {
+                result_cols.insert(col.clone(), left_col.clone());
+                continue;
+            }
+
+            let left_col_filled = if let Some(fv) = &fill_scalar {
+                let vals: Vec<Scalar> = left_col
+                    .values()
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            fv.clone()
+                        } else {
+                            v.clone()
+                        }
+                    })
+                    .collect();
+                Column::from_values(vals)
+                    .map_err(fp_frame::FrameError::Column)
+                    .map_err(frame_error_to_py)?
+            } else {
+                left_col.clone()
+            };
+
+            let right_col_filled = if let Some(fv) = &fill_scalar {
+                let vals: Vec<Scalar> = right_col
+                    .values()
+                    .iter()
+                    .map(|v| {
+                        if v.is_missing() {
+                            fv.clone()
+                        } else {
+                            v.clone()
+                        }
+                    })
+                    .collect();
+                Column::from_values(vals)
+                    .map_err(fp_frame::FrameError::Column)
+                    .map_err(frame_error_to_py)?
+            } else {
+                right_col.clone()
+            };
+
+            let left_s = Series::new(col.clone(), aligned_left.index().clone(), left_col_filled)
+                .map_err(frame_error_to_py)?;
+            let right_s = Series::new(col.clone(), aligned_right.index().clone(), right_col_filled)
+                .map_err(frame_error_to_py)?;
+
+            let py_s1 = Py::new(py, PySeries { inner: left_s })?;
+            let py_s2 = Py::new(py, PySeries { inner: right_s })?;
+
+            let call_res = func.call1((py_s1, py_s2))?;
+
+            if let Ok(py_res_s) = call_res.extract::<PyRef<'_, PySeries>>() {
+                let res_inner = &py_res_s.inner;
+                if res_inner.len() == aligned_left.len() {
+                    result_cols.insert(col.clone(), res_inner.column().clone());
+                } else {
+                    let reindexed = res_inner
+                        .reindex(aligned_left.index().labels().to_vec())
+                        .map_err(frame_error_to_py)?;
+                    result_cols.insert(col.clone(), reindexed.column().clone());
+                }
+            } else if let Ok(py_list) = call_res.extract::<Vec<Bound<'_, PyAny>>>() {
+                let mut scalars = Vec::with_capacity(py_list.len());
+                for item in py_list {
+                    scalars.push(py_to_scalar(py, &item)?);
+                }
+                let res_col = Column::from_values(scalars)
+                    .map_err(fp_frame::FrameError::Column)
                     .map_err(frame_error_to_py)?;
+                result_cols.insert(col.clone(), res_col);
+            } else if let Ok(sc) = py_to_scalar(py, &call_res) {
+                let res_col = Column::from_values(vec![sc; aligned_left.len()])
+                    .map_err(fp_frame::FrameError::Column)
+                    .map_err(frame_error_to_py)?;
+                result_cols.insert(col.clone(), res_col);
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "Unsupported return type from combine func for column '{}'",
+                    col
+                )));
             }
         }
-        Ok(PyDataFrame { inner: new_df })
+
+        let final_df = DataFrame::new_with_column_order(
+            aligned_left.index().clone(),
+            result_cols,
+            new_columns,
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: final_df })
     }
 
     #[getter]
