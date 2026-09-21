@@ -4116,6 +4116,35 @@ impl PyDatetimeIndex {
     }
 }
 
+fn extract_index_names_flexible(
+    names: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Vec<Option<String>>>> {
+    let Some(names_obj) = names else {
+        return Ok(None);
+    };
+    if names_obj.is_none() {
+        return Ok(None);
+    }
+    if let Ok(s) = names_obj.extract::<String>() {
+        return Ok(Some(vec![Some(s)]));
+    }
+    if let Ok(iter) = names_obj.try_iter() {
+        let mut res = Vec::new();
+        for item in iter {
+            let item = item?;
+            if item.is_none() {
+                res.push(None);
+            } else if let Ok(s) = item.extract::<String>() {
+                res.push(Some(s));
+            } else {
+                res.push(Some(item.str()?.to_string()));
+            }
+        }
+        return Ok(Some(res));
+    }
+    Ok(Some(vec![Some(names_obj.str()?.to_string())]))
+}
+
 /// Python wrapper for FrankenPandas MultiIndex.
 #[pyclass(name = "MultiIndex", from_py_object)]
 #[derive(Clone)]
@@ -4126,90 +4155,216 @@ pub struct PyMultiIndex {
 #[pymethods]
 impl PyMultiIndex {
     #[staticmethod]
-    #[pyo3(signature = (tuples, names=None))]
+    #[pyo3(signature = (tuples, sortorder=None, names=None))]
     fn from_tuples(
-        tuples: Vec<Bound<'_, PyAny>>,
-        names: Option<Vec<Option<String>>>,
+        tuples: &Bound<'_, PyAny>,
+        sortorder: Option<i64>,
+        names: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let mut parsed_tuples: Vec<Vec<IndexLabel>> = Vec::with_capacity(tuples.len());
-        for t in &tuples {
-            if let Ok(seq) = t.cast::<pyo3::types::PySequence>() {
-                let len = seq.len()?;
-                let mut row = Vec::with_capacity(len);
-                for i in 0..len {
-                    let item = seq.get_item(i)?;
-                    row.push(py_to_index_label(&item)?);
+        let _ = sortorder;
+        let mut parsed_tuples: Vec<Vec<IndexLabel>> = Vec::new();
+        if let Ok(seq) = tuples.cast::<pyo3::types::PySequence>() {
+            let len = seq.len()?;
+            parsed_tuples.reserve(len);
+            for i in 0..len {
+                let t = seq.get_item(i)?;
+                if let Ok(subseq) = t.cast::<pyo3::types::PySequence>() {
+                    let sublen = subseq.len()?;
+                    let mut row = Vec::with_capacity(sublen);
+                    for j in 0..sublen {
+                        let item = subseq.get_item(j)?;
+                        row.push(py_to_index_label(&item)?);
+                    }
+                    parsed_tuples.push(row);
+                } else if let Ok(it) = t.try_iter() {
+                    let mut row = Vec::new();
+                    for item in it {
+                        let item = item?;
+                        row.push(py_to_index_label(&item)?);
+                    }
+                    parsed_tuples.push(row);
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Each tuple must be a sequence of labels",
+                    ));
                 }
-                parsed_tuples.push(row);
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Each tuple must be a sequence of labels",
-                ));
             }
+        } else if let Ok(iter) = tuples.try_iter() {
+            for t in iter {
+                let t = t?;
+                if let Ok(subseq) = t.cast::<pyo3::types::PySequence>() {
+                    let sublen = subseq.len()?;
+                    let mut row = Vec::with_capacity(sublen);
+                    for j in 0..sublen {
+                        let item = subseq.get_item(j)?;
+                        row.push(py_to_index_label(&item)?);
+                    }
+                    parsed_tuples.push(row);
+                } else if let Ok(it) = t.try_iter() {
+                    let mut row = Vec::new();
+                    for item in it {
+                        let item = item?;
+                        row.push(py_to_index_label(&item)?);
+                    }
+                    parsed_tuples.push(row);
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Each tuple must be a sequence of labels",
+                    ));
+                }
+            }
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "tuples must be an iterable of sequences",
+            ));
         }
         let mut inner = MultiIndex::from_tuples(parsed_tuples)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        if let Some(ns) = names {
+        if let Some(ns) = extract_index_names_flexible(names)? {
             inner = inner.set_names(ns);
         }
         Ok(PyMultiIndex { inner })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (arrays, names=None))]
+    #[pyo3(signature = (arrays, sortorder=None, names=None))]
     fn from_arrays(
-        arrays: Vec<Bound<'_, PyAny>>,
-        names: Option<Vec<Option<String>>>,
+        arrays: &Bound<'_, PyAny>,
+        sortorder: Option<i64>,
+        names: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let mut parsed_arrays: Vec<Vec<IndexLabel>> = Vec::with_capacity(arrays.len());
-        for arr in &arrays {
-            if let Ok(seq) = arr.cast::<pyo3::types::PySequence>() {
-                let len = seq.len()?;
-                let mut col = Vec::with_capacity(len);
-                for i in 0..len {
-                    let item = seq.get_item(i)?;
-                    col.push(py_to_index_label(&item)?);
+        let _ = sortorder;
+        let mut parsed_arrays: Vec<Vec<IndexLabel>> = Vec::new();
+        if let Ok(seq) = arrays.cast::<pyo3::types::PySequence>() {
+            let len = seq.len()?;
+            parsed_arrays.reserve(len);
+            for i in 0..len {
+                let arr = seq.get_item(i)?;
+                if let Ok(subseq) = arr.cast::<pyo3::types::PySequence>() {
+                    let sublen = subseq.len()?;
+                    let mut col = Vec::with_capacity(sublen);
+                    for j in 0..sublen {
+                        let item = subseq.get_item(j)?;
+                        col.push(py_to_index_label(&item)?);
+                    }
+                    parsed_arrays.push(col);
+                } else if let Ok(it) = arr.try_iter() {
+                    let mut col = Vec::new();
+                    for item in it {
+                        let item = item?;
+                        col.push(py_to_index_label(&item)?);
+                    }
+                    parsed_arrays.push(col);
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Each array must be a sequence of labels",
+                    ));
                 }
-                parsed_arrays.push(col);
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Each array must be a sequence of labels",
-                ));
             }
+        } else if let Ok(iter) = arrays.try_iter() {
+            for arr in iter {
+                let arr = arr?;
+                if let Ok(subseq) = arr.cast::<pyo3::types::PySequence>() {
+                    let sublen = subseq.len()?;
+                    let mut col = Vec::with_capacity(sublen);
+                    for j in 0..sublen {
+                        let item = subseq.get_item(j)?;
+                        col.push(py_to_index_label(&item)?);
+                    }
+                    parsed_arrays.push(col);
+                } else if let Ok(it) = arr.try_iter() {
+                    let mut col = Vec::new();
+                    for item in it {
+                        let item = item?;
+                        col.push(py_to_index_label(&item)?);
+                    }
+                    parsed_arrays.push(col);
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Each array must be a sequence of labels",
+                    ));
+                }
+            }
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "arrays must be an iterable of sequences",
+            ));
         }
         let mut inner = MultiIndex::from_arrays(parsed_arrays)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        if let Some(ns) = names {
+        if let Some(ns) = extract_index_names_flexible(names)? {
             inner = inner.set_names(ns);
         }
         Ok(PyMultiIndex { inner })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (iterables, names=None))]
+    #[pyo3(signature = (iterables, sortorder=None, names=None))]
     fn from_product(
-        iterables: Vec<Bound<'_, PyAny>>,
-        names: Option<Vec<Option<String>>>,
+        iterables: &Bound<'_, PyAny>,
+        sortorder: Option<i64>,
+        names: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let mut parsed_iterables: Vec<Vec<IndexLabel>> = Vec::with_capacity(iterables.len());
-        for it in &iterables {
-            if let Ok(seq) = it.cast::<pyo3::types::PySequence>() {
-                let len = seq.len()?;
-                let mut row = Vec::with_capacity(len);
-                for i in 0..len {
-                    let item = seq.get_item(i)?;
-                    row.push(py_to_index_label(&item)?);
+        let _ = sortorder;
+        let mut parsed_iterables: Vec<Vec<IndexLabel>> = Vec::new();
+        if let Ok(seq) = iterables.cast::<pyo3::types::PySequence>() {
+            let len = seq.len()?;
+            parsed_iterables.reserve(len);
+            for i in 0..len {
+                let it = seq.get_item(i)?;
+                if let Ok(subseq) = it.cast::<pyo3::types::PySequence>() {
+                    let sublen = subseq.len()?;
+                    let mut row = Vec::with_capacity(sublen);
+                    for j in 0..sublen {
+                        let item = subseq.get_item(j)?;
+                        row.push(py_to_index_label(&item)?);
+                    }
+                    parsed_iterables.push(row);
+                } else if let Ok(iter) = it.try_iter() {
+                    let mut row = Vec::new();
+                    for item in iter {
+                        let item = item?;
+                        row.push(py_to_index_label(&item)?);
+                    }
+                    parsed_iterables.push(row);
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Each iterable must be a sequence of labels",
+                    ));
                 }
-                parsed_iterables.push(row);
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Each iterable must be a sequence of labels",
-                ));
             }
+        } else if let Ok(iter) = iterables.try_iter() {
+            for it in iter {
+                let it = it?;
+                if let Ok(subseq) = it.cast::<pyo3::types::PySequence>() {
+                    let sublen = subseq.len()?;
+                    let mut row = Vec::with_capacity(sublen);
+                    for j in 0..sublen {
+                        let item = subseq.get_item(j)?;
+                        row.push(py_to_index_label(&item)?);
+                    }
+                    parsed_iterables.push(row);
+                } else if let Ok(it) = it.try_iter() {
+                    let mut row = Vec::new();
+                    for item in it {
+                        let item = item?;
+                        row.push(py_to_index_label(&item)?);
+                    }
+                    parsed_iterables.push(row);
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Each iterable must be a sequence of labels",
+                    ));
+                }
+            }
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "iterables must be an iterable of sequences",
+            ));
         }
         let mut inner = MultiIndex::from_product(parsed_iterables)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        if let Some(ns) = names {
+        if let Some(ns) = extract_index_names_flexible(names)? {
             inner = inner.set_names(ns);
         }
         Ok(PyMultiIndex { inner })
@@ -4796,42 +4951,68 @@ impl PyMultiIndex {
     }
 
     #[classmethod]
-    #[pyo3(signature = (df, names=None))]
+    #[pyo3(signature = (df, sortorder=None, names=None))]
     fn from_frame(
         _cls: &Bound<'_, pyo3::types::PyType>,
-        df: &PyDataFrame,
-        names: Option<Vec<String>>,
+        df: &Bound<'_, PyAny>,
+        sortorder: Option<i64>,
+        names: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let cols = df.inner.column_names();
-        let mut column_data = Vec::with_capacity(cols.len());
-        for col_name in &cols {
-            let col = df.inner.column(col_name).ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                    "column {col_name:?} missing"
-                ))
-            })?;
-            let labels: Vec<IndexLabel> = col
-                .values()
-                .iter()
-                .map(|sc| match sc {
-                    Scalar::Int64(v) => IndexLabel::Int64(*v),
-                    Scalar::Float64(f) => IndexLabel::Float64(fp_index::OrderedF64(*f)),
-                    Scalar::Utf8(s) => IndexLabel::Utf8(s.clone()),
-                    Scalar::Bool(b) => IndexLabel::Bool(*b),
-                    Scalar::Datetime64(d) => IndexLabel::Datetime64(*d),
-                    Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
-                    Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
-                    Scalar::Interval(inv) => IndexLabel::Utf8(format!("{inv:?}")),
-                    Scalar::Null(k) => IndexLabel::Null(*k),
-                })
-                .collect();
-            column_data.push((Some((*col_name).clone()), labels));
+        let _ = sortorder;
+        if let Ok(pdf) = df.extract::<PyRef<'_, PyDataFrame>>() {
+            let cols = pdf.inner.column_names();
+            let mut column_data = Vec::with_capacity(cols.len());
+            for col_name in &cols {
+                let col = pdf.inner.column(col_name).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                        "column {col_name:?} missing"
+                    ))
+                })?;
+                let labels: Vec<IndexLabel> = col
+                    .values()
+                    .iter()
+                    .map(|sc| match sc {
+                        Scalar::Int64(v) => IndexLabel::Int64(*v),
+                        Scalar::Float64(f) => IndexLabel::Float64(fp_index::OrderedF64(*f)),
+                        Scalar::Utf8(s) => IndexLabel::Utf8(s.clone()),
+                        Scalar::Bool(b) => IndexLabel::Bool(*b),
+                        Scalar::Datetime64(d) => IndexLabel::Datetime64(*d),
+                        Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
+                        Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
+                        Scalar::Interval(inv) => IndexLabel::Utf8(format!("{inv:?}")),
+                        Scalar::Null(k) => IndexLabel::Null(*k),
+                    })
+                    .collect();
+                column_data.push((Some((*col_name).clone()), labels));
+            }
+            let mut mi = MultiIndex::from_frame(column_data).map_err(index_error_to_py)?;
+            if let Some(ns) = extract_index_names_flexible(names)? {
+                mi = mi.set_names(ns);
+            }
+            return Ok(Self { inner: mi });
         }
-        let mut mi = MultiIndex::from_frame(column_data).map_err(index_error_to_py)?;
-        if let Some(ns) = names {
-            mi = mi.set_names(ns.into_iter().map(Some).collect());
+        if let Ok(columns_attr) = df.getattr("columns") {
+            let mut column_data = Vec::new();
+            for col_name_obj in columns_attr.try_iter()? {
+                let col_name_obj = col_name_obj?;
+                let col_name_str = col_name_obj.to_string();
+                let col_series = df.get_item(&col_name_obj)?;
+                let mut labels = Vec::new();
+                for item in col_series.try_iter()? {
+                    let item = item?;
+                    labels.push(py_to_index_label(&item)?);
+                }
+                column_data.push((Some(col_name_str), labels));
+            }
+            let mut mi = MultiIndex::from_frame(column_data).map_err(index_error_to_py)?;
+            if let Some(ns) = extract_index_names_flexible(names)? {
+                mi = mi.set_names(ns);
+            }
+            return Ok(Self { inner: mi });
         }
-        Ok(Self { inner: mi })
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "from_frame requires a DataFrame or DataFrame-like object",
+        ))
     }
 
     fn get_indexer_for(&self, target: &PyMultiIndex) -> PyResult<Vec<i64>> {
@@ -10222,14 +10403,43 @@ impl PySeries {
     }
 
     /// Return the quantile at `q` in [0, 1].
-    fn quantile(&self, q: f64) -> PyResult<Py<PyAny>> {
-        Python::attach(|py| {
+    #[pyo3(signature = (q=None, interpolation="linear"))]
+    fn quantile(
+        &self,
+        py: Python<'_>,
+        q: Option<&Bound<'_, PyAny>>,
+        interpolation: &str,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(q_obj) = q {
+            if let Ok(f) = q_obj.extract::<f64>() {
+                let r = self
+                    .inner
+                    .quantile_with_interpolation(f, interpolation)
+                    .map_err(frame_error_to_py)?;
+                scalar_to_py(py, &r)
+            } else if let Ok(it) = q_obj.try_iter() {
+                let mut qs = Vec::new();
+                for item in it {
+                    let item = item?;
+                    qs.push(item.extract::<f64>()?);
+                }
+                let res = self
+                    .inner
+                    .quantile_list(&qs, interpolation)
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "q must be a float or sequence of floats",
+                ))
+            }
+        } else {
             let r = self
                 .inner
-                .quantile(q)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                .quantile_with_interpolation(0.5, interpolation)
+                .map_err(frame_error_to_py)?;
             scalar_to_py(py, &r)
-        })
+        }
     }
 
     /// Return the number of non-missing values.
@@ -11166,15 +11376,23 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (n=5))]
-    fn nlargest(&self, n: usize) -> PyResult<PySeries> {
-        let res = self.inner.nlargest(n).map_err(frame_error_to_py)?;
+    #[pyo3(signature = (n=5, keep="first"))]
+    fn nlargest(&self, n: usize, keep: &str) -> PyResult<PySeries> {
+        let res = match keep {
+            "first" => self.inner.nlargest(n),
+            _ => self.inner.nlargest_keep(n, keep),
+        }
+        .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (n=5))]
-    fn nsmallest(&self, n: usize) -> PyResult<PySeries> {
-        let res = self.inner.nsmallest(n).map_err(frame_error_to_py)?;
+    #[pyo3(signature = (n=5, keep="first"))]
+    fn nsmallest(&self, n: usize, keep: &str) -> PyResult<PySeries> {
+        let res = match keep {
+            "first" => self.inner.nsmallest(n),
+            _ => self.inner.nsmallest_keep(n, keep),
+        }
+        .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
@@ -11353,11 +11571,34 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    fn corr(&self, other: &PySeries) -> PyResult<f64> {
+    #[pyo3(signature = (other, method="pearson", min_periods=None))]
+    fn corr(
+        &self,
+        other: &PySeries,
+        method: Option<&str>,
+        min_periods: Option<usize>,
+    ) -> PyResult<f64> {
+        let _ = min_periods;
+        if let Some(m) = method {
+            if m != "pearson" {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    format!(
+                        "correlation method '{m}' is not implemented, only 'pearson' is supported"
+                    ),
+                ));
+            }
+        }
         self.inner.corr(&other.inner).map_err(frame_error_to_py)
     }
 
-    fn cov(&self, other: &PySeries) -> PyResult<f64> {
+    #[pyo3(signature = (other, min_periods=None, ddof=1))]
+    fn cov(
+        &self,
+        other: &PySeries,
+        min_periods: Option<usize>,
+        ddof: Option<usize>,
+    ) -> PyResult<f64> {
+        let _ = (min_periods, ddof);
         self.inner.cov(&other.inner).map_err(frame_error_to_py)
     }
 
@@ -11948,12 +12189,6 @@ impl PySeries {
             Ok(PySeries { inner: s })
         } else if let Ok(dict) = arg.cast::<PyDict>() {
             let mut out = Vec::with_capacity(vals.len());
-            for v in &vals {
-                if ignore_na && (v.is_null() || *v == Scalar::Float64(f64::NAN)) {
-        let vals = self.inner.column().values();
-        let labels = self.inner.index().labels();
-            for v in vals {
-                if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
             for v in vals {
                 if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
                     out.push(v.clone());
@@ -11971,8 +12206,6 @@ impl PySeries {
             Ok(PySeries { inner: s })
         } else if let Ok(other_ser) = arg.extract::<PyRef<PySeries>>() {
             let mut out = Vec::with_capacity(vals.len());
-            for v in &vals {
-                if ignore_na && (v.is_null() || *v == Scalar::Float64(f64::NAN)) {
             for v in vals {
                 if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
                     out.push(v.clone());
@@ -11985,29 +12218,25 @@ impl PySeries {
                     Scalar::Bool(b) => IndexLabel::Bool(*b),
                     _ => IndexLabel::Utf8(v.to_string()),
                 };
-                if let Some(idx_pos) = other_ser.inner.index().get_loc(&lbl) {
-                    let col_val = other_ser
+                let col_val = if let Some(idx_pos) = other_ser.inner.index().get_loc(&lbl) {
+                    other_ser
                         .inner
                         .column()
                         .values()
                         .get(idx_pos)
-                    Scalar::Float64(f) => IndexLabel::Float64(OrderedF64(*f)),
-                    Scalar::Bool(b) => IndexLabel::Bool(*b),
-                if let Some(idx_pos) = other_ser.inner.index().get_loc(&lbl) {
-                        .values()
                         .cloned()
-                        .unwrap_or(Scalar::Float64(f64::NAN));
-                    out.push(col_val);
+                        .unwrap_or(Scalar::Float64(f64::NAN))
                 } else {
-                    out.push(Scalar::Float64(f64::NAN));
-                }
+                    Scalar::Float64(f64::NAN)
+                };
+                out.push(col_val);
             }
             let s = Series::from_values(self.inner.name(), labels.to_vec(), out)
                 .map_err(frame_error_to_py)?;
             Ok(PySeries { inner: s })
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "map expects callable, dict, or Series",
+                "map expects a callable, dict, or Series",
             ))
         }
     }
@@ -14087,7 +14316,23 @@ impl PyDataFrame {
     }
 
     /// Return the column-pair correlation matrix as a DataFrame.
-    fn corr(&self) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (method="pearson", min_periods=1, numeric_only=false))]
+    fn corr(
+        &self,
+        method: Option<&str>,
+        min_periods: Option<usize>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (min_periods, numeric_only);
+        if let Some(m) = method {
+            if m != "pearson" {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    format!(
+                        "correlation method '{m}' is not implemented, only 'pearson' is supported"
+                    ),
+                ));
+            }
+        }
         let result = self
             .inner
             .corr()
@@ -15731,61 +15976,55 @@ impl PyDataFrame {
     }
 
     /// Return the first n rows ordered by columns in descending order.
-    #[pyo3(signature = (n, columns, keep=None))]
-    fn nlargest(
-        &self,
-        n: usize,
-        columns: &Bound<'_, PyAny>,
-        keep: Option<&str>,
-    ) -> PyResult<PyDataFrame> {
-        if let Ok(col) = columns.extract::<String>() {
+    #[pyo3(signature = (n, columns, keep="first"))]
+    fn nlargest(&self, n: usize, columns: &Bound<'_, PyAny>, keep: &str) -> PyResult<PyDataFrame> {
+        let cols = extract_col_names_flexible(Some(columns))?;
+        if cols.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "columns cannot be empty",
+            ));
+        }
+        if cols.len() == 1 {
+            let col = &cols[0];
             let res = match keep {
-                Some(k) => self.inner.nlargest_keep(n, &col, k),
-                None => self.inner.nlargest(n, &col),
+                "first" => self.inner.nlargest(n, col),
+                _ => self.inner.nlargest_keep(n, col, keep),
             }
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(PyDataFrame { inner: res });
         }
-        if let Ok(cols) = columns.extract::<Vec<String>>() {
-            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-            let res = self
-                .inner
-                .nlargest_multi(n, &refs)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            return Ok(PyDataFrame { inner: res });
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "columns must be a column name or list of column names",
-        ))
+        let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+        let res = self
+            .inner
+            .nlargest_multi(n, &refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: res })
     }
 
     /// Return the first n rows ordered by columns in ascending order.
-    #[pyo3(signature = (n, columns, keep=None))]
-    fn nsmallest(
-        &self,
-        n: usize,
-        columns: &Bound<'_, PyAny>,
-        keep: Option<&str>,
-    ) -> PyResult<PyDataFrame> {
-        if let Ok(col) = columns.extract::<String>() {
+    #[pyo3(signature = (n, columns, keep="first"))]
+    fn nsmallest(&self, n: usize, columns: &Bound<'_, PyAny>, keep: &str) -> PyResult<PyDataFrame> {
+        let cols = extract_col_names_flexible(Some(columns))?;
+        if cols.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "columns cannot be empty",
+            ));
+        }
+        if cols.len() == 1 {
+            let col = &cols[0];
             let res = match keep {
-                Some(k) => self.inner.nsmallest_keep(n, &col, k),
-                None => self.inner.nsmallest(n, &col),
+                "first" => self.inner.nsmallest(n, col),
+                _ => self.inner.nsmallest_keep(n, col, keep),
             }
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(PyDataFrame { inner: res });
         }
-        if let Ok(cols) = columns.extract::<Vec<String>>() {
-            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-            let res = self
-                .inner
-                .nsmallest_multi(n, &refs)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            return Ok(PyDataFrame { inner: res });
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "columns must be a column name or list of column names",
-        ))
+        let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+        let res = self
+            .inner
+            .nsmallest_multi(n, &refs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: res })
     }
 
     /// Return index of first occurrence of maximum over requested axis.
@@ -16130,7 +16369,14 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    fn cov(&self) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (min_periods=None, ddof=1, numeric_only=false))]
+    fn cov(
+        &self,
+        min_periods: Option<usize>,
+        ddof: Option<usize>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (min_periods, ddof, numeric_only);
         let res = self.inner.cov().map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
@@ -16435,10 +16681,107 @@ impl PyDataFrame {
         self.prod()
     }
 
-    #[pyo3(signature = (q=0.5))]
-    fn quantile(&self, q: f64) -> PyResult<PySeries> {
-        let res = self.inner.quantile(q).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (q=None, axis=None, numeric_only=false, interpolation="linear", method="single"))]
+    fn quantile(
+        &self,
+        py: Python<'_>,
+        q: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        numeric_only: bool,
+        interpolation: &str,
+        method: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = method;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let target_df = if numeric_only {
+            self.inner
+                .select_dtypes(&[DType::Int64, DType::Float64, DType::Bool], &[])
+                .map_err(frame_error_to_py)?
+        } else {
+            self.inner.clone()
+        };
+
+        let mut q_scalar: Option<f64> = None;
+        let mut q_vec: Option<Vec<f64>> = None;
+
+        if let Some(q_obj) = q {
+            if let Ok(f) = q_obj.extract::<f64>() {
+                q_scalar = Some(f);
+            } else if let Ok(it) = q_obj.try_iter() {
+                let mut vec = Vec::new();
+                for item in it {
+                    let item = item?;
+                    vec.push(item.extract::<f64>()?);
+                }
+                q_vec = Some(vec);
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "q must be a float or sequence of floats",
+                ));
+            }
+        } else {
+            q_scalar = Some(0.5);
+        }
+
+        if let Some(q_val) = q_scalar {
+            let res = match ax {
+                0 => target_df.quantile(q_val).map_err(frame_error_to_py)?,
+                1 => target_df.quantile_axis1(q_val).map_err(frame_error_to_py)?,
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "No axis named {other} for object type DataFrame"
+                    )));
+                }
+            };
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+
+        if let Some(qs) = q_vec {
+            let df_to_use = match ax {
+                0 => target_df,
+                1 => target_df.transpose().map_err(frame_error_to_py)?,
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "No axis named {other} for object type DataFrame"
+                    )));
+                }
+            };
+
+            let mut series_list = Vec::new();
+            for col_name in df_to_use.column_names() {
+                if let Some(col) = df_to_use.column(col_name) {
+                    if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+                        let s =
+                            Series::new(col_name.clone(), df_to_use.index().clone(), col.clone())
+                                .map_err(frame_error_to_py)?;
+                        let q_s = s
+                            .quantile_list(&qs, interpolation)
+                            .map_err(frame_error_to_py)?;
+                        series_list.push(q_s);
+                    }
+                }
+            }
+            let res_df = if series_list.is_empty() {
+                let index_labels: Vec<IndexLabel> = qs
+                    .iter()
+                    .map(|&q| IndexLabel::Float64(fp_index::OrderedF64(q)))
+                    .collect();
+                DataFrame::new_with_column_order(
+                    Index::new(index_labels),
+                    std::collections::BTreeMap::<String, Column>::new(),
+                    Vec::<String>::new(),
+                )
+                .map_err(frame_error_to_py)?
+            } else {
+                DataFrame::from_series(series_list).map_err(frame_error_to_py)?
+            };
+            return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
+        }
+
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Failed to evaluate quantile",
+        ))
     }
 
     #[pyo3(signature = (axis=None, method=None, numeric_only=false, na_option=None, ascending=None, pct=false))]
@@ -16835,12 +17178,6 @@ impl PyDataFrame {
     }
 
     #[pyo3(signature = (index=true, name="Pandas"))]
-    fn itertuples(
-        &self,
-        py: Python<'_>,
-        index: bool,
-        name: Option<&str>,
-    ) -> PyResult<Py<PyAny>> {
     fn itertuples(&self, py: Python<'_>, index: bool, name: Option<&str>) -> PyResult<Py<PyAny>> {
         let tuples = self.inner.itertuples();
         let col_names = self.inner.column_names();
@@ -16881,7 +17218,6 @@ impl PyDataFrame {
             }
             let row_obj = if let Some(ref nt) = named_type {
                 let tup = pyo3::types::PyTuple::new(py, &py_vals)?;
-                if let Ok(inst) = nt.call1(tup) {
                 if let Ok(inst) = nt.call1(&tup) {
                     inst.into_any().unbind()
                 } else {
@@ -17105,7 +17441,6 @@ impl PyDataFrame {
                     func.call(t, kwargs)?
                 } else {
                     let mut full_args = Vec::with_capacity(1 + args.len());
-                    full_args.push(py_s.into_any().unbind());
                     full_args.push(py_s.into_any());
                     for a in args.iter() {
                         full_args.push(a.into_any().unbind());
@@ -17167,8 +17502,7 @@ impl PyDataFrame {
         let col_names = self.inner.column_names();
         let col_labels: Vec<IndexLabel> = col_names
             .iter()
-            .map(|n| IndexLabel::Utf8(n.clone()))
-            .map(|n| IndexLabel::Utf8((*n).to_string()))
+            .map(|n| IndexLabel::Utf8(n.to_string()))
             .collect();
         let mut cols_vals = Vec::with_capacity(ncols);
         for pos in 0..ncols {
@@ -17182,7 +17516,6 @@ impl PyDataFrame {
             let row_label = self
                 .inner
                 .index()
-                .label_at(r)
                 .labels()
                 .get(r)
                 .cloned()
@@ -17195,7 +17528,6 @@ impl PyDataFrame {
                 func.call(t, kwargs)?
             } else {
                 let mut full_args = Vec::with_capacity(1 + args.len());
-                full_args.push(py_s.into_any().unbind());
                 full_args.push(py_s.into_any());
                 for a in args.iter() {
                     full_args.push(a.into_any().unbind());
@@ -17252,7 +17584,6 @@ impl PyDataFrame {
             }
             let mut col_map = BTreeMap::new();
             for (ci, name) in new_col_names.iter().enumerate() {
-                let col = Column::from_scalars(col_data[ci].clone()).map_err(frame_error_to_py)?;
                 let col = Column::from_values(col_data[ci].clone()).map_err(column_error_to_py)?;
                 col_map.insert(name.clone(), col);
             }
@@ -17299,13 +17630,6 @@ impl PyDataFrame {
                 let col = Column::from_values(col_vals).map_err(column_error_to_py)?;
                 col_map.insert(k.clone(), col);
             }
-            let df = DataFrame::new_with_column_order(
-                self.inner.index().clone(),
-                col_map,
-                seen_keys,
-            )
-            .map_err(frame_error_to_py)?;
-                let col = Column::from_values(col_vals).map_err(column_error_to_py)?;
             let df =
                 DataFrame::new_with_column_order(self.inner.index().clone(), col_map, seen_keys)
                     .map_err(frame_error_to_py)?;
@@ -19434,7 +19758,15 @@ impl PyRolling {
         ))
     }
 
-    pub fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
+    pub fn quantile(
+        &self,
+        py: Python<'_>,
+        q: f64,
+        interpolation: Option<&str>,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (interpolation, numeric_only);
         if let Some(ref s) = self.series {
             let res = s
                 .rolling_with_center(self.window, self.min_periods, self.center)
@@ -19877,7 +20209,15 @@ impl PyExpanding {
         ))
     }
 
-    pub fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
+    pub fn quantile(
+        &self,
+        py: Python<'_>,
+        q: f64,
+        interpolation: Option<&str>,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (interpolation, numeric_only);
         if let Some(ref s) = self.series {
             let res = s
                 .expanding(self.min_periods)
@@ -20764,7 +21104,14 @@ impl PyGroupBy {
         self.prod()
     }
 
-    fn quantile(&self, q: f64) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
+    fn quantile(
+        &self,
+        q: f64,
+        interpolation: Option<&str>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        let _ = (interpolation, numeric_only);
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
             .df
@@ -21689,7 +22036,9 @@ impl PySeriesGroupBy {
         self.prod()
     }
 
-    fn quantile(&self, q: f64) -> PyResult<PySeries> {
+    #[pyo3(signature = (q=0.5, interpolation="linear"))]
+    fn quantile(&self, q: f64, interpolation: Option<&str>) -> PyResult<PySeries> {
+        let _ = interpolation;
         let res = self
             .series
             .groupby(&self.by)
@@ -22725,6 +23074,7 @@ impl PyResampler {
         }
     }
 
+    #[pyo3(signature = (q=0.5))]
     fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
         match &self.target {
             ResampleTarget::Series(s) => {
@@ -28859,10 +29209,6 @@ impl PyPlotAccessor {
                                 "{kind_str} requires x and y column names"
                             )));
                         }
-                        let spec = df.plot_xy(kind, &cols[0], &cols[1]).map_err(frame_error_to_py)?;
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "{kind_str} requires x and y column names"
-                            )));
                         let spec = df
                             .plot_xy(kind, cols[0], cols[1])
                             .map_err(frame_error_to_py)?;
@@ -28969,7 +29315,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x=None, y=None, **kwargs))]
-    fn line(&self, x: Option<&str>, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn line(
         &self,
         x: Option<&str>,
@@ -28981,7 +29326,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x=None, y=None, **kwargs))]
-    fn bar(&self, x: Option<&str>, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn bar(
         &self,
         x: Option<&str>,
@@ -28993,7 +29337,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x=None, y=None, **kwargs))]
-    fn barh(&self, x: Option<&str>, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn barh(
         &self,
         x: Option<&str>,
@@ -29005,7 +29348,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (by=None, bins=None, **kwargs))]
-    fn hist(&self, by: Option<&Bound<'_, PyAny>>, bins: Option<usize>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn hist(
         &self,
         by: Option<&Bound<'_, PyAny>>,
@@ -29017,7 +29359,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (by=None, **kwargs))]
-    fn box_plot(&self, by: Option<&Bound<'_, PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn box_plot(
         &self,
         by: Option<&Bound<'_, PyAny>>,
@@ -29028,7 +29369,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (by=None, **kwargs))]
-    fn r#box(&self, by: Option<&Bound<'_, PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn r#box(
         &self,
         by: Option<&Bound<'_, PyAny>>,
@@ -29051,7 +29391,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x=None, y=None, **kwargs))]
-    fn area(&self, x: Option<&str>, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn area(
         &self,
         x: Option<&str>,
@@ -29069,7 +29408,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x, y, **kwargs))]
-    fn scatter(&self, x: &str, y: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn scatter(
         &self,
         x: &str,
@@ -29081,7 +29419,6 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x, y, **kwargs))]
-    fn hexbin(&self, x: &str, y: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn hexbin(
         &self,
         x: &str,
@@ -29114,7 +29451,6 @@ fn plotting_scatter_matrix(
             svg,
             kind: "scatter_matrix".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29141,7 +29477,6 @@ fn plotting_autocorrelation_plot(
             svg,
             kind: "autocorrelation".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29169,7 +29504,6 @@ fn plotting_bootstrap_plot(
             svg,
             kind: "bootstrap".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29196,7 +29530,6 @@ fn plotting_lag_plot(
             svg,
             kind: "lag".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29225,7 +29558,6 @@ fn plotting_parallel_coordinates(
             svg,
             kind: "parallel_coordinates".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29254,7 +29586,6 @@ fn plotting_radviz(
             svg,
             kind: "radviz".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29283,7 +29614,6 @@ fn plotting_andrews_curves(
             svg,
             kind: "andrews_curves".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29310,7 +29640,6 @@ fn plotting_boxplot(
             svg,
             kind: "boxplot".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29337,7 +29666,6 @@ fn plotting_boxplot_frame(
             svg,
             kind: "boxplot".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29369,7 +29697,6 @@ fn plotting_boxplot_frame_groupby(
             svg,
             kind: "boxplot".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     let _ = args;
@@ -29397,7 +29724,6 @@ fn plotting_hist_frame(
             svg,
             kind: "hist".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29424,7 +29750,6 @@ fn plotting_hist_series(
             svg,
             kind: "hist".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29455,9 +29780,6 @@ fn plotting_table(
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(s) = data.extract::<PyRef<PySeries>>() {
-        let spec = fp_frame::plotting::table_series(&s.inner, None, None)
-            .map_err(frame_error_to_py)?;
-        return Ok(Py::new(py, res)?.into_any());
         let spec =
             fp_frame::plotting::table_series(&s.inner, None, None).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -29465,7 +29787,6 @@ fn plotting_table(
             svg,
             kind: "table".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -30530,9 +30851,9 @@ mod tests {
         let shifted = py_s.shift(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
         assert_eq!(shifted.inner.len(), 4);
 
-        let nlg = py_s.nlargest(2).expect("nlargest"); // ubs:ignore — test fixture
+        let nlg = py_s.nlargest(2, "first").expect("nlargest"); // ubs:ignore — test fixture
         assert_eq!(nlg.inner.len(), 2);
-        let nsm = py_s.nsmallest(2).expect("nsmallest"); // ubs:ignore — test fixture
+        let nsm = py_s.nsmallest(2, "first").expect("nsmallest"); // ubs:ignore — test fixture
         assert_eq!(nsm.inner.len(), 2);
 
         let dedup = py_s
@@ -30765,7 +31086,7 @@ mod tests {
         assert_eq!(ewm.span, Some(0.5));
 
         let s2 = py_s.clone();
-        let c = py_s.corr(&s2).expect("corr"); // ubs:ignore — test fixture
+        let c = py_s.corr(&s2, None, None).expect("corr"); // ubs:ignore — test fixture
         assert!((c - 1.0).abs() < 1e-6);
 
         let ffilled = py_s.ffill(None, false, None, None, None).expect("ffill"); // ubs:ignore — test fixture

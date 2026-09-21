@@ -1285,3 +1285,128 @@ def test_melt_pivot_sample_explode_differential():
     assert list(ser_exp_fp.to_list()) == ["x", "y", "z", "w"]
     assert list(ser_exp_fp.index) == [0, 1, 2, 3]
 
+
+def test_quantile_corr_cov_nlargest_multiindex_differential():
+    """Differential test for quantile, corr, cov, nlargest, nsmallest, and MultiIndex constructors."""
+    import frankenpandas as fpd
+    import pandas as pd
+    import numpy as np
+
+    # 1. MultiIndex constructors parity
+    tuples = [(1, "red"), (1, "blue"), (2, "red"), (2, "blue")]
+    mi_pd_t = pd.MultiIndex.from_tuples(tuples, sortorder=None, names=("num", "color"))
+    mi_fp_t = fpd.MultiIndex.from_tuples(tuples, sortorder=None, names=("num", "color"))
+    assert list(mi_fp_t.names) == list(mi_pd_t.names)
+    assert len(mi_fp_t) == len(mi_pd_t)
+    assert list(mi_fp_t.to_list()) == list(mi_pd_t)
+
+    arrays = [[1, 1, 2, 2], ["red", "blue", "red", "blue"]]
+    mi_pd_a = pd.MultiIndex.from_arrays(arrays, sortorder=None, names=["num", "color"])
+    mi_fp_a = fpd.MultiIndex.from_arrays(arrays, sortorder=None, names=["num", "color"])
+    assert list(mi_fp_a.names) == list(mi_pd_a.names)
+    assert len(mi_fp_a) == len(mi_pd_a)
+
+    prod = [[1, 2], ["x", "y"]]
+    mi_pd_p = pd.MultiIndex.from_product(prod, sortorder=None, names=("first", "second"))
+    mi_fp_p = fpd.MultiIndex.from_product(prod, sortorder=None, names=("first", "second"))
+    assert list(mi_fp_p.names) == list(mi_pd_p.names)
+    assert len(mi_fp_p) == len(mi_pd_p)
+    assert list(mi_fp_p.to_list()) == list(mi_pd_p)
+
+    df_base = {"level_0": [10, 20, 30], "level_1": ["a", "b", "c"]}
+    df_pd_mi = pd.DataFrame(df_base)
+    df_fp_mi = fpd.DataFrame(df_base)
+    mi_pd_f = pd.MultiIndex.from_frame(df_pd_mi, sortorder=None)
+    mi_fp_f = fpd.MultiIndex.from_frame(df_fp_mi, sortorder=None)
+    assert list(mi_fp_f.names) == list(mi_pd_f.names)
+    assert len(mi_fp_f) == len(mi_pd_f)
+
+    mi_pd_f_custom = pd.MultiIndex.from_frame(df_pd_mi, sortorder=None, names=("X", "Y"))
+    mi_fp_f_custom = fpd.MultiIndex.from_frame(df_fp_mi, sortorder=None, names=("X", "Y"))
+    assert list(mi_fp_f_custom.names) == list(mi_pd_f_custom.names)
+
+    # 2. corr & cov parity
+    c_data = {"a": [1.0, 2.0, 3.0, 4.0, 5.0], "b": [2.0, 4.0, 5.0, 8.0, 10.0]}
+    df_c_pd = pd.DataFrame(c_data)
+    df_c_fp = fpd.DataFrame(c_data)
+
+    corr_pd = df_c_pd.corr(method="pearson", min_periods=1, numeric_only=True)
+    corr_fp = df_c_fp.corr(method="pearson", min_periods=1, numeric_only=True)
+    assert corr_fp.shape == corr_pd.shape
+    np.testing.assert_allclose(corr_fp["a"].to_list(), corr_pd["a"].to_list(), rtol=1e-5)
+    np.testing.assert_allclose(corr_fp["b"].to_list(), corr_pd["b"].to_list(), rtol=1e-5)
+
+    cov_pd = df_c_pd.cov(min_periods=None, ddof=1, numeric_only=True)
+    cov_fp = df_c_fp.cov(min_periods=None, ddof=1, numeric_only=True)
+    assert cov_fp.shape == cov_pd.shape
+    np.testing.assert_allclose(cov_fp["a"].to_list(), cov_pd["a"].to_list(), rtol=1e-5)
+    np.testing.assert_allclose(cov_fp["b"].to_list(), cov_pd["b"].to_list(), rtol=1e-5)
+
+    s1_pd, s2_pd = df_c_pd["a"], df_c_pd["b"]
+    s1_fp, s2_fp = df_c_fp["a"], df_c_fp["b"]
+    assert abs(s1_fp.corr(s2_fp, method="pearson") - s1_pd.corr(s2_pd, method="pearson")) < 1e-5
+    assert abs(s1_fp.cov(s2_fp, ddof=1) - s1_pd.cov(s2_pd, ddof=1)) < 1e-5
+
+    # 3. nlargest & nsmallest parity
+    nl_data = {"a": [10.0, 50.0, 20.0, 40.0, 30.0], "b": [1.0, 5.0, 2.0, 4.0, 3.0]}
+    df_nl_pd = pd.DataFrame(nl_data)
+    df_nl_fp = fpd.DataFrame(nl_data)
+
+    nl_fp_1 = df_nl_fp.nlargest(3, "a", keep="first")
+    nl_pd_1 = df_nl_pd.nlargest(3, "a", keep="first")
+    assert list(nl_fp_1.index) == list(nl_pd_1.index)
+    assert list(nl_fp_1["a"]) == list(nl_pd_1["a"])
+
+    nl_fp_tuple = df_nl_fp.nlargest(3, ("a", "b"))
+    nl_pd_tuple = df_nl_pd.nlargest(3, ["a", "b"])
+    assert list(nl_fp_tuple.index) == list(nl_pd_tuple.index)
+
+    ns_fp_1 = df_nl_fp.nsmallest(3, "a")
+    ns_pd_1 = df_nl_pd.nsmallest(3, "a")
+    assert list(ns_fp_1.index) == list(ns_pd_1.index)
+
+    ser_nl_pd = df_nl_pd["a"]
+    ser_nl_fp = df_nl_fp["a"]
+    assert list(ser_nl_fp.nlargest(3, keep="first").index) == list(ser_nl_pd.nlargest(3, keep="first").index)
+    assert list(ser_nl_fp.nsmallest(3, keep="first").index) == list(ser_nl_pd.nsmallest(3, keep="first").index)
+
+    # 4. quantile parity
+    q_data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
+    df_q_pd = pd.DataFrame(q_data)
+    df_q_fp = fpd.DataFrame(q_data)
+
+    # Series quantile default and list
+    sq_pd = df_q_pd["a"]
+    sq_fp = df_q_fp["a"]
+    assert abs(sq_fp.quantile() - sq_pd.quantile()) < 1e-5
+    assert abs(sq_fp.quantile(0.25) - sq_pd.quantile(0.25)) < 1e-5
+    sq_list_pd = sq_pd.quantile([0.25, 0.75])
+    sq_list_fp = sq_fp.quantile([0.25, 0.75])
+    assert list(sq_list_fp.index) == [0.25, 0.75]
+    np.testing.assert_allclose(sq_list_fp.to_list(), sq_list_pd.to_list(), rtol=1e-5)
+
+    # DataFrame quantile scalar axis 0 and 1
+    df_q0_pd = df_q_pd.quantile(0.5, axis=0)
+    df_q0_fp = df_q_fp.quantile(0.5, axis=0)
+    np.testing.assert_allclose(df_q0_fp.to_list(), df_q0_pd.to_list(), rtol=1e-5)
+
+    df_q1_pd = df_q_pd.quantile(0.5, axis=1)
+    df_q1_fp = df_q_fp.quantile(0.5, axis=1)
+    np.testing.assert_allclose(df_q1_fp.to_list(), df_q1_pd.to_list(), rtol=1e-5)
+
+    # DataFrame quantile list-like axis 0 and 1
+    df_ql0_pd = df_q_pd.quantile([0.25, 0.75], axis=0)
+    df_ql0_fp = df_q_fp.quantile([0.25, 0.75], axis=0)
+    assert df_ql0_fp.shape == df_ql0_pd.shape
+    assert list(df_ql0_fp.index) == [0.25, 0.75]
+    np.testing.assert_allclose(df_ql0_fp["a"].to_list(), df_ql0_pd["a"].to_list(), rtol=1e-5)
+    np.testing.assert_allclose(df_ql0_fp["b"].to_list(), df_ql0_pd["b"].to_list(), rtol=1e-5)
+
+    df_ql1_pd = df_q_pd.quantile([0.25, 0.75], axis=1)
+    df_ql1_fp = df_q_fp.quantile([0.25, 0.75], axis=1)
+    assert df_ql1_fp.shape == df_ql1_pd.shape
+    assert list(df_ql1_fp.index) == [0.25, 0.75]
+    for col in df_ql1_pd.columns:
+        np.testing.assert_allclose(df_ql1_fp[str(col)].to_list(), df_ql1_pd[col].to_list(), rtol=1e-5)
+
+
