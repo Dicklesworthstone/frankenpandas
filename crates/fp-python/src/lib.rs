@@ -24,10 +24,7 @@ use std::{
 
 use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
-use fp_frame::{
-    BoxPlotSpec, DataFrame, DropNaHow, HistogramSpec, PlotKind, PlotSpec, Series,
-    concat_dataframes, concat_series,
-};
+use fp_frame::{DataFrame, DropNaHow, PlotKind, Series, concat_dataframes, concat_series};
 use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
@@ -11902,7 +11899,7 @@ impl PySeries {
         let vals = self.inner.column().values();
         let labels = self.inner.index().labels();
         let mut out = Vec::with_capacity(vals.len());
-        for v in &vals {
+        for v in vals {
             let py_val = scalar_to_py(py, v)?;
             let res = if let Some(extra_args) = args {
                 let mut full_args = Vec::with_capacity(1 + extra_args.len());
@@ -11933,12 +11930,12 @@ impl PySeries {
         na_action: Option<&str>,
     ) -> PyResult<PySeries> {
         let ignore_na = na_action == Some("ignore");
+        let vals = self.inner.column().values();
+        let labels = self.inner.index().labels();
         if arg.is_callable() {
-            let vals = self.inner.column().values();
-            let labels = self.inner.index().labels();
             let mut out = Vec::with_capacity(vals.len());
-            for v in &vals {
-                if ignore_na && (v.is_null() || *v == Scalar::Float64(f64::NAN)) {
+            for v in vals {
+                if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
                     out.push(v.clone());
                     continue;
                 }
@@ -11950,8 +11947,6 @@ impl PySeries {
                 .map_err(frame_error_to_py)?;
             Ok(PySeries { inner: s })
         } else if let Ok(dict) = arg.cast::<PyDict>() {
-            let vals = self.inner.column().values();
-            let labels = self.inner.index().labels();
             let mut out = Vec::with_capacity(vals.len());
             for v in &vals {
                 if ignore_na && (v.is_null() || *v == Scalar::Float64(f64::NAN)) {
@@ -11975,8 +11970,6 @@ impl PySeries {
                 .map_err(frame_error_to_py)?;
             Ok(PySeries { inner: s })
         } else if let Ok(other_ser) = arg.extract::<PyRef<PySeries>>() {
-            let vals = self.inner.column().values();
-            let labels = self.inner.index().labels();
             let mut out = Vec::with_capacity(vals.len());
             for v in &vals {
                 if ignore_na && (v.is_null() || *v == Scalar::Float64(f64::NAN)) {
@@ -11988,13 +11981,15 @@ impl PySeries {
                 let lbl = match v {
                     Scalar::Utf8(s) => IndexLabel::Utf8(s.clone()),
                     Scalar::Int64(i) => IndexLabel::Int64(*i),
-                    Scalar::Float64(f) => IndexLabel::Float64(ordered_float::OrderedFloat(*f)),
+                    Scalar::Float64(f) => IndexLabel::Float64(OrderedF64(*f)),
+                    Scalar::Bool(b) => IndexLabel::Bool(*b),
                     _ => IndexLabel::Utf8(v.to_string()),
                 };
-                if let Ok(idx_pos) = other_ser.inner.index().get_loc(&lbl) {
+                if let Some(idx_pos) = other_ser.inner.index().get_loc(&lbl) {
                     let col_val = other_ser
                         .inner
                         .column()
+                        .values()
                         .get(idx_pos)
                     Scalar::Float64(f) => IndexLabel::Float64(OrderedF64(*f)),
                     Scalar::Bool(b) => IndexLabel::Bool(*b),
@@ -17301,7 +17296,7 @@ impl PyDataFrame {
                         col_vals.push(Scalar::Float64(f64::NAN));
                     }
                 }
-                let col = Column::from_scalars(col_vals).map_err(frame_error_to_py)?;
+                let col = Column::from_values(col_vals).map_err(column_error_to_py)?;
                 col_map.insert(k.clone(), col);
             }
             let df = DataFrame::new_with_column_order(
@@ -28860,9 +28855,9 @@ impl PyPlotAccessor {
                     } else {
                         let cols = df.column_names();
                         if cols.len() < 2 {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                format!("{kind_str} requires x and y column names"),
-                            ));
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "{kind_str} requires x and y column names"
+                            )));
                         }
                         let spec = df.plot_xy(kind, &cols[0], &cols[1]).map_err(frame_error_to_py)?;
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -29457,7 +29452,7 @@ fn plotting_table(
             svg,
             kind: "table".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any().unbind());
+        return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(s) = data.extract::<PyRef<PySeries>>() {
         let spec = fp_frame::plotting::table_series(&s.inner, None, None)
