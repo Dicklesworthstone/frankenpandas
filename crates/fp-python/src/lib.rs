@@ -24,7 +24,10 @@ use std::{
 
 use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
-use fp_frame::{DataFrame, DropNaHow, PlotKind, Series, concat_dataframes, concat_series};
+use fp_frame::{
+    BoxPlotSpec, DataFrame, DropNaHow, HistogramSpec, PlotKind, PlotSpec, Series,
+    concat_dataframes, concat_series,
+};
 use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
@@ -11899,7 +11902,7 @@ impl PySeries {
         let vals = self.inner.column().values();
         let labels = self.inner.index().labels();
         let mut out = Vec::with_capacity(vals.len());
-        for v in vals {
+        for v in &vals {
             let py_val = scalar_to_py(py, v)?;
             let res = if let Some(extra_args) = args {
                 let mut full_args = Vec::with_capacity(1 + extra_args.len());
@@ -11930,12 +11933,12 @@ impl PySeries {
         na_action: Option<&str>,
     ) -> PyResult<PySeries> {
         let ignore_na = na_action == Some("ignore");
-        let vals = self.inner.column().values();
-        let labels = self.inner.index().labels();
         if arg.is_callable() {
+            let vals = self.inner.column().values();
+            let labels = self.inner.index().labels();
             let mut out = Vec::with_capacity(vals.len());
-            for v in vals {
-                if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
+            for v in &vals {
+                if ignore_na && (v.is_null() || *v == Scalar::Float64(f64::NAN)) {
                     out.push(v.clone());
                     continue;
                 }
@@ -11947,7 +11950,15 @@ impl PySeries {
                 .map_err(frame_error_to_py)?;
             Ok(PySeries { inner: s })
         } else if let Ok(dict) = arg.cast::<PyDict>() {
+            let vals = self.inner.column().values();
+            let labels = self.inner.index().labels();
             let mut out = Vec::with_capacity(vals.len());
+            for v in &vals {
+                if ignore_na && (v.is_null() || *v == Scalar::Float64(f64::NAN)) {
+        let vals = self.inner.column().values();
+        let labels = self.inner.index().labels();
+            for v in vals {
+                if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
             for v in vals {
                 if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
                     out.push(v.clone());
@@ -11964,7 +11975,11 @@ impl PySeries {
                 .map_err(frame_error_to_py)?;
             Ok(PySeries { inner: s })
         } else if let Ok(other_ser) = arg.extract::<PyRef<PySeries>>() {
+            let vals = self.inner.column().values();
+            let labels = self.inner.index().labels();
             let mut out = Vec::with_capacity(vals.len());
+            for v in &vals {
+                if ignore_na && (v.is_null() || *v == Scalar::Float64(f64::NAN)) {
             for v in vals {
                 if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
                     out.push(v.clone());
@@ -11973,16 +11988,18 @@ impl PySeries {
                 let lbl = match v {
                     Scalar::Utf8(s) => IndexLabel::Utf8(s.clone()),
                     Scalar::Int64(i) => IndexLabel::Int64(*i),
-                    Scalar::Float64(f) => IndexLabel::Float64(OrderedF64(*f)),
-                    Scalar::Bool(b) => IndexLabel::Bool(*b),
+                    Scalar::Float64(f) => IndexLabel::Float64(ordered_float::OrderedFloat(*f)),
                     _ => IndexLabel::Utf8(v.to_string()),
                 };
-                if let Some(idx_pos) = other_ser.inner.index().get_loc(&lbl) {
+                if let Ok(idx_pos) = other_ser.inner.index().get_loc(&lbl) {
                     let col_val = other_ser
                         .inner
                         .column()
-                        .values()
                         .get(idx_pos)
+                    Scalar::Float64(f) => IndexLabel::Float64(OrderedF64(*f)),
+                    Scalar::Bool(b) => IndexLabel::Bool(*b),
+                if let Some(idx_pos) = other_ser.inner.index().get_loc(&lbl) {
+                        .values()
                         .cloned()
                         .unwrap_or(Scalar::Float64(f64::NAN));
                     out.push(col_val);
@@ -16823,6 +16840,12 @@ impl PyDataFrame {
     }
 
     #[pyo3(signature = (index=true, name="Pandas"))]
+    fn itertuples(
+        &self,
+        py: Python<'_>,
+        index: bool,
+        name: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
     fn itertuples(&self, py: Python<'_>, index: bool, name: Option<&str>) -> PyResult<Py<PyAny>> {
         let tuples = self.inner.itertuples();
         let col_names = self.inner.column_names();
@@ -16863,6 +16886,7 @@ impl PyDataFrame {
             }
             let row_obj = if let Some(ref nt) = named_type {
                 let tup = pyo3::types::PyTuple::new(py, &py_vals)?;
+                if let Ok(inst) = nt.call1(tup) {
                 if let Ok(inst) = nt.call1(&tup) {
                     inst.into_any().unbind()
                 } else {
@@ -17086,6 +17110,7 @@ impl PyDataFrame {
                     func.call(t, kwargs)?
                 } else {
                     let mut full_args = Vec::with_capacity(1 + args.len());
+                    full_args.push(py_s.into_any().unbind());
                     full_args.push(py_s.into_any());
                     for a in args.iter() {
                         full_args.push(a.into_any().unbind());
@@ -17147,6 +17172,7 @@ impl PyDataFrame {
         let col_names = self.inner.column_names();
         let col_labels: Vec<IndexLabel> = col_names
             .iter()
+            .map(|n| IndexLabel::Utf8(n.clone()))
             .map(|n| IndexLabel::Utf8((*n).to_string()))
             .collect();
         let mut cols_vals = Vec::with_capacity(ncols);
@@ -17161,6 +17187,7 @@ impl PyDataFrame {
             let row_label = self
                 .inner
                 .index()
+                .label_at(r)
                 .labels()
                 .get(r)
                 .cloned()
@@ -17173,6 +17200,7 @@ impl PyDataFrame {
                 func.call(t, kwargs)?
             } else {
                 let mut full_args = Vec::with_capacity(1 + args.len());
+                full_args.push(py_s.into_any().unbind());
                 full_args.push(py_s.into_any());
                 for a in args.iter() {
                     full_args.push(a.into_any().unbind());
@@ -17229,6 +17257,7 @@ impl PyDataFrame {
             }
             let mut col_map = BTreeMap::new();
             for (ci, name) in new_col_names.iter().enumerate() {
+                let col = Column::from_scalars(col_data[ci].clone()).map_err(frame_error_to_py)?;
                 let col = Column::from_values(col_data[ci].clone()).map_err(column_error_to_py)?;
                 col_map.insert(name.clone(), col);
             }
@@ -17272,9 +17301,16 @@ impl PyDataFrame {
                         col_vals.push(Scalar::Float64(f64::NAN));
                     }
                 }
-                let col = Column::from_values(col_vals).map_err(column_error_to_py)?;
+                let col = Column::from_scalars(col_vals).map_err(frame_error_to_py)?;
                 col_map.insert(k.clone(), col);
             }
+            let df = DataFrame::new_with_column_order(
+                self.inner.index().clone(),
+                col_map,
+                seen_keys,
+            )
+            .map_err(frame_error_to_py)?;
+                let col = Column::from_values(col_vals).map_err(column_error_to_py)?;
             let df =
                 DataFrame::new_with_column_order(self.inner.index().clone(), col_map, seen_keys)
                     .map_err(frame_error_to_py)?;
@@ -28824,10 +28860,14 @@ impl PyPlotAccessor {
                     } else {
                         let cols = df.column_names();
                         if cols.len() < 2 {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                format!("{kind_str} requires x and y column names"),
+                            ));
+                        }
+                        let spec = df.plot_xy(kind, &cols[0], &cols[1]).map_err(frame_error_to_py)?;
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                                 "{kind_str} requires x and y column names"
                             )));
-                        }
                         let spec = df
                             .plot_xy(kind, cols[0], cols[1])
                             .map_err(frame_error_to_py)?;
@@ -28934,6 +28974,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x=None, y=None, **kwargs))]
+    fn line(&self, x: Option<&str>, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn line(
         &self,
         x: Option<&str>,
@@ -28945,6 +28986,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x=None, y=None, **kwargs))]
+    fn bar(&self, x: Option<&str>, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn bar(
         &self,
         x: Option<&str>,
@@ -28956,6 +28998,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x=None, y=None, **kwargs))]
+    fn barh(&self, x: Option<&str>, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn barh(
         &self,
         x: Option<&str>,
@@ -28967,6 +29010,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (by=None, bins=None, **kwargs))]
+    fn hist(&self, by: Option<&Bound<'_, PyAny>>, bins: Option<usize>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn hist(
         &self,
         by: Option<&Bound<'_, PyAny>>,
@@ -28978,6 +29022,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (by=None, **kwargs))]
+    fn box_plot(&self, by: Option<&Bound<'_, PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn box_plot(
         &self,
         by: Option<&Bound<'_, PyAny>>,
@@ -28988,6 +29033,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (by=None, **kwargs))]
+    fn r#box(&self, by: Option<&Bound<'_, PyAny>>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn r#box(
         &self,
         by: Option<&Bound<'_, PyAny>>,
@@ -29010,6 +29056,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x=None, y=None, **kwargs))]
+    fn area(&self, x: Option<&str>, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn area(
         &self,
         x: Option<&str>,
@@ -29027,6 +29074,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x, y, **kwargs))]
+    fn scatter(&self, x: &str, y: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn scatter(
         &self,
         x: &str,
@@ -29038,6 +29086,7 @@ impl PyPlotAccessor {
     }
 
     #[pyo3(signature = (x, y, **kwargs))]
+    fn hexbin(&self, x: &str, y: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
     fn hexbin(
         &self,
         x: &str,
@@ -29070,6 +29119,7 @@ fn plotting_scatter_matrix(
             svg,
             kind: "scatter_matrix".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29096,6 +29146,7 @@ fn plotting_autocorrelation_plot(
             svg,
             kind: "autocorrelation".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29123,6 +29174,7 @@ fn plotting_bootstrap_plot(
             svg,
             kind: "bootstrap".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29149,6 +29201,7 @@ fn plotting_lag_plot(
             svg,
             kind: "lag".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29177,6 +29230,7 @@ fn plotting_parallel_coordinates(
             svg,
             kind: "parallel_coordinates".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29205,6 +29259,7 @@ fn plotting_radviz(
             svg,
             kind: "radviz".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29233,6 +29288,7 @@ fn plotting_andrews_curves(
             svg,
             kind: "andrews_curves".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29259,6 +29315,7 @@ fn plotting_boxplot(
             svg,
             kind: "boxplot".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29285,6 +29342,7 @@ fn plotting_boxplot_frame(
             svg,
             kind: "boxplot".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29316,6 +29374,7 @@ fn plotting_boxplot_frame_groupby(
             svg,
             kind: "boxplot".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     let _ = args;
@@ -29343,6 +29402,7 @@ fn plotting_hist_frame(
             svg,
             kind: "hist".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29369,6 +29429,7 @@ fn plotting_hist_series(
             svg,
             kind: "hist".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
@@ -29396,9 +29457,12 @@ fn plotting_table(
             svg,
             kind: "table".to_string(),
         };
-        return Ok(Py::new(py, res)?.into_any());
+        return Ok(Py::new(py, res)?.into_any().unbind());
     }
     if let Ok(s) = data.extract::<PyRef<PySeries>>() {
+        let spec = fp_frame::plotting::table_series(&s.inner, None, None)
+            .map_err(frame_error_to_py)?;
+        return Ok(Py::new(py, res)?.into_any());
         let spec =
             fp_frame::plotting::table_series(&s.inner, None, None).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -29406,6 +29470,7 @@ fn plotting_table(
             svg,
             kind: "table".to_string(),
         };
+        return Ok(Py::new(py, res)?.into_any().unbind());
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(pd) = py.import("pandas.plotting") {
