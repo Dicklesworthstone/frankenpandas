@@ -28,10 +28,7 @@
         "value": 3
       }
     ],
-    "column_order": [
-      "nums",
-      "vals"
-    ],
+    "column_order": ["nums", "vals"],
     "columns": {
       "nums": [
         {
@@ -128,9 +125,6 @@
         }
       ]
     },
-    "column_order": [
-      "nums",
-      "vals"
-    ]
+    "column_order": ["nums", "vals"]
   }
 }

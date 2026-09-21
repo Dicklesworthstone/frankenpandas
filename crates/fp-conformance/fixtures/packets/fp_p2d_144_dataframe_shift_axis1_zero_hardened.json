@@ -11,37 +11,19 @@
   "shift_axis": 1,
   "shift_periods": 0,
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 2.5 }
-      ],
-      "b": [
-        { "kind": "utf8", "value": "x" },
-        { "kind": "utf8", "value": "y" }
-      ]
+      "a": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 2.5 }],
+      "b": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 2.5 }
-      ],
-      "b": [
-        { "kind": "utf8", "value": "x" },
-        { "kind": "utf8", "value": "y" }
-      ]
+      "a": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 2.5 }],
+      "b": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }]
     }
   }
 }

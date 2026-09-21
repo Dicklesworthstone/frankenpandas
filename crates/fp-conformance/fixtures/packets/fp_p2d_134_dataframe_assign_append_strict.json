@@ -11,40 +11,22 @@
   "assignments": [
     {
       "name": "b",
-      "values": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ]
+      "values": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
     }
   ],
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
     }
   }
 }

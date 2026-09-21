@@ -10,25 +10,13 @@
   },
   "left": {
     "name": "lhs",
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 3 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 30 }
-    ]
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 3 }],
+    "values": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 30 }]
   },
   "right": {
     "name": "rhs",
-    "index": [
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 4 }
-    ]
+    "index": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 3 }],
+    "values": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 4 }]
   },
   "expected_series": {
     "index": [

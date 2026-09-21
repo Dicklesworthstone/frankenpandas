@@ -10,25 +10,13 @@
   },
   "left": {
     "name": "labels",
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "hello" },
-      { "kind": "utf8", "value": "world" }
-    ]
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
+    "values": [{ "kind": "utf8", "value": "hello" }, { "kind": "utf8", "value": "world" }]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
     "columns": {
-      "labels": [
-        { "kind": "utf8", "value": "hello" },
-        { "kind": "utf8", "value": "world" }
-      ]
+      "labels": [{ "kind": "utf8", "value": "hello" }, { "kind": "utf8", "value": "world" }]
     }
   }
 }

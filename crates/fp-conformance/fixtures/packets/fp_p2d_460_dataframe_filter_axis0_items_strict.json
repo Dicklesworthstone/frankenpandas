@@ -4,12 +4,7 @@
   "mode": "strict",
   "operation": "dataframe_filter",
   "filter_axis": 0,
-  "filter_items": [
-    "row_c",
-    "missing",
-    "row_a",
-    "row_c"
-  ],
+  "filter_items": ["row_c", "missing", "row_a", "row_c"],
   "frame": {
     "index": [
       {
@@ -25,10 +20,7 @@
         "value": "row_c"
       }
     ],
-    "column_order": [
-      "alpha",
-      "beta"
-    ],
+    "column_order": ["alpha", "beta"],
     "columns": {
       "alpha": [
         {
@@ -93,10 +85,7 @@
         }
       ]
     },
-    "column_order": [
-      "alpha",
-      "beta"
-    ]
+    "column_order": ["alpha", "beta"]
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",

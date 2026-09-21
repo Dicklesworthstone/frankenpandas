@@ -34,19 +34,11 @@
   },
   "head_n": 1,
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 10 }
-    ],
+    "index": [{ "kind": "int64", "value": 10 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 100 }
-      ],
-      "b": [
-        { "kind": "utf8", "value": "alpha" }
-      ],
-      "flag": [
-        { "kind": "bool", "value": true }
-      ]
+      "a": [{ "kind": "int64", "value": 100 }],
+      "b": [{ "kind": "utf8", "value": "alpha" }],
+      "flag": [{ "kind": "bool", "value": true }]
     }
   }
 }

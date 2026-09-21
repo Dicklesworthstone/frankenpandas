@@ -17,10 +17,7 @@
         "value": "a"
       }
     ],
-    "column_order": [
-      "pop",
-      "city"
-    ],
+    "column_order": ["pop", "city"],
     "columns": {
       "city": [
         {
@@ -43,10 +40,7 @@
         "value": "b"
       }
     ],
-    "column_order": [
-      "state",
-      "city"
-    ],
+    "column_order": ["state", "city"],
     "columns": {
       "city": [
         {
@@ -105,10 +99,6 @@
         }
       ]
     },
-    "column_order": [
-      "pop",
-      "city",
-      "state"
-    ]
+    "column_order": ["pop", "city", "state"]
   }
 }

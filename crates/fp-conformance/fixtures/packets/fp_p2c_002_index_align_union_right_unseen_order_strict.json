@@ -10,10 +10,7 @@
   },
   "left": {
     "name": "left_idx",
-    "index": [
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 1 }],
     "values": []
   },
   "right": {

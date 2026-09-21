@@ -24,10 +24,7 @@
         "value": "r3"
       }
     ],
-    "column_order": [
-      "z",
-      "a"
-    ],
+    "column_order": ["z", "a"],
     "columns": {
       "a": [
         {
@@ -104,9 +101,6 @@
         }
       ]
     },
-    "column_order": [
-      "z",
-      "a"
-    ]
+    "column_order": ["z", "a"]
   }
 }

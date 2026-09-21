@@ -9,14 +9,8 @@
     "generated_at": "2026-09-01T06:09:33Z"
   },
   "join_type": "outer",
-  "left_on_keys": [
-    "lk1",
-    "lk2"
-  ],
-  "right_on_keys": [
-    "rk1",
-    "rk2"
-  ],
+  "left_on_keys": ["lk1", "lk2"],
+  "right_on_keys": ["rk1", "rk2"],
   "frame": {
     "index": [
       {
@@ -266,13 +260,6 @@
         }
       ]
     },
-    "column_order": [
-      "lk1",
-      "lk2",
-      "left_v",
-      "rk1",
-      "rk2",
-      "right_v"
-    ]
+    "column_order": ["lk1", "lk2", "left_v", "rk1", "rk2", "right_v"]
   }
 }

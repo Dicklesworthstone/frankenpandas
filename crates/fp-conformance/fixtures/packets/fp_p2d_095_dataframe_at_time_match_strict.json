@@ -29,10 +29,7 @@
       { "kind": "utf8", "value": "2024-01-16 14:30:00" }
     ],
     "columns": {
-      "value": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 300 }
-      ]
+      "value": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 300 }]
     }
   }
 }

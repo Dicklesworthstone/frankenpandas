@@ -9,25 +9,15 @@
     "generated_at": "2026-09-01T06:09:14Z"
   },
   "dict_columns": {
-    "a": [
-      { "kind": "int64", "value": 1 }
-    ],
-    "b": [
-      { "kind": "int64", "value": 2 }
-    ]
+    "a": [{ "kind": "int64", "value": 1 }],
+    "b": [{ "kind": "int64", "value": 2 }]
   },
   "column_order": ["a", "z"],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 }
-      ],
-      "z": [
-        { "kind": "null", "value": "na_n" }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }],
+      "z": [{ "kind": "null", "value": "na_n" }]
     },
     "column_order": ["a", "z"]
   }

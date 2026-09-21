@@ -8,7 +8,7 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:09:18Z",
     "oracle_attestation": "error_agreement"
-},
+  },
   "fill_value": { "kind": "int64", "value": 1 },
   "column_order": ["a"],
   "expected_error_contains": "index is required for dataframe_constructor_scalar"

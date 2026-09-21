@@ -9,30 +9,18 @@
     "generated_at": "2026-09-01T06:10:16Z"
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 }
-    ],
+    "index": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }],
     "column_order": ["value"],
     "columns": {
-      "value": [
-        { "kind": "int64", "value": 7 },
-        { "kind": "int64", "value": 8 }
-      ]
+      "value": [{ "kind": "int64", "value": 7 }, { "kind": "int64", "value": 8 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "value" }
-    ],
+    "index": [{ "kind": "utf8", "value": "value" }],
     "column_order": ["10", "20"],
     "columns": {
-      "10": [
-        { "kind": "int64", "value": 7 }
-      ],
-      "20": [
-        { "kind": "int64", "value": 8 }
-      ]
+      "10": [{ "kind": "int64", "value": 7 }],
+      "20": [{ "kind": "int64", "value": 8 }]
     }
   }
 }

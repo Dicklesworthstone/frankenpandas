@@ -21,12 +21,8 @@
       { "kind": "int64", "value": 3 }
     ]
   },
-  "replace_to_find": [
-    { "kind": "int64", "value": 100 }
-  ],
-  "replace_to_value": [
-    { "kind": "int64", "value": 999 }
-  ],
+  "replace_to_find": [{ "kind": "int64", "value": 100 }],
+  "replace_to_value": [{ "kind": "int64", "value": 999 }],
   "expected_series": {
     "name": "x",
     "index": [

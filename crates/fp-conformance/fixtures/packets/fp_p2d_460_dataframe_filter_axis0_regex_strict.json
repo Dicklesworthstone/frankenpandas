@@ -24,10 +24,7 @@
         "value": "row_c"
       }
     ],
-    "column_order": [
-      "alpha",
-      "beta"
-    ],
+    "column_order": ["alpha", "beta"],
     "columns": {
       "alpha": [
         {
@@ -100,10 +97,7 @@
         }
       ]
     },
-    "column_order": [
-      "alpha",
-      "beta"
-    ]
+    "column_order": ["alpha", "beta"]
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",

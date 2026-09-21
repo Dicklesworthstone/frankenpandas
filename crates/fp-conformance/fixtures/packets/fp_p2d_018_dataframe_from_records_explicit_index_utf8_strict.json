@@ -8,10 +8,7 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:09:15Z"
   },
-  "index": [
-    { "kind": "utf8", "value": "row-a" },
-    { "kind": "utf8", "value": "row-b" }
-  ],
+  "index": [{ "kind": "utf8", "value": "row-a" }, { "kind": "utf8", "value": "row-b" }],
   "records": [
     {
       "city": { "kind": "utf8", "value": "ny" },
@@ -23,19 +20,10 @@
     }
   ],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "row-a" },
-      { "kind": "utf8", "value": "row-b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "row-a" }, { "kind": "utf8", "value": "row-b" }],
     "columns": {
-      "city": [
-        { "kind": "utf8", "value": "ny" },
-        { "kind": "utf8", "value": "la" }
-      ],
-      "score": [
-        { "kind": "float64", "value": 9.5 },
-        { "kind": "float64", "value": 8.0 }
-      ]
+      "city": [{ "kind": "utf8", "value": "ny" }, { "kind": "utf8", "value": "la" }],
+      "score": [{ "kind": "float64", "value": 9.5 }, { "kind": "float64", "value": 8.0 }]
     }
   }
 }

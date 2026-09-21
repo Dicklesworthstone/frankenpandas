@@ -10,18 +10,12 @@
   },
   "left": {
     "name": "left_idx",
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
     "values": []
   },
   "right": {
     "name": "right_idx",
-    "index": [
-      { "kind": "utf8", "value": "b" },
-      { "kind": "utf8", "value": "c" }
-    ],
+    "index": [{ "kind": "utf8", "value": "b" }, { "kind": "utf8", "value": "c" }],
     "values": []
   },
   "expected_alignment": {

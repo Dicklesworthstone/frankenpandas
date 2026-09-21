@@ -16,9 +16,7 @@
       "overlap=[1,2], left_only=[0], right_only=[3]",
       "values=float64 arithmetic with pandas alignment"
     ],
-    "intentional_divergence_notes": [
-      "none"
-    ]
+    "intentional_divergence_notes": ["none"]
   },
   "oracle_source": "fixture",
   "requirement_level": null,

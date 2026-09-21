@@ -9,34 +9,16 @@
     "generated_at": "2026-09-01T06:09:19Z"
   },
   "matrix_rows": [
-    [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 }
-    ],
-    [
-      { "kind": "int64", "value": 30 },
-      { "kind": "int64", "value": 40 }
-    ]
+    [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }],
+    [{ "kind": "int64", "value": 30 }, { "kind": "int64", "value": 40 }]
   ],
   "column_order": ["left", "right"],
-  "index": [
-    { "kind": "utf8", "value": "r1" },
-    { "kind": "utf8", "value": "r2" }
-  ],
+  "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "left": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 30 }
-      ],
-      "right": [
-        { "kind": "int64", "value": 20 },
-        { "kind": "int64", "value": 40 }
-      ]
+      "left": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 30 }],
+      "right": [{ "kind": "int64", "value": 20 }, { "kind": "int64", "value": 40 }]
     }
   }
 }

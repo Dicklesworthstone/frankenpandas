@@ -9,28 +9,12 @@
     "generated_at": "2026-09-01T06:09:15Z"
   },
   "column_order": ["city"],
-  "matrix_rows": [
-    [
-      { "kind": "utf8", "value": "ny" }
-    ],
-    [
-      { "kind": "utf8", "value": "la" }
-    ]
-  ],
-  "index": [
-    { "kind": "utf8", "value": "row-a" },
-    { "kind": "utf8", "value": "row-b" }
-  ],
+  "matrix_rows": [[{ "kind": "utf8", "value": "ny" }], [{ "kind": "utf8", "value": "la" }]],
+  "index": [{ "kind": "utf8", "value": "row-a" }, { "kind": "utf8", "value": "row-b" }],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "row-a" },
-      { "kind": "utf8", "value": "row-b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "row-a" }, { "kind": "utf8", "value": "row-b" }],
     "columns": {
-      "city": [
-        { "kind": "utf8", "value": "ny" },
-        { "kind": "utf8", "value": "la" }
-      ]
+      "city": [{ "kind": "utf8", "value": "ny" }, { "kind": "utf8", "value": "la" }]
     }
   }
 }

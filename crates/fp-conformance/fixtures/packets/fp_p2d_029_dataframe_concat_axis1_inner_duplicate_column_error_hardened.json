@@ -16,25 +16,16 @@
   "concat_axis": 1,
   "concat_join": "inner",
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 1 }],
     "columns": {
-      "dup": [
-        { "kind": "int64", "value": 9 }
-      ]
+      "dup": [{ "kind": "int64", "value": 9 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 1 }],
     "columns": {
-      "dup": [
-        { "kind": "int64", "value": 8 }
-      ]
+      "dup": [{ "kind": "int64", "value": 8 }]
     }
   },
   "expected_error_contains": "duplicate column"
 }
-

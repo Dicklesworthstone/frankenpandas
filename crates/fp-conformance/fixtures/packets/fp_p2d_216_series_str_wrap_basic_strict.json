@@ -11,23 +11,11 @@
   "str_wrap_width": 5,
   "left": {
     "name": "text",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "str", "value": "hello world" },
-      { "kind": "str", "value": "abc" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "str", "value": "hello world" }, { "kind": "str", "value": "abc" }]
   },
   "expected_series": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "str", "value": "hello\nworld" },
-      { "kind": "str", "value": "abc" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "str", "value": "hello\nworld" }, { "kind": "str", "value": "abc" }]
   }
 }

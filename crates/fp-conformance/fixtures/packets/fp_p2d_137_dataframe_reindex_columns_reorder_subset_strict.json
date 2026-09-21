@@ -10,41 +10,20 @@
   },
   "reindex_columns": ["c", "a"],
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a", "b", "c"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "utf8", "value": "x" },
-        { "kind": "utf8", "value": "y" }
-      ],
-      "c": [
-        { "kind": "bool", "value": true },
-        { "kind": "bool", "value": false }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
+      "c": [{ "kind": "bool", "value": true }, { "kind": "bool", "value": false }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["c", "a"],
     "columns": {
-      "c": [
-        { "kind": "bool", "value": true },
-        { "kind": "bool", "value": false }
-      ],
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ]
+      "c": [{ "kind": "bool", "value": true }, { "kind": "bool", "value": false }],
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }]
     }
   }
 }

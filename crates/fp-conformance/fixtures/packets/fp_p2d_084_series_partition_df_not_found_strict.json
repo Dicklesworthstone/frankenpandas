@@ -11,33 +11,15 @@
   "string_sep": "@",
   "left": {
     "name": "strings",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "hello" },
-      { "kind": "utf8", "value": "world" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "utf8", "value": "hello" }, { "kind": "utf8", "value": "world" }]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "0": [
-        { "kind": "utf8", "value": "hello" },
-        { "kind": "utf8", "value": "world" }
-      ],
-      "1": [
-        { "kind": "utf8", "value": "" },
-        { "kind": "utf8", "value": "" }
-      ],
-      "2": [
-        { "kind": "utf8", "value": "" },
-        { "kind": "utf8", "value": "" }
-      ]
+      "0": [{ "kind": "utf8", "value": "hello" }, { "kind": "utf8", "value": "world" }],
+      "1": [{ "kind": "utf8", "value": "" }, { "kind": "utf8", "value": "" }],
+      "2": [{ "kind": "utf8", "value": "" }, { "kind": "utf8", "value": "" }]
     }
   }
 }

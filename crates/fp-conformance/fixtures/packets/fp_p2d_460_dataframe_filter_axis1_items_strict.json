@@ -4,12 +4,7 @@
   "mode": "strict",
   "operation": "dataframe_filter",
   "filter_axis": 1,
-  "filter_items": [
-    "gamma",
-    "missing",
-    "alpha",
-    "gamma"
-  ],
+  "filter_items": ["gamma", "missing", "alpha", "gamma"],
   "frame": {
     "index": [
       {
@@ -21,11 +16,7 @@
         "value": 1
       }
     ],
-    "column_order": [
-      "alpha",
-      "beta",
-      "gamma"
-    ],
+    "column_order": ["alpha", "beta", "gamma"],
     "columns": {
       "alpha": [
         {
@@ -92,10 +83,7 @@
         }
       ]
     },
-    "column_order": [
-      "gamma",
-      "alpha"
-    ]
+    "column_order": ["gamma", "alpha"]
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",

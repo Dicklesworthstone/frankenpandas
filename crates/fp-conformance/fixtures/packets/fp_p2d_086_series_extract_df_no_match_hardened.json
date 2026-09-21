@@ -11,33 +11,15 @@
   "regex_pattern": "(\\d{4})-(\\d{2})-(\\d{2})",
   "left": {
     "name": "strings",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "2024-01-15" },
-      { "kind": "utf8", "value": "invalid" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "utf8", "value": "2024-01-15" }, { "kind": "utf8", "value": "invalid" }]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "0": [
-        { "kind": "utf8", "value": "2024" },
-        { "kind": "null", "value": "na_n" }
-      ],
-      "1": [
-        { "kind": "utf8", "value": "01" },
-        { "kind": "null", "value": "na_n" }
-      ],
-      "2": [
-        { "kind": "utf8", "value": "15" },
-        { "kind": "null", "value": "na_n" }
-      ]
+      "0": [{ "kind": "utf8", "value": "2024" }, { "kind": "null", "value": "na_n" }],
+      "1": [{ "kind": "utf8", "value": "01" }, { "kind": "null", "value": "na_n" }],
+      "2": [{ "kind": "utf8", "value": "15" }, { "kind": "null", "value": "na_n" }]
     }
   }
 }

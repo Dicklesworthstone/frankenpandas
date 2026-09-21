@@ -9,19 +9,10 @@
     "generated_at": "2026-09-01T06:10:11Z"
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "A": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "B": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "null", "value": "null" }
-      ]
+      "A": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "B": [{ "kind": "int64", "value": 3 }, { "kind": "null", "value": "null" }]
     },
     "column_order": ["A", "B"]
   },

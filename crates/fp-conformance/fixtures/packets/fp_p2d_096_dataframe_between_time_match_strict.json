@@ -32,10 +32,7 @@
       { "kind": "utf8", "value": "2024-01-15 10:00:00" }
     ],
     "columns": {
-      "value": [
-        { "kind": "float64", "value": 200.0 },
-        { "kind": "float64", "value": 300.0 }
-      ]
+      "value": [{ "kind": "float64", "value": 200.0 }, { "kind": "float64", "value": 300.0 }]
     }
   }
 }

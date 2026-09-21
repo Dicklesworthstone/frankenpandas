@@ -30,16 +30,10 @@
     "column_order": ["x", "y"]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 1 }],
     "columns": {
-      "x": [
-        { "kind": "int64", "value": 3 }
-      ],
-      "y": [
-        { "kind": "int64", "value": 20 }
-      ]
+      "x": [{ "kind": "int64", "value": 3 }],
+      "y": [{ "kind": "int64", "value": 20 }]
     },
     "column_order": ["x", "y"]
   }

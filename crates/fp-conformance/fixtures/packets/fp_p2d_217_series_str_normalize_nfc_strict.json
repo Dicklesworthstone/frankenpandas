@@ -11,23 +11,11 @@
   "str_normalize_form": "NFC",
   "left": {
     "name": "text",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "str", "value": "café" },
-      { "kind": "str", "value": "hello" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "str", "value": "café" }, { "kind": "str", "value": "hello" }]
   },
   "expected_series": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "str", "value": "café" },
-      { "kind": "str", "value": "hello" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "str", "value": "café" }, { "kind": "str", "value": "hello" }]
   }
 }

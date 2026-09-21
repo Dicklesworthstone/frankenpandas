@@ -9,38 +9,20 @@
     "generated_at": "2026-09-01T06:09:43Z"
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "id": [
-        { "kind": "utf8", "value": "row-1" },
-        { "kind": "utf8", "value": "row-2" }
-      ],
-      "v": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
-      ]
+      "id": [{ "kind": "utf8", "value": "row-1" }, { "kind": "utf8", "value": "row-2" }],
+      "v": [{ "kind": "int64", "value": 3 }, { "kind": "int64", "value": 4 }]
     }
   },
   "set_index_column": "id",
   "set_index_drop": false,
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "row-1" },
-      { "kind": "utf8", "value": "row-2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "row-1" }, { "kind": "utf8", "value": "row-2" }],
     "column_order": ["id", "v"],
     "columns": {
-      "id": [
-        { "kind": "utf8", "value": "row-1" },
-        { "kind": "utf8", "value": "row-2" }
-      ],
-      "v": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
-      ]
+      "id": [{ "kind": "utf8", "value": "row-1" }, { "kind": "utf8", "value": "row-2" }],
+      "v": [{ "kind": "int64", "value": 3 }, { "kind": "int64", "value": 4 }]
     }
   }
 }

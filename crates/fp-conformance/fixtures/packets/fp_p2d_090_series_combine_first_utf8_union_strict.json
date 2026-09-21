@@ -10,25 +10,13 @@
   },
   "left": {
     "name": "primary",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "alpha" },
-      { "kind": "null", "value": "null" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "utf8", "value": "alpha" }, { "kind": "null", "value": "null" }]
   },
   "right": {
     "name": "fallback",
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "beta" },
-      { "kind": "utf8", "value": "gamma" }
-    ]
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+    "values": [{ "kind": "utf8", "value": "beta" }, { "kind": "utf8", "value": "gamma" }]
   },
   "expected_series": {
     "index": [

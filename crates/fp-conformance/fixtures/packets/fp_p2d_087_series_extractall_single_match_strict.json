@@ -11,14 +11,8 @@
   "regex_pattern": "(\\d+)",
   "left": {
     "name": "strings",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "abc123" },
-      { "kind": "utf8", "value": "456def" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "utf8", "value": "abc123" }, { "kind": "utf8", "value": "456def" }]
   },
   "expected_frame": {
     "index": [
@@ -26,10 +20,7 @@
       { "kind": "utf8", "value": "Int64(1), 0" }
     ],
     "columns": {
-      "0": [
-        { "kind": "utf8", "value": "123" },
-        { "kind": "utf8", "value": "456" }
-      ]
+      "0": [{ "kind": "utf8", "value": "123" }, { "kind": "utf8", "value": "456" }]
     }
   }
 }

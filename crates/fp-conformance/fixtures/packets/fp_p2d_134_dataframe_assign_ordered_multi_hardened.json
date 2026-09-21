@@ -11,51 +11,27 @@
   "assignments": [
     {
       "name": "b",
-      "values": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 2.5 }
-      ]
+      "values": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 2.5 }]
     },
     {
       "name": "c",
-      "values": [
-        { "kind": "utf8", "value": "left" },
-        { "kind": "utf8", "value": "right" }
-      ]
+      "values": [{ "kind": "utf8", "value": "left" }, { "kind": "utf8", "value": "right" }]
     }
   ],
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a", "b", "c"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 2.5 }
-      ],
-      "c": [
-        { "kind": "utf8", "value": "left" },
-        { "kind": "utf8", "value": "right" }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 2.5 }],
+      "c": [{ "kind": "utf8", "value": "left" }, { "kind": "utf8", "value": "right" }]
     }
   }
 }

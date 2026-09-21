@@ -9,19 +9,10 @@
     "generated_at": "2026-09-01T06:10:13Z"
   },
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "B": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ],
-      "A": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ]
+      "B": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }],
+      "A": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }]
     },
     "column_order": ["B", "A"]
   },

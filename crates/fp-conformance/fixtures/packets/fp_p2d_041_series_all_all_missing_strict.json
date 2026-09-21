@@ -10,14 +10,8 @@
   },
   "left": {
     "name": "vals",
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
-    "values": [
-      { "kind": "null", "value": "null" },
-      { "kind": "null", "value": "na_n" }
-    ]
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
+    "values": [{ "kind": "null", "value": "null" }, { "kind": "null", "value": "na_n" }]
   },
   "expected_bool": true
 }

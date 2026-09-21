@@ -12,23 +12,15 @@
   "join_type": "cross",
   "left_index": true,
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "a" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }],
     "columns": {
-      "left_v": [
-        { "kind": "int64", "value": 10 }
-      ]
+      "left_v": [{ "kind": "int64", "value": 10 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "b" }],
     "columns": {
-      "right_v": [
-        { "kind": "int64", "value": 20 }
-      ]
+      "right_v": [{ "kind": "int64", "value": 20 }]
     }
   },
   "expected_error_contains": "join_type='cross' does not allow left_index/right_index"

@@ -25,32 +25,16 @@
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" }
-    ],
+    "index": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
     "columns": {
-      "right_col": [
-        { "kind": "int64", "value": 70 },
-        { "kind": "int64", "value": 80 }
-      ]
+      "right_col": [{ "kind": "int64", "value": 70 }, { "kind": "int64", "value": 80 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" }
-    ],
+    "index": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
     "columns": {
-      "left_col": [
-        { "kind": "int64", "value": 7 },
-        { "kind": "int64", "value": 8 }
-      ],
-      "right_col": [
-        { "kind": "int64", "value": 70 },
-        { "kind": "int64", "value": 80 }
-      ]
+      "left_col": [{ "kind": "int64", "value": 7 }, { "kind": "int64", "value": 8 }],
+      "right_col": [{ "kind": "int64", "value": 70 }, { "kind": "int64", "value": 80 }]
     }
   }
 }
-

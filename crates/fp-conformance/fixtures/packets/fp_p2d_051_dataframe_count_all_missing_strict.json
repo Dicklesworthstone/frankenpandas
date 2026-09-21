@@ -29,13 +29,7 @@
     "column_order": ["right", "left"]
   },
   "expected_series": {
-    "index": [
-      { "kind": "utf8", "value": "right" },
-      { "kind": "utf8", "value": "left" }
-    ],
-    "values": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 0 }
-    ]
+    "index": [{ "kind": "utf8", "value": "right" }, { "kind": "utf8", "value": "left" }],
+    "values": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 0 }]
   }
 }

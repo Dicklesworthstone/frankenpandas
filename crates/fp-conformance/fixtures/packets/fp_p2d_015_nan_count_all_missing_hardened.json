@@ -10,14 +10,8 @@
   },
   "left": {
     "name": "values",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "null", "value": "null" },
-      { "kind": "null", "value": "na_n" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "null", "value": "null" }, { "kind": "null", "value": "na_n" }]
   },
   "expected_scalar": { "kind": "int64", "value": 0 }
 }

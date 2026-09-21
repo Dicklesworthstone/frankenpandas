@@ -10,34 +10,16 @@
   },
   "left": {
     "name": "lhs",
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 7 }
-    ]
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+    "values": [{ "kind": "int64", "value": 5 }, { "kind": "int64", "value": 7 }]
   },
   "right": {
     "name": "rhs",
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 }
-    ]
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+    "values": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
   },
   "expected_series": {
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 15 },
-      { "kind": "int64", "value": 27 }
-    ]
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+    "values": [{ "kind": "int64", "value": 15 }, { "kind": "int64", "value": 27 }]
   }
 }

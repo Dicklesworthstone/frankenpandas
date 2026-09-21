@@ -9,13 +9,9 @@
     "generated_at": "2026-09-01T06:10:01Z"
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "val": [
-        { "kind": "bool", "value": false }
-      ]
+      "val": [{ "kind": "bool", "value": false }]
     }
   },
   "expected_bool": false

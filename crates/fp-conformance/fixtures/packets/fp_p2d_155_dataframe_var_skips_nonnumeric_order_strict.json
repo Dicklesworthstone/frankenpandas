@@ -24,11 +24,7 @@
         "value": 2
       }
     ],
-    "column_order": [
-      "left",
-      "label",
-      "right"
-    ],
+    "column_order": ["left", "label", "right"],
     "columns": {
       "left": [
         {

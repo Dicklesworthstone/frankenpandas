@@ -8,17 +8,10 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:11:04Z"
   },
-  "groupby_columns": [
-    "grp"
-  ],
+  "groupby_columns": ["grp"],
   "groupby_agg_multi": {
-    "x": [
-      "sum",
-      "mean"
-    ],
-    "y": [
-      "count"
-    ]
+    "x": ["sum", "mean"],
+    "y": ["count"]
   },
   "frame": {
     "index": [
@@ -39,11 +32,7 @@
         "value": 3
       }
     ],
-    "column_order": [
-      "grp",
-      "x",
-      "y"
-    ],
+    "column_order": ["grp", "x", "y"],
     "columns": {
       "grp": [
         {
@@ -144,11 +133,7 @@
         }
       ]
     },
-    "column_order": [
-      "x_sum",
-      "x_mean",
-      "y_count"
-    ],
+    "column_order": ["x_sum", "x_mean", "y_count"],
     "column_multiindex": {
       "tuples": [
         [
@@ -182,10 +167,7 @@
           }
         ]
       ],
-      "names": [
-        null,
-        null
-      ]
+      "names": [null, null]
     }
   }
 }

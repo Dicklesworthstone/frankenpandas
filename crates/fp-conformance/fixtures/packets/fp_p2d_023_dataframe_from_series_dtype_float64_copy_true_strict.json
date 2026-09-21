@@ -12,40 +12,19 @@
   "constructor_copy": true,
   "left": {
     "name": "a",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
   },
   "right": {
     "name": "b",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 30 },
-      { "kind": "int64", "value": 40 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "int64", "value": 30 }, { "kind": "int64", "value": 40 }]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "a": [
-        { "kind": "float64", "value": 10.0 },
-        { "kind": "float64", "value": 20.0 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 30.0 },
-        { "kind": "float64", "value": 40.0 }
-      ]
+      "a": [{ "kind": "float64", "value": 10.0 }, { "kind": "float64", "value": 20.0 }],
+      "b": [{ "kind": "float64", "value": 30.0 }, { "kind": "float64", "value": 40.0 }]
     }
   }
 }

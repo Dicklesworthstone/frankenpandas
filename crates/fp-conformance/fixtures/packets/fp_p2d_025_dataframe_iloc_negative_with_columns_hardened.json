@@ -30,15 +30,9 @@
   "iloc_positions": [-1, -3],
   "column_order": ["b"],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 12 },
-      { "kind": "int64", "value": 10 }
-    ],
+    "index": [{ "kind": "int64", "value": 12 }, { "kind": "int64", "value": 10 }],
     "columns": {
-      "b": [
-        { "kind": "utf8", "value": "r" },
-        { "kind": "utf8", "value": "p" }
-      ]
+      "b": [{ "kind": "utf8", "value": "r" }, { "kind": "utf8", "value": "p" }]
     }
   }
 }

@@ -3,9 +3,7 @@
   "case_id": "dataframe_groupby_rolling_count_basic_strict",
   "mode": "strict",
   "operation": "dataframe_groupby_rolling_count",
-  "groupby_columns": [
-    "k"
-  ],
+  "groupby_columns": ["k"],
   "window_size": 2,
   "frame": {
     "index": [
@@ -34,10 +32,7 @@
         "value": 5
       }
     ],
-    "column_order": [
-      "k",
-      "v"
-    ],
+    "column_order": ["k", "v"],
     "columns": {
       "k": [
         {
@@ -174,10 +169,7 @@
         }
       ]
     },
-    "column_order": [
-      "k",
-      "v"
-    ]
+    "column_order": ["k", "v"]
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",

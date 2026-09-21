@@ -7,9 +7,7 @@
   "resample_closed": "right",
   "resample_label": "right",
   "frame": {
-    "column_order": [
-      "a"
-    ],
+    "column_order": ["a"],
     "columns": {
       "a": [
         {
@@ -85,8 +83,6 @@
         }
       ]
     },
-    "column_order": [
-      "a"
-    ]
+    "column_order": ["a"]
   }
 }

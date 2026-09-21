@@ -11,15 +11,9 @@
   "index": [],
   "column_order": ["a", "z"],
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 7 },
-        { "kind": "int64", "value": 8 }
-      ]
+      "a": [{ "kind": "int64", "value": 7 }, { "kind": "int64", "value": 8 }]
     }
   },
   "expected_frame": {

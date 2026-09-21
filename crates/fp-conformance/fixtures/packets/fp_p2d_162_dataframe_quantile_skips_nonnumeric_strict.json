@@ -24,12 +24,7 @@
         "value": 2
       }
     ],
-    "column_order": [
-      "ints",
-      "text",
-      "floats",
-      "flag"
-    ],
+    "column_order": ["ints", "text", "floats", "flag"],
     "columns": {
       "ints": [
         {

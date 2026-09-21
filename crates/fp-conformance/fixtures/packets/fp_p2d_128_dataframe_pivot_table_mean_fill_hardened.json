@@ -43,19 +43,10 @@
     "column_order": ["region", "product", "sales"]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "east" },
-      { "kind": "utf8", "value": "west" }
-    ],
+    "index": [{ "kind": "utf8", "value": "east" }, { "kind": "utf8", "value": "west" }],
     "columns": {
-      "A": [
-        { "kind": "float64", "value": 6.5 },
-        { "kind": "float64", "value": 7.0 }
-      ],
-      "B": [
-        { "kind": "float64", "value": 5.0 },
-        { "kind": "float64", "value": 0.0 }
-      ]
+      "A": [{ "kind": "float64", "value": 6.5 }, { "kind": "float64", "value": 7.0 }],
+      "B": [{ "kind": "float64", "value": 5.0 }, { "kind": "float64", "value": 0.0 }]
     },
     "column_order": ["A", "B"]
   }

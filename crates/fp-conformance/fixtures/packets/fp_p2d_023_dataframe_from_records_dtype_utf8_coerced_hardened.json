@@ -15,13 +15,9 @@
     }
   ],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "a": [
-        { "kind": "utf8", "value": "1" }
-      ]
+      "a": [{ "kind": "utf8", "value": "1" }]
     }
   }
 }

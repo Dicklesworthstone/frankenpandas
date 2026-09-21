@@ -11,11 +11,26 @@
   "filter_axis": 0,
   "filter_regex": "^row_[ac]$",
   "frame": {
-    "index": [{ "kind": "utf8", "value": "row_a" }, { "kind": "utf8", "value": "row_b" }, { "kind": "utf8", "value": "other_c" }, { "kind": "utf8", "value": "row_c" }],
+    "index": [
+      { "kind": "utf8", "value": "row_a" },
+      { "kind": "utf8", "value": "row_b" },
+      { "kind": "utf8", "value": "other_c" },
+      { "kind": "utf8", "value": "row_c" }
+    ],
     "column_order": ["alpha", "beta"],
     "columns": {
-      "alpha": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }, { "kind": "int64", "value": 30 }, { "kind": "int64", "value": 40 }],
-      "beta": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 200 }, { "kind": "int64", "value": 300 }, { "kind": "int64", "value": 400 }]
+      "alpha": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 },
+        { "kind": "int64", "value": 40 }
+      ],
+      "beta": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 },
+        { "kind": "int64", "value": 400 }
+      ]
     }
   },
   "expected_frame": {

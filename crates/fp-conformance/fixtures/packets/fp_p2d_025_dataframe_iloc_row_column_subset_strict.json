@@ -35,19 +35,10 @@
   "iloc_positions": [2, 0],
   "column_order": ["b", "a"],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 0 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 10 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 300 },
-        { "kind": "int64", "value": 100 }
-      ]
+      "a": [{ "kind": "int64", "value": 30 }, { "kind": "int64", "value": 10 }],
+      "b": [{ "kind": "int64", "value": 300 }, { "kind": "int64", "value": 100 }]
     }
   }
 }

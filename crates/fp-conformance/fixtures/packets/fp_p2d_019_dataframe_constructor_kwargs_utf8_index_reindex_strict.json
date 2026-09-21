@@ -85,9 +85,6 @@
         }
       ]
     },
-    "column_order": [
-      "city",
-      "score"
-    ]
+    "column_order": ["city", "score"]
   }
 }

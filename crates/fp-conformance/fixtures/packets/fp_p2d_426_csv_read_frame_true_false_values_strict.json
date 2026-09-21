@@ -8,12 +8,8 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:11:03Z"
   },
-  "csv_true_values": [
-    "1"
-  ],
-  "csv_false_values": [
-    "0"
-  ],
+  "csv_true_values": ["1"],
+  "csv_false_values": ["0"],
   "csv_input": "flag\n1\n0\n",
   "expected_frame": {
     "columns": {
@@ -28,9 +24,7 @@
         }
       ]
     },
-    "column_order": [
-      "flag"
-    ],
+    "column_order": ["flag"],
     "index": [
       {
         "kind": "int64",

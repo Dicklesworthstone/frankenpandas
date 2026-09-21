@@ -102,9 +102,6 @@
         }
       ]
     },
-    "column_order": [
-      "left_col",
-      "right_col"
-    ]
+    "column_order": ["left_col", "right_col"]
   }
 }

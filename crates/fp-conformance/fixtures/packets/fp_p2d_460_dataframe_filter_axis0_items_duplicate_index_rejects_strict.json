@@ -4,9 +4,7 @@
   "mode": "strict",
   "operation": "dataframe_filter",
   "filter_axis": 0,
-  "filter_items": [
-    "dup"
-  ],
+  "filter_items": ["dup"],
   "frame": {
     "index": [
       {
@@ -22,9 +20,7 @@
         "value": "solo"
       }
     ],
-    "column_order": [
-      "alpha"
-    ],
+    "column_order": ["alpha"],
     "columns": {
       "alpha": [
         {

@@ -8,9 +8,7 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:10:10Z"
   },
-  "dummy_columns": [
-    "color"
-  ],
+  "dummy_columns": ["color"],
   "frame": {
     "index": [
       {
@@ -70,11 +68,7 @@
         }
       ]
     },
-    "column_order": [
-      "id",
-      "color",
-      "size"
-    ]
+    "column_order": ["id", "color", "size"]
   },
   "expected_frame": {
     "index": [
@@ -149,11 +143,6 @@
         }
       ]
     },
-    "column_order": [
-      "id",
-      "size",
-      "color_blue",
-      "color_red"
-    ]
+    "column_order": ["id", "size", "color_blue", "color_red"]
   }
 }

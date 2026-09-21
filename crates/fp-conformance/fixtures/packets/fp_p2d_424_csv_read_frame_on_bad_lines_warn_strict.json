@@ -12,19 +12,10 @@
   "csv_input": "a,b\n1,2\n3,4,5\n6,7\n",
   "expected_frame": {
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 6 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 7 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 6 }],
+      "b": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 7 }]
     },
     "column_order": ["a", "b"],
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }]
   }
 }

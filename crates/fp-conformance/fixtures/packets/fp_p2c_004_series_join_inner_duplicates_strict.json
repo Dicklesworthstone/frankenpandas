@@ -24,14 +24,8 @@
   },
   "right": {
     "name": "right",
-    "index": [
-      { "kind": "utf8", "value": "k" },
-      { "kind": "utf8", "value": "k" }
-    ],
-    "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 }
-    ]
+    "index": [{ "kind": "utf8", "value": "k" }, { "kind": "utf8", "value": "k" }],
+    "values": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
   },
   "expected_join": {
     "index": [

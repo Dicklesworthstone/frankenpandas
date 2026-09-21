@@ -10,10 +10,7 @@
   },
   "constructor_dtype": "category",
   "dict_columns": {
-    "kind": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ]
+    "kind": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }]
   },
   "expected_frame": {
     "index": [
@@ -38,8 +35,6 @@
         }
       ]
     },
-    "column_order": [
-      "kind"
-    ]
+    "column_order": ["kind"]
   }
 }

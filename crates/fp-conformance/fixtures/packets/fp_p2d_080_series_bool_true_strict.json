@@ -10,12 +10,8 @@
   },
   "left": {
     "name": "val",
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
-    "values": [
-      { "kind": "bool", "value": true }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }],
+    "values": [{ "kind": "bool", "value": true }]
   },
   "expected_bool": true
 }

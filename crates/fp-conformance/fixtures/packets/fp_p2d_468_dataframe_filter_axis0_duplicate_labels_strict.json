@@ -12,10 +12,18 @@
   "filter_axis": 0,
   "filter_items": ["dup"],
   "frame": {
-    "index": [{ "kind": "utf8", "value": "dup" }, { "kind": "utf8", "value": "dup" }, { "kind": "utf8", "value": "solo" }],
+    "index": [
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "solo" }
+    ],
     "column_order": ["alpha"],
     "columns": {
-      "alpha": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }, { "kind": "int64", "value": 30 }]
+      "alpha": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ]
     }
   },
   "expected_error_contains": "duplicate"

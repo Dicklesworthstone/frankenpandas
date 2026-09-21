@@ -9,16 +9,10 @@
     "generated_at": "2026-09-01T06:09:17Z"
   },
   "fill_value": { "kind": "int64", "value": 9 },
-  "index": [
-    { "kind": "int64", "value": 0 },
-    { "kind": "int64", "value": 1 }
-  ],
+  "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
   "column_order": [],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {}
   }
 }

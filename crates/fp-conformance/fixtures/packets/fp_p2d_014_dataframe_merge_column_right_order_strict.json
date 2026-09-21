@@ -121,10 +121,6 @@
         }
       ]
     },
-    "column_order": [
-      "id",
-      "left_v",
-      "right_v"
-    ]
+    "column_order": ["id", "left_v", "right_v"]
   }
 }

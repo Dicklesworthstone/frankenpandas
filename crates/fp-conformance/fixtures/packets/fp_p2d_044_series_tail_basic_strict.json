@@ -25,13 +25,7 @@
   },
   "tail_n": 2,
   "expected_series": {
-    "index": [
-      { "kind": "utf8", "value": "r3" },
-      { "kind": "utf8", "value": "r4" }
-    ],
-    "values": [
-      { "kind": "int64", "value": 30 },
-      { "kind": "int64", "value": 40 }
-    ]
+    "index": [{ "kind": "utf8", "value": "r3" }, { "kind": "utf8", "value": "r4" }],
+    "values": [{ "kind": "int64", "value": 30 }, { "kind": "int64", "value": 40 }]
   }
 }

@@ -8,10 +8,7 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:10:11Z"
   },
-  "pivot_values": [
-    "sales",
-    "profit"
-  ],
+  "pivot_values": ["sales", "profit"],
   "pivot_index": "region",
   "pivot_columns": "product",
   "pivot_aggfunc": "sum",
@@ -108,12 +105,7 @@
         }
       ]
     },
-    "column_order": [
-      "region",
-      "product",
-      "sales",
-      "profit"
-    ]
+    "column_order": ["region", "product", "sales", "profit"]
   },
   "expected_frame": {
     "index": [
@@ -168,11 +160,6 @@
         }
       ]
     },
-    "column_order": [
-      "profit_A",
-      "profit_B",
-      "sales_A",
-      "sales_B"
-    ]
+    "column_order": ["profit_A", "profit_B", "sales_A", "sales_B"]
   }
 }

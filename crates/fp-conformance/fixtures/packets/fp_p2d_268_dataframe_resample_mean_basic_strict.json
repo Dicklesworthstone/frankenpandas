@@ -33,19 +33,10 @@
     "column_order": ["a", "b"]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "2024-01-01" },
-      { "kind": "utf8", "value": "2024-01-03" }
-    ],
+    "index": [{ "kind": "utf8", "value": "2024-01-01" }, { "kind": "utf8", "value": "2024-01-03" }],
     "columns": {
-      "a": [
-        { "kind": "float64", "value": 15.0 },
-        { "kind": "float64", "value": 35.0 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 3.5 }
-      ]
+      "a": [{ "kind": "float64", "value": 15.0 }, { "kind": "float64", "value": 35.0 }],
+      "b": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 3.5 }]
     },
     "column_order": ["a", "b"]
   }

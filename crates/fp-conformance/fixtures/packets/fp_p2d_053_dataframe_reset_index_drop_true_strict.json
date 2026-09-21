@@ -9,29 +9,17 @@
     "generated_at": "2026-09-01T06:09:43Z"
   },
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "v": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
-      ]
+      "v": [{ "kind": "int64", "value": 3 }, { "kind": "int64", "value": 4 }]
     }
   },
   "reset_index_drop": true,
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "column_order": ["v"],
     "columns": {
-      "v": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
-      ]
+      "v": [{ "kind": "int64", "value": 3 }, { "kind": "int64", "value": 4 }]
     }
   }
 }

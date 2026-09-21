@@ -16,10 +16,7 @@
       { "kind": "utf8", "value": "2024-01-15 10:00:00" }
     ],
     "columns": {
-      "price": [
-        { "kind": "float64", "value": 100.0 },
-        { "kind": "float64", "value": 200.0 }
-      ]
+      "price": [{ "kind": "float64", "value": 100.0 }, { "kind": "float64", "value": 200.0 }]
     }
   },
   "expected_frame": {

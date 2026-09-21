@@ -9,23 +9,12 @@
     "generated_at": "2026-09-01T06:09:22Z"
   },
   "constructor_copy": true,
-  "matrix_rows": [
-    [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 }
-    ]
-  ],
+  "matrix_rows": [[{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "0": [
-        { "kind": "int64", "value": 10 }
-      ],
-      "1": [
-        { "kind": "int64", "value": 20 }
-      ]
+      "0": [{ "kind": "int64", "value": 10 }],
+      "1": [{ "kind": "int64", "value": 20 }]
     }
   }
 }

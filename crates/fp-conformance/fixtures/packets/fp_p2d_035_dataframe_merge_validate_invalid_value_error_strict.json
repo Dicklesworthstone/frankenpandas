@@ -13,29 +13,17 @@
   "merge_on": "id",
   "merge_validate": "diagonal",
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "id": [
-        { "kind": "int64", "value": 1 }
-      ],
-      "left_v": [
-        { "kind": "int64", "value": 10 }
-      ]
+      "id": [{ "kind": "int64", "value": 1 }],
+      "left_v": [{ "kind": "int64", "value": 10 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 10 }
-    ],
+    "index": [{ "kind": "int64", "value": 10 }],
     "columns": {
-      "id": [
-        { "kind": "int64", "value": 1 }
-      ],
-      "right_v": [
-        { "kind": "int64", "value": 100 }
-      ]
+      "id": [{ "kind": "int64", "value": 1 }],
+      "right_v": [{ "kind": "int64", "value": 100 }]
     }
   },
   "expected_error_contains": "merge_validate must be one_to_one, one_to_many, many_to_one, or many_to_many"

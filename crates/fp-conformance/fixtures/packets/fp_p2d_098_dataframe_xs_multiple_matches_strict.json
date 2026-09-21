@@ -24,15 +24,9 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "val": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 300 }
-      ]
+      "val": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 300 }]
     }
   }
 }

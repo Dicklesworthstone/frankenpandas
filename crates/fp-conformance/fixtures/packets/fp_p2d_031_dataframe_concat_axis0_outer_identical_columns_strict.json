@@ -11,46 +11,24 @@
   "concat_axis": 0,
   "concat_join": "outer",
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "k": [
-        { "kind": "int64", "value": 1 }
-      ],
-      "v": [
-        { "kind": "int64", "value": 10 }
-      ]
+      "k": [{ "kind": "int64", "value": 1 }],
+      "v": [{ "kind": "int64", "value": 10 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 1 }],
     "columns": {
-      "k": [
-        { "kind": "int64", "value": 2 }
-      ],
-      "v": [
-        { "kind": "int64", "value": 20 }
-      ]
+      "k": [{ "kind": "int64", "value": 2 }],
+      "v": [{ "kind": "int64", "value": 20 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "k": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "v": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ]
+      "k": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "v": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
     }
   }
 }
-

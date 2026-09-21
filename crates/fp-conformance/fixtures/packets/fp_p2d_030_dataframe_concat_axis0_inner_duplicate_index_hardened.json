@@ -11,25 +11,15 @@
   "concat_axis": 0,
   "concat_join": "inner",
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 0 }],
     "columns": {
-      "b": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ]
+      "b": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "b": [
-        { "kind": "int64", "value": 3 }
-      ]
+      "b": [{ "kind": "int64", "value": 3 }]
     }
   },
   "expected_frame": {

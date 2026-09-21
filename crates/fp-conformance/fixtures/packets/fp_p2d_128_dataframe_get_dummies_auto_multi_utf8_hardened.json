@@ -67,11 +67,7 @@
         }
       ]
     },
-    "column_order": [
-      "count",
-      "animal",
-      "mood"
-    ]
+    "column_order": ["count", "animal", "mood"]
   },
   "expected_frame": {
     "index": [
@@ -146,11 +142,6 @@
         }
       ]
     },
-    "column_order": [
-      "count",
-      "animal_cat",
-      "animal_dog",
-      "mood_happy"
-    ]
+    "column_order": ["count", "animal_cat", "animal_dog", "mood_happy"]
   }
 }

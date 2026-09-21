@@ -32,19 +32,10 @@
   },
   "tail_n": 2,
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r3" },
-      { "kind": "utf8", "value": "r4" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r3" }, { "kind": "utf8", "value": "r4" }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 40 }
-      ],
-      "b": [
-        { "kind": "utf8", "value": "y" },
-        { "kind": "utf8", "value": "z" }
-      ]
+      "a": [{ "kind": "int64", "value": 30 }, { "kind": "int64", "value": 40 }],
+      "b": [{ "kind": "utf8", "value": "y" }, { "kind": "utf8", "value": "z" }]
     }
   }
 }

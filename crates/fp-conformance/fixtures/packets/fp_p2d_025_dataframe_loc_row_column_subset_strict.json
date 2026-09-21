@@ -32,25 +32,13 @@
       ]
     }
   },
-  "loc_labels": [
-    { "kind": "utf8", "value": "r3" },
-    { "kind": "utf8", "value": "r1" }
-  ],
+  "loc_labels": [{ "kind": "utf8", "value": "r3" }, { "kind": "utf8", "value": "r1" }],
   "column_order": ["c", "a"],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r3" },
-      { "kind": "utf8", "value": "r1" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r3" }, { "kind": "utf8", "value": "r1" }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 10 }
-      ],
-      "c": [
-        { "kind": "utf8", "value": "z" },
-        { "kind": "utf8", "value": "x" }
-      ]
+      "a": [{ "kind": "int64", "value": 30 }, { "kind": "int64", "value": 10 }],
+      "c": [{ "kind": "utf8", "value": "z" }, { "kind": "utf8", "value": "x" }]
     }
   }
 }

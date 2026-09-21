@@ -185,12 +185,6 @@
         }
       ]
     },
-    "column_order": [
-      "id",
-      "left_v",
-      "shared_x",
-      "right_v",
-      "shared_y"
-    ]
+    "column_order": ["id", "left_v", "shared_x", "right_v", "shared_y"]
   }
 }

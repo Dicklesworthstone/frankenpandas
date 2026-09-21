@@ -39,10 +39,7 @@
     ]
   },
   "expected_series": {
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
     "values": [
       { "kind": "float64", "value": 14.1421356237309505 },
       { "kind": "float64", "value": 14.1421356237309505 }

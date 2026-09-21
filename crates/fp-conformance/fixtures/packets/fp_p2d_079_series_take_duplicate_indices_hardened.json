@@ -11,14 +11,8 @@
   "take_indices": [1, 1, 0],
   "left": {
     "name": "vals",
-    "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "first" },
-      { "kind": "utf8", "value": "second" }
-    ]
+    "index": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
+    "values": [{ "kind": "utf8", "value": "first" }, { "kind": "utf8", "value": "second" }]
   },
   "expected_series": {
     "index": [

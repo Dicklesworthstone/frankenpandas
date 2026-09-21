@@ -77,10 +77,7 @@
         }
       ]
     },
-    "column_order": [
-      "A",
-      "B"
-    ]
+    "column_order": ["A", "B"]
   },
   "window_size": 3,
   "min_periods": 2,
@@ -153,9 +150,6 @@
         }
       ]
     },
-    "column_order": [
-      "A",
-      "B"
-    ]
+    "column_order": ["A", "B"]
   }
 }

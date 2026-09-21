@@ -8,12 +8,7 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:11:04Z"
   },
-  "csv_parse_date_combinations": [
-    [
-      "date",
-      "time"
-    ]
-  ],
+  "csv_parse_date_combinations": [["date", "time"]],
   "csv_input": "date,time,value\n2024-01-15,10:30:00,1\n2024-01-16,11:45:30,2\n",
   "expected_frame": {
     "index": [
@@ -48,9 +43,6 @@
         }
       ]
     },
-    "column_order": [
-      "date_time",
-      "value"
-    ]
+    "column_order": ["date_time", "value"]
   }
 }

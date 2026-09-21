@@ -11,36 +11,18 @@
   "merge_on": "key",
   "merge_fill_method": "ffill",
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "key": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 3 }
-      ],
-      "left_val": [
-        { "kind": "float64", "value": 10.0 },
-        { "kind": "float64", "value": 30.0 }
-      ]
+      "key": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 3 }],
+      "left_val": [{ "kind": "float64", "value": 10.0 }, { "kind": "float64", "value": 30.0 }]
     },
     "column_order": ["key", "left_val"]
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "key": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 4 }
-      ],
-      "right_val": [
-        { "kind": "float64", "value": 20.0 },
-        { "kind": "float64", "value": 40.0 }
-      ]
+      "key": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 4 }],
+      "right_val": [{ "kind": "float64", "value": 20.0 }, { "kind": "float64", "value": 40.0 }]
     },
     "column_order": ["key", "right_val"]
   },

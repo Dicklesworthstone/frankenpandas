@@ -8,46 +8,22 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:10:20Z"
   },
-  "replace_to_find": [
-    { "kind": "int64", "value": 1 },
-    { "kind": "int64", "value": 2 }
-  ],
-  "replace_to_value": [
-    { "kind": "int64", "value": 2 },
-    { "kind": "int64", "value": 99 }
-  ],
+  "replace_to_find": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+  "replace_to_value": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 99 }],
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 1 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 1 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 99 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 99 },
-        { "kind": "int64", "value": 2 }
-      ]
+      "a": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 99 }],
+      "b": [{ "kind": "int64", "value": 99 }, { "kind": "int64", "value": 2 }]
     }
   }
 }

@@ -10,26 +10,14 @@
   },
   "left": {
     "name": "data",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 6 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "int64", "value": 5 }, { "kind": "int64", "value": 6 }]
   },
   "replace_to_find": [],
   "replace_to_value": [],
   "expected_series": {
     "name": "data",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "null", "value": "na_n" },
-      { "kind": "null", "value": "na_n" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "null", "value": "na_n" }, { "kind": "null", "value": "na_n" }]
   }
 }

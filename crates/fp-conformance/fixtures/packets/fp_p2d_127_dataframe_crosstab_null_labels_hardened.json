@@ -35,13 +35,9 @@
     ]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "a" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }],
     "columns": {
-      "x": [
-        { "kind": "int64", "value": 1 }
-      ]
+      "x": [{ "kind": "int64", "value": 1 }]
     },
     "column_order": ["x"]
   }

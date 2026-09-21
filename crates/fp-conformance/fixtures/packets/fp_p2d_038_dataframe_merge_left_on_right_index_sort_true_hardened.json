@@ -14,55 +14,25 @@
   "right_on_keys": ["ridx"],
   "merge_sort": true,
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 11 }
-    ],
+    "index": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 11 }],
     "columns": {
-      "lk": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 1 }
-      ],
-      "left_v": [
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 10 }
-      ]
+      "lk": [{ "kind": "int64", "value": 3 }, { "kind": "int64", "value": 1 }],
+      "left_v": [{ "kind": "int64", "value": 30 }, { "kind": "int64", "value": 10 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 3 }
-    ],
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 3 }],
     "columns": {
-      "right_v": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 300 }
-      ]
+      "right_v": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 300 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "left_v": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 30 }
-      ],
-      "lk": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 3 }
-      ],
-      "ridx": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 3 }
-      ],
-      "right_v": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 300 }
-      ]
+      "left_v": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 30 }],
+      "lk": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 3 }],
+      "ridx": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 3 }],
+      "right_v": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 300 }]
     }
   }
 }

@@ -8,20 +8,12 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:09:05Z",
     "oracle_attestation": "error_agreement"
-},
+  },
   "left": {
     "name": "data",
-    "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" }
-    ],
-    "values": [
-      { "kind": "int64", "value": 11 },
-      { "kind": "int64", "value": 22 }
-    ]
+    "index": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
+    "values": [{ "kind": "int64", "value": 11 }, { "kind": "int64", "value": 22 }]
   },
-  "loc_labels": [
-    { "kind": "utf8", "value": "missing" }
-  ],
+  "loc_labels": [{ "kind": "utf8", "value": "missing" }],
   "expected_error_contains": "loc label not found"
 }

@@ -125,10 +125,6 @@
         }
       ]
     },
-    "column_order": [
-      "a",
-      "b",
-      "c"
-    ]
+    "column_order": ["a", "b", "c"]
   }
 }

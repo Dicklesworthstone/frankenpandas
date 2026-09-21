@@ -8,25 +8,13 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:09:43Z",
     "oracle_attestation": "error_agreement"
-},
+  },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "index": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "level_0": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
-      ],
-      "v": [
-        { "kind": "int64", "value": 5 },
-        { "kind": "int64", "value": 6 }
-      ]
+      "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "level_0": [{ "kind": "int64", "value": 3 }, { "kind": "int64", "value": 4 }],
+      "v": [{ "kind": "int64", "value": 5 }, { "kind": "int64", "value": 6 }]
     }
   },
   "reset_index_drop": false,

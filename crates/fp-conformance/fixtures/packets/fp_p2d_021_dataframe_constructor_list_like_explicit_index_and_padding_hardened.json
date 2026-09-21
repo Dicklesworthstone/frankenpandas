@@ -9,15 +9,9 @@
     "generated_at": "2026-04-22T21:02:48Z"
   },
   "matrix_rows": [
-    [
-      { "kind": "int64", "value": 10 }
-    ],
-    [
-      { "kind": "int64", "value": 20 }
-    ],
-    [
-      { "kind": "int64", "value": 30 }
-    ]
+    [{ "kind": "int64", "value": 10 }],
+    [{ "kind": "int64", "value": 20 }],
+    [{ "kind": "int64", "value": 30 }]
   ],
   "index": [
     { "kind": "utf8", "value": "a" },

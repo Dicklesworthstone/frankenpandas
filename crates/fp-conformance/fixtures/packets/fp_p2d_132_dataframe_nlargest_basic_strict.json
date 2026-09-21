@@ -34,20 +34,11 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r4" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r4" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["score", "label"],
     "columns": {
-      "score": [
-        { "kind": "int64", "value": 40 },
-        { "kind": "int64", "value": 30 }
-      ],
-      "label": [
-        { "kind": "utf8", "value": "top" },
-        { "kind": "utf8", "value": "high" }
-      ]
+      "score": [{ "kind": "int64", "value": 40 }, { "kind": "int64", "value": 30 }],
+      "label": [{ "kind": "utf8", "value": "top" }, { "kind": "utf8", "value": "high" }]
     }
   }
 }

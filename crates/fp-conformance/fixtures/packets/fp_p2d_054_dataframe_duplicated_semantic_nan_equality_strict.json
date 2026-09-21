@@ -9,29 +9,14 @@
     "generated_at": "2026-09-01T06:09:44Z"
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "a": [
-        { "kind": "null", "value": "na_n" },
-        { "kind": "null", "value": "na_n" }
-      ],
-      "b": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 1 }
-      ]
+      "a": [{ "kind": "null", "value": "na_n" }, { "kind": "null", "value": "na_n" }],
+      "b": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 1 }]
     }
   },
   "expected_series": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "bool", "value": false },
-      { "kind": "bool", "value": true }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "bool", "value": false }, { "kind": "bool", "value": true }]
   }
 }

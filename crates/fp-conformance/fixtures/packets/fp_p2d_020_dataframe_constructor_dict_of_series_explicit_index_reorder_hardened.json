@@ -97,9 +97,6 @@
         }
       ]
     },
-    "column_order": [
-      "a",
-      "b"
-    ]
+    "column_order": ["a", "b"]
   }
 }

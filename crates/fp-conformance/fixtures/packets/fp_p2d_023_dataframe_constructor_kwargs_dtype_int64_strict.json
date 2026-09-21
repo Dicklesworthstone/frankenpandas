@@ -10,35 +10,17 @@
   },
   "constructor_dtype": "int64",
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "flag": [
-        { "kind": "bool", "value": true },
-        { "kind": "bool", "value": false }
-      ],
-      "score": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 0.0 }
-      ]
+      "flag": [{ "kind": "bool", "value": true }, { "kind": "bool", "value": false }],
+      "score": [{ "kind": "float64", "value": 1.0 }, { "kind": "float64", "value": 0.0 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "flag": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 0 }
-      ],
-      "score": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 0 }
-      ]
+      "flag": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 0 }],
+      "score": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 0 }]
     }
   }
 }

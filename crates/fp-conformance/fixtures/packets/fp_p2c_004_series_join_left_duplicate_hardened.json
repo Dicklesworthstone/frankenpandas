@@ -11,36 +11,17 @@
   "join_type": "left",
   "left": {
     "name": "left",
-    "index": [
-      { "kind": "utf8", "value": "m" },
-      { "kind": "utf8", "value": "m" }
-    ],
-    "values": [
-      { "kind": "int64", "value": 7 },
-      { "kind": "int64", "value": 8 }
-    ]
+    "index": [{ "kind": "utf8", "value": "m" }, { "kind": "utf8", "value": "m" }],
+    "values": [{ "kind": "int64", "value": 7 }, { "kind": "int64", "value": 8 }]
   },
   "right": {
     "name": "right",
-    "index": [
-      { "kind": "utf8", "value": "m" }
-    ],
-    "values": [
-      { "kind": "int64", "value": 9 }
-    ]
+    "index": [{ "kind": "utf8", "value": "m" }],
+    "values": [{ "kind": "int64", "value": 9 }]
   },
   "expected_join": {
-    "index": [
-      { "kind": "utf8", "value": "m" },
-      { "kind": "utf8", "value": "m" }
-    ],
-    "left_values": [
-      { "kind": "int64", "value": 7 },
-      { "kind": "int64", "value": 8 }
-    ],
-    "right_values": [
-      { "kind": "int64", "value": 9 },
-      { "kind": "int64", "value": 9 }
-    ]
+    "index": [{ "kind": "utf8", "value": "m" }, { "kind": "utf8", "value": "m" }],
+    "left_values": [{ "kind": "int64", "value": 7 }, { "kind": "int64", "value": 8 }],
+    "right_values": [{ "kind": "int64", "value": 9 }, { "kind": "int64", "value": 9 }]
   }
 }

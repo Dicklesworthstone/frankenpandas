@@ -31,19 +31,10 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "k2" },
-      { "kind": "utf8", "value": "k0" }
-    ],
+    "index": [{ "kind": "utf8", "value": "k2" }, { "kind": "utf8", "value": "k0" }],
     "columns": {
-      "a": [
-        { "kind": "utf8", "value": "b" },
-        { "kind": "utf8", "value": "c" }
-      ],
-      "b": [
-        { "kind": "utf8", "value": "u" },
-        { "kind": "utf8", "value": "w" }
-      ]
+      "a": [{ "kind": "utf8", "value": "b" }, { "kind": "utf8", "value": "c" }],
+      "b": [{ "kind": "utf8", "value": "u" }, { "kind": "utf8", "value": "w" }]
     }
   }
 }

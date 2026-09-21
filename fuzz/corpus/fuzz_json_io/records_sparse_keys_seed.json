@@ -1,1 +1,6 @@
-[{"a":1,"b":"x"},{"a":2,"c":true},{"b":"z","c":false},{"a":null,"b":null,"c":null}]
+[
+  { "a": 1, "b": "x" },
+  { "a": 2, "c": true },
+  { "b": "z", "c": false },
+  { "a": null, "b": null, "c": null }
+]

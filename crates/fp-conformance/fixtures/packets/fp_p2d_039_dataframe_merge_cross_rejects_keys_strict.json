@@ -12,23 +12,15 @@
   "join_type": "cross",
   "merge_on": "id",
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "id": [
-        { "kind": "int64", "value": 1 }
-      ]
+      "id": [{ "kind": "int64", "value": 1 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "id": [
-        { "kind": "int64", "value": 2 }
-      ]
+      "id": [{ "kind": "int64", "value": 2 }]
     }
   },
   "expected_error_contains": "join_type='cross' does not allow merge_on/merge_on_keys/left_on_keys/right_on_keys"

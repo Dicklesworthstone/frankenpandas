@@ -21,10 +21,7 @@
         "value": 1
       }
     ],
-    "column_order": [
-      "b",
-      "a"
-    ],
+    "column_order": ["b", "a"],
     "columns": {
       "a": [
         {
@@ -59,11 +56,7 @@
         "value": 3
       }
     ],
-    "column_order": [
-      "d",
-      "c",
-      "a"
-    ],
+    "column_order": ["d", "c", "a"],
     "columns": {
       "a": [
         {
@@ -190,11 +183,6 @@
         }
       ]
     },
-    "column_order": [
-      "b",
-      "a",
-      "d",
-      "c"
-    ]
+    "column_order": ["b", "a", "d", "c"]
   }
 }

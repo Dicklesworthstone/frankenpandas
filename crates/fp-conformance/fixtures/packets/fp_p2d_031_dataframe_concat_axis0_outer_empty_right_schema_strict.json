@@ -74,8 +74,6 @@
         }
       ]
     },
-    "column_order": [
-      "a"
-    ]
+    "column_order": ["a"]
   }
 }

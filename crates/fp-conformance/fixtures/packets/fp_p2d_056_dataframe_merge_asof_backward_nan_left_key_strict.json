@@ -56,10 +56,7 @@
         }
       ]
     },
-    "column_order": [
-      "time",
-      "left_val"
-    ]
+    "column_order": ["time", "left_val"]
   },
   "frame_right": {
     "index": [
@@ -94,10 +91,7 @@
         }
       ]
     },
-    "column_order": [
-      "time",
-      "right_val"
-    ]
+    "column_order": ["time", "right_val"]
   },
   "expected_error_contains": "incompatible merge keys"
 }

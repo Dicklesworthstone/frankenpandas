@@ -27,10 +27,7 @@
         "value": 3
       }
     ],
-    "column_order": [
-      "x",
-      "y"
-    ],
+    "column_order": ["x", "y"],
     "columns": {
       "x": [
         {

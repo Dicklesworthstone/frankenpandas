@@ -34,14 +34,8 @@
       { "kind": "utf8", "value": "2024-01-16 10:30:00" }
     ],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 3 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 3.5 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 3 }],
+      "b": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 3.5 }]
     }
   }
 }

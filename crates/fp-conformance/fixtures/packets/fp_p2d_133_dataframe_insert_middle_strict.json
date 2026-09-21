@@ -10,46 +10,22 @@
   },
   "insert_loc": 1,
   "insert_column": "b",
-  "insert_values": [
-    { "kind": "int64", "value": 10 },
-    { "kind": "int64", "value": 20 }
-  ],
+  "insert_values": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }],
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a", "c"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "c": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 200 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "c": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 200 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a", "b", "c"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ],
-      "c": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 200 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }],
+      "c": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 200 }]
     }
   }
 }

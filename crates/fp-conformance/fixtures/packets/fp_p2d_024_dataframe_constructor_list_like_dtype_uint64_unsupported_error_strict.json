@@ -10,19 +10,11 @@
     "oracle_attestation": "Live oracle run 2026-08-30: /data/projects/frankenpandas/.venv-oracle/bin/python crates/fp-conformance/oracle/pandas_oracle.py --legacy-root /dp/frankenpandas/legacy_pandas_code/pandas --allow-system-pandas-fallback < fp_p2d_024_dataframe_constructor_list_like_dtype_uint64_unsupported_error_strict.json; pandas 2.2.3 returned error=null and expected_frame column 0=[int64(1)]."
   },
   "constructor_dtype": "uint64",
-  "matrix_rows": [
-    [
-      { "kind": "int64", "value": 1 }
-    ]
-  ],
+  "matrix_rows": [[{ "kind": "int64", "value": 1 }]],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "0": [
-        { "kind": "int64", "value": 1 }
-      ]
+      "0": [{ "kind": "int64", "value": 1 }]
     },
     "column_order": ["0"]
   }

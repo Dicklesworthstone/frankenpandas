@@ -9,35 +9,17 @@
     "generated_at": "2026-09-01T06:09:41Z"
   },
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ],
-      "b": [
-        { "kind": "utf8", "value": "k" },
-        { "kind": "utf8", "value": "l" }
-      ]
+      "a": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }],
+      "b": [{ "kind": "utf8", "value": "k" }, { "kind": "utf8", "value": "l" }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "a": [
-        { "kind": "bool", "value": false },
-        { "kind": "bool", "value": false }
-      ],
-      "b": [
-        { "kind": "bool", "value": false },
-        { "kind": "bool", "value": false }
-      ]
+      "a": [{ "kind": "bool", "value": false }, { "kind": "bool", "value": false }],
+      "b": [{ "kind": "bool", "value": false }, { "kind": "bool", "value": false }]
     }
   }
 }

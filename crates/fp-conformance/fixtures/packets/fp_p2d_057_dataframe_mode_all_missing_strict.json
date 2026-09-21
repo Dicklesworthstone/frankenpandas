@@ -9,19 +9,10 @@
     "generated_at": "2026-09-01T06:09:47Z"
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "x": [
-        { "kind": "null", "value": "na_n" },
-        { "kind": "null", "value": "na_n" }
-      ],
-      "y": [
-        { "kind": "null", "value": "na_n" },
-        { "kind": "null", "value": "na_n" }
-      ]
+      "x": [{ "kind": "null", "value": "na_n" }, { "kind": "null", "value": "na_n" }],
+      "y": [{ "kind": "null", "value": "na_n" }, { "kind": "null", "value": "na_n" }]
     },
     "column_order": ["x", "y"]
   },

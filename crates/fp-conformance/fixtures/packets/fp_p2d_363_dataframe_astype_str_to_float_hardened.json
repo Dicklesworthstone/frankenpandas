@@ -24,9 +24,7 @@
         "value": 2
       }
     ],
-    "column_order": [
-      "a"
-    ],
+    "column_order": ["a"],
     "columns": {
       "a": [
         {
@@ -75,8 +73,6 @@
         }
       ]
     },
-    "column_order": [
-      "a"
-    ]
+    "column_order": ["a"]
   }
 }

@@ -11,14 +11,8 @@
   "resample_freq": "Q",
   "left": {
     "name": "vals",
-    "index": [
-      { "kind": "utf8", "value": "2024-01-15" },
-      { "kind": "utf8", "value": "2024-10-20" }
-    ],
-    "values": [
-      { "kind": "float64", "value": 1.0 },
-      { "kind": "float64", "value": 2.0 }
-    ]
+    "index": [{ "kind": "utf8", "value": "2024-01-15" }, { "kind": "utf8", "value": "2024-10-20" }],
+    "values": [{ "kind": "float64", "value": 1.0 }, { "kind": "float64", "value": 2.0 }]
   },
   "expected_series": {
     "index": [

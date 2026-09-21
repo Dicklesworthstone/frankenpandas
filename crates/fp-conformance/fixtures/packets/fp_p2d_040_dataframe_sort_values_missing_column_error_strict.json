@@ -8,19 +8,13 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:09:36Z",
     "oracle_attestation": "error_agreement"
-},
+  },
   "sort_column": "missing",
   "sort_ascending": true,
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ]
+      "a": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
     }
   },
   "expected_error_contains": "not found"

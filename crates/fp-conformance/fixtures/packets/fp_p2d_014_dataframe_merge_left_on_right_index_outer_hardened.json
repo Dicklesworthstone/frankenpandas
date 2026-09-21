@@ -32,15 +32,9 @@
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
-    ],
+    "index": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 3 }],
     "columns": {
-      "right_v": [
-        { "kind": "int64", "value": 20 },
-        { "kind": "int64", "value": 30 }
-      ]
+      "right_v": [{ "kind": "int64", "value": 20 }, { "kind": "int64", "value": 30 }]
     }
   },
   "expected_frame": {

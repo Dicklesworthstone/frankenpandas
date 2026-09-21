@@ -27,12 +27,7 @@
         "value": 3
       }
     ],
-    "column_order": [
-      "flag",
-      "nums",
-      "text",
-      "empty"
-    ],
+    "column_order": ["flag", "nums", "text", "empty"],
     "columns": {
       "flag": [
         {

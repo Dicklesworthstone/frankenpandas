@@ -11,29 +11,17 @@
   "regex_pattern": "(\\w+)@(\\w+)",
   "left": {
     "name": "strings",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "values": [
       { "kind": "utf8", "value": "user@domain" },
       { "kind": "utf8", "value": "hello@world" }
     ]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "0": [
-        { "kind": "utf8", "value": "user" },
-        { "kind": "utf8", "value": "hello" }
-      ],
-      "1": [
-        { "kind": "utf8", "value": "domain" },
-        { "kind": "utf8", "value": "world" }
-      ]
+      "0": [{ "kind": "utf8", "value": "user" }, { "kind": "utf8", "value": "hello" }],
+      "1": [{ "kind": "utf8", "value": "domain" }, { "kind": "utf8", "value": "world" }]
     }
   }
 }

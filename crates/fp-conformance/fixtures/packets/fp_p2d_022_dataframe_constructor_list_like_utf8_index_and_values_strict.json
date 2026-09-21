@@ -9,34 +9,16 @@
     "generated_at": "2026-09-01T06:09:21Z"
   },
   "matrix_rows": [
-    [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
-    [
-      { "kind": "utf8", "value": "c" },
-      { "kind": "utf8", "value": "d" }
-    ]
+    [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
+    [{ "kind": "utf8", "value": "c" }, { "kind": "utf8", "value": "d" }]
   ],
-  "index": [
-    { "kind": "utf8", "value": "u1" },
-    { "kind": "utf8", "value": "u2" }
-  ],
+  "index": [{ "kind": "utf8", "value": "u1" }, { "kind": "utf8", "value": "u2" }],
   "column_order": ["c1", "c2"],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "u1" },
-      { "kind": "utf8", "value": "u2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "u1" }, { "kind": "utf8", "value": "u2" }],
     "columns": {
-      "c1": [
-        { "kind": "utf8", "value": "a" },
-        { "kind": "utf8", "value": "c" }
-      ],
-      "c2": [
-        { "kind": "utf8", "value": "b" },
-        { "kind": "utf8", "value": "d" }
-      ]
+      "c1": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "c" }],
+      "c2": [{ "kind": "utf8", "value": "b" }, { "kind": "utf8", "value": "d" }]
     }
   }
 }

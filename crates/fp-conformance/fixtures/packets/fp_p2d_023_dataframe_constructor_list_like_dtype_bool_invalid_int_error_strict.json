@@ -8,12 +8,8 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:09:22Z",
     "oracle_attestation": "error_agreement"
-},
+  },
   "constructor_dtype": "boolean",
-  "matrix_rows": [
-    [
-      { "kind": "int64", "value": 2 }
-    ]
-  ],
+  "matrix_rows": [[{ "kind": "int64", "value": 2 }]],
   "expected_error_contains": "expected 0/1 for bool cast from int64"
 }

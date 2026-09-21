@@ -11,12 +11,8 @@
   "regex_pattern": "(\\d+)",
   "left": {
     "name": "strings",
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "a1b2c3" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }],
+    "values": [{ "kind": "utf8", "value": "a1b2c3" }]
   },
   "expected_frame": {
     "index": [

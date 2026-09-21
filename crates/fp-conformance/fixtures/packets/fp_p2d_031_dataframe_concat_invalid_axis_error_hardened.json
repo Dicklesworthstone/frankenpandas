@@ -12,23 +12,15 @@
   "concat_axis": 7,
   "concat_join": "outer",
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 1 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 2 }
-      ]
+      "a": [{ "kind": "int64", "value": 2 }]
     }
   },
   "expected_error_contains": "concat_axis must be 0 or 1"

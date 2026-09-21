@@ -34,20 +34,11 @@
   "keep": "last",
   "ignore_index": true,
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "column_order": ["a", "c"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 1 }
-      ],
-      "c": [
-        { "kind": "int64", "value": 12 },
-        { "kind": "int64", "value": 13 }
-      ]
+      "a": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 1 }],
+      "c": [{ "kind": "int64", "value": 12 }, { "kind": "int64", "value": 13 }]
     }
   }
 }

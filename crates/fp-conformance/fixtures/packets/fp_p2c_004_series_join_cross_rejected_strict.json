@@ -12,21 +12,13 @@
   "join_type": "cross",
   "left": {
     "name": "left",
-    "index": [
-      { "kind": "utf8", "value": "a" }
-    ],
-    "values": [
-      { "kind": "int64", "value": 1 }
-    ]
+    "index": [{ "kind": "utf8", "value": "a" }],
+    "values": [{ "kind": "int64", "value": 1 }]
   },
   "right": {
     "name": "right",
-    "index": [
-      { "kind": "utf8", "value": "b" }
-    ],
-    "values": [
-      { "kind": "int64", "value": 2 }
-    ]
+    "index": [{ "kind": "utf8", "value": "b" }],
+    "values": [{ "kind": "int64", "value": 2 }]
   },
   "expected_error_contains": "series_join requires join_type=inner|left|right|outer"
 }

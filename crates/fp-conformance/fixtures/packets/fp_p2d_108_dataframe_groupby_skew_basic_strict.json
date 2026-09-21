@@ -38,10 +38,7 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
     "columns": {
       "val": [
         { "kind": "float64", "value": 0.0 },

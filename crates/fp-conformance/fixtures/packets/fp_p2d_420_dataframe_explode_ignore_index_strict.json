@@ -13,20 +13,11 @@
   "ignore_index": true,
   "frame": {
     "columns": {
-      "id": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "items": [
-        { "kind": "utf8", "value": "a| b" },
-        { "kind": "utf8", "value": "c" }
-      ]
+      "id": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "items": [{ "kind": "utf8", "value": "a| b" }, { "kind": "utf8", "value": "c" }]
     },
     "column_order": ["id", "items"],
-    "index": [
-      { "kind": "utf8", "value": "left" },
-      { "kind": "utf8", "value": "right" }
-    ]
+    "index": [{ "kind": "utf8", "value": "left" }, { "kind": "utf8", "value": "right" }]
   },
   "expected_frame": {
     "columns": {

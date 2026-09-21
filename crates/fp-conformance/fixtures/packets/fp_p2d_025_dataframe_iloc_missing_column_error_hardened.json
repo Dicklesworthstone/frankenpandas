@@ -10,13 +10,9 @@
     "oracle_attestation": "error_agreement"
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 10 }
-      ]
+      "a": [{ "kind": "int64", "value": 10 }]
     }
   },
   "iloc_positions": [0],

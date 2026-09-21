@@ -33,10 +33,7 @@
         "value": 4
       }
     ],
-    "column_order": [
-      "a",
-      "b"
-    ],
+    "column_order": ["a", "b"],
     "columns": {
       "a": [
         {
@@ -153,9 +150,6 @@
         }
       ]
     },
-    "column_order": [
-      "a",
-      "b"
-    ]
+    "column_order": ["a", "b"]
   }
 }

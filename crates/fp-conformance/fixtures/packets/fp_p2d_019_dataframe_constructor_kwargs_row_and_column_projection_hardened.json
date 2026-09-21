@@ -18,10 +18,7 @@
       "value": 0
     }
   ],
-  "column_order": [
-    "b",
-    "z"
-  ],
+  "column_order": ["b", "z"],
   "frame": {
     "index": [
       {
@@ -89,9 +86,6 @@
         }
       ]
     },
-    "column_order": [
-      "b",
-      "z"
-    ]
+    "column_order": ["b", "z"]
   }
 }

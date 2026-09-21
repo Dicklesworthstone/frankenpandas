@@ -30,16 +30,10 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "grp": [
-        { "kind": "utf8", "value": "x" }
-      ],
-      "val": [
-        { "kind": "float64", "value": 100.0 }
-      ]
+      "grp": [{ "kind": "utf8", "value": "x" }],
+      "val": [{ "kind": "float64", "value": 100.0 }]
     }
   }
 }

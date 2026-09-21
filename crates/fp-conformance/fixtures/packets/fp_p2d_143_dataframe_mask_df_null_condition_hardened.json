@@ -19,9 +19,7 @@
         "value": 1
       }
     ],
-    "column_order": [
-      "a"
-    ],
+    "column_order": ["a"],
     "columns": {
       "a": [
         {
@@ -46,9 +44,7 @@
         "value": 1
       }
     ],
-    "column_order": [
-      "a"
-    ],
+    "column_order": ["a"],
     "columns": {
       "a": [
         {
@@ -73,9 +69,7 @@
         "value": 1
       }
     ],
-    "column_order": [
-      "a"
-    ],
+    "column_order": ["a"],
     "columns": {
       "a": [
         {
@@ -112,8 +106,6 @@
         }
       ]
     },
-    "column_order": [
-      "a"
-    ]
+    "column_order": ["a"]
   }
 }

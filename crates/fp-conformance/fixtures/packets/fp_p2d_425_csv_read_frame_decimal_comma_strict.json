@@ -12,15 +12,9 @@
   "csv_input": "price\n\"1,50\"\n\"3,75\"\n",
   "expected_frame": {
     "columns": {
-      "price": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 3.75 }
-      ]
+      "price": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 3.75 }]
     },
     "column_order": ["price"],
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }]
   }
 }

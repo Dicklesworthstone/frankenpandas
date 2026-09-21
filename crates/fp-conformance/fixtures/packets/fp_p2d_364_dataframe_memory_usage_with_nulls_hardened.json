@@ -27,10 +27,7 @@
         "value": 3
       }
     ],
-    "column_order": [
-      "nums",
-      "strs"
-    ],
+    "column_order": ["nums", "strs"],
     "columns": {
       "nums": [
         {

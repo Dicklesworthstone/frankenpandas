@@ -11,23 +11,11 @@
   "melt_id_vars": ["id"],
   "melt_value_vars": ["x", "y"],
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "id": [
-        { "kind": "utf8", "value": "a" },
-        { "kind": "utf8", "value": "b" }
-      ],
-      "x": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 2.0 }
-      ],
-      "y": [
-        { "kind": "float64", "value": 3.0 },
-        { "kind": "float64", "value": 4.0 }
-      ]
+      "id": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
+      "x": [{ "kind": "float64", "value": 1.0 }, { "kind": "float64", "value": 2.0 }],
+      "y": [{ "kind": "float64", "value": 3.0 }, { "kind": "float64", "value": 4.0 }]
     },
     "column_order": ["id", "x", "y"]
   },

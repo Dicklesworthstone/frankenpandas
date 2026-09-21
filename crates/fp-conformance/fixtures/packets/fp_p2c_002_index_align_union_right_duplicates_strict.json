@@ -10,10 +10,7 @@
   },
   "left": {
     "name": "left_idx",
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
     "values": []
   },
   "right": {

@@ -10,24 +10,12 @@
   },
   "left": {
     "name": "vals",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "float64", "value": 1.25 },
-      { "kind": "float64", "value": 2.5 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "float64", "value": 1.25 }, { "kind": "float64", "value": 2.5 }]
   },
   "tail_n": 10,
   "expected_series": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "float64", "value": 1.25 },
-      { "kind": "float64", "value": 2.5 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "float64", "value": 1.25 }, { "kind": "float64", "value": 2.5 }]
   }
 }

@@ -32,15 +32,9 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
     "columns": {
-      "flag": [
-        { "kind": "bool", "value": true },
-        { "kind": "bool", "value": false }
-      ]
+      "flag": [{ "kind": "bool", "value": true }, { "kind": "bool", "value": false }]
     }
   }
 }

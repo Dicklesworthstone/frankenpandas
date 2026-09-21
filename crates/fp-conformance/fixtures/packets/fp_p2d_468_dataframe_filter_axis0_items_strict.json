@@ -11,11 +11,23 @@
   "filter_axis": 0,
   "filter_items": ["row_c", "missing", "row_a", "row_c"],
   "frame": {
-    "index": [{ "kind": "utf8", "value": "row_a" }, { "kind": "utf8", "value": "row_b" }, { "kind": "utf8", "value": "row_c" }],
+    "index": [
+      { "kind": "utf8", "value": "row_a" },
+      { "kind": "utf8", "value": "row_b" },
+      { "kind": "utf8", "value": "row_c" }
+    ],
     "column_order": ["alpha", "beta"],
     "columns": {
-      "alpha": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }, { "kind": "int64", "value": 30 }],
-      "beta": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 200 }, { "kind": "int64", "value": 300 }]
+      "alpha": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ],
+      "beta": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
     }
   },
   "expected_frame": {

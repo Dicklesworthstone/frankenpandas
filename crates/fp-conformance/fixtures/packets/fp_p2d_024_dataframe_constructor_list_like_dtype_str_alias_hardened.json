@@ -10,29 +10,14 @@
   },
   "constructor_dtype": "str",
   "matrix_rows": [
-    [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" }
-    ],
-    [
-      { "kind": "utf8", "value": "z" },
-      { "kind": "utf8", "value": "w" }
-    ]
+    [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
+    [{ "kind": "utf8", "value": "z" }, { "kind": "utf8", "value": "w" }]
   ],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "0": [
-        { "kind": "utf8", "value": "x" },
-        { "kind": "utf8", "value": "z" }
-      ],
-      "1": [
-        { "kind": "utf8", "value": "y" },
-        { "kind": "utf8", "value": "w" }
-      ]
+      "0": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "z" }],
+      "1": [{ "kind": "utf8", "value": "y" }, { "kind": "utf8", "value": "w" }]
     }
   }
 }

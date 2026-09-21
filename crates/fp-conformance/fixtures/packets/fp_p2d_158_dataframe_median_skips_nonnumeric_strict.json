@@ -32,11 +32,7 @@
         "value": 4
       }
     ],
-    "column_order": [
-      "score",
-      "label",
-      "offset"
-    ],
+    "column_order": ["score", "label", "offset"],
     "columns": {
       "score": [
         {

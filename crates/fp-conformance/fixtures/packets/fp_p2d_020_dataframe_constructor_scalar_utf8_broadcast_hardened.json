@@ -9,21 +9,12 @@
     "generated_at": "2026-09-01T06:09:18Z"
   },
   "fill_value": { "kind": "utf8", "value": "x" },
-  "index": [
-    { "kind": "utf8", "value": "r1" },
-    { "kind": "utf8", "value": "r2" }
-  ],
+  "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
   "column_order": ["label"],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "label": [
-        { "kind": "utf8", "value": "x" },
-        { "kind": "utf8", "value": "x" }
-      ]
+      "label": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "x" }]
     }
   }
 }

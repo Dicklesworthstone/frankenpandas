@@ -8,27 +8,14 @@
     "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
     "generated_at": "2026-04-22T21:02:48Z"
   },
-  "matrix_rows": [
-    [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 6 }
-    ]
-  ],
+  "matrix_rows": [[{ "kind": "int64", "value": 5 }, { "kind": "int64", "value": 6 }]],
   "column_order": ["a", "b", "c"],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 5 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 6 }
-      ],
-      "c": [
-        { "kind": "null", "value": "null" }
-      ]
+      "a": [{ "kind": "int64", "value": 5 }],
+      "b": [{ "kind": "int64", "value": 6 }],
+      "c": [{ "kind": "null", "value": "null" }]
     }
   }
 }

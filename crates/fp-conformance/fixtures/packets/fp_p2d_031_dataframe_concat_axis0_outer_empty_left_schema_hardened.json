@@ -15,28 +15,15 @@
     "columns": {}
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 6 }
-    ],
+    "index": [{ "kind": "int64", "value": 5 }, { "kind": "int64", "value": 6 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 50 },
-        { "kind": "int64", "value": 60 }
-      ]
+      "a": [{ "kind": "int64", "value": 50 }, { "kind": "int64", "value": 60 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 6 }
-    ],
+    "index": [{ "kind": "int64", "value": 5 }, { "kind": "int64", "value": 6 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 50 },
-        { "kind": "int64", "value": 60 }
-      ]
+      "a": [{ "kind": "int64", "value": 50 }, { "kind": "int64", "value": 60 }]
     }
   }
 }
-

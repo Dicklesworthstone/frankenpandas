@@ -16,19 +16,11 @@
     ]
   ],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "0": [
-        { "kind": "int64", "value": 5 }
-      ],
-      "1": [
-        { "kind": "int64", "value": 6 }
-      ],
-      "2": [
-        { "kind": "int64", "value": 7 }
-      ]
+      "0": [{ "kind": "int64", "value": 5 }],
+      "1": [{ "kind": "int64", "value": 6 }],
+      "2": [{ "kind": "int64", "value": 7 }]
     }
   }
 }

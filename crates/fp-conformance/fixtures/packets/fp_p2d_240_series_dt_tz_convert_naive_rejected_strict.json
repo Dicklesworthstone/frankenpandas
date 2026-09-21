@@ -6,12 +6,8 @@
   "dt_tz": "UTC",
   "left": {
     "name": "ts",
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
-    "values": [
-      { "kind": "utf8", "value": "2024-01-15 10:30:00" }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }],
+    "values": [{ "kind": "utf8", "value": "2024-01-15 10:30:00" }]
   },
   "expected_error_contains": "Cannot convert tz-naive timestamps",
   "fixture_provenance": {

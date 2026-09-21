@@ -41,10 +41,7 @@
         }
       ]
     },
-    "column_order": [
-      "a",
-      "b"
-    ]
+    "column_order": ["a", "b"]
   },
   "frame_right": {
     "index": [
@@ -79,15 +76,9 @@
         }
       ]
     },
-    "column_order": [
-      "a",
-      "b"
-    ]
+    "column_order": ["a", "b"]
   },
-  "compare_result_names": [
-    "left",
-    "right"
-  ],
+  "compare_result_names": ["left", "right"],
   "expected_frame": {
     "index": [
       {
@@ -109,10 +100,7 @@
         }
       ]
     },
-    "column_order": [
-      "a_left",
-      "a_right"
-    ],
+    "column_order": ["a_left", "a_right"],
     "column_multiindex": {
       "tuples": [
         [
@@ -136,10 +124,7 @@
           }
         ]
       ],
-      "names": [
-        null,
-        null
-      ]
+      "names": [null, null]
     }
   }
 }

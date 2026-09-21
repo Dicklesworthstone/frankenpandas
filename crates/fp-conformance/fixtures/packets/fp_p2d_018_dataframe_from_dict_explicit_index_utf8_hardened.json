@@ -9,33 +9,15 @@
     "generated_at": "2026-09-01T06:09:14Z"
   },
   "dict_columns": {
-    "tag": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" }
-    ],
-    "val": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 20 }
-    ]
+    "tag": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
+    "val": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
   },
-  "index": [
-    { "kind": "utf8", "value": "r1" },
-    { "kind": "utf8", "value": "r2" }
-  ],
+  "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "tag": [
-        { "kind": "utf8", "value": "x" },
-        { "kind": "utf8", "value": "y" }
-      ],
-      "val": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ]
+      "tag": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
+      "val": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
     }
   }
 }

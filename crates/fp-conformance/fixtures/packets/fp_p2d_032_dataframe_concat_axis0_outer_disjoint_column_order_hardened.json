@@ -17,10 +17,7 @@
         "value": 0
       }
     ],
-    "column_order": [
-      "v",
-      "u"
-    ],
+    "column_order": ["v", "u"],
     "columns": {
       "u": [
         {
@@ -47,10 +44,7 @@
         "value": 2
       }
     ],
-    "column_order": [
-      "x",
-      "w"
-    ],
+    "column_order": ["x", "w"],
     "columns": {
       "w": [
         {
@@ -147,11 +141,6 @@
         }
       ]
     },
-    "column_order": [
-      "v",
-      "u",
-      "x",
-      "w"
-    ]
+    "column_order": ["v", "u", "x", "w"]
   }
 }

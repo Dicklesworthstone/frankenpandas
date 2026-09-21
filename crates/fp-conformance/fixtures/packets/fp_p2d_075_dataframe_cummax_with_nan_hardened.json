@@ -87,8 +87,6 @@
         }
       ]
     },
-    "column_order": [
-      "value"
-    ]
+    "column_order": ["value"]
   }
 }

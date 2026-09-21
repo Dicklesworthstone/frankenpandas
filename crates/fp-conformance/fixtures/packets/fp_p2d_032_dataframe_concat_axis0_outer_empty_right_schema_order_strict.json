@@ -21,10 +21,7 @@
         "value": "r1"
       }
     ],
-    "column_order": [
-      "q",
-      "p"
-    ],
+    "column_order": ["q", "p"],
     "columns": {
       "p": [
         {
@@ -102,9 +99,6 @@
         }
       ]
     },
-    "column_order": [
-      "q",
-      "p"
-    ]
+    "column_order": ["q", "p"]
   }
 }

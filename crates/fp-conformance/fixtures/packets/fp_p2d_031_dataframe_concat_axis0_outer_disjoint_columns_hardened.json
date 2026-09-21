@@ -75,9 +75,6 @@
         }
       ]
     },
-    "column_order": [
-      "x",
-      "y"
-    ]
+    "column_order": ["x", "y"]
   }
 }

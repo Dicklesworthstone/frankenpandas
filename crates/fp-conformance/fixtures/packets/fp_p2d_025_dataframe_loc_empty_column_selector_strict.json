@@ -9,29 +9,16 @@
     "generated_at": "2026-09-01T06:09:25Z"
   },
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
     }
   },
-  "loc_labels": [
-    { "kind": "utf8", "value": "r2" }
-  ],
+  "loc_labels": [{ "kind": "utf8", "value": "r2" }],
   "column_order": [],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r2" }],
     "columns": {}
   }
 }

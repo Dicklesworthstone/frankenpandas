@@ -33,17 +33,11 @@
   "subset": ["a"],
   "keep": "none",
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 3 }
-    ],
+    "index": [{ "kind": "int64", "value": 3 }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 20 }
-      ]
+      "a": [{ "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "int64", "value": 20 }]
     }
   }
 }

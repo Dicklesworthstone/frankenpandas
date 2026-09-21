@@ -39,20 +39,11 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "b" }],
     "column_order": ["x", "b"],
     "columns": {
-      "x": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 1.0 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 1.0 }
-      ]
+      "x": [{ "kind": "float64", "value": 1.0 }, { "kind": "float64", "value": 1.0 }],
+      "b": [{ "kind": "float64", "value": 1.0 }, { "kind": "float64", "value": 1.0 }]
     }
   }
 }

@@ -23,11 +23,7 @@
         "value": 2
       }
     ],
-    "column_order": [
-      "a",
-      "b",
-      "c"
-    ],
+    "column_order": ["a", "b", "c"],
     "columns": {
       "a": [
         {

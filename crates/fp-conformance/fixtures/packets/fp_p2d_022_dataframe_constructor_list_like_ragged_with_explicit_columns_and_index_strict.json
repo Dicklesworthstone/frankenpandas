@@ -9,37 +9,17 @@
     "generated_at": "2026-04-22T21:02:48Z"
   },
   "matrix_rows": [
-    [
-      { "kind": "int64", "value": 8 }
-    ],
-    [
-      { "kind": "int64", "value": 9 },
-      { "kind": "int64", "value": 10 }
-    ]
+    [{ "kind": "int64", "value": 8 }],
+    [{ "kind": "int64", "value": 9 }, { "kind": "int64", "value": 10 }]
   ],
   "column_order": ["x", "y", "z"],
-  "index": [
-    { "kind": "utf8", "value": "r1" },
-    { "kind": "utf8", "value": "r2" }
-  ],
+  "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "x": [
-        { "kind": "int64", "value": 8 },
-        { "kind": "int64", "value": 9 }
-      ],
-      "y": [
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 10 }
-      ],
-      "z": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "null" }
-      ]
+      "x": [{ "kind": "int64", "value": 8 }, { "kind": "int64", "value": 9 }],
+      "y": [{ "kind": "null", "value": "null" }, { "kind": "int64", "value": 10 }],
+      "z": [{ "kind": "null", "value": "null" }, { "kind": "null", "value": "null" }]
     }
   }
 }

@@ -22,19 +22,10 @@
     }
   ],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "c": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "int64", "value": 200 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "c": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 200 }]
     }
   }
 }

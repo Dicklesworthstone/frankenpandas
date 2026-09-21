@@ -41,19 +41,10 @@
     "column_order": ["row", "column", "value"]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "A" },
-      { "kind": "utf8", "value": "B" }
-    ],
+    "index": [{ "kind": "utf8", "value": "A" }, { "kind": "utf8", "value": "B" }],
     "columns": {
-      "x": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 3 }
-      ],
-      "y": [
-        { "kind": "int64", "value": 2 },
-        { "kind": "int64", "value": 4 }
-      ]
+      "x": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 3 }],
+      "y": [{ "kind": "int64", "value": 2 }, { "kind": "int64", "value": 4 }]
     },
     "column_order": ["x", "y"]
   }

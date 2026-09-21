@@ -9,33 +9,18 @@
     "generated_at": "2026-09-01T06:09:59Z"
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "column_order": ["a"],
     "columns": {
-      "a": [
-        { "kind": "utf8", "value": "alpha" },
-        { "kind": "null", "value": "null" }
-      ]
+      "a": [{ "kind": "utf8", "value": "alpha" }, { "kind": "null", "value": "null" }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
-    ],
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "utf8", "value": "beta" },
-        { "kind": "utf8", "value": "gamma" }
-      ],
-      "b": [
-        { "kind": "utf8", "value": "bee" },
-        { "kind": "utf8", "value": "cee" }
-      ]
+      "a": [{ "kind": "utf8", "value": "beta" }, { "kind": "utf8", "value": "gamma" }],
+      "b": [{ "kind": "utf8", "value": "bee" }, { "kind": "utf8", "value": "cee" }]
     }
   },
   "expected_frame": {

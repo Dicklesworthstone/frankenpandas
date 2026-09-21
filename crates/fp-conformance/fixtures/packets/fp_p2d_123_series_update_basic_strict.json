@@ -25,14 +25,8 @@
   },
   "right": {
     "name": "updates",
-    "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 3 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 99 },
-      { "kind": "int64", "value": 100 }
-    ]
+    "index": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 3 }],
+    "values": [{ "kind": "int64", "value": 99 }, { "kind": "int64", "value": 100 }]
   },
   "expected_series": {
     "name": "values",

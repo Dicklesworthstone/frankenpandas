@@ -35,20 +35,11 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 1.0 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 1.0 }
-      ]
+      "a": [{ "kind": "float64", "value": 1.0 }, { "kind": "float64", "value": 1.0 }],
+      "b": [{ "kind": "float64", "value": 1.0 }, { "kind": "float64", "value": 1.0 }]
     }
   }
 }

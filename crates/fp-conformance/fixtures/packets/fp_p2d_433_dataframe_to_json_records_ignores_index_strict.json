@@ -9,23 +9,11 @@
     "generated_at": "2026-09-01T06:11:04Z"
   },
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "row-a" },
-      { "kind": "utf8", "value": "row-b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "row-a" }, { "kind": "utf8", "value": "row-b" }],
     "columns": {
-      "b": [
-        { "kind": "utf8", "value": "x" },
-        { "kind": "utf8", "value": "y" }
-      ],
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "null", "value": "null" }
-      ],
-      "c": [
-        { "kind": "bool", "value": true },
-        { "kind": "bool", "value": false }
-      ]
+      "b": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "null", "value": "null" }],
+      "c": [{ "kind": "bool", "value": true }, { "kind": "bool", "value": false }]
     },
     "column_order": ["b", "a", "c"]
   },

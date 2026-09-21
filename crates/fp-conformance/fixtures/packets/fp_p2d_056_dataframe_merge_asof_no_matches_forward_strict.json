@@ -31,10 +31,7 @@
     "columns": {
       "time": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }],
       "left_val": [{ "kind": "int64", "value": 100 }, { "kind": "int64", "value": 200 }],
-      "right_val": [
-        { "kind": "null", "value": "na_n" },
-        { "kind": "null", "value": "na_n" }
-      ]
+      "right_val": [{ "kind": "null", "value": "na_n" }, { "kind": "null", "value": "na_n" }]
     }
   }
 }

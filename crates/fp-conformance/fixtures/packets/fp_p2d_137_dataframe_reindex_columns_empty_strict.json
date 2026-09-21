@@ -10,27 +10,15 @@
   },
   "reindex_columns": [],
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": ["a", "b"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 40 }
-      ]
+      "a": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }],
+      "b": [{ "kind": "int64", "value": 30 }, { "kind": "int64", "value": 40 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "column_order": [],
     "columns": {}
   }

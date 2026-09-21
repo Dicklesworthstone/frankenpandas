@@ -99,9 +99,6 @@
         }
       ]
     },
-    "column_order": [
-      "val",
-      "other"
-    ]
+    "column_order": ["val", "other"]
   }
 }

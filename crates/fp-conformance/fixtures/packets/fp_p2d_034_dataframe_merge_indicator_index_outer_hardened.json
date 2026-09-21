@@ -13,27 +13,15 @@
   "right_index": true,
   "merge_indicator": true,
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
-    ],
+    "index": [{ "kind": "utf8", "value": "a" }, { "kind": "utf8", "value": "b" }],
     "columns": {
-      "left_v": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 }
-      ]
+      "left_v": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 20 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "utf8", "value": "b" },
-      { "kind": "utf8", "value": "c" }
-    ],
+    "index": [{ "kind": "utf8", "value": "b" }, { "kind": "utf8", "value": "c" }],
     "columns": {
-      "right_v": [
-        { "kind": "int64", "value": 200 },
-        { "kind": "int64", "value": 300 }
-      ]
+      "right_v": [{ "kind": "int64", "value": 200 }, { "kind": "int64", "value": 300 }]
     }
   },
   "expected_frame": {

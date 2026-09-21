@@ -9,19 +9,10 @@
     "generated_at": "2026-09-01T06:09:41Z"
   },
   "frame": {
-    "index": [
-      { "kind": "utf8", "value": "r1" },
-      { "kind": "utf8", "value": "r2" }
-    ],
+    "index": [{ "kind": "utf8", "value": "r1" }, { "kind": "utf8", "value": "r2" }],
     "columns": {
-      "a": [
-        { "kind": "null", "value": "null" },
-        { "kind": "null", "value": "na_n" }
-      ],
-      "b": [
-        { "kind": "null", "value": "na_t" },
-        { "kind": "null", "value": "null" }
-      ]
+      "a": [{ "kind": "null", "value": "null" }, { "kind": "null", "value": "na_n" }],
+      "b": [{ "kind": "null", "value": "na_t" }, { "kind": "null", "value": "null" }]
     }
   },
   "expected_frame": {

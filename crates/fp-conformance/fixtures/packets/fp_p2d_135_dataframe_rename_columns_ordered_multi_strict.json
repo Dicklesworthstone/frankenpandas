@@ -8,50 +8,23 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:10:18Z"
   },
-  "rename_columns": [
-    { "from": "a", "to": "x" },
-    { "from": "c", "to": "z" }
-  ],
+  "rename_columns": [{ "from": "a", "to": "x" }, { "from": "c", "to": "z" }],
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "column_order": ["a", "b", "c"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 2.5 }
-      ],
-      "c": [
-        { "kind": "utf8", "value": "left" },
-        { "kind": "utf8", "value": "right" }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 2.5 }],
+      "c": [{ "kind": "utf8", "value": "left" }, { "kind": "utf8", "value": "right" }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "column_order": ["x", "b", "z"],
     "columns": {
-      "x": [
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 1.5 },
-        { "kind": "float64", "value": 2.5 }
-      ],
-      "z": [
-        { "kind": "utf8", "value": "left" },
-        { "kind": "utf8", "value": "right" }
-      ]
+      "x": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+      "b": [{ "kind": "float64", "value": 1.5 }, { "kind": "float64", "value": 2.5 }],
+      "z": [{ "kind": "utf8", "value": "left" }, { "kind": "utf8", "value": "right" }]
     }
   }
 }

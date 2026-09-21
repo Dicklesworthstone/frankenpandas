@@ -13,29 +13,17 @@
   "merge_on": "id",
   "merge_suffixes": ["", ""],
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "id": [
-        { "kind": "int64", "value": 1 }
-      ],
-      "val": [
-        { "kind": "int64", "value": 10 }
-      ]
+      "id": [{ "kind": "int64", "value": 1 }],
+      "val": [{ "kind": "int64", "value": 10 }]
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 10 }
-    ],
+    "index": [{ "kind": "int64", "value": 10 }],
     "columns": {
-      "id": [
-        { "kind": "int64", "value": 1 }
-      ],
-      "val": [
-        { "kind": "int64", "value": 100 }
-      ]
+      "id": [{ "kind": "int64", "value": 1 }],
+      "val": [{ "kind": "int64", "value": 100 }]
     }
   },
   "expected_error_contains": "columns overlap but no suffix specified"

@@ -54,9 +54,7 @@
       }
     ]
   },
-  "column_order": [
-    "b"
-  ],
+  "column_order": ["b"],
   "expected_frame": {
     "index": [
       {
@@ -80,8 +78,6 @@
         }
       ]
     },
-    "column_order": [
-      "b"
-    ]
+    "column_order": ["b"]
   }
 }

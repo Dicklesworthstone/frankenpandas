@@ -8,21 +8,12 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:09:02Z",
     "oracle_attestation": "error_agreement"
-},
+  },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 11 }
-    ],
+    "index": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 11 }],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1000 },
-        { "kind": "int64", "value": 1100 }
-      ],
-      "b": [
-        { "kind": "int64", "value": 2000 },
-        { "kind": "int64", "value": 2100 }
-      ]
+      "a": [{ "kind": "int64", "value": 1000 }, { "kind": "int64", "value": 1100 }],
+      "b": [{ "kind": "int64", "value": 2000 }, { "kind": "int64", "value": 2100 }]
     }
   },
   "iloc_positions": [99],

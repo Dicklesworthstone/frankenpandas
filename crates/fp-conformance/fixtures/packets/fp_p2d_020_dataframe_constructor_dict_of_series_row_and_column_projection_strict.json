@@ -64,11 +64,7 @@
       "value": "x"
     }
   ],
-  "column_order": [
-    "b",
-    "a",
-    "m"
-  ],
+  "column_order": ["b", "a", "m"],
   "expected_frame": {
     "index": [
       {
@@ -112,10 +108,6 @@
         }
       ]
     },
-    "column_order": [
-      "b",
-      "a",
-      "m"
-    ]
+    "column_order": ["b", "a", "m"]
   }
 }

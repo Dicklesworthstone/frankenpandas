@@ -27,9 +27,6 @@
       { "kind": "utf8", "value": "2024-01-15 09:30:00" },
       { "kind": "utf8", "value": "2024-01-16 09:30:00" }
     ],
-    "values": [
-      { "kind": "float64", "value": 100.0 },
-      { "kind": "float64", "value": 300.0 }
-    ]
+    "values": [{ "kind": "float64", "value": 100.0 }, { "kind": "float64", "value": 300.0 }]
   }
 }

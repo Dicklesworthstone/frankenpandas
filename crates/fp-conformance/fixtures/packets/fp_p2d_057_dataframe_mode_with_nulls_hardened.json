@@ -32,16 +32,10 @@
     "column_order": ["a", "b"]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "a": [
-        { "kind": "float64", "value": 1.0 }
-      ],
-      "b": [
-        { "kind": "float64", "value": 3.0 }
-      ]
+      "a": [{ "kind": "float64", "value": 1.0 }],
+      "b": [{ "kind": "float64", "value": 3.0 }]
     },
     "column_order": ["a", "b"]
   }

@@ -25,13 +25,7 @@
   },
   "expected_series": {
     "name": "values",
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }]
   }
 }

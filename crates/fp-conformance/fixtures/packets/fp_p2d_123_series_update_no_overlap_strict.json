@@ -23,14 +23,8 @@
   },
   "right": {
     "name": "y",
-    "index": [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 6 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 50 },
-      { "kind": "int64", "value": 60 }
-    ]
+    "index": [{ "kind": "int64", "value": 5 }, { "kind": "int64", "value": 6 }],
+    "values": [{ "kind": "int64", "value": 50 }, { "kind": "int64", "value": 60 }]
   },
   "expected_series": {
     "name": "x",

@@ -24,11 +24,7 @@
         "value": 2
       }
     ],
-    "column_order": [
-      "label",
-      "a",
-      "b"
-    ],
+    "column_order": ["label", "a", "b"],
     "columns": {
       "label": [
         {

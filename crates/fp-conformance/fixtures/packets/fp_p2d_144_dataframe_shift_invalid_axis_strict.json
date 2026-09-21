@@ -12,14 +12,10 @@
   "shift_axis": 2,
   "shift_periods": 1,
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "column_order": ["a"],
     "columns": {
-      "a": [
-        { "kind": "int64", "value": 1 }
-      ]
+      "a": [{ "kind": "int64", "value": 1 }]
     }
   },
   "expected_error_contains": "shift_axis must be 0 or 1"

@@ -10,29 +10,14 @@
   },
   "constructor_dtype": "BOOLEAN",
   "matrix_rows": [
-    [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 0 }
-    ],
-    [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ]
+    [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 0 }],
+    [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }]
   ],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "0": [
-        { "kind": "bool", "value": true },
-        { "kind": "bool", "value": false }
-      ],
-      "1": [
-        { "kind": "bool", "value": false },
-        { "kind": "bool", "value": true }
-      ]
+      "0": [{ "kind": "bool", "value": true }, { "kind": "bool", "value": false }],
+      "1": [{ "kind": "bool", "value": false }, { "kind": "bool", "value": true }]
     }
   }
 }

@@ -13,26 +13,14 @@
     "discount": { "kind": "int64", "value": 2 }
   },
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "price": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 15 }
-      ]
+      "price": [{ "kind": "int64", "value": 10 }, { "kind": "int64", "value": 15 }]
     },
     "column_order": ["price"]
   },
   "expected_series": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
-    "values": [
-      { "kind": "int64", "value": 8 },
-      { "kind": "int64", "value": 13 }
-    ]
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
+    "values": [{ "kind": "int64", "value": 8 }, { "kind": "int64", "value": 13 }]
   }
 }

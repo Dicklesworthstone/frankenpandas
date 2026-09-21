@@ -8,7 +8,7 @@
     "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
     "generated_at": "2026-09-01T06:09:12Z",
     "oracle_attestation": "error_agreement"
-},
+  },
   "csv_input": "a,b\n\"open,1\n2,3\n",
   "expected_error_contains": "CSV error"
 }

@@ -32,10 +32,7 @@
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "utf8", "value": "x" },
-      { "kind": "utf8", "value": "y" }
-    ],
+    "index": [{ "kind": "utf8", "value": "x" }, { "kind": "utf8", "value": "y" }],
     "column_order": ["x", "y"],
     "columns": {
       "x": [

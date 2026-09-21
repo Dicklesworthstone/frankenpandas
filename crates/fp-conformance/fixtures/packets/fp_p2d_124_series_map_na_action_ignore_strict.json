@@ -23,14 +23,8 @@
       { "kind": "int64", "value": 2 }
     ]
   },
-  "replace_to_find": [
-    { "kind": "int64", "value": 1 },
-    { "kind": "int64", "value": 2 }
-  ],
-  "replace_to_value": [
-    { "kind": "utf8", "value": "one" },
-    { "kind": "utf8", "value": "two" }
-  ],
+  "replace_to_find": [{ "kind": "int64", "value": 1 }, { "kind": "int64", "value": 2 }],
+  "replace_to_value": [{ "kind": "utf8", "value": "one" }, { "kind": "utf8", "value": "two" }],
   "na_action_ignore": true,
   "expected_series": {
     "name": "values",

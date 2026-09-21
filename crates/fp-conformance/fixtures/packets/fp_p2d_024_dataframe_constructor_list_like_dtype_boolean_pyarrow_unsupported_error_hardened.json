@@ -10,19 +10,11 @@
     "oracle_attestation": "Live oracle run 2026-08-30: /data/projects/frankenpandas/.venv-oracle/bin/python crates/fp-conformance/oracle/pandas_oracle.py --legacy-root /dp/frankenpandas/legacy_pandas_code/pandas --allow-system-pandas-fallback < fp_p2d_024_dataframe_constructor_list_like_dtype_boolean_pyarrow_unsupported_error_hardened.json; pandas 2.2.3 returned error=null and expected_frame column 0=[bool(true)]."
   },
   "constructor_dtype": "boolean[pyarrow]",
-  "matrix_rows": [
-    [
-      { "kind": "int64", "value": 1 }
-    ]
-  ],
+  "matrix_rows": [[{ "kind": "int64", "value": 1 }]],
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "0": [
-        { "kind": "bool", "value": true }
-      ]
+      "0": [{ "kind": "bool", "value": true }]
     },
     "column_order": ["0"]
   }

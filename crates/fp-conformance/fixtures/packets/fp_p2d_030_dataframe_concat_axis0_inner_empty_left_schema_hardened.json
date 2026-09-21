@@ -18,26 +18,16 @@
     }
   },
   "frame_right": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "b": [
-        { "kind": "int64", "value": 9 }
-      ],
-      "c": [
-        { "kind": "int64", "value": 99 }
-      ]
+      "b": [{ "kind": "int64", "value": 9 }],
+      "c": [{ "kind": "int64", "value": 99 }]
     }
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }],
     "columns": {
-      "b": [
-        { "kind": "int64", "value": 9 }
-      ]
+      "b": [{ "kind": "int64", "value": 9 }]
     }
   }
 }

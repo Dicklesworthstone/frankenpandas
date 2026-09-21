@@ -10,21 +10,12 @@
   },
   "constructor_dtype": "STRING",
   "dict_columns": {
-    "name": [
-      { "kind": "utf8", "value": "alice" },
-      { "kind": "utf8", "value": "bob" }
-    ]
+    "name": [{ "kind": "utf8", "value": "alice" }, { "kind": "utf8", "value": "bob" }]
   },
   "expected_frame": {
-    "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
-    ],
+    "index": [{ "kind": "int64", "value": 0 }, { "kind": "int64", "value": 1 }],
     "columns": {
-      "name": [
-        { "kind": "utf8", "value": "alice" },
-        { "kind": "utf8", "value": "bob" }
-      ]
+      "name": [{ "kind": "utf8", "value": "alice" }, { "kind": "utf8", "value": "bob" }]
     }
   }
 }
