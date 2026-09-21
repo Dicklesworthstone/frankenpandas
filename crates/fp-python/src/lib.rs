@@ -24,7 +24,9 @@ use std::{
 
 use fp_columnar::Column;
 use fp_expr::DataFrameExprExt;
-use fp_frame::{DataFrame, DropNaHow, PlotKind, Series, concat_dataframes, concat_series};
+use fp_frame::{
+    DataFrame, DropNaHow, FrameError, PlotKind, Series, concat_dataframes, concat_series,
+};
 use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
@@ -9356,6 +9358,15 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                     PyErrorKind::Key,
                     format!("compatibility gate rejected operation: {msg}"),
                 )
+            } else if lower.contains("cannot reduce non-numeric")
+                || lower.contains("could not convert")
+                || lower.contains("not allowed for dtype")
+                || lower.contains("unsupported operand type")
+            {
+                (
+                    PyErrorKind::Type,
+                    format!("compatibility gate rejected operation: {msg}"),
+                )
             } else {
                 (
                     PyErrorKind::Value,
@@ -9772,6 +9783,45 @@ fn extract_or_build_series(
         vec![scalar; like.len()],
     )
     .map_err(frame_error_to_py)
+}
+
+fn check_series_axis(axis: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+    if ax != 0 {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "No axis named {ax} for object type Series"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+impl PySeries {
+    fn check_numeric_only(&self, name: &str) -> PyResult<()> {
+        if !matches!(
+            self.inner.dtype(),
+            DType::Int64 | DType::Float64 | DType::Bool
+        ) {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Series.{name} does not allow numeric_only=True with non-numeric dtypes."
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_numeric(&self, name: &str) -> PyResult<()> {
+        if !matches!(
+            self.inner.dtype(),
+            DType::Int64 | DType::Float64 | DType::Bool
+        ) {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Could not convert non-numeric series to float for Series.{name}"
+            )))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[pymethods]
@@ -10283,56 +10333,131 @@ impl PySeries {
     }
 
     /// Return the sum of the Series.
-    fn sum(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn sum(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = kwargs;
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("sum")?;
+        }
         Python::attach(|py| {
-            let result = self
-                .inner
-                .sum()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let result = if !skipna {
+                self.inner.sum_skipna(false)
+            } else {
+                self.inner.sum()
+            }
+            .map_err(frame_error_to_py)?;
             scalar_to_py(py, &result)
         })
     }
 
     /// Return the mean of the Series.
-    fn mean(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn mean(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = kwargs;
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("mean")?;
+        } else {
+            self.require_numeric("mean")?;
+        }
         Python::attach(|py| {
-            let result = self
-                .inner
-                .mean()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let result = if !skipna {
+                self.inner.mean_skipna(false)
+            } else {
+                self.inner.mean()
+            }
+            .map_err(frame_error_to_py)?;
             scalar_to_py(py, &result)
         })
     }
 
     /// Return the minimum value.
-    fn min(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn min(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = kwargs;
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("min")?;
+        }
         Python::attach(|py| {
-            let result = self
-                .inner
-                .min()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let result = if !skipna {
+                self.inner.min_skipna(false)
+            } else {
+                self.inner.min()
+            }
+            .map_err(frame_error_to_py)?;
             scalar_to_py(py, &result)
         })
     }
 
     /// Return the maximum value.
-    fn max(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn max(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = kwargs;
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("max")?;
+        }
         Python::attach(|py| {
-            let result = self
-                .inner
-                .max()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let result = if !skipna {
+                self.inner.max_skipna(false)
+            } else {
+                self.inner.max()
+            }
+            .map_err(frame_error_to_py)?;
             scalar_to_py(py, &result)
         })
     }
 
     /// Return the standard deviation.
-    fn std(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false, **kwargs))]
+    fn std(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        ddof: Option<usize>,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (ddof, kwargs);
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("std")?;
+        } else {
+            self.require_numeric("std")?;
+        }
         Python::attach(|py| {
-            let result = self
-                .inner
-                .std()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let result = if !skipna {
+                self.inner.std_skipna(false)
+            } else {
+                self.inner.std()
+            }
+            .map_err(frame_error_to_py)?;
             scalar_to_py(py, &result)
         })
     }
@@ -10370,34 +10495,84 @@ impl PySeries {
     }
 
     /// Return the median value.
-    fn median(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn median(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = kwargs;
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("median")?;
+        } else {
+            self.require_numeric("median")?;
+        }
         Python::attach(|py| {
-            let r = self
-                .inner
-                .median()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let r = if !skipna {
+                self.inner.median_skipna(false)
+            } else {
+                self.inner.median()
+            }
+            .map_err(frame_error_to_py)?;
             scalar_to_py(py, &r)
         })
     }
 
     /// Return the (sample) variance.
-    fn var(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false, **kwargs))]
+    fn var(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        ddof: Option<usize>,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (ddof, kwargs);
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("var")?;
+        } else {
+            self.require_numeric("var")?;
+        }
         Python::attach(|py| {
-            let r = self
-                .inner
-                .var()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let r = if !skipna {
+                self.inner.var_skipna(false)
+            } else {
+                self.inner.var()
+            }
+            .map_err(frame_error_to_py)?;
             scalar_to_py(py, &r)
         })
     }
 
     /// Return the product of the values.
-    fn prod(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
+    fn prod(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        min_count: Option<usize>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (min_count, kwargs);
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("prod")?;
+        } else {
+            self.require_numeric("prod")?;
+        }
         Python::attach(|py| {
-            let r = self
-                .inner
-                .prod()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let r = if !skipna {
+                self.inner.prod_skipna(false)
+            } else {
+                self.inner.prod()
+            }
+            .map_err(frame_error_to_py)?;
             scalar_to_py(py, &r)
         })
     }
@@ -10448,22 +10623,45 @@ impl PySeries {
     }
 
     /// Return the number of distinct non-missing values.
-    fn nunique(&self) -> usize {
-        self.inner.nunique()
+    #[pyo3(signature = (dropna=true))]
+    fn nunique(&self, dropna: bool) -> usize {
+        self.inner.nunique_with_dropna(dropna)
     }
 
     /// Return the sample skewness.
-    fn skew(&self) -> PyResult<f64> {
-        self.inner
-            .skew()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    fn skew(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<f64> {
+        let _ = skipna;
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("skew")?;
+        } else {
+            self.require_numeric("skew")?;
+        }
+        self.inner.skew().map_err(frame_error_to_py)
     }
 
     /// Return the sample (excess) kurtosis.
-    fn kurt(&self) -> PyResult<f64> {
-        self.inner
-            .kurt()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    fn kurt(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<f64> {
+        let _ = skipna;
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("kurt")?;
+        } else {
+            self.require_numeric("kurt")?;
+        }
+        self.inner.kurt().map_err(frame_error_to_py)
     }
 
     /// Return the absolute value of each element as a new Series.
@@ -11579,16 +11777,18 @@ impl PySeries {
         min_periods: Option<usize>,
     ) -> PyResult<f64> {
         let _ = min_periods;
-        if let Some(m) = method {
-            if m != "pearson" {
-                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                    format!(
-                        "correlation method '{m}' is not implemented, only 'pearson' is supported"
-                    ),
-                ));
+        let m = method.unwrap_or("pearson");
+        let res = match m {
+            "pearson" => self.inner.corr(&other.inner),
+            "spearman" => self.inner.corr_spearman(&other.inner),
+            "kendall" => self.inner.corr_kendall(&other.inner),
+            other_m => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid method '{other_m}', expecting one of ('pearson', 'kendall', 'spearman')"
+                )));
             }
-        }
-        self.inner.corr(&other.inner).map_err(frame_error_to_py)
+        };
+        res.map_err(frame_error_to_py)
     }
 
     #[pyo3(signature = (other, min_periods=None, ddof=1))]
@@ -11728,20 +11928,52 @@ impl PySeries {
         self.inner.all().map_err(frame_error_to_py)
     }
 
-    fn sem(&self) -> PyResult<f64> {
+    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false))]
+    fn sem(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        ddof: Option<usize>,
+        numeric_only: bool,
+    ) -> PyResult<f64> {
+        let _ = (skipna, ddof);
+        check_series_axis(axis)?;
+        if numeric_only {
+            self.check_numeric_only("sem")?;
+        } else {
+            self.require_numeric("sem")?;
+        }
         self.inner.sem().map_err(frame_error_to_py)
     }
 
-    fn kurtosis(&self) -> PyResult<f64> {
-        self.kurt()
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    fn kurtosis(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<f64> {
+        self.kurt(axis, skipna, numeric_only)
     }
 
-    fn product(&self) -> PyResult<Py<PyAny>> {
-        self.prod()
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
+    fn product(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        min_count: Option<usize>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.prod(axis, skipna, numeric_only, min_count, kwargs)
     }
 
-    fn mode(&self) -> PyResult<PySeries> {
-        let res = self.inner.mode().map_err(frame_error_to_py)?;
+    #[pyo3(signature = (dropna=true))]
+    fn mode(&self, dropna: bool) -> PyResult<PySeries> {
+        let res = self
+            .inner
+            .mode_with_dropna(dropna)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
@@ -11939,18 +12171,30 @@ impl PySeries {
     fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(name) = func.extract::<String>() {
             match name.as_str() {
-                "sum" => self.sum(),
-                "mean" => self.mean(),
-                "min" => self.min(),
-                "max" => self.max(),
-                "std" => self.std(),
-                "var" => self.var(),
+                "sum" => self.sum(None, true, false, None),
+                "mean" => self.mean(None, true, false, None),
+                "min" => self.min(None, true, false, None),
+                "max" => self.max(None, true, false, None),
+                "std" => self.std(None, true, None, false, None),
+                "var" => self.var(None, true, None, false, None),
                 "count" => Ok(self.count().into_pyobject(py)?.into_any().unbind()),
-                "median" => self.median(),
-                "prod" | "product" => self.prod(),
-                "sem" => Ok(self.sem()?.into_pyobject(py)?.into_any().unbind()),
-                "skew" => Ok(self.skew()?.into_pyobject(py)?.into_any().unbind()),
-                "kurt" | "kurtosis" => Ok(self.kurt()?.into_pyobject(py)?.into_any().unbind()),
+                "median" => self.median(None, true, false, None),
+                "prod" | "product" => self.prod(None, true, false, None, None),
+                "sem" => Ok(self
+                    .sem(None, true, None, false)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind()),
+                "skew" => Ok(self
+                    .skew(None, true, false)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind()),
+                "kurt" | "kurtosis" => Ok(self
+                    .kurt(None, true, false)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind()),
                 other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unsupported agg function '{other}'"
                 ))),
@@ -12116,9 +12360,10 @@ impl PySeries {
         scalar_to_py(py, &val)
     }
 
-    #[pyo3(signature = (lag=1))]
-    fn autocorr(&self, lag: usize) -> PyResult<f64> {
-        self.inner.autocorr(lag).map_err(frame_error_to_py)
+    #[pyo3(signature = (lag=None))]
+    fn autocorr(&self, lag: Option<usize>) -> PyResult<f64> {
+        let l = lag.unwrap_or(1);
+        self.inner.autocorr(l).map_err(frame_error_to_py)
     }
 
     #[pyo3(signature = (ascending=true))]
@@ -13233,6 +13478,338 @@ impl PyDataFrame {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: series })
     }
+
+    fn numeric_inner(&self) -> Result<DataFrame, FrameError> {
+        self.inner
+            .select_dtypes(&[DType::Int64, DType::Float64, DType::Bool], &[])
+    }
+
+    fn has_non_numeric(&self) -> bool {
+        self.inner.column_names().iter().any(|c| {
+            self.inner.column(c).is_some_and(|col| {
+                !matches!(
+                    col.dtype(),
+                    DType::Int64 | DType::Float64 | DType::Bool | DType::Timedelta64
+                )
+            })
+        })
+    }
+
+    pub fn sum_internal(
+        &self,
+        axis: usize,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.sum_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "sum cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.sum_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            if !skipna {
+                df.sum_skipna(false)
+            } else {
+                df.sum()
+            }
+        }
+    }
+
+    pub fn mean_internal(
+        &self,
+        axis: usize,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.mean_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "mean cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.mean_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            if !skipna {
+                df.mean_skipna(false)
+            } else {
+                df.mean()
+            }
+        }
+    }
+
+    pub fn median_internal(
+        &self,
+        axis: usize,
+        _skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.median_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "median cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.median_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            df.median()
+        }
+    }
+
+    pub fn std_internal(
+        &self,
+        axis: usize,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.std_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "std cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.std_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            if !skipna {
+                df.std_agg_skipna(false)
+            } else {
+                df.std()
+            }
+        }
+    }
+
+    pub fn var_internal(
+        &self,
+        axis: usize,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.var_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "var cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.var_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            if !skipna {
+                df.var_agg_skipna(false)
+            } else {
+                df.var()
+            }
+        }
+    }
+
+    pub fn min_internal(
+        &self,
+        axis: usize,
+        _skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.min_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "min cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.min_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            df.min()
+        }
+    }
+
+    pub fn max_internal(
+        &self,
+        axis: usize,
+        _skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.max_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "max cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.max_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            df.max()
+        }
+    }
+
+    pub fn prod_internal(
+        &self,
+        axis: usize,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.prod_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "prod cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.prod_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            if !skipna {
+                df.prod_agg_skipna(false)
+            } else {
+                df.prod()
+            }
+        }
+    }
+
+    pub fn count_internal(&self, axis: usize, numeric_only: bool) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.count_axis1()
+            } else {
+                self.inner.count_axis1()
+            }
+        } else if numeric_only {
+            self.numeric_inner()?.count()
+        } else {
+            self.inner.count()
+        }
+    }
+
+    pub fn sem_internal(&self, axis: usize, numeric_only: bool) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.sem_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "sem cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.sem_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            df.sem()
+        }
+    }
+
+    pub fn skew_internal(&self, axis: usize, numeric_only: bool) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.skew_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "skew cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.skew_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            df.skew()
+        }
+    }
+
+    pub fn kurt_internal(&self, axis: usize, numeric_only: bool) -> Result<Series, FrameError> {
+        if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.kurt_axis1()
+            } else if self.has_non_numeric() {
+                Err(FrameError::CompatibilityRejected(
+                    "kurt cannot reduce non-numeric columns across axis=1 without numeric_only=True"
+                        .into(),
+                ))
+            } else {
+                self.inner.kurt_axis1()
+            }
+        } else {
+            let df = if numeric_only {
+                self.numeric_inner()?
+            } else {
+                self.inner.clone()
+            };
+            df.kurtosis()
+        }
+    }
 }
 
 fn empty_dataframe() -> DataFrame {
@@ -14243,100 +14820,127 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Return the sum of each column.
-    fn sum(&self) -> PyResult<PySeries> {
-        let result = self
-            .inner
-            .sum()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: result })
+    /// Return the sum of each column or row.
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn sum(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = kwargs;
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.sum_internal(ax, skipna, numeric_only))
     }
 
-    /// Return the mean of each column.
-    fn mean(&self) -> PyResult<PySeries> {
-        let result = self
-            .inner
-            .mean()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: result })
+    /// Return the mean of each column or row.
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn mean(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = kwargs;
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.mean_internal(ax, skipna, numeric_only))
     }
 
-    /// Return the median of each column.
-    fn median(&self) -> PyResult<PySeries> {
-        let result = self
-            .inner
-            .median()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: result })
+    /// Return the median of each column or row.
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn median(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = kwargs;
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.median_internal(ax, skipna, numeric_only))
     }
 
-    /// Return the standard deviation of each column.
-    fn std(&self) -> PyResult<PySeries> {
-        let result = self
-            .inner
-            .std()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: result })
+    /// Return the standard deviation of each column or row.
+    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false, **kwargs))]
+    fn std(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        ddof: Option<usize>,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = (ddof, kwargs);
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.std_internal(ax, skipna, numeric_only))
     }
 
-    /// Return the variance of each column.
-    fn var(&self) -> PyResult<PySeries> {
-        let result = self
-            .inner
-            .var()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: result })
+    /// Return the variance of each column or row.
+    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false, **kwargs))]
+    fn var(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        ddof: Option<usize>,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = (ddof, kwargs);
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.var_internal(ax, skipna, numeric_only))
     }
 
-    /// Return the count of non-missing values per column.
-    fn count(&self) -> PyResult<PySeries> {
-        let result = self
-            .inner
-            .count()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: result })
+    /// Return the count of non-missing values per column or row.
+    #[pyo3(signature = (axis=None, numeric_only=false))]
+    fn count(&self, axis: Option<&Bound<'_, PyAny>>, numeric_only: bool) -> PyResult<PySeries> {
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.count_internal(ax, numeric_only))
     }
 
-    /// Return the minimum of each column.
-    fn min(&self) -> PyResult<PySeries> {
-        let result = self
-            .inner
-            .min()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: result })
+    /// Return the minimum of each column or row.
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn min(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = kwargs;
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.min_internal(ax, skipna, numeric_only))
     }
 
-    /// Return the maximum of each column.
-    fn max(&self) -> PyResult<PySeries> {
-        let result = self
-            .inner
-            .max()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: result })
+    /// Return the maximum of each column or row.
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    fn max(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = kwargs;
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.max_internal(ax, skipna, numeric_only))
     }
 
     /// Return the column-pair correlation matrix as a DataFrame.
-    #[pyo3(signature = (method="pearson", min_periods=1, numeric_only=false))]
+    #[pyo3(signature = (method="pearson", min_periods=None, numeric_only=false))]
     fn corr(
         &self,
         method: Option<&str>,
         min_periods: Option<usize>,
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = (min_periods, numeric_only);
-        if let Some(m) = method {
-            if m != "pearson" {
-                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                    format!(
-                        "correlation method '{m}' is not implemented, only 'pearson' is supported"
-                    ),
-                ));
-            }
-        }
+        let _ = min_periods;
+        let m = method.unwrap_or("pearson");
         let result = self
             .inner
-            .corr()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .corr_method_with_numeric_only(m, numeric_only)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -16376,8 +16980,11 @@ impl PyDataFrame {
         ddof: Option<usize>,
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = (min_periods, ddof, numeric_only);
-        let res = self.inner.cov().map_err(frame_error_to_py)?;
+        let _ = (min_periods, ddof);
+        let res = self
+            .inner
+            .cov_with_numeric_only(numeric_only)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
@@ -16667,18 +17274,45 @@ impl PyDataFrame {
         Ok(PySeries { inner: res })
     }
 
-    fn mode(&self) -> PyResult<PyDataFrame> {
-        let res = self.inner.mode().map_err(frame_error_to_py)?;
+    #[pyo3(signature = (axis=None, numeric_only=false, dropna=true))]
+    fn mode(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        numeric_only: bool,
+        dropna: bool,
+    ) -> PyResult<PyDataFrame> {
+        let ax = parse_axis_param(axis)?;
+        let res = self
+            .inner
+            .mode_with_options(ax, numeric_only, dropna)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
-    fn prod(&self) -> PyResult<PySeries> {
-        let res = self.inner.prod().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
+    fn prod(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        min_count: Option<usize>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let _ = (min_count, kwargs);
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.prod_internal(ax, skipna, numeric_only))
     }
 
-    fn product(&self) -> PyResult<PySeries> {
-        self.prod()
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
+    fn product(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+        min_count: Option<usize>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        self.prod(axis, skipna, numeric_only, min_count, kwargs)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -16830,23 +17464,51 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    fn sem(&self) -> PyResult<PySeries> {
-        let res = self.inner.sem().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false))]
+    fn sem(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        ddof: Option<usize>,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        let _ = (skipna, ddof);
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.sem_internal(ax, numeric_only))
     }
 
-    fn skew(&self) -> PyResult<PySeries> {
-        let res = self.inner.skew().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    fn skew(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        let _ = skipna;
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.skew_internal(ax, numeric_only))
     }
 
-    fn kurt(&self) -> PyResult<PySeries> {
-        let res = self.inner.kurtosis().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    fn kurt(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        let _ = skipna;
+        let ax = parse_axis_param(axis)?;
+        wrap_series(self.kurt_internal(ax, numeric_only))
     }
 
-    fn kurtosis(&self) -> PyResult<PySeries> {
-        self.kurt()
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    fn kurtosis(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        self.kurt(axis, skipna, numeric_only)
     }
 
     #[pyo3(signature = (before=None, after=None, axis=None, copy=None))]
@@ -17256,18 +17918,106 @@ impl PyDataFrame {
     fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(name) = func.extract::<String>() {
             match name.as_str() {
-                "sum" => Ok(Py::new(py, self.sum()?)?.into_any()),
-                "mean" => Ok(Py::new(py, self.mean()?)?.into_any()),
-                "min" => Ok(Py::new(py, self.min()?)?.into_any()),
-                "max" => Ok(Py::new(py, self.max()?)?.into_any()),
-                "std" => Ok(Py::new(py, self.std()?)?.into_any()),
-                "var" => Ok(Py::new(py, self.var()?)?.into_any()),
-                "count" => Ok(Py::new(py, self.count()?)?.into_any()),
-                "median" => Ok(Py::new(py, self.median()?)?.into_any()),
-                "prod" | "product" => Ok(Py::new(py, self.prod()?)?.into_any()),
-                "sem" => Ok(Py::new(py, self.sem()?)?.into_any()),
-                "skew" => Ok(Py::new(py, self.skew()?)?.into_any()),
-                "kurt" | "kurtosis" => Ok(Py::new(py, self.kurt()?)?.into_any()),
+                "sum" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self
+                            .sum_internal(0, true, false)
+                            .map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "mean" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self
+                            .mean_internal(0, true, false)
+                            .map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "min" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self
+                            .min_internal(0, true, false)
+                            .map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "max" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self
+                            .max_internal(0, true, false)
+                            .map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "std" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self
+                            .std_internal(0, true, false)
+                            .map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "var" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self
+                            .var_internal(0, true, false)
+                            .map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "count" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self.count_internal(0, false).map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "median" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self
+                            .median_internal(0, true, false)
+                            .map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "prod" | "product" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self
+                            .prod_internal(0, true, false)
+                            .map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "sem" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self.sem_internal(0, false).map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "skew" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self.skew_internal(0, false).map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
+                "kurt" | "kurtosis" => Ok(Py::new(
+                    py,
+                    PySeries {
+                        inner: self.kurt_internal(0, false).map_err(frame_error_to_py)?,
+                    },
+                )?
+                .into_any()),
                 other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unsupported agg function '{other}'"
                 ))),
@@ -17389,12 +18139,259 @@ impl PyDataFrame {
         Ok(PySeries { inner: res })
     }
 
-    fn corrwith(&self, other: &PyDataFrame) -> PyResult<PySeries> {
-        let res = self
-            .inner
-            .corrwith(&other.inner)
-            .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+    #[pyo3(signature = (other, axis=None, drop=false, method="pearson", numeric_only=false))]
+    fn corrwith(
+        &self,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        drop: bool,
+        method: Option<&str>,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        let m = method.unwrap_or("pearson");
+        if !matches!(m, "pearson" | "spearman" | "kendall") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "unsupported correlation method: '{m}'"
+            )));
+        }
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let calc_corr = |s1: &Series, s2: &Series| -> Result<f64, FrameError> {
+            match m {
+                "pearson" => s1.corr(s2),
+                "spearman" => s1.corr_spearman(s2),
+                "kendall" => s1.corr_kendall(s2),
+                _ => unreachable!(),
+            }
+        };
+
+        if let Ok(other_s) = other.extract::<PyRef<PySeries>>() {
+            if !matches!(
+                other_s.inner.dtype(),
+                DType::Int64 | DType::Float64 | DType::Bool
+            ) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "could not convert non-numeric series to float",
+                ));
+            }
+            if ax == 0 {
+                let mut labels = Vec::new();
+                let mut values = Vec::new();
+                for col_name in self.inner.column_names() {
+                    let col = match self.inner.column(col_name) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    let is_num = matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool);
+                    if !is_num {
+                        if numeric_only {
+                            continue;
+                        }
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "Could not convert non-numeric column '{col_name}' to float"
+                        )));
+                    }
+                    let s_col =
+                        Series::new(col_name.clone(), self.inner.index().clone(), col.clone())
+                            .map_err(frame_error_to_py)?;
+                    let r = calc_corr(&s_col, &other_s.inner).map_err(frame_error_to_py)?;
+                    if drop && r.is_nan() {
+                        continue;
+                    }
+                    labels.push(IndexLabel::Utf8(col_name.clone()));
+                    values.push(Scalar::Float64(r));
+                }
+                let res = Series::from_values("corrwith".to_string(), labels, values)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner: res });
+            } else {
+                let mut cols_to_use = Vec::new();
+                for col_name in self.inner.column_names() {
+                    let col = match self.inner.column(col_name) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    let is_num = matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool);
+                    if !is_num {
+                        if numeric_only {
+                            continue;
+                        }
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "Could not convert non-numeric column '{col_name}' to float"
+                        )));
+                    }
+                    cols_to_use.push(col_name.to_string());
+                }
+                let col_labels: Vec<IndexLabel> = cols_to_use
+                    .iter()
+                    .map(|c| IndexLabel::Utf8(c.clone()))
+                    .collect();
+                let mut labels = Vec::new();
+                let mut values = Vec::new();
+                for (row_idx, row_label) in self.inner.index().labels().iter().enumerate() {
+                    let mut row_vals = Vec::with_capacity(cols_to_use.len());
+                    for c in &cols_to_use {
+                        if let Some(col) = self.inner.column(c) {
+                            row_vals.push(col.values()[row_idx].clone());
+                        }
+                    }
+                    let row_s =
+                        Series::from_values("row".to_string(), col_labels.clone(), row_vals)
+                            .map_err(frame_error_to_py)?;
+                    let r = calc_corr(&row_s, &other_s.inner).map_err(frame_error_to_py)?;
+                    if drop && r.is_nan() {
+                        continue;
+                    }
+                    labels.push(row_label.clone());
+                    values.push(Scalar::Float64(r));
+                }
+                let res = Series::from_values("corrwith".to_string(), labels, values)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner: res });
+            }
+        }
+
+        if let Ok(other_df) = other.extract::<PyRef<PyDataFrame>>() {
+            if ax == 0 {
+                let mut all_cols: Vec<String> = self
+                    .inner
+                    .column_names()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                for c in other_df.inner.column_names() {
+                    if !all_cols.contains(&c.to_string()) {
+                        all_cols.push(c.to_string());
+                    }
+                }
+                let mut labels = Vec::new();
+                let mut values = Vec::new();
+                for col_name in &all_cols {
+                    let col1 = self.inner.column(col_name);
+                    let col2 = other_df.inner.column(col_name);
+                    let is_num1 = col1.is_none_or(|c| {
+                        matches!(c.dtype(), DType::Int64 | DType::Float64 | DType::Bool)
+                    });
+                    let is_num2 = col2.is_none_or(|c| {
+                        matches!(c.dtype(), DType::Int64 | DType::Float64 | DType::Bool)
+                    });
+                    if !is_num1 || !is_num2 {
+                        if numeric_only {
+                            continue;
+                        }
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "Could not convert non-numeric column '{col_name}' to float"
+                        )));
+                    }
+                    let r = match (col1, col2) {
+                        (Some(c1), Some(c2)) => {
+                            let s1 = Series::new(
+                                col_name.clone(),
+                                self.inner.index().clone(),
+                                c1.clone(),
+                            )
+                            .map_err(frame_error_to_py)?;
+                            let s2 = Series::new(
+                                col_name.clone(),
+                                other_df.inner.index().clone(),
+                                c2.clone(),
+                            )
+                            .map_err(frame_error_to_py)?;
+                            calc_corr(&s1, &s2).map_err(frame_error_to_py)?
+                        }
+                        _ => f64::NAN,
+                    };
+                    if drop && r.is_nan() {
+                        continue;
+                    }
+                    labels.push(IndexLabel::Utf8(col_name.clone()));
+                    values.push(Scalar::Float64(r));
+                }
+                let res = Series::from_values("corrwith".to_string(), labels, values)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner: res });
+            } else {
+                let mut shared_cols = Vec::new();
+                for c in self.inner.column_names() {
+                    if let Some(other_c) = other_df.inner.column(c) {
+                        let self_c = self.inner.column(c).unwrap();
+                        let s_num =
+                            matches!(self_c.dtype(), DType::Int64 | DType::Float64 | DType::Bool);
+                        let o_num =
+                            matches!(other_c.dtype(), DType::Int64 | DType::Float64 | DType::Bool);
+                        if !s_num || !o_num {
+                            if numeric_only {
+                                continue;
+                            }
+                            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                                "Could not convert non-numeric column '{c}' to float"
+                            )));
+                        }
+                        shared_cols.push(c.to_string());
+                    }
+                }
+                let col_labels: Vec<IndexLabel> = shared_cols
+                    .iter()
+                    .map(|c| IndexLabel::Utf8(c.clone()))
+                    .collect();
+                let other_pos = other_df.inner.index().position_map_first();
+                let self_pos = self.inner.index().position_map_first();
+                let mut all_labels = self.inner.index().labels().to_vec();
+                for lbl in other_df.inner.index().labels() {
+                    if !all_labels.contains(lbl) {
+                        all_labels.push(lbl.clone());
+                    }
+                }
+                let mut labels = Vec::new();
+                let mut values = Vec::new();
+
+                for label in &all_labels {
+                    let r = match (self_pos.get(label), other_pos.get(label)) {
+                        (Some(&row1), Some(&row2)) => {
+                            if shared_cols.len() < 2 {
+                                f64::NAN
+                            } else {
+                                let r1_vals: Vec<Scalar> = shared_cols
+                                    .iter()
+                                    .map(|c| self.inner.column(c).unwrap().values()[row1].clone())
+                                    .collect();
+                                let r2_vals: Vec<Scalar> = shared_cols
+                                    .iter()
+                                    .map(|c| {
+                                        other_df.inner.column(c).unwrap().values()[row2].clone()
+                                    })
+                                    .collect();
+                                let s1 = Series::from_values(
+                                    "r1".to_string(),
+                                    col_labels.clone(),
+                                    r1_vals,
+                                )
+                                .map_err(frame_error_to_py)?;
+                                let s2 = Series::from_values(
+                                    "r2".to_string(),
+                                    col_labels.clone(),
+                                    r2_vals,
+                                )
+                                .map_err(frame_error_to_py)?;
+                                calc_corr(&s1, &s2).unwrap_or(f64::NAN)
+                            }
+                        }
+                        _ => f64::NAN,
+                    };
+                    if drop && r.is_nan() {
+                        continue;
+                    }
+                    labels.push(label.clone());
+                    values.push(Scalar::Float64(r));
+                }
+                let res = Series::from_values("corrwith".to_string(), labels, values)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner: res });
+            }
+        }
+
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "other must be a Series or DataFrame",
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -18172,19 +19169,19 @@ impl PyDataFrame {
     #[pyo3(signature = (subset=None, normalize=false, sort=true, ascending=false, dropna=true))]
     fn value_counts(
         &self,
-        subset: Option<Vec<String>>,
+        subset: Option<&Bound<'_, PyAny>>,
         normalize: bool,
         sort: bool,
         ascending: bool,
         dropna: bool,
     ) -> PyResult<PySeries> {
         let _ = (dropna, sort);
-        let mut s = match subset {
-            Some(cols) => {
-                let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-                self.inner.value_counts_subset(&refs)
-            }
-            None => self.inner.value_counts(),
+        let cols = extract_col_names_flexible(subset)?;
+        let mut s = if cols.is_empty() {
+            self.inner.value_counts()
+        } else {
+            let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+            self.inner.value_counts_subset(&refs)
         }
         .map_err(frame_error_to_py)?;
 
@@ -18226,8 +19223,13 @@ impl PyDataFrame {
         Ok(PySeries { inner: s })
     }
 
-    fn nunique(&self) -> PyResult<PySeries> {
-        let s = self.inner.nunique().map_err(frame_error_to_py)?;
+    #[pyo3(signature = (axis=None, dropna=true))]
+    fn nunique(&self, axis: Option<&Bound<'_, PyAny>>, dropna: bool) -> PyResult<PySeries> {
+        let ax = parse_axis_param(axis)?;
+        let s = self
+            .inner
+            .nunique_axis_with_dropna(ax, dropna)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
@@ -31635,8 +32637,9 @@ mod tests {
                 .expect("df value_counts");
             assert_eq!(df_counts.shape(), (2,));
 
+            let sub_list = pyo3::types::PyList::new(py, vec!["a"]).expect("list");
             let df_counts_sub = py_df_vc
-                .value_counts(Some(vec!["a".into()]), false, true, false, true)
+                .value_counts(Some(sub_list.as_any()), false, true, false, true)
                 .expect("df value_counts subset");
             assert_eq!(df_counts_sub.shape(), (2,));
 

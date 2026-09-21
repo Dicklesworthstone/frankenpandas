@@ -1410,3 +1410,129 @@ def test_quantile_corr_cov_nlargest_multiindex_differential():
         np.testing.assert_allclose(df_ql1_fp[str(col)].to_list(), df_ql1_pd[col].to_list(), rtol=1e-5)
 
 
+def test_row_reductions_corrwith_differential():
+    if fpd is None:
+        pytest.skip("frankenpandas not installed")
+
+    # 1. DataFrame row reductions (axis=1) and column reductions (axis=0)
+    data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0], "c": [7.0, 8.0, 9.0]}
+    df_pd = pd.DataFrame(data)
+    df_fp = fpd.DataFrame(data)
+
+    reductions = [
+        "sum", "mean", "min", "max", "std", "var", "median", "prod",
+        "count", "sem", "skew", "kurt",
+    ]
+    for red in reductions:
+        # axis=1
+        res_pd_1 = getattr(df_pd, red)(axis=1)
+        res_fp_1 = getattr(df_fp, red)(axis=1)
+        np.testing.assert_allclose(res_fp_1.to_list(), res_pd_1.to_list(), rtol=1e-5, atol=1e-5)
+
+        # axis=0
+        res_pd_0 = getattr(df_pd, red)(axis=0)
+        res_fp_0 = getattr(df_fp, red)(axis=0)
+        np.testing.assert_allclose(res_fp_0.to_list(), res_pd_0.to_list(), rtol=1e-5, atol=1e-5)
+
+    # 2. Mixed DataFrame with numeric_only=True vs numeric_only=False
+    data_mixed = {"a": [1.0, 2.0, 3.0], "b": ["x", "y", "z"], "c": [10.0, 20.0, 30.0]}
+    df_m_pd = pd.DataFrame(data_mixed)
+    df_m_fp = fpd.DataFrame(data_mixed)
+
+    # numeric_only=True should compute on numeric columns only
+    res_m_pd_1 = df_m_pd.sum(axis=1, numeric_only=True)
+    res_m_fp_1 = df_m_fp.sum(axis=1, numeric_only=True)
+    np.testing.assert_allclose(res_m_fp_1.to_list(), res_m_pd_1.to_list(), rtol=1e-5)
+
+    res_m_pd_0 = df_m_pd.sum(axis=0, numeric_only=True)
+    res_m_fp_0 = df_m_fp.sum(axis=0, numeric_only=True)
+    np.testing.assert_allclose(res_m_fp_0.to_list(), res_m_pd_0.to_list(), rtol=1e-5)
+
+    # numeric_only=False (default) should raise TypeError on row reductions with non-numeric cols
+    with pytest.raises(TypeError):
+        df_m_fp.sum(axis=1)
+    with pytest.raises(TypeError):
+        df_m_fp.mean(axis=1)
+
+    # 3. Series reductions with skipna and numeric_only
+    s_data = [1.0, 2.0, 3.0, None]
+    s_pd = pd.Series(s_data)
+    s_fp = fpd.Series(s_data)
+
+    assert abs(s_fp.sum(skipna=True) - s_pd.sum(skipna=True)) < 1e-5
+    assert np.isnan(s_fp.sum(skipna=False))
+    assert abs(s_fp.mean(skipna=True) - s_pd.mean(skipna=True)) < 1e-5
+    assert np.isnan(s_fp.mean(skipna=False))
+
+    s_str_pd = pd.Series(["hello", "world"])
+    s_str_fp = fpd.Series(["hello", "world"])
+    with pytest.raises(TypeError):
+        s_str_fp.mean()
+    with pytest.raises(TypeError):
+        s_str_fp.mean(numeric_only=True)
+
+    # 4. Correlation & Covariance methods (pearson, spearman, kendall)
+    s1_vals = [1.0, 2.0, 3.0, 4.0, 5.0]
+    s2_vals = [5.0, 4.0, 2.0, 2.0, 1.0]
+    s1_pd = pd.Series(s1_vals)
+    s2_pd = pd.Series(s2_vals)
+    s1_fp = fpd.Series(s1_vals)
+    s2_fp = fpd.Series(s2_vals)
+
+    for method in ["pearson", "spearman", "kendall"]:
+        corr_pd = s1_pd.corr(s2_pd, method=method)
+        corr_fp = s1_fp.corr(s2_fp, method=method)
+        assert abs(corr_fp - corr_pd) < 1e-4
+
+    # Autocorrelation
+    assert abs(s1_fp.autocorr() - s1_pd.autocorr()) < 1e-5
+    assert abs(s1_fp.autocorr(lag=2) - s1_pd.autocorr(lag=2)) < 1e-5
+
+    # DataFrame corr and cov
+    df_corr_pd = df_pd.corr(method="spearman")
+    df_corr_fp = df_fp.corr(method="spearman")
+    for col in df_corr_pd.columns:
+        np.testing.assert_allclose(df_corr_fp[col].to_list(), df_corr_pd[col].to_list(), rtol=1e-4)
+
+    df_cov_pd = df_m_pd.cov(numeric_only=True)
+    df_cov_fp = df_m_fp.cov(numeric_only=True)
+    for col in df_cov_pd.columns:
+        np.testing.assert_allclose(df_cov_fp[col].to_list(), df_cov_pd[col].to_list(), rtol=1e-4)
+
+    # 5. corrwith parity
+    cw_s_pd = df_pd.corrwith(s1_pd, axis=0)
+    cw_s_fp = df_fp.corrwith(s1_fp, axis=0)
+    np.testing.assert_allclose(cw_s_fp.to_list(), cw_s_pd.to_list(), rtol=1e-4)
+
+    df2_data = {"a": [2.0, 3.0, 4.0], "b": [3.0, 5.0, 7.0], "c": [1.0, 2.0, 4.0]}
+    df2_pd = pd.DataFrame(df2_data)
+    df2_fp = fpd.DataFrame(df2_data)
+
+    cw_df_pd_0 = df_pd.corrwith(df2_pd, axis=0)
+    cw_df_fp_0 = df_fp.corrwith(df2_fp, axis=0)
+    np.testing.assert_allclose(cw_df_fp_0.to_list(), cw_df_pd_0.to_list(), rtol=1e-4)
+
+    cw_df_pd_1 = df_pd.corrwith(df2_pd, axis=1)
+    cw_df_fp_1 = df_fp.corrwith(df2_fp, axis=1)
+    np.testing.assert_allclose(cw_df_fp_1.to_list(), cw_df_pd_1.to_list(), rtol=1e-4)
+
+    # 6. mode and nunique parity
+    mode_vals = [1, 2, 2, 3, 3, 3]
+    s_m_pd = pd.Series(mode_vals)
+    s_m_fp = fpd.Series(mode_vals)
+    assert s_m_fp.mode().to_list() == s_m_pd.mode().to_list()
+
+    assert s_m_fp.nunique() == s_m_pd.nunique()
+
+    df_nu_pd = pd.DataFrame({"a": [1, 2, 2], "b": [1, 1, 1]})
+    df_nu_fp = fpd.DataFrame({"a": [1, 2, 2], "b": [1, 1, 1]})
+    np.testing.assert_allclose(df_nu_fp.nunique(axis=0).to_list(), df_nu_pd.nunique(axis=0).to_list())
+    np.testing.assert_allclose(df_nu_fp.nunique(axis=1).to_list(), df_nu_pd.nunique(axis=1).to_list())
+
+    # 7. value_counts subset flexible
+    vc_pd = df_nu_pd.value_counts(subset="a")
+    vc_fp = df_nu_fp.value_counts(subset="a")
+    assert len(vc_fp) == len(vc_pd)
+
+
+

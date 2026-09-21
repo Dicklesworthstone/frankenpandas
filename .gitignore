@@ -17,11 +17,13 @@ flamegraph.svg
 *.bmp
 *.tiff
 
-# Python caches
+# Python caches and distribution
 __pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
+dist/
+*.whl
 
 # Local issue-tracker state
 .bv/
