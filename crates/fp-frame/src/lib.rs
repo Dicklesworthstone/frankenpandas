@@ -87238,7 +87238,7 @@ impl DataFrame {
         self.apply_per_column(|s| s.cummin_with_skipna(skipna))
     }
 
-    fn cumulative_axis1<F>(&self, init: f64, op: F) -> Result<Self, FrameError>
+    fn cumulative_axis1<F>(&self, init: f64, op: F, skipna: bool) -> Result<Self, FrameError>
     where
         F: Fn(f64, f64) -> f64 + Copy,
     {
@@ -87326,10 +87326,16 @@ impl DataFrame {
 
         for row_idx in 0..self.len() {
             let mut acc = init;
+            let mut poisoned = false;
             for col_idx in 0..n_cols {
                 let col = self.column_at(col_idx).expect("column in bounds");
                 let value = &col.values()[row_idx];
-                if value.is_missing() {
+                if poisoned {
+                    per_column[col_idx].push(Scalar::Null(NullKind::NaN));
+                } else if value.is_missing() {
+                    if !skipna {
+                        poisoned = true;
+                    }
                     per_column[col_idx].push(Scalar::Null(NullKind::NaN));
                 } else {
                     let x = value.to_f64().map_err(ColumnError::from)?;
@@ -87376,7 +87382,12 @@ impl DataFrame {
     /// Per br-frankenpandas-bktp1: typed-i64 cumulative axis=1 reducer for
     /// uniformly-Timedelta DataFrames. Op operates on i64 ns; missing
     /// positions don't advance the accumulator. Emits Scalar::Timedelta64.
-    fn cumulative_axis1_timedelta<Op>(&self, init: i64, op: Op) -> Result<Self, FrameError>
+    fn cumulative_axis1_timedelta<Op>(
+        &self,
+        init: i64,
+        op: Op,
+        skipna: bool,
+    ) -> Result<Self, FrameError>
     where
         Op: Fn(i64, i64) -> i64,
     {
@@ -87387,16 +87398,26 @@ impl DataFrame {
         for row_idx in 0..self.len() {
             let mut acc = init;
             let mut started = false;
+            let mut poisoned = false;
             for col_idx in 0..n_cols {
                 let col = self.column_at(col_idx).expect("column in bounds");
                 let value = &col.values()[row_idx];
-                match value {
-                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => {
-                        acc = if started { op(acc, *ns) } else { *ns };
-                        started = true;
-                        per_column[col_idx].push(Scalar::Timedelta64(acc));
+                if poisoned {
+                    per_column[col_idx].push(Scalar::Timedelta64(Timedelta::NAT));
+                } else {
+                    match value {
+                        Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => {
+                            acc = if started { op(acc, *ns) } else { *ns };
+                            started = true;
+                            per_column[col_idx].push(Scalar::Timedelta64(acc));
+                        }
+                        _ => {
+                            if !skipna {
+                                poisoned = true;
+                            }
+                            per_column[col_idx].push(Scalar::Timedelta64(Timedelta::NAT));
+                        }
                     }
-                    _ => per_column[col_idx].push(Scalar::Timedelta64(Timedelta::NAT)),
                 }
             }
         }
@@ -87419,20 +87440,23 @@ impl DataFrame {
         Ok(out)
     }
 
+    /// Cumulative sum across columns with explicit `skipna`, computed row-wise.
+    pub fn cumsum_axis1_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
+        if self.all_columns_timedelta() {
+            return self.cumulative_axis1_timedelta(0, Timedelta::add, skipna);
+        }
+        self.cumulative_axis1(0.0, |acc, x| acc + x, skipna)
+    }
+
     /// Cumulative sum across columns, computed row-wise.
     ///
     /// Matches `pd.DataFrame.cumsum(axis=1, skipna=True)`.
     pub fn cumsum_axis1(&self) -> Result<Self, FrameError> {
-        if self.all_columns_timedelta() {
-            return self.cumulative_axis1_timedelta(0, Timedelta::add);
-        }
-        self.cumulative_axis1(0.0, |acc, x| acc + x)
+        self.cumsum_axis1_with_skipna(true)
     }
 
-    /// Cumulative product across columns, computed row-wise.
-    ///
-    /// Matches `pd.DataFrame.cumprod(axis=1, skipna=True)`.
-    pub fn cumprod_axis1(&self) -> Result<Self, FrameError> {
+    /// Cumulative product across columns with explicit `skipna`, computed row-wise.
+    pub fn cumprod_axis1_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
         // Per br-frankenpandas-bktp1: pandas raises TypeError on
         // td_df.cumprod(axis=1); mirror Series::cumprod br-v36qy by emitting
         // all-NaT for uniformly-Timedelta DataFrames.
@@ -87460,29 +87484,46 @@ impl DataFrame {
             out.allows_duplicate_labels = self.allows_duplicate_labels;
             return Ok(out);
         }
-        self.cumulative_axis1(1.0, |acc, x| acc * x)
+        self.cumulative_axis1(1.0, |acc, x| acc * x, skipna)
+    }
+
+    /// Cumulative product across columns, computed row-wise.
+    ///
+    /// Matches `pd.DataFrame.cumprod(axis=1, skipna=True)`.
+    pub fn cumprod_axis1(&self) -> Result<Self, FrameError> {
+        self.cumprod_axis1_with_skipna(true)
+    }
+
+    /// Cumulative minimum across columns with explicit `skipna`, computed row-wise.
+    pub fn cummin_axis1_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-bktp1: sister to cumsum_axis1 above.
+        if self.all_columns_timedelta() {
+            return self.cumulative_axis1_timedelta(i64::MAX, |a, b| a.min(b), skipna);
+        }
+        self.cumulative_axis1(f64::INFINITY, f64::min, skipna)
     }
 
     /// Cumulative minimum across columns, computed row-wise.
     ///
     /// Matches `pd.DataFrame.cummin(axis=1, skipna=True)`.
     pub fn cummin_axis1(&self) -> Result<Self, FrameError> {
+        self.cummin_axis1_with_skipna(true)
+    }
+
+    /// Cumulative maximum across columns with explicit `skipna`, computed row-wise.
+    pub fn cummax_axis1_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
         // Per br-frankenpandas-bktp1: sister to cumsum_axis1 above.
         if self.all_columns_timedelta() {
-            return self.cumulative_axis1_timedelta(i64::MAX, |a, b| a.min(b));
+            return self.cumulative_axis1_timedelta(i64::MIN, |a, b| a.max(b), skipna);
         }
-        self.cumulative_axis1(f64::INFINITY, f64::min)
+        self.cumulative_axis1(f64::NEG_INFINITY, f64::max, skipna)
     }
 
     /// Cumulative maximum across columns, computed row-wise.
     ///
     /// Matches `pd.DataFrame.cummax(axis=1, skipna=True)`.
     pub fn cummax_axis1(&self) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-bktp1: sister to cumsum_axis1 above.
-        if self.all_columns_timedelta() {
-            return self.cumulative_axis1_timedelta(i64::MIN, |a, b| a.max(b));
-        }
-        self.cumulative_axis1(f64::NEG_INFINITY, f64::max)
+        self.cummax_axis1_with_skipna(true)
     }
 
     /// First-order difference per column.
@@ -160120,6 +160161,130 @@ mod tests {
         assert!(df.cumprod_axis1().is_err());
         assert!(df.cummin_axis1().is_err());
         assert!(df.cummax_axis1().is_err());
+    }
+
+    #[test]
+    fn df_cumulative_axis1_skipna_false_poisons() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let cs = df.cumsum_axis1_with_skipna(false).unwrap();
+        assert_eq!(cs.columns()["a"].values()[0], Scalar::Float64(1.0));
+        assert!(cs.columns()["b"].values()[0].is_missing());
+        assert!(cs.columns()["c"].values()[0].is_missing());
+
+        assert!(cs.columns()["a"].values()[1].is_missing());
+        assert!(cs.columns()["b"].values()[1].is_missing());
+        assert!(cs.columns()["c"].values()[1].is_missing());
+
+        assert_eq!(cs.columns()["a"].values()[2], Scalar::Float64(10.0));
+        assert_eq!(cs.columns()["b"].values()[2], Scalar::Float64(30.0));
+        assert_eq!(cs.columns()["c"].values()[2], Scalar::Float64(60.0));
+
+        let cp = df.cumprod_axis1_with_skipna(false).unwrap();
+        assert_eq!(cp.columns()["a"].values()[0], Scalar::Float64(1.0));
+        assert!(cp.columns()["b"].values()[0].is_missing());
+        assert!(cp.columns()["c"].values()[0].is_missing());
+
+        assert_eq!(cp.columns()["a"].values()[2], Scalar::Float64(10.0));
+        assert_eq!(cp.columns()["b"].values()[2], Scalar::Float64(200.0));
+        assert_eq!(cp.columns()["c"].values()[2], Scalar::Float64(6000.0));
+
+        let cmin = df.cummin_axis1_with_skipna(false).unwrap();
+        assert_eq!(cmin.columns()["a"].values()[0], Scalar::Float64(1.0));
+        assert!(cmin.columns()["b"].values()[0].is_missing());
+        assert!(cmin.columns()["c"].values()[0].is_missing());
+
+        let cmax = df.cummax_axis1_with_skipna(false).unwrap();
+        assert_eq!(cmax.columns()["a"].values()[0], Scalar::Float64(1.0));
+        assert!(cmax.columns()["b"].values()[0].is_missing());
+        assert!(cmax.columns()["c"].values()[0].is_missing());
+    }
+
+    #[test]
+    fn df_cumulative_axis1_timedelta_skipna() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Timedelta64(100),
+                        Scalar::Timedelta64(Timedelta::NAT),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Timedelta64(Timedelta::NAT),
+                        Scalar::Timedelta64(200),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![Scalar::Timedelta64(300), Scalar::Timedelta64(400)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let cs_skip = df.cumsum_axis1_with_skipna(true).unwrap();
+        assert_eq!(cs_skip.columns()["a"].values()[0], Scalar::Timedelta64(100));
+        assert!(cs_skip.columns()["b"].values()[0].is_missing());
+        assert_eq!(cs_skip.columns()["c"].values()[0], Scalar::Timedelta64(400));
+
+        let cs_noskip = df.cumsum_axis1_with_skipna(false).unwrap();
+        assert_eq!(cs_noskip.columns()["a"].values()[0], Scalar::Timedelta64(100));
+        assert!(cs_noskip.columns()["b"].values()[0].is_missing());
+        assert!(cs_noskip.columns()["c"].values()[0].is_missing());
+
+        assert!(cs_noskip.columns()["a"].values()[1].is_missing());
+        assert!(cs_noskip.columns()["b"].values()[1].is_missing());
+        assert!(cs_noskip.columns()["c"].values()[1].is_missing());
+
+        let cmin_noskip = df.cummin_axis1_with_skipna(false).unwrap();
+        assert_eq!(
+            cmin_noskip.columns()["a"].values()[0],
+            Scalar::Timedelta64(100)
+        );
+        assert!(cmin_noskip.columns()["b"].values()[0].is_missing());
+        assert!(cmin_noskip.columns()["c"].values()[0].is_missing());
+
+        let cmax_noskip = df.cummax_axis1_with_skipna(false).unwrap();
+        assert_eq!(
+            cmax_noskip.columns()["a"].values()[0],
+            Scalar::Timedelta64(100)
+        );
+        assert!(cmax_noskip.columns()["b"].values()[0].is_missing());
+        assert!(cmax_noskip.columns()["c"].values()[0].is_missing());
     }
 
     // ── Batch 12: DataFrame::map_elements + str removeprefix/removesuffix ──

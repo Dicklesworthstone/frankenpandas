@@ -17660,7 +17660,7 @@ impl PyDataFrame {
         let res = if ax == 0 {
             self.inner.cumsum_with_skipna(skipna)
         } else {
-            self.inner.cumsum_axis1()
+            self.inner.cumsum_axis1_with_skipna(skipna)
         }
         .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
@@ -17673,7 +17673,7 @@ impl PyDataFrame {
         let res = if ax == 0 {
             self.inner.cumprod_with_skipna(skipna)
         } else {
-            self.inner.cumprod_axis1()
+            self.inner.cumprod_axis1_with_skipna(skipna)
         }
         .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
@@ -17686,7 +17686,7 @@ impl PyDataFrame {
         let res = if ax == 0 {
             self.inner.cummin_with_skipna(skipna)
         } else {
-            self.inner.cummin_axis1()
+            self.inner.cummin_axis1_with_skipna(skipna)
         }
         .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
@@ -17699,7 +17699,7 @@ impl PyDataFrame {
         let res = if ax == 0 {
             self.inner.cummax_with_skipna(skipna)
         } else {
-            self.inner.cummax_axis1()
+            self.inner.cummax_axis1_with_skipna(skipna)
         }
         .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
@@ -34012,6 +34012,26 @@ mod tests {
                 .cummax(Some(axis_1.as_any()), true)
                 .expect("df cummax axis 1");
             assert_eq!(df_cmax1.shape(), (3, 2));
+
+            let df_cs1_noskip = py_df_cum
+                .cumsum(Some(axis_1.as_any()), false)
+                .expect("df cumsum axis 1 skipna false");
+            assert_eq!(df_cs1_noskip.shape(), (3, 2));
+
+            let df_cp1_noskip = py_df_cum
+                .cumprod(Some(axis_1.as_any()), false)
+                .expect("df cumprod axis 1 skipna false");
+            assert_eq!(df_cp1_noskip.shape(), (3, 2));
+
+            let df_cmin1_noskip = py_df_cum
+                .cummin(Some(axis_1.as_any()), false)
+                .expect("df cummin axis 1 skipna false");
+            assert_eq!(df_cmin1_noskip.shape(), (3, 2));
+
+            let df_cmax1_noskip = py_df_cum
+                .cummax(Some(axis_1.as_any()), false)
+                .expect("df cummax axis 1 skipna false");
+            assert_eq!(df_cmax1_noskip.shape(), (3, 2));
         });
     }
 
