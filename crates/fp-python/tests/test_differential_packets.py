@@ -1535,4 +1535,132 @@ def test_row_reductions_corrwith_differential():
     assert len(vc_fp) == len(vc_pd)
 
 
+def test_rolling_expanding_ewm_df_differential():
+    if fpd is None:
+        pytest.skip("frankenpandas not installed")
+
+    df_data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [2.0, 4.0, 6.0, 8.0]}
+    s_data = [1.0, 3.0, 2.0, 4.0]
+    df2_data = {"a": [2.0, 3.0, 4.0, 5.0], "b": [1.0, 2.0, 1.0, 2.0]}
+
+    df_fp = fpd.DataFrame(df_data)
+    df_pd = pd.DataFrame(df_data)
+
+    s_fp = fpd.Series(s_data)
+    s_pd = pd.Series(s_data)
+
+    df2_fp = fpd.DataFrame(df2_data)
+    df2_pd = pd.DataFrame(df2_data)
+
+    # 1. DataFrame rolling apply
+    r_apply_fp = df_fp.rolling(2).apply(sum)
+    r_apply_pd = df_pd.rolling(2).apply(np.sum)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(r_apply_fp[col].to_list(), r_apply_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    # 2. DataFrame expanding apply
+    e_apply_fp = df_fp.expanding(2).apply(sum)
+    e_apply_pd = df_pd.expanding(2).apply(np.sum)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(e_apply_fp[col].to_list(), e_apply_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    # 3. DataFrame rolling/expanding apply on non-numeric columns raises DataError
+    df_mixed_fp = fpd.DataFrame({"a": [1.0, 2.0], "b": ["x", "y"]})
+    with pytest.raises(Exception) as exc_info:
+        df_mixed_fp.rolling(2).apply(sum)
+    assert "DataError" in type(exc_info.value).__name__ or isinstance(exc_info.value, TypeError)
+
+    with pytest.raises(Exception) as exc_info:
+        df_mixed_fp.expanding(2).apply(sum)
+    assert "DataError" in type(exc_info.value).__name__ or isinstance(exc_info.value, TypeError)
+
+    # 4. DataFrame rolling corr/cov with Series and DataFrame
+    r_corr_s_fp = df_fp.rolling(2).corr(s_fp)
+    r_corr_s_pd = df_pd.rolling(2).corr(s_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(r_corr_s_fp[col].to_list(), r_corr_s_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    r_corr_df_fp = df_fp.rolling(2).corr(df2_fp)
+    r_corr_df_pd = df_pd.rolling(2).corr(df2_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(r_corr_df_fp[col].to_list(), r_corr_df_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    r_cov_s_fp = df_fp.rolling(2).cov(s_fp)
+    r_cov_s_pd = df_pd.rolling(2).cov(s_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(r_cov_s_fp[col].to_list(), r_cov_s_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    r_cov_df_fp = df_fp.rolling(2).cov(df2_fp)
+    r_cov_df_pd = df_pd.rolling(2).cov(df2_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(r_cov_df_fp[col].to_list(), r_cov_df_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    # 5. DataFrame expanding corr/cov with Series and DataFrame
+    e_corr_s_fp = df_fp.expanding(2).corr(s_fp)
+    e_corr_s_pd = df_pd.expanding(2).corr(s_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(e_corr_s_fp[col].to_list(), e_corr_s_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    e_corr_df_fp = df_fp.expanding(2).corr(df2_fp)
+    e_corr_df_pd = df_pd.expanding(2).corr(df2_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(e_corr_df_fp[col].to_list(), e_corr_df_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    e_cov_s_fp = df_fp.expanding(2).cov(s_fp)
+    e_cov_s_pd = df_pd.expanding(2).cov(s_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(e_cov_s_fp[col].to_list(), e_cov_s_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    e_cov_df_fp = df_fp.expanding(2).cov(df2_fp)
+    e_cov_df_pd = df_pd.expanding(2).cov(df2_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(e_cov_df_fp[col].to_list(), e_cov_df_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    # 6. DataFrame ewm corr/cov with Series and DataFrame
+    ewm_corr_s_fp = df_fp.ewm(span=2).corr(s_fp)
+    ewm_corr_s_pd = df_pd.ewm(span=2).corr(s_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(ewm_corr_s_fp[col].to_list(), ewm_corr_s_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    ewm_corr_df_fp = df_fp.ewm(span=2).corr(df2_fp)
+    ewm_corr_df_pd = df_pd.ewm(span=2).corr(df2_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(ewm_corr_df_fp[col].to_list(), ewm_corr_df_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    ewm_cov_s_fp = df_fp.ewm(span=2).cov(s_fp)
+    ewm_cov_s_pd = df_pd.ewm(span=2).cov(s_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(ewm_cov_s_fp[col].to_list(), ewm_cov_s_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    ewm_cov_df_fp = df_fp.ewm(span=2).cov(df2_fp)
+    ewm_cov_df_pd = df_pd.ewm(span=2).cov(df2_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(ewm_cov_df_fp[col].to_list(), ewm_cov_df_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    # 7. Series window corr/cov with DataFrame
+    s_r_corr_fp = s_fp.rolling(2).corr(df_fp)
+    s_r_corr_pd = s_pd.rolling(2).corr(df_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(s_r_corr_fp[col].to_list(), s_r_corr_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    s_e_cov_fp = s_fp.expanding(2).cov(df_fp)
+    s_e_cov_pd = s_pd.expanding(2).cov(df_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(s_e_cov_fp[col].to_list(), s_e_cov_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    s_w_corr_fp = s_fp.ewm(span=2).corr(df_fp)
+    s_w_corr_pd = s_pd.ewm(span=2).corr(df_pd)
+    for col in ["a", "b"]:
+        np.testing.assert_allclose(s_w_corr_fp[col].to_list(), s_w_corr_pd[col].to_list(), rtol=1e-5, atol=1e-5)
+
+    # 8. Type validation for other
+    with pytest.raises(TypeError):
+        df_fp.rolling(2).corr(42)
+    with pytest.raises(TypeError):
+        df_fp.expanding(2).cov("invalid")
+    with pytest.raises(TypeError):
+        df_fp.ewm(span=2).corr([1, 2, 3])
+
+
+
 

@@ -20588,6 +20588,149 @@ impl PySparseAccessor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_window_bivariate<F, G>(
+    py: Python<'_>,
+    series: Option<&Series>,
+    dataframe: Option<&DataFrame>,
+    other: Option<&Bound<'_, PyAny>>,
+    op: F,
+    df_none_pairwise: Option<G>,
+    err_msg_empty: &'static str,
+    err_msg_df_none: &'static str,
+) -> PyResult<Py<PyAny>>
+where
+    F: Fn(&Series, &Series) -> Result<Series, FrameError>,
+    G: Fn(&DataFrame) -> Result<DataFrame, FrameError>,
+{
+    let (other_series, other_df) = match other {
+        Some(o) if !o.is_none() => {
+            if let Ok(s) = o.extract::<PyRef<'_, PySeries>>() {
+                (Some(s), None)
+            } else if let Ok(df) = o.extract::<PyRef<'_, PyDataFrame>>() {
+                (None, Some(df))
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "other must be a Series or DataFrame",
+                ));
+            }
+        }
+        _ => (None, None),
+    };
+
+    if let Some(s) = series {
+        if let Some(ref o) = other_series {
+            let res = op(s, &o.inner).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        } else if let Some(ref o_df) = other_df {
+            let mut out_series_list = Vec::new();
+            for col_name in o_df.inner.column_names() {
+                let Some(col) = o_df.inner.column(col_name) else {
+                    continue;
+                };
+                if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                    continue;
+                }
+                let col_s = Series::new(col_name.as_str(), o_df.inner.index().clone(), col.clone())
+                    .map_err(frame_error_to_py)?;
+                let mut res = op(s, &col_s).map_err(frame_error_to_py)?;
+                if res.index() != o_df.inner.index() {
+                    res = res
+                        .reindex(o_df.inner.index().labels().to_vec())
+                        .map_err(frame_error_to_py)?;
+                }
+                let res = Series::new(col_name.as_str(), res.index().clone(), res.column().clone())
+                    .map_err(frame_error_to_py)?;
+                out_series_list.push(res);
+            }
+            let res_df = if out_series_list.is_empty() {
+                DataFrame::new(o_df.inner.index().clone(), BTreeMap::new())
+                    .map_err(frame_error_to_py)?
+            } else {
+                DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?
+            };
+            return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
+        } else {
+            let res = op(s, s).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+    }
+
+    if let Some(df) = dataframe {
+        if let Some(ref o) = other_series {
+            let mut out_series_list = Vec::new();
+            for col_name in df.column_names() {
+                let Some(col) = df.column(col_name) else {
+                    continue;
+                };
+                if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                    continue;
+                }
+                let s1 = Series::new(col_name.as_str(), df.index().clone(), col.clone())
+                    .map_err(frame_error_to_py)?;
+                let mut res = op(&s1, &o.inner).map_err(frame_error_to_py)?;
+                if res.index() != df.index() {
+                    res = res
+                        .reindex(df.index().labels().to_vec())
+                        .map_err(frame_error_to_py)?;
+                }
+                let res = Series::new(col_name.as_str(), res.index().clone(), res.column().clone())
+                    .map_err(frame_error_to_py)?;
+                out_series_list.push(res);
+            }
+            let res_df = if out_series_list.is_empty() {
+                DataFrame::new(df.index().clone(), BTreeMap::new()).map_err(frame_error_to_py)?
+            } else {
+                DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?
+            };
+            return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
+        } else if let Some(ref o_df) = other_df {
+            let (a1, a2) = df
+                .align_on_index(&o_df.inner, AlignMode::Outer)
+                .map_err(frame_error_to_py)?;
+            let mut out_series_list = Vec::new();
+            for col_name in a1.column_names() {
+                let Some(c1) = a1.column(col_name) else {
+                    continue;
+                };
+                let Some(c2) = a2.column(col_name) else {
+                    continue;
+                };
+                if (c1.dtype() == DType::Int64 || c1.dtype() == DType::Float64)
+                    && (c2.dtype() == DType::Int64 || c2.dtype() == DType::Float64)
+                {
+                    let s1 = Series::new(col_name.as_str(), a1.index().clone(), c1.clone())
+                        .map_err(frame_error_to_py)?;
+                    let s2 = Series::new(col_name.as_str(), a2.index().clone(), c2.clone())
+                        .map_err(frame_error_to_py)?;
+                    let res = op(&s1, &s2).map_err(frame_error_to_py)?;
+                    let res =
+                        Series::new(col_name.as_str(), res.index().clone(), res.column().clone())
+                            .map_err(frame_error_to_py)?;
+                    out_series_list.push(res);
+                }
+            }
+            let res_df = if out_series_list.is_empty() {
+                DataFrame::new(a1.index().clone(), BTreeMap::new()).map_err(frame_error_to_py)?
+            } else {
+                DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?
+            };
+            return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
+        } else if let Some(pairwise) = df_none_pairwise {
+            let res = pairwise(df).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                err_msg_df_none,
+            ));
+        }
+    }
+
+    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        err_msg_empty,
+    ))
+}
+
 /// Python wrapper for rolling window calculations over Series or DataFrame.
 #[pyclass(name = "Rolling")]
 pub struct PyRolling {
@@ -20888,53 +21031,35 @@ impl PyRolling {
     }
 
     #[pyo3(signature = (other=None))]
-    pub fn corr(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let other_series = match other {
-                Some(o) => &o.inner,
-                None => s,
-            };
-            let res = s
-                .rolling(self.window, self.min_periods)
-                .corr(other_series)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling(self.window, self.min_periods)
-                .corr()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+    pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let window = self.window;
+        let min_periods = self.min_periods;
+        execute_window_bivariate(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            other,
+            |s1, s2| s1.rolling(window, min_periods).corr(s2),
+            Some(|df: &DataFrame| df.rolling(window, min_periods).corr()),
             "Empty rolling object",
-        ))
+            "DataFrame rolling corr without other is not supported",
+        )
     }
 
     #[pyo3(signature = (other=None))]
-    pub fn cov(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let other_series = match other {
-                Some(o) => &o.inner,
-                None => s,
-            };
-            let res = s
-                .rolling(self.window, self.min_periods)
-                .cov(other_series)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling(self.window, self.min_periods)
-                .cov()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+    pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let window = self.window;
+        let min_periods = self.min_periods;
+        execute_window_bivariate(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            other,
+            |s1, s2| s1.rolling(window, min_periods).cov(s2),
+            Some(|df: &DataFrame| df.rolling(window, min_periods).cov()),
             "Empty rolling object",
-        ))
+            "DataFrame rolling cov without other is not supported",
+        )
     }
 
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -21007,36 +21132,87 @@ impl PyRolling {
         if func.extract::<String>().is_ok() {
             return self.agg(py, func);
         }
-        if func.is_callable()
-            && let Some(ref s) = self.series
-        {
-            let n = s.len();
-            let vals = s.column().values();
-            let mut out_vals = Vec::with_capacity(n);
-            let w = self.window;
-            let min_p = self.min_periods.unwrap_or(w);
-            for i in 0..n {
-                let start = (i + 1).saturating_sub(w);
-                let slice = &vals[start..=i];
-                if slice.len() < min_p {
-                    out_vals.push(Scalar::Float64(f64::NAN));
-                } else {
-                    let py_slice: Vec<Py<PyAny>> = slice
-                        .iter()
-                        .map(|v| scalar_to_py(py, v))
-                        .collect::<Result<_, _>>()?;
-                    let arg = PyList::new(py, py_slice)?;
-                    let res = func.call1((arg,))?;
-                    let res_scalar = py_to_scalar(py, &res)?;
-                    out_vals.push(res_scalar);
+        if func.is_callable() {
+            if let Some(ref s) = self.series {
+                let n = s.len();
+                let vals = s.column().values();
+                let mut out_vals = Vec::with_capacity(n);
+                let w = self.window;
+                let min_p = self.min_periods.unwrap_or(w);
+                for i in 0..n {
+                    let start = (i + 1).saturating_sub(w);
+                    let slice = &vals[start..=i];
+                    if slice.len() < min_p {
+                        out_vals.push(Scalar::Float64(f64::NAN));
+                    } else {
+                        let py_slice: Vec<Py<PyAny>> = slice
+                            .iter()
+                            .map(|v| scalar_to_py(py, v))
+                            .collect::<Result<_, _>>()?;
+                        let arg = PyList::new(py, py_slice)?;
+                        let res = func.call1((arg,))?;
+                        let res_scalar = py_to_scalar(py, &res)?;
+                        out_vals.push(res_scalar);
+                    }
                 }
+                let res_series =
+                    Series::from_values(s.name(), s.index().labels().to_vec(), out_vals)
+                        .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
             }
-            let res_series = Series::from_values(s.name(), s.index().labels().to_vec(), out_vals)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
+            if let Some(ref df) = self.dataframe {
+                let n = df.len();
+                let w = self.window;
+                let min_p = self.min_periods.unwrap_or(w);
+                let col_names = df.column_names();
+                if col_names.is_empty() {
+                    let empty_df = DataFrame::new(df.index().clone(), BTreeMap::new())
+                        .map_err(frame_error_to_py)?;
+                    return Ok(Py::new(py, PyDataFrame { inner: empty_df })?.into_any());
+                }
+                let mut out_series_list = Vec::with_capacity(col_names.len());
+                for col_name in &col_names {
+                    let Some(col) = df.column(col_name) else {
+                        continue;
+                    };
+                    if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                        return Err(PyErr::new::<DataError, _>(format!(
+                            "Cannot aggregate non-numeric type: {:?}",
+                            col.dtype()
+                        )));
+                    }
+                    let vals = col.values();
+                    let mut out_vals = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let start = (i + 1_usize).saturating_sub(w);
+                        let slice = &vals[start..=i];
+                        if slice.len() < min_p {
+                            out_vals.push(Scalar::Float64(f64::NAN));
+                        } else {
+                            let py_slice: Vec<Py<PyAny>> = slice
+                                .iter()
+                                .map(|v| scalar_to_py(py, v))
+                                .collect::<Result<_, _>>()?;
+                            let arg = PyList::new(py, py_slice)?;
+                            let res = func.call1((arg,))?;
+                            let res_scalar = py_to_scalar(py, &res)?;
+                            out_vals.push(res_scalar);
+                        }
+                    }
+                    let s = Series::from_values(
+                        col_name.as_str(),
+                        df.index().labels().to_vec(),
+                        out_vals,
+                    )
+                    .map_err(frame_error_to_py)?;
+                    out_series_list.push(s);
+                }
+                let res_df = DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
+            }
         }
         Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "rolling.apply currently supported for Series with Python callable",
+            "rolling.apply currently supported for Series and DataFrame with Python callable",
         ))
     }
 }
@@ -21339,39 +21515,33 @@ impl PyExpanding {
     }
 
     #[pyo3(signature = (other=None))]
-    pub fn corr(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let other_series = match other {
-                Some(o) => &o.inner,
-                None => s,
-            };
-            let res = s
-                .expanding(self.min_periods)
-                .corr(other_series)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "DataFrame expanding corr not implemented",
-        ))
+    pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let min_periods = self.min_periods;
+        execute_window_bivariate(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            other,
+            |s1, s2| s1.expanding(min_periods).corr(s2),
+            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
+            "Empty expanding object",
+            "DataFrame expanding corr without other is not supported",
+        )
     }
 
     #[pyo3(signature = (other=None))]
-    pub fn cov(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let other_series = match other {
-                Some(o) => &o.inner,
-                None => s,
-            };
-            let res = s
-                .expanding(self.min_periods)
-                .cov(other_series)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "DataFrame expanding cov not implemented",
-        ))
+    pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let min_periods = self.min_periods;
+        execute_window_bivariate(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            other,
+            |s1, s2| s1.expanding(min_periods).cov(s2),
+            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
+            "Empty expanding object",
+            "DataFrame expanding cov without other is not supported",
+        )
     }
 
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -21444,34 +21614,83 @@ impl PyExpanding {
         if func.extract::<String>().is_ok() {
             return self.agg(py, func);
         }
-        if func.is_callable()
-            && let Some(ref s) = self.series
-        {
-            let n = s.len();
-            let vals = s.column().values();
-            let mut out_vals = Vec::with_capacity(n);
-            let min_p = self.min_periods.unwrap_or(1);
-            for i in 0..n {
-                let slice = &vals[0..=i];
-                if slice.len() < min_p {
-                    out_vals.push(Scalar::Float64(f64::NAN));
-                } else {
-                    let py_slice: Vec<Py<PyAny>> = slice
-                        .iter()
-                        .map(|v| scalar_to_py(py, v))
-                        .collect::<Result<_, _>>()?;
-                    let arg = PyList::new(py, py_slice)?;
-                    let res = func.call1((arg,))?;
-                    let res_scalar = py_to_scalar(py, &res)?;
-                    out_vals.push(res_scalar);
+        if func.is_callable() {
+            if let Some(ref s) = self.series {
+                let n = s.len();
+                let vals = s.column().values();
+                let mut out_vals = Vec::with_capacity(n);
+                let min_p = self.min_periods.unwrap_or(1);
+                for i in 0..n {
+                    let slice = &vals[0..=i];
+                    if slice.len() < min_p {
+                        out_vals.push(Scalar::Float64(f64::NAN));
+                    } else {
+                        let py_slice: Vec<Py<PyAny>> = slice
+                            .iter()
+                            .map(|v| scalar_to_py(py, v))
+                            .collect::<Result<_, _>>()?;
+                        let arg = PyList::new(py, py_slice)?;
+                        let res = func.call1((arg,))?;
+                        let res_scalar = py_to_scalar(py, &res)?;
+                        out_vals.push(res_scalar);
+                    }
                 }
+                let res_series =
+                    Series::from_values(s.name(), s.index().labels().to_vec(), out_vals)
+                        .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
             }
-            let res_series = Series::from_values(s.name(), s.index().labels().to_vec(), out_vals)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
+            if let Some(ref df) = self.dataframe {
+                let n = df.len();
+                let min_p = self.min_periods.unwrap_or(1);
+                let col_names = df.column_names();
+                if col_names.is_empty() {
+                    let empty_df = DataFrame::new(df.index().clone(), BTreeMap::new())
+                        .map_err(frame_error_to_py)?;
+                    return Ok(Py::new(py, PyDataFrame { inner: empty_df })?.into_any());
+                }
+                let mut out_series_list = Vec::with_capacity(col_names.len());
+                for col_name in &col_names {
+                    let Some(col) = df.column(col_name) else {
+                        continue;
+                    };
+                    if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                        return Err(PyErr::new::<DataError, _>(format!(
+                            "Cannot aggregate non-numeric type: {:?}",
+                            col.dtype()
+                        )));
+                    }
+                    let vals = col.values();
+                    let mut out_vals = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let slice = &vals[0..=i];
+                        if slice.len() < min_p {
+                            out_vals.push(Scalar::Float64(f64::NAN));
+                        } else {
+                            let py_slice: Vec<Py<PyAny>> = slice
+                                .iter()
+                                .map(|v| scalar_to_py(py, v))
+                                .collect::<Result<_, _>>()?;
+                            let arg = PyList::new(py, py_slice)?;
+                            let res = func.call1((arg,))?;
+                            let res_scalar = py_to_scalar(py, &res)?;
+                            out_vals.push(res_scalar);
+                        }
+                    }
+                    let s = Series::from_values(
+                        col_name.as_str(),
+                        df.index().labels().to_vec(),
+                        out_vals,
+                    )
+                    .map_err(frame_error_to_py)?;
+                    out_series_list.push(s);
+                }
+                let res_df = DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
+            }
         }
         Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "expanding.apply currently supported for Series with Python callable",
+            "expanding.apply currently supported for Series and DataFrame with Python callable",
         ))
     }
 }
@@ -21573,39 +21792,35 @@ impl PyExponentialMovingWindow {
     }
 
     #[pyo3(signature = (other=None))]
-    pub fn corr(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let other_series = match other {
-                Some(o) => &o.inner,
-                None => s,
-            };
-            let res = s
-                .ewm(self.span, self.alpha)
-                .corr(other_series)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "DataFrame EWM corr not supported",
-        ))
+    pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let span = self.span;
+        let alpha = self.alpha;
+        execute_window_bivariate(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            other,
+            |s1, s2| s1.ewm(span, alpha).corr(s2),
+            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
+            "Empty ewm object",
+            "DataFrame EWM corr without other is not supported",
+        )
     }
 
     #[pyo3(signature = (other=None))]
-    pub fn cov(&self, py: Python<'_>, other: Option<&PySeries>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let other_series = match other {
-                Some(o) => &o.inner,
-                None => s,
-            };
-            let res = s
-                .ewm(self.span, self.alpha)
-                .cov(other_series)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "DataFrame EWM cov not supported",
-        ))
+    pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let span = self.span;
+        let alpha = self.alpha;
+        execute_window_bivariate(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            other,
+            |s1, s2| s1.ewm(span, alpha).cov(s2),
+            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
+            "Empty ewm object",
+            "DataFrame EWM cov without other is not supported",
+        )
     }
 
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
