@@ -1031,6 +1031,257 @@ def test_milestone_j_exports_and_submodules_differential(tmp_path: Path) -> None
         assert hasattr(fpd, exp), f"Missing top-level export: {exp}"
 
 
+def test_native_plot_result_and_accessors():
+    df = fpd.DataFrame({"x": [1, 2, 3, 4], "y": [10, 20, 15, 30]})
+    res = df.plot()
+    assert res is not None
+    svg = res.to_svg()
+    assert isinstance(svg, str)
+    assert "<svg" in svg
+    assert "</svg>" in svg
+
+    html = res.to_html()
+    assert isinstance(html, str)
+    assert "<figure" in html
+    assert "<svg" in html
+
+    page = res.to_html_page(title="Custom Title")
+    assert "<!DOCTYPE html>" in page
+    assert "<title>Custom Title</title>" in page
+    assert "<svg" in page
+
+    md = res.to_markdown()
+    assert "<figure>" in md
+    assert "<figcaption>" in md
+
+    # Rich display representation for notebooks
+    assert res._repr_svg_() == svg
+    assert res._repr_html_() == html
+    assert "Plot:" in repr(res)
+
+    for kind in ["line", "bar", "barh", "hist", "box", "kde", "density", "area", "pie"]:
+        p = df.plot(kind=kind)
+        assert "<svg" in p.to_svg(), f"Failed to render kind: {kind}"
+
+    # Explicit accessor methods
+    assert "<svg" in df.plot.line().to_svg()
+    assert "<svg" in df.plot.bar().to_svg()
+    assert "<svg" in df.plot.barh().to_svg()
+    assert "<svg" in df.plot.hist().to_svg()
+    assert "<svg" in df.plot.box().to_svg()
+    assert "<svg" in df.plot.kde().to_svg()
+    assert "<svg" in df.plot.density().to_svg()
+    assert "<svg" in df.plot.area().to_svg()
+    assert "<svg" in df.plot.pie().to_svg()
+
+    # 2D scatter and hexbin plots
+    scatter_res = df.plot.scatter(x="x", y="y")
+    assert "<svg" in scatter_res.to_svg()
+
+    hexbin_res = df.plot.hexbin(x="x", y="y")
+    assert "<svg" in hexbin_res.to_svg()
 
 
+def test_series_native_plot_accessor():
+    s = fpd.Series([1.5, 2.5, 3.0, 4.2, 5.1], name="metric")
+    res = s.plot()
+    assert "<svg" in res.to_svg()
+
+    for kind in ["line", "bar", "barh", "hist", "box", "kde", "density", "area", "pie"]:
+        p = s.plot(kind=kind)
+        assert "<svg" in p.to_svg(), f"Series plot failed for kind: {kind}"
+
+    assert "<svg" in s.plot.line().to_svg()
+    assert "<svg" in s.plot.bar().to_svg()
+    assert "<svg" in s.plot.barh().to_svg()
+    assert "<svg" in s.plot.hist().to_svg()
+    assert "<svg" in s.plot.box().to_svg()
+    assert "<svg" in s.plot.area().to_svg()
+    assert "<svg" in s.plot.pie().to_svg()
+
+
+def test_plotting_convenience_helpers_and_functions():
+    df = fpd.DataFrame({"x": [10.0, 20.0, 30.0], "y": [100.0, 200.0, 300.0]})
+    s = fpd.Series([5.0, 10.0, 15.0], name="nums")
+
+    assert "<svg" in df.plot_to_svg()
+    assert "<svg" in df.plot_to_html()
+    assert "<svg" in s.plot_to_svg()
+    assert "<svg" in s.plot_to_html()
+
+    hist_res = df.hist()
+    assert hist_res is not None
+    assert "<svg" in hist_res.to_svg()
+
+    box_res = df.boxplot()
+    assert box_res is not None
+    assert "<svg" in box_res.to_svg()
+
+    # Top-level plotting functions
+    sm = fpd.plotting.scatter_matrix(df)
+    assert sm is not None and "<svg" in sm.to_svg()
+
+    ac = fpd.plotting.autocorrelation_plot(s)
+    assert ac is not None and "<svg" in ac.to_svg()
+
+    bp = fpd.plotting.bootstrap_plot(s)
+    assert bp is not None and "<svg" in bp.to_svg()
+
+    lp = fpd.plotting.lag_plot(s)
+    assert lp is not None and "<svg" in lp.to_svg()
+
+    bx = fpd.plotting.boxplot(df)
+    assert bx is not None and "<svg" in bx.to_svg()
+
+    bxf = fpd.plotting.boxplot_frame(df)
+    assert bxf is not None and "<svg" in bxf.to_svg()
+
+    hf = fpd.plotting.hist_frame(df)
+    assert hf is not None and "<svg" in hf.to_svg()
+
+    hs = fpd.plotting.hist_series(s)
+    assert hs is not None and "<svg" in hs.to_svg()
+
+    tbl_df = fpd.plotting.table(None, df)
+    assert tbl_df is not None and "<svg" in tbl_df.to_svg()
+
+    tbl_s = fpd.plotting.table(None, s)
+    assert tbl_s is not None and "<svg" in tbl_s.to_svg()
+
+
+def test_dataframe_apply_axis1_and_row_returns():
+    df = fpd.DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
+
+    # Row-wise sum returning scalar -> Series
+    row_sums = df.apply(lambda row: row["a"] + row["b"], axis=1)
+    assert list(row_sums.values) == [11, 22, 33]
+
+    # Row-wise function returning dict -> DataFrame
+    def row_transform(row):
+        return {"sum": row["a"] + row["b"], "diff": row["b"] - row["a"]}
+
+    df_out = df.apply(row_transform, axis=1)
+    assert isinstance(df_out, fpd.DataFrame)
+    assert list(df_out["sum"].values) == [11, 22, 33]
+    assert list(df_out["diff"].values) == [9, 18, 27]
+
+
+def test_series_map_na_action_and_mapping():
+    s = fpd.Series([1, 2, 3], name="x")
+    mapped = s.map({1: 10, 2: 20})
+    vals = list(mapped.values)
+    assert vals[0] == 10
+    assert vals[1] == 20
+    assert vals[2] != vals[2]  # NaN check
+
+    s_str = fpd.Series(["cat", "dog", None], name="animals")
+    upper_mapped = s_str.map(lambda x: x.upper(), na_action="ignore")
+    u_vals = list(upper_mapped.values)
+    assert u_vals[0] == "CAT"
+    assert u_vals[1] == "DOG"
+    assert u_vals[2] is None
+
+
+def test_dataframe_itertuples_options():
+    df = fpd.DataFrame({"a": [1, 2], "b": [3, 4]})
+
+    # With default index=True, name="Pandas"
+    rows_with_idx = list(df.itertuples())
+    assert len(rows_with_idx) == 2
+    assert type(rows_with_idx[0]).__name__ == "Pandas"
+    assert rows_with_idx[0].Index == 0
+    assert rows_with_idx[0].a == 1
+    assert rows_with_idx[0].b == 3
+
+    # With index=False
+    rows_no_idx = list(df.itertuples(index=False))
+    assert len(rows_no_idx) == 2
+    assert not hasattr(rows_no_idx[0], "Index")
+    assert rows_no_idx[0].a == 1
+    assert rows_no_idx[0].b == 3
+
+    # With name=None (returns plain tuples)
+    plain_tuples = list(df.itertuples(name=None))
+    assert type(plain_tuples[0]) is tuple
+    assert plain_tuples[0] == (0, 1, 3)
+def test_melt_pivot_sample_explode_differential():
+    # 1. melt flexibility & ignore_index
+    data = {"A": ["x", "y"], "B": [1, 2], "C": [3, 4]}
+    df_fp = fpd.DataFrame(data)
+    df_pd = pd.DataFrame(data)
+
+    m_fp_single = df_fp.melt(id_vars="A", value_vars="B")
+    m_pd_single = df_pd.melt(id_vars="A", value_vars="B")
+    assert m_fp_single.shape == m_pd_single.shape
+    assert list(m_fp_single["A"]) == list(m_pd_single["A"])
+    assert list(m_fp_single["value"]) == list(m_pd_single["value"])
+
+    m_fp_no_idx = df_fp.melt(id_vars=["A"], value_vars=["B", "C"], ignore_index=False)
+    m_pd_no_idx = df_pd.melt(id_vars=["A"], value_vars=["B", "C"], ignore_index=False)
+    assert m_fp_no_idx.shape == m_pd_no_idx.shape
+    assert list(m_fp_no_idx.index) == list(m_pd_no_idx.index)
+
+    # Top-level melt
+    top_m_fp = fpd.melt(df_fp, id_vars="A", value_vars=["B", "C"])
+    top_m_pd = pd.melt(df_pd, id_vars="A", value_vars=["B", "C"])
+    assert top_m_fp.shape == top_m_pd.shape
+    assert list(top_m_fp["variable"]) == list(top_m_pd["variable"])
+
+    # 2. pivot flexibility & keyword ordering
+    pdata = {
+        "foo": ["one", "one", "two", "two"],
+        "bar": ["A", "B", "A", "B"],
+        "baz": [1, 2, 3, 4],
+    }
+    df_p_fp = fpd.DataFrame(pdata)
+    df_p_pd = pd.DataFrame(pdata)
+
+    p_fp = df_p_fp.pivot(columns="bar", index="foo", values="baz")
+    p_pd = df_p_pd.pivot(columns="bar", index="foo", values="baz")
+    assert p_fp.shape == p_pd.shape
+    assert sorted(list(p_fp.columns)) == sorted(list(p_pd.columns))
+
+    # Top-level pivot
+    top_p_fp = fpd.pivot(df_p_fp, columns="bar", index="foo", values="baz")
+    assert top_p_fp.shape == p_pd.shape
+
+    # Pivot without explicit index (uses existing row index)
+    p_fp_no_idx = df_p_fp.pivot(columns="bar", values="baz")
+    assert p_fp_no_idx.shape == (4, 2)
+    assert sorted(list(p_fp_no_idx.columns)) == ["A", "B"]
+
+    # 3. sample ignore_index and axis
+    sdata = {"A": [10, 20, 30, 40], "B": [100, 200, 300, 400]}
+    df_s_fp = fpd.DataFrame(sdata)
+    df_s_pd = pd.DataFrame(sdata)
+
+    samp_fp = df_s_fp.sample(2, random_state=42, ignore_index=True)
+    assert samp_fp.shape == (2, 2)
+    assert list(samp_fp.index) == [0, 1]
+
+    col_samp_fp = df_s_fp.sample(1, axis=1, random_state=42)
+    assert col_samp_fp.shape == (4, 1)
+
+    ser_s_fp = fpd.Series([10, 20, 30, 40])
+    ser_samp_fp = ser_s_fp.sample(3, random_state=42, ignore_index=True)
+    assert ser_samp_fp.shape == (3,)
+    assert list(ser_samp_fp.index) == [0, 1, 2]
+
+    # 4. explode list of columns and ignore_index
+    edata = {"A": ["1,2", "3,4"], "B": [10, 20]}
+    df_e_fp = fpd.DataFrame(edata)
+    df_e_pd = pd.DataFrame(edata)
+
+    exp_fp_single = df_e_fp.explode("A")
+    assert exp_fp_single.shape == (4, 2)
+    assert list(exp_fp_single["A"]) == ["1", "2", "3", "4"]
+
+    exp_fp_list = df_e_fp.explode(["A"], ignore_index=True)
+    assert exp_fp_list.shape == (4, 2)
+    assert list(exp_fp_list.index) == [0, 1, 2, 3]
+
+    ser_e_fp = fpd.Series(["x,y", "z,w"])
+    ser_exp_fp = ser_e_fp.explode(ignore_index=True)
+    assert list(ser_exp_fp.to_list()) == ["x", "y", "z", "w"]
+    assert list(ser_exp_fp.index) == [0, 1, 2, 3]
 
