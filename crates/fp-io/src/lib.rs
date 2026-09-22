@@ -1115,10 +1115,28 @@ fn parse_simple_numeric_csv_chunk(
 fn merge_one_simple_numeric_csv_column(
     is_float: bool,
     capacity: usize,
-    sources: Vec<CsvTypedColumnValues>,
+    mut sources: Vec<CsvTypedColumnValues>,
 ) -> Option<CsvTypedColumnValues> {
+    if sources.is_empty() {
+        return if is_float {
+            Some(CsvTypedColumnValues::Float64(Vec::with_capacity(capacity)))
+        } else {
+            Some(CsvTypedColumnValues::Int64(Vec::with_capacity(capacity)))
+        };
+    }
     if is_float {
-        let mut out = Vec::with_capacity(capacity);
+        let first = sources.remove(0);
+        let mut out = match first {
+            CsvTypedColumnValues::Int64(src) => {
+                let mut v = Vec::with_capacity(capacity);
+                v.extend(src.into_iter().map(|value| value as f64));
+                v
+            }
+            CsvTypedColumnValues::Float64(mut src) => {
+                src.reserve(capacity.saturating_sub(src.len()));
+                src
+            }
+        };
         for src in sources {
             match src {
                 CsvTypedColumnValues::Int64(src) => {
@@ -1129,7 +1147,14 @@ fn merge_one_simple_numeric_csv_column(
         }
         Some(CsvTypedColumnValues::Float64(out))
     } else {
-        let mut out = Vec::with_capacity(capacity);
+        let first = sources.remove(0);
+        let mut out = match first {
+            CsvTypedColumnValues::Int64(mut src) => {
+                src.reserve(capacity.saturating_sub(src.len()));
+                src
+            }
+            CsvTypedColumnValues::Float64(_) => return None,
+        };
         for src in sources {
             match src {
                 CsvTypedColumnValues::Int64(src) => out.extend(src),
@@ -1139,6 +1164,7 @@ fn merge_one_simple_numeric_csv_column(
         Some(CsvTypedColumnValues::Int64(out))
     }
 }
+
 
 /// Minimum total value count before the chunk merge fans out to threads;
 /// below this the scoped-spawn overhead outweighs the copy it hides.
