@@ -110,7 +110,7 @@ use arrow::{
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray,
     },
-    datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit},
+    datatypes::{DataType as ArrowDataType, Field, Metadata as ArrowMetadata, Schema, TimeUnit},
 };
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use dta::stata::{
@@ -6721,7 +6721,7 @@ fn restore_row_multiindex_names(
 }
 
 fn row_multiindex_names_from_arrow_metadata(
-    metadata: &std::collections::HashMap<String, String>,
+    metadata: &ArrowMetadata,
 ) -> Option<Vec<Option<String>>> {
     let raw = metadata.get(ROW_MULTIINDEX_NAMES_METADATA_KEY)?;
     serde_json::from_str::<Vec<Option<String>>>(raw).ok()

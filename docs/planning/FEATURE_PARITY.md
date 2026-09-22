@@ -112,12 +112,12 @@ Gate enforcement and trend history:
 
 **Aggregate status (live from `artifacts/phase2c/`):**
 
-- Total packet suites: **445**
-- Gate passing: **443** (99%)
+- Total packet suites: **460**
+- Gate passing: **442** (96%)
 - Gate failing: **0**
-- Pending (no gate result yet): **2**
+- Pending (no gate result yet): **18**
 
-By family: FP-P2C **11** (11 gate-passing) · FP-P2D **434** (432 gate-passing)
+By family: FP-P2C **11** (11 gate-passing) · FP-P2D **449** (431 gate-passing)
 
 **Compact status by packet** (✓ gate-pass / ✗ gate-fail / · pending):
 
@@ -165,7 +165,7 @@ By family: FP-P2C **11** (11 gate-passing) · FP-P2D **434** (432 gate-passing)
 `FP-P2D-219 ✓`  `FP-P2D-220 ✓`  `FP-P2D-221 ✓`  `FP-P2D-222 ✓`  `FP-P2D-223 ✓`  `FP-P2D-224 ✓`  
 `FP-P2D-225 ✓`  `FP-P2D-226 ✓`  `FP-P2D-227 ✓`  `FP-P2D-228 ✓`  `FP-P2D-229 ✓`  `FP-P2D-230 ✓`  
 `FP-P2D-231 ✓`  `FP-P2D-232 ✓`  `FP-P2D-233 ✓`  `FP-P2D-234 ✓`  `FP-P2D-235 ✓`  `FP-P2D-236 ✓`  
-`FP-P2D-237 ✓`  `FP-P2D-238 ✓`  `FP-P2D-239 ✓`  `FP-P2D-240 ✓`  `FP-P2D-241 ✓`  `FP-P2D-242 ✓`  
+`FP-P2D-237 ✓`  `FP-P2D-238 ✓`  `FP-P2D-239 ✓`  `FP-P2D-240 ·`  `FP-P2D-241 ✓`  `FP-P2D-242 ✓`  
 `FP-P2D-243 ✓`  `FP-P2D-244 ✓`  `FP-P2D-245 ✓`  `FP-P2D-246 ✓`  `FP-P2D-247 ✓`  `FP-P2D-248 ✓`  
 `FP-P2D-249 ✓`  `FP-P2D-250 ✓`  `FP-P2D-251 ✓`  `FP-P2D-252 ✓`  `FP-P2D-253 ✓`  `FP-P2D-254 ✓`  
 `FP-P2D-255 ✓`  `FP-P2D-256 ✓`  `FP-P2D-257 ✓`  `FP-P2D-258 ✓`  `FP-P2D-259 ✓`  `FP-P2D-260 ✓`  
@@ -200,6 +200,8 @@ By family: FP-P2C **11** (11 gate-passing) · FP-P2D **434** (432 gate-passing)
 `FP-P2D-429 ✓`  `FP-P2D-430 ✓`  `FP-P2D-431 ✓`  `FP-P2D-432 ✓`  `FP-P2D-433 ✓`  `FP-P2D-434 ✓`  
 `FP-P2D-435 ✓`  `FP-P2D-436 ✓`  `FP-P2D-437 ✓`  `FP-P2D-438 ✓`  `FP-P2D-439 ✓`  `FP-P2D-460 ✓`  
 `FP-P2D-461 ✓`  `FP-P2D-462 ✓`  `FP-P2D-463 ✓`  `FP-P2D-464 ·`  `FP-P2D-465 ✓`  `FP-P2D-466 ·`  
-`FP-P2D-467 ✓`  `FP-P2D-468 ✓`  
+`FP-P2D-467 ✓`  `FP-P2D-468 ✓`  `FP-P2D-469 ·`  `FP-P2D-470 ·`  `FP-P2D-471 ·`  `FP-P2D-472 ·`  
+`FP-P2D-473 ·`  `FP-P2D-474 ·`  `FP-P2D-475 ·`  `FP-P2D-476 ·`  `FP-P2D-477 ·`  `FP-P2D-478 ·`  
+`FP-P2D-479 ·`  `FP-P2D-480 ·`  `FP-P2D-481 ·`  `FP-P2D-482 ·`  `FP-P2D-483 ·`  
 
 <!-- END AUTO-PACKET-TABLE -->
