@@ -1165,7 +1165,6 @@ fn merge_one_simple_numeric_csv_column(
     }
 }
 
-
 /// Minimum total value count before the chunk merge fans out to threads;
 /// below this the scoped-spawn overhead outweighs the copy it hides.
 const SIMPLE_NUMERIC_CSV_PARALLEL_MERGE_MIN_VALUES: usize = 1 << 16;

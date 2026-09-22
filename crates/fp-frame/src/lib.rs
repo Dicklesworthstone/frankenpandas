@@ -60722,7 +60722,6 @@ impl LazyTransposeFramePlan {
         Some(std::sync::Arc::from(buffer))
     }
 
-
     fn cached_column_if_present(&self, output_column: usize) -> Option<&Column> {
         debug_assert!(output_column < self.output_columns);
         // Same single read as `cached_column`: this function INDEXES pages that
@@ -160287,7 +160286,10 @@ mod tests {
         assert_eq!(cs_skip.columns()["c"].values()[0], Scalar::Timedelta64(400));
 
         let cs_noskip = df.cumsum_axis1_with_skipna(false).unwrap();
-        assert_eq!(cs_noskip.columns()["a"].values()[0], Scalar::Timedelta64(100));
+        assert_eq!(
+            cs_noskip.columns()["a"].values()[0],
+            Scalar::Timedelta64(100)
+        );
         assert!(cs_noskip.columns()["b"].values()[0].is_missing());
         assert!(cs_noskip.columns()["c"].values()[0].is_missing());
 
