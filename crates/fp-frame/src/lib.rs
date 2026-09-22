@@ -60685,6 +60685,30 @@ impl LazyTransposeFramePlan {
             }
         }
         let ncols = sources.len();
+        let all_f64 = sources.iter().all(|s| matches!(s, Src::F64(_)));
+        if all_f64 {
+            let f64_sources: Vec<&[f64]> = sources
+                .iter()
+                .map(|s| match s {
+                    Src::F64(v) => *v,
+                    Src::I64(_) => unreachable!(),
+                })
+                .collect();
+            let end_row = page_start.checked_add(page_len)?;
+            for s in &f64_sources {
+                if end_row > s.len() {
+                    return None;
+                }
+            }
+            let mut buffer: Vec<f64> = Vec::with_capacity(page_len.checked_mul(ncols)?);
+            for row in page_start..end_row {
+                for &s in &f64_sources {
+                    buffer.push(s[row]);
+                }
+            }
+            return Some(std::sync::Arc::from(buffer));
+        }
+
         let mut buffer: Vec<f64> = Vec::with_capacity(page_len.checked_mul(ncols)?);
         for offset in 0..page_len {
             let row = page_start + offset;
@@ -60697,6 +60721,7 @@ impl LazyTransposeFramePlan {
         }
         Some(std::sync::Arc::from(buffer))
     }
+
 
     fn cached_column_if_present(&self, output_column: usize) -> Option<&Column> {
         debug_assert!(output_column < self.output_columns);
