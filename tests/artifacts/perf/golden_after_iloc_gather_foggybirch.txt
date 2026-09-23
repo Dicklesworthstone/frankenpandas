@@ -1,7 +1,0 @@
-i64_lbls=[Int64(4), Int64(0), Int64(4), Int64(2), Int64(0), Int64(2)]
-i64_vals=[Int64(50), Int64(10), Int64(50), Int64(30), Int64(10), Int64(30)]
-f64=[Float64(-3.0), Float64(NaN), Float64(1.5)]
-ni=[Null(NaN), Int64(9), Int64(7)]
-utf8=[Utf8("c"), Utf8("a")]
-bool=[Bool(false), Bool(true), Bool(false)]
-oob_err=true

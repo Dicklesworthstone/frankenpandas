@@ -1,3 +1,0 @@
-✓ No changed files to scan.
-
-UBS_STAGED_RUST_EXIT=0

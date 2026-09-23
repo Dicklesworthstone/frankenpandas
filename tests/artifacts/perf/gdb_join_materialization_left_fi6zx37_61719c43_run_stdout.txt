@@ -1,1 +1,0 @@
-join_bench join_type=left rows=20000 right_rows=20000 key_cardinality=1000 ordered_unique=false force_generic=false warmup=1 iters=100 output_rows=400000 mean_ms=57.598 p50_ms=57.254 p95_ms=63.202 p99_ms=64.332 checksum=399983374000.000

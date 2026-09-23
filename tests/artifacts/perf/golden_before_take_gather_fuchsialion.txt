@@ -1,9 +1,0 @@
-take_lbls=[Int64(4), Int64(0), Int64(4), Int64(2), Int64(0), Int64(2)]
-take_vals=[Int64(50), Int64(10), Int64(50), Int64(30), Int64(10), Int64(30)]
-take_oob_err=true
-take_f64=[Float64(-3.0), Float64(NaN), Float64(1.5)]
-take_ni=[Null(NaN), Int64(9), Int64(7)]
-take_utf8=[Utf8("c"), Utf8("a")]
-gb_nlargest_lbls=[Int64(2), Int64(6), Int64(3), Int64(5)]
-gb_nlargest_vals=[Int64(9), Int64(8), Int64(3), Int64(2)]
-gb_head_vals=[Int64(5), Int64(1)]

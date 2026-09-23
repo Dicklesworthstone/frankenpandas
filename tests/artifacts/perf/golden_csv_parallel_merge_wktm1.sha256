@@ -1,3 +1,0 @@
-# br-frankenpandas-wktm1 parallel per-column merge golden proof
-17f95925cec162c66933d5e935566b6f6fec5f8ef56872b98b00fb97ebf59fff  golden csv_read|csv_read_options|csv_read_no_na_filter 5000 (sequential path, before AND after)
-b069ea419894f6deb6d1509fc62d637302f98615cc3dfead105c87b189d422fa  golden csv_read 200000 (parallel row-block path, before AND after)
