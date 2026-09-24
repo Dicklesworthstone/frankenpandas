@@ -3194,6 +3194,68 @@ def test_drop_rename_errors_match_pandas() -> None:
         _dr(fpd).drop("x", level=0)
 
 
+def _ewm_s(m: Any) -> Any:
+    return m.Series([1.0, 2.0, _NAN, 4.0, 8.0, 3.0])
+
+
+def _ewm_df(m: Any) -> Any:
+    return m.DataFrame({"a": [1.0, 2.0, _NAN, 4.0], "b": [4, 3, 2, 1]})
+
+
+# br-frankenpandas-n57tz: ewm took span/alpha only (and span went through
+# 2/(span+1), not pandas' com).
+_EWM_CASES = {
+    "span": lambda m: _ewm_s(m).ewm(span=3).mean(),
+    "com": lambda m: _ewm_s(m).ewm(com=0.5).mean(),
+    "halflife": lambda m: _ewm_s(m).ewm(halflife=2).mean(),
+    "alpha": lambda m: _ewm_s(m).ewm(alpha=0.3).mean(),
+    "adjust_false": lambda m: _ewm_s(m).ewm(span=3, adjust=False).mean(),
+    "min_periods": lambda m: _ewm_s(m).ewm(span=3, min_periods=3).mean(),
+    "sum_halflife": lambda m: _ewm_s(m).ewm(halflife=1.5).sum(),
+    "frame_com": lambda m: _ewm_df(m).ewm(com=0.5).mean(),
+    "frame_adjust_false_min_periods": lambda m: _ewm_df(m).ewm(span=2, adjust=False, min_periods=2).mean(),
+    "std_com": pytest.param(
+        lambda m: _ewm_s(m).ewm(com=1).std(),
+        marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-c5nwf: ewm std last-bit order"),
+    ),
+    "var_adjust_false": pytest.param(
+        lambda m: _ewm_s(m).ewm(alpha=0.4, adjust=False).var(),
+        marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-c5nwf: ewm var last-bit order"),
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EWM_CASES.values()), ids=list(_EWM_CASES))
+def test_ewm_keywords_match_pandas(case: Any) -> None:
+    assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"com": 1, "span": 2}, "comass, span, halflife, and alpha are mutually exclusive"),
+        ({}, "Must pass one of comass, span, halflife, or alpha"),
+        ({"com": -1}, "comass must satisfy: comass >= 0"),
+        ({"span": 0.5}, "span must satisfy: span >= 1"),
+        ({"halflife": 0}, "halflife must satisfy: halflife > 0"),
+        ({"alpha": 1.5}, "alpha must satisfy: 0 < alpha <= 1"),
+    ],
+)
+def test_ewm_decay_validation_matches_pandas(kwargs: Any, message: str) -> None:
+    for m in (pd, fpd):
+        with pytest.raises(ValueError, match=message):
+            _ewm_s(m).ewm(**kwargs)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_ewm_refuses_what_it_cannot_run() -> None:
+    for kwargs in ({"span": 2, "ignore_na": True}, {"halflife": 2, "times": [1, 2, 3, 4, 5, 6]}, {"span": 2, "method": "table"}):
+        with pytest.raises(NotImplementedError):
+            _ewm_s(fpd).ewm(**kwargs)
+
+
 def _sr(m: Any) -> Any:
     return m.Series([1, 2, 3], index=["a", "b", "c"], name="v")
 

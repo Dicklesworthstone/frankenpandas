@@ -37001,6 +37001,11 @@ pub struct DataFrameEwm<'a> {
     df: &'a DataFrame,
     span: Option<f64>,
     alpha: Option<f64>,
+    /// pandas `adjust` and `min_periods`, per column as in
+    /// [`Series::ewm_with_options`] (br-frankenpandas-n57tz: the DataFrame
+    /// EWM had neither).
+    adjust: bool,
+    min_periods: usize,
 }
 
 impl DataFrameEwm<'_> {
@@ -37008,7 +37013,7 @@ impl DataFrameEwm<'_> {
     /// Column-parallel (br-frankenpandas-1q4q4) — see `DataFrameRolling::apply_rolling`.
     fn apply_ewm<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
-        F: Fn(&Series, Option<f64>, Option<f64>) -> Result<Series, FrameError> + Sync,
+        F: Fn(&Ewm<'_>) -> Result<Series, FrameError> + Sync,
     {
         let numeric_positions: Vec<usize> = (0..self.df.num_columns())
             .filter(|&pos| {
@@ -37023,7 +37028,7 @@ impl DataFrameEwm<'_> {
             let col = self.df.column_at(pos).expect("pos in bounds");
             let name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&name, self.df.index.clone(), col.clone())?;
-            let result = agg(&series, self.span, self.alpha)?;
+            let result = agg(&self.series_ewm(&series))?;
             Ok((name, result.column().clone()))
         };
 
@@ -37096,19 +37101,24 @@ impl DataFrameEwm<'_> {
         Ok(out)
     }
 
+    /// One column's EWM with this window's span/alpha, adjust and min_periods.
+    fn series_ewm<'s>(&self, series: &'s Series) -> Ewm<'s> {
+        series.ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+    }
+
     /// EWM mean across all numeric columns.
     pub fn mean(&self) -> Result<DataFrame, FrameError> {
-        self.apply_ewm(|s, span, alpha| s.ewm(span, alpha).mean())
+        self.apply_ewm(|ewm| ewm.mean())
     }
 
     /// EWM standard deviation across all numeric columns.
     pub fn std(&self) -> Result<DataFrame, FrameError> {
-        self.apply_ewm(|s, span, alpha| s.ewm(span, alpha).std())
+        self.apply_ewm(|ewm| ewm.std())
     }
 
     /// EWM variance across all numeric columns.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
-        self.apply_ewm(|s, span, alpha| s.ewm(span, alpha).var())
+        self.apply_ewm(|ewm| ewm.var())
     }
 
     /// EWM weighted sum across all numeric columns.
@@ -37117,7 +37127,7 @@ impl DataFrameEwm<'_> {
     /// are skipped (same policy as the existing mean/std/var
     /// reducers).
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
-        self.apply_ewm(|s, span, alpha| s.ewm(span, alpha).sum())
+        self.apply_ewm(|ewm| ewm.sum())
     }
 
     /// Aggregate each numeric column with multiple EWM functions.
@@ -37138,7 +37148,7 @@ impl DataFrameEwm<'_> {
 
             let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
-            let ewm = series.ewm(self.span, self.alpha).agg(funcs)?;
+            let ewm = self.series_ewm(&series).agg(funcs)?;
             for func in funcs {
                 let out_name = format!("{col_name}_{func}");
                 pairs.push((out_name.clone(), ewm.columns()[*func].clone()));
@@ -81143,12 +81153,27 @@ impl DataFrame {
 
     /// Create an exponentially weighted moving window view over all numeric columns.
     ///
-    /// Matches `df.ewm(span=...)` semantics.
+    /// Matches `df.ewm(span=...)` semantics (pandas' default `adjust=True`,
+    /// `min_periods=0`).
     pub fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> DataFrameEwm<'_> {
+        self.ewm_with_options(span, alpha, true, 0)
+    }
+
+    /// [`ewm`](Self::ewm) with pandas' `adjust` and `min_periods`, applied to
+    /// each numeric column as [`Series::ewm_with_options`] does.
+    pub fn ewm_with_options(
+        &self,
+        span: Option<f64>,
+        alpha: Option<f64>,
+        adjust: bool,
+        min_periods: usize,
+    ) -> DataFrameEwm<'_> {
         DataFrameEwm {
             df: self,
             span,
             alpha,
+            adjust,
+            min_periods,
         }
     }
 
@@ -154521,6 +154546,49 @@ mod tests {
             [2, 4, 6].map(Scalar::Int64)
         );
         assert!(filled.column("a").unwrap().values()[1].is_missing());
+    }
+
+    #[test]
+    fn dataframe_ewm_with_options_matches_the_series_ewm_n57tz() {
+        // DataFrame EWM took span/alpha only; adjust and min_periods now reach
+        // every column, as the Series EWM applies them. pandas 2.2.3:
+        // DataFrame({'a': [1., 2., nan, 4.]}).ewm(span=2, adjust=False,
+        // min_periods=2).mean()['a'] -> [nan, 1.6666666666666665,
+        // 1.6666666666666665, 3.6666666666666665].
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(4.0),
+                ],
+            )],
+        )
+        .unwrap();
+        let framed = df
+            .ewm_with_options(Some(2.0), None, false, 2)
+            .mean()
+            .unwrap();
+        let series = df.column_as_series("a").unwrap();
+        let direct = series
+            .ewm_with_options(Some(2.0), None, false, 2)
+            .mean()
+            .unwrap();
+        assert_eq!(framed.column("a").unwrap().values(), direct.values());
+        let values = framed.column("a").unwrap().values();
+        assert!(values[0].is_missing());
+        assert_eq!(values[1], Scalar::Float64(1.666_666_666_666_666_5));
+        assert_eq!(values[3], Scalar::Float64(3.666_666_666_666_666_5));
+        // NEGATIVE: the defaults are pandas' adjust=True, min_periods=0.
+        assert_eq!(
+            df.ewm(Some(2.0), None).mean().unwrap(),
+            df.ewm_with_options(Some(2.0), None, true, 0)
+                .mean()
+                .unwrap()
+        );
     }
 
     #[test]

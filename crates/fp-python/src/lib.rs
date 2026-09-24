@@ -12870,14 +12870,47 @@ impl PySeries {
         }
     }
 
-    #[pyo3(signature = (span=None, alpha=None))]
-    fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> PyExponentialMovingWindow {
-        PyExponentialMovingWindow {
-            series: Some(self.inner.clone()),
-            dataframe: None,
-            span,
-            alpha,
-        }
+    /// pandas' `s.ewm(com=None, span=None, halflife=None, alpha=None,
+    /// min_periods=0, adjust=True, ignore_na=False, axis=0, times=None,
+    /// method='single')`; see [`exponential_window`].
+    #[pyo3(signature = (
+        com=None,
+        span=None,
+        halflife=None,
+        alpha=None,
+        min_periods=0,
+        adjust=true,
+        ignore_na=false,
+        axis=None,
+        times=None,
+        method="single"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn ewm(
+        &self,
+        com: Option<f64>,
+        span: Option<f64>,
+        halflife: Option<f64>,
+        alpha: Option<f64>,
+        min_periods: usize,
+        adjust: bool,
+        ignore_na: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        times: Option<&Bound<'_, PyAny>>,
+        method: &str,
+    ) -> PyResult<PyExponentialMovingWindow> {
+        exponential_window(
+            "Series.ewm",
+            Some(self.inner.clone()),
+            None,
+            (com, span, halflife, alpha),
+            min_periods,
+            adjust,
+            ignore_na,
+            axis,
+            times,
+            method,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -20161,14 +20194,47 @@ impl PyDataFrame {
         }
     }
 
-    #[pyo3(signature = (span=None, alpha=None))]
-    fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> PyExponentialMovingWindow {
-        PyExponentialMovingWindow {
-            series: None,
-            dataframe: Some(self.inner.clone()),
-            span,
-            alpha,
-        }
+    /// pandas' `df.ewm(com=None, span=None, halflife=None, alpha=None,
+    /// min_periods=0, adjust=True, ignore_na=False, axis=0, times=None,
+    /// method='single')`; see [`exponential_window`].
+    #[pyo3(signature = (
+        com=None,
+        span=None,
+        halflife=None,
+        alpha=None,
+        min_periods=0,
+        adjust=true,
+        ignore_na=false,
+        axis=None,
+        times=None,
+        method="single"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn ewm(
+        &self,
+        com: Option<f64>,
+        span: Option<f64>,
+        halflife: Option<f64>,
+        alpha: Option<f64>,
+        min_periods: usize,
+        adjust: bool,
+        ignore_na: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        times: Option<&Bound<'_, PyAny>>,
+        method: &str,
+    ) -> PyResult<PyExponentialMovingWindow> {
+        exponential_window(
+            "DataFrame.ewm",
+            None,
+            Some(self.inner.clone()),
+            (com, span, halflife, alpha),
+            min_periods,
+            adjust,
+            ignore_na,
+            axis,
+            times,
+            method,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -25628,6 +25694,10 @@ pub struct PyExponentialMovingWindow {
     dataframe: Option<DataFrame>,
     span: Option<f64>,
     alpha: Option<f64>,
+    /// pandas' `adjust` and `min_periods` (br-frankenpandas-n57tz: the
+    /// binding took span/alpha only).
+    adjust: bool,
+    min_periods: usize,
 }
 
 #[pymethods]
@@ -25640,14 +25710,14 @@ impl PyExponentialMovingWindow {
     pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = s
-                .ewm(self.span, self.alpha)
+                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                 .mean()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .ewm(self.span, self.alpha)
+                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                 .mean()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -25660,14 +25730,14 @@ impl PyExponentialMovingWindow {
     pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = s
-                .ewm(self.span, self.alpha)
+                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                 .std()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .ewm(self.span, self.alpha)
+                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                 .std()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -25680,14 +25750,14 @@ impl PyExponentialMovingWindow {
     pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = s
-                .ewm(self.span, self.alpha)
+                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                 .var()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .ewm(self.span, self.alpha)
+                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                 .var()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -25700,14 +25770,14 @@ impl PyExponentialMovingWindow {
     pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = s
-                .ewm(self.span, self.alpha)
+                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                 .sum()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .ewm(self.span, self.alpha)
+                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                 .sum()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -25719,14 +25789,17 @@ impl PyExponentialMovingWindow {
 
     #[pyo3(signature = (other=None))]
     pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        let span = self.span;
-        let alpha = self.alpha;
+        let (span, alpha, adjust, min_periods) =
+            (self.span, self.alpha, self.adjust, self.min_periods);
         execute_window_bivariate(
             py,
             self.series.as_ref(),
             self.dataframe.as_ref(),
             other,
-            |s1, s2| s1.ewm(span, alpha).corr(s2),
+            |s1, s2| {
+                s1.ewm_with_options(span, alpha, adjust, min_periods)
+                    .corr(s2)
+            },
             None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
             "Empty ewm object",
             "DataFrame EWM corr without other is not supported",
@@ -25735,14 +25808,17 @@ impl PyExponentialMovingWindow {
 
     #[pyo3(signature = (other=None))]
     pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        let span = self.span;
-        let alpha = self.alpha;
+        let (span, alpha, adjust, min_periods) =
+            (self.span, self.alpha, self.adjust, self.min_periods);
         execute_window_bivariate(
             py,
             self.series.as_ref(),
             self.dataframe.as_ref(),
             other,
-            |s1, s2| s1.ewm(span, alpha).cov(s2),
+            |s1, s2| {
+                s1.ewm_with_options(span, alpha, adjust, min_periods)
+                    .cov(s2)
+            },
             None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
             "Empty ewm object",
             "DataFrame EWM cov without other is not supported",
@@ -25764,14 +25840,14 @@ impl PyExponentialMovingWindow {
             let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
             if let Some(ref s) = self.series {
                 let res = s
-                    .ewm(self.span, self.alpha)
+                    .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
                 let res = df
-                    .ewm(self.span, self.alpha)
+                    .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -25810,6 +25886,8 @@ impl PyExponentialMovingWindow {
             dataframe: self.dataframe.clone(),
             span: self.span,
             alpha: self.alpha,
+            adjust: self.adjust,
+            min_periods: self.min_periods,
         })
     }
 }
@@ -26763,6 +26841,8 @@ impl PyGroupBy {
             dataframe: Some(self.df.clone()),
             span,
             alpha,
+            adjust: true,
+            min_periods: 0,
         })
     }
 
@@ -27798,6 +27878,8 @@ impl PySeriesGroupBy {
             dataframe: None,
             span,
             alpha,
+            adjust: true,
+            min_periods: 0,
         })
     }
 
@@ -34834,6 +34916,106 @@ fn unsupported_params(method: &str, params: &[(&str, bool)]) -> PyResult<()> {
     }
 }
 
+/// pandas' EWM decay (`get_center_of_mass`): exactly one of com, span,
+/// halflife and alpha, each validated with pandas' message, turned into the
+/// alpha its kernels use, `1 / (1 + com)` (br-frankenpandas-n57tz: only
+/// span and alpha were taken, and span went through `2 / (span + 1)`).
+fn ewm_alpha(
+    com: Option<f64>,
+    span: Option<f64>,
+    halflife: Option<f64>,
+    alpha: Option<f64>,
+) -> PyResult<f64> {
+    let value_error =
+        |message: &str| PyErr::new::<pyo3::exceptions::PyValueError, _>(message.to_owned());
+    let given = [com, span, halflife, alpha]
+        .iter()
+        .filter(|v| v.is_some())
+        .count();
+    if given > 1 {
+        return Err(value_error(
+            "comass, span, halflife, and alpha are mutually exclusive",
+        ));
+    }
+    let com = match (com, span, halflife, alpha) {
+        (Some(com), ..) => {
+            if com < 0.0 {
+                return Err(value_error("comass must satisfy: comass >= 0"));
+            }
+            com
+        }
+        (_, Some(span), ..) => {
+            if span < 1.0 {
+                return Err(value_error("span must satisfy: span >= 1"));
+            }
+            (span - 1.0) / 2.0
+        }
+        (_, _, Some(halflife), _) => {
+            if halflife <= 0.0 {
+                return Err(value_error("halflife must satisfy: halflife > 0"));
+            }
+            let decay = 1.0 - (0.5_f64.ln() / halflife).exp();
+            1.0 / decay - 1.0
+        }
+        (_, _, _, Some(alpha)) => {
+            if alpha <= 0.0 || alpha > 1.0 {
+                return Err(value_error("alpha must satisfy: 0 < alpha <= 1"));
+            }
+            (1.0 - alpha) / alpha
+        }
+        _ => {
+            return Err(value_error(
+                "Must pass one of comass, span, halflife, or alpha",
+            ));
+        }
+    };
+    Ok(1.0 / (1.0 + com))
+}
+
+/// A Series or DataFrame EWM with pandas' full `ewm` signature: the decay
+/// becomes alpha ([`ewm_alpha`]); `adjust` and `min_periods` are honoured;
+/// `ignore_na=True`, `times` and `method='table'` are refused, and `axis`
+/// can only name the rows.
+#[allow(clippy::too_many_arguments)]
+fn exponential_window(
+    method_name: &str,
+    series: Option<Series>,
+    dataframe: Option<DataFrame>,
+    decay: (Option<f64>, Option<f64>, Option<f64>, Option<f64>),
+    min_periods: usize,
+    adjust: bool,
+    ignore_na: bool,
+    axis: Option<&Bound<'_, PyAny>>,
+    times: Option<&Bound<'_, PyAny>>,
+    method: &str,
+) -> PyResult<PyExponentialMovingWindow> {
+    let kind = if series.is_some() {
+        "Series"
+    } else {
+        "DataFrame"
+    };
+    if parse_axis_param_for_type(axis, kind)?.unwrap_or(0) != 0 {
+        return Err(not_implemented(&format!("{method_name}(axis=1)")));
+    }
+    unsupported_params(
+        method_name,
+        &[
+            ("ignore_na", !ignore_na),
+            ("times", times.is_none_or(|t| t.is_none())),
+            ("method", method == "single"),
+        ],
+    )?;
+    let (com, span, halflife, alpha) = decay;
+    Ok(PyExponentialMovingWindow {
+        series,
+        dataframe,
+        span: None,
+        alpha: Some(ewm_alpha(com, span, halflife, alpha)?),
+        adjust,
+        min_periods,
+    })
+}
+
 /// A keyword argument that was passed and is not None.
 fn passed<'py>(obj: Option<&Bound<'py, PyAny>>) -> Option<Bound<'py, PyAny>> {
     obj.filter(|o| !o.is_none()).cloned()
@@ -38077,8 +38259,38 @@ mod tests {
         let exp = py_s.expanding(None);
         assert_eq!(exp.min_periods, None);
 
-        let ewm = py_s.ewm(Some(0.5), None);
-        assert_eq!(ewm.span, Some(0.5));
+        // span=3 is pandas' com=1, alpha=0.5 (br-frankenpandas-n57tz); span=0.5
+        // is pandas' ValueError (span >= 1), which this used to accept.
+        let ewm = py_s
+            .ewm(
+                None,
+                Some(3.0),
+                None,
+                None,
+                0,
+                true,
+                false,
+                None,
+                None,
+                "single",
+            )
+            .expect("ewm span=3"); // ubs:ignore — test fixture
+        assert_eq!(ewm.alpha, Some(0.5));
+        assert!(
+            py_s.ewm(
+                None,
+                Some(0.5),
+                None,
+                None,
+                0,
+                true,
+                false,
+                None,
+                None,
+                "single"
+            )
+            .is_err()
+        );
 
         let s2 = py_s.clone();
         let c = py_s.corr(&s2, None, None).expect("corr"); // ubs:ignore — test fixture
@@ -38312,7 +38524,20 @@ mod tests {
         assert_eq!(roll.ndim(), 2);
         let exp = py_df.expanding(None);
         assert_eq!(exp.ndim(), 2);
-        let ewm = py_df.ewm(Some(0.5), None);
+        let ewm = py_df
+            .ewm(
+                None,
+                Some(3.0),
+                None,
+                None,
+                0,
+                true,
+                false,
+                None,
+                None,
+                "single",
+            )
+            .expect("ewm span=3"); // ubs:ignore — test fixture
         assert_eq!(ewm.ndim(), 2);
     }
 
@@ -38368,7 +38593,20 @@ mod tests {
         assert_eq!(d1.shape(), (2, 1));
         assert_eq!(d2.shape(), (2, 1));
 
-        let ewm = py_df1.ewm(Some(0.5), None);
+        let ewm = py_df1
+            .ewm(
+                None,
+                Some(3.0),
+                None,
+                None,
+                0,
+                true,
+                false,
+                None,
+                None,
+                "single",
+            )
+            .expect("ewm span=3"); // ubs:ignore — test fixture
         assert_eq!(ewm.ndim(), 2);
         assert!(ewm.online("numba").is_ok());
     }
