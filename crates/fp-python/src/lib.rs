@@ -24905,6 +24905,48 @@ impl PyGroupBy {
             .groupby_full_options(&by_refs, self.as_index, self.sort, self.dropna)
     }
 
+    /// `op` over this groupby, or with `numeric_only` over its keys and
+    /// numeric columns alone, as pandas' groupby reductions select: bool and
+    /// the nullable numeric dtypes count, strings and temporal columns do not
+    /// (br-frankenpandas-n57tz).
+    fn reduce(
+        &self,
+        numeric_only: bool,
+        op: impl FnOnce(&fp_frame::DataFrameGroupBy<'_>) -> Result<DataFrame, FrameError>,
+    ) -> Result<DataFrame, FrameError> {
+        if !numeric_only {
+            return op(&self.grouped()?);
+        }
+        let keep: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .filter(|name| {
+                self.by.contains(*name)
+                    || self.df.column(name).is_some_and(|column| {
+                        matches!(
+                            column.dtype(),
+                            DType::Int64
+                                | DType::Float64
+                                | DType::Bool
+                                | DType::Int64Nullable
+                                | DType::Float64Nullable
+                                | DType::BoolNullable
+                        )
+                    })
+            })
+            .map(String::as_str)
+            .collect();
+        let numeric = Self {
+            df: self.df.select_columns(&keep)?,
+            by: self.by.clone(),
+            as_index: self.as_index,
+            sort: self.sort,
+            dropna: self.dropna,
+        };
+        op(&numeric.grouped()?)
+    }
+
     /// One column grouped by this groupby's key: pandas' `gb["col"]` / `gb.col`.
     fn column_groupby(&self, name: &str) -> PyResult<PySeriesGroupBy> {
         let [key] = self.by.as_slice() else {
@@ -24993,22 +25035,34 @@ impl PyGroupBy {
         ))
     }
 
-    fn sum(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .sum()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// pandas' `gb.sum(numeric_only=, min_count=, engine=, engine_kwargs=)`
+    /// (br-frankenpandas-n57tz; the binding took no keywords).
+    #[pyo3(signature = (numeric_only=false, min_count=0, engine=None, engine_kwargs=None))]
+    fn sum(
+        &self,
+        numeric_only: bool,
+        min_count: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = engine_kwargs;
+        groupby_engine("DataFrameGroupBy.sum", engine)?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        wrap_frame(self.reduce(numeric_only, |gb| {
+            gb.with_min_count(gb.sum()?, min_count, true)
+        }))
     }
 
-    fn mean(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .mean()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    fn mean(
+        &self,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = engine_kwargs;
+        groupby_engine("DataFrameGroupBy.mean", engine)?;
+        wrap_frame(self.reduce(numeric_only, |gb| gb.mean()))
     }
 
     fn count(&self) -> PyResult<PyDataFrame> {
@@ -25020,76 +25074,95 @@ impl PyGroupBy {
         Ok(PyDataFrame { inner: result })
     }
 
-    fn min(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .min()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (numeric_only=false, min_count=-1, engine=None, engine_kwargs=None))]
+    fn min(
+        &self,
+        numeric_only: bool,
+        min_count: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = engine_kwargs;
+        groupby_engine("DataFrameGroupBy.min", engine)?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        wrap_frame(self.reduce(numeric_only, |gb| {
+            gb.with_min_count(gb.min()?, min_count, false)
+        }))
     }
 
-    fn max(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .max()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (numeric_only=false, min_count=-1, engine=None, engine_kwargs=None))]
+    fn max(
+        &self,
+        numeric_only: bool,
+        min_count: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = engine_kwargs;
+        groupby_engine("DataFrameGroupBy.max", engine)?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        wrap_frame(self.reduce(numeric_only, |gb| {
+            gb.with_min_count(gb.max()?, min_count, false)
+        }))
     }
 
-    fn var(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .var()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
+    fn var(
+        &self,
+        ddof: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        let _ = engine_kwargs;
+        groupby_engine("DataFrameGroupBy.var", engine)?;
+        let ddof = groupby_ddof("DataFrameGroupBy.var", ddof)?;
+        wrap_frame(self.reduce(numeric_only, |gb| gb.var_ddof(ddof)))
     }
 
-    fn std(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .std()
-            .map_err(groupby_moment_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
+    fn std(
+        &self,
+        ddof: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        let _ = engine_kwargs;
+        groupby_engine("DataFrameGroupBy.std", engine)?;
+        let ddof = groupby_ddof("DataFrameGroupBy.std", ddof)?;
+        self.reduce(numeric_only, |gb| gb.std_ddof(ddof))
+            .map(|inner| PyDataFrame { inner })
+            .map_err(groupby_moment_error_to_py)
     }
 
-    fn median(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .median()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (numeric_only=false))]
+    fn median(&self, numeric_only: bool) -> PyResult<PyDataFrame> {
+        wrap_frame(self.reduce(numeric_only, |gb| gb.median()))
     }
 
-    fn prod(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .prod()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (numeric_only=false, min_count=0))]
+    fn prod(&self, numeric_only: bool, min_count: i64) -> PyResult<PyDataFrame> {
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        wrap_frame(self.reduce(numeric_only, |gb| {
+            gb.with_min_count(gb.prod()?, min_count, true)
+        }))
     }
 
-    fn first(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .first()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
+    fn first(&self, numeric_only: bool, min_count: i64, skipna: bool) -> PyResult<PyDataFrame> {
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        wrap_frame(self.reduce(numeric_only, |gb| {
+            gb.with_min_count(gb.first_skipna(skipna)?, min_count, true)
+        }))
     }
 
-    fn last(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .last()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
+    fn last(&self, numeric_only: bool, min_count: i64, skipna: bool) -> PyResult<PyDataFrame> {
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        wrap_frame(self.reduce(numeric_only, |gb| {
+            gb.with_min_count(gb.last_skipna(skipna)?, min_count, true)
+        }))
     }
 
     /// pandas' `gb.size()`: an unnamed count per group whose index is named
@@ -25262,7 +25335,7 @@ impl PyGroupBy {
     }
 
     fn product(&self) -> PyResult<PyDataFrame> {
-        self.prod()
+        self.prod(false, 0)
     }
 
     #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
@@ -25290,13 +25363,12 @@ impl PyGroupBy {
         Ok(PyDataFrame { inner: result })
     }
 
-    fn sem(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .sem()
-            .map_err(groupby_moment_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    #[pyo3(signature = (ddof=1, numeric_only=false))]
+    fn sem(&self, ddof: i64, numeric_only: bool) -> PyResult<PyDataFrame> {
+        let ddof = groupby_ddof("DataFrameGroupBy.sem", ddof)?;
+        self.reduce(numeric_only, |gb| gb.sem_ddof(ddof))
+            .map(|inner| PyDataFrame { inner })
+            .map_err(groupby_moment_error_to_py)
     }
 
     fn skew(&self) -> PyResult<PyDataFrame> {
@@ -25392,17 +25464,18 @@ impl PyGroupBy {
         };
         if let Ok(name) = func.extract::<String>() {
             let res = match name.as_str() {
-                "sum" => self.sum()?,
-                "mean" => self.mean()?,
+                "sum" => self.sum(false, 0, None, None)?,
+                "mean" => self.mean(false, None, None)?,
                 "count" => self.count()?,
-                "min" => self.min()?,
-                "max" => self.max()?,
-                "var" => self.var()?,
-                "std" => self.std()?,
-                "median" => self.median()?,
-                "prod" => self.prod()?,
-                "first" => self.first()?,
-                "last" => self.last()?,
+                "min" => self.min(false, -1, None, None)?,
+                "max" => self.max(false, -1, None, None)?,
+                "var" => self.var(1, None, None, false)?,
+                "std" => self.std(1, None, None, false)?,
+                "sem" => self.sem(1, false)?,
+                "median" => self.median(false)?,
+                "prod" => self.prod(false, 0)?,
+                "first" => self.first(false, -1, true)?,
+                "last" => self.last(false, -1, true)?,
                 "nunique" => self.nunique()?,
                 "any" => self.any()?,
                 "all" => self.all()?,
@@ -25972,6 +26045,39 @@ pub struct PySeriesGroupBy {
 }
 
 impl PySeriesGroupBy {
+    /// pandas' `numeric_only=True` on a SeriesGroupBy: there is no column to
+    /// drop, so it only raises pandas' TypeError when the series is not
+    /// numeric (br-frankenpandas-n57tz).
+    fn check_numeric_only(&self, op: &str, numeric_only: bool) -> PyResult<()> {
+        let dtype = self.series.column().dtype();
+        let numeric = matches!(
+            dtype,
+            DType::Int64
+                | DType::Float64
+                | DType::Bool
+                | DType::Int64Nullable
+                | DType::Float64Nullable
+                | DType::BoolNullable
+        );
+        if !numeric_only || numeric {
+            return Ok(());
+        }
+        let message = if op == "sem" {
+            format!(
+                "SeriesGroupBy.sem called with numeric_only=True and dtype {}",
+                pandas_dtype_name(&dtype)
+            )
+        } else {
+            format!("Cannot use numeric_only=True with SeriesGroupBy.{op} and non-numeric dtypes.")
+        };
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(message))
+    }
+
+    /// The fp-frame groupby of this series by its key.
+    fn grouped(&self) -> PyResult<fp_frame::SeriesGroupBy<'_>> {
+        self.series.groupby(&self.by).map_err(frame_error_to_py)
+    }
+
     /// A reduction's result: sorted by key when `sort`, and with
     /// as_index=False the keys moved into a column beside it, as pandas does.
     fn wrap_result(&self, s: Series) -> PyResult<Py<PyAny>> {
@@ -26006,62 +26112,113 @@ impl PySeriesGroupBy {
         )
     }
 
-    fn sum(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
+    /// pandas' `gb["a"].sum(numeric_only=, min_count=, engine=,
+    /// engine_kwargs=)` (br-frankenpandas-n57tz; the binding took no keywords).
+    #[pyo3(signature = (numeric_only=false, min_count=0, engine=None, engine_kwargs=None))]
+    fn sum(
+        &self,
+        numeric_only: bool,
+        min_count: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = engine_kwargs;
+        groupby_engine("SeriesGroupBy.sum", engine)?;
+        self.check_numeric_only("sum", numeric_only)?;
+        let gb = self.grouped()?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        let res = gb
             .sum()
+            .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
 
-    fn mean(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .mean()
-            .map_err(frame_error_to_py)?;
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    fn mean(
+        &self,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = engine_kwargs;
+        groupby_engine("SeriesGroupBy.mean", engine)?;
+        self.check_numeric_only("mean", numeric_only)?;
+        let res = self.grouped()?.mean().map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
 
-    fn std(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
+    fn std(
+        &self,
+        ddof: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = engine_kwargs;
+        groupby_engine("SeriesGroupBy.std", engine)?;
+        self.check_numeric_only("std", numeric_only)?;
+        let ddof = groupby_ddof("SeriesGroupBy.std", ddof)?;
         let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .std()
+            .grouped()?
+            .std_ddof(ddof)
             .map_err(groupby_moment_error_to_py)?;
         self.wrap_result(res)
     }
 
-    fn var(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .var()
-            .map_err(frame_error_to_py)?;
+    #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
+    fn var(
+        &self,
+        ddof: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = engine_kwargs;
+        groupby_engine("SeriesGroupBy.var", engine)?;
+        self.check_numeric_only("var", numeric_only)?;
+        let ddof = groupby_ddof("SeriesGroupBy.var", ddof)?;
+        let res = self.grouped()?.var_ddof(ddof).map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
 
-    fn min(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
+    #[pyo3(signature = (numeric_only=false, min_count=-1, engine=None, engine_kwargs=None))]
+    fn min(
+        &self,
+        numeric_only: bool,
+        min_count: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = engine_kwargs;
+        groupby_engine("SeriesGroupBy.min", engine)?;
+        self.check_numeric_only("min", numeric_only)?;
+        let gb = self.grouped()?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        let res = gb
             .min()
+            .and_then(|s| gb.with_min_count(s, min_count, false))
             .map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
 
-    fn max(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
+    #[pyo3(signature = (numeric_only=false, min_count=-1, engine=None, engine_kwargs=None))]
+    fn max(
+        &self,
+        numeric_only: bool,
+        min_count: i64,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = engine_kwargs;
+        groupby_engine("SeriesGroupBy.max", engine)?;
+        self.check_numeric_only("max", numeric_only)?;
+        let gb = self.grouped()?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        let res = gb
             .max()
+            .and_then(|s| gb.with_min_count(s, min_count, false))
             .map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
@@ -26076,42 +26233,45 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn first(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .first()
+    #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
+    fn first(&self, numeric_only: bool, min_count: i64, skipna: bool) -> PyResult<Py<PyAny>> {
+        self.check_numeric_only("first", numeric_only)?;
+        let gb = self.grouped()?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        let res = gb
+            .first_skipna(skipna)
+            .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
 
-    fn last(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .last()
+    #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
+    fn last(&self, numeric_only: bool, min_count: i64, skipna: bool) -> PyResult<Py<PyAny>> {
+        self.check_numeric_only("last", numeric_only)?;
+        let gb = self.grouped()?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        let res = gb
+            .last_skipna(skipna)
+            .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
 
-    fn median(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .median()
-            .map_err(frame_error_to_py)?;
+    #[pyo3(signature = (numeric_only=false))]
+    fn median(&self, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.check_numeric_only("median", numeric_only)?;
+        let res = self.grouped()?.median().map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
 
-    fn prod(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
+    #[pyo3(signature = (numeric_only=false, min_count=0))]
+    fn prod(&self, numeric_only: bool, min_count: i64) -> PyResult<Py<PyAny>> {
+        self.check_numeric_only("prod", numeric_only)?;
+        let gb = self.grouped()?;
+        let min_count = usize::try_from(min_count).unwrap_or(0);
+        let res = gb
             .prod()
+            .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
         self.wrap_result(res)
     }
@@ -26264,7 +26424,7 @@ impl PySeriesGroupBy {
     }
 
     fn product(&self) -> PyResult<Py<PyAny>> {
-        self.prod()
+        self.prod(false, 0)
     }
 
     #[pyo3(signature = (q=0.5, interpolation="linear"))]
@@ -26285,12 +26445,13 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    fn sem(&self) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (ddof=1, numeric_only=false))]
+    fn sem(&self, ddof: i64, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.check_numeric_only("sem", numeric_only)?;
+        let ddof = groupby_ddof("SeriesGroupBy.sem", ddof)?;
         let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .sem()
+            .grouped()?
+            .sem_ddof(ddof)
             .map_err(groupby_moment_error_to_py)?;
         self.wrap_result(res)
     }
@@ -26352,17 +26513,18 @@ impl PySeriesGroupBy {
     fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(name) = func.extract::<String>() {
             let res = match name.as_str() {
-                "sum" => self.sum()?,
-                "mean" => self.mean()?,
-                "min" => self.min()?,
-                "max" => self.max()?,
-                "std" => self.std()?,
-                "var" => self.var()?,
+                "sum" => self.sum(false, 0, None, None)?,
+                "mean" => self.mean(false, None, None)?,
+                "min" => self.min(false, -1, None, None)?,
+                "max" => self.max(false, -1, None, None)?,
+                "std" => self.std(1, None, None, false)?,
+                "var" => self.var(1, None, None, false)?,
+                "sem" => self.sem(1, false)?,
                 "count" => self.count()?,
-                "first" => self.first()?,
-                "last" => self.last()?,
-                "median" => self.median()?,
-                "prod" => self.prod()?,
+                "first" => self.first(false, -1, true)?,
+                "last" => self.last(false, -1, true)?,
+                "median" => self.median(false)?,
+                "prod" => self.prod(false, 0)?,
                 "size" => self.size()?,
                 "nunique" => self.nunique()?,
                 "any" => self.any()?,
@@ -33623,6 +33785,21 @@ fn unsupported_params(method: &str, params: &[(&str, bool)]) -> PyResult<()> {
     }
 }
 
+/// pandas' groupby `engine=`: "numba" JIT-compiles the reduction, which
+/// frankenpandas cannot; every other value runs pandas' default kernels, and
+/// `engine_kwargs` only ever reaches numba (br-frankenpandas-n57tz).
+fn groupby_engine(method: &str, engine: Option<&str>) -> PyResult<()> {
+    if engine == Some("numba") {
+        return Err(not_implemented(&format!("{method}(engine='numba')")));
+    }
+    Ok(())
+}
+
+/// A groupby `ddof`; pandas also takes a negative one, which is refused.
+fn groupby_ddof(method: &str, ddof: i64) -> PyResult<usize> {
+    usize::try_from(ddof).map_err(|_| not_implemented(&format!("{method}(ddof={ddof})")))
+}
+
 /// Labels 0..n, so a sorted copy records where each row came from (the
 /// key= sorts, fvsao.5).
 fn position_labels(n: usize) -> Vec<IndexLabel> {
@@ -36893,19 +37070,19 @@ mod tests {
             Python::attach(|py| obj.and_then(|o| o.extract::<PySeries>(py).map_err(PyErr::from)))
                 .expect("a Series") // ubs:ignore — test fixture
         };
-        let sum_s = as_series(sgb.sum());
+        let sum_s = as_series(sgb.sum(false, 0, None, None));
         assert_eq!(sum_s.inner.len(), 2);
-        let mean_s = as_series(sgb.mean());
+        let mean_s = as_series(sgb.mean(false, None, None));
         assert_eq!(mean_s.inner.len(), 2);
         let count_s = as_series(sgb.count());
         assert_eq!(count_s.inner.len(), 2);
-        let min_s = as_series(sgb.min());
+        let min_s = as_series(sgb.min(false, -1, None, None));
         assert_eq!(min_s.inner.len(), 2);
-        let max_s = as_series(sgb.max());
+        let max_s = as_series(sgb.max(false, -1, None, None));
         assert_eq!(max_s.inner.len(), 2);
-        let first_s = as_series(sgb.first());
+        let first_s = as_series(sgb.first(false, -1, true));
         assert_eq!(first_s.inner.len(), 2);
-        let last_s = as_series(sgb.last());
+        let last_s = as_series(sgb.last(false, -1, true));
         assert_eq!(last_s.inner.len(), 2);
         let size_s = as_series(sgb.size());
         assert_eq!(size_s.inner.len(), 2);
@@ -36944,9 +37121,9 @@ mod tests {
             sort: true,
             dropna: true,
         };
-        let gb_first = gb.first().expect("first"); // ubs:ignore — test fixture
+        let gb_first = gb.first(false, -1, true).expect("first"); // ubs:ignore — test fixture
         assert_eq!(gb_first.shape(), (2, 1));
-        let gb_last = gb.last().expect("last"); // ubs:ignore — test fixture
+        let gb_last = gb.last(false, -1, true).expect("last"); // ubs:ignore — test fixture
         assert_eq!(gb_last.shape(), (2, 1));
         let gb_size = Python::attach(|py| {
             gb.size(py)

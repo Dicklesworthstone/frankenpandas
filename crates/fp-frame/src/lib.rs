@@ -42674,6 +42674,84 @@ impl SeriesGroupBy<'_> {
         self.kurtosis()
     }
 
+    /// Variance of each group with pandas' `ddof`; `var_ddof(1)` is
+    /// [`var`](Self::var).
+    pub fn var_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        if ddof == 1 {
+            return self.var();
+        }
+        self.refuse_text("var")?;
+        self.agg_values_scalar(self.series.name(), |vals| fp_types::nanvar(vals, ddof))
+            .and_then(float_moment_series)
+    }
+
+    /// Standard deviation of each group with pandas' `ddof`; `std_ddof(1)` is
+    /// [`std`](Self::std).
+    pub fn std_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        if ddof == 1 {
+            return self.std();
+        }
+        self.refuse_text("std")?;
+        self.agg_values_scalar(self.series.name(), |vals| fp_types::nanstd(vals, ddof))
+            .and_then(float_moment_series)
+    }
+
+    /// Standard error of the mean of each group with pandas' `ddof`;
+    /// `sem_ddof(1)` is [`sem`](Self::sem).
+    pub fn sem_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        if ddof == 1 {
+            return self.sem();
+        }
+        self.refuse_text("sem")?;
+        self.agg_values_scalar(self.series.name(), |vals| {
+            fp_types::nansem_grouped(vals, ddof)
+        })
+        .and_then(float_moment_series)
+    }
+
+    /// pandas' `first(skipna=)`: with `skipna = false` each group's value at
+    /// its first row, missing or not; `first_skipna(true)` is
+    /// [`first`](Self::first).
+    pub fn first_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        if skipna {
+            return self.first();
+        }
+        self.agg_values_scalar(self.series.name(), |vals| vals[0].clone())
+    }
+
+    /// pandas' `last(skipna=)`: with `skipna = false` each group's value at
+    /// its last row, missing or not; `last_skipna(true)` is [`last`](Self::last).
+    pub fn last_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        if skipna {
+            return self.last();
+        }
+        self.agg_values_scalar(self.series.name(), |vals| vals[vals.len() - 1].clone())
+    }
+
+    /// pandas' `min_count` on a sum/prod/min/max/first/last already reduced
+    /// into `reduced` (see [`DataFrameGroupBy::with_min_count`]).
+    pub fn with_min_count(
+        &self,
+        reduced: Series,
+        min_count: usize,
+        mask_text: bool,
+    ) -> Result<Series, FrameError> {
+        if min_count == 0 {
+            return Ok(reduced);
+        }
+        let counts = self.count()?;
+        if counts.index().labels() != reduced.index().labels() {
+            return Err(FrameError::CompatibilityRejected(
+                "groupby min_count: the counts and the reduction disagree on the groups".into(),
+            ));
+        }
+        let below = below_min_count(counts.values(), min_count);
+        match mask_groups(reduced.column(), &below, mask_text)? {
+            Some(masked) => Series::new(reduced.name(), reduced.index().clone(), masked),
+            None => Ok(reduced),
+        }
+    }
+
     /// Original index label of the minimum value in each group.
     /// Cache-hot dense group idxmin/idxmax for an all-valid numeric value column
     /// keyed by a single bounded-Int64 column (br-frankenpandas-1q4q4).
@@ -93424,6 +93502,57 @@ fn float_moment_series(series: Series) -> Result<Series, FrameError> {
     }
 }
 
+/// Which groups of a groupby `count()` column hold fewer than `min_count`
+/// non-missing values.
+fn below_min_count(counts: &[Scalar], min_count: usize) -> Vec<bool> {
+    counts
+        .iter()
+        .map(|c| matches!(c, Scalar::Int64(n) if usize::try_from(*n).is_ok_and(|n| n < min_count)))
+        .collect()
+}
+
+/// A reduced groupby column with the flagged groups made missing, as pandas'
+/// `min_count` does it (br-frankenpandas-n57tz): int, float and bool columns
+/// become float64 with NaN, nullable and temporal columns keep their dtype and
+/// missing value, and a string column gets None, except under min/max
+/// (`mask_text = false`), where pandas leaves strings as they are. `None` when
+/// nothing is flagged, so an int column with no short group stays int64.
+fn mask_groups(
+    column: &Column,
+    flagged: &[bool],
+    mask_text: bool,
+) -> Result<Option<Column>, FrameError> {
+    if !flagged.contains(&true) {
+        return Ok(None);
+    }
+    let dtype = column.dtype();
+    let values = column.values();
+    let masked = match dtype {
+        DType::Int64 | DType::Float64 | DType::Bool => {
+            let data = values
+                .iter()
+                .zip(flagged)
+                .map(|(value, &hide)| match value.to_f64() {
+                    Ok(x) if !hide => Scalar::Float64(x),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect();
+            Column::new(DType::Float64, data)?
+        }
+        DType::Utf8 if !mask_text => return Ok(None),
+        _ => {
+            let missing = Scalar::missing_for_dtype(dtype.clone());
+            let data = values
+                .iter()
+                .zip(flagged)
+                .map(|(value, &hide)| if hide { missing.clone() } else { value.clone() })
+                .collect();
+            Column::new(dtype, data)?
+        }
+    };
+    Ok(Some(masked))
+}
+
 struct DenseMultiInt64Grouping {
     gid_per_row: Vec<usize>,
     ngroups: usize,
@@ -98498,6 +98627,120 @@ impl DataFrameGroupBy<'_> {
     /// GroupBy median.
     pub fn median(&self) -> Result<DataFrame, FrameError> {
         self.aggregate_named_func("median")
+    }
+
+    /// GroupBy variance with pandas' `ddof`; `var_ddof(1)` is [`var`](Self::var).
+    pub fn var_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        if ddof == 1 {
+            return self.var();
+        }
+        self.refuse_text_columns("var")?;
+        float_moment_frame(self.aggregate_each_group(|vals| fp_types::nanvar(vals, ddof))?)
+    }
+
+    /// GroupBy standard deviation with pandas' `ddof`; `std_ddof(1)` is
+    /// [`std`](Self::std).
+    pub fn std_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        if ddof == 1 {
+            return self.std();
+        }
+        self.refuse_text_columns("std")?;
+        float_moment_frame(self.aggregate_each_group(|vals| fp_types::nanstd(vals, ddof))?)
+    }
+
+    /// GroupBy standard error of the mean with pandas' `ddof`; `sem_ddof(1)`
+    /// is [`sem`](Self::sem).
+    pub fn sem_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        if ddof == 1 {
+            return self.sem();
+        }
+        self.refuse_text_columns("sem")?;
+        float_moment_frame(self.aggregate_each_group(|vals| fp_types::nansem_grouped(vals, ddof))?)
+    }
+
+    /// pandas' `first(skipna=)`: with `skipna = false` each group's value at
+    /// its first row, missing or not; `first_skipna(true)` is
+    /// [`first`](Self::first).
+    pub fn first_skipna(&self, skipna: bool) -> Result<DataFrame, FrameError> {
+        if skipna {
+            return self.first();
+        }
+        self.aggregate_each_group(|vals| vals[0].clone())
+    }
+
+    /// pandas' `last(skipna=)`: with `skipna = false` each group's value at
+    /// its last row, missing or not; `last_skipna(true)` is [`last`](Self::last).
+    pub fn last_skipna(&self, skipna: bool) -> Result<DataFrame, FrameError> {
+        if skipna {
+            return self.last();
+        }
+        self.aggregate_each_group(|vals| vals[vals.len() - 1].clone())
+    }
+
+    /// pandas' `min_count` on a groupby sum/prod/min/max/first/last already
+    /// reduced into `reduced`: a group with fewer than `min_count` non-missing
+    /// values gets a missing result (see [`mask_groups`]; `mask_text = false`
+    /// for min/max, which pandas leaves strings alone under). `min_count = 0`
+    /// changes nothing.
+    pub fn with_min_count(
+        &self,
+        reduced: DataFrame,
+        min_count: usize,
+        mask_text: bool,
+    ) -> Result<DataFrame, FrameError> {
+        if min_count == 0 {
+            return Ok(reduced);
+        }
+        let counts = self.count()?;
+        if counts.index().labels() != reduced.index().labels() {
+            return Err(FrameError::CompatibilityRejected(
+                "groupby min_count: the counts and the reduction disagree on the groups".into(),
+            ));
+        }
+        let mut out = reduced;
+        for name in out.column_order.clone() {
+            if self.by.contains(&name) {
+                continue;
+            }
+            let Some(count) = counts.column(&name) else {
+                continue;
+            };
+            let below = below_min_count(count.values(), min_count);
+            if let Some(masked) = mask_groups(&out.columns[&name], &below, mask_text)? {
+                out = out.with_column(name, masked)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every value column reduced per group by `func` over the group's values
+    /// in row order, missing ones included (the generic path: no dense
+    /// kernels).
+    fn aggregate_each_group(
+        &self,
+        func: impl Fn(&[Scalar]) -> Scalar,
+    ) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let labels = group_order
+            .iter()
+            .map(|key| self.group_key_label(groups[key][0]))
+            .collect();
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for name in self.df.column_order.iter().filter(|c| !self.by.contains(c)) {
+            let values = self.df.columns[name].values();
+            let reduced = group_order
+                .iter()
+                .map(|key| {
+                    let group: Vec<Scalar> =
+                        groups[key].iter().map(|&i| values[i].clone()).collect();
+                    func(&group)
+                })
+                .collect();
+            result_cols.insert(name.clone(), Column::from_values(reduced)?);
+            col_order.push(name.clone());
+        }
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
     /// GroupBy idxmin. Returns the index label of the minimum value for each group.
@@ -153665,6 +153908,87 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pair.sem().unwrap(), 1.499_999_999_999_999_8);
+    }
+
+    #[test]
+    fn groupby_reduction_keywords_match_pandas_n57tz() {
+        // pandas 2.2.3 over k=['y','x','y','z'], a=[1,2,3,5], b=[1.5,NaN,3.5,0.5],
+        // s=['p','q','r','t'] (sorted groups x, y, z):
+        //   [['a','b']].var(ddof=0)       a [0.0, 1.0, 0.0]  b [NaN, 1.0, 0.0]
+        //   [['a','b']].sem(ddof=0)       a [0.0, 0.7071067811865476, 0.0]
+        //   [['a','b']].first(skipna=False)  b [NaN, 1.5, 0.5]
+        //   [['a','s']].sum(min_count=2)  a float64 [NaN, 4.0, NaN], s [None, 'pr', None]
+        //   [['a','s']].min(min_count=2)  a float64 [NaN, 1.0, NaN], s ['q', 'p', 't']
+        //   [['a']].sum(min_count=1)      a int64 [2, 4, 5]
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        let nan = Scalar::Null(NullKind::NaN);
+        let df = DataFrame::from_dict(
+            &["k", "a", "b", "s"],
+            vec![
+                ("k", vec![utf8("y"), utf8("x"), utf8("y"), utf8("z")]),
+                ("a", [1, 2, 3, 5].map(Scalar::Int64).to_vec()),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1.5),
+                        nan.clone(),
+                        Scalar::Float64(3.5),
+                        Scalar::Float64(0.5),
+                    ],
+                ),
+                ("s", vec![utf8("p"), utf8("q"), utf8("r"), utf8("t")]),
+            ],
+        )
+        .unwrap();
+        let numeric = df.select_columns(&["k", "a", "b"]).unwrap();
+        let gb = numeric.groupby(&["k"]).unwrap();
+        let col = |out: &DataFrame, name: &str| out.column(name).unwrap().values().to_vec();
+        let floats = |xs: &[f64]| xs.iter().map(|&x| Scalar::Float64(x)).collect::<Vec<_>>();
+        let var0 = gb.var_ddof(0).unwrap();
+        assert_eq!(col(&var0, "a"), floats(&[0.0, 1.0, 0.0]));
+        assert_eq!(col(&var0, "b")[1..], floats(&[1.0, 0.0])[..]);
+        assert!(col(&var0, "b")[0].is_missing());
+        let sem0 = gb.sem_ddof(0).unwrap();
+        assert_eq!(
+            col(&sem0, "a"),
+            floats(&[0.0, std::f64::consts::FRAC_1_SQRT_2, 0.0])
+        );
+        let first = gb.first_skipna(false).unwrap();
+        assert!(col(&first, "b")[0].is_missing());
+        assert_eq!(col(&first, "b")[1..], floats(&[1.5, 0.5])[..]);
+        // NEGATIVE: ddof=1 and skipna=true are the plain methods.
+        assert_eq!(gb.var_ddof(1).unwrap(), gb.var().unwrap());
+        assert_eq!(gb.first_skipna(true).unwrap(), gb.first().unwrap());
+
+        let text = df.select_columns(&["k", "a", "s"]).unwrap();
+        let gb = text.groupby(&["k"]).unwrap();
+        let sum = gb.with_min_count(gb.sum().unwrap(), 2, true).unwrap();
+        assert_eq!(sum.column("a").unwrap().dtype(), DType::Float64);
+        assert_eq!(col(&sum, "a")[1], Scalar::Float64(4.0));
+        assert!(col(&sum, "a")[0].is_missing() && col(&sum, "a")[2].is_missing());
+        assert_eq!(col(&sum, "s")[1], utf8("pr"));
+        assert!(col(&sum, "s")[0].is_missing());
+        let min = gb.with_min_count(gb.min().unwrap(), 2, false).unwrap();
+        assert_eq!(col(&min, "s"), vec![utf8("q"), utf8("p"), utf8("t")]);
+        // NEGATIVE: no group short of min_count leaves int64 alone.
+        let kept = gb.with_min_count(gb.sum().unwrap(), 1, true).unwrap();
+        assert_eq!(col(&kept, "a"), [2, 4, 5].map(Scalar::Int64).to_vec());
+
+        // SeriesGroupBy (first-seen groups y, x, z).
+        let key = df.column_as_series("k").unwrap();
+        let a = df.column_as_series("a").unwrap();
+        let sgb = a.groupby(&key).unwrap();
+        assert_eq!(
+            sgb.var_ddof(0).unwrap().values(),
+            &floats(&[1.0, 0.0, 0.0])[..]
+        );
+        let masked = sgb.with_min_count(sgb.sum().unwrap(), 2, true).unwrap();
+        assert_eq!(masked.values()[0], Scalar::Float64(4.0));
+        assert!(masked.values()[1].is_missing() && masked.values()[2].is_missing());
+        let b = df.column_as_series("b").unwrap();
+        let first_b = b.groupby(&key).unwrap().first_skipna(false).unwrap();
+        assert_eq!(first_b.values()[0], Scalar::Float64(1.5));
+        assert!(first_b.values()[1].is_missing());
     }
 
     #[test]

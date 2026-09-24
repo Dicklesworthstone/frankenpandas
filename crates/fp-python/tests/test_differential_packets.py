@@ -2821,6 +2821,76 @@ def test_groupby_options_match_pandas(case: Any) -> None:
     assert _nan_marked(_strict_ordered(op(_gb_frame(fpd).groupby("k", **kw)))) == expected
 
 
+def _gb_kw_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": ["y", "x", "y", "x", "z"],
+            "a": [1, 2, 3, 4, 5],
+            "b": [1.5, _NAN, 3.5, _NAN, 0.5],
+            "s": ["p", "q", "r", "s", "t"],
+            "t": [True, False, True, True, False],
+        }
+    )
+
+
+# br-frankenpandas-n57tz: the groupby reductions took no keywords at all.
+_GB_KEYWORD_CASES = {
+    "sum_numeric_only": lambda m: _gb_kw_frame(m).groupby("k").sum(numeric_only=True),
+    "sum_min_count": lambda m: _gb_kw_frame(m).groupby("k").sum(numeric_only=True, min_count=2),
+    "sum_min_count_unmasked_int": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b"]].sum(min_count=1),
+    "prod_min_count": lambda m: _gb_kw_frame(m).groupby("k")[["a", "t"]].prod(min_count=2),
+    "min_min_count_keeps_strings": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b", "s"]].min(min_count=2),
+    "max_min_count": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b", "s"]].max(min_count=2),
+    "first_min_count_masks_strings": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b", "s"]].first(min_count=2),
+    "last_min_count": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b", "s"]].last(min_count=2),
+    "first_skipna_false": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b"]].first(skipna=False),
+    "last_skipna_false": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b"]].last(skipna=False),
+    "mean_numeric_only": lambda m: _gb_kw_frame(m).groupby("k").mean(numeric_only=True),
+    "median_numeric_only": lambda m: _gb_kw_frame(m).groupby("k").median(numeric_only=True),
+    "std_ddof0": lambda m: _gb_kw_frame(m).groupby("k").std(ddof=0, numeric_only=True),
+    "var_ddof2": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b"]].var(ddof=2),
+    "sem_ddof0": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b"]].sem(ddof=0),
+    "engine_cython": lambda m: _gb_kw_frame(m).groupby("k")[["a"]].sum(engine="cython"),
+    "as_index_false_min_count": lambda m: _gb_kw_frame(m).groupby("k", as_index=False)[["a", "b"]].sum(min_count=2),
+    "as_index_false_numeric_only": lambda m: _gb_kw_frame(m).groupby("k", as_index=False).mean(numeric_only=True),
+    "agg_sem": lambda m: _gb_kw_frame(m).groupby("k")[["a", "b"]].agg("sem"),
+    "column_sum_min_count": lambda m: _gb_kw_frame(m).groupby("k")["a"].sum(min_count=2),
+    "column_sum_numeric_only": lambda m: _gb_kw_frame(m).groupby("k")["a"].sum(numeric_only=True),
+    "column_std_ddof0": lambda m: _gb_kw_frame(m).groupby("k")["b"].std(ddof=0),
+    "column_var_ddof0": lambda m: _gb_kw_frame(m).groupby("k")["a"].var(ddof=0),
+    "column_sem_ddof0": lambda m: _gb_kw_frame(m).groupby("k")["a"].sem(ddof=0),
+    "column_first_skipna_false": lambda m: _gb_kw_frame(m).groupby("k")["b"].first(skipna=False),
+    "column_first_min_count_strings": lambda m: _gb_kw_frame(m).groupby("k")["s"].first(min_count=2),
+    "column_min_min_count_strings": lambda m: _gb_kw_frame(m).groupby("k")["s"].min(min_count=2),
+    "column_agg_sem": lambda m: _gb_kw_frame(m).groupby("k")["a"].agg("sem"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GB_KEYWORD_CASES.values()), ids=list(_GB_KEYWORD_CASES))
+def test_groupby_reduction_keywords_match_pandas(case: Any) -> None:
+    assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_groupby_reduction_keyword_errors_and_refusals() -> None:
+    for m in (pd, fpd):
+        gb = _gb_kw_frame(m).groupby("k")
+        with pytest.raises(TypeError, match=r"Cannot use numeric_only=True with SeriesGroupBy\.sum"):
+            gb["s"].sum(numeric_only=True)
+        with pytest.raises(TypeError, match="SeriesGroupBy.sem called with numeric_only=True and dtype object"):
+            gb["s"].sem(numeric_only=True)
+        # NEGATIVE: without numeric_only a string column still refuses a mean.
+        with pytest.raises(TypeError, match="agg function failed"):
+            gb.mean()
+    gb = _gb_kw_frame(fpd).groupby("k")
+    # What the binding cannot run raises instead of being dropped.
+    with pytest.raises(NotImplementedError, match="engine='numba'"):
+        gb[["a"]].sum(engine="numba")
+    with pytest.raises(NotImplementedError, match="ddof=-1"):
+        gb[["a"]].std(ddof=-1)
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_groupby_option_refusals_and_errors_match_pandas() -> None:
     series = [1.0, 2.0, 3.0]
