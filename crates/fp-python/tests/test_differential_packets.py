@@ -1978,3 +1978,52 @@ def test_loc_indexing_matches_pandas(case: Any) -> None:
     assert run(fpd) == run(pd)
 
 
+def _values(obj: Any) -> list[Any]:
+    out = []
+    for v in list(obj):
+        if hasattr(v, "item"):
+            v = v.item()
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            out.append("<missing>")
+        else:
+            out.append(v)
+    return out
+
+
+_VALUE_CASES = {
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3: bool columns are
+    # numeric for reductions (was string concatenation "FalseTrue...").
+    "isna_sum": lambda m: m.DataFrame({"a": [1.0, None, 3.0], "b": ["x", None, None]}).isna().sum(),
+    "bool_column_sum": lambda m: m.DataFrame({"a": [True, False, True]}).sum(),
+    "bool_column_mean": lambda m: m.DataFrame({"a": [True, False, True, True]}).mean(),
+    # every column shifts, object columns included (was left unshifted)
+    "shift_object_column": lambda m: m.DataFrame({"k": ["x", "y", "z"], "a": [1, 2, 3]}).shift()["k"],
+    # ints mixed with None infer float64 with NaN (was int64 holding None)
+    "series_int_with_none": lambda m: m.Series([1, 2, None]),
+    "frame_int_with_none": lambda m: m.DataFrame({"a": [1, None, 3]})["a"],
+    # default fill_method='pad' forward-fills before the change (was no fill)
+    "pct_change_default_pad": lambda m: m.Series([4.0, 2.0, None, 3.0, 6.0]).pct_change(),
+    "pct_change_explicit_no_fill": lambda m: m.Series([4.0, 2.0, None, 3.0, 6.0]).pct_change(
+        fill_method=None
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VALUE_CASES.values()), ids=list(_VALUE_CASES))
+def test_values_match_pandas(case: Any) -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)  # pandas' pct_change default warns
+        expected = _values(case(pd))
+    assert _values(case(fpd)) == pytest.approx(expected) if all(
+        isinstance(v, float) for v in expected
+    ) else _values(case(fpd)) == expected
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_int_list_with_none_infers_float64_dtype() -> None:
+    assert str(fpd.Series([1, 2, None]).dtype) == str(pd.Series([1, 2, None]).dtype) == "float64"
+
+

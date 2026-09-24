@@ -85486,14 +85486,29 @@ impl DataFrame {
             "sum" | "mean" | "min" | "max" | "std" | "var" | "median" | "prod"
         );
         let includes_non_numeric = matches!(func, "sum" | "min" | "max");
+        // pandas counts bool and the nullable Int64/Float64/boolean dtypes as
+        // NUMERIC for reductions and for numeric_only (live 2.2.3: a bool column
+        // sums to its True count, means to the true fraction, and survives
+        // numeric_only=True). Treating Bool as an object column made
+        // `df.isna().sum()` concatenate "FalseTrue..." strings.
+        // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3.
+        let numeric_dtype = |dt: &DType| {
+            matches!(
+                dt,
+                DType::Int64
+                    | DType::Float64
+                    | DType::Bool
+                    | DType::Int64Nullable
+                    | DType::Float64Nullable
+                    | DType::BoolNullable
+            )
+        };
         let allowed: Vec<String> = self
             .column_order
             .iter()
             .filter(|name| {
                 let dt = self.columns[name.as_str()].dtype();
-                if matches!(dt, DType::Int64 | DType::Float64)
-                    || (timedelta_safe && matches!(dt, DType::Timedelta64))
-                {
+                if numeric_dtype(&dt) || (timedelta_safe && matches!(dt, DType::Timedelta64)) {
                     return true;
                 }
                 // pandas 2.x keeps non-numeric columns for the ops that can
@@ -85524,10 +85539,9 @@ impl DataFrame {
             // version of this flip. (br-frankenpandas-reductions-numeric-only-default-zx21n)
             if let Some(offender) = allowed.iter().find(|name| {
                 let column = &self.columns[name.as_str()];
-                !matches!(
-                    column.dtype(),
-                    DType::Int64 | DType::Float64 | DType::Timedelta64
-                ) && column.values().iter().any(|v| !v.is_missing())
+                let dt = column.dtype();
+                !(numeric_dtype(&dt) || matches!(dt, DType::Timedelta64))
+                    && column.values().iter().any(|v| !v.is_missing())
             }) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "could not convert column '{offender}' to numeric for {func}"
@@ -85537,10 +85551,8 @@ impl DataFrame {
 
         let values = self.par_map_columns(&allowed, |name| {
             let column = &self.columns[name];
-            let is_numeric = matches!(
-                column.dtype(),
-                DType::Int64 | DType::Float64 | DType::Timedelta64
-            );
+            let dt = column.dtype();
+            let is_numeric = numeric_dtype(&dt) || matches!(dt, DType::Timedelta64);
             // Object-column semantics for the include-ops, measured on pandas
             // 2.2.3: `sum` CONCATENATES the strings in row order and min/max
             // compare LEXICOGRAPHICALLY. Nulls are skipped, as they are for the
@@ -87889,16 +87901,25 @@ impl DataFrame {
                     out,
                     fp_columnar::ValidityMask::from_words(words, n),
                 ))
-            } else if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+            } else {
+                // EVERY dtype shifts: pandas moves object/datetime/timedelta/
+                // categorical/nullable columns too. This arm used to return non-
+                // numeric columns UNSHIFTED, silently misaligning rows (e.g.
+                // df.shift() on {'k': str, 'a': int} moved 'a' but not 'k').
+                // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3
                 Ok(self
                     .column_at_as_series(pos)?
                     .shift(periods)?
                     .column()
                     .clone())
-            } else {
-                Ok(col.clone())
             }
         })?;
+        self.with_columns_in_position_order(transformed)
+    }
+
+    /// Rebuild this frame (same index, axes and flags) from one replacement
+    /// column per existing column, in stored column order.
+    fn with_columns_in_position_order(&self, transformed: Vec<Column>) -> Result<Self, FrameError> {
         let pairs: Vec<(String, Column)> = self
             .columns
             .ordered_names()
@@ -87930,7 +87951,16 @@ impl DataFrame {
         periods: i64,
         fill_value: Scalar,
     ) -> Result<Self, FrameError> {
-        self.apply_per_column(|s| s.shift_with_fill_value(periods, fill_value.clone()))
+        // Every dtype shifts (see `shift`): `apply_per_column` passes non-numeric
+        // columns through untouched, which left object columns unshifted.
+        let transformed = self.par_map_column_positions_min(131_072, |pos| {
+            Ok(self
+                .column_at_as_series(pos)?
+                .shift_with_fill_value(periods, fill_value.clone())?
+                .column()
+                .clone())
+        })?;
+        self.with_columns_in_position_order(transformed)
     }
 
     /// Shift index horizontally by desired number of periods.
@@ -108125,6 +108155,73 @@ mod tests {
 
         let max = df.max_agg_with_numeric_only(false).expect("max");
         assert_eq!(at(&max, "label"), Scalar::Utf8("z".into()));
+    }
+
+    /// A BOOL column is numeric for pandas reductions. Live pandas 2.2.3 on
+    /// pd.DataFrame({'b': [True, False, True], 'label': ['x', 'y', 'z']}):
+    ///   df.sum()                  -> {'b': 2, 'label': 'xyz'}
+    ///   df.min()                  -> {'b': False, 'label': 'x'}
+    ///   df.mean(numeric_only=True)-> {'b': 0.6666666666666666}
+    ///   df.sum(numeric_only=True) -> {'b': 2}
+    /// FrankenPandas used to CONCATENATE the bool column ("TrueFalseTrue"), which
+    /// is what `df.isna().sum()` hit. br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3
+    #[test]
+    fn dataframe_reductions_treat_bool_columns_as_numeric() {
+        let df = DataFrame::from_dict(
+            &["b", "label"],
+            vec![
+                (
+                    "b",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .expect("frame");
+        let at = |s: &Series, label: &str| -> Scalar {
+            let pos = s
+                .index()
+                .labels()
+                .iter()
+                .position(|l| matches!(l, IndexLabel::Utf8(t) if t == label))
+                .unwrap_or_else(|| panic!("label {label} missing"));
+            s.column().values()[pos].clone()
+        };
+
+        let sum = df.sum_with_numeric_only(false).expect("sum");
+        assert_eq!(at(&sum, "b"), Scalar::Int64(2), "bool sums to its True count");
+        assert_eq!(at(&sum, "label"), Scalar::Utf8("xyz".into()), "object still concatenates");
+
+        let min = df.min_agg_with_numeric_only(false).expect("min");
+        assert_eq!(at(&min, "b"), Scalar::Bool(false));
+
+        let mean = df.mean_with_numeric_only(true).expect("mean");
+        match at(&mean, "b") {
+            Scalar::Float64(v) => assert!((v - 2.0 / 3.0).abs() < 1e-12, "mean {v}"),
+            other => panic!("bool mean must be float, got {other:?}"),
+        }
+
+        let numeric_sum = df.sum_with_numeric_only(true).expect("numeric_only sum");
+        assert!(
+            numeric_sum
+                .index()
+                .labels()
+                .iter()
+                .any(|l| matches!(l, IndexLabel::Utf8(t) if t == "b")),
+            "numeric_only=True keeps the bool column"
+        );
+
+        // isna().sum(): the reported bug.
+        let isna_sum = df.isna().expect("isna").sum().expect("sum");
+        assert_eq!(at(&isna_sum, "b"), Scalar::Int64(0));
+        assert_eq!(at(&isna_sum, "label"), Scalar::Int64(0));
     }
 
     /// The other half of the split: pandas 2.x RAISES for these eight when a
@@ -141236,6 +141333,64 @@ mod tests {
         assert!(col.values()[0].is_missing());
         assert_eq!(col.values()[1], Scalar::Float64(1.0));
         assert_eq!(col.values()[2], Scalar::Float64(2.0));
+    }
+
+    /// Every column shifts, whatever its dtype. pandas 2.2.3 on
+    /// pd.DataFrame({'k': ['x','y','z'], 'a': [1, 2, 3], 't': <3 timestamps>}).shift()
+    /// gives k=[None,'x','y'], a=[NaN,1.0,2.0], t=[NaT,t0,t1]. The object and
+    /// datetime columns used to come back UNSHIFTED (a silent row misalignment).
+    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3
+    #[test]
+    fn dataframe_shift_moves_object_and_datetime_columns_too() {
+        let t0 = 1_704_067_200_000_000_000_i64; // 2024-01-01
+        let day = 86_400_000_000_000_i64;
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "k".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("z".into()),
+            ])
+            .unwrap(),
+        );
+        columns.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
+        );
+        columns.insert(
+            "t".to_owned(),
+            Column::new(
+                DType::datetime64_naive(),
+                vec![
+                    Scalar::Datetime64(t0),
+                    Scalar::Datetime64(t0 + day),
+                    Scalar::Datetime64(t0 + 2 * day),
+                ],
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            columns,
+            vec!["k".to_owned(), "a".to_owned(), "t".to_owned()],
+        )
+        .unwrap();
+
+        for shifted in [
+            df.shift(1).unwrap(),
+            df.shift_with_fill_value(1, Scalar::Null(NullKind::Null)).unwrap(),
+        ] {
+            let k = shifted.column("k").unwrap().values().to_vec();
+            assert!(k[0].is_missing(), "object column vacated slot is missing");
+            assert_eq!(&k[1..], &[Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]);
+            let t = shifted.column("t").unwrap().values().to_vec();
+            assert!(t[0].is_missing(), "datetime column vacated slot is NaT");
+            assert_eq!(&t[1..], &[Scalar::Datetime64(t0), Scalar::Datetime64(t0 + day)]);
+            let a = shifted.column("a").unwrap().values().to_vec();
+            assert!(a[0].is_missing());
+        }
     }
 
     #[test]

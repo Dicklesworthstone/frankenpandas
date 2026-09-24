@@ -1558,10 +1558,11 @@ fn py_value_to_column(
         return Ok(s.inner.column().clone());
     }
     if let Ok(list) = val.cast::<PyList>() {
-        let scalars: Vec<Scalar> = list
-            .iter()
-            .map(|v| py_to_scalar(py, &v))
-            .collect::<PyResult<Vec<_>>>()?;
+        let scalars: Vec<Scalar> = pandas_promote_int_with_missing(
+            list.iter()
+                .map(|v| py_to_scalar(py, &v))
+                .collect::<PyResult<Vec<_>>>()?,
+        );
         if scalars.len() != expected_len {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Length of values ({}) does not match length of index ({})",
@@ -1573,10 +1574,12 @@ fn py_value_to_column(
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
     }
     if let Ok(tuple) = val.cast::<pyo3::types::PyTuple>() {
-        let scalars: Vec<Scalar> = tuple
-            .iter()
-            .map(|v| py_to_scalar(py, &v))
-            .collect::<PyResult<Vec<_>>>()?;
+        let scalars: Vec<Scalar> = pandas_promote_int_with_missing(
+            tuple
+                .iter()
+                .map(|v| py_to_scalar(py, &v))
+                .collect::<PyResult<Vec<_>>>()?,
+        );
         if scalars.len() != expected_len {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Length of values ({}) does not match length of index ({})",
@@ -9686,6 +9689,30 @@ fn is_py_collection(obj: &Bound<'_, PyAny>) -> bool {
         || obj.is_instance_of::<PyFrozenSet>()
 }
 
+/// pandas list inference for integers mixed with missing values: live pandas
+/// 2.2.3 gives `pd.Series([1, 2, None]).dtype == float64` with NaN (and the same
+/// for DataFrame columns and dict values). Without this the binding produced an
+/// int64 column holding None. Lists that are not integer-plus-missing are
+/// returned unchanged. br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3
+#[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
+fn pandas_promote_int_with_missing(scalars: Vec<Scalar>) -> Vec<Scalar> {
+    let has_int = scalars.iter().any(|s| matches!(s, Scalar::Int64(_)));
+    let has_missing = scalars.iter().any(Scalar::is_missing);
+    let int_or_missing = scalars
+        .iter()
+        .all(|s| matches!(s, Scalar::Int64(_)) || s.is_missing());
+    if !(has_int && has_missing && int_or_missing) {
+        return scalars;
+    }
+    scalars
+        .into_iter()
+        .map(|s| match s {
+            Scalar::Int64(v) => Scalar::Float64(v as f64),
+            _ => Scalar::Null(NullKind::NaN),
+        })
+        .collect()
+}
+
 fn py_sequence_to_scalars(py: Python<'_>, seq: &Bound<'_, PyAny>) -> PyResult<Vec<Scalar>> {
     let mut scalars = Vec::new();
     for item in seq.try_iter()? {
@@ -10101,6 +10128,7 @@ impl PySeries {
                 dict_keys.push(py_to_index_label(&k)?);
                 dict_vals.push(py_to_scalar(py, &v)?);
             }
+            let dict_vals = pandas_promote_int_with_missing(dict_vals);
             if let Some(idx_arg) = index {
                 let target_labels = extract_index_labels(Some(idx_arg), 0)?;
                 let mut reindexed_vals = Vec::with_capacity(target_labels.len());
@@ -10122,10 +10150,11 @@ impl PySeries {
         }
 
         if let Ok(list) = data.cast::<PyList>() {
-            let scalars: Vec<Scalar> = list
-                .iter()
-                .map(|v| py_to_scalar(py, &v))
-                .collect::<PyResult<Vec<_>>>()?;
+            let scalars: Vec<Scalar> = pandas_promote_int_with_missing(
+                list.iter()
+                    .map(|v| py_to_scalar(py, &v))
+                    .collect::<PyResult<Vec<_>>>()?,
+            );
             let labels = extract_index_labels(index, scalars.len())?;
             if labels.len() != scalars.len() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -10140,10 +10169,12 @@ impl PySeries {
         }
 
         if let Ok(tuple) = data.cast::<PyTuple>() {
-            let scalars: Vec<Scalar> = tuple
-                .iter()
-                .map(|v| py_to_scalar(py, &v))
-                .collect::<PyResult<Vec<_>>>()?;
+            let scalars: Vec<Scalar> = pandas_promote_int_with_missing(
+                tuple
+                    .iter()
+                    .map(|v| py_to_scalar(py, &v))
+                    .collect::<PyResult<Vec<_>>>()?,
+            );
             let labels = extract_index_labels(index, scalars.len())?;
             if labels.len() != scalars.len() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -11159,7 +11190,11 @@ impl PySeries {
     }
 
     /// Return the fractional change over `periods`.
-    #[pyo3(signature = (periods=1, fill_method=None, limit=None, freq=None))]
+    ///
+    /// pandas 2.2.3's default fill_method is 'pad' (deprecated there, but still
+    /// the default): missing values are forward-filled before the change is
+    /// computed. An explicit `fill_method=None` disables the fill.
+    #[pyo3(signature = (periods=1, fill_method=Some("pad"), limit=None, freq=None))]
     fn pct_change(
         &self,
         periods: i64,
@@ -17644,7 +17679,10 @@ impl PyDataFrame {
     }
 
     /// Percentage change between the current and a prior element.
-    #[pyo3(signature = (periods=1, fill_method=None, limit=None, freq=None, axis=None))]
+    ///
+    /// Default fill_method is 'pad' like pandas 2.2.3; `fill_method=None`
+    /// disables the forward fill.
+    #[pyo3(signature = (periods=1, fill_method=Some("pad"), limit=None, freq=None, axis=None))]
     fn pct_change(
         &self,
         periods: i64,
