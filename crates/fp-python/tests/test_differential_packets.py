@@ -3256,6 +3256,43 @@ def test_ewm_refuses_what_it_cannot_run() -> None:
             _ewm_s(fpd).ewm(**kwargs)
 
 
+def _mk(m: Any) -> Any:
+    return m.DataFrame({"k": ["x", "y", "x", "x"], "j": [1, 1, 2, 1], "v": [1.0, 2.0, 3.0, 4.0]})
+
+
+# br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9: a multi-key result's
+# index surfaced as fp-frame's joined 'x|1' strings; pandas returns a
+# MultiIndex of (k, j) tuples named ['k', 'j'].
+_MULTI_KEY_CASES = {
+    "groupby_sum": lambda m: _mk(m).groupby(["k", "j"]).sum(),
+    "groupby_mean": lambda m: _mk(m).groupby(["k", "j"]).mean(),
+    "groupby_agg_max": lambda m: _mk(m).groupby(["k", "j"]).agg("max"),
+    "groupby_sort_false": lambda m: _mk(m).groupby(["k", "j"], sort=False).sum(),
+    "set_index_two_columns": lambda m: _mk(m).set_index(["k", "j"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MULTI_KEY_CASES.values()), ids=list(_MULTI_KEY_CASES))
+def test_multi_key_results_carry_pandas_multiindex(case: Any) -> None:
+    got, want = case(fpd), case(pd)
+    assert type(got.index).__name__ == type(want.index).__name__ == "MultiIndex"
+    assert list(got.index.names) == list(want.index.names)
+    assert [tuple(label) for label in got.index] == [tuple(label) for label in want.index]
+    assert list(got.columns) == list(want.columns)
+    for column in want.columns:
+        assert got[column].tolist() == want[column].tolist()
+    # NEGATIVE: a single-key result keeps a flat Index.
+    assert type(_mk(fpd).groupby("k").sum().index).__name__ == "Index"
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="4qg5w.9: a Series has no row MultiIndex, so df['v'] of a MultiIndex frame is flat")
+def test_column_of_a_multiindex_frame_keeps_the_multiindex() -> None:
+    got, want = _mk(fpd).groupby(["k", "j"]).sum()["v"], _mk(pd).groupby(["k", "j"]).sum()["v"]
+    assert _strict_ordered(got) == _strict_ordered(want)
+
+
 def _gwin(m: Any) -> Any:
     return m.DataFrame({"k": ["x", "y", "x", "y"], "v": [1.0, 2.0, 3.0, 4.0]}).groupby("k")
 

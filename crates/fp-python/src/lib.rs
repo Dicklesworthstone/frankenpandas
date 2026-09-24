@@ -16887,12 +16887,29 @@ impl PyDataFrame {
             .collect()
     }
 
-    /// Return the index of the DataFrame.
+    /// Return the index of the DataFrame: its row MultiIndex when it has one
+    /// (a multi-key groupby result, set_index over several columns), as pandas
+    /// returns, else the flat Index. The flat labels of a MultiIndex frame are
+    /// fp-frame's joined 'x|1' strings, which surfaced as the index
+    /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
     #[getter]
-    fn index(&self) -> PyIndex {
-        PyIndex {
-            inner: self.inner.index().clone(),
+    fn index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(multi) = self.inner.row_multiindex() {
+            return Ok(Py::new(
+                py,
+                PyMultiIndex {
+                    inner: multi.clone(),
+                },
+            )?
+            .into_any());
         }
+        Ok(Py::new(
+            py,
+            PyIndex {
+                inner: self.inner.index().clone(),
+            },
+        )?
+        .into_any())
     }
 
     #[getter]
@@ -21417,9 +21434,9 @@ impl PyDataFrame {
     #[getter]
     fn axes(&self) -> Vec<Py<PyAny>> {
         Python::attach(|py| {
-            let idx = Py::new(py, self.index()).ok()?;
+            let idx = self.index(py).ok()?;
             let cols = PyList::new(py, self.columns()).ok()?;
-            Some(vec![idx.into_any(), cols.into_any().unbind()])
+            Some(vec![idx, cols.into_any().unbind()])
         })
         .unwrap_or_default()
     }
@@ -37674,8 +37691,13 @@ mod tests {
 
         // Shape and index
         assert_eq!(py_df.shape(), (3, 2));
-        let idx = py_df.index();
-        assert_eq!(idx.len(), 3);
+        let idx_len = Python::attach(|py| {
+            py_df
+                .index(py)
+                .and_then(|idx| idx.bind(py).len())
+                .expect("index length") // ubs:ignore — test fixture
+        });
+        assert_eq!(idx_len, 3);
 
         // Arithmetic: __neg__
         let neg = py_df.__neg__().expect("negate"); // ubs:ignore — test fixture
