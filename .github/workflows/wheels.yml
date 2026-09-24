@@ -43,11 +43,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+      # The manylinux containers do not see setup-python's interpreter: without
+      # --find-interpreter the x86_64 leg built only the image's default cp39
+      # wheel and the aarch64 cross image found no interpreter at all. (0zz8y.3)
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --manifest-path crates/fp-python/Cargo.toml
+          args: --release --out dist --find-interpreter --manifest-path crates/fp-python/Cargo.toml
           sccache: 'true'
           manylinux: auto
       # Only the leg whose wheel this runner can import (aarch64 is cross-built).
