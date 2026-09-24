@@ -2320,3 +2320,52 @@ def test_merge_indicator_dtype_is_category_like_pandas() -> None:
     assert str(merged["_merge"].dtype) == "category"
 
 
+# astype specs and loc slices (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.4).
+# astype took a str only (float/np.float64/np.dtype/dict raised TypeError) and
+# mapped "Int64" to int64; an unnamed Series reported name '' (pandas None).
+_AD = {"a": [1, 2, 3, 4], "b": [1.5, 2.5, 3.5, 4.5], "c": ["x", "y", "z", "w"]}
+_AN = {"a": [1, 2, 3, 4], "b": [1.5, 2.5, 3.5, 4.5]}
+
+_ASTYPE_LOC_CASES = {
+    "astype_float_type": lambda m: m.DataFrame(_AN).astype(float),
+    "astype_int_type_from_float": lambda m: m.DataFrame({"b": [1.0, 2.0]}).astype(int),
+    "astype_str_type": lambda m: m.DataFrame(_AN).astype(str),
+    "astype_bool_type": lambda m: m.DataFrame({"a": [0, 1, 2]}).astype(bool),
+    "astype_name": lambda m: m.DataFrame(_AN).astype("float64"),
+    "astype_numpy_type": lambda m: m.DataFrame(_AN).astype(np.float64),
+    "astype_numpy_dtype": lambda m: m.DataFrame(_AN).astype(np.dtype("float64")),
+    "astype_dict_names": lambda m: m.DataFrame(_AD).astype({"a": "float64", "b": str}),
+    "astype_dict_type": lambda m: m.DataFrame(_AD).astype({"a": float}),
+    "astype_nullable_Int64": lambda m: m.DataFrame(_AN).astype({"a": "Int64"}),
+    "series_astype_float": lambda m: m.Series([1, 2]).astype(float),
+    "series_astype_numpy": lambda m: m.Series([1, 2], name="s").astype(np.float64),
+    "series_astype_str": lambda m: m.Series([1, 2]).astype(str),
+    "series_astype_Int64": lambda m: m.Series([1, 2]).astype("Int64"),
+    "series_astype_dict": lambda m: m.Series([1, 2], name="s").astype({"s": "float64"}),
+    "series_astype_errors_ignore": lambda m: m.Series(["x", "1"]).astype("int64", errors="ignore"),
+    "loc_slice_cols_list": lambda m: m.DataFrame(_AD).loc[1:2, ["a", "c"]],
+    "loc_slice_col_slice": lambda m: m.DataFrame(_AD).loc[1:2, "a":"b"],
+    "loc_all_rows_cols": lambda m: m.DataFrame(_AD).loc[:, ["b", "a"]],
+    "loc_mask_cols": lambda m: m.DataFrame(_AD).loc[m.DataFrame(_AD)["a"] > 2, ["a", "c"]],
+    "loc_str_index_slice": lambda m: m.DataFrame(_AD, index=["p", "q", "r", "s"]).loc["q":"r", ["b"]],
+    "loc_slice_one_col": lambda m: m.DataFrame(_AD).loc[1:2, "a"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ASTYPE_LOC_CASES.values()), ids=list(_ASTYPE_LOC_CASES))
+def test_astype_specs_and_loc_slices_match_pandas(case: Any) -> None:
+    assert _strict_ordered(case(fpd)) == _strict_ordered(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_astype_errors_match_pandas() -> None:
+    for mod in (pd, fpd):
+        with pytest.raises(KeyError):
+            mod.DataFrame(_AD).astype({"zz": float})
+        with pytest.raises(TypeError, match="data type 'nonsense' not understood"):
+            mod.DataFrame(_AD).astype("nonsense")
+    with pytest.raises(NotImplementedError, match="category"):
+        fpd.Series(["a", "b"]).astype("category")
+
+

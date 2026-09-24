@@ -81,19 +81,38 @@ fn parse_freq_to_nanos(freq: &str) -> PyResult<i64> {
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("frequency overflow"))
 }
 
-/// Map a pandas-style dtype string to a FrankenPandas `DType`.
+/// Map a pandas dtype name to a FrankenPandas `DType` with pandas' meanings:
+/// "Int64"/"Float64"/"boolean" are the nullable dtypes, "category" is
+/// categorical (fp-types' `FromStr`); "i64"/"f64" are binding aliases.
 fn parse_dtype(name: &str) -> PyResult<fp_types::DType> {
     use fp_types::DType;
     match name {
-        "int" | "int64" | "i64" | "Int64" => Ok(DType::Int64),
-        "float" | "float64" | "f64" | "Float64" => Ok(DType::Float64),
-        "str" | "string" | "object" | "O" | "utf8" => Ok(DType::Utf8),
-        "bool" | "boolean" => Ok(DType::Bool),
-        "datetime64" | "datetime64[ns]" | "datetime" => Ok(DType::datetime64_naive()),
-        "timedelta64" | "timedelta64[ns]" | "timedelta" => Ok(DType::Timedelta64),
-        other => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-            "data type {other:?} not understood"
-        ))),
+        "i64" => Ok(DType::Int64),
+        "f64" => Ok(DType::Float64),
+        other => other.parse::<DType>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "data type '{other}' not understood"
+            ))
+        }),
+    }
+}
+
+/// pandas' name for a dtype, as `Series.dtype` / `DataFrame.dtypes` print it.
+fn pandas_dtype_name(dtype: &fp_types::DType) -> String {
+    use fp_types::DType;
+    match dtype {
+        DType::Int64 => "int64".to_owned(),
+        DType::Int64Nullable => "Int64".to_owned(),
+        DType::Float64 => "float64".to_owned(),
+        DType::Float64Nullable => "Float64".to_owned(),
+        DType::Bool => "bool".to_owned(),
+        DType::BoolNullable => "boolean".to_owned(),
+        DType::Utf8 | DType::Null => "object".to_owned(),
+        DType::Categorical => "category".to_owned(),
+        DType::Datetime64 { tz: None } => "datetime64[ns]".to_owned(),
+        DType::Datetime64 { tz: Some(tz) } => format!("datetime64[ns, {tz}]"),
+        DType::Timedelta64 => "timedelta64[ns]".to_owned(),
+        other => format!("{other:?}").to_ascii_lowercase(),
     }
 }
 
@@ -10223,10 +10242,12 @@ impl PySeries {
         }
     }
 
-    /// Return the name of the Series.
+    /// Return the name of the Series; None when unnamed, as in pandas (the Rust
+    /// Series stores an unnamed Series as "").
     #[getter]
-    fn name(&self) -> &str {
-        self.inner.name()
+    fn name(&self) -> Option<&str> {
+        let name = self.inner.name();
+        (!name.is_empty()).then_some(name)
     }
 
     /// Return the index of the Series.
@@ -10239,15 +10260,7 @@ impl PySeries {
 
     #[getter]
     fn dtype(&self) -> String {
-        match self.inner.dtype() {
-            fp_types::DType::Int64 => "int64".to_string(),
-            fp_types::DType::Float64 => "float64".to_string(),
-            fp_types::DType::Bool => "bool".to_string(),
-            fp_types::DType::Utf8 => "object".to_string(),
-            fp_types::DType::Datetime64 { .. } => "datetime64[ns]".to_string(),
-            fp_types::DType::Timedelta64 => "timedelta64[ns]".to_string(),
-            _ => format!("{:?}", self.inner.dtype()).to_ascii_lowercase(),
-        }
+        pandas_dtype_name(&self.inner.dtype())
     }
 
     #[getter]
@@ -11642,14 +11655,44 @@ impl PySeries {
         })
     }
 
-    /// Cast to a dtype (int64/float64/str/bool/datetime64/timedelta64).
-    fn astype(&self, dtype: &str) -> PyResult<PySeries> {
-        let dt = parse_dtype(dtype)?;
-        let r = self
-            .inner
-            .astype(dt)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
+    /// Cast to a dtype given as a pandas name, a Python type (`float`), a
+    /// numpy/pandas dtype, or `{name: dtype}` naming this Series; errors="ignore"
+    /// returns the Series unchanged on failure, as pandas does.
+    #[pyo3(signature = (dtype, copy=None, errors="raise"))]
+    fn astype(
+        &self,
+        dtype: &Bound<'_, PyAny>,
+        copy: Option<&Bound<'_, PyAny>>,
+        errors: &str,
+    ) -> PyResult<PySeries> {
+        let _ = copy; // pandas' copy= does not change the result
+        let target = if let Ok(mapping) = dtype.cast::<PyDict>() {
+            let name = self.inner.name().to_owned();
+            match mapping.get_item(&name)? {
+                Some(spec) if mapping.len() == 1 => py_dtype_arg(&spec)?,
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        "Only the Series name can be used for the key in Series dtype mappings.",
+                    ));
+                }
+            }
+        } else {
+            py_dtype_arg(dtype)?
+        };
+        if target == DType::Categorical {
+            // Categorical columns are not rendered as pandas' category yet
+            // (br-frankenpandas-hrxn9).
+            return Err(not_implemented("astype('category')"));
+        }
+        match self.inner.astype(target) {
+            Ok(inner) => Ok(PySeries { inner }),
+            Err(_) if errors == "ignore" => Ok(PySeries {
+                inner: self.inner.clone(),
+            }),
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                e.to_string(),
+            )),
+        }
     }
 
     #[getter]
@@ -15270,7 +15313,7 @@ impl PyDataFrame {
         for col in cols {
             labels.push(IndexLabel::Utf8(col.clone()));
             let dt = match self.inner.column(col) {
-                Some(c) => format!("{:?}", c.dtype()),
+                Some(c) => pandas_dtype_name(&c.dtype()),
                 None => "object".to_string(),
             };
             dtypes.push(Scalar::Utf8(dt));
@@ -17182,14 +17225,59 @@ impl PyDataFrame {
         })
     }
 
-    /// Cast every column to a dtype (int64/float64/str/bool/datetime64/timedelta64).
-    fn astype(&self, dtype: &str) -> PyResult<PyDataFrame> {
-        let dt = parse_dtype(dtype)?;
-        let result = self
-            .inner
-            .astype(dt)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// Cast every column, or the columns a `{column: dtype}` dict names, to a
+    /// dtype given as a pandas name, a Python type (`float`) or a numpy/pandas
+    /// dtype. A dict key that is not a column is pandas' KeyError;
+    /// errors="ignore" returns the frame unchanged on failure.
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.4)
+    #[pyo3(signature = (dtype, copy=None, errors="raise"))]
+    fn astype(
+        &self,
+        dtype: &Bound<'_, PyAny>,
+        copy: Option<&Bound<'_, PyAny>>,
+        errors: &str,
+    ) -> PyResult<PyDataFrame> {
+        let _ = copy; // pandas' copy= does not change the result
+        let result = if let Ok(mapping) = dtype.cast::<PyDict>() {
+            let mut targets: Vec<(String, DType)> = Vec::with_capacity(mapping.len());
+            for (column, spec) in mapping.iter() {
+                let column = column.extract::<String>()?;
+                if self.inner.column(&column).is_none() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        "Only a column name can be used for the key in a dtype mappings \
+                         argument. '"
+                            .to_owned()
+                            + &column
+                            + "' not found in columns.",
+                    ));
+                }
+                targets.push((column, py_dtype_arg(&spec)?));
+            }
+            if targets.iter().any(|(_, dt)| *dt == DType::Categorical) {
+                // Not rendered as pandas' category yet (br-frankenpandas-hrxn9).
+                return Err(not_implemented("astype('category')"));
+            }
+            let pairs: Vec<(&str, DType)> = targets
+                .iter()
+                .map(|(column, dt)| (column.as_str(), dt.clone()))
+                .collect();
+            self.inner.astype_columns(&pairs)
+        } else {
+            let target = py_dtype_arg(dtype)?;
+            if target == DType::Categorical {
+                return Err(not_implemented("astype('category')"));
+            }
+            self.inner.astype(target)
+        };
+        match result {
+            Ok(inner) => Ok(PyDataFrame { inner }),
+            Err(_) if errors == "ignore" => Ok(PyDataFrame {
+                inner: self.inner.clone(),
+            }),
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                e.to_string(),
+            )),
+        }
     }
 
     /// Sort DataFrame by one or more columns.
@@ -30940,11 +31028,9 @@ pub fn array(
     dtype: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PySeries> {
     let s = PySeries::new(py, Some(data), None, None)?;
-    if let Some(dt) = dtype {
-        let dt_str = dt.str()?.to_str()?.to_string();
-        s.astype(&dt_str)
-    } else {
-        Ok(s)
+    match dtype {
+        Some(dt) => s.astype(dt, None, "raise"),
+        None => Ok(s),
     }
 }
 
@@ -34270,7 +34356,7 @@ mod tests {
 
         let mut mod_df = py_df.clone();
         let popped = mod_df.pop("a").expect("pop"); // ubs:ignore — test fixture
-        assert_eq!(popped.name(), "a");
+        assert_eq!(popped.name(), Some("a"));
         assert_eq!(mod_df.columns(), vec!["b"]);
         assert!(mod_df.pop("nonexistent").is_err());
 
