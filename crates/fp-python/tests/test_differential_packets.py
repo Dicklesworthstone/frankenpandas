@@ -4004,3 +4004,99 @@ def test_array_like_column_refusals_match_pandas() -> None:
 def test_numpy_second_resolution_is_kept_like_pandas() -> None:
     values = np.array(["2020-01-05", "NaT"], dtype="datetime64[D]")
     assert str(fpd.Series(values).dtype) == str(pd.Series(values).dtype) == "datetime64[s]"
+
+
+def _dt_column(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2020-01-05", "2020-01-02", None, "2020-01-03"]), name="d")
+
+
+def _td_column(m: Any) -> Any:
+    return m.Series(m.to_timedelta(["1D", "2h", None, "30min"]), name="t")
+
+
+def _keyed_dates(m: Any) -> Any:
+    return m.DataFrame({"k": [1, 1, 2, 2], "d": _dt_column(m)}).groupby("k")["d"]
+
+
+TEMPORAL_COLUMN_OPS = {
+    "min": lambda m: _dt_column(m).min(),
+    "max": lambda m: _dt_column(m).max(),
+    "mean": lambda m: _dt_column(m).mean(),
+    "median": lambda m: _dt_column(m).median(),
+    "std": lambda m: _dt_column(m).std(),
+    "idxmax": lambda m: _dt_column(m).idxmax(),
+    "quantile": lambda m: _dt_column(m).quantile(0.25),
+    "sort_values": lambda m: _dt_column(m).sort_values(),
+    "sort_values_desc_na_first": lambda m: _dt_column(m).sort_values(ascending=False, na_position="first"),
+    "rank": lambda m: _dt_column(m).rank(),
+    "shift": lambda m: _dt_column(m).shift(1),
+    "diff": lambda m: _dt_column(m).diff(),
+    "gt_str": lambda m: _dt_column(m) > "2020-01-02",
+    "eq_unparseable_str": lambda m: _dt_column(m) == "not a date",
+    "ne_unparseable_str": lambda m: _dt_column(m) != "not a date",
+    "between_str": lambda m: _dt_column(m).between("2020-01-02", "2020-01-03"),
+    "clip_ts": lambda m: _dt_column(m).clip(lower=m.Timestamp("2020-01-03")),
+    "clip_str": lambda m: _dt_column(m).clip(upper="2020-01-03"),
+    "describe": lambda m: _dt_column(m).describe(),
+    "groupby_max": lambda m: _keyed_dates(m).max(),
+    "groupby_min": lambda m: _keyed_dates(m).min(),
+    "dt.day_name": lambda m: _dt_column(m).dt.day_name(),
+    "dt.month_name": lambda m: _dt_column(m).dt.month_name(),
+    "dt.strftime": lambda m: _dt_column(m).dt.strftime("%Y/%m/%d"),
+    "dt.floor": lambda m: _dt_column(m).dt.floor("D"),
+    "dt.is_month_start": lambda m: _dt_column(m).dt.is_month_start,
+    "td_mean": lambda m: _td_column(m).mean(),
+    "td_median": lambda m: _td_column(m).median(),
+    "td_std": lambda m: _td_column(m).std(),
+    "td_sort": lambda m: _td_column(m).sort_values(),
+    "td_describe": lambda m: _td_column(m).describe(),
+    "td_total_seconds": lambda m: _td_column(m).dt.total_seconds(),
+    "td_mul_int": lambda m: _td_column(m) * 2,
+    "td_rmul_float": lambda m: 1.5 * _td_column(m),
+    "td_div_td": lambda m: _td_column(m) / m.Timedelta("1h"),
+    "td_div_int": lambda m: _td_column(m) / 3,
+    "td_floordiv_td": lambda m: _td_column(m) // m.Timedelta("7min"),
+    "td_mod_td": lambda m: _td_column(m) % m.Timedelta("7min"),
+}
+
+
+def _temporal_result(r: Any) -> Any:
+    if hasattr(r, "dtype") and hasattr(r, "tolist"):
+        return (str(r.dtype), [str(v) for v in r.tolist()], [str(v) for v in r.index])
+    return (type(r).__name__, str(r))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", sorted(TEMPORAL_COLUMN_OPS))
+def test_temporal_column_ops_match_pandas(op: str) -> None:
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17: sort_values
+    # left a datetime column unsorted, rank/groupby max/td division gave NaN,
+    # min/max/mean/quantile and string comparisons raised, and the .dt methods
+    # were missing.
+    run = TEMPORAL_COLUMN_OPS[op]
+    assert _temporal_result(run(fpd)) == _temporal_result(run(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_temporal_column_refusals_match_pandas() -> None:
+    # fvsao.17 negatives: what pandas refuses on a datetime/timedelta column
+    # stays refused (same exception class).
+    for m in (pd, fpd):
+        d, t = _dt_column(m), _td_column(m)
+        for refused in (d.sum, d.var, d.prod, t.var, t.prod):
+            with pytest.raises(TypeError):
+                refused()
+        with pytest.raises(TypeError):
+            d > "not a date"
+        with pytest.raises(TypeError):
+            t * t
+    # pandas' .dt.date is datetime.date objects; the binding would give
+    # strings, so it is not exposed rather than silently mistyped.
+    with pytest.raises(AttributeError):
+        _dt_column(fpd).dt.date
+    # NEGATIVE: a numeric column's sort/rank/min are unchanged.
+    for m in (pd, fpd):
+        s = m.Series([3.0, 1.0, float("nan"), 2.0])
+        assert [str(v) for v in s.sort_values().tolist()] == ["1.0", "2.0", "3.0", "nan"]
+        assert [str(v) for v in s.rank().tolist()] == ["3.0", "1.0", "nan", "2.0"]
+        assert s.min() == 1.0

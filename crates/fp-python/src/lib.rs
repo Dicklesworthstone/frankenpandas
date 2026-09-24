@@ -10425,6 +10425,53 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
 }
 
+/// A comparison operand against a column of `dtype`: a string compared with
+/// a datetime/timedelta column is the Timestamp/Timedelta it names, as pandas
+/// parses it (`s > '2020-01-02'` compared str with datetime and raised;
+/// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17). `None` when
+/// the string names no instant or duration.
+fn comparison_scalar(
+    py: Python<'_>,
+    other: &Bound<'_, PyAny>,
+    dtype: &DType,
+) -> PyResult<Option<Scalar>> {
+    let scalar = py_to_scalar(py, other)?;
+    let Scalar::Utf8(text) = &scalar else {
+        return Ok(Some(scalar));
+    };
+    Ok(match dtype {
+        DType::Datetime64 { .. } => Timestamp::parse(text)
+            .ok()
+            .map(|ts| Scalar::Datetime64(ts.nanos)),
+        DType::Timedelta64 => Timedelta::parse(text).ok().map(Scalar::Timedelta64),
+        _ => Some(scalar),
+    })
+}
+
+/// The right-hand Series of a comparison with `like` (see
+/// [`comparison_scalar`]); `None` for a string that names no instant, which
+/// pandas answers with all-False `==`, all-True `!=`, and a TypeError for
+/// the ordering operators.
+fn comparison_operand(
+    py: Python<'_>,
+    other: &Bound<'_, PyAny>,
+    like: &Series,
+) -> PyResult<Option<Series>> {
+    if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+        return Ok(Some(series.inner.clone()));
+    }
+    let Some(scalar) = comparison_scalar(py, other, &like.dtype())? else {
+        return Ok(None);
+    };
+    Series::from_values(
+        like.name(),
+        like.index().labels().to_vec(),
+        vec![scalar; like.len()],
+    )
+    .map(Some)
+    .map_err(frame_error_to_py)
+}
+
 /// `side` with `fill` wherever it is missing and `against` is not: pandas'
 /// flex-method `fill_value` (br-frankenpandas-n57tz).
 fn fill_one_side(side: &Series, against: &Series, fill: &Scalar) -> PyResult<Series> {
@@ -10645,31 +10692,63 @@ impl PySeries {
         }
     }
 
-    fn require_numeric(&self, name: &str) -> PyResult<()> {
-        let is_valid = if name == "std" {
-            matches!(
-                self.inner.dtype(),
-                DType::Int64 | DType::Float64 | DType::Bool | DType::Timedelta64
-            )
-        } else {
-            matches!(
-                self.inner.dtype(),
-                DType::Int64 | DType::Float64 | DType::Bool
-            )
+    /// The right side of `<`, `<=`, `>`, `>=`: a string that names no instant
+    /// against a datetime column is pandas' "Invalid comparison" TypeError.
+    fn ordering_operand(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Series> {
+        check_comparable(&self.inner, other)?;
+        comparison_operand(py, other, &self.inner)?.ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Invalid comparison between dtype={} and str",
+                pandas_dtype_name(&self.inner.dtype())
+            ))
+        })
+    }
+
+    /// `==` (`equal`) or `!=` against `other`: a string naming no instant
+    /// is unequal to every row, as pandas answers.
+    fn equality(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        equal: bool,
+    ) -> PyResult<PySeries> {
+        check_comparable(&self.inner, other)?;
+        let Some(rhs) = comparison_operand(py, other, &self.inner)? else {
+            let column = Column::from_values(vec![Scalar::Bool(!equal); self.inner.len()])
+                .map_err(column_error_to_py)?;
+            return wrap_series(Series::new(
+                self.inner.name(),
+                self.inner.index().clone(),
+                column,
+            ));
         };
-        if !is_valid {
-            if matches!(self.inner.dtype(), DType::Timedelta64) {
-                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                    "'TimedeltaArray' with dtype timedelta64[ns] does not support reduction '{name}'"
-                )))
-            } else {
-                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                    "Could not convert non-numeric series to float for Series.{name}"
-                )))
-            }
+        wrap_series(if equal {
+            self.inner.eq(&rhs)
         } else {
-            Ok(())
-        }
+            self.inner.ne(&rhs)
+        })
+    }
+
+    /// pandas' reductions over datetime64/timedelta64 are mean, median and
+    /// std (a timedelta); the rest raise TypeError naming the array type. The
+    /// temporal mean/median were refused here
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+    fn require_numeric(&self, name: &str) -> PyResult<()> {
+        let temporal_reduction = matches!(name, "mean" | "median" | "std");
+        let array = match self.inner.dtype() {
+            DType::Int64 | DType::Float64 | DType::Bool => return Ok(()),
+            DType::Timedelta64 | DType::Datetime64 { .. } if temporal_reduction => return Ok(()),
+            DType::Timedelta64 => "'TimedeltaArray' with dtype timedelta64[ns]",
+            DType::Datetime64 { .. } => "'DatetimeArray' with dtype datetime64[ns]",
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "Could not convert non-numeric series to float for Series.{name}"
+                )));
+            }
+        };
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "{array} does not support reduction '{name}'"
+        )))
     }
 }
 
@@ -11267,34 +11346,26 @@ impl PySeries {
         wrap_series(self.inner.neg())
     }
     fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        check_comparable(&self.inner, other)?;
-        let rhs = series_operand(py, other, &self.inner)?;
+        let rhs = self.ordering_operand(py, other)?;
         wrap_series(self.inner.gt(&rhs))
     }
     fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        check_comparable(&self.inner, other)?;
-        let rhs = series_operand(py, other, &self.inner)?;
+        let rhs = self.ordering_operand(py, other)?;
         wrap_series(self.inner.ge(&rhs))
     }
     fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        check_comparable(&self.inner, other)?;
-        let rhs = series_operand(py, other, &self.inner)?;
+        let rhs = self.ordering_operand(py, other)?;
         wrap_series(self.inner.lt(&rhs))
     }
     fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        check_comparable(&self.inner, other)?;
-        let rhs = series_operand(py, other, &self.inner)?;
+        let rhs = self.ordering_operand(py, other)?;
         wrap_series(self.inner.le(&rhs))
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        check_comparable(&self.inner, other)?;
-        let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.eq(&rhs))
+        self.equality(py, other, true)
     }
     fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        check_comparable(&self.inner, other)?;
-        let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.ne(&rhs))
+        self.equality(py, other, false)
     }
 
     // The flex forms of the operators: pandas' (other, level=, fill_value=,
@@ -11658,6 +11729,12 @@ impl PySeries {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("sum")?;
+        }
+        if matches!(self.inner.dtype(), DType::Datetime64 { .. }) {
+            // pandas' refusal, not the kernel's internal to_f64 message.
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "'DatetimeArray' with dtype datetime64[ns] does not support reduction 'sum'",
+            ));
         }
         Python::attach(|py| {
             if self.inner.count() < min_count {
@@ -12516,6 +12593,7 @@ impl PySeries {
     #[pyo3(signature = (lower=None, upper=None, axis=None, inplace=false))]
     fn clip(
         &self,
+        py: Python<'_>,
         lower: Option<&Bound<'_, PyAny>>,
         upper: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
@@ -12533,6 +12611,30 @@ impl PySeries {
                     "No axis named {ax} for object type Series"
                 )));
             }
+        }
+
+        // A datetime/timedelta column clips to Timestamp/Timedelta bounds (or
+        // strings naming them) on its nanoseconds (fvsao.17).
+        let dtype = self.inner.dtype();
+        if matches!(dtype, DType::Datetime64 { .. } | DType::Timedelta64) {
+            let nanos = |bound: Option<&Bound<'_, PyAny>>| -> PyResult<Option<i64>> {
+                let Some(bound) = bound.filter(|bound| !bound.is_none()) else {
+                    return Ok(None);
+                };
+                match comparison_scalar(py, bound, &dtype)? {
+                    Some(Scalar::Datetime64(ns) | Scalar::Timedelta64(ns)) => Ok(Some(ns)),
+                    _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "clip bound must be a {} scalar",
+                        pandas_dtype_name(&dtype)
+                    ))),
+                }
+            };
+            let clipped = self
+                .inner
+                .clip_nanos(nanos(lower)?, nanos(upper)?)
+                .map_err(frame_error_to_py)?
+                .expect("temporal dtype checked above");
+            return Ok(PySeries { inner: clipped });
         }
 
         let extract_bound = |b: &Bound<'_, PyAny>| -> PyResult<SeriesOrScalarBound> {
@@ -12899,8 +13001,18 @@ impl PySeries {
         right: &Bound<'_, PyAny>,
         inclusive: &str,
     ) -> PyResult<PySeries> {
-        let left_scalar = py_to_scalar(py, left)?;
-        let right_scalar = py_to_scalar(py, right)?;
+        // String bounds on a datetime/timedelta column are parsed, as pandas
+        // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+        let bound = |value: &Bound<'_, PyAny>| {
+            comparison_scalar(py, value, &self.inner.dtype())?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "Invalid comparison between dtype={} and str",
+                    pandas_dtype_name(&self.inner.dtype())
+                ))
+            })
+        };
+        let left_scalar = bound(left)?;
+        let right_scalar = bound(right)?;
         let res = self
             .inner
             .between(&left_scalar, &right_scalar, inclusive)
@@ -24772,6 +24884,147 @@ impl PySeriesDatetimeAccessor {
     fn is_leap_year(&self) -> PyResult<PySeries> {
         let s = self.series.dt().is_leap_year().map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
+    }
+
+    // The accessor's methods and remaining properties, over fp-frame's
+    // DatetimeAccessor; the binding exposed only the field getters above, so
+    // `.dt.strftime(...)`, `.dt.day_name()`, `.dt.floor('D')` and
+    // `.dt.total_seconds()` raised AttributeError
+    // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+    #[getter]
+    fn weekday(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.weekday())
+    }
+    #[getter]
+    fn is_month_start(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.is_month_start())
+    }
+    #[getter]
+    fn is_month_end(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.is_month_end())
+    }
+    #[getter]
+    fn is_quarter_start(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.is_quarter_start())
+    }
+    #[getter]
+    fn is_quarter_end(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.is_quarter_end())
+    }
+    #[getter]
+    fn is_year_start(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.is_year_start())
+    }
+    #[getter]
+    fn is_year_end(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.is_year_end())
+    }
+    #[getter]
+    fn days_in_month(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.days_in_month())
+    }
+    #[getter]
+    fn daysinmonth(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.daysinmonth())
+    }
+    #[getter]
+    fn days(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.days())
+    }
+    #[getter]
+    fn seconds(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.seconds())
+    }
+    #[getter]
+    fn microseconds(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.microseconds())
+    }
+    #[getter]
+    fn nanoseconds(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.nanoseconds())
+    }
+
+    #[pyo3(signature = (locale=None))]
+    fn month_name(&self, locale: Option<&str>) -> PyResult<PySeries> {
+        require_default_locale(locale)?;
+        self.wrap(|dt| dt.month_name())
+    }
+    #[pyo3(signature = (locale=None))]
+    fn day_name(&self, locale: Option<&str>) -> PyResult<PySeries> {
+        require_default_locale(locale)?;
+        self.wrap(|dt| dt.day_name())
+    }
+    fn strftime(&self, date_format: &str) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.strftime(date_format))
+    }
+    fn total_seconds(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.total_seconds())
+    }
+    fn normalize(&self) -> PyResult<PySeries> {
+        self.wrap(|dt| dt.normalize())
+    }
+    #[pyo3(signature = (freq=None))]
+    fn to_period(&self, freq: Option<&str>) -> PyResult<PySeries> {
+        let freq = freq.ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "dt.to_period without freq (inferred from the values) is not supported yet",
+            )
+        })?;
+        self.wrap(|dt| dt.to_period(freq))
+    }
+    // `ambiguous`/`nonexistent` only decide DST edges of a tz-aware column;
+    // the columns reached here are tz-naive, so pandas' defaults hold.
+    #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
+    fn floor(
+        &self,
+        freq: &str,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = (ambiguous, nonexistent);
+        self.wrap(|dt| dt.floor(freq))
+    }
+    #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
+    fn ceil(
+        &self,
+        freq: &str,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = (ambiguous, nonexistent);
+        self.wrap(|dt| dt.ceil(freq))
+    }
+    #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
+    fn round(
+        &self,
+        freq: &str,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = (ambiguous, nonexistent);
+        self.wrap(|dt| dt.round(freq))
+    }
+}
+
+impl PySeriesDatetimeAccessor {
+    fn wrap(
+        &self,
+        op: impl FnOnce(&fp_frame::DatetimeAccessor<'_>) -> Result<Series, FrameError>,
+    ) -> PyResult<PySeries> {
+        op(&self.series.dt())
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
+    }
+}
+
+/// pandas' `locale=` for month/day names; only the default (English) names
+/// are produced.
+fn require_default_locale(locale: Option<&str>) -> PyResult<()> {
+    match locale {
+        None => Ok(()),
+        Some(locale) => Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            format!("locale={locale:?} is not supported; only the default English names are"),
+        )),
     }
 }
 
@@ -40115,6 +40368,7 @@ mod tests {
             let hi = pyo3::types::PyFloat::new(py, 3.0);
             let clipped_s = py_s
                 .clip(
+                    py,
                     Some(lo.as_any()),
                     Some(hi.as_any()),
                     Some(ax0.as_any()),
@@ -41383,8 +41637,8 @@ mod tests {
             assert!(py_s.cummax(Some(&ax1), true).is_err());
 
             // Series clip inplace
-            assert!(py_s.clip(None, None, None, true).is_err());
-            assert!(py_s.clip(None, None, Some(&ax1), false).is_err());
+            assert!(py_s.clip(py, None, None, None, true).is_err());
+            assert!(py_s.clip(py, None, None, Some(&ax1), false).is_err());
 
             // DataFrame clip inplace
             let df = DataFrame::from_dict(

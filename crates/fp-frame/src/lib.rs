@@ -7530,6 +7530,15 @@ fn forward_fill_scalars(vals: &[Scalar]) -> Vec<Scalar> {
     out
 }
 
+/// A timedelta reduction's result back as the datetime it stands for: the
+/// same nanoseconds (NaT stays NaT); see `Series::datetime_as_timedelta`.
+fn datetime_from_timedelta_result(result: Scalar) -> Scalar {
+    match result {
+        Scalar::Timedelta64(ns) => Scalar::Datetime64(ns),
+        other => other,
+    }
+}
+
 fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Ordering {
     match (left, right) {
         (Scalar::Bool(lhs), Scalar::Bool(rhs)) => lhs.cmp(rhs),
@@ -7538,6 +7547,13 @@ fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Orderi
             lhs.partial_cmp(rhs).unwrap_or(Ordering::Equal)
         }
         (Scalar::Utf8(lhs), Scalar::Utf8(rhs)) => lhs.cmp(rhs),
+        // Temporal values order by their i64 payload. They fell to the
+        // dtype fallback below, which calls every pair Equal, so a datetime
+        // column's sort_values returned the input order
+        // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+        (Scalar::Datetime64(lhs), Scalar::Datetime64(rhs))
+        | (Scalar::Timedelta64(lhs), Scalar::Timedelta64(rhs)) => lhs.cmp(rhs),
+        (Scalar::Period(lhs), Scalar::Period(rhs)) => lhs.ordinal.cmp(&rhs.ordinal),
         // Columns are dtype-homogeneous; this fallback is only for defensive
         // ordering when malformed mixed values leak in.
         _ => left.dtype().cmp(&right.dtype()),
@@ -10096,6 +10112,9 @@ impl Series {
             {
                 return Self::new(out_name, union_index, column);
             }
+            if let Some(column) = self.timedelta_scaled_binary_same_index(other, op)? {
+                return Self::new(out_name, union_index, column);
+            }
 
             let column = if matches!(self.column.dtype(), DType::Float64)
                 && matches!(other.column.dtype(), DType::Float64)
@@ -10333,6 +10352,131 @@ impl Series {
         } else {
             Column::from_timedelta64_values_with_validity(output, validity)
         }))
+    }
+
+    /// Timedelta arithmetic beyond add/sub, row by row over the same index,
+    /// as the numpy timedelta kernels pandas uses compute it (measured on
+    /// pandas 2.2.3): `td * n` (an int multiplies exactly, wrapping; a float
+    /// in f64, truncated toward zero), `td / n` and `td // n` (an int divides
+    /// truncating; a float in f64, truncated; a zero divisor gives NaT), a
+    /// NaN/inf result NaT; `td / td` float64; `td // td` floor, int64 (or
+    /// float64 with NaN where a side is NaT; a zero divisor gives 0); `td % td`
+    /// floor modulo (a zero divisor leaves the dividend). These raised on the
+    /// numeric kernel's dtype coercion or divided into NaN
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+    fn timedelta_scaled_binary_same_index(
+        &self,
+        other: &Self,
+        op: ArithmeticOp,
+    ) -> Result<Option<Column>, FrameError> {
+        #[derive(Clone, Copy)]
+        enum Factor {
+            Int(i64),
+            Float(f64),
+        }
+        let factor = |value: &Scalar| match value {
+            Scalar::Int64(v) => Some(Factor::Int(*v)),
+            Scalar::Bool(b) => Some(Factor::Int(i64::from(*b))),
+            Scalar::Float64(v) if !v.is_nan() => Some(Factor::Float(*v)),
+            _ => None,
+        };
+        let nanos = |value: &Scalar| match value {
+            Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns),
+            _ => None,
+        };
+        let float_nanos = |value: f64| {
+            if value.is_finite() {
+                value as i64
+            } else {
+                Timedelta::NAT
+            }
+        };
+        let scale = |ns: Option<i64>, k: Option<Factor>| -> i64 {
+            let (Some(ns), Some(k)) = (ns, k) else {
+                return Timedelta::NAT;
+            };
+            match (op, k) {
+                (ArithmeticOp::Mul, Factor::Int(k)) => ns.wrapping_mul(k),
+                (ArithmeticOp::Mul, Factor::Float(k)) => float_nanos(ns as f64 * k),
+                (_, Factor::Int(0)) => Timedelta::NAT,
+                (_, Factor::Int(k)) => ns.wrapping_div(k),
+                (_, Factor::Float(k)) => float_nanos(ns as f64 / k),
+            }
+        };
+        let timedelta_column = |raw: Vec<i64>| {
+            let mut validity = ValidityMask::all_valid(raw.len());
+            for (i, &ns) in raw.iter().enumerate() {
+                if ns == Timedelta::NAT {
+                    validity.set(i, false);
+                }
+            }
+            Column::from_timedelta64_values_with_validity(raw, validity)
+        };
+        let numeric = |dtype: &DType| matches!(dtype, DType::Int64 | DType::Float64 | DType::Bool);
+        let (left, right) = (self.values(), other.values());
+        let column = match (self.column.dtype(), other.column.dtype(), op) {
+            (
+                DType::Timedelta64,
+                dtype,
+                ArithmeticOp::Mul | ArithmeticOp::Div | ArithmeticOp::FloorDiv,
+            ) if numeric(&dtype) => timedelta_column(
+                left.iter()
+                    .zip(right)
+                    .map(|(td, k)| scale(nanos(td), factor(k)))
+                    .collect(),
+            ),
+            (dtype, DType::Timedelta64, ArithmeticOp::Mul) if numeric(&dtype) => timedelta_column(
+                left.iter()
+                    .zip(right)
+                    .map(|(k, td)| scale(nanos(td), factor(k)))
+                    .collect(),
+            ),
+            (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::Div) => Column::from_f64_values(
+                left.iter()
+                    .zip(right)
+                    .map(|(a, b)| match (nanos(a), nanos(b)) {
+                        (Some(a), Some(b)) => a as f64 / b as f64,
+                        _ => f64::NAN,
+                    })
+                    .collect(),
+            ),
+            (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::FloorDiv) => {
+                let quotients: Vec<Option<i64>> = left
+                    .iter()
+                    .zip(right)
+                    .map(|(a, b)| match (nanos(a), nanos(b)) {
+                        (Some(_), Some(0)) => Some(0),
+                        (Some(a), Some(b)) => Some(a.div_euclid(b) - i64::from(b < 0 && a.rem_euclid(b) != 0)),
+                        _ => None,
+                    })
+                    .collect();
+                if quotients.iter().all(Option::is_some) {
+                    Column::from_i64_values(quotients.into_iter().flatten().collect())
+                } else {
+                    Column::from_f64_values(
+                        quotients
+                            .into_iter()
+                            .map(|q| q.map_or(f64::NAN, |q| q as f64))
+                            .collect(),
+                    )
+                }
+            }
+            (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::Mod) => timedelta_column(
+                left.iter()
+                    .zip(right)
+                    .map(|(a, b)| match (nanos(a), nanos(b)) {
+                        (Some(a), Some(0)) => a,
+                        (Some(a), Some(b)) => {
+                            let r = a % b;
+                            if r != 0 && (r < 0) != (b < 0) { r + b } else { r }
+                        }
+                        _ => Timedelta::NAT,
+                    })
+                    .collect(),
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(column))
     }
 
     pub fn add_with_policy(
@@ -15850,6 +15994,11 @@ impl Series {
                 )));
             }
         };
+        if let Some(nanos) = self.datetime_as_timedelta()? {
+            return nanos
+                .quantile_with_interpolation(q, interpolation)
+                .map(datetime_from_timedelta_result);
+        }
         // Typed quickselect fast path: an all-valid Int64/Float64 column finds
         // the 1-2 needed order statistics in O(n) (vs the O(n log n) sort) with
         // no Scalar materialization. Bit-identical to the sort + percentile_
@@ -16456,6 +16605,37 @@ impl Series {
     ///
     /// Matches `series.clip(lower=series, upper=series)`. Each element is
     /// clipped independently using the corresponding bound.
+    /// Clip a datetime64/timedelta64 column to `[lower, upper]` nanoseconds
+    /// (either optional), NaT kept, as pandas' clip with Timestamp/Timedelta
+    /// bounds; `None` for any other dtype (the f64 clip refused these;
+    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+    pub fn clip_nanos(
+        &self,
+        lower: Option<i64>,
+        upper: Option<i64>,
+    ) -> Result<Option<Self>, FrameError> {
+        let dtype = self.column.dtype();
+        let wrap: fn(i64) -> Scalar = match dtype {
+            DType::Datetime64 { .. } => Scalar::Datetime64,
+            DType::Timedelta64 => Scalar::Timedelta64,
+            _ => return Ok(None),
+        };
+        let values = self
+            .column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Datetime64(ns) | Scalar::Timedelta64(ns) if *ns != i64::MIN => {
+                    let clipped = lower.map_or(*ns, |lo| (*ns).max(lo));
+                    wrap(upper.map_or(clipped, |hi| clipped.min(hi)))
+                }
+                other => other.clone(),
+            })
+            .collect();
+        let column = Column::new(dtype, values)?;
+        Self::new(self.name(), self.index.clone(), column).map(Some)
+    }
+
     pub fn clip_with_series(
         &self,
         lower: Option<&Self>,
@@ -17406,6 +17586,15 @@ impl Series {
     ///
     /// Matches `np.remainder(s1, s2)` / `s1 % s2`.
     pub fn remainder(&self, other: &Self) -> Result<Self, FrameError> {
+        // `td % td` is pandas' floor modulo on nanoseconds; the numeric
+        // kernel refused the dtype (fvsao.17). The kernel pairs rows by
+        // position, as this method does.
+        if self.len() == other.len()
+            && let Some(column) =
+                self.timedelta_scaled_binary_same_index(other, ArithmeticOp::Mod)?
+        {
+            return Self::new(self.name.clone(), self.index.clone(), column);
+        }
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -18221,10 +18410,61 @@ impl Series {
         Ok(Scalar::Float64(total))
     }
 
+    /// A datetime64 column's values as a timedelta64 column over the same
+    /// nanoseconds (NaT stays NaT); `None` for any other dtype. pandas reduces
+    /// datetime64 and timedelta64 through the same int64 code, so the
+    /// datetime min/max/median/quantile/idxmin/idxmax run the timedelta
+    /// reductions and re-wrap with `datetime_from_timedelta_result`. They
+    /// raised on `to_f64` (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+    fn datetime_as_timedelta(&self) -> Result<Option<Self>, FrameError> {
+        if !matches!(self.column.dtype(), DType::Datetime64 { .. }) {
+            return Ok(None);
+        }
+        let values = self
+            .column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Datetime64(ns) => Scalar::Timedelta64(*ns),
+                _ => Scalar::Timedelta64(Timedelta::NAT),
+            })
+            .collect();
+        let column = Column::new(DType::Timedelta64, values)?;
+        Self::new(self.name(), self.index.clone(), column).map(Some)
+    }
+
+    /// Mean of a datetime64 column the way pandas' nanmean takes it: NaT
+    /// slots filled with 0, all values summed as float64 (numpy's blocked
+    /// order, see [`Self::blocked_sum_f64`]), divided by the non-NaT count
+    /// and truncated to int64 nanoseconds; all-NaT or empty gives NaT.
+    fn datetime_mean(&self) -> Scalar {
+        let mut count = 0_usize;
+        let filled: Vec<f64> = self
+            .column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Datetime64(ns) if *ns != Timestamp::NAT => {
+                    count += 1;
+                    *ns as f64
+                }
+                _ => 0.0,
+            })
+            .collect();
+        if count == 0 {
+            return Scalar::Datetime64(Timestamp::NAT);
+        }
+        let mean = Self::blocked_sum_f64(&filled) / count as f64;
+        Scalar::Datetime64(mean as i64)
+    }
+
     /// Mean of non-null numeric values. Returns NaN for empty.
     ///
     /// Matches `pd.Series.mean()`.
     pub fn mean(&self) -> Result<Scalar, FrameError> {
+        if matches!(self.column.dtype(), DType::Datetime64 { .. }) {
+            return Ok(self.datetime_mean());
+        }
         // Concat chunk fast path (see sum): fold the lazy chunks in place instead
         // of materializing the cold buffer. Bit-identical to f64_valid_sum_count
         // over the materialized all-valid buffer (Σ data[0..n]/n, same order).
@@ -18282,6 +18522,9 @@ impl Series {
     pub fn min(&self) -> Result<Scalar, FrameError> {
         if let Some(meta) = &self.categorical {
             return self.categorical_extreme(meta, true);
+        }
+        if let Some(nanos) = self.datetime_as_timedelta()? {
+            return nanos.min().map(datetime_from_timedelta_result);
         }
 
         // Per br-frankenpandas-e7d61: pandas preserves input dtype for
@@ -18448,6 +18691,9 @@ impl Series {
     pub fn max(&self) -> Result<Scalar, FrameError> {
         if let Some(meta) = &self.categorical {
             return self.categorical_extreme(meta, false);
+        }
+        if let Some(nanos) = self.datetime_as_timedelta()? {
+            return nanos.max().map(datetime_from_timedelta_result);
         }
 
         // Per br-frankenpandas-e7d61: see min above.
@@ -18635,6 +18881,17 @@ impl Series {
     ///
     /// Matches `pd.Series.std()`.
     pub fn std(&self) -> Result<Scalar, FrameError> {
+        // A datetime/timedelta spread is a duration (pandas' std of datetimes
+        // is a Timedelta). The columnar std computes it in f64 nanoseconds, as
+        // pandas does; the var-then-sqrt route below clamps the ns² variance
+        // into i64 and gave sqrt(i64::MAX) = 3.04s for any spread wider than
+        // that (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+        if matches!(
+            self.column.dtype(),
+            DType::Datetime64 { .. } | DType::Timedelta64
+        ) {
+            return Ok(self.column.std_skipna(1, true));
+        }
         match self.var()? {
             Scalar::Float64(v) => Ok(Scalar::Float64(v.sqrt())),
             // Per br-frankenpandas-j0ilf: var() returns Scalar::Timedelta64
@@ -18903,6 +19160,13 @@ impl Series {
     ///
     /// Matches `pd.Series.std(ddof=n)`.
     pub fn std_ddof(&self, ddof: usize) -> Result<Scalar, FrameError> {
+        // See `std`: a temporal spread comes from the columnar std.
+        if matches!(
+            self.column.dtype(),
+            DType::Datetime64 { .. } | DType::Timedelta64
+        ) {
+            return Ok(self.column.std_skipna(ddof, true));
+        }
         match self.var_ddof(ddof)? {
             Scalar::Float64(v) => Ok(Scalar::Float64(v.sqrt())),
             // Per br-frankenpandas-e686u: mirror std() br-j0ilf — sqrt of
@@ -18926,6 +19190,9 @@ impl Series {
     ///
     /// Matches `pd.Series.median()`.
     pub fn median(&self) -> Result<Scalar, FrameError> {
+        if let Some(nanos) = self.datetime_as_timedelta()? {
+            return nanos.median().map(datetime_from_timedelta_result);
+        }
         // Typed quickselect fast path: an all-valid Int64/Float64 column finds
         // the median over its contiguous buffer in O(n) (vs the O(n log n) sort
         // below) with no Scalar materialization. Bit-identical to the sort path
@@ -19208,23 +19475,27 @@ impl Series {
     /// Mean with skipna control.
     pub fn mean_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.hasnans() {
-            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
-                Scalar::Timedelta64(Timedelta::NAT)
-            } else {
-                Scalar::Float64(f64::NAN)
-            });
+            return Ok(self.missing_location_result());
         }
         self.mean()
+    }
+
+    /// What a location reduction (mean/median/min/max) with `skipna=False`
+    /// gives over a column holding a missing value: NaT of the column's own
+    /// kind for datetime/timedelta (a datetime gave float NaN; fvsao.17),
+    /// else NaN.
+    fn missing_location_result(&self) -> Scalar {
+        match self.column.dtype() {
+            DType::Timedelta64 => Scalar::Timedelta64(Timedelta::NAT),
+            DType::Datetime64 { .. } => Scalar::Datetime64(Timestamp::NAT),
+            _ => Scalar::Float64(f64::NAN),
+        }
     }
 
     /// Min with skipna control.
     pub fn min_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.hasnans() {
-            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
-                Scalar::Timedelta64(Timedelta::NAT)
-            } else {
-                Scalar::Float64(f64::NAN)
-            });
+            return Ok(self.missing_location_result());
         }
         self.min()
     }
@@ -19232,11 +19503,7 @@ impl Series {
     /// Max with skipna control.
     pub fn max_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.hasnans() {
-            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
-                Scalar::Timedelta64(Timedelta::NAT)
-            } else {
-                Scalar::Float64(f64::NAN)
-            });
+            return Ok(self.missing_location_result());
         }
         self.max()
     }
@@ -19244,11 +19511,18 @@ impl Series {
     /// Std with skipna control.
     pub fn std_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.hasnans() {
-            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
-                Scalar::Timedelta64(Timedelta::NAT)
-            } else {
-                Scalar::Float64(f64::NAN)
-            });
+            // A datetime's spread is a duration, so its missing std is a
+            // timedelta NaT too.
+            return Ok(
+                if matches!(
+                    self.column.dtype(),
+                    DType::Timedelta64 | DType::Datetime64 { .. }
+                ) {
+                    Scalar::Timedelta64(Timedelta::NAT)
+                } else {
+                    Scalar::Float64(f64::NAN)
+                },
+            );
         }
         self.std()
     }
@@ -19268,11 +19542,7 @@ impl Series {
     /// Median with skipna control.
     pub fn median_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.hasnans() {
-            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
-                Scalar::Timedelta64(Timedelta::NAT)
-            } else {
-                Scalar::Float64(f64::NAN)
-            });
+            return Ok(self.missing_location_result());
         }
         self.median()
     }
@@ -19779,7 +20049,16 @@ impl Series {
     /// downward (earlier positions become NaN); negative shifts move
     /// values upward (later positions become NaN).
     pub fn shift(&self, periods: i64) -> Result<Self, FrameError> {
-        self.shift_with_fill_value(periods, Scalar::Null(NullKind::NaN))
+        // A datetime/timedelta column fills the gap with NaT, as pandas (the
+        // NaN fill read back as nan;
+        // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+        let fill = match self.column.dtype() {
+            dtype @ (DType::Datetime64 { .. } | DType::Timedelta64) => {
+                Scalar::missing_for_dtype(dtype)
+            }
+            _ => Scalar::Null(NullKind::NaN),
+        };
+        self.shift_with_fill_value(periods, fill)
     }
 
     /// Shift index by `periods`, filling the vacated positions with `fill_value`
@@ -22186,6 +22465,9 @@ impl Series {
     /// Matches `series.idxmin()`. Skips missing values. Returns an error
     /// if the series is empty or all-null.
     pub fn idxmin(&self) -> Result<IndexLabel, FrameError> {
+        if let Some(nanos) = self.datetime_as_timedelta()? {
+            return nanos.idxmin();
+        }
         // Per br-frankenpandas-7db78: pandas supports idxmin on Utf8
         // (returns label of lex-min). Was previously falling through to
         // to_f64 which errors. Sister gap to min/max Utf8 fix in 83c2a.
@@ -22335,6 +22617,9 @@ impl Series {
     ///
     /// Matches `series.idxmax()`. Skips missing values.
     pub fn idxmax(&self) -> Result<IndexLabel, FrameError> {
+        if let Some(nanos) = self.datetime_as_timedelta()? {
+            return nanos.idxmax();
+        }
         // Per br-frankenpandas-7db78: pandas supports idxmax on Utf8
         // (returns label of lex-max). Sister to idxmin Utf8 path above.
         if matches!(self.column.dtype(), DType::Utf8) {
@@ -24913,6 +25198,40 @@ impl Series {
             return Self::from_values(self.name.clone(), labels, stats);
         }
         let percentiles = normalize_describe_percentiles(percentiles)?;
+        // A datetime/timedelta column describes in its own units, as pandas:
+        // the count, then mean, std (timedelta only), min, the percentiles and
+        // max as Timestamps/Timedeltas, in an object result. It ran the f64
+        // summary over values `to_f64` refuses: count 0, the rest NaN
+        // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+        let with_std = match self.column.dtype() {
+            DType::Datetime64 { .. } => Some(false),
+            DType::Timedelta64 => Some(true),
+            _ => None,
+        };
+        if let Some(with_std) = with_std {
+            let count = self
+                .column
+                .values()
+                .iter()
+                .filter(|value| !value.is_missing())
+                .count();
+            let mut labels = vec!["count".to_owned(), "mean".to_owned()];
+            let mut stats = vec![Scalar::Int64(count as i64), self.mean()?];
+            if with_std {
+                labels.push("std".to_owned());
+                stats.push(self.std()?);
+            }
+            labels.push("min".to_owned());
+            stats.push(self.min()?);
+            for &p in &percentiles {
+                labels.push(describe_percentile_label(p));
+                stats.push(self.quantile(p)?);
+            }
+            labels.push("max".to_owned());
+            stats.push(self.max()?);
+            let labels = labels.into_iter().map(IndexLabel::Utf8).collect();
+            return Self::from_values(self.name.clone(), labels, stats);
+        }
         // perf (br-frankenpandas-igqxd): typed collection for all-valid Float64/Int64,
         // skipping the per-element Scalar to_f64. as_f64_slice is all-valid no-NaN (so
         // the !is_nan filter is a no-op); as_i64_slice casts to f64. Bit-identical to
@@ -27715,15 +28034,38 @@ impl Series {
                     null_positions.push(i);
                 }
             }
+        } else if matches!(
+            self.column().dtype(),
+            DType::Datetime64 { .. } | DType::Timedelta64
+        ) {
+            // Temporal values rank by their exact nanoseconds through a dense
+            // ordinal key, as the Utf8 arm does: `ns as f64` would merge
+            // instants closer than f64's spacing (256 ns near 2020), and
+            // Datetime64 fell to `to_f64` and ranked all-NaN
+            // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17;
+            // Timedelta64 ranked by `ns as f64` since br-frankenpandas-5pxmt).
+            let nanos_of = |v: &Scalar| match v {
+                Scalar::Datetime64(ns) | Scalar::Timedelta64(ns) if *ns != i64::MIN => Some(*ns),
+                _ => None,
+            };
+            let mut unique_nanos: Vec<i64> = vals.iter().filter_map(nanos_of).collect();
+            unique_nanos.sort_unstable();
+            unique_nanos.dedup();
+            for (i, v) in vals.iter().enumerate() {
+                match nanos_of(v) {
+                    Some(ns) => {
+                        let key = unique_nanos
+                            .binary_search(&ns)
+                            .expect("nanoseconds must be in the deduped set");
+                        sortable.push((i, key as f64));
+                    }
+                    None => null_positions.push(i),
+                }
+            }
         } else {
             for (i, v) in vals.iter().enumerate() {
                 if v.is_missing() {
                     null_positions.push(i);
-                // Per br-frankenpandas-5pxmt: rank Timedelta64 by ns count.
-                // pandas ranks td values as ordered numerics; the f64
-                // fallback below silently dropped them via to_f64().
-                } else if let Scalar::Timedelta64(ns) = v {
-                    sortable.push((i, *ns as f64));
                 } else if let Ok(f) = v.to_f64() {
                     sortable.push((i, f));
                 } else {
@@ -40988,6 +41330,11 @@ impl SeriesGroupBy<'_> {
         )
     }
 
+    /// Whether the grouped column is datetime64 (any timezone).
+    fn column_is_datetime(&self) -> bool {
+        matches!(self.series.column.dtype(), DType::Datetime64 { .. })
+    }
+
     /// Per br-frankenpandas-c1bxu: true when every non-missing value in the
     /// column is Timedelta64 (and at least one is). Allows NaT/Null markers.
     fn column_is_timedelta(&self) -> bool {
@@ -41412,9 +41759,10 @@ impl SeriesGroupBy<'_> {
                 Self::utf8_extreme(values, false)
             });
         }
-        // Per br-frankenpandas-tgm2i: Timedelta64 min preserves dtype.
-        if self.column_is_timedelta() {
-            return self.agg_timedelta_extrema(|a, b| a.min(b));
+        // Per br-frankenpandas-tgm2i: Timedelta64 min preserves dtype; so
+        // does a datetime column's (it gave NaN; fvsao.17).
+        if self.column_is_timedelta() || self.column_is_datetime() {
+            return self.agg_temporal_extrema(|a, b| a.min(b));
         }
         if let Some(r) = self.integral_reduce(std::cmp::min, true) {
             return r;
@@ -41438,9 +41786,10 @@ impl SeriesGroupBy<'_> {
                 Self::utf8_extreme(values, true)
             });
         }
-        // Per br-frankenpandas-tgm2i: Timedelta64 max preserves dtype.
-        if self.column_is_timedelta() {
-            return self.agg_timedelta_extrema(|a, b| a.max(b));
+        // Per br-frankenpandas-tgm2i: Timedelta64 max preserves dtype; so
+        // does a datetime column's (it gave NaN; fvsao.17).
+        if self.column_is_timedelta() || self.column_is_datetime() {
+            return self.agg_temporal_extrema(|a, b| a.max(b));
         }
         if let Some(r) = self.integral_reduce(std::cmp::max, true) {
             return r;
@@ -41780,10 +42129,18 @@ impl SeriesGroupBy<'_> {
     /// Per br-frankenpandas-tgm2i: running min/max accumulator over a
     /// uniformly-Timedelta64 source column. `combine(acc, value)` produces
     /// the new accumulator (e.g. min/max). NaT values are skipped.
-    fn agg_timedelta_extrema<F>(&self, combine: F) -> Result<Series, FrameError>
+    /// Per-group min/max of a timedelta64 or datetime64 column on its
+    /// nanoseconds, NaT skipped, an all-NaT group NaT; the result keeps the
+    /// column's dtype.
+    fn agg_temporal_extrema<F>(&self, combine: F) -> Result<Series, FrameError>
     where
         F: Fn(i64, i64) -> i64,
     {
+        let wrap: fn(i64) -> Scalar = if self.column_is_datetime() {
+            Scalar::Datetime64
+        } else {
+            Scalar::Timedelta64
+        };
         let (order, order_keys, groups) = self.build_groups();
         let mut labels = Vec::with_capacity(order_keys.len());
         let mut values = Vec::with_capacity(order_keys.len());
@@ -41791,7 +42148,9 @@ impl SeriesGroupBy<'_> {
             let indices = &groups[key];
             let mut best: Option<i64> = None;
             for &idx in indices {
-                if let Scalar::Timedelta64(ns) = &self.series.column.values()[idx] {
+                if let Scalar::Timedelta64(ns) | Scalar::Datetime64(ns) =
+                    &self.series.column.values()[idx]
+                {
                     if *ns == fp_types::Timedelta::NAT {
                         continue;
                     }
@@ -41802,10 +42161,7 @@ impl SeriesGroupBy<'_> {
                 }
             }
             labels.push(order[i].clone());
-            match best {
-                Some(ns) => values.push(Scalar::Timedelta64(ns)),
-                None => values.push(Scalar::Timedelta64(fp_types::Timedelta::NAT)),
-            }
+            values.push(wrap(best.unwrap_or(fp_types::Timedelta::NAT)));
         }
         // Per br-frankenpandas-a2m7y: sister to p6y8q. Apply by-Series name.
         let by_name = self.by.name();
@@ -202172,6 +202528,136 @@ mod tests {
             big.resample("D").sum().unwrap().values(),
             [Scalar::Int64((1_i64 << 53) + 3)]
         );
+    }
+
+    #[test]
+    fn datetime_and_timedelta_columns_reduce_sort_and_scale_like_pandas_fvsao17() {
+        // pandas 2.2.3, d = to_datetime(['2020-01-05','2020-01-02',None,'2020-01-03']),
+        // t = to_timedelta(['1D','2h',None,'30min']).
+        const DAY: i64 = 86_400_000_000_000;
+        const HOUR: i64 = 3_600_000_000_000;
+        let jan = |day: i64| 1_577_836_800_000_000_000 + (day - 1) * DAY;
+        let temporal = |dtype: DType, values: Vec<Scalar>| {
+            let n = values.len() as i64;
+            Series::new(
+                "x",
+                Index::new((0..n).map(IndexLabel::Int64).collect()),
+                Column::new(dtype, values).unwrap(),
+            )
+            .unwrap()
+        };
+        let nat = Scalar::Null(NullKind::NaT);
+        let d = temporal(
+            DType::Datetime64 { tz: None },
+            vec![
+                Scalar::Datetime64(jan(5)),
+                Scalar::Datetime64(jan(2)),
+                nat.clone(),
+                Scalar::Datetime64(jan(3)),
+            ],
+        );
+        let t = temporal(
+            DType::Timedelta64,
+            vec![
+                Scalar::Timedelta64(DAY),
+                Scalar::Timedelta64(2 * HOUR),
+                nat,
+                Scalar::Timedelta64(HOUR / 2),
+            ],
+        );
+        // sort_values returned the input order (every pair compared Equal).
+        let sorted = d.sort_values_na(true, "last").unwrap();
+        assert_eq!(
+            sorted.index().labels(),
+            [1, 3, 0, 2].map(IndexLabel::Int64).as_slice()
+        );
+        // Reductions raised on to_f64; each is a Timestamp as in pandas.
+        assert_eq!(d.min().unwrap(), Scalar::Datetime64(jan(2)));
+        assert_eq!(d.max().unwrap(), Scalar::Datetime64(jan(5)));
+        assert_eq!(d.mean().unwrap(), Scalar::Datetime64(jan(3) + 8 * HOUR));
+        assert_eq!(d.median().unwrap(), Scalar::Datetime64(jan(3)));
+        assert_eq!(d.quantile(0.25).unwrap(), Scalar::Datetime64(jan(2) + 12 * HOUR));
+        assert_eq!(d.idxmax().unwrap(), IndexLabel::Int64(0));
+        // pandas: std 1 days 12:39:38.180014728, a Timedelta.
+        assert_eq!(
+            d.std().unwrap(),
+            Scalar::Timedelta64(DAY + 12 * HOUR + 39 * 60_000_000_000 + 38_180_014_728)
+        );
+        // rank was all-NaN; NaT stays NaN.
+        let ranks = d.rank("average", true, "keep").unwrap();
+        assert_eq!(ranks.values()[..2], [Scalar::Float64(3.0), Scalar::Float64(1.0)]);
+        assert!(ranks.values()[2].is_missing());
+        // NEGATIVE: instants 1ns apart (merged by an f64 key) rank apart.
+        let close = temporal(
+            DType::Datetime64 { tz: None },
+            vec![Scalar::Datetime64(jan(1) + 1), Scalar::Datetime64(jan(1))],
+        );
+        assert_eq!(
+            close.rank("average", true, "keep").unwrap().values(),
+            [Scalar::Float64(2.0), Scalar::Float64(1.0)]
+        );
+        // shift fills NaT, not NaN.
+        assert!(matches!(
+            d.shift(1).unwrap().values()[0],
+            Scalar::Datetime64(fp_types::Timestamp::NAT) | Scalar::Null(NullKind::NaT)
+        ));
+        // Grouped max keeps the datetime (it gave NaN).
+        let keys = Series::from_values(
+            "k",
+            (0..4).map(IndexLabel::Int64).collect(),
+            [1, 1, 2, 2].map(Scalar::Int64).to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            d.groupby(&keys).unwrap().max().unwrap().values(),
+            [Scalar::Datetime64(jan(5)), Scalar::Datetime64(jan(3))]
+        );
+        // clip on nanoseconds, NaT kept.
+        let clipped = d.clip_nanos(Some(jan(3)), None).unwrap().unwrap();
+        assert_eq!(clipped.values()[1], Scalar::Datetime64(jan(3)));
+        assert!(clipped.values()[2].is_missing());
+        // Timedelta scaling: t * 2, t / Timedelta('1h') -> float, t // 2.5 truncates.
+        let broadcast = |value: Scalar| {
+            Series::from_values("x", t.index().labels().to_vec(), vec![value; 4]).unwrap()
+        };
+        assert_eq!(
+            t.mul(&broadcast(Scalar::Int64(2))).unwrap().values()[1],
+            Scalar::Timedelta64(4 * HOUR)
+        );
+        let hours = t.div(&broadcast(Scalar::Timedelta64(HOUR))).unwrap();
+        assert_eq!(hours.column().dtype(), DType::Float64);
+        assert_eq!(hours.values()[0], Scalar::Float64(24.0));
+        assert!(hours.values()[2].is_missing());
+        let small = temporal(DType::Timedelta64, vec![Scalar::Timedelta64(-7)]);
+        let by = |value: Scalar| Series::from_values("x", small.index().labels().to_vec(), vec![value]).unwrap();
+        assert_eq!(
+            small.floordiv(&by(Scalar::Float64(2.5))).unwrap().values(),
+            [Scalar::Timedelta64(-2)]
+        );
+        // td // td floors (int64 with no NaT); td % td is floor modulo.
+        assert_eq!(
+            small.floordiv(&by(Scalar::Timedelta64(2))).unwrap().values(),
+            [Scalar::Int64(-4)]
+        );
+        assert_eq!(
+            small.r#mod(&by(Scalar::Timedelta64(2))).unwrap().values(),
+            [Scalar::Timedelta64(1)]
+        );
+        // describe: count then Timestamps (it was count 0 and NaN).
+        let described = d.describe().unwrap();
+        assert_eq!(described.values()[0], Scalar::Int64(3));
+        assert_eq!(described.values()[1], Scalar::Datetime64(jan(3) + 8 * HOUR));
+        assert_eq!(described.len(), 7);
+        assert_eq!(t.describe().unwrap().len(), 8);
+        // NEGATIVE: a numeric column's reductions and sort are unchanged.
+        let numeric = Series::from_values(
+            "x",
+            (0..3).map(IndexLabel::Int64).collect(),
+            [3.0, 1.0, 2.0].map(Scalar::Float64).to_vec(),
+        )
+        .unwrap();
+        assert_eq!(numeric.min().unwrap(), Scalar::Float64(1.0));
+        assert_eq!(numeric.describe().unwrap().len(), 8);
     }
 
     #[test]
