@@ -534,7 +534,8 @@ jobs:
           # 'clippy-preview...', detected conflict: 'bin/cargo-clippy'" - two
           # concurrent on-demand installs racing. Nothing left to install means
           # nothing to race. (kyvo0.6)
-          components: rustfmt, clippy, rust-src
+          # llvm-tools-preview: G7 runs `cargo llvm-cov` (below).
+          components: rustfmt, clippy, rust-src, llvm-tools-preview
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -543,6 +544,12 @@ jobs:
 
       - name: Create temp dirs
         run: mkdir -p .tmp .target-gates
+
+      # G7 (Coverage Floor) shells out to `cargo llvm-cov --workspace
+      # --summary-only`; on 35961608652 it failed in 18ms with "no such command:
+      # llvm-cov" because nothing installed it. (kyvo0.6)
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
 
       - name: Install and verify required pandas oracle
         run: |
