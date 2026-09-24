@@ -16533,42 +16533,53 @@ impl PyDataFrame {
         })
     }
 
-    /// Merge with another DataFrame on key column(s) (pandas `DataFrame.merge`).
-    /// `on` is a column name or list of names; `how` is one of
-    /// inner/left/right/outer/cross.
-    #[pyo3(signature = (other, on, how="inner"))]
+    /// Merge with another DataFrame (pandas `DataFrame.merge`; see `merge_impl`).
+    #[pyo3(signature = (
+        right,
+        how="inner",
+        on=None,
+        left_on=None,
+        right_on=None,
+        left_index=false,
+        right_index=false,
+        sort=false,
+        suffixes=None,
+        copy=None,
+        indicator=None,
+        validate=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn merge(
         &self,
-        other: &PyDataFrame,
-        on: &Bound<'_, PyAny>,
+        right: &PyDataFrame,
         how: &str,
+        on: Option<&Bound<'_, PyAny>>,
+        left_on: Option<&Bound<'_, PyAny>>,
+        right_on: Option<&Bound<'_, PyAny>>,
+        left_index: bool,
+        right_index: bool,
+        sort: bool,
+        suffixes: Option<&Bound<'_, PyAny>>,
+        copy: Option<&Bound<'_, PyAny>>,
+        indicator: Option<&Bound<'_, PyAny>>,
+        validate: Option<&str>,
     ) -> PyResult<PyDataFrame> {
-        let on_cols: Vec<String> = if let Ok(s) = on.extract::<String>() {
-            vec![s]
-        } else {
-            on.extract::<Vec<String>>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>("`on` must be a str or list of str")
-            })?
+        let _ = copy; // pandas' copy= does not change the result
+        let args = MergeArgs {
+            how,
+            on,
+            left_on,
+            right_on,
+            left_index,
+            right_index,
+            sort,
+            suffixes,
+            indicator,
+            validate,
         };
-        let join_type = match how {
-            "inner" => fp_join::JoinType::Inner,
-            "left" => fp_join::JoinType::Left,
-            "right" => fp_join::JoinType::Right,
-            "outer" => fp_join::JoinType::Outer,
-            "cross" => fp_join::JoinType::Cross,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "unknown how={other:?}; expected inner/left/right/outer/cross"
-                )));
-            }
-        };
-        let on_refs: Vec<&str> = on_cols.iter().map(String::as_str).collect();
-        let merged = fp_join::merge_dataframes_on(&self.inner, &other.inner, &on_refs, join_type)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let frame =
-            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: frame })
+        Ok(PyDataFrame {
+            inner: merge_impl(&self.inner, &right.inner, &args)?,
+        })
     }
 
     /// Return a boolean DataFrame marking missing values (pandas `DataFrame.isna`).
@@ -26151,19 +26162,141 @@ impl PyResampler {
     }
 }
 
-/// `fp.concat([df1, df2, ...])`: stack frames along the row axis, pandas'
-/// default `axis=0` / `join="outer"` behaviour.
+/// pandas `concat` over fp-frame: a list of DataFrames or of Series, `axis` 0/1
+/// ("index"/"columns"), `join` outer/inner, `ignore_index`. `keys=` needs a row
+/// MultiIndex, which the binding does not return yet (DISC-006), so it raises
+/// NotImplementedError, as do `sort=True` and mixed Series/DataFrame lists.
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3)
 #[pyfunction]
-fn concat(frames: Vec<PyRef<'_, PyDataFrame>>) -> PyResult<PyDataFrame> {
-    if frames.is_empty() {
+#[pyo3(signature = (
+    objs,
+    *,
+    axis=None,
+    join="outer",
+    ignore_index=false,
+    keys=None,
+    sort=false,
+    copy=None,
+    **kwargs
+))]
+#[allow(clippy::too_many_arguments)]
+fn concat(
+    py: Python<'_>,
+    objs: &Bound<'_, PyAny>,
+    axis: Option<&Bound<'_, PyAny>>,
+    join: &str,
+    ignore_index: bool,
+    keys: Option<&Bound<'_, PyAny>>,
+    sort: bool,
+    copy: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let _ = copy; // pandas' copy= does not change the result
+    if let Some(kwargs) = kwargs
+        && let Some(flag) = kwargs.get_item("verify_integrity")?
+        && !flag.is_truthy()?
+    {
+        kwargs.del_item("verify_integrity")?;
+    }
+    reject_unsupported_kwargs("concat", kwargs, &[])?;
+    if keys.is_some_and(|k| !k.is_none()) {
+        return Err(not_implemented(
+            "concat(keys=...) (the result needs a row MultiIndex)",
+        ));
+    }
+    if sort {
+        return Err(not_implemented("concat(sort=True)"));
+    }
+    if objs.is_instance_of::<PyDict>() {
+        return Err(not_implemented(
+            "concat of a mapping (its keys become keys=)",
+        ));
+    }
+    let axis = match axis.filter(|a| !a.is_none()) {
+        None => 0,
+        Some(a) => match a.extract::<String>().ok().as_deref() {
+            Some("index" | "rows") => 0,
+            Some("columns") => 1,
+            Some(other) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {other} for object type DataFrame"
+                )));
+            }
+            None => a.extract::<i64>()?,
+        },
+    };
+    let join = match join {
+        "outer" => fp_frame::ConcatJoin::Outer,
+        "inner" => fp_frame::ConcatJoin::Inner,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Only can inner (intersect) or outer (union) join the other axis",
+            ));
+        }
+    };
+
+    let mut frames: Vec<DataFrame> = Vec::new();
+    let mut series: Vec<Series> = Vec::new();
+    for item in objs.try_iter()? {
+        let item = item?;
+        if item.is_none() {
+            continue;
+        }
+        if let Ok(frame) = item.extract::<PyRef<'_, PyDataFrame>>() {
+            frames.push(frame.inner.clone());
+        } else if let Ok(s) = item.extract::<PyRef<'_, PySeries>>() {
+            series.push(s.inner.clone());
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "cannot concatenate object of type '{}'; only Series and DataFrame objs are valid",
+                item.get_type().name()?
+            )));
+        }
+    }
+    if frames.is_empty() && series.is_empty() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "No objects to concatenate",
         ));
     }
-    let refs: Vec<&DataFrame> = frames.iter().map(|frame| &frame.inner).collect();
-    let inner = fp_frame::concat_dataframes(&refs)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    Ok(PyDataFrame { inner })
+    if !frames.is_empty() && !series.is_empty() {
+        return Err(not_implemented("concat of Series mixed with DataFrames"));
+    }
+
+    if !series.is_empty() && axis == 0 {
+        let refs: Vec<&Series> = series.iter().collect();
+        let out = fp_frame::concat_series_with_ignore_index(&refs, ignore_index)
+            .map_err(frame_error_to_py)?;
+        return PySeries { inner: out }.into_py_any(py);
+    }
+    if !series.is_empty() {
+        // axis=1: each Series is a column, named by its name or its position.
+        for (position, s) in series.iter().enumerate() {
+            let name = if s.name().is_empty() {
+                position.to_string()
+            } else {
+                s.name().to_owned()
+            };
+            frames.push(s.to_frame(Some(&name)).map_err(frame_error_to_py)?);
+        }
+    }
+    let refs: Vec<&DataFrame> = frames.iter().collect();
+    let mut out =
+        fp_frame::concat_dataframes_with_axis_join(&refs, axis, join).map_err(frame_error_to_py)?;
+    if ignore_index {
+        if axis == 0 {
+            out = out.reset_index(true).map_err(frame_error_to_py)?;
+        } else {
+            let names: Vec<String> = out.column_names().iter().map(|n| n.to_string()).collect();
+            let positions: Vec<String> = (0..names.len()).map(|i| i.to_string()).collect();
+            let mapping: Vec<(&str, &str)> = names
+                .iter()
+                .map(String::as_str)
+                .zip(positions.iter().map(String::as_str))
+                .collect();
+            out = out.rename_columns(&mapping).map_err(frame_error_to_py)?;
+        }
+    }
+    PyDataFrame { inner: out }.into_py_any(py)
 }
 
 /// A pandas dtype argument: a name (`"float64"`), a Python type (`float`), or
@@ -26500,61 +26633,242 @@ fn read_parquet(path: &str) -> PyResult<PyDataFrame> {
     Ok(PyDataFrame { inner: df })
 }
 
+/// pandas' `merge` keywords after `left`/`right` (see `merge_impl`).
+struct MergeArgs<'a, 'py> {
+    how: &'a str,
+    on: Option<&'a Bound<'py, PyAny>>,
+    left_on: Option<&'a Bound<'py, PyAny>>,
+    right_on: Option<&'a Bound<'py, PyAny>>,
+    left_index: bool,
+    right_index: bool,
+    sort: bool,
+    suffixes: Option<&'a Bound<'py, PyAny>>,
+    indicator: Option<&'a Bound<'py, PyAny>>,
+    validate: Option<&'a str>,
+}
+
+fn merge_key_names(keys: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(one) = keys.extract::<String>() {
+        return Ok(vec![one]);
+    }
+    keys.extract::<Vec<String>>().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "merge keys must be a column name or a list of column names",
+        )
+    })
+}
+
+/// fp-join's validate failure as pandas' MergeError message.
+fn merge_error_to_py(error: fp_join::JoinError) -> PyErr {
+    let message = error.to_string();
+    for (mode, side, kind) in [
+        ("one_to_one", "left", "one-to-one"),
+        ("one_to_one", "right", "one-to-one"),
+        ("one_to_many", "left", "one-to-many"),
+        ("many_to_one", "right", "many-to-one"),
+    ] {
+        if message.contains(&format!(
+            "validate='{mode}' failed: {side} keys are not unique"
+        )) {
+            return MergeError::new_err(format!(
+                "Merge keys are not unique in {side} dataset; not a {kind} merge"
+            ));
+        }
+    }
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+}
+
+/// pandas `merge` over fp-join (suffixes, indicator, validate and sort
+/// included); left_index/right_index merges join on the index labels moved
+/// into a key column and restore them as the result index.
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3)
+fn merge_impl(
+    left: &DataFrame,
+    right: &DataFrame,
+    args: &MergeArgs<'_, '_>,
+) -> PyResult<DataFrame> {
+    let join_type = match args.how {
+        "inner" => fp_join::JoinType::Inner,
+        "left" => fp_join::JoinType::Left,
+        "right" => fp_join::JoinType::Right,
+        "outer" => fp_join::JoinType::Outer,
+        "cross" => fp_join::JoinType::Cross,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "unknown how={other:?}; expected inner/left/right/outer/cross"
+            )));
+        }
+    };
+    let validate_mode = match args.validate {
+        None => None,
+        Some("one_to_one" | "1:1") => Some(fp_join::MergeValidateMode::OneToOne),
+        Some("one_to_many" | "1:m") => Some(fp_join::MergeValidateMode::OneToMany),
+        Some("many_to_one" | "m:1") => Some(fp_join::MergeValidateMode::ManyToOne),
+        Some("many_to_many" | "m:m") => Some(fp_join::MergeValidateMode::ManyToMany),
+        Some(other) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "\"{other}\" is not a valid argument. Valid arguments are:\n- \"1:1\"\n- \
+                 \"1:m\"\n- \"m:1\"\n- \"m:m\"\n- \"one_to_one\"\n- \"one_to_many\"\n- \
+                 \"many_to_one\"\n- \"many_to_many\""
+            )));
+        }
+    };
+    let indicator_name = match args.indicator.filter(|i| !i.is_none()) {
+        None => None,
+        Some(flag) if flag.is_instance_of::<pyo3::types::PyBool>() => {
+            flag.extract::<bool>()?.then(|| "_merge".to_owned())
+        }
+        Some(name) => Some(name.extract::<String>()?),
+    };
+    let suffixes = match args.suffixes.filter(|s| !s.is_none()) {
+        None => None,
+        Some(pair) => {
+            let (l, r): (Option<String>, Option<String>) = pair.extract()?;
+            Some([l, r])
+        }
+    };
+    let options = fp_join::MergeExecutionOptions {
+        indicator_name,
+        validate_mode,
+        suffixes,
+        sort: args.sort,
+    };
+
+    let run = |left: &DataFrame,
+               right: &DataFrame,
+               left_on: &[String],
+               right_on: &[String]|
+     -> PyResult<DataFrame> {
+        let l: Vec<&str> = left_on.iter().map(String::as_str).collect();
+        let r: Vec<&str> = right_on.iter().map(String::as_str).collect();
+        let merged = fp_join::merge_dataframes_on_with_options(
+            left,
+            right,
+            &l,
+            &r,
+            join_type,
+            options.clone(),
+        )
+        .map_err(merge_error_to_py)?;
+        DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+            .map_err(frame_error_to_py)
+    };
+
+    if args.left_index || args.right_index {
+        if !(args.left_index && args.right_index)
+            || args.on.is_some()
+            || args.left_on.is_some()
+            || args.right_on.is_some()
+        {
+            return Err(not_implemented(
+                "merge with left_index/right_index mixed with column keys",
+            ));
+        }
+        const KEY: &str = "__fp_merge_index_key__";
+        let keyed = |frame: &DataFrame| -> PyResult<DataFrame> {
+            let labels: Vec<Scalar> = frame
+                .index()
+                .labels()
+                .iter()
+                .map(index_label_to_scalar)
+                .collect();
+            let key = Column::from_values(labels)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            frame.with_column(KEY, key).map_err(frame_error_to_py)
+        };
+        let key = vec![KEY.to_owned()];
+        let merged = run(&keyed(left)?, &keyed(right)?, &key, &key)?
+            .set_index(KEY, true)
+            .map_err(frame_error_to_py)?;
+        let labels = merged.index().labels().to_vec();
+        let mut frame = merged.set_axis(labels, 0).map_err(frame_error_to_py)?;
+        if let Some(name) = left.index().name()
+            && right.index().name() == Some(name)
+        {
+            frame = frame.rename_axis(name).map_err(frame_error_to_py)?;
+        }
+        return Ok(frame);
+    }
+
+    let (left_on, right_on) = match (args.on, args.left_on, args.right_on) {
+        (Some(on), None, None) => (merge_key_names(on)?, merge_key_names(on)?),
+        (None, Some(l), Some(r)) => (merge_key_names(l)?, merge_key_names(r)?),
+        (None, None, None) if join_type == fp_join::JoinType::Cross => (Vec::new(), Vec::new()),
+        (None, None, None) => {
+            // pandas: the columns both frames share.
+            let common: Vec<String> = left
+                .column_names()
+                .iter()
+                .filter(|c| right.column(c).is_some())
+                .map(|c| c.to_string())
+                .collect();
+            if common.is_empty() {
+                return Err(MergeError::new_err(
+                    "No common columns to perform merge on. Merge options: left_on=None, \
+                     right_on=None, left_index=False, right_index=False",
+                ));
+            }
+            (common.clone(), common)
+        }
+        _ => {
+            return Err(MergeError::new_err(
+                "Can only pass argument \"on\" OR \"left_on\" and \"right_on\", not a \
+                 combination of both.",
+            ));
+        }
+    };
+    run(left, right, &left_on, &right_on)
+}
+
 /// Merge two DataFrames (pandas `merge`).
 #[pyfunction]
-#[pyo3(signature = (left, right, on=None, how="inner", left_on=None, right_on=None))]
+#[pyo3(signature = (
+    left,
+    right,
+    how="inner",
+    on=None,
+    left_on=None,
+    right_on=None,
+    left_index=false,
+    right_index=false,
+    sort=false,
+    suffixes=None,
+    copy=None,
+    indicator=None,
+    validate=None
+))]
+#[allow(clippy::too_many_arguments)]
 fn merge(
     left: &PyDataFrame,
     right: &PyDataFrame,
-    on: Option<&Bound<'_, PyAny>>,
     how: &str,
+    on: Option<&Bound<'_, PyAny>>,
     left_on: Option<&Bound<'_, PyAny>>,
     right_on: Option<&Bound<'_, PyAny>>,
+    left_index: bool,
+    right_index: bool,
+    sort: bool,
+    suffixes: Option<&Bound<'_, PyAny>>,
+    copy: Option<&Bound<'_, PyAny>>,
+    indicator: Option<&Bound<'_, PyAny>>,
+    validate: Option<&str>,
 ) -> PyResult<PyDataFrame> {
-    if let Some(on_val) = on {
-        left.merge(right, on_val, how)
-    } else if let (Some(l_on), Some(r_on)) = (left_on, right_on) {
-        let l_cols: Vec<String> = if let Ok(s) = l_on.extract::<String>() {
-            vec![s]
-        } else {
-            l_on.extract::<Vec<String>>()?
-        };
-        let r_cols: Vec<String> = if let Ok(s) = r_on.extract::<String>() {
-            vec![s]
-        } else {
-            r_on.extract::<Vec<String>>()?
-        };
-        let join_type = match how {
-            "inner" => fp_join::JoinType::Inner,
-            "left" => fp_join::JoinType::Left,
-            "right" => fp_join::JoinType::Right,
-            "outer" => fp_join::JoinType::Outer,
-            "cross" => fp_join::JoinType::Cross,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "unknown how={other:?}; expected inner/left/right/outer/cross"
-                )));
-            }
-        };
-        let l_refs: Vec<&str> = l_cols.iter().map(String::as_str).collect();
-        let r_refs: Vec<&str> = r_cols.iter().map(String::as_str).collect();
-        let merged = fp_join::merge_dataframes_on_with(
-            &left.inner,
-            &right.inner,
-            &l_refs,
-            &r_refs,
-            join_type,
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let frame =
-            DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: frame })
-    } else {
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "merge requires `on` or both `left_on` and `right_on`",
-        ))
-    }
+    let _ = copy; // pandas' copy= does not change the result
+    let args = MergeArgs {
+        how,
+        on,
+        left_on,
+        right_on,
+        left_index,
+        right_index,
+        sort,
+        suffixes,
+        indicator,
+        validate,
+    };
+    Ok(PyDataFrame {
+        inner: merge_impl(&left.inner, &right.inner, &args)?,
+    })
 }
 
 /// Convert argument to numeric type (pandas `to_numeric`).

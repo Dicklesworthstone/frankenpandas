@@ -2211,3 +2211,112 @@ def test_read_csv_unsupported_keyword_is_not_silently_ignored() -> None:
         fpd.read_csv(io.StringIO(_CSV), sep=",", delimiter=",")
 
 
+# merge / concat keywords (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3).
+# Every keyword below raised "unexpected keyword argument", and concat took
+# DataFrames only.
+_ML = {"k": ["a", "b", "c"], "v": [1, 2, 3]}
+_MR = {"k": ["a", "b", "d"], "v": [10, 20, 40], "w": [0.5, 1.5, 2.5]}
+_CA = {"x": [1, 2], "y": ["p", "q"]}
+_CB = {"x": [3, 4], "z": [1.5, 2.5]}
+_CC = {"u": [7, 8], "t": ["s", "r"]}
+
+
+def _mframes(m: Any) -> Any:
+    return m.DataFrame(_ML), m.DataFrame(_MR)
+
+
+_MERGE_CONCAT_CASES = {
+    "merge_on": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k"),
+    "merge_how_positional": lambda m: _mframes(m)[0].merge(_mframes(m)[1], "left", "k"),
+    "merge_outer": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k", how="outer"),
+    "merge_right": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k", how="right"),
+    "merge_suffixes": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k", suffixes=("_l", "_r")),
+    "merge_validate_ok": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k", validate="1:1"),
+    "merge_left_right_on": lambda m: _mframes(m)[0].merge(
+        _mframes(m)[1].rename(columns={"k": "kk"}), left_on="k", right_on="kk"
+    ),
+    "merge_common_columns": lambda m: _mframes(m)[0].merge(m.DataFrame({"k": ["b", "c"], "q": [1, 2]})),
+    "merge_index": lambda m: _mframes(m)[0].set_index("k").merge(
+        _mframes(m)[1].set_index("k"), left_index=True, right_index=True, how="outer"
+    ),
+    "merge_sort": lambda m: _mframes(m)[1].merge(_mframes(m)[0], on="k", how="outer", sort=True),
+    "merge_function": lambda m: m.merge(*_mframes(m), on="k", how="left", suffixes=("_a", "_b")),
+    # The indicator column's dtype is pinned separately (hrxn9, xfail below);
+    # its values are compared in test_merge_indicator_values_match_pandas.
+    "merge_indicator_other_columns": lambda m: _mframes(m)[0]
+    .merge(_mframes(m)[1], on="k", how="outer", indicator="src")
+    .drop(columns=["src"]),
+    "concat_rows": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CA)]),
+    "concat_ignore_index": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CA)], ignore_index=True),
+    "concat_axis1": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CC)], axis=1),
+    "concat_axis_columns": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CC)], axis="columns"),
+    "concat_join_inner": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CB)], join="inner"),
+    "concat_outer_float_gap": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CB)]),
+    "concat_skips_none": lambda m: m.concat([None, m.DataFrame(_CA)]),
+    "concat_series_rows": lambda m: m.concat([m.Series([1, 2], name="a"), m.Series([3], name="a")]),
+    "concat_series_ignore_index": lambda m: m.concat(
+        [m.Series([1, 2], name="a"), m.Series([3], name="a")], ignore_index=True
+    ),
+    "concat_series_axis1": lambda m: m.concat([m.Series([1, 2], name="a"), m.Series([3, 4], name="b")], axis=1),
+}
+
+
+def _strict_ordered(obj: Any) -> Any:
+    # concat repeats labels, and to_dict keeps only the last one per label, so
+    # also compare the values in row order.
+    if hasattr(obj, "columns"):
+        ordered = [[_marker(v, False) for v in obj[c].tolist()] for c in obj.columns]
+    else:
+        ordered = [_marker(v, False) for v in obj.tolist()]
+    return (_strict(obj), obj.index.name, list(obj.index), ordered)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MERGE_CONCAT_CASES.values()), ids=list(_MERGE_CONCAT_CASES))
+def test_merge_and_concat_keywords_match_pandas(case: Any) -> None:
+    assert _strict_ordered(case(fpd)) == _strict_ordered(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_merge_errors_match_pandas() -> None:
+    dup = {"k": ["a", "a"], "u": [1, 2]}
+    for mod in (pd, fpd):
+        left = mod.DataFrame(_ML)
+        with pytest.raises(mod.errors.MergeError) as err:
+            left.merge(mod.DataFrame(dup), on="k", validate="one_to_one")
+        assert str(err.value) == "Merge keys are not unique in right dataset; not a one-to-one merge"
+        with pytest.raises(mod.errors.MergeError) as err:
+            left.merge(mod.DataFrame({"z": [1]}))
+        assert str(err.value).startswith("No common columns to perform merge on.")
+    assert issubclass(fpd.errors.MergeError, ValueError)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_concat_refuses_what_it_cannot_match() -> None:
+    frame = fpd.DataFrame(_CA)
+    with pytest.raises(NotImplementedError, match="keys"):
+        fpd.concat([frame, frame], keys=["p", "q"])
+    with pytest.raises(NotImplementedError, match="sort"):
+        fpd.concat([frame, frame], sort=True)
+    with pytest.raises(ValueError, match="No objects to concatenate"):
+        fpd.concat([])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_merge_indicator_values_match_pandas() -> None:
+    def indicator(m: Any, flag: Any) -> list:
+        return m.DataFrame(_ML).merge(m.DataFrame(_MR), on="k", how="outer", indicator=flag)[
+            "_merge" if flag is True else flag
+        ].tolist()
+
+    for flag in (True, "src"):
+        assert indicator(fpd, flag) == [str(v) for v in indicator(pd, flag)]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="br-frankenpandas-hrxn9: _merge is object, pandas category")
+def test_merge_indicator_dtype_is_category_like_pandas() -> None:
+    merged = fpd.DataFrame(_ML).merge(fpd.DataFrame(_MR), on="k", how="outer", indicator=True)
+    assert str(merged["_merge"].dtype) == "category"
+
+
