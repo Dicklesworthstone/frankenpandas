@@ -34347,9 +34347,10 @@ fn resample_bin_label(key: &str) -> IndexLabel {
     resample_label_to_ns(&text).map_or(text, IndexLabel::Datetime64)
 }
 
-/// Per-bin integer results that took an empty bin: numpy int64 cannot hold
-/// the NaN, so pandas returns float64 (with no empty bin it stays int64;
-/// br-frankenpandas-0yilt - these came back int64 holding a NaN).
+/// Per-bin integer or bool results that took an empty bin: numpy int64/bool
+/// cannot hold the NaN, so pandas returns float64 (a bool as 0.0/1.0; with no
+/// empty bin it stays int64/bool; br-frankenpandas-0yilt - these came back
+/// int64 holding a NaN; 4qg5w.23 for bool).
 fn int_bins_with_gaps_as_float(values: Vec<Scalar>) -> Vec<Scalar> {
     if !values.iter().any(Scalar::is_missing) {
         return values;
@@ -34358,6 +34359,7 @@ fn int_bins_with_gaps_as_float(values: Vec<Scalar>) -> Vec<Scalar> {
         .into_iter()
         .map(|value| match value {
             Scalar::Int64(v) => Scalar::Float64(v as f64),
+            Scalar::Bool(b) => Scalar::Float64(f64::from(u8::from(b))),
             other => other,
         })
         .collect()
@@ -35080,8 +35082,201 @@ impl Resample<'_> {
         Series::new(self.series.name(), index, column)
     }
 
+    /// Each bin's rows reduced by `reduce` (an empty bin gives `empty`), into
+    /// a column of `dtype`, or of the inferred dtype when `None`.
+    fn per_bin_reduction<F>(
+        &self,
+        dtype: Option<DType>,
+        empty: &Scalar,
+        reduce: F,
+    ) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series) -> Result<Scalar, FrameError>,
+    {
+        self.validate()?;
+        let (order, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order.len());
+        let mut values = Vec::with_capacity(order.len());
+        for key in &order {
+            labels.push(resample_bin_label(key));
+            let rows = &groups[key];
+            values.push(if rows.is_empty() {
+                empty.clone()
+            } else {
+                let positions: Vec<i64> = rows.iter().map(|&row| row as i64).collect();
+                reduce(&self.series.take(&positions)?)?
+            });
+        }
+        let index = Index::new(labels).rename_index(self.series.index().name());
+        let column = match dtype {
+            // A timezone is column metadata over UTC nanoseconds: build the
+            // naive column, then carry the zone (a direct cast is refused).
+            Some(dtype @ DType::Datetime64 { tz: Some(_) }) => {
+                Column::new(DType::Datetime64 { tz: None }, values)?.with_dtype(dtype)
+            }
+            Some(dtype) => Column::new(dtype, values)?,
+            None => Column::from_values(values)?,
+        };
+        Series::new(self.series.name(), index, column)
+    }
+
+    /// The resample reductions pandas defines differently for object, bool,
+    /// datetime and timedelta columns (measured, pandas 2.2.3); `None` where
+    /// the numeric paths already answer as pandas does. They returned NaN
+    /// where pandas raises, float where it keeps int/bool/datetime, and
+    /// datetimes as strings (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.23).
+    fn non_numeric_reduction(&self, how: &str) -> Option<Result<Series, FrameError>> {
+        match self.series.column().dtype() {
+            dtype @ (DType::Datetime64 { .. } | DType::Timedelta64) => {
+                self.temporal_reduction(how, dtype)
+            }
+            DType::Utf8 => self.object_reduction(how),
+            DType::Bool => self.bool_reduction(how),
+            _ => None,
+        }
+    }
+
+    /// Datetime/timedelta bins reduce through the Series reductions of their
+    /// rows: min/max/mean/median/first/last keep the dtype, std/sem are
+    /// durations, a timedelta sums (an empty bin to 0), NaT for an empty bin;
+    /// pandas refuses the rest ("datetime64 type does not support sum
+    /// operations").
+    fn temporal_reduction(&self, how: &str, dtype: DType) -> Option<Result<Series, FrameError>> {
+        let kind = if matches!(dtype, DType::Datetime64 { .. }) {
+            "datetime64"
+        } else {
+            "timedelta64"
+        };
+        let nat = Scalar::missing_for_dtype(dtype.clone());
+        let duration_nat = Scalar::Timedelta64(Timedelta::NAT);
+        let present = |rows: &Series, from_end: bool| {
+            let values = rows.values();
+            let found = if from_end {
+                values.iter().rev().find(|value| !value.is_missing())
+            } else {
+                values.iter().find(|value| !value.is_missing())
+            };
+            found.cloned().unwrap_or_else(|| nat.clone())
+        };
+        Some(match how {
+            "min" => self.per_bin_reduction(Some(dtype), &nat, Series::min),
+            "max" => self.per_bin_reduction(Some(dtype), &nat, Series::max),
+            "mean" => self.per_bin_reduction(Some(dtype), &nat, Series::mean),
+            "median" => self.per_bin_reduction(Some(dtype), &nat, Series::median),
+            "first" => self.per_bin_reduction(Some(dtype), &nat, |rows| Ok(present(rows, false))),
+            "last" => self.per_bin_reduction(Some(dtype), &nat, |rows| Ok(present(rows, true))),
+            "std" => self.per_bin_reduction(Some(DType::Timedelta64), &duration_nat, Series::std),
+            "sem" => self.per_bin_reduction(Some(DType::Timedelta64), &duration_nat, |rows| {
+                Ok(match rows.std()? {
+                    Scalar::Timedelta64(ns) if ns != Timedelta::NAT => {
+                        Scalar::Timedelta64((ns as f64 / (rows.count() as f64).sqrt()) as i64)
+                    }
+                    _ => Scalar::Timedelta64(Timedelta::NAT),
+                })
+            }),
+            "sum" if kind == "timedelta64" => {
+                self.per_bin_reduction(Some(dtype), &Scalar::Timedelta64(0), Series::sum)
+            }
+            "sum" | "prod" | "var" => Err(FrameError::CompatibilityRejected(format!(
+                "{kind} type does not support {how} operations"
+            ))),
+            _ => return None,
+        })
+    }
+
+    /// Object (string) bins: pandas raises for mean/median/var ("agg function
+    /// failed"), std/sem (the float conversion's ValueError) and min/max
+    /// over a column holding a missing value; a product is the bin's single
+    /// value, 1 when empty, and raises for two strings; first/last of an
+    /// empty bin is None. `sum` (concatenation) is answered below.
+    fn object_reduction(&self, how: &str) -> Option<Result<Series, FrameError>> {
+        let failed = |how: &str| {
+            FrameError::CompatibilityRejected(format!(
+                "agg function failed [how->{how},dtype->object]"
+            ))
+        };
+        let present = |rows: &Series, from_end: bool| {
+            let values = rows.values();
+            let found = if from_end {
+                values.iter().rev().find(|value| !value.is_missing())
+            } else {
+                values.iter().find(|value| !value.is_missing())
+            };
+            found.cloned().unwrap_or(Scalar::Null(NullKind::Null))
+        };
+        let none = Scalar::Null(NullKind::Null);
+        Some(match how {
+            "mean" | "median" | "var" => Err(failed(how)),
+            "std" | "sem" => {
+                let first = self
+                    .series
+                    .values()
+                    .iter()
+                    .find_map(|value| match value {
+                        Scalar::Utf8(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                Err(FrameError::CompatibilityRejected(format!(
+                    "could not convert string to float: '{first}'"
+                )))
+            }
+            "min" | "max" if self.series.column().has_any_missing() => Err(failed(how)),
+            "prod" => self.per_bin_reduction(None, &Scalar::Int64(1), |rows| {
+                let values: Vec<&Scalar> = rows
+                    .values()
+                    .iter()
+                    .filter(|value| !value.is_missing())
+                    .collect();
+                match values.as_slice() {
+                    [] => Ok(Scalar::Int64(1)),
+                    [one] => Ok((*one).clone()),
+                    _ => Err(failed("prod")),
+                }
+            }),
+            "first" => self.per_bin_reduction(None, &none, |rows| Ok(present(rows, false))),
+            "last" => self.per_bin_reduction(None, &none, |rows| Ok(present(rows, true))),
+            _ => return None,
+        })
+    }
+
+    /// Bool bins: sum/prod count as int64 (0 and 1 for an empty bin);
+    /// min/max/first/last stay bool unless a bin is empty, when numpy's bool
+    /// cannot hold the NaN and pandas returns float64.
+    fn bool_reduction(&self, how: &str) -> Option<Result<Series, FrameError>> {
+        let is_true = |value: &Scalar| matches!(value, Scalar::Bool(true));
+        let is_false = |value: &Scalar| matches!(value, Scalar::Bool(false));
+        let located = |rows: &Series| -> Result<Scalar, FrameError> {
+            let mut bools = rows.values().iter().filter(|value| !value.is_missing());
+            Ok(match how {
+                "min" => Scalar::Bool(bools.all(is_true)),
+                "max" => Scalar::Bool(bools.any(is_true)),
+                "first" => bools.next().cloned().unwrap_or(Scalar::Null(NullKind::NaN)),
+                _ => bools.next_back().cloned().unwrap_or(Scalar::Null(NullKind::NaN)),
+            })
+        };
+        Some(match how {
+            "sum" => self.per_bin_reduction(Some(DType::Int64), &Scalar::Int64(0), |rows| {
+                Ok(Scalar::Int64(rows.values().iter().filter(|v| is_true(v)).count() as i64))
+            }),
+            "prod" => self.per_bin_reduction(Some(DType::Int64), &Scalar::Int64(1), |rows| {
+                Ok(Scalar::Int64(i64::from(!rows.values().iter().any(&is_false))))
+            }),
+            "min" | "max" | "first" | "last" => self
+                .per_bin_reduction(None, &Scalar::Null(NullKind::NaN), located)
+                .and_then(|bins| {
+                    let values = int_bins_with_gaps_as_float(bins.values().to_vec());
+                    Series::new(bins.name(), bins.index().clone(), Column::from_values(values)?)
+                }),
+            _ => return None,
+        })
+    }
+
     /// Resample sum.
     pub fn sum(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("sum") {
+            return result;
+        }
         // Typed-f64 fast path: skip aggregate_scalar's column.values() Scalar
         // materialization (O(n) Scalar) AND the per-bucket Vec<Scalar> clone.
         // Gated on an all-valid no-NaN f64 column so nansum == plain typed sum,
@@ -35163,6 +35358,9 @@ impl Resample<'_> {
 
     /// Resample mean.
     pub fn mean(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("mean") {
+            return result;
+        }
         // Typed-f64 fast path: skip the column.values() Scalar materialization
         // AND the per-bucket Vec<Scalar> clone. Gated on an all-valid (no
         // validity-null) f64 column with NO NaN, so nanmean == plain sum/count
@@ -35667,6 +35865,9 @@ impl Resample<'_> {
 
     /// Resample min.
     pub fn min(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("min") {
+            return result;
+        }
         if let Some(r) = self.resample_extremum_typed(false) {
             return r;
         }
@@ -35678,6 +35879,9 @@ impl Resample<'_> {
 
     /// Resample max.
     pub fn max(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("max") {
+            return result;
+        }
         if let Some(r) = self.resample_extremum_typed(true) {
             return r;
         }
@@ -35822,6 +36026,9 @@ impl Resample<'_> {
 
     /// Resample first non-null value.
     pub fn first(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("first") {
+            return result;
+        }
         if let Some(r) = self.resample_first_last_typed_i64(false) {
             return r;
         }
@@ -35835,6 +36042,9 @@ impl Resample<'_> {
 
     /// Resample last non-null value.
     pub fn last(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("last") {
+            return result;
+        }
         if let Some(r) = self.resample_first_last_typed_i64(true) {
             return r;
         }
@@ -35889,6 +36099,9 @@ impl Resample<'_> {
 
     /// Resample standard deviation (ddof=1).
     pub fn std(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("std") {
+            return result;
+        }
         if let Some(r) = self.resample_var_typed(true) {
             return r;
         }
@@ -35897,6 +36110,9 @@ impl Resample<'_> {
 
     /// Resample variance.
     pub fn var(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("var") {
+            return result;
+        }
         if let Some(r) = self.resample_var_typed(false) {
             return r;
         }
@@ -35957,6 +36173,9 @@ impl Resample<'_> {
 
     /// Resample median.
     pub fn median(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("median") {
+            return result;
+        }
         // Typed-f64 fast path: skip aggregate_scalar's column.values() Scalar
         // materialization AND the per-bucket Vec<Scalar> clone + collect_finite
         // re-scan. Gated on an all-valid no-NaN f64 column with NO empty bins, so
@@ -36015,6 +36234,9 @@ impl Resample<'_> {
 
     /// Resample product.
     pub fn prod(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("prod") {
+            return result;
+        }
         // Typed all-valid Int64 fast path (analog of resample sum): `nanprod` folds
         // `prod *= to_f64(v)` in f64 and returns `Scalar::Float64`, so an Int64
         // column also yields a Float64 product — build the `v as f64` view once and
@@ -36502,6 +36724,9 @@ impl Resample<'_> {
 
     /// Resample standard error of the mean.
     pub fn sem(&self) -> Result<Series, FrameError> {
+        if let Some(result) = self.non_numeric_reduction("sem") {
+            return result;
+        }
         // Typed path (f64 borrows its slice rejecting any NaN; all-valid Int64 builds
         // the `v as f64` view once): `nansem_grouped(_, 1)` returns
         // `sqrt(nanvar(_, 1) / n)` (Float64) and `Null(NaN)` when `n <= 1`, so Int64
@@ -37578,6 +37803,7 @@ pub struct DataFrameResample<'a> {
     closed: Option<String>,
     label: Option<String>,
     origin: Option<String>,
+    numeric_only: bool,
 }
 
 impl<'a> DataFrameResample<'a> {
@@ -37593,6 +37819,14 @@ impl<'a> DataFrameResample<'a> {
 
     pub fn origin(mut self, origin: &str) -> Self {
         self.origin = Some(origin.to_string());
+        self
+    }
+
+    /// pandas' `numeric_only=` for the reductions: `true` reduces only the
+    /// int, float and bool columns; the default reduces every column and
+    /// raises where one cannot be reduced, as pandas does.
+    pub fn numeric_only(mut self, numeric_only: bool) -> Self {
+        self.numeric_only = numeric_only;
         self
     }
 
@@ -37637,51 +37871,60 @@ impl<'a> DataFrameResample<'a> {
             .collect()
     }
 
-    /// Apply resampling to each numeric column.
+    /// Apply resampling to each int64/float64 column (the extra statistics
+    /// pandas' resampler does not define for other dtypes: quantile, skew,
+    /// kurt, agg).
     fn apply_resample<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&Resample<'_>) -> Result<Series, FrameError>,
     {
-        self.validate()?;
-        let mut pairs = Vec::new();
-        let mut col_order = Vec::new();
-        let mut result_index: Option<Index> = None;
-
-        for pos in self.numeric_column_positions() {
-            let col = self.df.column_at(pos).expect("pos in bounds");
-            let col_name = self.df.column_name_at(pos).expect("pos in bounds");
-
-            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
-            let resample = self.series_resample(&series);
-            let result = agg(&resample)?;
-            if result_index.is_none() {
-                result_index = Some(result.index().clone());
-            }
-            pairs.push((col_name.clone(), result.column().clone()));
-            col_order.push(col_name);
-        }
-
-        // Per br-frankenpandas-pjjro: pandas resample preserves source axis
-        // name even when the result is empty (no numeric columns).
-        let index = result_index
-            .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name()));
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = DataFrame::new_with_axes(index, None, columns, col_order, None)?;
-        out.allows_duplicate_labels = self.df.allows_duplicate_labels;
-        Ok(out)
+        self.apply_resample_at(self.numeric_column_positions(), agg)
     }
 
     fn apply_resample_all_columns<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&Resample<'_>) -> Result<Series, FrameError>,
     {
+        self.apply_resample_at((0..self.df.num_columns()).collect(), agg)
+    }
+
+    /// A pandas reduction over the frame: every column in order (the first
+    /// that cannot be reduced raises, as pandas), or only the int, float and
+    /// bool columns under `numeric_only`. It reduced only the int64/float64
+    /// columns and silently dropped the rest (br-frankenpandas-0yilt).
+    fn apply_reduction<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Resample<'_>) -> Result<Series, FrameError>,
+    {
+        if !self.numeric_only {
+            return self.apply_resample_all_columns(agg);
+        }
+        let positions = (0..self.df.num_columns())
+            .filter(|&pos| {
+                matches!(
+                    self.df.column_at(pos).expect("pos in bounds").dtype(),
+                    DType::Int64
+                        | DType::Int64Nullable
+                        | DType::Float64
+                        | DType::Float64Nullable
+                        | DType::Bool
+                        | DType::BoolNullable
+                )
+            })
+            .collect();
+        self.apply_resample_at(positions, agg)
+    }
+
+    fn apply_resample_at<F>(&self, positions: Vec<usize>, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Resample<'_>) -> Result<Series, FrameError>,
+    {
         self.validate()?;
-        let n_cols = self.df.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut col_order = Vec::with_capacity(n_cols);
+        let mut pairs = Vec::with_capacity(positions.len());
+        let mut col_order = Vec::with_capacity(positions.len());
         let mut result_index: Option<Index> = None;
 
-        for pos in 0..n_cols {
+        for pos in positions {
             let col = self.df.column_at(pos).expect("pos in bounds");
             let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
@@ -37694,8 +37937,8 @@ impl<'a> DataFrameResample<'a> {
             col_order.push(col_name);
         }
 
-        // Per br-frankenpandas-hkcdn: pandas resample preserves source axis
-        // name even when the all-columns result is empty.
+        // Per br-frankenpandas-pjjro / hkcdn: pandas resample preserves the
+        // source axis name even when the result is empty (no columns).
         let index = result_index
             .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name()));
         let columns = ColumnStore::from_pairs(pairs);
@@ -37704,73 +37947,74 @@ impl<'a> DataFrameResample<'a> {
         Ok(out)
     }
 
-    /// Resample sum across all numeric columns.
+    /// Resample sum of each column (see [`Self::numeric_only`]).
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.sum())
+        self.apply_reduction(|r| r.sum())
     }
 
-    /// Resample mean across all numeric columns.
+    /// Resample mean of each column (see [`Self::numeric_only`]).
     pub fn mean(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.mean())
+        self.apply_reduction(|r| r.mean())
     }
 
-    /// Resample count across all numeric columns.
+    /// Resample count of every column (pandas counts every dtype).
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.count())
+        self.apply_resample_all_columns(|r| r.count())
     }
 
-    /// Resample min across all numeric columns.
+    /// Resample min of each column (see [`Self::numeric_only`]).
     pub fn min(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.min())
+        self.apply_reduction(|r| r.min())
     }
 
-    /// Resample max across all numeric columns.
+    /// Resample max of each column (see [`Self::numeric_only`]).
     pub fn max(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.max())
+        self.apply_reduction(|r| r.max())
     }
 
-    /// Resample product across all numeric columns.
+    /// Resample product of each column (see [`Self::numeric_only`]).
     pub fn prod(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.prod())
+        self.apply_reduction(|r| r.prod())
     }
 
-    /// Resample first across all numeric columns.
+    /// Resample first of each column (see [`Self::numeric_only`]).
     ///
     /// Matches `df.resample(freq).first()`. README line 494 lists `first`
     /// in the Resample row; fd90.200 brings the DataFrameResample direct-
     /// method surface up to parity with Series Resample.
     pub fn first(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.first())
+        self.apply_reduction(|r| r.first())
     }
 
-    /// Resample last across all numeric columns.
+    /// Resample last of each column (see [`Self::numeric_only`]).
     ///
     /// Matches `df.resample(freq).last()`. fd90.200 sibling of `first`.
     pub fn last(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.last())
+        self.apply_reduction(|r| r.last())
     }
 
-    /// Resample standard deviation (ddof=1) across all numeric columns.
+    /// Resample standard deviation (ddof=1) of each column (see
+    /// [`Self::numeric_only`]).
     ///
     /// Matches `df.resample(freq).std()`. Closes parity gap — pandas
     /// exposes std/var/median/skew/kurt on DataFrame.resample(); the
     /// fp-frame impl only had sum/mean/min/max/first/last/sem before.
     pub fn std(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.std())
+        self.apply_reduction(|r| r.std())
     }
 
-    /// Resample variance (ddof=1) across all numeric columns.
+    /// Resample variance (ddof=1) of each column (see [`Self::numeric_only`]).
     ///
     /// Matches `df.resample(freq).var()`.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.var())
+        self.apply_reduction(|r| r.var())
     }
 
-    /// Resample median across all numeric columns.
+    /// Resample median of each column (see [`Self::numeric_only`]).
     ///
     /// Matches `df.resample(freq).median()`.
     pub fn median(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.median())
+        self.apply_reduction(|r| r.median())
     }
 
     /// Resample skewness (Fisher's definition, bias=False).
@@ -37975,16 +38219,19 @@ impl<'a> DataFrameResample<'a> {
         self.apply_resample(|r| r.quantile(q))
     }
 
-    /// Resample standard error of the mean across numeric columns.
+    /// Resample standard error of the mean of each column (see
+    /// [`Self::numeric_only`]).
     pub fn sem(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample(|r| r.sem())
+        self.apply_reduction(|r| r.sem())
     }
 
     /// Count source rows in each resample bucket.
     pub fn size(&self) -> Result<Series, FrameError> {
         self.validate()?;
         let (order, groups) = self.build_groups();
-        let labels: Vec<IndexLabel> = order.iter().cloned().map(IndexLabel::Utf8).collect();
+        // Timestamp bins, as every other resample result (they were the bin
+        // keys' text; br-frankenpandas-0yilt).
+        let labels: Vec<IndexLabel> = order.iter().map(|key| resample_bin_label(key)).collect();
         let values: Vec<Scalar> = order
             .iter()
             .map(|key| Scalar::Int64(groups[key].len() as i64))
@@ -81591,6 +81838,7 @@ impl DataFrame {
             closed: None,
             label: None,
             origin: None,
+            numeric_only: false,
         }
     }
 
@@ -81607,6 +81855,7 @@ impl DataFrame {
             closed: closed.map(str::to_string),
             label: label.map(str::to_string),
             origin: origin.map(str::to_string),
+            numeric_only: false,
         }
     }
 
@@ -157241,7 +157490,16 @@ mod tests {
         )
         .unwrap();
 
-        let result = df.resample("M").prod().unwrap();
+        // GOLDEN-CHANGE (br-frankenpandas-0yilt): pandas 2.2.3 raises for the
+        // string column (two strings in January: "agg function failed
+        // [how->prod,dtype->object]"); numeric_only=True gives sales and cost.
+        // This pinned the old silent drop of 'label'.
+        let err = df.resample("M").prod().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("agg function failed [how->prod,dtype->object]")
+        );
+        let result = df.resample("M").numeric_only(true).prod().unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result.column_names(), vec!["sales", "cost"]);
 
@@ -157348,7 +157606,11 @@ mod tests {
             quantile.columns()["x"].values(),
             &[Scalar::Float64(2.0), Scalar::Float64(15.0)]
         );
-        let sem = resample.sem().unwrap();
+        // GOLDEN-CHANGE (br-frankenpandas-0yilt): pandas 2.2.3 raises for the
+        // string column ("could not convert string to float: 'a'");
+        // numeric_only=True gives x and y. This pinned the silent drop.
+        assert!(resample.sem().is_err());
+        let sem = df.resample("M").numeric_only(true).sem().unwrap();
         assert!((sem.columns()["x"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-12);
         assert!((sem.columns()["x"].values()[1].to_f64().unwrap() - 5.0).abs() < 1e-12);
 
@@ -202527,6 +202789,124 @@ mod tests {
         assert_eq!(
             big.resample("D").sum().unwrap().values(),
             [Scalar::Int64((1_i64 << 53) + 3)]
+        );
+    }
+
+    #[test]
+    fn resample_of_object_bool_and_temporal_columns_matches_pandas_4qg5w23() {
+        // pandas 2.2.3, rows at 2024-01-01 x2 and 2024-01-03 x2, resample('D')
+        // (so 2024-01-02 is an empty bin).
+        const DAY: i64 = 86_400_000_000_000;
+        let base = 1_704_067_200_000_000_000_i64;
+        let index = Index::from_datetime64(vec![base, base, base + 2 * DAY, base + 2 * DAY]);
+        let series = |dtype: DType, values: Vec<Scalar>| {
+            Series::new("x", index.clone(), Column::new(dtype, values).unwrap()).unwrap()
+        };
+        let text = |s: &str| Scalar::Utf8(s.to_owned());
+        let strings = series(DType::Utf8, vec![text("a"), text("b"), text("c"), text("d")]);
+        let r = strings.resample("D");
+        // object: mean/median/var raise TypeError text, std the float ValueError.
+        for (how, result) in [("mean", r.mean()), ("median", r.median()), ("var", r.var())] {
+            let message = result.unwrap_err().to_string();
+            assert!(message.contains(&format!("agg function failed [how->{how},dtype->object]")));
+        }
+        assert!(r.std().unwrap_err().to_string().contains("could not convert string to float: 'a'"));
+        // Two strings in a bin cannot multiply.
+        assert!(r.prod().is_err());
+        // first/last of the empty bin is None; min of a column with no gap works.
+        assert_eq!(r.first().unwrap().values()[1], Scalar::Null(NullKind::Null));
+        assert_eq!(r.min().unwrap().values()[0], text("a"));
+        // A single string's product is itself, an empty bin's is 1.
+        let sparse = series(
+            DType::Utf8,
+            vec![text("a"), Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)],
+        );
+        assert_eq!(
+            sparse.resample("D").prod().unwrap().values(),
+            [text("a"), Scalar::Int64(1), Scalar::Int64(1)]
+        );
+        // ... and min over a column holding a missing value raises.
+        assert!(sparse.resample("D").min().is_err());
+
+        // bool: sum/prod int64; min promotes to float64 with the empty bin.
+        let bools = series(
+            DType::Bool,
+            [true, false, true, true].map(Scalar::Bool).to_vec(),
+        );
+        let r = bools.resample("D");
+        assert_eq!(r.sum().unwrap().values(), [1_i64, 0, 2].map(Scalar::Int64));
+        assert_eq!(r.prod().unwrap().values(), [0_i64, 1, 1].map(Scalar::Int64));
+        let min = r.min().unwrap();
+        assert_eq!(min.column().dtype(), DType::Float64);
+        assert_eq!(min.values()[0], Scalar::Float64(0.0));
+        assert!(min.values()[1].is_missing());
+        assert_eq!(r.nunique().unwrap().values(), [2_i64, 0, 1].map(Scalar::Int64));
+
+        // datetime: min/mean keep datetime64 with NaT; sum/prod/var refused; std is a duration.
+        let jan = |day: i64| 1_577_836_800_000_000_000 + (day - 1) * DAY;
+        let dates = series(
+            DType::Datetime64 { tz: None },
+            [5, 2, 3, 4].map(|d| Scalar::Datetime64(jan(d))).to_vec(),
+        );
+        let r = dates.resample("D");
+        let min = r.min().unwrap();
+        assert!(matches!(min.column().dtype(), DType::Datetime64 { .. }));
+        assert_eq!(min.values()[0], Scalar::Datetime64(jan(2)));
+        assert!(min.values()[1].is_missing());
+        assert_eq!(r.mean().unwrap().values()[2], Scalar::Datetime64(jan(3) + DAY / 2));
+        for result in [r.sum(), r.prod(), r.var()] {
+            assert!(result.unwrap_err().to_string().contains("datetime64 type does not support"));
+        }
+        assert_eq!(r.std().unwrap().column().dtype(), DType::Timedelta64);
+        // A tz-aware column keeps its zone on the result (pandas: datetime64[ns, UTC]).
+        let utc = DType::Datetime64 {
+            tz: Some("UTC".to_owned()),
+        };
+        let aware = Series::new("x", index.clone(), dates.column().with_dtype(utc.clone())).unwrap();
+        let aware_min = aware.resample("D").min().unwrap();
+        assert_eq!(aware_min.column().dtype(), utc);
+        assert_eq!(aware_min.values()[0], Scalar::Datetime64(jan(2)));
+
+        // timedelta: sum keeps timedelta64 with 0 for the empty bin.
+        let durations = series(
+            DType::Timedelta64,
+            [DAY, 2 * DAY, 3, 4].map(Scalar::Timedelta64).to_vec(),
+        );
+        assert_eq!(
+            durations.resample("D").sum().unwrap().values(),
+            [3 * DAY, 0, 7].map(Scalar::Timedelta64)
+        );
+
+        // DataFrame: every column by default (raising as pandas), numeric_only
+        // keeps int/float/bool; size is keyed by Timestamps.
+        let frame = DataFrame::new_with_column_order(
+            index.clone(),
+            [
+                ("k".to_owned(), strings.column().clone()),
+                ("v".to_owned(), Column::from_i64_values(vec![1, 2, 3, 4])),
+                ("b".to_owned(), bools.column().clone()),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<String, Column>>(),
+            vec!["k".to_owned(), "v".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        let summed = frame.resample("D").sum().unwrap();
+        assert_eq!(summed.column_names(), vec!["k", "v", "b"]);
+        assert_eq!(summed.columns()["k"].values()[0], text("ab"));
+        assert!(frame.resample("D").mean().is_err());
+        let means = frame.resample("D").numeric_only(true).mean().unwrap();
+        assert_eq!(means.column_names(), vec!["v", "b"]);
+        assert_eq!(means.columns()["b"].values()[0], Scalar::Float64(0.5));
+        assert_eq!(
+            frame.resample("D").size().unwrap().index().labels()[0],
+            IndexLabel::Datetime64(base)
+        );
+        // NEGATIVE: a float column's resample is unchanged.
+        let floats = series(DType::Float64, [1.0, 2.0, 3.0, 4.0].map(Scalar::Float64).to_vec());
+        assert_eq!(
+            floats.resample("D").sum().unwrap().values(),
+            [3.0, 0.0, 7.0].map(Scalar::Float64)
         );
     }
 

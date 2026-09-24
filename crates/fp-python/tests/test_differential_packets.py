@@ -4100,3 +4100,86 @@ def test_temporal_column_refusals_match_pandas() -> None:
         assert [str(v) for v in s.sort_values().tolist()] == ["1.0", "2.0", "3.0", "nan"]
         assert [str(v) for v in s.rank().tolist()] == ["3.0", "1.0", "nan", "2.0"]
         assert s.min() == 1.0
+
+
+RESAMPLE_OPS = ["sum", "mean", "count", "min", "max", "prod", "first", "last", "median", "std", "var", "nunique", "size"]
+# Two rows on 2024-01-01 and two on 2024-01-03: resample('D') has an empty
+# middle bin.
+RESAMPLE_DTYPE_VALUES = {
+    "str": lambda m: ["a", "b", "c", "d"],
+    "str_with_none": lambda m: ["a", None, None, None],
+    "bool": lambda m: [True, False, True, True],
+    "datetime": lambda m: m.to_datetime(["2020-01-05", "2020-01-02", "2020-01-03", "2020-01-04"]),
+    "timedelta": lambda m: m.to_timedelta(["1D", "2D", "3h", "4h"]),
+    "float_nan": lambda m: [1.0, float("nan"), 3.0, 4.0],
+}
+
+
+def _resample_outcome(run: Any) -> Any:
+    try:
+        r = run()
+    except Exception as e:  # noqa: BLE001
+        return ("raise", type(e).__name__, str(e))
+    if hasattr(r, "columns"):
+        return ("frame", [(str(c), str(r[c].dtype), [str(v) for v in r[c].tolist()]) for c in r.columns],
+                [str(t) for t in r.index])
+    return (str(r.dtype), [str(v) for v in r.tolist()], [str(t) for t in r.index])
+
+
+def _assert_same_outcome(got: Any, want: Any) -> None:
+    # A refusal must be pandas' exception class, carrying pandas' message
+    # verbatim (the binding prefixes its gate text).
+    if want[0] == "raise":
+        assert got[0] == "raise" and got[1] == want[1], (got, want)
+        assert want[2] in got[2], (got, want)
+    else:
+        assert got == want
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", sorted(RESAMPLE_DTYPE_VALUES))
+def test_series_resample_of_every_dtype_matches_pandas(kind: str) -> None:
+    # br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.23: str/bool/
+    # datetime/timedelta columns resampled to NaN where pandas raises, float
+    # where it keeps int/bool/datetime, datetimes as strings; nunique was count.
+    # With an empty middle bin (numpy int/bool cannot hold its NaN) and dense.
+    for stamps in (
+        ["2024-01-01", "2024-01-01", "2024-01-03", "2024-01-03"],
+        ["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-02"],
+    ):
+
+        def series(m: Any) -> Any:
+            return m.Series(RESAMPLE_DTYPE_VALUES[kind](m), index=m.to_datetime(stamps), name="x")
+
+        for op in RESAMPLE_OPS:
+            got = _resample_outcome(lambda: getattr(series(fpd).resample("D"), op)())
+            want = _resample_outcome(lambda: getattr(series(pd).resample("D"), op)())
+            _assert_same_outcome(got, want)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("numeric_only", [False, True])
+def test_frame_resample_reduces_every_column_like_pandas(numeric_only: bool) -> None:
+    # br-frankenpandas-0yilt: DataFrame.resample dropped every non-int/float
+    # column; pandas reduces them all (raising where one cannot be reduced)
+    # unless numeric_only=True keeps the int/float/bool columns.
+    def frame(m: Any) -> Any:
+        idx = m.to_datetime(["2024-01-01", "2024-01-01", "2024-01-03", "2024-01-03"])
+        return m.DataFrame(
+            {"k": ["a", "b", "c", "d"], "v": [1, 2, 3, 4], "f": [1.5, 2.5, 3.5, 4.5], "b": [True, False, True, True]},
+            index=idx,
+        )
+
+    kwargs = {"numeric_only": True} if numeric_only else {}
+    for op in ["sum", "mean", "min", "max", "prod", "first", "last", "median", "std", "var", "sem"]:
+        got = _resample_outcome(lambda: getattr(frame(fpd).resample("D"), op)(**kwargs))
+        want = _resample_outcome(lambda: getattr(frame(pd).resample("D"), op)(**kwargs))
+        _assert_same_outcome(got, want)
+    if not numeric_only:
+        for op in ["count", "nunique"]:
+            got = _resample_outcome(lambda: getattr(frame(fpd).resample("D"), op)())
+            want = _resample_outcome(lambda: getattr(frame(pd).resample("D"), op)())
+            _assert_same_outcome(got, want)
+        s = fpd.Series(["a"], index=fpd.to_datetime(["2024-01-01"]))
+        with pytest.raises(TypeError, match="numeric_only=True"):
+            s.resample("D").mean(numeric_only=True)

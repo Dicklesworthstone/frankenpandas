@@ -9975,20 +9975,25 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
         ),
         FrameError::CompatibilityRejected(msg) => {
             let lower = msg.to_lowercase();
+            // pandas' own error texts reach Python verbatim, as pandas raises
+            // them; the gate prefix marks frankenpandas' own refusals
+            // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.23).
+            let pandas_verbatim = msg.starts_with("agg function failed [how->")
+                || msg.starts_with("could not convert string to float: ")
+                || msg.contains(" type does not support ");
+            let text = if pandas_verbatim {
+                msg.clone()
+            } else {
+                format!("compatibility gate rejected operation: {msg}")
+            };
             if lower.contains("not implemented") || lower.contains("unimplemented") {
-                (
-                    PyErrorKind::NotImplemented,
-                    format!("compatibility gate rejected operation: {msg}"),
-                )
+                (PyErrorKind::NotImplemented, text)
             } else if (lower.contains("column") && lower.contains("not found"))
                 || lower.contains("key not found")
                 || (lower.contains("label") && lower.contains("not found"))
                 || lower.contains("not found in index")
             {
-                (
-                    PyErrorKind::Key,
-                    format!("compatibility gate rejected operation: {msg}"),
-                )
+                (PyErrorKind::Key, text)
             } else if lower.contains("cannot reduce non-numeric")
                 || lower.contains("agg function failed")
                 || lower.contains("could not convert")
@@ -10001,16 +10006,13 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 // pandas' TypeErrors for unordered categoricals (hrxn9).
                 || lower.contains("categorical is not ordered for operation")
                 || lower.contains("unordered categoricals can only compare")
+                // pandas' TypeError for a datetime/timedelta reduction it does
+                // not define (4qg5w.23).
+                || lower.contains("type does not support")
             {
-                (
-                    PyErrorKind::Type,
-                    format!("compatibility gate rejected operation: {msg}"),
-                )
+                (PyErrorKind::Type, text)
             } else {
-                (
-                    PyErrorKind::Value,
-                    format!("compatibility gate rejected operation: {msg}"),
-                )
+                (PyErrorKind::Value, text)
             }
         }
         other => (PyErrorKind::Value, other.to_string()),
@@ -29162,126 +29164,97 @@ pub struct PyResampler {
     origin: Option<String>,
 }
 
+impl PyResampler {
+    /// One of pandas' resampler reductions over the Series or every frame
+    /// column, with `numeric_only` as pandas takes it: a frame reduces only
+    /// its int/float/bool columns, and a non-numeric Series raises. std/sem
+    /// over strings raise the float conversion's ValueError, as pandas
+    /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.23).
+    fn reduction<S, D>(
+        &self,
+        py: Python<'_>,
+        how: &str,
+        numeric_only: bool,
+        series_op: S,
+        frame_op: D,
+    ) -> PyResult<Py<PyAny>>
+    where
+        S: FnOnce(&fp_frame::Resample<'_>) -> Result<Series, FrameError>,
+        D: FnOnce(&fp_frame::DataFrameResample<'_>) -> Result<DataFrame, FrameError>,
+    {
+        let to_py: fn(FrameError) -> PyErr = if matches!(how, "std" | "sem") {
+            groupby_moment_error_to_py
+        } else {
+            frame_error_to_py
+        };
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                if numeric_only
+                    && !matches!(
+                        s.dtype(),
+                        DType::Int64
+                            | DType::Int64Nullable
+                            | DType::Float64
+                            | DType::Float64Nullable
+                            | DType::Bool
+                            | DType::BoolNullable
+                    )
+                {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "Cannot use numeric_only=True with SeriesGroupBy.{how} and non-numeric dtypes."
+                    )));
+                }
+                let resampler = s.resample_ext(
+                    &self.freq,
+                    self.closed.as_deref(),
+                    self.label.as_deref(),
+                    self.origin.as_deref(),
+                );
+                let res = series_op(&resampler).map_err(to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let resampler = df
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .numeric_only(numeric_only);
+                let res = frame_op(&resampler).map_err(to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+}
+
 #[pymethods]
 impl PyResampler {
     fn __repr__(&self) -> String {
         format!("Resampler(freq='{}')", self.freq)
     }
 
-    fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .sum()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .sum()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    // pandas' reductions take `numeric_only` (keyword-only here: pandas'
+    // positional order differs per method, e.g. std's first is ddof).
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn sum(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "sum", numeric_only, |r| r.sum(), |r| r.sum())
     }
 
-    fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .mean()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .mean()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn mean(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "mean", numeric_only, |r| r.mean(), |r| r.mean())
     }
 
-    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .min()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .min()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn min(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "min", numeric_only, |r| r.min(), |r| r.min())
     }
 
-    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .max()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .max()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn max(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "max", numeric_only, |r| r.max(), |r| r.max())
     }
 
     fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -29313,178 +29286,34 @@ impl PyResampler {
         }
     }
 
-    fn first(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .first()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .first()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn first(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "first", numeric_only, |r| r.first(), |r| r.first())
     }
 
-    fn last(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .last()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .last()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn last(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "last", numeric_only, |r| r.last(), |r| r.last())
     }
 
-    fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .std()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .std()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn std(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "std", numeric_only, |r| r.std(), |r| r.std())
     }
 
-    fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .var()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .var()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn var(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "var", numeric_only, |r| r.var(), |r| r.var())
     }
 
-    fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .median()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .median()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn median(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "median", numeric_only, |r| r.median(), |r| r.median())
     }
 
-    fn prod(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .prod()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .prod()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn prod(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "prod", numeric_only, |r| r.prod(), |r| r.prod())
     }
 
     fn size(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -29583,33 +29412,9 @@ impl PyResampler {
         }
     }
 
-    fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .sem()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .sem()
-                    .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    #[pyo3(signature = (*, numeric_only=false))]
+    fn sem(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.reduction(py, "sem", numeric_only, |r| r.sem(), |r| r.sem())
     }
 
     fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -29705,20 +29510,20 @@ impl PyResampler {
 
     fn agg(&self, py: Python<'_>, func: &str) -> PyResult<Py<PyAny>> {
         match func {
-            "sum" => self.sum(py),
-            "mean" => self.mean(py),
-            "min" => self.min(py),
-            "max" => self.max(py),
+            "sum" => self.sum(py, false),
+            "mean" => self.mean(py, false),
+            "min" => self.min(py, false),
+            "max" => self.max(py, false),
             "count" => self.count(py),
-            "first" => self.first(py),
-            "last" => self.last(py),
-            "std" => self.std(py),
-            "var" => self.var(py),
-            "median" => self.median(py),
-            "prod" => self.prod(py),
+            "first" => self.first(py, false),
+            "last" => self.last(py, false),
+            "std" => self.std(py, false),
+            "var" => self.var(py, false),
+            "median" => self.median(py, false),
+            "prod" => self.prod(py, false),
             "size" => self.size(py),
             "ohlc" => self.ohlc(py),
-            "sem" => self.sem(py),
+            "sem" => self.sem(py, false),
             "skew" => self.skew(py),
             "kurt" | "kurtosis" => self.kurt(py),
             "nearest" => self.nearest(py),
@@ -29756,7 +29561,7 @@ impl PyResampler {
 
     #[pyo3(signature = (limit=None))]
     fn ffill(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<Py<PyAny>> {
-        let first_val = self.first(py)?;
+        let first_val = self.first(py, false)?;
         let bound = first_val.bind(py);
         let kwargs = PyDict::new(py);
         if let Some(l) = limit {
@@ -29769,7 +29574,7 @@ impl PyResampler {
 
     #[pyo3(signature = (limit=None))]
     fn bfill(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<Py<PyAny>> {
-        let first_val = self.first(py)?;
+        let first_val = self.first(py, false)?;
         let bound = first_val.bind(py);
         let kwargs = PyDict::new(py);
         if let Some(l) = limit {
@@ -29868,7 +29673,7 @@ impl PyResampler {
 
     #[getter]
     fn ngroups(&self, py: Python<'_>) -> PyResult<usize> {
-        let f = self.first(py)?;
+        let f = self.first(py, false)?;
         let bound = f.bind(py);
         bound.len()
     }
@@ -29880,7 +29685,7 @@ impl PyResampler {
             ResampleTarget::Series(s) => s.len(),
             ResampleTarget::DataFrame(df) => df.len(),
         };
-        let first_val = self.first(py)?;
+        let first_val = self.first(py, false)?;
         let first_bound = first_val.bind(py);
         let idx_obj = first_bound.getattr("index")?;
         let bucket_count = idx_obj.len()?;
@@ -29910,7 +29715,7 @@ impl PyResampler {
     #[getter]
     fn groups<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
-        let first_val = self.first(py)?;
+        let first_val = self.first(py, false)?;
         let first_bound = first_val.bind(py);
         let idx_obj = first_bound.getattr("index")?;
         let bucket_count = idx_obj.len()?;
@@ -29933,7 +29738,7 @@ impl PyResampler {
     fn get_group(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         match &self.target {
             ResampleTarget::Series(s) => {
-                let first_val = self.first(py)?;
+                let first_val = self.first(py, false)?;
                 let first_bound = first_val.bind(py);
                 let idx = first_bound.getattr("index")?;
                 let mut found_pos = None;
@@ -29961,7 +29766,7 @@ impl PyResampler {
                 Ok(Py::new(py, PySeries { inner: sliced })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
-                let first_val = self.first(py)?;
+                let first_val = self.first(py, false)?;
                 let first_bound = first_val.bind(py);
                 let idx = first_bound.getattr("index")?;
                 let mut found_pos = None;
@@ -29991,8 +29796,10 @@ impl PyResampler {
         }
     }
 
+    /// Distinct non-missing values per bin (this returned count(), so
+    /// [True, True] counted 2; br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.23).
     fn nunique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.count(py)
+        self.reduction(py, "nunique", false, |r| r.nunique(), |r| r.nunique())
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]
@@ -30023,7 +29830,7 @@ impl PyResampler {
         if let Ok(name) = func.extract::<String>() {
             return self.agg(py, &name);
         }
-        let first_res = self.first(py)?;
+        let first_res = self.first(py, false)?;
         let bound = first_res.bind(py);
         bound
             .call_method("apply", (func,), kwargs)
