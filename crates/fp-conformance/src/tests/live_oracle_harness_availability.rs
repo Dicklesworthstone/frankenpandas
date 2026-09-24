@@ -105,6 +105,11 @@ fn live_oracle_non_oracle_unavailable_errors_still_propagate() {
     // every host (4qg5w.2).
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = true;
+    // The fallback opt-in is probe-gated, and the probe fails for a missing
+    // python, so without this the legacy-root check fired first and the test
+    // passed only where FP_REQUIRE_LIVE_ORACLE=1 (CI); a demand is not gated,
+    // so every host reaches the spawn this test is about (br-frankenpandas-2svmt).
+    cfg.require_live_oracle = true;
     cfg.python_bin = "/__fp_missing_python__/python3".to_owned();
 
     let report = super::run_packet_by_id(&cfg, "FP-P2C-001", super::OracleMode::LiveLegacyPandas)
