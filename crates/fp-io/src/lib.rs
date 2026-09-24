@@ -9325,7 +9325,11 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Int64 | DType::Int64Nullable => ArrowDataType::Int64,
         DType::Float64 | DType::Float64Nullable => ArrowDataType::Float64,
         DType::Utf8 => ArrowDataType::Utf8,
-        DType::Categorical => ArrowDataType::Utf8,
+        // pyarrow's encoding of pandas' `category`: keys into the categories.
+        DType::Categorical => ArrowDataType::Dictionary(
+            Box::new(ArrowDataType::Int32),
+            Box::new(ArrowDataType::Utf8),
+        ),
         DType::Bool | DType::BoolNullable => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
         // Real Arrow temporal types, as pyarrow writes them for pandas; these
@@ -9389,7 +9393,8 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             }
             Arc::new(builder.finish())
         }
-        DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => {
+        DType::Categorical => categorical_to_arrow_dictionary(column)?,
+        DType::Utf8 | DType::Null | DType::Sparse => {
             if column.dtype() == DType::Utf8
                 && let Some((bytes, offsets)) = column.as_utf8_contiguous()
             {
@@ -9585,7 +9590,8 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
             .column(name)
             .ok_or_else(|| IoError::Parquet(format!("missing column: {name}")))?;
         let dt = col.dtype();
-        let mut field = Field::new(name.as_str(), dtype_to_arrow(dt.clone()), true);
+        let mut field = Field::new(name.as_str(), dtype_to_arrow(dt.clone()), true)
+            .with_dict_is_ordered(col.categorical().is_some_and(|meta| meta.ordered));
         if let Some(tag) = nullable_extension_tag(dt) {
             field = field.with_metadata(std::collections::HashMap::from([(
                 FP_DTYPE_METADATA_KEY.to_owned(),
@@ -9694,7 +9700,12 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
         // contiguous-nullable constructor). Bit-identical to the Scalar path's
         // per-type null-kind conventions (Int/Bool/Utf8 → Null(Null); Float →
         // Null(NaN)); validity constructors reproduce those exactly (verified).
-        let col = match arrow_array_to_column_typed(arr.as_ref(), field.data_type()) {
+        let typed = if matches!(field.data_type(), ArrowDataType::Dictionary(_, _)) {
+            Some(arrow_dictionary_to_categorical(arr.as_ref(), field)?)
+        } else {
+            arrow_array_to_column_typed(arr.as_ref(), field.data_type())
+        };
+        let col = match typed {
             Some(c) => c,
             None => {
                 let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
@@ -9871,6 +9882,111 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
         }
         _ => None,
     }
+}
+
+/// A categorical column as pyarrow writes pandas' `category`: Int32 keys into
+/// a dictionary holding the categories in their order, unused ones included.
+/// Only string categories are encoded; any other kind refuses (this column
+/// used to be written as each value's Debug text, e.g. `Int64(1)`).
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
+fn categorical_to_arrow_dictionary(column: &Column) -> Result<Arc<dyn Array>, IoError> {
+    let categories: Vec<Scalar> = match column.categorical() {
+        Some(meta) => meta.categories.clone(),
+        None => {
+            let mut seen = BTreeSet::new();
+            let mut firsts = Vec::new();
+            for value in column.values() {
+                if let Scalar::Utf8(text) = value
+                    && seen.insert(text.clone())
+                {
+                    firsts.push(value.clone());
+                }
+            }
+            firsts
+        }
+    };
+    let mut labels = Vec::with_capacity(categories.len());
+    for category in &categories {
+        match category {
+            Scalar::Utf8(text) => labels.push(text.as_str()),
+            other => {
+                return Err(IoError::Parquet(format!(
+                    "categorical columns with non-string categories are not supported \
+                     by the Arrow writer (category {other:?})"
+                )));
+            }
+        }
+    }
+    let position: std::collections::HashMap<&str, i32> = labels
+        .iter()
+        .enumerate()
+        .map(|(pos, label)| Ok((*label, i32::try_from(pos)?)))
+        .collect::<Result<_, std::num::TryFromIntError>>()
+        .map_err(|e| IoError::Parquet(format!("too many categories: {e}")))?;
+    let mut keys = Vec::with_capacity(column.len());
+    for value in column.values() {
+        keys.push(match value {
+            Scalar::Utf8(text) => Some(*position.get(text.as_str()).ok_or_else(|| {
+                IoError::Parquet(format!(
+                    "value {text:?} is not among the column's categories"
+                ))
+            })?),
+            _ => None,
+        });
+    }
+    let dictionary = arrow::array::DictionaryArray::<arrow::datatypes::Int32Type>::try_new(
+        arrow::array::Int32Array::from(keys),
+        Arc::new(StringArray::from(labels)),
+    )
+    .map_err(|e| IoError::Parquet(e.to_string()))?;
+    Ok(Arc::new(dictionary))
+}
+
+/// pandas' `category` columns arrive as Arrow dictionaries (they used to be
+/// rejected as "unsupported Arrow data type"). Decode to fp's categorical
+/// column: the labels, with the dictionary as the categories in dictionary
+/// order and the field's ordered flag. String dictionaries only.
+fn arrow_dictionary_to_categorical(arr: &dyn Array, field: &Field) -> Result<Column, IoError> {
+    use arrow::array::AsArray;
+
+    let dictionary = arr
+        .as_any_dictionary_opt()
+        .ok_or_else(|| IoError::Parquet(format!("expected a dictionary array for {field:?}")))?;
+    let dictionary_values = dictionary.values();
+    let labels = arrow_array_to_scalars(dictionary_values.as_ref(), dictionary_values.data_type())?;
+    if let Some(other) = labels
+        .iter()
+        .find(|label| !matches!(label, Scalar::Utf8(_)))
+    {
+        return Err(IoError::Parquet(format!(
+            "categorical columns with non-string categories are not supported \
+             by the Arrow reader (category {other:?})"
+        )));
+    }
+    // normalized_keys panics on an empty dictionary; every row is null then.
+    let keys = if labels.is_empty() {
+        vec![0; arr.len()]
+    } else {
+        dictionary.normalized_keys()
+    };
+    let values = keys
+        .iter()
+        .enumerate()
+        .map(|(row, key)| {
+            if arr.is_null(row) || labels.is_empty() {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                labels[*key].clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let column = Column::new(DType::Categorical, values)?;
+    Ok(
+        column.with_categorical(Some(fp_types::CategoricalMetadata::new(
+            labels,
+            field.dict_is_ordered().unwrap_or(false),
+        ))),
+    )
 }
 
 /// fp spells a fixed-offset zone `UTC+05:30` (pandas' repr); Arrow and
@@ -28773,6 +28889,88 @@ mod tests {
                 assert_eq!(got.values(), want.values(), "{label} {name} values");
             }
         }
+    }
+
+    #[test]
+    fn arrow_categorical_columns_round_trip_as_dictionaries() {
+        // pandas' category dtype travels as an Arrow dictionary (pyarrow writes
+        // Dictionary(Int8, Utf8) with the ordered flag); fp rejected those on
+        // read and wrote categoricals as plain strings (or Debug text).
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
+        let values = vec![
+            Scalar::Utf8("b".to_owned()),
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Utf8("b".to_owned()),
+        ];
+        // Category order b, a plus an unused "z", ordered: all must survive.
+        let categories = vec![
+            Scalar::Utf8("b".to_owned()),
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Utf8("z".to_owned()),
+        ];
+        let column = Column::new(DType::Categorical, values)
+            .expect("categorical")
+            .with_categorical(Some(fp_types::CategoricalMetadata::new(
+                categories.clone(),
+                true,
+            )));
+        let mut cols = BTreeMap::new();
+        cols.insert("c".to_owned(), column.clone());
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2, 3]),
+            cols,
+            vec!["c".to_owned()],
+        )
+        .expect("frame");
+
+        let batch = super::dataframe_to_record_batch(&frame).expect("batch");
+        let field = batch.schema().field(0).clone();
+        assert_eq!(
+            field.data_type(),
+            &ArrowDataType::Dictionary(
+                Box::new(ArrowDataType::Int32),
+                Box::new(ArrowDataType::Utf8)
+            )
+        );
+        assert_eq!(field.dict_is_ordered(), Some(true));
+
+        let parquet = read_parquet_bytes(&super::write_parquet_bytes(&frame).expect("write pq"))
+            .expect("read pq");
+        let feather = read_feather_bytes(&super::write_feather_bytes(&frame).expect("write ft"))
+            .expect("read ft");
+        // KNOWN DIVERGENCE (Parquet only): arrow-rs' Parquet writer re-encodes
+        // the dictionary from the values present, so the unused category "z"
+        // is lost; pyarrow keeps it. Feather/IPC writes the dictionary as is.
+        for (label, back, want) in [
+            ("parquet", parquet, &categories[..2]),
+            ("feather", feather, &categories[..]),
+        ] {
+            let got = back.column("c").expect("c");
+            assert_eq!(got.dtype(), DType::Categorical, "{label}");
+            assert_eq!(got.values(), column.values(), "{label}");
+            let meta = got.categorical().expect("categorical metadata");
+            assert_eq!(meta.categories, want, "{label}");
+            assert!(meta.ordered, "{label}");
+        }
+
+        let mut ints = BTreeMap::new();
+        ints.insert(
+            "n".to_owned(),
+            Column::new(DType::Categorical, vec![Scalar::Int64(1), Scalar::Int64(2)])
+                .expect("int categorical"),
+        );
+        let ints = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            ints,
+            vec!["n".to_owned()],
+        )
+        .expect("ints");
+        let err = super::write_parquet_bytes(&ints).expect_err("non-string categories refuse");
+        assert!(
+            format!("{err}").contains("non-string categories"),
+            "got: {err}"
+        );
     }
 
     #[test]
