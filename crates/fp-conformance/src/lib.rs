@@ -6866,9 +6866,25 @@ fn assert_csv_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     Ok(())
 }
 
+/// pandas' Excel round trip is `to_excel(p)` then `read_excel(p, index_col=0)`:
+/// the index is written as the first column under its name, or under a blank
+/// header that reads back as "Unnamed: 0". Reading with default options only
+/// "round-tripped" while fp-io guessed that column was an index and dropped it,
+/// which pandas never does (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19).
+fn excel_round_trip_read_options(frame: &DataFrame) -> ExcelReadOptions {
+    if frame.row_multiindex().is_some() {
+        // Levels are written as ordinary named columns; nothing to promote.
+        return ExcelReadOptions::default();
+    }
+    ExcelReadOptions {
+        index_col: Some(frame.index().name().unwrap_or("Unnamed: 0").to_owned()),
+        ..ExcelReadOptions::default()
+    }
+}
+
 fn assert_excel_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     let encoded = write_excel_bytes(frame)?;
-    let reparsed = read_excel_bytes(&encoded, &ExcelReadOptions::default())?;
+    let reparsed = read_excel_bytes(&encoded, &excel_round_trip_read_options(frame))?;
     if !frame.equals(&reparsed) {
         return Err(FpIoError::Io(std::io::Error::other(
             "excel round-trip drifted after parse/write/reparse",
@@ -16243,7 +16259,7 @@ fn execute_feather_round_trip_fixture_operation(fixture: &PacketFixture) -> Resu
 fn execute_excel_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
     let frame = build_dataframe(require_frame(fixture)?)?;
     let bytes = write_excel_bytes(&frame).map_err(|err| format!("excel write failed: {err}"))?;
-    let reparsed = read_excel_bytes(&bytes, &ExcelReadOptions::default())
+    let reparsed = read_excel_bytes(&bytes, &excel_round_trip_read_options(&frame))
         .map_err(|err| format!("excel read failed: {err}"))?;
     Ok(dataframes_semantically_equal(&frame, &reparsed))
 }

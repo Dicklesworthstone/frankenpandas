@@ -13417,7 +13417,9 @@ impl PySeries {
         Err(not_implemented("to_hdf (no HDF5 backend in this build)"))
     }
 
-    #[pyo3(signature = (path_or_buf=None, orient="records", **kwargs))]
+    /// pandas' default orient for a Series is "index" (`{"0": 1.5, ...}`);
+    /// this defaulted to "records". (4qg5w.19)
+    #[pyo3(signature = (path_or_buf=None, orient=None, **kwargs))]
     fn to_json(
         &self,
         path_or_buf: Option<&str>,
@@ -13427,7 +13429,7 @@ impl PySeries {
         let _ = kwargs;
         let s = self
             .inner
-            .to_json(orient.unwrap_or("records"))
+            .to_json(orient.unwrap_or("index"))
             .map_err(frame_error_to_py)?;
         if let Some(p) = path_or_buf {
             std::fs::write(p, &s)
@@ -20735,7 +20737,10 @@ impl PyDataFrame {
         Err(not_implemented("to_hdf (no HDF5 backend in this build)"))
     }
 
-    #[pyo3(signature = (path_or_buf=None, orient="records", **kwargs))]
+    /// pandas' default orient for a DataFrame is "columns"; this defaulted
+    /// to "records", so fp's default output was not what pandas reads back by
+    /// default. (4qg5w.19)
+    #[pyo3(signature = (path_or_buf=None, orient=None, **kwargs))]
     fn to_json(
         &self,
         path_or_buf: Option<&str>,
@@ -20745,7 +20750,7 @@ impl PyDataFrame {
         let _ = kwargs;
         let s = self
             .inner
-            .to_json(orient.unwrap_or("records"))
+            .to_json(orient.unwrap_or("columns"))
             .map_err(frame_error_to_py)?;
         if let Some(p) = path_or_buf {
             std::fs::write(p, &s)
@@ -26108,12 +26113,27 @@ fn parse_json_orient(orient: &str) -> PyResult<fp_io::JsonOrient> {
 }
 
 /// Read a JSON file into a DataFrame (pandas `read_json`). `orient` is one of
-/// records/columns/index/split/values.
+/// records/columns/index/split/values. With no orient, pandas reads both of
+/// its common shapes: an object of columns (its own default output) and an
+/// array of records - so the orient is taken from the first JSON token.
+/// (This defaulted to "records" and refused pandas' default files.) (4qg5w.19)
 #[pyfunction]
-#[pyo3(signature = (path, orient="records"))]
-fn read_json(path: &str, orient: &str) -> PyResult<PyDataFrame> {
-    let orient = parse_json_orient(orient)?;
-    let df = fp_io::read_json(std::path::Path::new(path), orient).map_err(io_error_to_py)?;
+#[pyo3(signature = (path, orient=None))]
+fn read_json(path: &str, orient: Option<&str>) -> PyResult<PyDataFrame> {
+    let path = std::path::Path::new(path);
+    let orient = match orient {
+        Some(orient) => parse_json_orient(orient)?,
+        None => {
+            let text =
+                std::fs::read_to_string(path).map_err(|e| io_error_to_py(fp_io::IoError::Io(e)))?;
+            if text.trim_start().starts_with('[') {
+                fp_io::JsonOrient::Records
+            } else {
+                fp_io::JsonOrient::Columns
+            }
+        }
+    };
+    let df = fp_io::read_json(path, orient).map_err(io_error_to_py)?;
     Ok(PyDataFrame { inner: df })
 }
 

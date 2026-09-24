@@ -10088,31 +10088,54 @@ proptest! {
 // Property: Excel round-trip invariants (frankenpandas-44y)
 // ---------------------------------------------------------------------------
 
+/// GOLDEN-CHANGE (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19): the
+/// round-trip properties below read back with DEFAULT options and so pinned
+/// fp-io's old guess that a blank-headed 0..n first column was an index to
+/// drop. pandas never guesses: its round trip is `to_excel(p)` then
+/// `read_excel(p, index_col=0)`, and a default read keeps the old index as a
+/// DATA column named "Unnamed: 0". Both halves are pinned below.
+fn excel_index_col_read() -> fp_io::ExcelReadOptions {
+    fp_io::ExcelReadOptions {
+        index_col: Some("Unnamed: 0".to_owned()),
+        ..fp_io::ExcelReadOptions::default()
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(30))]
 
-    /// Excel default round-trip preserves shape for the default
-    /// writer/reader pair on unnamed RangeIndex frames.
+    /// Excel round-trip (pandas idiom: index_col=0) preserves shape and names.
     #[test]
     fn prop_excel_default_round_trip_preserves_shape(df in arb_int64_dataframe(8, 4)) {
         let bytes = fp_io::write_excel_bytes(&df);
         prop_assert!(bytes.is_ok(), "Excel write must succeed");
         let bytes = bytes.unwrap();
 
-        let parsed = fp_io::read_excel_bytes(&bytes, &fp_io::ExcelReadOptions::default());
+        let parsed = fp_io::read_excel_bytes(&bytes, &excel_index_col_read());
         prop_assert!(parsed.is_ok(), "Excel parse must succeed: {:?}", parsed.err());
         let parsed = parsed.unwrap();
 
         prop_assert_eq!(parsed.index().len(), df.index().len(),
             "Excel round-trip must preserve row count");
         prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
-            "Excel default round-trip must preserve column count");
+            "Excel round-trip must preserve column count");
         prop_assert_eq!(parsed.column_names(), df.column_names(),
-            "Excel default round-trip must preserve column names");
+            "Excel round-trip must preserve column names");
+
+        // And a DEFAULT read keeps the written index as data, as pandas does.
+        let default_read = fp_io::read_excel_bytes(&bytes, &fp_io::ExcelReadOptions::default());
+        prop_assert!(default_read.is_ok(), "Excel default parse must succeed");
+        let default_read = default_read.unwrap();
+        prop_assert_eq!(
+            default_read.column_names().len(),
+            df.column_names().len() + 1,
+            "a default read keeps the index column"
+        );
+        prop_assert_eq!(default_read.column_names()[0].as_str(), "Unnamed: 0");
     }
 
-    /// Excel default round-trip preserves both index labels and Int64 values
-    /// without falling back to index=false writer options.
+    /// Excel round-trip (pandas idiom: index_col=0) preserves both index
+    /// labels and Int64 values without falling back to index=false options.
     #[test]
     fn prop_excel_default_round_trip_preserves_index_and_int64_values(
         df in arb_int64_dataframe(8, 4)
@@ -10121,7 +10144,7 @@ proptest! {
         prop_assert!(bytes.is_ok(), "Excel write must succeed");
         let bytes = bytes.unwrap();
 
-        let parsed = fp_io::read_excel_bytes(&bytes, &fp_io::ExcelReadOptions::default());
+        let parsed = fp_io::read_excel_bytes(&bytes, &excel_index_col_read());
         prop_assert!(parsed.is_ok(), "Excel parse must succeed: {:?}", parsed.err());
         let parsed = parsed.unwrap();
 

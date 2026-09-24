@@ -198,18 +198,40 @@ def test_series_to_excel_writes_a_named_column(tmp_path):
     assert _as_lists(fpd.read_excel(str(path))) == {"v": [1, 2]}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19: fp-io guesses the "
-    "unnamed first column is an index and drops it; pandas keeps it as 'Unnamed: 0'",
-)
 def test_excel_written_index_reads_back_as_unnamed_column(tmp_path):
-    # pandas 2.2.3: DataFrame(DATA).to_excel(p); list(read_excel(p).columns)
-    # -> ["Unnamed: 0", "i", "f", "s", "b"]
+    # pandas 2.2.3: DataFrame(DATA).to_excel(p); read_excel(p) ->
+    # columns ["Unnamed: 0", "i", "f", "s", "b"], the old index as DATA.
+    # fp-io used to guess the unnamed 0..n column was an index and drop it.
+    # (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
     path = tmp_path / "with_index.xlsx"
     _frame().to_excel(str(path))
-    assert list(fpd.read_excel(str(path)).columns) == ["Unnamed: 0", "i", "f", "s", "b"]
+    back = fpd.read_excel(str(path))
+    assert list(back.columns) == ["Unnamed: 0", "i", "f", "s", "b"]
+    assert back["Unnamed: 0"].tolist() == [0, 1, 2]
+
+
+def test_csv_blank_index_header_reads_as_unnamed(tmp_path):
+    # pandas 2.2.3: DataFrame({'i': [1, 2], 'f': [1.5, None]}).to_csv() is
+    # ',i,f\n0,1,1.5\n1,2,\n' and read_csv of it -> ['Unnamed: 0', 'i', 'f'].
+    path = tmp_path / "pandas_default.csv"
+    path.write_text(",i,f\n0,1,1.5\n1,2,\n")
+    assert list(fpd.read_csv(str(path)).columns) == ["Unnamed: 0", "i", "f"]
+
+
+def test_json_defaults_match_pandas_both_ways(tmp_path):
+    # pandas 2.2.3 defaults: DataFrame.to_json() orient 'columns', Series
+    # 'index'; read_json accepts both its default shape and records.
+    frame = fpd.DataFrame({"i": [1, 2], "f": [1.5, None]})
+    assert frame.to_json() == '{"i":{"0":1,"1":2},"f":{"0":1.5,"1":null}}'
+    assert fpd.Series([1.5, 2.0], name="x").to_json() == '{"0":1.5,"1":2.0}'
+    expected = {"i": [1, 2], "f": [1.5, None]}
+    for name, text in [
+        ("columns.json", '{"i":{"0":1,"1":2},"f":{"0":1.5,"1":null}}'),
+        ("records.json", '[{"i":1,"f":1.5},{"i":2,"f":null}]'),
+    ]:
+        path = tmp_path / name
+        path.write_text(text)
+        assert _as_lists(fpd.read_json(str(path))) == expected, name
 
 
 def _temporal_frame():

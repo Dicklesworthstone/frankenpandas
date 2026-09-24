@@ -43,6 +43,11 @@ categories = ["data-structures", "science"]
 
 [workspace.dependencies]
 arrow = { version = "60.0.0", default-features = false, features = ["prettyprint", "ipc"] }
+# Only to switch on LZ4 decompression inside `arrow`'s IPC reader: pyarrow
+# compresses feather v2 with lz4 by default, so without it every feather file
+# pandas writes fails to read. lz4 pulls lz4_flex (pure Rust); arrow's own
+# `ipc_compression` would also pull zstd (C). (4qg5w.19)
+arrow-ipc = { version = "60.0.0", default-features = false, features = ["lz4"] }
 bumpalo = { version = "3.20.3", features = ["collections"] }
 bytes = "1.12.1"
 calamine = "0.36.1"

@@ -1401,7 +1401,7 @@ fn try_read_csv_with_options_no_na_numeric_fast_path(
     if headers_record.is_empty() {
         return Err(IoError::MissingHeaders);
     }
-    let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
+    let headers: Vec<String> = pandas_header_names(headers_record.iter());
     reject_duplicate_headers(&headers)?;
 
     try_read_csv_str_simple_typed_numeric(input, &headers)
@@ -1514,7 +1514,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     if headers_record.is_empty() {
         return Err(IoError::MissingHeaders);
     }
-    let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
+    let headers: Vec<String> = pandas_header_names(headers_record.iter());
     reject_duplicate_headers(&headers)?;
     let header_count = headers.len();
     // pandas treats a uniformly one-field-wider body as an implicit first
@@ -4686,6 +4686,26 @@ fn parse_scalar_with_options(
     Scalar::Utf8(field.to_owned())
 }
 
+/// Header names as pandas' readers give them: an EMPTY header cell becomes
+/// `Unnamed: {position}` (a whitespace-only one is kept as is). The blank cell
+/// is exactly what `DataFrame.to_csv` / `to_excel` write above an unnamed
+/// index, so every pandas-written file with its index has one. MEASURED,
+/// pandas 2.2.3: `read_csv(",a,\n1,2,3")` -> ['Unnamed: 0', 'a', 'Unnamed: 2'].
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
+fn pandas_header_names<'a>(cells: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    cells
+        .into_iter()
+        .enumerate()
+        .map(|(position, cell)| {
+            if cell.is_empty() {
+                format!("Unnamed: {position}")
+            } else {
+                cell.to_owned()
+            }
+        })
+        .collect()
+}
+
 fn reject_duplicate_headers(headers: &[String]) -> Result<(), IoError> {
     let mut used = BTreeSet::new();
     for name in headers {
@@ -5605,10 +5625,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
 
             let header_count = headers_record.len();
             let row_hint = input.len() / (header_count * 8).max(1);
-            let headers = headers_record
-                .iter()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
+            let headers = pandas_header_names(headers_record.iter());
             let columns: Vec<Vec<Scalar>> = (0..header_count)
                 .map(|_| Vec::with_capacity(row_hint))
                 .collect();
@@ -5626,8 +5643,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
 
             let header_count = first_record.len();
             let row_hint = input.len() / (header_count * 8).max(1);
+            // header=None: pandas labels the columns 0..n-1. (4qg5w.19)
             let headers = (0..header_count)
-                .map(|idx| format!("column_{idx}"))
+                .map(|idx| idx.to_string())
                 .collect::<Vec<_>>();
             let mut columns: Vec<Vec<Scalar>> = (0..header_count)
                 .map(|_| Vec::with_capacity(row_hint))
@@ -10446,35 +10464,19 @@ fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
     }
 }
 
-fn infer_writer_emitted_default_excel_index_col(
-    headers: &[String],
-    header_generated: &[bool],
-    columns: &[Vec<Scalar>],
-    options: &ExcelReadOptions,
-) -> Option<usize> {
-    if !options.has_headers
-        || options.index_col.is_some()
-        || options.usecols.is_some()
-        || options.names.is_some()
-    {
-        return None;
-    }
-
-    if headers.first()?.as_str() != "column_0"
-        || !header_generated.first().copied().unwrap_or(false)
-    {
-        return None;
-    }
-
-    let first_col = columns.first()?;
-    if first_col
-        .iter()
-        .enumerate()
-        .all(|(idx, scalar)| matches!(scalar, Scalar::Int64(value) if *value == idx as i64))
-    {
-        Some(0)
-    } else {
-        None
+/// A header-row cell as pandas names the column: a non-empty string as is, a
+/// number/bool/date by its value (pandas keeps e.g. 2020 as the label; fp
+/// labels are strings, so "2020"), and an empty cell `Unnamed: {position}`.
+/// The flag marks a generated name (no index name when it becomes the index).
+fn excel_header_name(cell: &calamine::Data, position: usize) -> (String, bool) {
+    match excel_cell_to_scalar(cell) {
+        Scalar::Utf8(text) => (text, false),
+        Scalar::Null(_) => (format!("Unnamed: {position}"), true),
+        Scalar::Int64(v) => (v.to_string(), false),
+        Scalar::Float64(v) => (format_pandas_float(v), false),
+        Scalar::Bool(v) => ((if v { "True" } else { "False" }).to_owned(), false),
+        Scalar::Datetime64(ns) => (format_datetime_ns(ns), false),
+        other => (other.to_string(), false),
     }
 }
 
@@ -10508,13 +10510,15 @@ fn parse_excel_rows(
         let (headers, header_generated): (Vec<_>, Vec<_>) = if let Some(names) = provided_names {
             (names, vec![false; header_width])
         } else {
+            // pandas names a blank header cell `Unnamed: {i}` - the cell
+            // to_excel writes above an unnamed index - and keeps numeric
+            // headers as their value. (These were `column_{i}`, and a blank
+            // first header over 0..n was then DROPPED as a guessed index.)
+            // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
             let header_pairs: Vec<(String, bool)> = header_row
                 .iter()
                 .enumerate()
-                .map(|(i, cell)| match cell {
-                    calamine::Data::String(s) if !s.is_empty() => (s.clone(), false),
-                    _ => (format!("column_{i}"), true),
-                })
+                .map(|(i, cell)| excel_header_name(cell, i))
                 .collect();
             header_pairs.into_iter().unzip()
         };
@@ -10525,7 +10529,8 @@ fn parse_excel_rows(
         let (headers, header_generated) = if let Some(names) = provided_names {
             (names, vec![false; ncols])
         } else {
-            let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
+            // header=None: pandas labels the columns 0..n-1.
+            let headers: Vec<String> = (0..ncols).map(|i| i.to_string()).collect();
             let header_generated = vec![true; ncols];
             (headers, header_generated)
         };
@@ -10567,7 +10572,7 @@ fn parse_excel_rows(
         (headers, header_generated, columns)
     };
 
-    // Handle index_col if specified.
+    // Only index_col makes an index; pandas never guesses one.
     let index_col_idx = if let Some(ref idx_name) = options.index_col {
         let pos = headers.iter().position(|h| h == idx_name);
         if pos.is_none() {
@@ -10575,7 +10580,7 @@ fn parse_excel_rows(
         }
         pos
     } else {
-        infer_writer_emitted_default_excel_index_col(&headers, &header_generated, &columns, options)
+        None
     };
 
     let index_name = index_col_idx.and_then(|idx_pos| {
@@ -19232,9 +19237,15 @@ mod tests {
             .into_iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["column_0", "sales"]);
+        // GOLDEN-CHANGE (4qg5w.19): the blank index header reads as
+        // "Unnamed: 0" (pandas: Series(..., name='sales').to_excel(p);
+        // read_excel(p).columns -> ['Unnamed: 0', 'sales']), not "column_0".
+        assert_eq!(names, vec!["Unnamed: 0", "sales"]);
         assert_eq!(
-            roundtrip.column("column_0").expect("index column").values(),
+            roundtrip
+                .column("Unnamed: 0")
+                .expect("index column")
+                .values(),
             &[Scalar::Utf8("r1".into()), Scalar::Utf8("r2".into())]
         );
         assert_eq!(
@@ -22539,22 +22550,52 @@ mod tests {
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
         assert_eq!(frame.index().len(), 2);
-        assert_eq!(
-            frame.column("column_0").unwrap().values()[0],
-            Scalar::Int64(1)
-        );
-        assert_eq!(
-            frame.column("column_1").unwrap().values()[0],
-            Scalar::Int64(2)
-        );
-        assert_eq!(
-            frame.column("column_0").unwrap().values()[1],
-            Scalar::Int64(3)
-        );
-        assert_eq!(
-            frame.column("column_1").unwrap().values()[1],
-            Scalar::Int64(4)
-        );
+        // GOLDEN-CHANGE (4qg5w.19): "0"/"1", not "column_0"/"column_1" -
+        // pandas 2.2.3 read_csv(header=None) labels the columns 0 and 1.
+        assert_eq!(frame.column_names(), vec!["0", "1"]);
+        assert_eq!(frame.column("0").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("1").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(frame.column("0").unwrap().values()[1], Scalar::Int64(3));
+        assert_eq!(frame.column("1").unwrap().values()[1], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn csv_blank_headers_are_named_unnamed_like_pandas() {
+        // pandas 2.2.3: read_csv(",a,\n1,2,3") -> ['Unnamed: 0', 'a',
+        // 'Unnamed: 2']; a whitespace-only header is kept:
+        // read_csv(",a, ,b\n1,2,3,4") -> ['Unnamed: 0', 'a', ' ', 'b'].
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
+        for (input, want) in [
+            (",a,\n1,2,3\n", vec!["Unnamed: 0", "a", "Unnamed: 2"]),
+            (",a, ,b\n1,2,3,4\n", vec!["Unnamed: 0", "a", " ", "b"]),
+        ] {
+            let default = read_csv_str(input).expect("default path");
+            assert_eq!(default.column_names(), want, "read_csv_str {input:?}");
+            let with_options =
+                read_csv_with_options(input, &CsvReadOptions::default()).expect("options path");
+            assert_eq!(with_options.column_names(), want, "options {input:?}");
+        }
+    }
+
+    #[test]
+    fn excel_numeric_header_cells_keep_their_value_as_the_name() {
+        // pandas keeps a numeric header cell as the label (2020 -> 2020); fp
+        // labels are strings, so "2020". These used to become "column_{i}".
+        let rows = vec![
+            vec![
+                calamine::Data::Float(2020.0),
+                calamine::Data::String("x".to_owned()),
+                calamine::Data::Float(1.5),
+            ],
+            vec![
+                calamine::Data::Int(1),
+                calamine::Data::Int(2),
+                calamine::Data::Int(3),
+            ],
+        ];
+        let frame = super::parse_excel_rows(rows, &super::ExcelReadOptions::default())
+            .expect("parse excel rows");
+        assert_eq!(frame.column_names(), vec!["2020", "x", "1.5"]);
     }
 
     #[test]
@@ -22573,22 +22614,24 @@ mod tests {
     #[test]
     fn csv_without_headers_supports_generated_index_col_name() {
         let input = "10,alpha\n20,beta\n";
+        // GOLDEN-CHANGE (4qg5w.19): the header-less names are "0"/"1" as in
+        // pandas (read_csv(header=None, index_col=0) -> index 10/20, column 1).
         let opts = CsvReadOptions {
             has_headers: false,
-            index_col: Some("column_0".into()),
+            index_col: Some("0".into()),
             ..Default::default()
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
         assert_eq!(frame.index().len(), 2);
         assert_eq!(frame.index().labels()[0], IndexLabel::Int64(10));
         assert_eq!(frame.index().labels()[1], IndexLabel::Int64(20));
-        assert!(frame.column("column_0").is_none());
+        assert!(frame.column("0").is_none());
         assert_eq!(
-            frame.column("column_1").unwrap().values()[0],
+            frame.column("1").unwrap().values()[0],
             Scalar::Utf8("alpha".into())
         );
         assert_eq!(
-            frame.column("column_1").unwrap().values()[1],
+            frame.column("1").unwrap().values()[1],
             Scalar::Utf8("beta".into())
         );
     }
@@ -24902,7 +24945,9 @@ mod tests {
         let frame2 = super::read_excel_bytes(
             &bytes,
             &super::ExcelReadOptions {
-                index_col: Some("column_0".into()),
+                // GOLDEN-CHANGE (4qg5w.19): the blank index header is
+                // "Unnamed: 0", as pandas names it (was "column_0").
+                index_col: Some("Unnamed: 0".into()),
                 ..Default::default()
             },
         )
@@ -24949,7 +24994,9 @@ mod tests {
         let frame2 = super::read_excel(
             &path,
             &super::ExcelReadOptions {
-                index_col: Some("column_0".into()),
+                // GOLDEN-CHANGE (4qg5w.19): the blank index header is
+                // "Unnamed: 0", as pandas names it (was "column_0").
+                index_col: Some("Unnamed: 0".into()),
                 ..Default::default()
             },
         )
@@ -24994,7 +25041,9 @@ mod tests {
         let frame2 = super::read_excel_bytes(
             &bytes,
             &super::ExcelReadOptions {
-                index_col: Some("column_0".into()),
+                // GOLDEN-CHANGE (4qg5w.19): the blank index header is
+                // "Unnamed: 0", as pandas names it (was "column_0").
+                index_col: Some("Unnamed: 0".into()),
                 ..Default::default()
             },
         )
@@ -25037,7 +25086,9 @@ mod tests {
         let frame2 = super::read_excel_bytes(
             &bytes,
             &super::ExcelReadOptions {
-                index_col: Some("column_0".into()),
+                // GOLDEN-CHANGE (4qg5w.19): the blank index header is
+                // "Unnamed: 0", as pandas names it (was "column_0").
+                index_col: Some("Unnamed: 0".into()),
                 ..Default::default()
             },
         )
@@ -25085,9 +25136,10 @@ mod tests {
         .expect("read with skip");
 
         // Skipped the header row, so first data row becomes first row.
-        // With has_headers=false, column names are auto-generated.
+        // With has_headers=false, columns are named 0..n-1 as in pandas
+        // (GOLDEN-CHANGE 4qg5w.19: was "column_0").
         assert_eq!(frame2.index().len(), 2);
-        assert!(frame2.column("column_0").is_some());
+        assert_eq!(frame2.column_names(), vec!["0", "1"]);
     }
 
     #[test]
@@ -25263,17 +25315,36 @@ mod tests {
     }
 
     #[test]
-    fn excel_default_read_promotes_writer_range_index_back_to_index() {
+    fn excel_default_read_keeps_the_unnamed_index_column_as_data_like_pandas() {
+        // GOLDEN-CHANGE (4qg5w.19). This test used to pin a heuristic that
+        // treated a blank first header over 0..n as a writer-emitted index and
+        // DROPPED the column. pandas never guesses: DataFrame(...).to_excel(p);
+        // read_excel(p).columns -> ['Unnamed: 0', ...] with the 0..n values as
+        // DATA and a fresh RangeIndex. A real data column that happens to hold
+        // 0..n under a blank header must survive, so the old behaviour fails
+        // this test.
         let frame = make_test_dataframe();
         let bytes = super::write_excel_bytes(&frame).expect("write excel");
 
         let frame2 = super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default())
             .expect("read excel");
 
-        assert_eq!(frame2.index().labels(), frame.index().labels());
-        assert_eq!(frame2.index().name(), None);
-        assert_eq!(frame2.column_names(), vec!["ints", "floats", "names"],);
-        assert!(frame2.column("column_0").is_none());
+        assert_eq!(
+            frame2.column_names(),
+            vec!["Unnamed: 0", "ints", "floats", "names"]
+        );
+        assert_eq!(
+            frame2.column("Unnamed: 0").expect("kept as data").values(),
+            &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            frame2.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2)
+            ]
+        );
     }
 
     #[test]
@@ -25294,9 +25365,10 @@ mod tests {
             frame.index().labels(),
             &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
         );
-        assert_eq!(frame.column_names(), vec!["column_0", "value"]);
+        // GOLDEN-CHANGE (4qg5w.19): pandas names the blank header "Unnamed: 0".
+        assert_eq!(frame.column_names(), vec!["Unnamed: 0", "value"]);
         assert_eq!(
-            frame.column("column_0").unwrap().values(),
+            frame.column("Unnamed: 0").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(20)],
         );
     }
@@ -28823,6 +28895,60 @@ mod tests {
     }
 
     #[test]
+    fn feather_reader_decodes_lz4_compressed_ipc_like_pyarrow_writes() {
+        // pyarrow's feather v2 writer compresses with LZ4 by default, so every
+        // feather file pandas writes needs this; it used to fail with "lz4 IPC
+        // decompression requires the lz4 feature".
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
+        use arrow::{
+            array::{Float64Array, StringArray},
+            datatypes::{Field, Schema},
+            ipc::{
+                CompressionType,
+                writer::{FileWriter, IpcWriteOptions},
+            },
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, true),
+            Field::new("s", ArrowDataType::Utf8, true),
+        ]));
+        let batch = arrow::array::RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![Some(1.5), None, Some(-2.0)])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])),
+            ],
+        )
+        .expect("batch");
+        let options = IpcWriteOptions::default()
+            .try_with_compression(Some(CompressionType::LZ4_FRAME))
+            .expect("lz4 option");
+        let mut bytes = Vec::new();
+        {
+            let mut writer =
+                FileWriter::try_new_with_options(&mut bytes, &schema, options).expect("writer");
+            writer.write(&batch).expect("write");
+            writer.finish().expect("finish");
+        }
+
+        let frame = read_feather_bytes(&bytes).expect("lz4 feather must read");
+        assert_eq!(
+            frame.column("x").expect("x").values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-2.0)
+            ]
+        );
+        assert_eq!(
+            frame.column("s").expect("s").values()[0],
+            Scalar::Utf8("a".to_owned())
+        );
+        assert!(frame.column("s").expect("s").values()[2].is_missing());
+    }
+
+    #[test]
     fn arrow_temporal_columns_round_trip_as_temporal_types() {
         // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20: Datetime64 and
         // Timedelta64 were written as plain Int64 and Timestamps were read back
@@ -29909,16 +30035,18 @@ mod tests {
     #[test]
     fn csv_parse_dates_deferred_mask_tracks_usecols_and_headerless() {
         let input = "2024-01-15 10:30:00,10\n2024-01-16 11:45:30,20\n";
+        // GOLDEN-CHANGE (4qg5w.19): header-less columns are "0"/"1" (pandas'
+        // 0/1), not "column_0"/"column_1".
         let opts = CsvReadOptions {
             has_headers: false,
-            parse_dates: Some(vec!["column_0".to_owned()]),
-            usecols: Some(vec!["column_0".to_owned()]),
+            parse_dates: Some(vec!["0".to_owned()]),
+            usecols: Some(vec!["0".to_owned()]),
             ..Default::default()
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
-        assert_eq!(frame.column_names(), vec!["column_0"]);
+        assert_eq!(frame.column_names(), vec!["0"]);
         assert_eq!(
-            frame.column("column_0").unwrap().values(),
+            frame.column("0").unwrap().values(),
             &[
                 Scalar::Datetime64(1_705_314_600_000_000_000),
                 Scalar::Datetime64(1_705_405_530_000_000_000),
