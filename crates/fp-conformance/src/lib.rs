@@ -27251,7 +27251,17 @@ mod tests {
         let pack =
             build_compat_closure_final_evidence_pack(&cfg, &reports, &[differential], &[fault])
                 .expect("build final evidence");
-        let paths = write_compat_closure_final_evidence_pack(&cfg, &pack).expect("write final");
+        // Write under a temp root, not the checkout: the pack carries a fresh
+        // timestamp and signature on every run, so writing the tracked
+        // artifacts/phase2c/compat_closure_* files dirtied the shared checkout on
+        // every `cargo test -p fp-conformance` (and peers then committed the churn,
+        // e.g. 3ab22efec). br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.5.
+        let out = tempfile::tempdir().expect("tmp");
+        let mut out_cfg = cfg.clone();
+        out_cfg.repo_root = out.path().to_path_buf();
+        let paths =
+            write_compat_closure_final_evidence_pack(&out_cfg, &pack).expect("write final");
+        assert!(paths.evidence_pack_path.starts_with(out.path()));
 
         assert!(paths.evidence_pack_path.exists());
         assert!(paths.migration_manifest_path.exists());
