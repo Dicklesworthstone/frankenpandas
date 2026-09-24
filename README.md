@@ -170,7 +170,7 @@ frankenpandas/
 │   ├── fp-bench/         # FrankenPandas arm of the vs-pandas timing harness (more than 4,500 lines)
 │   ├── fp-runtime/       # Strict/Hardened policy, EvidenceLedger, ConformalGuard, RaptorQ (more than 3,500 lines)
 │   ├── fp-frankentui/    # Dashboard snapshot value types + E2E scenario harness; the TUI itself is not in-tree (more than 2,700 lines)
-│   └── fp-python/        # PyO3 bindings: pandas-named surface (partial behavior), native IO, stubs, wheel CI (more than 32,000 lines)
+│   └── fp-python/        # PyO3 bindings: pandas-named surface (partial behavior), native IO, stubs, wheel CI (more than 40,000 lines)
 ├── artifacts/perf/       # Optimization round baselines and proofs
 ├── artifacts/phase2c/    # Conformance packet artifacts and drift history
 ├── artifacts/bench/      # vs-pandas benchmark rows (schema v4: ELF sha, A/A null, balanced square)

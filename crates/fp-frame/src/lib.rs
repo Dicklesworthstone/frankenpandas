@@ -21680,7 +21680,7 @@ impl Series {
                     _ => fill.clone(),
                 })
                 .collect();
-            return self.with_values_preserving_index(values);
+            return self.with_values_preserving_index(self.int_gaps_as_float(values));
         }
 
         let plan = align(&self.index, &cond.index, AlignMode::Left);
@@ -21702,7 +21702,22 @@ impl Series {
             .collect();
 
         // Per br-frankenpandas-bzcjb: pandas Series.where preserves index name.
-        self.with_labels_and_values_preserving_name(plan.union_index.labels().to_vec(), values)
+        self.with_labels_and_values_preserving_name(
+            plan.union_index.labels().to_vec(),
+            self.int_gaps_as_float(values),
+        )
+    }
+
+    /// An int64 column's values after a selection that may have put a missing
+    /// value among them: numpy int64 cannot hold the NaN, so pandas returns
+    /// float64 (`s.mask(s > 5)` / `s.where(...)` on ints; they stayed int64
+    /// holding a NaN; br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
+    fn int_gaps_as_float(&self, values: Vec<Scalar>) -> Vec<Scalar> {
+        if self.column.dtype() == DType::Int64 {
+            int_bins_with_gaps_as_float(values)
+        } else {
+            values
+        }
     }
 
     /// Pandas-named alias for [`Self::where_cond`].
@@ -22100,7 +22115,7 @@ impl Series {
                     _ => val.clone(),
                 })
                 .collect();
-            return self.with_values_preserving_index(values);
+            return self.with_values_preserving_index(self.int_gaps_as_float(values));
         }
 
         let plan = align(&self.index, &cond.index, AlignMode::Left);
@@ -22122,7 +22137,10 @@ impl Series {
             .collect();
 
         // Per br-frankenpandas-xfdn2: pandas Series.mask preserves index name.
-        self.with_labels_and_values_preserving_name(plan.union_index.labels().to_vec(), values)
+        self.with_labels_and_values_preserving_name(
+            plan.union_index.labels().to_vec(),
+            self.int_gaps_as_float(values),
+        )
     }
 
     /// Test whether each element is contained in a set of values.
@@ -62680,14 +62698,6 @@ impl LazyDataFrameColumns {
         self.materialized().iter_positional()
     }
 
-    fn name_at(&self, position: usize) -> Option<&str> {
-        self.materialized().name_at(position)
-    }
-
-    fn ordered_names(&self) -> impl ExactSizeIterator<Item = &String> + '_ {
-        self.materialized().ordered_names()
-    }
-
     fn len(&self) -> usize {
         self.logical_len()
     }
@@ -69945,6 +69955,27 @@ impl DataFrame {
         self.column_multiindex.as_ref()
     }
 
+    /// This frame with `multiindex` as its column axis (None: the flat
+    /// names), as pandas' `df.columns = MultiIndex` sets it; the storage keys
+    /// stay as they are, so its width must match the column count.
+    pub fn with_columns_multiindex(
+        &self,
+        multiindex: Option<fp_index::MultiIndex>,
+    ) -> Result<Self, FrameError> {
+        if let Some(multiindex) = &multiindex
+            && multiindex.len() != self.column_order.len()
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Length mismatch: Expected axis has {} elements, new values have {} elements",
+                self.column_order.len(),
+                multiindex.len()
+            )));
+        }
+        let mut out = self.clone();
+        out.column_multiindex = multiindex;
+        Ok(out)
+    }
+
     /// Return the flat storage column names in observable DataFrame order.
     ///
     /// For the pandas-visible logical column index, including MultiIndex
@@ -70001,15 +70032,38 @@ impl DataFrame {
                 return Some(column);
             }
             if let LazyDataFrameColumns::Eager(store) = &self.columns {
-                return store.column_at(position);
+                return store.column_at(self.store_position(store, position)?);
             }
             let name = self.column_order.name_at(position)?;
             self.columns.get_one(name.as_str())
         }
         #[cfg(not(feature = "lazy-transpose-view"))]
         {
-            self.columns.column_at(position)
+            self.columns
+                .column_at(self.store_position(&self.columns, position)?)
         }
+    }
+
+    /// Where `store` keeps the column at position `position` of the frame's
+    /// column order.
+    ///
+    /// The store keeps the frame's order when the frame comes through
+    /// `new_with_axes`, which reorders it, but a frame assembled field by
+    /// field from a name-sorted `BTreeMap` keeps the MAP's order - and reading
+    /// that store by position gave `groupby(...)[['z', 'a']].cumsum().iloc[:, 0]`
+    /// the `a` values and paired `agg({'x': ['sum', 'max']})`'s `x_sum` label
+    /// with the max values. So the label decides: the store's own position
+    /// when it carries that label (O(1), the usual case), else the same
+    /// occurrence of the label, which keeps duplicated labels apart.
+    fn store_position(&self, store: &ColumnStore, position: usize) -> Option<usize> {
+        let name = self.column_name_at(position)?;
+        if store.name_at(position) == Some(name.as_str()) {
+            return Some(position);
+        }
+        let occurrence = (0..position)
+            .filter(|&earlier| self.column_name_at(earlier).as_deref() == Some(name.as_str()))
+            .count();
+        store.positions_of(&name).get(occurrence).copied()
     }
 
     /// O(1) positional column-name access, matching `df.columns[i]` in
@@ -70281,13 +70335,16 @@ impl DataFrame {
         // column order.
         let filled = self.par_map_column_positions_min(16_384, |pos| {
             Ok(self
-                .columns
                 .column_at(pos)
                 .expect("column in bounds")
                 .fillna(fill_value)?)
         })?;
-        let pairs: Vec<(String, Column)> =
-            self.columns.ordered_names().cloned().zip(filled).collect();
+        let pairs: Vec<(String, Column)> = self
+            .column_names()
+            .into_iter()
+            .cloned()
+            .zip(filled)
+            .collect();
         let column_order = pairs
             .iter()
             .map(|(name, _)| name.clone())
@@ -72013,14 +72070,10 @@ impl DataFrame {
                 };
                 columns.insert(column_name.clone(), level_column);
             }
+            let column_multiindex = self.column_multiindex_with_leading(&column_order)?;
             column_order.extend(self.column_order.iter().cloned());
-            let mut out = Self::new_with_axes(
-                index,
-                None,
-                columns,
-                column_order,
-                self.column_multiindex.clone(),
-            )?;
+            let mut out =
+                Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
             out.allows_duplicate_labels = self.allows_duplicate_labels;
             return Ok(out);
         }
@@ -72037,19 +72090,41 @@ impl DataFrame {
 
         let mut columns = self.columns.clone();
         columns.insert(index_column_name.clone(), index_column);
+        let column_multiindex =
+            self.column_multiindex_with_leading(std::slice::from_ref(&index_column_name))?;
         let mut column_order = Vec::with_capacity(self.column_order.len() + 1);
         column_order.push(index_column_name);
         column_order.extend(self.column_order.iter().cloned());
 
-        let mut out = Self::new_with_axes(
-            index,
-            None,
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
+        let mut out = Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
         Ok(out)
+    }
+
+    /// The column MultiIndex with `names` in front, each as `(name, '', ...)`,
+    /// pandas' spelling for a column joining a multi-level column axis
+    /// (`reset_index` of an `agg({'x': ['sum', 'max']})` result gives
+    /// `('g', '')`; the axis was passed through one entry short, and
+    /// `new_with_axes` refused the frame).
+    fn column_multiindex_with_leading(
+        &self,
+        names: &[String],
+    ) -> Result<Option<fp_index::MultiIndex>, FrameError> {
+        let Some(multiindex) = &self.column_multiindex else {
+            return Ok(None);
+        };
+        let mut arrays = Vec::with_capacity(multiindex.nlevels());
+        for level in 0..multiindex.nlevels() {
+            let mut labels: Vec<IndexLabel> = names
+                .iter()
+                .map(|name| IndexLabel::from(if level == 0 { name.as_str() } else { "" }))
+                .collect();
+            labels.extend(multiindex.get_level_values(level)?.labels().iter().cloned());
+            arrays.push(labels);
+        }
+        Ok(Some(
+            fp_index::MultiIndex::from_arrays(arrays)?.set_names(multiindex.names().to_vec()),
+        ))
     }
 
     fn rebuild_with_row_multiindex(
@@ -72968,6 +73043,18 @@ impl DataFrame {
         };
         let positions: Vec<usize> = (start_pos..=end_pos).collect();
         self.take_rows_by_positions(&positions)
+    }
+
+    /// The row positions `.loc[start:stop]` selects, resolved as
+    /// [`Self::loc_slice`] resolves them - for callers that write through
+    /// them (`df.loc[a:b, col] = value`).
+    pub fn loc_slice_positions(
+        &self,
+        start: Option<&IndexLabel>,
+        stop: Option<&IndexLabel>,
+    ) -> Result<Vec<usize>, FrameError> {
+        Ok(loc_slice_positions(self.index.labels(), start, stop)?
+            .map_or_else(Vec::new, |(first, last)| (first..=last).collect()))
     }
 
     /// Position-based slice row selection (exclusive end).
@@ -80185,6 +80272,15 @@ impl DataFrame {
         Ok(column.values()[row_idx].clone())
     }
 
+    /// This frame with `index` as its row axis, labels and name both, as
+    /// pandas' `df.index = new_index` replaces it (`set_axis` keeps the old
+    /// axis name).
+    pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
+        let mut out = self.set_axis(index.labels().to_vec(), 0)?;
+        out.index = out.index.rename_index(index.name());
+        Ok(out)
+    }
+
     /// Replace the row index or column names without touching data.
     ///
     /// Matches `pd.DataFrame.set_axis(labels, axis=0|1)`:
@@ -85450,7 +85546,9 @@ impl DataFrame {
                 (seen.len() + usize::from(missing_seen)) as i64,
             ))
         })?;
-        Series::from_values("nunique".to_string(), labels, values)
+        // Unnamed, as pandas' DataFrame.nunique() (it was named "nunique";
+        // fvsao.13).
+        Series::from_values(String::new(), labels, values)
     }
 
     /// Count unique non-null values with axis parameter.
@@ -88473,10 +88571,10 @@ impl DataFrame {
 
     /// Internal: extract a column at a positional index as a Series.
     fn column_at_as_series(&self, pos: usize) -> Result<Series, FrameError> {
-        let name = self.columns.name_at(pos).ok_or_else(|| {
+        let name = self.column_name_at(pos).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column position {pos} out of range"))
         })?;
-        let col = self.columns.column_at(pos).ok_or_else(|| {
+        let col = self.column_at(pos).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column position {pos} out of range"))
         })?;
         Series::new(name.to_string(), self.series_index(), col.clone())
@@ -88849,7 +88947,7 @@ impl DataFrame {
         // Non-Float64 columns delegate to Series::diff (Timedelta/Bool/Int64 dtype
         // rules preserved).
         let transformed = self.par_map_column_positions_min(16_384, |pos| {
-            let col = self.columns.column_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
             if col.dtype() == DType::Float64
                 && let Some((data, validity)) = col.as_f64_slice_with_validity()
             {
@@ -88893,8 +88991,8 @@ impl DataFrame {
             }
         })?;
         let pairs: Vec<(String, Column)> = self
-            .columns
-            .ordered_names()
+            .column_names()
+            .into_iter()
             .cloned()
             .zip(transformed)
             .collect();
@@ -89151,7 +89249,7 @@ impl DataFrame {
         // the exact `apply_per_column` gate (numeric → Series shift, non-numeric →
         // clone passthrough).
         let transformed = self.par_map_column_positions_min(131_072, |pos| {
-            let col = self.columns.column_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
             if col.dtype() == DType::Float64
                 && let Some((data, validity)) = col.as_f64_slice_with_validity()
             {
@@ -89197,11 +89295,12 @@ impl DataFrame {
     }
 
     /// Rebuild this frame (same index, axes and flags) from one replacement
-    /// column per existing column, in stored column order.
+    /// column per existing column, in the frame's column order (the order
+    /// `column_at` reads).
     fn with_columns_in_position_order(&self, transformed: Vec<Column>) -> Result<Self, FrameError> {
         let pairs: Vec<(String, Column)> = self
-            .columns
-            .ordered_names()
+            .column_names()
+            .into_iter()
             .cloned()
             .zip(transformed)
             .collect();
@@ -93163,8 +93262,12 @@ impl DataFrame {
             });
         }
 
+        // The store may not keep the frame's order (see `store_position`).
+        let stored = self.store_position(self.columns(), loc).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("isetitem loc {loc} has no stored column"))
+        })?;
         let mut columns = self.columns.clone();
-        if let Some(c) = columns.column_at_mut(loc) {
+        if let Some(c) = columns.column_at_mut(stored) {
             *c = column;
         }
         Ok(Self {
@@ -122196,10 +122299,13 @@ mod tests {
         )
         .unwrap();
 
+        // GOLDEN-CHANGE (fvsao.13): pandas 2.2.3 returns float64 once a NaN
+        // lands in an int64 Series - s.where(cond) -> [1.0, nan, 3.0]; this
+        // pinned the kept values as Int64.
         let result = s.where_cond(&cond, None).unwrap();
-        assert_eq!(result.values()[0], Scalar::Int64(1));
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
         assert!(result.values()[1].is_missing());
-        assert_eq!(result.values()[2], Scalar::Int64(3));
+        assert_eq!(result.values()[2], Scalar::Float64(3.0));
     }
 
     #[test]
@@ -122218,9 +122324,11 @@ mod tests {
         )
         .unwrap();
 
+        // GOLDEN-CHANGE (fvsao.13): float64, as pandas 2.2.3 -
+        // [10.0, nan] (an absent cond label is False).
         let result = s.where_cond(&cond, None).unwrap();
         assert_eq!(result.index().labels(), s.index().labels());
-        assert_eq!(result.values()[0], Scalar::Int64(10));
+        assert_eq!(result.values()[0], Scalar::Float64(10.0));
         assert!(result.values()[1].is_missing());
     }
 
@@ -122261,9 +122369,10 @@ mod tests {
         )
         .unwrap();
 
+        // GOLDEN-CHANGE (fvsao.13): float64 once the NaN is in, as pandas.
         let result = s.where_cond(&cond, None).unwrap();
         assert!(result.values()[0].is_missing());
-        assert_eq!(result.values()[1], Scalar::Int64(2));
+        assert_eq!(result.values()[1], Scalar::Float64(2.0));
     }
 
     // --- Series::mask tests ---
@@ -122284,9 +122393,11 @@ mod tests {
         )
         .unwrap();
 
+        // GOLDEN-CHANGE (fvsao.13): pandas 2.2.3 s.mask(cond) on int64 ->
+        // float64 [nan, 2.0, nan]; this pinned the kept value as Int64.
         let result = s.mask(&cond, None).unwrap();
         assert!(result.values()[0].is_missing()); // True -> replaced
-        assert_eq!(result.values()[1], Scalar::Int64(2)); // False -> kept
+        assert_eq!(result.values()[1], Scalar::Float64(2.0)); // False -> kept
         assert!(result.values()[2].is_missing()); // True -> replaced
     }
 
@@ -203156,6 +203267,154 @@ mod tests {
 
     fn text_scalar(text: &str) -> Scalar {
         Scalar::Utf8(text.to_owned())
+    }
+
+    #[test]
+    fn positional_reads_follow_the_column_order_not_the_store_fvsao13() {
+        // A frame assembled field by field from a name-sorted map, as the
+        // groupby / agg builders do: the store holds [a, z], the frame's
+        // order is [z, a].
+        let z = [1.0, 2.0, 3.0];
+        let a = [10.0, 20.0, 30.0];
+        let misaligned = DataFrame {
+            index: Index::new((0..3).map(IndexLabel::Int64).collect()),
+            row_multiindex: None,
+            columns: BTreeMap::from([
+                ("z".to_owned(), Column::from_f64_values(z.to_vec())),
+                ("a".to_owned(), Column::from_f64_values(a.to_vec())),
+            ])
+            .into(),
+            column_order: vec!["z".to_owned(), "a".to_owned()].into(),
+            column_multiindex: None,
+            allows_duplicate_labels: true,
+        };
+        // The premise: the store's first column is `a`.
+        assert_eq!(misaligned.columns().name_at(0), Some("a"));
+        let floats = |values: &[f64]| values.iter().map(|&v| Scalar::Float64(v)).collect::<Vec<_>>();
+        assert_eq!(misaligned.column_at(0).unwrap().values(), floats(&z));
+        let first = misaligned.take_columns(&[0]).unwrap();
+        assert_eq!(first.column_names(), vec!["z"]);
+        assert_eq!(first.columns()["z"].values(), floats(&z));
+        let renamed = misaligned
+            .set_axis(vec![IndexLabel::from("Z"), IndexLabel::from("A")], 1)
+            .unwrap();
+        assert_eq!(renamed.columns()["Z"].values(), floats(&z));
+        assert_eq!(renamed.columns()["A"].values(), floats(&a));
+        // Column-parallel ops keep the frame's order.
+        assert_eq!(
+            misaligned.fillna(&Scalar::Float64(0.0)).unwrap().column_names(),
+            vec!["z", "a"]
+        );
+        let diffed = misaligned.diff(1).unwrap();
+        assert_eq!(diffed.column_names(), vec!["z", "a"]);
+        assert_eq!(diffed.columns()["z"].values()[1], Scalar::Float64(1.0));
+        assert_eq!(misaligned.shift(1).unwrap().column_names(), vec!["z", "a"]);
+        // isetitem(0) replaces `z`, not the store's first column.
+        let replaced = misaligned
+            .isetitem(0, Column::from_f64_values(vec![7.0; 3]))
+            .unwrap();
+        assert_eq!(replaced.columns()["z"].values(), floats(&[7.0; 3]));
+        assert_eq!(replaced.columns()["a"].values(), floats(&a));
+
+        // The user-visible case: agg({'x': ['sum', 'max']}) over int64, then
+        // flattening its columns (pandas: x_sum [4, 2], x_max [3, 2]).
+        let frame = DataFrame::from_dict(
+            &["g", "x"],
+            vec![
+                ("g", ["a", "b", "a"].map(text_scalar).to_vec()),
+                ("x", [1_i64, 2, 3].map(Scalar::Int64).to_vec()),
+            ],
+        )
+        .unwrap();
+        let aggregated = frame
+            .groupby(&["g"])
+            .unwrap()
+            .agg_dict_list(&[("x".to_owned(), vec!["sum".to_owned(), "max".to_owned()])])
+            .unwrap();
+        assert_eq!(aggregated.columns_multiindex().map(|m| m.len()), Some(2));
+        // reset_index puts the key in front as ('g', ''), as pandas; it was
+        // refused (the axis passed through one entry short).
+        let reset = aggregated.reset_index(false).unwrap();
+        assert_eq!(reset.column_names(), vec!["g", "x_sum", "x_max"]);
+        let reset_axis = reset.columns_multiindex().unwrap();
+        assert_eq!(
+            reset_axis.get_tuple(0).unwrap(),
+            vec![&IndexLabel::from("g"), &IndexLabel::from("")]
+        );
+        assert_eq!(
+            reset_axis.get_tuple(2).unwrap(),
+            vec![&IndexLabel::from("x"), &IndexLabel::from("max")]
+        );
+        let flat = aggregated
+            .set_axis(vec![IndexLabel::from("x_sum"), IndexLabel::from("x_max")], 1)
+            .unwrap();
+        assert!(flat.columns_multiindex().is_none());
+        assert_eq!(flat.columns()["x_sum"].values(), [4_i64, 2].map(Scalar::Int64));
+        assert_eq!(flat.columns()["x_max"].values(), [3_i64, 2].map(Scalar::Int64));
+
+        // df.columns = MultiIndex / df.index = Index: NEGATIVE, a wrong width
+        // or length is refused.
+        let two_level = aggregated.columns_multiindex().unwrap().clone();
+        assert!(
+            flat.with_columns_multiindex(Some(two_level.clone()))
+                .unwrap()
+                .columns_multiindex()
+                .is_some()
+        );
+        assert!(
+            flat.take_columns(&[0])
+                .unwrap()
+                .with_columns_multiindex(Some(two_level))
+                .is_err()
+        );
+        let keyed = frame
+            .with_index(Index::new((5..8).map(IndexLabel::Int64).collect()).set_name("k"))
+            .unwrap();
+        assert_eq!(keyed.index().name(), Some("k"));
+        assert_eq!(keyed.index().labels()[0], IndexLabel::Int64(5));
+        assert!(
+            frame
+                .with_index(Index::new(vec![IndexLabel::Int64(1)]))
+                .is_err()
+        );
+
+        // s.mask(s > 5) on int64 puts a NaN in: float64, as pandas; NEGATIVE:
+        // a mask that hides nothing keeps int64.
+        let ints = Series::from_values(
+            "v",
+            (0..3).map(IndexLabel::Int64).collect(),
+            [1_i64, 7, 3].map(Scalar::Int64).to_vec(),
+        )
+        .unwrap();
+        let masked = ints
+            .mask(&ints.gt_scalar(&Scalar::Int64(5)).unwrap(), None)
+            .unwrap();
+        assert_eq!(masked.column().dtype(), DType::Float64);
+        assert_eq!(masked.values()[0], Scalar::Float64(1.0));
+        assert!(masked.values()[1].is_missing());
+        let untouched = ints
+            .mask(&ints.gt_scalar(&Scalar::Int64(50)).unwrap(), None)
+            .unwrap();
+        assert_eq!(untouched.column().dtype(), DType::Int64);
+        let kept = ints
+            .where_cond(&ints.gt_scalar(&Scalar::Int64(5)).unwrap(), None)
+            .unwrap();
+        assert_eq!(kept.column().dtype(), DType::Float64);
+
+        // DataFrame.nunique() is unnamed in pandas.
+        assert_eq!(frame.nunique().unwrap().name(), "");
+
+        // .loc[2:4] on a monotonic int index takes the rows between.
+        let sparse = frame
+            .with_index(Index::new([1_i64, 3, 5].map(IndexLabel::Int64).to_vec()))
+            .unwrap();
+        assert_eq!(
+            sparse
+                .loc_slice_positions(Some(&IndexLabel::Int64(2)), Some(&IndexLabel::Int64(4)))
+                .unwrap(),
+            vec![1]
+        );
+        assert_eq!(sparse.loc_slice_positions(None, None).unwrap(), vec![0, 1, 2]);
     }
 
     #[test]

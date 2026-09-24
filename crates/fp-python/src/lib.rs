@@ -2050,6 +2050,54 @@ fn extract_index_labels(
     }
 }
 
+/// A FrameError from replacing an axis, in pandas' words for a wrong length.
+fn axis_length_error_to_py(err: FrameError) -> PyErr {
+    match err {
+        FrameError::LengthMismatch {
+            index_len,
+            column_len,
+        } => PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Length mismatch: Expected axis has {column_len} elements, new values have \
+             {index_len} elements"
+        )),
+        other => frame_error_to_py(other),
+    }
+}
+
+/// The row axis `obj.index = value` sets, as pandas builds it: an Index
+/// keeps its labels and name, a Series gives its values and name, a list or
+/// other iterable its items, unnamed.
+fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
+    if value.is_instance_of::<pyo3::types::PyString>() {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Index(...) must be called with a collection of some kind, {} was passed",
+            value.repr()?
+        )));
+    }
+    if value.extract::<PyRef<'_, PyMultiIndex>>().is_ok() {
+        return Err(not_implemented(
+            "assigning a MultiIndex as the row axis (use set_index with several columns)",
+        ));
+    }
+    if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
+        let labels = series
+            .inner
+            .column()
+            .values()
+            .iter()
+            .map(scalar_to_index_label_converter)
+            .collect();
+        let name = series.inner.name();
+        return Ok(Index::new(labels).rename_index((!name.is_empty()).then_some(name)));
+    }
+    let name = value
+        .getattr("name")
+        .ok()
+        .and_then(|name| name.extract::<String>().ok());
+    let labels = extract_index_labels(Some(value), 0)?;
+    Ok(Index::new(labels).rename_index(name.as_deref()))
+}
+
 /// Extract column names from an optional Python object (Index, list, tuple, sequence, or None).
 fn extract_columns_names(columns: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<String>>> {
     let Some(cols) = columns else {
@@ -11224,6 +11272,36 @@ impl PySeries {
         row_index_to_py(py, self.inner.index())
     }
 
+    /// `s.name = value` renames the Series in place, as pandas' (None
+    /// unnames it). It raised AttributeError.
+    #[setter(name)]
+    fn assign_name(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = if value.is_none() {
+            String::new()
+        } else {
+            py_to_index_label(value)?.to_string()
+        };
+        self.inner = self.inner.rename(&name).map_err(frame_error_to_py)?;
+        Ok(())
+    }
+
+    /// `s.index = labels`: a new index, labels and name, as pandas'. It
+    /// raised AttributeError.
+    #[setter(index)]
+    fn assign_index(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let index = index_from_axis_value(value)?;
+        if index.labels().len() != self.inner.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length mismatch: Expected axis has {} elements, new values have {} elements",
+                self.inner.len(),
+                index.labels().len()
+            )));
+        }
+        self.inner = Series::new(self.inner.name(), index, self.inner.column().clone())
+            .map_err(frame_error_to_py)?;
+        Ok(())
+    }
+
     #[getter]
     fn dtype(&self) -> String {
         column_pandas_dtype_name(self.inner.column())
@@ -15736,6 +15814,124 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// The flat column names, in order.
+    ///
+    /// Positional, via `column_name_at`, NOT `column_names()`.
+    /// br-frankenpandas-r18qs.
+    ///
+    /// `column_names()` returns `Vec<&String>`, and a transposed frame's column
+    /// axis is a lazy `Int64UnitRange` that owns no `String`s — so handing out
+    /// references forces it to materialize every label, and with it the whole
+    /// store. That is precisely what this must not do: it converts the
+    /// borrowed names to OWNED ones on the very next line, so the references
+    /// were never needed. `column_name_at` formats just the requested label.
+    ///
+    /// This was measured, not reasoned: with `column_names()` here,
+    /// `dataframe_observers_preserve_lazy_transpose_storage` fails its
+    /// post-observer `is_lazy_transpose_storage()` assertion.
+    fn column_labels(&self) -> Vec<String> {
+        (0..self.inner.num_columns())
+            .filter_map(|position| self.inner.column_name_at(position))
+            .collect()
+    }
+
+    /// The columns `key` names on a two-level column axis, as pandas'
+    /// `df[key]` reads it: a full `(top, sub)` tuple one column, a bare
+    /// top-level label every column under it; with the key's depth. None
+    /// for flat columns, or a key that is neither a tuple nor a string.
+    fn multi_column_selection(
+        &self,
+        key: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<(usize, Vec<usize>)>> {
+        let Some(multi) = self.inner.columns_multiindex() else {
+            return Ok(None);
+        };
+        let wanted: Vec<IndexLabel> = if let Ok(tuple) = key.cast::<PyTuple>() {
+            tuple
+                .iter()
+                .map(|item| py_to_index_label(&item))
+                .collect::<PyResult<_>>()?
+        } else if key.is_instance_of::<pyo3::types::PyString>() {
+            vec![py_to_index_label(key)?]
+        } else {
+            return Ok(None);
+        };
+        let positions = (0..multi.len())
+            .filter(|&position| {
+                multi.get_tuple(position).is_some_and(|labels| {
+                    labels.len() >= wanted.len()
+                        && labels.iter().zip(&wanted).all(|(have, want)| *have == want)
+                })
+            })
+            .collect();
+        Ok(Some((wanted.len(), positions)))
+    }
+
+    /// `df[key]` on a two-level column axis, as pandas answers it: one
+    /// column for a full tuple, the sub-frame under a top-level label (its
+    /// columns the second level; a lone '' column is that label's Series).
+    fn multi_column_item(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        depth: usize,
+        positions: &[usize],
+    ) -> PyResult<Py<PyAny>> {
+        let Some(multi) = self.inner.columns_multiindex() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.clone().unbind(),
+            ));
+        };
+        let storage_key = |position: usize| {
+            self.inner
+                .column_name_at(position)
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind()))
+        };
+        match positions {
+            [] => {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    key.clone().unbind(),
+                ));
+            }
+            [position] if depth == multi.nlevels() => {
+                let series = self.column_series(&storage_key(*position)?)?;
+                return Ok(Py::new(py, series)?.into_any());
+            }
+            _ => {}
+        }
+        let frame = self
+            .inner
+            .take_columns(positions)
+            .map_err(frame_error_to_py)?;
+        if depth == multi.nlevels() {
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
+        if multi.nlevels() - depth != 1 {
+            return Err(not_implemented(
+                "selecting part of a column MultiIndex with more than two levels",
+            ));
+        }
+        let sub_labels: Vec<IndexLabel> = positions
+            .iter()
+            .map(|&position| {
+                multi
+                    .get_tuple(position)
+                    .and_then(|labels| labels.get(depth).map(|label| (*label).clone()))
+                    .unwrap_or_else(|| IndexLabel::Utf8(String::new()))
+            })
+            .collect();
+        if let ([position], [IndexLabel::Utf8(sub)]) = (positions, sub_labels.as_slice())
+            && sub.is_empty()
+        {
+            let top = key.str()?.to_string();
+            let series = self.column_series(&storage_key(*position)?)?;
+            let inner = series.inner.rename(&top).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner })?.into_any());
+        }
+        let frame = frame.set_axis(sub_labels, 1).map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any())
+    }
+
     /// `self <op> other` (or `other <op> self` when `reflected`) for the
     /// arithmetic operators: another DataFrame aligns, a Series broadcasts
     /// along the columns as pandas' operators do (br-frankenpandas-ini2u: it
@@ -17491,26 +17687,100 @@ impl PyDataFrame {
         self.inner.shape()
     }
 
-    /// Return the column names.
-    ///
-    /// Positional, via `column_name_at`, NOT `column_names()`.
-    /// br-frankenpandas-r18qs.
-    ///
-    /// `column_names()` returns `Vec<&String>`, and a transposed frame's column
-    /// axis is a lazy `Int64UnitRange` that owns no `String`s — so handing out
-    /// references forces it to materialize every label, and with it the whole
-    /// store. That is precisely what this getter must not do: it converts the
-    /// borrowed names to OWNED ones on the very next line, so the references
-    /// were never needed. `column_name_at` formats just the requested label.
-    ///
-    /// This was measured, not reasoned: with `column_names()` here,
-    /// `dataframe_observers_preserve_lazy_transpose_storage` fails its
-    /// post-observer `is_lazy_transpose_storage()` assertion.
+    /// pandas' `DataFrame.columns`: an Index of the column labels, or the
+    /// two-level MultiIndex a frame carries after `agg` with lists, `ohlc`
+    /// or `compare` - it was a Python list of the flat storage keys, so
+    /// `.columns.tolist()` raised and an `agg({'x': ['sum', 'max']})` result
+    /// read `x_sum` (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
     #[getter]
-    fn columns(&self) -> Vec<String> {
-        (0..self.inner.num_columns())
-            .filter_map(|position| self.inner.column_name_at(position))
-            .collect()
+    fn columns(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(multi) = self.inner.columns_multiindex() {
+            return Ok(Py::new(
+                py,
+                PyMultiIndex {
+                    inner: multi.clone(),
+                },
+            )?
+            .into_any());
+        }
+        Ok(Py::new(
+            py,
+            PyIndex {
+                inner: Index::from_utf8(self.column_labels()),
+            },
+        )?
+        .into_any())
+    }
+
+    /// `df.columns = labels`: new column labels, as many as there are
+    /// columns - an Index, a list, or a MultiIndex / tuples for a two-level
+    /// axis (whose storage keys join the levels with '_'). It raised
+    /// AttributeError.
+    #[setter(columns)]
+    fn assign_columns(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        if value.is_instance_of::<pyo3::types::PyString>() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Index(...) must be called with a collection of some kind, {} was passed",
+                value.repr()?
+            )));
+        }
+        let multi = if let Ok(multi) = value.extract::<PyRef<'_, PyMultiIndex>>() {
+            multi.inner.clone()
+        } else {
+            let items = value.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+            if items.is_empty() || !items.iter().all(|item| item.is_instance_of::<PyTuple>()) {
+                let labels = extract_index_labels(Some(value), 0)?;
+                self.inner = self
+                    .inner
+                    .set_axis(labels, 1)
+                    .map_err(axis_length_error_to_py)?;
+                return Ok(());
+            }
+            let tuples = items
+                .iter()
+                .map(|item| {
+                    item.try_iter()?
+                        .map(|label| py_to_index_label(&label?))
+                        .collect()
+                })
+                .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
+            fp_index::MultiIndex::from_tuples(tuples).map_err(index_error_to_py)?
+        };
+        let keys = (0..multi.len())
+            .map(|position| {
+                let labels = multi.get_tuple(position).unwrap_or_default();
+                IndexLabel::Utf8(
+                    labels
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("_"),
+                )
+            })
+            .collect();
+        self.inner = self
+            .inner
+            .set_axis(keys, 1)
+            .and_then(|frame| frame.with_columns_multiindex(Some(multi)))
+            .map_err(axis_length_error_to_py)?;
+        Ok(())
+    }
+
+    /// `df.index = labels`: a new row axis, labels and name, as pandas'
+    /// (a Series gives its values and name). It raised AttributeError.
+    #[setter(index)]
+    fn assign_index(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner = self
+            .inner
+            .with_index(index_from_axis_value(value)?)
+            .map_err(axis_length_error_to_py)?;
+        Ok(())
+    }
+
+    /// `for label in df` walks the column labels, as pandas' does (tuples
+    /// under a two-level column axis); it raised TypeError.
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self.columns(py)?.bind(py).try_iter()?.into_any().unbind())
     }
 
     /// Return the index of the DataFrame: its row MultiIndex when it has one
@@ -17605,7 +17875,7 @@ impl PyDataFrame {
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
         let constructor = py.get_type::<PyDataFrame>().into_any();
         let dict = PyDict::new(py);
-        let col_names = self.columns();
+        let col_names = self.column_labels();
         for col_name in &col_names {
             if let Some(col) = self.inner.column(col_name) {
                 let vals: Vec<Py<PyAny>> = col
@@ -17662,9 +17932,10 @@ impl PyDataFrame {
 
     /// Access a group of rows and columns by label(s) or a boolean array.
     #[getter]
-    fn loc(&self) -> PyDataFrameLoc {
+    fn loc(slf: &Bound<'_, Self>) -> PyDataFrameLoc {
         PyDataFrameLoc {
-            inner: self.inner.clone(),
+            inner: slf.borrow().inner.clone(),
+            parent: slf.clone().unbind(),
         }
     }
 
@@ -17688,6 +17959,10 @@ impl PyDataFrame {
     /// pandas; the infallible `get_column` used here before fabricated an
     /// all-NaN column instead of raising.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // `df[("x", "sum")]` / `df["x"]` on a two-level column axis
+        if let Some((depth, positions)) = self.multi_column_selection(key)? {
+            return self.multi_column_item(py, key, depth, &positions);
+        }
         // `df["a"]` -> Series
         if let Ok(col) = key.extract::<String>() {
             return Ok(Py::new(py, self.column_series(&col)?)?.into_any());
@@ -17807,7 +18082,7 @@ impl PyDataFrame {
         }
         if let Ok(mask) = key.extract::<PyRef<'_, PySeries>>() {
             let scalar = py_to_scalar(py, value)?;
-            for col in self.columns() {
+            for col in self.column_labels() {
                 let col_series = self.column_series(&col)?;
                 let mut vals = col_series.inner.column().values().to_vec();
                 for (i, m) in mask.inner.values().iter().enumerate() {
@@ -18339,9 +18614,15 @@ impl PyDataFrame {
         self.flex_cmp(py, "ge", other, axis, level, ComparisonOp::Ge)
     }
 
-    /// `"a" in df` checks the column labels, as in pandas.
-    fn __contains__(&self, name: &str) -> bool {
-        self.inner.column(name).is_some()
+    /// `"a" in df` checks the column labels, as in pandas: under a two-level
+    /// column axis a `(top, sub)` tuple or a top-level label.
+    fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Some((_, positions)) = self.multi_column_selection(key)? {
+            return Ok(!positions.is_empty());
+        }
+        Ok(key
+            .extract::<String>()
+            .is_ok_and(|name| self.inner.column(&name).is_some()))
     }
 
     /// Return summary statistics.
@@ -19409,8 +19690,11 @@ impl PyDataFrame {
                                 .map_err(frame_error_to_py)?;
                             Ok(Some(s))
                         } else {
-                            let labels: Vec<IndexLabel> =
-                                self.columns().into_iter().map(IndexLabel::Utf8).collect();
+                            let labels: Vec<IndexLabel> = self
+                                .column_labels()
+                                .into_iter()
+                                .map(IndexLabel::Utf8)
+                                .collect();
                             let vals = vec![Scalar::Float64(v); labels.len()];
                             let s = Series::from_values("bounds", labels, vals)
                                 .map_err(frame_error_to_py)?;
@@ -21872,8 +22156,9 @@ impl PyDataFrame {
         }
     }
 
-    fn keys(&self) -> Vec<String> {
-        self.columns()
+    /// pandas' `DataFrame.keys()`: the columns axis.
+    fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.columns(py)
     }
 
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -22117,8 +22402,8 @@ impl PyDataFrame {
     fn axes(&self) -> Vec<Py<PyAny>> {
         Python::attach(|py| {
             let idx = self.index(py).ok()?;
-            let cols = PyList::new(py, self.columns()).ok()?;
-            Some(vec![idx, cols.into_any().unbind()])
+            let cols = self.columns(py).ok()?;
+            Some(vec![idx, cols])
         })
         .unwrap_or_default()
     }
@@ -24209,7 +24494,7 @@ impl PyDataFrame {
             None
         };
 
-        let data_columns = self.columns();
+        let data_columns = self.column_labels();
         for col_name in &data_columns {
             columns_to_write.push(col_name.clone());
             let col = self.inner.column(col_name).unwrap();
@@ -24787,6 +25072,265 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
     }
 }
 
+/// The row POSITIONS a `.loc` row indexer selects, for writes: a boolean
+/// Series (aligned on the index), a boolean list/array, an inclusive label
+/// slice, a list of labels or one label (every row carrying it); resolved in
+/// the order `resolve_loc_rows` uses.
+fn resolve_loc_row_positions(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+    let labels = df.index().labels();
+    let positions_of = |label: &IndexLabel| -> PyResult<Vec<usize>> {
+        let found: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| *candidate == label)
+            .map(|(position, _)| position)
+            .collect();
+        if found.is_empty() {
+            Err(loc_key_error(label))
+        } else {
+            Ok(found)
+        }
+    };
+    if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+        if !slice.getattr("step")?.is_none() {
+            return Err(not_implemented("loc label slices with a step"));
+        }
+        let bound = |name: &str| -> PyResult<Option<IndexLabel>> {
+            let value = slice.getattr(name)?;
+            if value.is_none() {
+                Ok(None)
+            } else {
+                py_to_index_label(&value).map(Some)
+            }
+        };
+        let (start, stop) = (bound("start")?, bound("stop")?);
+        return df
+            .loc_slice_positions(start.as_ref(), stop.as_ref())
+            .map_err(loc_key_error);
+    }
+    if let Some(mask) = loc_bool_series_mask(key) {
+        let truthy = |value: &Scalar| matches!(value, Scalar::Bool(true));
+        if mask.inner.index().labels() == labels {
+            return Ok(mask
+                .inner
+                .values()
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| truthy(value))
+                .map(|(position, _)| position)
+                .collect());
+        }
+        let by_label: HashMap<&IndexLabel, &Scalar> = mask
+            .inner
+            .index()
+            .labels()
+            .iter()
+            .zip(mask.inner.values())
+            .collect();
+        return Ok(labels
+            .iter()
+            .enumerate()
+            .filter(|(_, label)| by_label.get(label).is_some_and(|value| truthy(value)))
+            .map(|(position, _)| position)
+            .collect());
+    }
+    if (key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok())
+        && let Ok(mask) = key.extract::<Vec<bool>>()
+    {
+        if mask.len() != labels.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Boolean index has wrong length: {} instead of {}",
+                mask.len(),
+                labels.len()
+            )));
+        }
+        return Ok((0..mask.len()).filter(|&position| mask[position]).collect());
+    }
+    if let Some(wanted) = loc_label_list(key) {
+        let mut positions = Vec::new();
+        for label in wanted? {
+            positions.extend(positions_of(&label)?);
+        }
+        return Ok(positions);
+    }
+    positions_of(&py_to_index_label(key)?)
+}
+
+/// `df.loc[rows, cols] = value` / `df.loc[rows] = value` as pandas writes it:
+/// the selected rows of each named column (a new column is created, missing
+/// elsewhere) take a scalar, a Series aligned on the index, or an array-like
+/// matched to the selected rows in order (fvsao.13: `.loc` took no writes).
+fn loc_assign(
+    py: Python<'_>,
+    df: &DataFrame,
+    positions: &[usize],
+    columns: &[String],
+    value: &Bound<'_, PyAny>,
+) -> PyResult<DataFrame> {
+    let labels = df.index().labels();
+    let new_values: Vec<Scalar> = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
+        let by_label: HashMap<&IndexLabel, &Scalar> = series
+            .inner
+            .index()
+            .labels()
+            .iter()
+            .zip(series.inner.values())
+            .collect();
+        positions
+            .iter()
+            .map(|&position| {
+                by_label
+                    .get(&labels[position])
+                    .map_or(Scalar::Null(NullKind::NaN), |value| (*value).clone())
+            })
+            .collect()
+    } else if let Some(column) = py_array_like_column(py, value)? {
+        column.values().to_vec()
+    } else if let Ok(list) = value.cast::<PyList>() {
+        list.iter()
+            .map(|item| py_to_scalar(py, &item))
+            .collect::<PyResult<Vec<_>>>()?
+    } else {
+        vec![py_to_scalar(py, value)?; positions.len()]
+    };
+    if new_values.len() != positions.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Must have equal len keys and value when setting with an iterable",
+        ));
+    }
+    let mut out = df.clone();
+    for name in columns {
+        let mut values: Vec<Scalar> = match out.column(name) {
+            Some(column) => column.values().to_vec(),
+            None => vec![Scalar::Null(NullKind::NaN); labels.len()],
+        };
+        for (&position, value) in positions.iter().zip(&new_values) {
+            values[position] = value.clone();
+        }
+        let column = Column::from_values(pandas_promote_int_with_missing(values))
+            .map_err(column_error_to_py)?;
+        out = out
+            .with_column(name.clone(), column)
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(out)
+}
+
+/// Whether a `.loc` row indexer is one label (a string, a number, a
+/// timestamp), not a slice, list, array, mask or Series.
+fn is_single_loc_label(key: &Bound<'_, PyAny>) -> bool {
+    key.is_instance_of::<pyo3::types::PyString>()
+        || !(key.hasattr("__len__").unwrap_or(true) || key.cast::<pyo3::types::PySlice>().is_ok())
+}
+
+/// `df.loc[label, cols] = value` for a row label the index lacks: pandas
+/// appends that row (setting with enlargement). A whole row keeps each
+/// column's dtype where its new cell fits, as a concat does; a partial row
+/// first gives every column a missing cell (so int64 columns become
+/// float64), then sets the named ones. The value is one scalar for every
+/// named column, a Series matched on the column labels, or one item per
+/// column.
+#[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
+fn loc_enlarge(
+    py: Python<'_>,
+    df: &DataFrame,
+    label: IndexLabel,
+    columns: &[String],
+    whole_row: bool,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<DataFrame> {
+    let missing = || Scalar::Null(NullKind::NaN);
+    let cells: Vec<Scalar> = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
+        let by_label: HashMap<&IndexLabel, &Scalar> = series
+            .inner
+            .index()
+            .labels()
+            .iter()
+            .zip(series.inner.values())
+            .collect();
+        columns
+            .iter()
+            .map(|name| {
+                by_label
+                    .get(&IndexLabel::Utf8(name.clone()))
+                    .map_or_else(missing, |cell| (*cell).clone())
+            })
+            .collect()
+    } else if let Some(column) = py_array_like_column(py, value)? {
+        column.values().to_vec()
+    } else if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+        py_sequence_to_scalars(py, value)?
+    } else {
+        vec![py_to_scalar(py, value)?; columns.len()]
+    };
+    if cells.len() != columns.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "cannot set a row with mismatched columns",
+        ));
+    }
+    let mut labels = df.index().labels().to_vec();
+    labels.push(label);
+    let index = Index::new(labels).rename_index(df.index().name());
+    let mut names: Vec<String> = df.column_names().into_iter().cloned().collect();
+    names.extend(
+        columns
+            .iter()
+            .filter(|name| df.column(name).is_none())
+            .cloned(),
+    );
+    let mut built = Vec::with_capacity(names.len());
+    for name in &names {
+        let existing = df.column(name);
+        let mut values = existing.map_or_else(
+            || vec![missing(); df.len()],
+            |column| column.values().to_vec(),
+        );
+        values.push(
+            columns
+                .iter()
+                .position(|column| column == name)
+                .map_or_else(missing, |at| cells[at].clone()),
+        );
+        // The reindex a partial row goes through leaves an int64 (or new)
+        // column float64 before its cell is set.
+        let widened = !whole_row && existing.is_none_or(|column| column.dtype() == DType::Int64);
+        // A number joining a bool column promotes it as numpy does: bool +
+        // int -> int64, bool + float -> float64.
+        let bool_as_int = existing
+            .filter(|column| whole_row && column.dtype() == DType::Bool)
+            .and_then(|_| match values.last() {
+                Some(Scalar::Int64(_)) => Some(true),
+                Some(Scalar::Float64(_)) => Some(false),
+                _ => None,
+            });
+        if let Some(as_int) = bool_as_int {
+            values = values
+                .into_iter()
+                .map(|cell| match cell {
+                    Scalar::Bool(b) if as_int => Scalar::Int64(i64::from(b)),
+                    Scalar::Bool(b) => Scalar::Float64(f64::from(u8::from(b))),
+                    other => other,
+                })
+                .collect();
+        }
+        if widened {
+            values = values
+                .into_iter()
+                .map(|cell| match cell {
+                    Scalar::Int64(v) => Scalar::Float64(v as f64),
+                    other => other,
+                })
+                .collect();
+        }
+        let column = Column::from_values(pandas_promote_int_with_missing(values))
+            .map_err(column_error_to_py)?;
+        built.push((name.clone(), column));
+    }
+    let order: Vec<String> = built.iter().map(|(name, _)| name.clone()).collect();
+    DataFrame::new_with_column_order(index, built.into_iter().collect::<BTreeMap<_, _>>(), order)
+        .map_err(frame_error_to_py)
+}
+
 /// Column names selected by a `.loc` column indexer: one name, a list, or an
 /// inclusive label slice over the column order.
 fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<String>>> {
@@ -24832,10 +25376,57 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
 #[pyclass(name = "_DataFrameLoc")]
 pub struct PyDataFrameLoc {
     inner: DataFrame,
+    /// The frame `.loc` was taken from, which `df.loc[...] = value` writes.
+    parent: Py<PyDataFrame>,
 }
 
 #[pymethods]
 impl PyDataFrameLoc {
+    /// pandas' `df.loc[rows, cols] = value` / `df.loc[rows] = value`
+    /// (see [`loc_assign`]); the frame is changed in place.
+    fn __setitem__(
+        &mut self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let (rows, columns) = if let Ok(tuple) = key.cast::<PyTuple>() {
+            if tuple.len() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "Too many indexers; DataFrame loc takes at most 2",
+                ));
+            }
+            let col_key = tuple.get_item(1)?;
+            let columns = match col_key.extract::<String>() {
+                Ok(name) => vec![name],
+                Err(_) => resolve_loc_columns(&self.inner, &col_key)?.unwrap_or_default(),
+            };
+            (tuple.get_item(0)?, columns)
+        } else {
+            (
+                key.clone(),
+                self.inner.column_names().into_iter().cloned().collect(),
+            )
+        };
+        let updated = match is_single_loc_label(&rows)
+            .then(|| py_to_index_label(&rows))
+            .transpose()?
+            .filter(|label| !self.inner.index().labels().contains(label))
+        {
+            Some(label) => {
+                let whole_row = key.cast::<PyTuple>().is_err();
+                loc_enlarge(py, &self.inner, label, &columns, whole_row, value)?
+            }
+            None => {
+                let positions = resolve_loc_row_positions(&self.inner, &rows)?;
+                loc_assign(py, &self.inner, &positions, &columns, value)?
+            }
+        };
+        self.parent.borrow_mut(py).inner = updated.clone();
+        self.inner = updated;
+        Ok(())
+    }
+
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // Case 1: Tuple (row_indexer, col_indexer)
         if let Ok(tuple) = key.cast::<pyo3::types::PyTuple>() {
@@ -28467,17 +29058,74 @@ impl PyGroupBy {
                 }
             };
             return Ok(Py::new(py, res)?.into_any());
-        } else if let Ok(dict) = func.extract::<std::collections::HashMap<String, String>>() {
-            let res = self
-                .grouped()
-                .map_err(frame_error_to_py)?
-                .agg(&dict)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "agg expects a string function name or dict of column -> func",
-        ))
+        let unsupported = || {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "agg expects a function name, a list of them, or a dict of column -> name(s)",
+            )
+        };
+        // Every function over every value column (a list), or the dict's
+        // own (column, functions) in the order it asks - pandas' order, not
+        // the frame's; a list anywhere gives the two-level (column, func)
+        // column axis.
+        let (specs, two_level) = if let Ok(dict) = func.cast::<PyDict>() {
+            let mut specs = Vec::with_capacity(dict.len());
+            let mut two_level = false;
+            for (column, funcs) in dict.iter() {
+                let funcs = match funcs.extract::<String>() {
+                    Ok(name) => vec![name],
+                    Err(_) => {
+                        two_level = true;
+                        funcs.extract::<Vec<String>>().map_err(|_| unsupported())?
+                    }
+                };
+                specs.push((column.extract::<String>()?, funcs));
+            }
+            (specs, two_level)
+        } else {
+            let funcs = func.extract::<Vec<String>>().map_err(|_| unsupported())?;
+            let specs = self
+                .df
+                .column_names()
+                .into_iter()
+                .filter(|column| !self.by.contains(*column))
+                .map(|column| (column.clone(), funcs.clone()))
+                .collect();
+            (specs, true)
+        };
+        let missing: Vec<String> = specs
+            .iter()
+            .filter(|(column, _)| self.df.column(column).is_none())
+            .map(|(column, _)| format!("'{column}'"))
+            .collect();
+        if !missing.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Column(s) [{}] do not exist",
+                missing.join(", ")
+            )));
+        }
+        let grouped = self.grouped().map_err(frame_error_to_py)?;
+        let res = if two_level {
+            grouped.agg_dict_list(&specs)
+        } else {
+            let requested: Vec<&str> = specs.iter().map(|(column, _)| column.as_str()).collect();
+            let map = specs
+                .iter()
+                .map(|(column, funcs)| (column.clone(), funcs[0].clone()))
+                .collect();
+            grouped.agg(&map).and_then(|res| {
+                let order: Vec<&str> = res
+                    .column_names()
+                    .into_iter()
+                    .map(String::as_str)
+                    .filter(|column| !requested.contains(column))
+                    .chain(requested.iter().copied())
+                    .collect();
+                res.select_columns(&order)
+            })
+        }
+        .map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
     }
 
     #[pyo3(signature = (func=None, *args, **kwargs))]
@@ -32771,8 +33419,8 @@ fn assert_frame_equal(
             ),
         ));
     }
-    let l_cols = l_df.columns();
-    let r_cols = r_df.columns();
+    let l_cols = l_df.column_labels();
+    let r_cols = r_df.column_labels();
     if l_cols != r_cols {
         return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
             format!(
@@ -33649,7 +34297,7 @@ fn get_dummies(
     dtype: Option<&str>,
 ) -> PyResult<PyDataFrame> {
     if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
-        let all_df_cols = df.columns();
+        let all_df_cols = df.column_labels();
         let target_cols: Vec<String> = columns.unwrap_or_else(|| {
             all_df_cols
                 .iter()
@@ -35777,7 +36425,7 @@ pub fn from_dummies(
     } else {
         PyDataFrame::new(data.py(), Some(data), None, None)?
     };
-    let col_names = df_obj.columns();
+    let col_names = df_obj.column_labels();
     let num_rows = df_obj.inner.len();
 
     let def_cat_str = if let Some(dc) = default_category {
@@ -36445,7 +37093,7 @@ fn lreshape(
         }
     }
 
-    let existing_cols = df.columns();
+    let existing_cols = df.column_labels();
     let id_cols: Vec<String> = existing_cols
         .into_iter()
         .filter(|c| !all_group_source_cols.contains(c))
@@ -36559,7 +37207,7 @@ fn wide_to_long(
     };
 
     let re_mod = py.import("re")?;
-    let all_cols = py_df.columns();
+    let all_cols = py_df.column_labels();
     let mut suffix_values = BTreeSet::new();
 
     for stub in &stubs {
@@ -39763,7 +40411,7 @@ mod tests {
 
         assert!(dataframe.inner.is_lazy_transpose_storage());
         assert_eq!(dataframe.shape(), (2, 3));
-        assert_eq!(dataframe.columns(), vec!["0", "1", "2"]);
+        assert_eq!(dataframe.column_labels(), vec!["0", "1", "2"]);
         assert!(dataframe.inner.is_lazy_transpose_storage());
 
         let selected = dataframe.column_series("1").expect("selected column"); // ubs:ignore — asserted static transpose label exists
@@ -39896,9 +40544,13 @@ mod tests {
         let row0 = iloc.inner.iloc_row(0).expect("row 0"); // ubs:ignore — test fixture
         assert_eq!(row0.len(), 2);
 
-        // loc proxy
-        let loc = py_df.loc();
-        assert_eq!(loc.inner.shape(), (3, 2));
+        // loc proxy (it holds the frame it writes through, so it takes the
+        // Python object)
+        let loc_shape = Python::attach(|py| {
+            let bound = Bound::new(py, py_df.clone()).expect("frame object");
+            PyDataFrame::loc(&bound).inner.shape()
+        });
+        assert_eq!(loc_shape, (3, 2));
 
         // iat proxy
         let iat = py_df.iat();
@@ -40310,16 +40962,16 @@ mod tests {
         assert_eq!(dedup.shape(), (3, 2));
 
         let p_df = py_df.add_prefix("col_", None).expect("add_prefix"); // ubs:ignore — test fixture
-        assert_eq!(p_df.columns(), vec!["col_a", "col_b"]);
+        assert_eq!(p_df.column_labels(), vec!["col_a", "col_b"]);
         let s_df = py_df.add_suffix("_end", None).expect("add_suffix"); // ubs:ignore — test fixture
-        assert_eq!(s_df.columns(), vec!["a_end", "b_end"]);
+        assert_eq!(s_df.column_labels(), vec!["a_end", "b_end"]);
 
         assert!(py_df.equals(&df_copy));
 
         let mut mod_df = py_df.clone();
         let popped = mod_df.pop("a").expect("pop"); // ubs:ignore — test fixture
         assert_eq!(popped.name(), Some("a"));
-        assert_eq!(mod_df.columns(), vec!["b"]);
+        assert_eq!(mod_df.column_labels(), vec!["b"]);
         assert!(mod_df.pop("nonexistent").is_err());
 
         pyo3::Python::initialize();
@@ -40707,7 +41359,15 @@ mod tests {
         )
         .expect("df"); // ubs:ignore — test fixture
         let py_df = PyDataFrame { inner: df };
-        assert_eq!(py_df.keys(), vec!["a".to_string(), "b".to_string()]);
+        let keys: Vec<String> = Python::attach(|py| {
+            let keys = py_df.keys(py).expect("keys"); // ubs:ignore — test fixture
+            let keys = keys.bind(py);
+            assert!(keys.extract::<PyRef<'_, PyIndex>>().is_ok());
+            keys.call_method0("tolist")
+                .and_then(|labels| labels.extract())
+                .expect("labels") // ubs:ignore — test fixture
+        });
+        assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
         let t_df = py_df.T().expect("T"); // ubs:ignore — test fixture
         assert_eq!(t_df.shape(), (2, 2));
 
@@ -40974,14 +41634,14 @@ mod tests {
                     None,
                 )
                 .expect("trunc col");
-            assert_eq!(trunc_col.columns(), vec!["a"]);
+            assert_eq!(trunc_col.column_labels(), vec!["a"]);
 
             let new_cols = pyo3::types::PyList::new(py, vec!["x", "y"]).expect("cols");
             let axis_1 = pyo3::types::PyInt::new(py, 1);
             let df_renamed = py_df
                 .set_axis(new_cols.as_any(), Some(axis_1.as_any()), None)
                 .expect("set_axis");
-            assert_eq!(df_renamed.columns(), vec!["x", "y"]);
+            assert_eq!(df_renamed.column_labels(), vec!["x", "y"]);
 
             let s = Series::from_values(
                 "s",
@@ -41427,14 +42087,14 @@ mod tests {
                 "df dropna ax1",
             );
             assert_eq!(d_ax1.shape(), (3, 1));
-            assert_eq!(d_ax1.columns(), vec!["c"]);
+            assert_eq!(d_ax1.column_labels(), vec!["c"]);
 
             let d_ax1_thresh = frame(
                 py_df.dropna(Some(ax1.as_any()), None, Some(2), None, false, false),
                 "df dropna ax1 thresh 2",
             );
             assert_eq!(d_ax1_thresh.shape(), (3, 2));
-            assert_eq!(d_ax1_thresh.columns(), vec!["b", "c"]);
+            assert_eq!(d_ax1_thresh.column_labels(), vec!["b", "c"]);
 
             // Both how and thresh should fail
             assert!(
@@ -42135,7 +42795,7 @@ mod tests {
                     None,
                 )
                 .expect("df sort_index axis 1");
-            assert_eq!(df_ax1.columns(), vec!["col_a", "col_b"]);
+            assert_eq!(df_ax1.column_labels(), vec!["col_a", "col_b"]);
 
             // 8. DataFrame sort_index axis=1 ignore_index=True
             let df_ax1_ign = py_df
@@ -42152,7 +42812,7 @@ mod tests {
                     None,
                 )
                 .expect("df sort_index axis 1 ign");
-            assert_eq!(df_ax1_ign.columns(), vec!["0", "1"]);
+            assert_eq!(df_ax1_ign.column_labels(), vec!["0", "1"]);
 
             // 9. DataFrame sort_index inplace=True error
             assert!(

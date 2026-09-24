@@ -4599,3 +4599,224 @@ def test_text_journey_matches_pandas() -> None:
     want, got = _text_journey(pd), _text_journey(fpd)
     for step in want:
         assert _plain(got[step]) == _plain(want[step]), step
+
+
+def _plain_any(obj: Any) -> Any:
+    if hasattr(obj, "columns") or (hasattr(obj, "tolist") and hasattr(obj, "index")):
+        return _plain(obj)
+    if hasattr(obj, "tolist"):
+        return (type(obj).__name__, [str(v) for v in obj.tolist()])
+    return obj
+
+
+def _axis_assignment(m: Any) -> dict:
+    out = {}
+    df = m.DataFrame({"A": [1, 2, 3], "B": [4.0, 5.0, 6.0]})
+    out["columns"] = df.columns
+    out["iterate"] = list(df)
+    out["in"] = ("A" in df, "Z" in df, "A" in df.columns)
+    out["keys"] = df.keys()
+    out["get_loc"] = df.columns.get_loc("B")
+    renamed = df.copy()
+    renamed.columns = [c.lower() for c in renamed.columns]
+    out["set columns"] = renamed
+    reindexed = df.copy()
+    reindexed.index = ["x", "y", "z"]
+    out["set index"] = reindexed
+    out["index name"] = reindexed.index.name
+    named = df.copy()
+    named.index = m.Index([7, 8, 9], name="k")
+    out["set named index"] = named
+    out["named index name"] = named.index.name
+    s = m.Series([1, 2])
+    s.name = "v"
+    s.index = ["a", "b"]
+    out["series name/index"] = s
+    out["series name"] = s.name
+    return out
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_axis_assignment_matches_pandas() -> None:
+    # fvsao.7 / fvsao.13: df.columns was a Python list (no .tolist()), and
+    # df.columns = / df.index = / s.name = / s.index = raised AttributeError;
+    # `for c in df` raised TypeError.
+    want, got = _axis_assignment(pd), _axis_assignment(fpd)
+    for step in want:
+        assert _plain_any(got[step]) == _plain_any(want[step]), step
+    # NEGATIVES: a wrong length or a bare string is refused.
+    for m in (pd, fpd):
+        df = m.DataFrame({"A": [1, 2]})
+        with pytest.raises(ValueError, match="Length mismatch: Expected axis has 1 elements"):
+            df.columns = ["a", "b"]
+        with pytest.raises(ValueError, match="Length mismatch: Expected axis has 2 elements"):
+            df.index = [1, 2, 3]
+        with pytest.raises(TypeError):
+            df.columns = "A"
+        assert list(df.columns) == ["A"]
+
+
+def _agg_lists(m: Any) -> dict:
+    df = m.DataFrame({"g": ["a", "b", "a", "b"], "x": [1, 2, 3, 5], "y": [1.5, 2.5, 3.5, 4.5]})
+    gb = df.groupby("g")
+    lists = gb.agg({"x": ["sum", "max"], "y": "mean"})
+    flat = lists.copy()
+    flat.columns = ["_".join(c) for c in flat.columns]
+    return {
+        "dict order": gb.agg({"y": "sum", "x": "max"}),
+        "dict lists": lists,
+        "column tuples": [str(c) for c in lists.columns],
+        "list funcs": gb.agg(["sum", "max"]),
+        "top level": lists["x"],
+        "tuple key": lists[("x", "max")].tolist(),
+        "tuple in": (("x", "max") in lists, "x" in lists, ("x", "min") in lists),
+        "reset_index": lists.reset_index(),
+        "reset key": lists.reset_index()["g"],
+        "ohlc columns": [str(c) for c in gb.ohlc().columns],
+        "flattened": flat,
+        "cumsum iloc": gb[["y", "x"]].cumsum().iloc[:, 0],
+    }
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_groupby_agg_with_lists_matches_pandas() -> None:
+    # fvsao.13 ETL journey: agg({'amount': ['sum', 'max'], ...}) raised; a
+    # dict came back in the frame's order, not the request's; the (column,
+    # func) column axis never reached Python; and a groupby result's storage
+    # order leaked into positional reads (iloc / flattening paired a label
+    # with another column's values).
+    want, got = _agg_lists(pd), _agg_lists(fpd)
+    for step in want:
+        assert _plain_any(got[step]) == _plain_any(want[step]), step
+    # NEGATIVE: a column the frame lacks is pandas' KeyError.
+    for m in (pd, fpd):
+        with pytest.raises(KeyError, match="do not exist"):
+            m.DataFrame({"g": [1], "x": [2]}).groupby("g").agg({"nope": "sum"})
+
+
+def _loc_writes(m: Any) -> dict:
+    def base() -> Any:
+        return m.DataFrame(
+            {"a": [1, 2, 3, 4], "b": [1.5, 2.5, 3.5, 4.5], "s": ["w", "x", "y", "z"]},
+            index=["p", "q", "r", "t"],
+        )
+
+    out = {}
+    df = base(); df.loc[df["a"] > 2, "b"] = 0.0; out["mask, column, scalar"] = df
+    df = base(); df.loc[df["a"] > 2, "a"] = 0.5; out["int column takes a float"] = df
+    df = base(); df.loc[df["a"] > 2, "a"] = 9; out["int column takes an int"] = df
+    df = base(); df.loc["q":"r", "b"] = -1.0; out["label slice"] = df
+    df = base(); df.loc[["p", "t"], ["a", "b"]] = 0; out["label lists"] = df
+    df = base(); df.loc["q", "s"] = "NEW"; out["one cell"] = df
+    df = base()[["a", "b"]]; df.loc[df["a"] < 3] = 0; out["whole rows"] = df
+    df = base()
+    df.loc[df["a"] > 1, "b"] = m.Series([10.0, 20.0, 30.0, 40.0], index=["t", "r", "q", "p"])
+    out["series aligned on labels"] = df
+    df = base(); df.loc[df["a"] > 2, "b"] = [7.0, 8.0]; out["list"] = df
+    df = base(); df.loc[df["a"] > 2, "c"] = 1.0; out["new column"] = df
+    df = base(); df.loc["p", "a"] = np.nan; out["nan into int"] = df
+    df = base(); df.loc["u"] = [5, 5.5, "v"]; out["append a row"] = df
+    df = base(); df.loc["u", "a"] = 5; out["append part of a row"] = df
+    df = m.DataFrame({"a": [1, 2], "f": [True, False]}); df.loc[len(df)] = 0; out["append numbers"] = df
+    return out
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_loc_writes_match_pandas() -> None:
+    # fvsao.13 ETL journey: `df.loc[mask, "col"] = value` raised ("does not
+    # support item assignment"); pandas also appends a row for a label the
+    # index lacks.
+    want, got = _loc_writes(pd), _loc_writes(fpd)
+    for step in want:
+        assert _plain(got[step]) == _plain(want[step]), step
+    # NEGATIVES: a value of the wrong length, a row of the wrong width, and a
+    # list with a label the index lacks are refused; the frame is unchanged.
+    for m in (pd, fpd):
+        df = m.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]})
+        with pytest.raises(ValueError):
+            df.loc[df["a"] > 1, "b"] = [7.0]
+        with pytest.raises(ValueError, match="cannot set a row with mismatched columns"):
+            df.loc[3] = [1]
+        with pytest.raises(KeyError):
+            df.loc[[0, 9], "a"] = 1
+        assert df["b"].tolist() == [4.0, 5.0, 6.0]
+
+
+JOURNEY_ORDERS_CSV = """order_id,customer,order_date,amount,qty,status,region
+1001, acme ,2024-01-03,120.50,3,shipped,EU
+1002,globex,2024-01-04,NA,1,pending,US
+1003,acme,2024-01-10,75.00,,shipped,EU
+1004,initech,2024-02-01,300.00,10,cancelled,US
+1005,globex,2024-02-15,42.25,2,shipped,US
+1006,umbrella,2024-02-20,999.99,1,shipped,APAC
+1007,acme,2024-03-01,15.00,5,returned,EU
+1008,initech,2024-03-05,60.00,2,shipped,
+"""
+JOURNEY_CUSTOMERS_CSV = """customer,segment,since
+acme,enterprise,2019
+globex,smb,2021
+initech,enterprise,2018
+hooli,smb,2022
+"""
+
+
+def _etl_journey(m: Any, tmp_path: Path) -> dict:
+    tmp_path.mkdir()
+    orders_path = tmp_path / "orders.csv"
+    customers_path = tmp_path / "customers.csv"
+    orders_path.write_text(JOURNEY_ORDERS_CSV)
+    customers_path.write_text(JOURNEY_CUSTOMERS_CSV)
+    out = {}
+    raw = m.read_csv(str(orders_path), parse_dates=["order_date"], dtype={"order_id": "int64"},
+                     na_values=["NA"])
+    customers = m.read_csv(str(customers_path))
+    out["dtypes"] = raw.dtypes.astype(str)
+    stripped = raw.assign(customer=lambda d: d["customer"].str.strip())
+    filled = stripped.fillna({"region": "UNKNOWN", "qty": 0})
+    typed = filled.dropna(subset=["amount"]).astype({"qty": "int64"})
+    clean = typed.rename(columns={"amount": "revenue_raw"}).assign(amount=lambda d: d["revenue_raw"])
+    out["clean"] = clean
+    out["query"] = clean.query("status == 'shipped' and amount > 50")
+    written = clean.copy()
+    written.loc[written["status"] == "cancelled", "amount"] = 0.0
+    out["loc write"] = written
+    out["where"] = clean["amount"].where(clean["amount"] < 500, 500.0)
+    out["mask"] = clean["qty"].mask(clean["qty"] > 5)
+    out["row apply"] = clean.apply(lambda r: r["amount"] / max(r["qty"], 1), axis=1)
+    out["unit price"] = (clean["amount"] / clean["qty"].replace(0, np.nan)).round(2)
+    named = clean.groupby("customer").agg(total=("amount", "sum"), orders=("order_id", "count"),
+                                          avg_qty=("qty", "mean"))
+    out["named agg"] = named
+    out["agg dict"] = clean.groupby("region").agg({"amount": ["sum", "max"], "qty": "sum"})
+    merged = clean.merge(customers, on="customer", how="left", indicator=True)
+    out["merge"] = merged
+    out["merge suffixes"] = clean[["customer", "amount"]].merge(
+        clean[["customer", "qty", "amount"]], on="customer", suffixes=("_l", "_r")).head(6)
+    out["merge counts"] = merged["_merge"].value_counts()
+    out["pivot_table"] = clean.pivot_table(index="region", columns="status", values="amount",
+                                           aggfunc="sum", fill_value=0)
+    out["melt"] = named.reset_index().melt(id_vars="customer", value_vars=["total", "orders"])
+    out["sort"] = clean.sort_values(["region", "amount"], ascending=[True, False])[
+        ["order_id", "region", "amount"]]
+    out["rank"] = clean["amount"].rank(ascending=False)
+    out["cumsum by group"] = clean.groupby("customer")["amount"].cumsum()
+    out["duplicated"] = clean.duplicated(subset=["customer"])
+    out["month period"] = clean["order_date"].dt.to_period("M").astype(str)
+    out["monthly totals"] = clean.groupby(clean["order_date"].dt.month)["amount"].sum()
+    out["categories"] = clean["region"].astype("category").cat.categories.tolist()
+    out["concat"] = m.concat([clean.head(2), clean.tail(2)], ignore_index=True)[["order_id", "amount"]]
+    out["csv round trip"] = m.read_csv(io.StringIO(named.to_csv()), index_col=0)
+    out["describe"] = clean[["amount", "qty"]].describe()
+    out["nunique"] = clean.nunique()
+    return out
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_etl_journey_matches_pandas(tmp_path: Path) -> None:
+    # fvsao.13 journey (1): read two CSVs, clean, filter, write through .loc,
+    # aggregate (named and dict-of-lists), merge, reshape, rank and export
+    # under both libraries, every intermediate compared.
+    want = _etl_journey(pd, tmp_path / "pd")
+    got = _etl_journey(fpd, tmp_path / "fpd")
+    for step in want:
+        assert _plain_any(got[step]) == _plain_any(want[step]), step
