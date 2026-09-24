@@ -22,7 +22,7 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use fp_columnar::Column;
+use fp_columnar::{ArithmeticOp, Column};
 use fp_expr::DataFrameExprExt;
 use fp_frame::{
     DataFrame, DropNaHow, FrameError, PlotKind, Series, concat_dataframes, concat_series,
@@ -10207,6 +10207,19 @@ fn fill_one_side(side: &Series, against: &Series, fill: &Scalar) -> PyResult<Ser
     Series::new(side.name(), side.index().clone(), column).map_err(frame_error_to_py)
 }
 
+/// A Python number as a DataFrame arithmetic scalar: an int stays an Int64
+/// scalar so int64 columns stay int64 (br-frankenpandas-c74wi: ints went
+/// through as f64); a bool stays Bool, which keeps the f64 path.
+fn number_scalar(other: &Bound<'_, PyAny>) -> Option<Scalar> {
+    if other.is_instance_of::<pyo3::types::PyBool>() {
+        return other.extract::<bool>().ok().map(Scalar::Bool);
+    }
+    if let Ok(value) = other.extract::<i64>() {
+        return Some(Scalar::Int64(value));
+    }
+    other.extract::<f64>().ok().map(Scalar::Float64)
+}
+
 /// pandas refuses `s1 < s2` (and the other comparison operators) between two
 /// Series with different labels; only the flex methods align them
 /// (br-frankenpandas-zwfz3: the operators aligned too).
@@ -16854,10 +16867,8 @@ impl PyDataFrame {
     fn __add__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(self.inner.add(&other_df.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.add_scalar(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.add_scalar(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Add, false))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for +",
@@ -16870,10 +16881,8 @@ impl PyDataFrame {
     fn __sub__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(self.inner.sub(&other_df.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.sub_scalar(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.sub_scalar(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Sub, false))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for -",
@@ -16883,10 +16892,8 @@ impl PyDataFrame {
     fn __rsub__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(other_df.inner.sub(&self.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.rsub(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.rsub(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Sub, true))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for -",
@@ -16896,10 +16903,8 @@ impl PyDataFrame {
     fn __mul__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(self.inner.mul(&other_df.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.mul_scalar(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.mul_scalar(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Mul, false))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for *",
@@ -16912,10 +16917,8 @@ impl PyDataFrame {
     fn __truediv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(self.inner.div(&other_df.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.div_scalar(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.div_scalar(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Div, false))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for /",
@@ -16925,10 +16928,8 @@ impl PyDataFrame {
     fn __rtruediv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(other_df.inner.div(&self.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.rdiv(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.rdiv(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Div, true))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for /",
@@ -16938,10 +16939,11 @@ impl PyDataFrame {
     fn __floordiv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(self.inner.floordiv(&other_df.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.floordiv(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.floordiv(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(
+                self.inner
+                    .arith_scalar(&scalar, ArithmeticOp::FloorDiv, false),
+            )
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for //",
@@ -16951,10 +16953,11 @@ impl PyDataFrame {
     fn __rfloordiv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(other_df.inner.floordiv(&self.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.rfloordiv(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.rfloordiv(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(
+                self.inner
+                    .arith_scalar(&scalar, ArithmeticOp::FloorDiv, true),
+            )
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for //",
@@ -16964,10 +16967,8 @@ impl PyDataFrame {
     fn __mod__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(self.inner.r#mod(&other_df.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.mod_scalar(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.mod_scalar(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Mod, false))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for %",
@@ -16977,10 +16978,8 @@ impl PyDataFrame {
     fn __rmod__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(other_df.inner.r#mod(&self.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.rmod(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.rmod(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Mod, true))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for %",
@@ -16995,10 +16994,8 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(self.inner.pow(&other_df.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.pow_scalar(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.pow_scalar(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Pow, false))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for **",
@@ -17013,10 +17010,8 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
             wrap_frame(other_df.inner.pow(&self.inner))
-        } else if let Ok(val) = other.extract::<f64>() {
-            wrap_frame(self.inner.rpow(val))
-        } else if let Ok(val) = other.extract::<i64>() {
-            wrap_frame(self.inner.rpow(val as f64))
+        } else if let Some(scalar) = number_scalar(other) {
+            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Pow, true))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Unsupported operand type for **",

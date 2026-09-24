@@ -63541,6 +63541,9 @@ impl<'a> SparseDataFrameView<'a> {
 pub enum DataFrameArithmeticOperand<'a> {
     DataFrame(&'a DataFrame),
     Scalar(f64),
+    /// An integer scalar: int64 columns stay int64 under + - * // % **, as in
+    /// pandas (br-frankenpandas-c74wi; it was carried as an f64).
+    Integer(i64),
 }
 
 impl<'a> From<&'a DataFrame> for DataFrameArithmeticOperand<'a> {
@@ -63557,13 +63560,13 @@ impl<'a> From<f64> for DataFrameArithmeticOperand<'a> {
 
 impl<'a> From<i64> for DataFrameArithmeticOperand<'a> {
     fn from(value: i64) -> Self {
-        Self::Scalar(value as f64)
+        Self::Integer(value)
     }
 }
 
 impl<'a> From<i32> for DataFrameArithmeticOperand<'a> {
     fn from(value: i32) -> Self {
-        Self::Scalar(value as f64)
+        Self::Integer(i64::from(value))
     }
 }
 
@@ -89043,6 +89046,130 @@ impl DataFrame {
         self.apply_scalar_op(value, |a, b| a + b)
     }
 
+    /// `df <op> scalar`, or `scalar <op> df` when `reflected`, with pandas'
+    /// dtypes: an all-valid Int64 column (and a Bool column under + - * // %)
+    /// with an integer scalar goes through the Series kernel
+    /// (`Column::binary_numeric`) and stays int64 - wrapping overflow, pandas'
+    /// zero-division floats, its negative-power error - where the f64 path made
+    /// it float64 (br-frankenpandas-c74wi). True division, a float scalar, and
+    /// every other column keep the f64 path of the per-op methods.
+    pub fn arith_scalar(
+        &self,
+        scalar: &Scalar,
+        op: ArithmeticOp,
+        reflected: bool,
+    ) -> Result<Self, FrameError> {
+        let value = scalar.to_f64().map_err(ColumnError::from)?;
+        // A bool column computes as 0/1 floats, as in pandas (bool / 2, bool +
+        // 1.5); the f64 kernels passed it through unchanged. A bool scalar keeps
+        // that pass-through (pandas' bool + True stays bool).
+        let promote_bools = !matches!(scalar, Scalar::Bool(_));
+        let f64_path = |df: &Self| -> Result<Self, FrameError> {
+            let promoted;
+            let df = if promote_bools
+                && df
+                    .column_order
+                    .iter()
+                    .any(|name| df.columns[name.as_str()].dtype() == DType::Bool)
+            {
+                promoted = df.apply_per_column(|s| {
+                    if s.dtype() == DType::Bool {
+                        s.astype(DType::Float64)
+                    } else {
+                        Ok(s.clone())
+                    }
+                })?;
+                &promoted
+            } else {
+                df
+            };
+            match (op, reflected) {
+                (ArithmeticOp::Add, _) => df.add_scalar(value),
+                (ArithmeticOp::Mul, _) => df.mul_scalar(value),
+                (ArithmeticOp::Sub, false) => df.sub_scalar(value),
+                (ArithmeticOp::Sub, true) => df.apply_scalar_op(value, |a, b| b - a),
+                (ArithmeticOp::Div, false) => df.div_scalar(value),
+                (ArithmeticOp::Div, true) => df.apply_scalar_op(value, |a, b| b / a),
+                (ArithmeticOp::FloorDiv, false) => df.floordiv_scalar(value),
+                (ArithmeticOp::FloorDiv, true) => df.apply_scalar_op(value, |a, b| (b / a).floor()),
+                (ArithmeticOp::Mod, false) => df.mod_scalar(value),
+                (ArithmeticOp::Mod, true) => {
+                    df.apply_scalar_op(value, |a, b| b - (b / a).floor() * a)
+                }
+                (ArithmeticOp::Pow, false) => df.pow_scalar(value),
+                (ArithmeticOp::Pow, true) => df.apply_scalar_op(value, |a, b| b.powf(a)),
+            }
+        };
+        let integer = match scalar {
+            Scalar::Int64(v) if op != ArithmeticOp::Div => Some(*v),
+            _ => None,
+        };
+        let Some(integer) = integer else {
+            return f64_path(self);
+        };
+        let bool_ok = matches!(
+            op,
+            ArithmeticOp::Add
+                | ArithmeticOp::Sub
+                | ArithmeticOp::Mul
+                | ArithmeticOp::FloorDiv
+                | ArithmeticOp::Mod
+        );
+        let integral: Vec<&String> = self
+            .column_order
+            .iter()
+            .filter(|name| {
+                let column = &self.columns[name.as_str()];
+                column.validity().all()
+                    && (column.dtype() == DType::Int64
+                        || (bool_ok && column.dtype() == DType::Bool))
+            })
+            .collect();
+        if integral.is_empty() {
+            return f64_path(self);
+        }
+        let rest: Vec<&str> = self
+            .column_order
+            .iter()
+            .filter(|name| !integral.contains(name))
+            .map(String::as_str)
+            .collect();
+        let rest_out = if rest.is_empty() {
+            None
+        } else {
+            Some(f64_path(&self.select_columns(&rest)?)?)
+        };
+        let broadcast = Column::from_i64_values(vec![integer; self.len()]);
+        // The integer columns run in parallel, as the f64 kernels do.
+        let integral_names: Vec<String> = integral.iter().map(|name| (*name).clone()).collect();
+        let integral_out = self.par_map_columns(&integral_names, |name| {
+            let column = &self.columns[name];
+            Ok(if reflected {
+                broadcast.binary_numeric(column, op)?
+            } else {
+                column.binary_numeric(&broadcast, op)?
+            })
+        })?;
+        let mut columns: BTreeMap<String, Column> =
+            integral_names.into_iter().zip(integral_out).collect();
+        if let Some(out) = rest_out {
+            for name in rest {
+                let column = out.columns.get(name).cloned().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!("arith_scalar lost column {name}"))
+                })?;
+                columns.insert(name.to_owned(), column);
+            }
+        }
+        Ok(Self {
+            columns: columns.into(),
+            column_order: self.column_order.clone(),
+            index: self.index.clone(),
+            column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
+        })
+    }
+
     /// Subtract a scalar from all numeric columns.
     pub fn sub_scalar(&self, value: f64) -> Result<Self, FrameError> {
         self.apply_scalar_op(value, |a, b| a - b)
@@ -89093,7 +89220,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => self.add_df(frame),
-            DataFrameArithmeticOperand::Scalar(value) => self.add_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Add, false)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Add, false)
+            }
         }
     }
 
@@ -89104,7 +89236,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => self.sub_df(frame),
-            DataFrameArithmeticOperand::Scalar(value) => self.sub_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Sub, false)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Sub, false)
+            }
         }
     }
 
@@ -89123,7 +89260,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => self.mul_df(frame),
-            DataFrameArithmeticOperand::Scalar(value) => self.mul_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Mul, false)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Mul, false)
+            }
         }
     }
 
@@ -89142,7 +89284,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => self.div_df(frame),
-            DataFrameArithmeticOperand::Scalar(value) => self.div_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Div, false)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Div, false)
+            }
         }
     }
 
@@ -89169,7 +89316,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => self.floordiv_df(frame),
-            DataFrameArithmeticOperand::Scalar(value) => self.floordiv_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::FloorDiv, false)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::FloorDiv, false)
+            }
         }
     }
 
@@ -89182,7 +89334,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => self.mod_df(frame),
-            DataFrameArithmeticOperand::Scalar(value) => self.mod_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Mod, false)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Mod, false)
+            }
         }
     }
 
@@ -89193,7 +89350,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => self.pow_df(frame),
-            DataFrameArithmeticOperand::Scalar(value) => self.pow_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Pow, false)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Pow, false)
+            }
         }
     }
 
@@ -89204,7 +89366,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => frame.add_df(self),
-            DataFrameArithmeticOperand::Scalar(value) => self.add_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Add, true)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Add, true)
+            }
         }
     }
 
@@ -89215,7 +89382,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => frame.sub_df(self),
-            DataFrameArithmeticOperand::Scalar(value) => self.apply_scalar_op(value, |a, b| b - a),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Sub, true)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Sub, true)
+            }
         }
     }
 
@@ -89226,7 +89398,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => frame.mul_df(self),
-            DataFrameArithmeticOperand::Scalar(value) => self.mul_scalar(value),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Mul, true)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Mul, true)
+            }
         }
     }
 
@@ -89237,7 +89414,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => frame.div_df(self),
-            DataFrameArithmeticOperand::Scalar(value) => self.apply_scalar_op(value, |a, b| b / a),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Div, true)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Div, true)
+            }
         }
     }
 
@@ -89257,7 +89439,10 @@ impl DataFrame {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => frame.floordiv_df(self),
             DataFrameArithmeticOperand::Scalar(value) => {
-                self.apply_scalar_op(value, |a, b| (b / a).floor())
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::FloorDiv, true)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::FloorDiv, true)
             }
         }
     }
@@ -89273,7 +89458,10 @@ impl DataFrame {
             // sign via the floored remainder b - floor(b/a)*a, not Rust's
             // dividend-sign %. (br 5btt1.)
             DataFrameArithmeticOperand::Scalar(value) => {
-                self.apply_scalar_op(value, |a, b| b - (b / a).floor() * a)
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Mod, true)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Mod, true)
             }
         }
     }
@@ -89286,7 +89474,10 @@ impl DataFrame {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => frame.pow_df(self),
             DataFrameArithmeticOperand::Scalar(value) => {
-                self.apply_scalar_op(value, |a, b| b.powf(a))
+                self.arith_scalar(&Scalar::Float64(value), ArithmeticOp::Pow, true)
+            }
+            DataFrameArithmeticOperand::Integer(value) => {
+                self.arith_scalar(&Scalar::Int64(value), ArithmeticOp::Pow, true)
             }
         }
     }
@@ -89297,10 +89488,27 @@ impl DataFrame {
     ///
     /// Aligns on index (outer join), operates on shared numeric columns,
     /// fills missing with NaN.
-    fn binary_df_op<F>(&self, other: &Self, op: F, _name: &str) -> Result<Self, FrameError>
+    fn binary_df_op<F>(&self, other: &Self, op: F, name: &str) -> Result<Self, FrameError>
     where
         F: Fn(f64, f64) -> f64 + Sync,
     {
+        // Two all-valid int64 columns stay int64 under everything but true
+        // division, through the Series kernel (br-frankenpandas-c74wi: the f64
+        // closure made them float64).
+        let int_op = match name {
+            "add" => Some(ArithmeticOp::Add),
+            "sub" => Some(ArithmeticOp::Sub),
+            "mul" => Some(ArithmeticOp::Mul),
+            "floordiv" => Some(ArithmeticOp::FloorDiv),
+            "mod" => Some(ArithmeticOp::Mod),
+            _ => None,
+        };
+        let both_int = |lc: &Column, rc: &Column| {
+            lc.dtype() == DType::Int64
+                && rc.dtype() == DType::Int64
+                && lc.validity().all()
+                && rc.validity().all()
+        };
         // Per br-frankenpandas-b0cab: fast path for the common case where self
         // and other already share the same index and column ordering. The
         // align_on_index round-trip would otherwise materialize two intermediate
@@ -89328,6 +89536,11 @@ impl DataFrame {
                 let right_numlike =
                     matches!(rc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
 
+                if let Some(int_op) = int_op
+                    && both_int(lc, rc)
+                {
+                    return Ok(lc.binary_numeric(rc, int_op)?);
+                }
                 if left_numlike && right_numlike {
                     // Typed Float64 fast path (br-frankenpandas-73cu1): when both
                     // columns are contiguous Float64, apply `op` straight over the
@@ -89487,7 +89700,11 @@ impl DataFrame {
             let left_numlike = matches!(lc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
             let right_numlike = matches!(rc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
 
-            if left_numlike && right_numlike {
+            if let Some(int_op) = int_op
+                && both_int(lc, rc)
+            {
+                result_cols.insert(col_name.clone(), lc.binary_numeric(rc, int_op)?);
+            } else if left_numlike && right_numlike {
                 // to_f64() returns Err for Null values, which maps to NaN
                 let vals: Vec<Scalar> = lc
                     .values()
@@ -163161,9 +163378,10 @@ mod tests {
         )
         .unwrap();
         let result = df1.floordiv_df(&df2).unwrap();
-        // 7 // 3 = 2.0, 10 // 4 = 2.0
-        assert_eq!(result.columns["a"].values()[0], Scalar::Float64(2.0));
-        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(2.0));
+        // GOLDEN-CHANGE (br-frankenpandas-c74wi): these were Float64(2.0); pandas
+        // 2.2.3 keeps int64 // int64 int64: 7 // 3 = 2, 10 // 4 = 2.
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(2));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Int64(2));
     }
 
     #[test]
@@ -163179,9 +163397,10 @@ mod tests {
         )
         .unwrap();
         let result = df1.mod_df(&df2).unwrap();
-        // 7 % 3 = 1.0, 10 % 4 = 2.0
-        assert_eq!(result.columns["a"].values()[0], Scalar::Float64(1.0));
-        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(2.0));
+        // GOLDEN-CHANGE (br-frankenpandas-c74wi): these were Float64; pandas
+        // 2.2.3 keeps int64 % int64 int64: 7 % 3 = 1, 10 % 4 = 2.
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(1));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Int64(2));
     }
 
     #[test]
@@ -198190,9 +198409,11 @@ mod tests {
         .unwrap();
 
         let sum = a.add_df(&b).unwrap();
+        // GOLDEN-CHANGE (br-frankenpandas-c74wi): x was Float64; pandas 2.2.3
+        // keeps int64 + int64 int64.
         assert_eq!(
             sum.column("x").unwrap().values(),
-            &[Scalar::Float64(11.0), Scalar::Float64(22.0)]
+            &[Scalar::Int64(11), Scalar::Int64(22)]
         );
         assert_eq!(
             sum.column("y").unwrap().values(),

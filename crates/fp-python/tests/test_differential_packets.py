@@ -3013,6 +3013,47 @@ def test_series_flex_keywords_match_pandas(case: Any) -> None:
     assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
 
 
+def _int_frame(m: Any) -> Any:
+    return m.DataFrame({"i": [1, -2, 0, 7], "t": [True, False, True, True], "f": [0.5, 1.5, -2.0, 4.0]})
+
+
+# br-frankenpandas-c74wi: DataFrame arithmetic made int64 columns float64.
+_FRAME_INT_ARITH_CASES = {
+    "add_int": lambda m: _int_frame(m) + 3,
+    "sub_int": lambda m: _int_frame(m) - 3,
+    "mul_int": lambda m: _int_frame(m) * 3,
+    "floordiv_int": lambda m: _int_frame(m) // 3,
+    "mod_int": lambda m: _int_frame(m) % 3,
+    "pow_int": lambda m: _int_frame(m)[["i", "f"]] ** 2,
+    "rsub_int": lambda m: 3 - _int_frame(m),
+    "radd_int": lambda m: 3 + _int_frame(m),
+    "rfloordiv_int_zero_division": lambda m: 10 // _int_frame(m)[["i"]],
+    "rmod_int": lambda m: 10 % _int_frame(m)[["i"]].replace(0, 5),
+    "floordiv_zero": lambda m: _int_frame(m)[["i"]] // 0,
+    "mod_zero": lambda m: _int_frame(m)[["i"]] % 0,
+    "overflow_wraps": lambda m: m.DataFrame({"i": [2**62]}) * 4,
+    "frame_plus_frame": lambda m: _int_frame(m)[["i", "f"]] + _int_frame(m)[["i", "f"]],
+    "frame_floordiv_frame": lambda m: _int_frame(m)[["i"]] // m.DataFrame({"i": [3, 3, 3, 3]}),
+    # NEGATIVE: true division, a float scalar and float columns give float64.
+    "truediv_int": lambda m: _int_frame(m) / 2,
+    "add_float": lambda m: _int_frame(m) + 1.5,
+    "rtruediv_int": lambda m: 12 / _int_frame(m)[["i"]].replace(0, 4),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FRAME_INT_ARITH_CASES.values()), ids=list(_FRAME_INT_ARITH_CASES))
+def test_frame_integer_arithmetic_keeps_pandas_dtypes(case: Any) -> None:
+    assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_integer_negative_power_raises_like_pandas() -> None:
+    for m in (pd, fpd):
+        with pytest.raises(ValueError, match="Integers to negative integer powers are not allowed"):
+            _int_frame(m)[["i"]] ** -1
+
+
 def _nan_pair(m: Any) -> Any:
     return m.Series([1.0, _NAN, 3.0]), m.Series([2.0, _NAN, 1.0])
 
