@@ -4112,6 +4112,22 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
+/// Index labels as the values of a column (`reset_index`): typed, except that
+/// a mix of Int64 and Utf8 labels becomes all-Utf8 so the column can hold it.
+fn index_labels_to_column_scalars(labels: &[IndexLabel]) -> Vec<Scalar> {
+    let has_int = labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Int64(_)));
+    let has_utf8 = labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Utf8(_)));
+    if has_int && has_utf8 {
+        labels.iter().map(index_label_to_utf8_scalar).collect()
+    } else {
+        labels.iter().map(index_label_to_scalar).collect()
+    }
+}
+
 /// Per br-frankenpandas-41edff: render Float64 the same way pandas to_csv
 /// does — whole-number floats get a `.0` suffix instead of being collapsed
 /// to integer form by Rust's default Display. Mirrors the predicate used
@@ -12388,17 +12404,14 @@ impl Series {
             .iter()
             .map(|&position| normalize_iloc_position(position, self.len()))
             .collect::<Result<Vec<usize>, _>>()?;
-        let out_labels: Vec<IndexLabel> = normalized
-            .iter()
-            .map(|&pos| self.index.labels()[pos].clone())
-            .collect();
         // Series::new mirrors the prior with_labels_and_values_preserving_name
         // construction (categorical/sparse reset to None) — only the column
         // gather changes from a Scalar loop to the typed take_positions.
-        let index = Index::new(out_labels).rename_index(self.index.name());
+        // Index::take keeps the name and carries row MultiIndex levels
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
         Self::new(
             self.name.clone(),
-            index,
+            self.index.take(&normalized),
             self.column.take_positions(&normalized),
         )
     }
@@ -24379,6 +24392,31 @@ impl Series {
                 self.name.clone()
             }
         });
+        // Row MultiIndex levels reset into one column per level, named by the
+        // level or `level_i`, as pandas does
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+        if let Some(levels) = self.index.row_multiindex() {
+            let mut columns = BTreeMap::new();
+            let mut order = Vec::with_capacity(levels.nlevels() + 1);
+            for level in 0..levels.nlevels() {
+                let level_name = levels.names()[level]
+                    .clone()
+                    .unwrap_or_else(|| format!("level_{level}"));
+                if level_name == value_column_name || order.contains(&level_name) {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "cannot insert {level_name}, already exists"
+                    )));
+                }
+                let values =
+                    index_labels_to_column_scalars(levels.get_level_values(level)?.labels());
+                columns.insert(level_name.clone(), Column::from_values(values)?);
+                order.push(level_name);
+            }
+            columns.insert(value_column_name.clone(), self.column.clone());
+            order.push(value_column_name);
+            let frame = DataFrame::new_with_column_order(range_index(self.len())?, columns, order)?;
+            return Ok(SeriesResetIndexResult::DataFrame(frame));
+        }
         let index_column_name = match self.index.name() {
             Some(name) => {
                 if name == value_column_name {
@@ -24397,29 +24435,7 @@ impl Series {
             }
         };
 
-        let has_int = self
-            .index
-            .labels()
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Int64(_)));
-        let has_utf8 = self
-            .index
-            .labels()
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Utf8(_)));
-        let index_values = if has_int && has_utf8 {
-            self.index
-                .labels()
-                .iter()
-                .map(index_label_to_utf8_scalar)
-                .collect::<Vec<_>>()
-        } else {
-            self.index
-                .labels()
-                .iter()
-                .map(index_label_to_scalar)
-                .collect::<Vec<_>>()
-        };
+        let index_values = index_labels_to_column_scalars(self.index.labels());
 
         let mut columns = BTreeMap::new();
         columns.insert(
@@ -69086,15 +69102,35 @@ impl DataFrame {
     /// flat storage fallback in `index()`.
     #[must_use]
     pub fn row_index(&self) -> fp_index::MultiIndexOrIndex {
-        match &self.row_multiindex {
+        match self.row_multiindex() {
             Some(multiindex) => fp_index::MultiIndexOrIndex::Multi(multiindex.clone()),
             None => fp_index::MultiIndexOrIndex::Index(self.index.clone()),
         }
     }
 
+    /// The row `MultiIndex`: the frame's own, else the levels its flat index
+    /// carries (a frame built from a Series that had them).
     #[must_use]
     pub fn row_multiindex(&self) -> Option<&fp_index::MultiIndex> {
-        self.row_multiindex.as_ref()
+        self.row_multiindex
+            .as_ref()
+            .or_else(|| self.index.row_multiindex())
+    }
+
+    /// The row index a column of this frame carries as a Series: the flat
+    /// labels, with the row `MultiIndex` levels attached when the frame has
+    /// them, so `df['v']` of a multi-key groupby result keeps its levels
+    /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+    #[must_use]
+    pub fn series_index(&self) -> Index {
+        match &self.row_multiindex {
+            Some(levels) => self
+                .index
+                .clone()
+                .with_row_multiindex(levels.clone())
+                .unwrap_or_else(|_| self.index.to_flat_index()),
+            None => self.index.clone(),
+        }
     }
 
     /// The COLUMN axis when it has more than one level, as
@@ -79521,7 +79557,7 @@ impl DataFrame {
         // (same shape as br-7c7d0 Series::value_counts fix). Vec<ScalarKey>
         // is Hash + Eq via the ScalarKey derive; using it as a HashMap key
         // gives O(1) lookup per row instead of O(n) linear scan.
-        let mut key_counts: Vec<(Vec<ScalarKey<'_>>, String, i64)> = Vec::new();
+        let mut key_counts: Vec<(Vec<ScalarKey<'_>>, String, i64, usize)> = Vec::new();
         let mut idx_map: HashMap<Vec<ScalarKey<'_>>, usize> = HashMap::new();
 
         for i in 0..self.len() {
@@ -79557,7 +79593,7 @@ impl DataFrame {
                 Some(&idx) => key_counts[idx].2 += 1,
                 None => {
                     idx_map.insert(key_parts.clone(), key_counts.len());
-                    key_counts.push((key_parts, key_label, 1));
+                    key_counts.push((key_parts, key_label, 1, i));
                 }
             }
         }
@@ -79572,14 +79608,26 @@ impl DataFrame {
 
         let labels: Vec<IndexLabel> = key_counts
             .iter()
-            .map(|(_, label, _)| IndexLabel::Utf8(label.clone()))
+            .map(|(_, label, _, _)| IndexLabel::Utf8(label.clone()))
             .collect();
         let values: Vec<Scalar> = key_counts
             .iter()
-            .map(|(_, _, count)| Scalar::Int64(*count))
+            .map(|(_, _, count, _)| Scalar::Int64(*count))
+            .collect();
+        let levels: Vec<Vec<IndexLabel>> = self
+            .column_order
+            .iter()
+            .map(|col_name| {
+                let column = self.columns[col_name].values();
+                key_counts
+                    .iter()
+                    .map(|&(_, _, _, row)| DataFrameGroupBy::group_key_scalar_label(&column[row]))
+                    .collect()
+            })
             .collect();
 
-        Series::from_values("count".to_string(), labels, values)
+        let counts = Series::from_values("count".to_string(), labels, values)?;
+        self.with_value_count_levels(counts, levels)
     }
 
     /// Dense fast path for [`value_counts`]: every column bounded-Int64 or
@@ -79706,12 +79754,33 @@ impl DataFrame {
                 IndexLabel::Utf8(parts.join(", "))
             })
             .collect();
+        let mut levels: Vec<Vec<IndexLabel>> = (0..ncol).map(|_| Vec::with_capacity(d)).collect();
+        for &g in &order {
+            for (level, key) in levels.iter_mut().zip(&key_of_gid[g]) {
+                level.push(key.to_index_label());
+            }
+        }
         let values: Vec<Scalar> = order.iter().map(|&g| Scalar::Int64(count[g])).collect();
-        Ok(Some(Series::from_values(
-            "count".to_string(),
-            labels,
-            values,
-        )?))
+        let counts = Series::from_values("count".to_string(), labels, values)?;
+        Ok(Some(self.with_value_count_levels(counts, levels)?))
+    }
+
+    /// `value_counts`' counts indexed by their row tuples as a MultiIndex named
+    /// after the counted columns - one level for a single column - as pandas
+    /// returns (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+    fn with_value_count_levels(
+        &self,
+        counts: Series,
+        levels: Vec<Vec<IndexLabel>>,
+    ) -> Result<Series, FrameError> {
+        let names = self
+            .column_order
+            .iter()
+            .map(|name| Some(name.clone()))
+            .collect();
+        let levels = fp_index::MultiIndex::from_arrays(levels)?.set_names(names);
+        let index = counts.index().clone().with_row_multiindex(levels)?;
+        Series::new(counts.name(), index, counts.column().clone())
     }
 
     /// Count unique value combinations for a subset of columns.
@@ -87638,7 +87707,7 @@ impl DataFrame {
         let col = self.column(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column not found: {name}"))
         })?;
-        Series::new(name.to_string(), self.index.clone(), col.clone())
+        Series::new(name.to_string(), self.series_index(), col.clone())
     }
 
     /// Internal: extract a column at a positional index as a Series.
@@ -87649,7 +87718,7 @@ impl DataFrame {
         let col = self.columns.column_at(pos).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column position {pos} out of range"))
         })?;
-        Series::new(name.to_string(), self.index.clone(), col.clone())
+        Series::new(name.to_string(), self.series_index(), col.clone())
     }
 
     // ── DataFrame element-wise operations ──
@@ -94629,47 +94698,7 @@ impl DataFrameGroupBy<'_> {
     /// Internal: extract the group key label for a given row index.
     fn group_key_label(&self, row: usize) -> IndexLabel {
         if self.by.len() == 1 {
-            let val = &self.df.columns[&self.by[0]].values()[row];
-            match val {
-                Scalar::Int64(v) => IndexLabel::Int64(*v),
-                Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-                // Typed temporal group-key labels (was Utf8(format!("{:?}")) — a
-                // stringified "Datetime64(..)" debug label, NOT pandas' typed
-                // DatetimeIndex). Matches the part-2 dense temporal path and pandas.
-                Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-                Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
-                // br-frankenpandas-9m9zf, the same correction the temporal arms
-                // above already received. MEASURED, live pandas 2.2.3:
-                //   df.groupby("k").sum().index -> [False, True], index dtype bool
-                //   a float key stays float
-                // never the strings "True"/"False".
-                Scalar::Bool(v) => IndexLabel::Bool(*v),
-                // ⚠️ Float64 had NO arm and fell to the debug catch-all below,
-                // so a float group key became the Rust debug string
-                // "Float64(1.5)" — not even the "1.5" the other stringifying
-                // sites produced.
-                Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
-                // br-frankenpandas-no6s4. REACHABLE, verified not assumed: the
-                // loop that builds these groups only skips a missing key when
-                // `self.dropna` is true (lib.rs:84969 `if self.dropna && ...
-                // is_missing() { continue; }`), so under `dropna=false` a null
-                // key survives and lands here. It used to fall to the debug
-                // catch-all below and render as a Rust `{:?}` string.
-                //
-                // MEASURED, live pandas 2.2.3:
-                //   df.groupby("k", dropna=False).sum().index -> [1.0, nan]
-                // the NaN key SURVIVES as a float nan, never a string.
-                //
-                // COLLAPSE rule copied from `scalar_to_typed_index_label`, whose
-                // comment reasons it for exactly this case (br-frankenpandas-8m6ay):
-                // grouping machinery merges None into the nan group, NaT keeps NaT.
-                Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-                Scalar::Null(_) => IndexLabel::Null(NullKind::NaN),
-                // Still the debug rendering for PERIOD and INTERVAL keys, which
-                // `IndexLabel` has no variant for — a representation gap, not a
-                // mapping bug. See br-frankenpandas-no6s4.
-                other => IndexLabel::Utf8(format!("{other:?}")),
-            }
+            Self::group_key_scalar_label(&self.df.columns[&self.by[0]].values()[row])
         } else {
             let parts: Vec<String> = self
                 .by
@@ -94684,6 +94713,89 @@ impl DataFrameGroupBy<'_> {
                 })
                 .collect();
             IndexLabel::Utf8(parts.join("|"))
+        }
+    }
+
+    /// Every row's group as a code in this groupby's group order (null where
+    /// `dropna` drops the row), and the groups in that order as an index: their
+    /// flat labels, carrying the row `MultiIndex` levels when grouping by
+    /// several keys. A Series grouped by the codes reduces to one value per
+    /// code, and `take` of this index at the codes labels that result as pandas
+    /// labels the groups - how the Python binding runs `gb[col]` over several
+    /// keys (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+    pub fn group_codes(&self) -> Result<(Column, Index), FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let mut codes = vec![None; self.df.len()];
+        let mut labels = Vec::with_capacity(group_order.len());
+        for (code, key) in group_order.iter().enumerate() {
+            let rows = &groups[key];
+            labels.push(self.group_key_label(rows[0]));
+            let code = i64::try_from(code).map_err(|_| {
+                FrameError::CompatibilityRejected("too many groups for Int64 codes".to_owned())
+            })?;
+            for &row in rows {
+                codes[row] = Some(code);
+            }
+        }
+        let codes = match codes.iter().copied().collect::<Option<Vec<i64>>>() {
+            Some(all) => Column::from_i64_values(all),
+            None => Column::from_values(
+                codes
+                    .into_iter()
+                    .map(|code| code.map_or(Scalar::Null(NullKind::NaN), Scalar::Int64))
+                    .collect(),
+            )?,
+        };
+        let index = Index::new(labels);
+        let index = match self.group_keys_as_row_multiindex(&group_order, &groups)? {
+            Some(levels) => index.with_row_multiindex(levels)?,
+            None => index,
+        };
+        Ok((codes, index))
+    }
+
+    /// A group key's label, typed as pandas types a groupby result's index and
+    /// each level of a multi-key result's MultiIndex.
+    fn group_key_scalar_label(val: &Scalar) -> IndexLabel {
+        match val {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            // Typed temporal group-key labels (was Utf8(format!("{:?}")) — a
+            // stringified "Datetime64(..)" debug label, NOT pandas' typed
+            // DatetimeIndex). Matches the part-2 dense temporal path and pandas.
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
+            // br-frankenpandas-9m9zf, the same correction the temporal arms
+            // above already received. MEASURED, live pandas 2.2.3:
+            //   df.groupby("k").sum().index -> [False, True], index dtype bool
+            //   a float key stays float
+            // never the strings "True"/"False".
+            Scalar::Bool(v) => IndexLabel::Bool(*v),
+            // ⚠️ Float64 had NO arm and fell to the debug catch-all below,
+            // so a float group key became the Rust debug string
+            // "Float64(1.5)" — not even the "1.5" the other stringifying
+            // sites produced.
+            Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
+            // br-frankenpandas-no6s4. REACHABLE, verified not assumed: the
+            // loop that builds these groups only skips a missing key when
+            // `self.dropna` is true (lib.rs:84969 `if self.dropna && ...
+            // is_missing() { continue; }`), so under `dropna=false` a null
+            // key survives and lands here. It used to fall to the debug
+            // catch-all below and render as a Rust `{:?}` string.
+            //
+            // MEASURED, live pandas 2.2.3:
+            //   df.groupby("k", dropna=False).sum().index -> [1.0, nan]
+            // the NaN key SURVIVES as a float nan, never a string.
+            //
+            // COLLAPSE rule copied from `scalar_to_typed_index_label`, whose
+            // comment reasons it for exactly this case (br-frankenpandas-8m6ay):
+            // grouping machinery merges None into the nan group, NaT keeps NaT.
+            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
+            Scalar::Null(_) => IndexLabel::Null(NullKind::NaN),
+            // Still the debug rendering for PERIOD and INTERVAL keys, which
+            // `IndexLabel` has no variant for — a representation gap, not a
+            // mapping bug. See br-frankenpandas-no6s4.
+            other => IndexLabel::Utf8(format!("{other:?}")),
         }
     }
 
@@ -94709,19 +94821,12 @@ impl DataFrameGroupBy<'_> {
         for gkey in group_order {
             let first_row = groups[gkey][0];
             for (level_idx, col_name) in self.by.iter().enumerate() {
-                let value = &self.df.columns[col_name].values()[first_row];
-                let label = match value {
-                    Scalar::Int64(v) => IndexLabel::Int64(*v),
-                    Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-                    Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
-                    Scalar::Bool(v) => IndexLabel::Utf8(if *v {
-                        "True".to_owned()
-                    } else {
-                        "False".to_owned()
-                    }),
-                    other => IndexLabel::Utf8(format!("{other:?}")),
-                };
-                level_arrays[level_idx].push(label);
+                // Typed like a single key's label (bool, float and datetime
+                // levels were the strings "True" / "Float64(1.5)" /
+                // "Datetime64(..)"; pandas keeps each level's dtype).
+                level_arrays[level_idx].push(Self::group_key_scalar_label(
+                    &self.df.columns[col_name].values()[first_row],
+                ));
             }
         }
         let names: Vec<Option<String>> = self.by.iter().map(|n| Some(n.clone())).collect();
@@ -102988,55 +103093,31 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
-    /// GroupBy size (number of rows per group).
+    /// GroupBy size (number of rows per group). Over several keys the result's
+    /// index carries the keys' row MultiIndex, as pandas returns
+    /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
     pub fn size(&self) -> Result<Series, FrameError> {
         // Dense fast path for >=2 keys: histogram rows per dense gid and build the
         // group labels from the dense key tuples, skipping build_groups' per-row
-        // Vec<ScalarKey>. Bit-identical: same sorted group order and the same
-        // "|"-joined multi-key labels as the generic group_key_label, with the
-        // flat Index (no MultiIndex) the generic size returns.
+        // Vec<ScalarKey>. Same sorted group order, "|"-joined flat labels and
+        // MultiIndex levels as the generic path below.
         if self.as_index && self.by.len() >= 2 {
-            if let Some(g) = self.multi_int64_dense_grouping() {
-                let mut count = vec![0i64; g.ngroups];
-                for &gid in &g.gid_per_row {
+            let counts = |gid_per_row: &[usize], ngroups: usize, order: &[usize]| {
+                let mut count = vec![0i64; ngroups];
+                for &gid in gid_per_row {
                     count[gid] += 1;
                 }
-                let labels: Vec<IndexLabel> = g
-                    .order
-                    .iter()
-                    .map(|&gid| {
-                        let parts: Vec<String> =
-                            g.key_of_gid[gid].iter().map(ToString::to_string).collect();
-                        IndexLabel::Utf8(parts.join("|"))
-                    })
-                    .collect();
-                let values: Vec<Scalar> = g
-                    .order
-                    .iter()
-                    .map(|&gid| Scalar::Int64(count[gid]))
-                    .collect();
-                return Series::from_values("size", labels, values);
+                Column::from_i64_values(order.iter().map(|&gid| count[gid]).collect())
+            };
+            if let Some(g) = self.multi_int64_dense_grouping() {
+                let (index, levels) = self.multi_dense_index(&g)?;
+                let sizes = counts(&g.gid_per_row, g.ngroups, &g.order);
+                return Series::new("size", index.with_row_multiindex(levels)?, sizes);
             }
             if let Some(g) = self.multi_mixed_dense_grouping() {
-                let mut count = vec![0i64; g.ngroups];
-                for &gid in &g.gid_per_row {
-                    count[gid] += 1;
-                }
-                let labels: Vec<IndexLabel> = g
-                    .order
-                    .iter()
-                    .map(|&gid| {
-                        let parts: Vec<String> =
-                            g.key(gid).iter().map(ToString::to_string).collect();
-                        IndexLabel::Utf8(parts.join("|"))
-                    })
-                    .collect();
-                let values: Vec<Scalar> = g
-                    .order
-                    .iter()
-                    .map(|&gid| Scalar::Int64(count[gid]))
-                    .collect();
-                return Series::from_values("size", labels, values);
+                let (index, levels) = self.multi_dense_index_mixed(&g)?;
+                let sizes = counts(&g.gid_per_row, g.ngroups, &g.order);
+                return Series::new("size", index.with_row_multiindex(levels)?, sizes);
             }
         }
 
@@ -103050,7 +103131,14 @@ impl DataFrameGroupBy<'_> {
             values.push(Scalar::Int64(groups[gkey].len() as i64));
         }
 
-        Series::from_values("size", labels, values)
+        let sizes = Series::from_values("size", labels, values)?;
+        match self.group_keys_as_row_multiindex(&group_order, &groups)? {
+            Some(levels) if self.as_index => {
+                let index = sizes.index().clone().with_row_multiindex(levels)?;
+                Series::new("size", index, sizes.column().clone())
+            }
+            _ => Ok(sizes),
+        }
     }
 
     /// Filter groups using a function that returns bool for each group.
@@ -154414,6 +154502,113 @@ mod tests {
         let first_b = b.groupby(&key).unwrap().first_skipna(false).unwrap();
         assert_eq!(first_b.values()[0], Scalar::Float64(1.5));
         assert!(first_b.values()[1].is_missing());
+    }
+
+    #[test]
+    fn multi_key_series_carry_the_row_multiindex_4qg5w9() {
+        // pandas 2.2.3 over k=['x','y','x','x'], j=[1,1,2,1], v=[1.,2.,3.,4.]:
+        //   groupby(['k','j']).size()        -> {('x',1): 2, ('x',2): 1, ('y',1): 1}
+        //   groupby(['k','j']).ngroup()      -> [0, 2, 1, 0]
+        //   groupby(['k','j']).sum()['v']    -> {('x',1): 5., ('x',2): 3., ('y',1): 2.}
+        //   df[['k','j']].value_counts()     -> {('x',1): 2, ('x',2): 1, ('y',1): 1}
+        //   groupby(['k','j'])['v'].sum().reset_index()
+        //       -> {'k': [x,x,y], 'j': [1,2,1], 'v': [5.,3.,2.]}
+        //   groupby(['b','k']).sum().index   -> [(False,'y'), (True,'x')], level 0 bool
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        let df = DataFrame::from_dict(
+            &["k", "j", "b", "v"],
+            vec![
+                ("k", vec![utf8("x"), utf8("y"), utf8("x"), utf8("x")]),
+                ("j", [1_i64, 1, 2, 1].map(Scalar::Int64).to_vec()),
+                ("b", [true, false, true, true].map(Scalar::Bool).to_vec()),
+                ("v", [1.0, 2.0, 3.0, 4.0].map(Scalar::Float64).to_vec()),
+            ],
+        )
+        .unwrap();
+        let label = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let tuples = |index: &Index| {
+            let levels = index.row_multiindex().expect("row MultiIndex levels");
+            assert_eq!(
+                levels.names(),
+                &[Some("k".to_owned()), Some("j".to_owned())]
+            );
+            (0..levels.len())
+                .map(|row| {
+                    levels
+                        .get_tuple(row)
+                        .unwrap()
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let want = vec![
+            vec![label("x"), IndexLabel::Int64(1)],
+            vec![label("x"), IndexLabel::Int64(2)],
+            vec![label("y"), IndexLabel::Int64(1)],
+        ];
+        let kj = df.select_columns(&["k", "j", "v"]).unwrap();
+        let gb = kj.groupby(&["k", "j"]).unwrap();
+
+        let size = gb.size().unwrap();
+        assert_eq!(tuples(size.index()), want);
+        assert_eq!(size.values(), [2_i64, 1, 1].map(Scalar::Int64));
+
+        let (codes, groups) = gb.group_codes().unwrap();
+        assert_eq!(codes.values(), [0_i64, 2, 1, 0].map(Scalar::Int64));
+        assert_eq!(tuples(&groups), want);
+
+        let summed = gb.sum().unwrap();
+        let v = summed.column_as_series("v").unwrap();
+        assert_eq!(tuples(v.index()), want);
+        assert_eq!(v.values(), [5.0, 3.0, 2.0].map(Scalar::Float64));
+        // iloc takes the levels at the same positions.
+        let picked = v.iloc(&[2, 0]).unwrap();
+        assert_eq!(
+            tuples(picked.index()),
+            vec![want[2].clone(), want[0].clone()]
+        );
+
+        let counts = df
+            .select_columns(&["k", "j"])
+            .unwrap()
+            .value_counts()
+            .unwrap();
+        assert_eq!(tuples(counts.index()), want);
+        assert_eq!(counts.values(), [2_i64, 1, 1].map(Scalar::Int64));
+
+        let super::SeriesResetIndexResult::DataFrame(reset) = v.reset_index(false).unwrap() else {
+            panic!("reset_index(drop=False) is a frame");
+        };
+        assert_eq!(reset.column_names(), vec!["k", "j", "v"]);
+        assert_eq!(
+            reset.column("k").unwrap().values(),
+            [utf8("x"), utf8("x"), utf8("y")]
+        );
+        assert_eq!(
+            reset.column("j").unwrap().values(),
+            [1_i64, 2, 1].map(Scalar::Int64)
+        );
+
+        // A bool key level stays bool (it was the string "True").
+        let by_bool = df.groupby(&["b", "k"]).unwrap().sum().unwrap();
+        let levels = by_bool.row_multiindex().unwrap();
+        assert_eq!(
+            levels.get_level_values(0).unwrap().labels(),
+            &[IndexLabel::Bool(false), IndexLabel::Bool(true)]
+        );
+
+        // NEGATIVE: one key stays flat, and a flat Series resets into 'index'.
+        let single = df.groupby(&["k"]).unwrap().size().unwrap();
+        assert!(single.index().row_multiindex().is_none());
+        assert_eq!(single.index().labels(), &[label("x"), label("y")]);
+        let flat = Series::from_values("v", vec![label("a")], vec![Scalar::Float64(1.0)]).unwrap();
+        let super::SeriesResetIndexResult::DataFrame(flat) = flat.reset_index(false).unwrap()
+        else {
+            panic!("reset_index(drop=False) is a frame");
+        };
+        assert_eq!(flat.column_names(), vec!["index", "v"]);
     }
 
     #[test]

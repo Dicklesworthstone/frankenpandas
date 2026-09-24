@@ -1702,6 +1702,51 @@ fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> 
     }
 }
 
+/// The Python key of every row of `index`: a tuple per row when the flat
+/// labels carry row MultiIndex levels, as pandas keys a MultiIndex Series,
+/// else the label itself (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+fn row_keys_to_py(py: Python<'_>, index: &Index) -> PyResult<Vec<Py<PyAny>>> {
+    let Some(levels) = index.row_multiindex() else {
+        return index
+            .labels()
+            .iter()
+            .map(|label| index_label_to_py(py, label))
+            .collect();
+    };
+    (0..levels.len())
+        .map(|row| {
+            let parts = levels
+                .get_tuple(row)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|label| index_label_to_py(py, label))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(pyo3::types::PyTuple::new(py, parts)?.into_any().unbind())
+        })
+        .collect()
+}
+
+/// `index` as the pandas object: a MultiIndex when its labels carry row
+/// MultiIndex levels, else a flat Index.
+fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
+    if let Some(levels) = index.row_multiindex() {
+        return Ok(Py::new(
+            py,
+            PyMultiIndex {
+                inner: levels.clone(),
+            },
+        )?
+        .into_any());
+    }
+    Ok(Py::new(
+        py,
+        PyIndex {
+            inner: index.clone(),
+        },
+    )?
+    .into_any())
+}
+
 /// Extract index labels from an optional Python object (Index, list, tuple, sequence, or None).
 fn extract_index_labels(
     index: Option<&Bound<'_, PyAny>>,
@@ -10743,12 +10788,12 @@ impl PySeries {
         (!name.is_empty()).then_some(name)
     }
 
-    /// Return the index of the Series.
+    /// Return the index of the Series: a MultiIndex when its labels carry row
+    /// MultiIndex levels (a multi-key groupby result, a column of a frame
+    /// indexed by several columns), as pandas returns, else the flat Index.
     #[getter]
-    fn index(&self) -> PyIndex {
-        PyIndex {
-            inner: self.inner.index().clone(),
-        }
+    fn index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        row_index_to_py(py, self.inner.index())
     }
 
     #[getter]
@@ -12841,9 +12886,8 @@ impl PySeries {
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
-        let idx = self.inner.index();
-        for (i, val) in self.inner.values().iter().enumerate() {
-            let k = index_label_to_py(py, &idx.labels()[i])?;
+        let keys = row_keys_to_py(py, self.inner.index())?;
+        for (k, val) in keys.into_iter().zip(self.inner.values().iter()) {
             let v = scalar_to_py(py, val)?;
             dict.set_item(k, v)?;
         }
@@ -13143,6 +13187,7 @@ impl PySeries {
             by,
             sort,
             as_index: true,
+            groups: None,
         })
     }
 
@@ -13412,21 +13457,18 @@ impl PySeries {
     }
 
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let labels = self.inner.index().labels();
+        let keys = row_keys_to_py(py, self.inner.index())?;
         let values = self.inner.column().values();
-        let mut list = Vec::with_capacity(labels.len());
-        for (l, v) in labels.iter().zip(values.iter()) {
-            let py_l = index_label_to_py(py, l)?;
+        let mut list = Vec::with_capacity(keys.len());
+        for (py_l, v) in keys.into_iter().zip(values.iter()) {
             let py_v = scalar_to_py(py, v)?;
             list.push(pyo3::types::PyTuple::new(py, &[py_l, py_v])?);
         }
         Ok(PyList::new(py, list)?.into_any().unbind())
     }
 
-    fn keys(&self) -> PyIndex {
-        PyIndex {
-            inner: self.inner.index().clone(),
-        }
+    fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        row_index_to_py(py, self.inner.index())
     }
 
     #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None))]
@@ -13602,8 +13644,8 @@ impl PySeries {
     }
 
     #[getter]
-    fn axes(&self) -> Vec<PyIndex> {
-        vec![self.index()]
+    fn axes(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        Ok(vec![self.index(py)?])
     }
 
     #[getter]
@@ -15359,7 +15401,7 @@ impl PyDataFrame {
             .inner
             .column(col)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.to_owned()))?;
-        let series = Series::new(col, self.inner.index().clone(), column.clone())
+        let series = Series::new(col, self.inner.series_index(), column.clone())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: series })
     }
@@ -26092,18 +26134,28 @@ impl PyGroupBy {
 
     /// One column grouped by this groupby's key: pandas' `gb["col"]` / `gb.col`.
     fn column_groupby(&self, name: &str) -> PyResult<PySeriesGroupBy> {
-        let [key] = self.by.as_slice() else {
-            // A multi-key groupby's result index is not yet a MultiIndex
-            // (DISC-006), so a SeriesGroupBy over several keys cannot match pandas.
-            return Err(not_implemented(
-                "selecting a column from a groupby over several keys",
-            ));
-        };
         let column = |col: &str| -> PyResult<Series> {
             let values = self.df.column(col).ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Column not found: {col}"))
             })?;
             Series::new(col, self.df.index().clone(), values.clone()).map_err(frame_error_to_py)
+        };
+        let series = column(name)?;
+        let [key] = self.by.as_slice() else {
+            // Several keys: group the column by each row's group code, whose
+            // groups the frame groupby orders (sort, dropna) and labels with
+            // their MultiIndex (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+            let (codes, groups) = self
+                .grouped()
+                .and_then(|gb| gb.group_codes())
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeriesGroupBy {
+                series,
+                by: Series::new("", self.df.index().clone(), codes).map_err(frame_error_to_py)?,
+                sort: self.sort,
+                as_index: self.as_index,
+                groups: Some(groups),
+            });
         };
         // A Series groupby drops missing keys; keeping them is not supported.
         unsupported_params(
@@ -26111,10 +26163,11 @@ impl PyGroupBy {
             &[("dropna", self.dropna)],
         )?;
         Ok(PySeriesGroupBy {
-            series: column(name)?,
+            series,
             by: column(key)?,
             sort: self.sort,
             as_index: self.as_index,
+            groups: None,
         })
     }
 }
@@ -27170,6 +27223,11 @@ pub struct PySeriesGroupBy {
     /// holding the key and the result (br-frankenpandas-n57tz). Always true
     /// for a Series' own groupby, where pandas refuses as_index=False.
     as_index: bool,
+    /// `df.groupby([k1, k2])["a"]`: `by` holds each row's group code, and this
+    /// index the groups in code order (flat labels carrying the MultiIndex
+    /// levels), which relabels a per-group result as pandas labels it
+    /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+    groups: Option<Index>,
 }
 
 impl PySeriesGroupBy {
@@ -27206,14 +27264,62 @@ impl PySeriesGroupBy {
         self.series.groupby(&self.by).map_err(frame_error_to_py)
     }
 
-    /// A reduction's result: sorted by key when `sort`, and with
-    /// as_index=False the keys moved into a column beside it, as pandas does.
-    fn wrap_result(&self, s: Series) -> PyResult<Py<PyAny>> {
-        let res = if self.sort {
+    /// A per-group result in pandas' group order - sorted by key when `sort`
+    /// (quantile, idxmax, idxmin and is_monotonic_* came back in first-seen
+    /// order) - and, over several keys, relabelled from group codes.
+    fn per_group(&self, s: Series) -> PyResult<Series> {
+        let s = if self.sort {
             s.sort_index(true).map_err(frame_error_to_py)?
         } else {
             s
         };
+        self.label_groups(s)
+    }
+
+    /// A per-group result of a groupby over several keys is indexed by group
+    /// code; relabel it with those groups' labels and MultiIndex levels. A
+    /// single-key result passes through.
+    fn label_groups(&self, s: Series) -> PyResult<Series> {
+        let Some(groups) = &self.groups else {
+            return Ok(s);
+        };
+        let positions = s
+            .index()
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Int64(code) => usize::try_from(*code).ok(),
+                IndexLabel::Float64(code) if code.0.fract() == 0.0 && code.0 >= 0.0 => {
+                    Some(code.0 as usize)
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<usize>>>()
+            .filter(|positions| positions.iter().all(|&p| p < groups.len()))
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "a multi-key groupby result was not indexed by its group codes",
+                )
+            })?;
+        Series::new(s.name(), groups.take(&positions), s.column().clone())
+            .map_err(frame_error_to_py)
+    }
+
+    /// NotImplementedError for an operation whose result is not relabelled
+    /// from group codes yet, when grouping by several keys.
+    fn single_key(&self, op: &str) -> PyResult<()> {
+        if self.groups.is_some() {
+            return Err(not_implemented(&format!(
+                "SeriesGroupBy.{op} over several keys"
+            )));
+        }
+        Ok(())
+    }
+
+    /// A reduction's result: sorted by key when `sort`, and with
+    /// as_index=False the keys moved into a column beside it, as pandas does.
+    fn wrap_result(&self, s: Series) -> PyResult<Py<PyAny>> {
+        let res = self.per_group(s)?;
         Python::attach(|py| {
             if self.as_index {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());
@@ -27445,6 +27551,7 @@ impl PySeriesGroupBy {
     }
 
     fn value_counts(&self) -> PyResult<Py<PyAny>> {
+        self.single_key("value_counts")?;
         let res = self
             .series
             .groupby(&self.by)
@@ -27456,6 +27563,7 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (n=5))]
     fn nlargest(&self, n: usize) -> PyResult<PySeries> {
+        self.single_key("nlargest")?;
         let res = self
             .series
             .groupby(&self.by)
@@ -27467,6 +27575,7 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (n=5))]
     fn nsmallest(&self, n: usize) -> PyResult<PySeries> {
+        self.single_key("nsmallest")?;
         let res = self
             .series
             .groupby(&self.by)
@@ -27570,7 +27679,9 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .quantile(q)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: self.per_group(res)?,
+        })
     }
 
     #[pyo3(signature = (ddof=1, numeric_only=false))]
@@ -27669,6 +27780,7 @@ impl PySeriesGroupBy {
             };
             return Ok(res);
         } else if let Ok(list) = func.extract::<Vec<String>>() {
+            self.single_key("agg with a list of functions")?;
             let refs: Vec<&str> = list.iter().map(String::as_str).collect();
             let df = self
                 .series
@@ -27732,6 +27844,7 @@ impl PySeriesGroupBy {
     }
 
     fn describe(&self) -> PyResult<PyDataFrame> {
+        self.single_key("describe")?;
         let res = self
             .series
             .groupby(&self.by)
@@ -27742,6 +27855,7 @@ impl PySeriesGroupBy {
     }
 
     fn get_group(&self, name: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.single_key("get_group")?;
         let s = name
             .extract::<String>()
             .or_else(|_| name.str().map(|py_s| py_s.to_string()))?;
@@ -27756,6 +27870,7 @@ impl PySeriesGroupBy {
 
     #[getter]
     fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        self.single_key("groups")?;
         let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
         let dict = PyDict::new(py);
         for (lbl, indices) in gb.groups() {
@@ -27784,6 +27899,7 @@ impl PySeriesGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        self.single_key("apply")?;
         let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
         let groups = gb.groups();
         let mut keys: Vec<_> = groups.keys().cloned().collect();
@@ -27845,7 +27961,9 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .corr(&other.inner)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: self.per_group(res)?,
+        })
     }
 
     #[pyo3(signature = (other, min_periods=None, ddof=None))]
@@ -27868,7 +27986,9 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .cov(&other.inner)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: self.per_group(res)?,
+        })
     }
 
     // Grouped windows: refused, see `grouped_window_refused`.
@@ -27967,6 +28087,7 @@ impl PySeriesGroupBy {
     ) -> PyResult<PyPlotResult> {
         let _ = py;
         plot_args(args, kwargs)?;
+        self.single_key("hist")?;
         let spec = self
             .series
             .groupby(&self.by)
@@ -27995,7 +28116,9 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .idxmax()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: self.per_group(res)?,
+        })
     }
 
     #[pyo3(signature = (axis=0, skipna=true))]
@@ -28013,7 +28136,9 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .idxmin()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: self.per_group(res)?,
+        })
     }
 
     #[getter]
@@ -28024,7 +28149,9 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .is_monotonic_decreasing()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: self.per_group(res)?,
+        })
     }
 
     #[getter]
@@ -28035,11 +28162,16 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .is_monotonic_increasing()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: self.per_group(res)?,
+        })
     }
 
     #[getter]
     fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(levels) = self.groups.as_ref().and_then(Index::row_multiindex) {
+            return Ok(PyList::new(py, levels.names())?.into_any().unbind());
+        }
         Ok(pyo3::types::PyString::new(py, self.by.name())
             .into_any()
             .unbind())
@@ -28074,6 +28206,7 @@ impl PySeriesGroupBy {
     }
 
     fn ohlc(&self) -> PyResult<PyDataFrame> {
+        self.single_key("ohlc")?;
         let res = self
             .series
             .groupby(&self.by)
@@ -28143,6 +28276,7 @@ impl PySeriesGroupBy {
     ) -> PyResult<PyPlotResult> {
         let _ = py;
         plot_args(args, kwargs)?;
+        self.single_key("plot")?;
         let spec = self
             .series
             .groupby(&self.by)
@@ -28181,6 +28315,7 @@ impl PySeriesGroupBy {
             "SeriesGroupBy.take",
             &[("axis", matches!(axis, None | Some(0)))],
         )?;
+        self.single_key("take")?;
         let res = self
             .series
             .groupby(&self.by)
@@ -28214,6 +28349,7 @@ impl PySeriesGroupBy {
     }
 
     fn unique(&self) -> PyResult<PySeries> {
+        self.single_key("unique")?;
         let res = self
             .series
             .groupby(&self.by)
@@ -29138,10 +29274,57 @@ impl PyResampler {
     }
 }
 
-/// pandas `concat` over fp-frame: a list of DataFrames or of Series, `axis` 0/1
-/// ("index"/"columns"), `join` outer/inner, `ignore_index`. `keys=` needs a row
-/// MultiIndex, which the binding does not return yet (DISC-006), so it raises
-/// NotImplementedError, as do `sort=True` and mixed Series/DataFrame lists.
+/// pandas' `concat(keys=...)` row labels: every piece's labels under its key as
+/// the outer level. The level names are `names=`, else no name and the pieces'
+/// shared index name. Returns the flat `key|label` labels and the levels
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3).
+fn keyed_rows(
+    keys: &[IndexLabel],
+    pieces: &[&Index],
+    names: Option<Vec<Option<String>>>,
+) -> PyResult<(Vec<IndexLabel>, fp_index::MultiIndex)> {
+    if pieces.iter().any(|piece| piece.row_multiindex().is_some()) {
+        return Err(not_implemented(
+            "concat(keys=...) of objects that already have a MultiIndex",
+        ));
+    }
+    let rows: usize = pieces.iter().map(|piece| piece.len()).sum();
+    let (mut outer, mut inner, mut flat) = (
+        Vec::with_capacity(rows),
+        Vec::with_capacity(rows),
+        Vec::with_capacity(rows),
+    );
+    for (key, piece) in keys.iter().zip(pieces) {
+        for label in piece.labels() {
+            outer.push(key.clone());
+            inner.push(label.clone());
+            flat.push(IndexLabel::Utf8(format!("{key}|{label}")));
+        }
+    }
+    let shared_name = pieces
+        .first()
+        .and_then(|first| first.name())
+        .filter(|name| pieces.iter().all(|piece| piece.name() == Some(*name)))
+        .map(str::to_owned);
+    let names = names.unwrap_or_else(|| vec![None, shared_name]);
+    if names.len() != 2 {
+        return Err(not_implemented(
+            "concat(names=...) naming other than the key level and one index level",
+        ));
+    }
+    let levels = fp_index::MultiIndex::from_arrays(vec![outer, inner])
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        .set_names(names);
+    Ok((flat, levels))
+}
+
+/// pandas `concat` over fp-frame: a list (or a dict, whose keys become
+/// `keys=`) of DataFrames or of Series, `axis` 0/1 ("index"/"columns"), `join`
+/// outer/inner, `ignore_index`, and `keys=`/`names=`, which put each piece's
+/// rows under its key in a row MultiIndex (or, for Series side by side, name
+/// the columns). `sort=True`, mixed Series/DataFrame lists, `keys=` for frames
+/// side by side (a column MultiIndex) and keys that do not pair with the
+/// objects one to one raise NotImplementedError.
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3)
 #[pyfunction]
 #[pyo3(signature = (
@@ -29168,25 +29351,46 @@ fn concat(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let _ = copy; // pandas' copy= does not change the result
-    if let Some(kwargs) = kwargs
-        && let Some(flag) = kwargs.get_item("verify_integrity")?
-        && !flag.is_truthy()?
-    {
-        kwargs.del_item("verify_integrity")?;
+    let mut names: Option<Vec<Option<String>>> = None;
+    if let Some(kwargs) = kwargs {
+        if let Some(flag) = kwargs.get_item("verify_integrity")?
+            && !flag.is_truthy()?
+        {
+            kwargs.del_item("verify_integrity")?;
+        }
+        if let Some(given) = kwargs.get_item("names")? {
+            if !given.is_none() {
+                names = Some(given.extract()?);
+            }
+            kwargs.del_item("names")?;
+        }
     }
     reject_unsupported_kwargs("concat", kwargs, &[])?;
-    if keys.is_some_and(|k| !k.is_none()) {
-        return Err(not_implemented(
-            "concat(keys=...) (the result needs a row MultiIndex)",
-        ));
-    }
     if sort {
         return Err(not_implemented("concat(sort=True)"));
     }
-    if objs.is_instance_of::<PyDict>() {
-        return Err(not_implemented(
-            "concat of a mapping (its keys become keys=)",
-        ));
+    // A mapping's keys are the keys= of its values.
+    let keys = keys.filter(|k| !k.is_none());
+    let (objs, keys) = match objs.cast::<PyDict>() {
+        Ok(mapping) => {
+            if keys.is_some() {
+                return Err(not_implemented(
+                    "concat of a mapping with keys= (selecting from it)",
+                ));
+            }
+            (mapping.values().into_any(), Some(mapping.keys().into_any()))
+        }
+        Err(_) => (objs.clone(), keys.cloned()),
+    };
+    let keys = keys
+        .map(|keys| -> PyResult<Vec<IndexLabel>> {
+            keys.try_iter()?
+                .map(|key| py_to_index_label(&key?))
+                .collect()
+        })
+        .transpose()?;
+    if names.is_some() && keys.is_none() {
+        return Err(not_implemented("concat(names=...) without keys="));
     }
     let axis = match axis.filter(|a| !a.is_none()) {
         None => 0,
@@ -29211,12 +29415,25 @@ fn concat(
         }
     };
 
+    let objects = objs.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+    if keys
+        .as_ref()
+        .is_some_and(|keys| keys.len() != objects.len())
+    {
+        return Err(not_implemented(
+            "concat with keys= of a different length than objs (pandas truncates, deprecated)",
+        ));
+    }
     let mut frames: Vec<DataFrame> = Vec::new();
     let mut series: Vec<Series> = Vec::new();
-    for item in objs.try_iter()? {
-        let item = item?;
+    // The keys of the objects kept: a None object drops out with its key.
+    let mut kept_keys: Vec<IndexLabel> = Vec::new();
+    for (position, item) in objects.iter().enumerate() {
         if item.is_none() {
             continue;
+        }
+        if let Some(keys) = &keys {
+            kept_keys.push(keys[position].clone());
         }
         if let Ok(frame) = item.extract::<PyRef<'_, PyDataFrame>>() {
             frames.push(frame.inner.clone());
@@ -29237,20 +29454,45 @@ fn concat(
     if !frames.is_empty() && !series.is_empty() {
         return Err(not_implemented("concat of Series mixed with DataFrames"));
     }
+    // ignore_index=True drops the keys, as pandas does.
+    let keys = if ignore_index || keys.is_none() {
+        None
+    } else {
+        Some(kept_keys)
+    };
 
     if !series.is_empty() && axis == 0 {
         let refs: Vec<&Series> = series.iter().collect();
         let out = fp_frame::concat_series_with_ignore_index(&refs, ignore_index)
             .map_err(frame_error_to_py)?;
+        let Some(keys) = &keys else {
+            return PySeries { inner: out }.into_py_any(py);
+        };
+        let pieces: Vec<&Index> = series.iter().map(Series::index).collect();
+        let (flat, levels) = keyed_rows(keys, &pieces, names)?;
+        let index = Index::new(flat)
+            .with_row_multiindex(levels)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let out =
+            Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)?;
         return PySeries { inner: out }.into_py_any(py);
     }
+    if keys.is_some() && axis == 1 && series.is_empty() {
+        return Err(not_implemented(
+            "concat(keys=..., axis=1) of DataFrames (the columns become a MultiIndex)",
+        ));
+    }
+    if names.is_some() && axis == 1 {
+        return Err(not_implemented("concat(names=..., axis=1)"));
+    }
     if !series.is_empty() {
-        // axis=1: each Series is a column, named by its name or its position.
+        // axis=1: each Series is a column, named by its key, else its name,
+        // else its position.
         for (position, s) in series.iter().enumerate() {
-            let name = if s.name().is_empty() {
-                position.to_string()
-            } else {
-                s.name().to_owned()
+            let name = match &keys {
+                Some(keys) => keys[position].to_string(),
+                None if s.name().is_empty() => position.to_string(),
+                None => s.name().to_owned(),
             };
             frames.push(s.to_frame(Some(&name)).map_err(frame_error_to_py)?);
         }
@@ -29258,6 +29500,16 @@ fn concat(
     let refs: Vec<&DataFrame> = frames.iter().collect();
     let mut out =
         fp_frame::concat_dataframes_with_axis_join(&refs, axis, join).map_err(frame_error_to_py)?;
+    if let Some(keys) = &keys
+        && axis == 0
+    {
+        let pieces: Vec<&Index> = frames.iter().map(DataFrame::index).collect();
+        let (flat, levels) = keyed_rows(keys, &pieces, names)?;
+        out = out
+            .set_axis(flat, 0)
+            .and_then(|framed| framed.with_row_multiindex(levels))
+            .map_err(frame_error_to_py)?;
+    }
     if ignore_index {
         if axis == 0 {
             out = out.reset_index(true).map_err(frame_error_to_py)?;
@@ -37643,10 +37895,13 @@ mod tests {
         let series = Series::from_values("test_s", labels.clone(), values).expect("valid series"); // ubs:ignore — test fixture
         let py_s = PySeries { inner: series };
 
-        // Index getter
-        let idx = py_s.index();
-        assert_eq!(idx.len(), 3);
-        assert_eq!(idx.inner.labels(), &labels);
+        // Index getter: a flat Series index is a flat Index.
+        Python::attach(|py| {
+            let idx = py_s.index(py).expect("index"); // ubs:ignore — test fixture
+            let idx = idx.extract::<PyRef<'_, PyIndex>>(py).expect("flat Index"); // ubs:ignore — test fixture
+            assert_eq!(idx.len(), 3);
+            assert_eq!(idx.inner.labels(), &labels);
+        });
 
         // iloc proxy
         let iloc = py_s.iloc();
@@ -38404,6 +38659,7 @@ mod tests {
             by: by_s,
             sort: true,
             as_index: true,
+            groups: None,
         };
 
         // Reductions return a Series (or, with as_index=False, a frame).
@@ -38499,8 +38755,12 @@ mod tests {
 
         let t_s = py_s.T();
         assert_eq!(t_s.inner.len(), 3);
-        let keys_s = py_s.keys();
-        assert_eq!(keys_s.inner.len(), 3);
+        let keys_len = Python::attach(|py| {
+            py_s.keys(py)
+                .and_then(|keys| keys.bind(py).len())
+                .expect("keys") // ubs:ignore — test fixture
+        });
+        assert_eq!(keys_len, 3);
         let pad_s = py_s.pad(None, false, None, None).expect("pad"); // ubs:ignore — test fixture
         assert_eq!(pad_s.inner.len(), 3);
         let backfill_s = py_s.backfill(None, false, None, None).expect("backfill"); // ubs:ignore — test fixture

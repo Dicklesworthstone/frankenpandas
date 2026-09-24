@@ -2317,8 +2317,14 @@ def test_merge_errors_match_pandas() -> None:
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_concat_refuses_what_it_cannot_match() -> None:
     frame = fpd.DataFrame(_CA)
-    with pytest.raises(NotImplementedError, match="keys"):
-        fpd.concat([frame, frame], keys=["p", "q"])
+    # keys= side by side makes a column MultiIndex; pandas 2.2.3 truncates
+    # keys of another length (deprecated); names= only names keys= levels.
+    with pytest.raises(NotImplementedError, match="column"):
+        fpd.concat([frame, frame], keys=["p", "q"], axis=1)
+    with pytest.raises(NotImplementedError, match="different length"):
+        fpd.concat([frame, frame], keys=["p"])
+    with pytest.raises(NotImplementedError, match="names"):
+        fpd.concat([frame, frame], names=["p"])
     with pytest.raises(NotImplementedError, match="sort"):
         fpd.concat([frame, frame], sort=True)
     with pytest.raises(ValueError, match="No objects to concatenate"):
@@ -3286,11 +3292,163 @@ def test_multi_key_results_carry_pandas_multiindex(case: Any) -> None:
     assert type(_mk(fpd).groupby("k").sum().index).__name__ == "Index"
 
 
+def _mk_nan(m: Any) -> Any:
+    return m.DataFrame({"k": ["x", None, "x", "y"], "j": [1, 1, 2, 2], "v": [1.0, 2.0, 3.0, 4.0]})
+
+
+def _sgb2(m: Any, **kwargs: Any) -> Any:
+    return _mk(m).groupby(["k", "j"], **kwargs)["v"]
+
+
+# 4qg5w.9: the Series pandas indexes by a MultiIndex - a column of a multi-key
+# result, a SeriesGroupBy over several keys (which raised NotImplementedError),
+# size, DataFrame.value_counts - and what follows them (positional selection,
+# sorting, arithmetic) came back flat, with 'x|1' / 'x, 1' string labels.
+_MULTI_KEY_SERIES_CASES = {
+    "column_of_groupby_result": lambda m: _mk(m).groupby(["k", "j"]).sum()["v"],
+    "column_of_set_index": lambda m: _mk(m).set_index(["k", "j"])["v"],
+    "sgb_sum": lambda m: _sgb2(m).sum(),
+    "sgb_mean": lambda m: _sgb2(m).mean(),
+    "sgb_count": lambda m: _sgb2(m).count(),
+    "sgb_max": lambda m: _sgb2(m).max(),
+    "sgb_agg_sum": lambda m: _sgb2(m).agg("sum"),
+    "sgb_sort_false": lambda m: _sgb2(m, sort=False).sum(),
+    "sgb_quantile": lambda m: _sgb2(m).quantile(0.5),
+    "sgb_idxmax": lambda m: _sgb2(m).idxmax(),
+    "sgb_dropna": lambda m: _mk_nan(m).groupby(["k", "j"])["v"].sum(),
+    "sgb_dropna_false": lambda m: _mk_nan(m).groupby(["k", "j"], dropna=False)["v"].sum(),
+    "size": lambda m: _mk(m).groupby(["k", "j"]).size(),
+    "frame_value_counts": lambda m: _mk(m)[["k", "j"]].value_counts(),
+    "frame_value_counts_one_column": lambda m: _mk(m)[["k"]].value_counts(),
+    "sort_values": lambda m: _sgb2(m).sum().sort_values(),
+    "head": lambda m: _sgb2(m).sum().head(2),
+    "iloc_list": lambda m: _sgb2(m).sum().iloc[[2, 0]],
+    "times_two": lambda m: _sgb2(m).sum() * 2,
+}
+
+
+def _mi_series(obj: Any) -> Any:
+    def key(label: Any) -> Any:
+        return tuple(_marker(part) for part in label)
+
+    return (
+        type(obj).__name__,
+        str(obj.dtype),
+        obj.name,
+        type(obj.index).__name__,
+        list(obj.index.names),
+        [key(label) for label in obj.index],
+        [_marker(v) for v in obj.tolist()],
+        {key(k): _marker(v) for k, v in obj.to_dict().items()},
+    )
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="4qg5w.9: a Series has no row MultiIndex, so df['v'] of a MultiIndex frame is flat")
-def test_column_of_a_multiindex_frame_keeps_the_multiindex() -> None:
-    got, want = _mk(fpd).groupby(["k", "j"]).sum()["v"], _mk(pd).groupby(["k", "j"]).sum()["v"]
-    assert _strict_ordered(got) == _strict_ordered(want)
+@pytest.mark.parametrize(
+    "case", list(_MULTI_KEY_SERIES_CASES.values()), ids=list(_MULTI_KEY_SERIES_CASES)
+)
+def test_multi_key_series_carry_pandas_multiindex(case: Any) -> None:
+    got, want = case(fpd), case(pd)
+    assert type(want.index).__name__ == "MultiIndex"
+    assert _mi_series(got) == _mi_series(want)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_multi_key_series_reset_into_pandas_columns() -> None:
+    def columns(frame: Any) -> Any:
+        return [(str(c), [_marker(v) for v in frame[c].tolist()]) for c in frame.columns]
+
+    cases = [
+        lambda m: _sgb2(m).sum().reset_index(),
+        lambda m: _sgb2(m, as_index=False).sum(),
+        lambda m: _mk(m).groupby(["k", "j"]).size().reset_index(),
+    ]
+    for case in cases:
+        assert columns(case(fpd)) == columns(case(pd))
+    # NEGATIVE: a flat Series still resets into an 'index' column.
+    flat = fpd.Series([1.0, 2.0], name="v").reset_index()
+    assert list(flat.columns) == ["index", "v"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_multi_key_series_groupby_refuses_what_it_cannot_label() -> None:
+    # These results are not relabelled from group codes yet; they raise rather
+    # than come back indexed by the codes.
+    for op in (
+        lambda g: g.value_counts(),
+        lambda g: g.unique(),
+        lambda g: g.nlargest(1),
+        lambda g: g.describe(),
+        lambda g: g.apply(lambda s: s.sum()),
+        lambda g: g.agg(["sum", "mean"]),
+        lambda g: g.get_group(("x", 1)),
+    ):
+        with pytest.raises(NotImplementedError, match="several keys"):
+            op(_sgb2(fpd))
+    # NEGATIVE: one key keeps its flat Index and its own labels.
+    single = _mk(fpd).groupby("k")["v"].sum()
+    assert type(single.index).__name__ == "Index"
+    assert list(single.index) == ["x", "y"]
+
+
+# fvsao.6.3: concat(keys=...) raised NotImplementedError; pandas puts each
+# piece's rows under its key in a row MultiIndex.
+def _cs1(m: Any) -> Any:
+    return m.Series([1.0, 2.0], name="v")
+
+
+def _cs2(m: Any) -> Any:
+    return m.Series([3.0], name="v")
+
+
+_CONCAT_KEYS_CASES = {
+    "series": lambda m: m.concat([_cs1(m), _cs2(m)], keys=["a", "b"]),
+    "int_keys": lambda m: m.concat([_cs1(m), _cs2(m)], keys=[1, 2]),
+    "names": lambda m: m.concat([_cs1(m), _cs2(m)], keys=["a", "b"], names=["o", "i"]),
+    "dict": lambda m: m.concat({"a": _cs1(m), "b": _cs2(m)}),
+    "none_dropped_with_its_key": lambda m: m.concat(
+        [_cs1(m), None, _cs2(m)], keys=["a", "n", "b"]
+    ),
+    "shared_index_name": lambda m: m.concat(
+        [_cs1(m).rename_axis("r"), _cs2(m).rename_axis("r")], keys=["a", "b"]
+    ),
+    "mixed_index_names": lambda m: m.concat(
+        [_cs1(m).rename_axis("r"), _cs2(m)], keys=["a", "b"]
+    ),
+    "frames": lambda m: m.concat([_mk(m).head(2), _mk(m).tail(1)], keys=["a", "b"]),
+    "frames_inner": lambda m: m.concat(
+        [_mk(m).head(2), _mk(m)[["v"]].tail(1)], keys=["a", "b"], join="inner"
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CONCAT_KEYS_CASES.values()), ids=list(_CONCAT_KEYS_CASES))
+def test_concat_keys_match_pandas(case: Any) -> None:
+    got, want = case(fpd), case(pd)
+    assert type(got).__name__ == type(want).__name__
+    assert type(got.index).__name__ == type(want.index).__name__ == "MultiIndex"
+    assert list(got.index.names) == list(want.index.names)
+    assert [tuple(label) for label in got.index] == [tuple(label) for label in want.index]
+    if hasattr(want, "columns"):
+        assert list(got.columns) == list(want.columns)
+        for column in want.columns:
+            assert [_marker(v) for v in got[column].tolist()] == [
+                _marker(v) for v in want[column].tolist()
+            ]
+    else:
+        assert _mi_series(got) == _mi_series(want)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_concat_keys_side_cases_match_pandas() -> None:
+    for m in (pd, fpd):
+        # ignore_index drops the keys; side by side, the keys name the columns.
+        flat = m.concat([_cs1(m), _cs2(m)], keys=["a", "b"], ignore_index=True)
+        assert list(flat.index) == [0, 1, 2]
+        assert flat.tolist() == [1.0, 2.0, 3.0]
+        wide = m.concat([_cs1(m), _cs2(m)], keys=["a", "b"], axis=1)
+        assert list(wide.columns) == ["a", "b"]
 
 
 def _gwin(m: Any) -> Any:

@@ -1706,7 +1706,7 @@ impl<'de> Deserialize<'de> for IndexLabels {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Index {
     #[serde(default)]
     labels: IndexLabels,
@@ -1724,6 +1724,66 @@ pub struct Index {
     /// Runtime-only cache for labels-derived AACE semantic fingerprints.
     #[serde(skip)]
     semantic_fingerprint_cache: OnceLock<String>,
+    /// The levels of the row `MultiIndex` whose flattened labels these are (a
+    /// multi-key groupby result, a column of a frame indexed by several
+    /// columns). The labels stay the flat keys every kernel handles; the levels
+    /// ride with them. Only [`Self::with_row_multiindex`] attaches them and only
+    /// `take`/`slice` carry them to new labels, so any other operation that
+    /// builds labels returns a flat index rather than mislabelled levels
+    /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "row_multiindex_serde"
+    )]
+    row_multiindex: Option<Arc<MultiIndex>>,
+}
+
+/// The derived layout, with the row `MultiIndex` levels listed only when an
+/// index carries them: a flat index prints exactly as before they existed.
+impl fmt::Debug for Index {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = f.debug_struct("Index");
+        out.field("labels", &self.labels)
+            .field("name", &self.name)
+            .field("label_identity", &self.label_identity)
+            .field("duplicate_cache", &self.duplicate_cache)
+            .field("sort_order_cache", &self.sort_order_cache)
+            .field(
+                "semantic_fingerprint_cache",
+                &self.semantic_fingerprint_cache,
+            );
+        if let Some(levels) = &self.row_multiindex {
+            out.field("row_multiindex", levels);
+        }
+        out.finish()
+    }
+}
+
+/// Serde for the shared `Arc` behind [`Index`]'s row `MultiIndex` levels:
+/// serialized as the plain `MultiIndex` (the workspace builds serde without
+/// its `rc` feature).
+mod row_multiindex_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::{Arc, MultiIndex};
+
+    #[allow(
+        clippy::ref_option,
+        reason = "serde's `with` contract passes the field by reference"
+    )]
+    pub fn serialize<S: Serializer>(
+        levels: &Option<Arc<MultiIndex>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        levels.as_deref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<MultiIndex>>, D::Error> {
+        Ok(Option::<MultiIndex>::deserialize(deserializer)?.map(Arc::new))
+    }
 }
 
 impl PartialEq for Index {
@@ -1834,6 +1894,7 @@ impl Index {
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
         }
     }
 
@@ -1890,6 +1951,7 @@ impl Index {
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
         };
         let _ = index.duplicate_cache.set(false);
         let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
@@ -1910,6 +1972,7 @@ impl Index {
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -1930,6 +1993,7 @@ impl Index {
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
         })
     }
 
@@ -1961,6 +2025,7 @@ impl Index {
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
         }
     }
 
@@ -1982,6 +2047,7 @@ impl Index {
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
         })
     }
 
@@ -2000,6 +2066,7 @@ impl Index {
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
         }
     }
 
@@ -2040,6 +2107,7 @@ impl Index {
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2132,10 +2200,13 @@ impl Index {
     ///
     /// Matches `pd.Index.to_flat_index()`. For a non-MultiIndex this is a
     /// no-op that returns a clone. For a MultiIndex it would convert tuples
-    /// to flat labels.
+    /// to flat labels; attached row `MultiIndex` levels are dropped, leaving
+    /// the flat labels alone.
     #[must_use]
     pub fn to_flat_index(&self) -> Self {
-        self.clone()
+        let mut flat = self.clone();
+        flat.row_multiindex = None;
+        flat
     }
 
     /// Return a new index with the name cleared.
@@ -4002,8 +4073,22 @@ impl Index {
         ))
     }
 
+    /// Select labels by position, carrying the row `MultiIndex` levels (taken at
+    /// the same positions) when the index has them.
     #[must_use]
     pub fn take(&self, indices: &[usize]) -> Self {
+        let taken = self.take_labels(indices);
+        match self
+            .row_multiindex
+            .as_deref()
+            .map(|levels| levels.take(indices))
+        {
+            Some(Ok(levels)) => taken.attach_row_multiindex(levels),
+            _ => taken,
+        }
+    }
+
+    fn take_labels(&self, indices: &[usize]) -> Self {
         // Affine-in, affine-out fast path (br-frankenpandas, BlackThrush): when the
         // backing is an Int64 affine range AND the requested positions are
         // themselves arithmetic (constant stride), the gathered labels are
@@ -4090,14 +4175,50 @@ impl Index {
 
     #[must_use]
     pub fn slice(&self, start: usize, len: usize) -> Self {
-        self.propagate_name(Self {
+        let sliced = self.propagate_name(Self {
             labels: self.labels.slice(start, len),
             name: None,
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
-        })
+            row_multiindex: None,
+        });
+        let Some(levels) = self.row_multiindex.as_deref() else {
+            return sliced;
+        };
+        let positions: Vec<usize> = (start..start.saturating_add(sliced.len())).collect();
+        match levels.take(&positions) {
+            Ok(levels) => sliced.attach_row_multiindex(levels),
+            Err(_) => sliced,
+        }
+    }
+
+    /// Attach the levels of the row `MultiIndex` whose flattened labels this
+    /// index holds, one level tuple per label, in label order. The caller
+    /// vouches that label `i` is the flat form of tuple `i`; the heights must
+    /// match.
+    pub fn with_row_multiindex(self, levels: MultiIndex) -> Result<Self, IndexError> {
+        if levels.len() != self.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.len(),
+                actual: levels.len(),
+                context: "row MultiIndex height vs index length".to_owned(),
+            });
+        }
+        Ok(self.attach_row_multiindex(levels))
+    }
+
+    fn attach_row_multiindex(mut self, levels: MultiIndex) -> Self {
+        self.row_multiindex = Some(Arc::new(levels));
+        self
+    }
+
+    /// The row `MultiIndex` levels these flat labels stand for, when attached
+    /// (see [`Self::with_row_multiindex`]).
+    #[must_use]
+    pub fn row_multiindex(&self) -> Option<&MultiIndex> {
+        self.row_multiindex.as_deref()
     }
 
     #[must_use]
@@ -20771,7 +20892,7 @@ mod tests {
     }
 
     use super::{
-        CategoricalIndex, DateOffset, DateRangeError, DatetimeIndex, Index, IndexLabel,
+        CategoricalIndex, DateOffset, DateRangeError, DatetimeIndex, Index, IndexError, IndexLabel,
         Int64AffineLabels, MultiIndex, PeriodFields, PeriodIndex, RangeIndex, TimedeltaIndex,
         TimedeltaRangeError, align_union, apply_date_offset, bdate_range, date_range, infer_freq,
         infer_freq_from_timestamps, timedelta_range, validate_alignment_plan,
@@ -21545,6 +21666,61 @@ mod tests {
         let different = Index::new(vec![1_i64.into(), 2_i64.into(), 4_i64.into()]);
         assert_ne!(base, different);
         assert!(!base.equals(&different));
+    }
+
+    #[test]
+    fn row_multiindex_levels_ride_with_their_flat_labels_4qg5w9() {
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let levels = MultiIndex::from_arrays(vec![
+            vec![utf8("y"), utf8("x"), utf8("x")],
+            vec![1_i64.into(), 1_i64.into(), 2_i64.into()],
+        ])
+        .expect("levels")
+        .set_names(vec![Some("k".to_owned()), Some("j".to_owned())]);
+        let flat = Index::new(vec![utf8("y|1"), utf8("x|1"), utf8("x|2")]);
+        let index = flat
+            .clone()
+            .with_row_multiindex(levels.clone())
+            .expect("heights match");
+        assert_eq!(index.row_multiindex(), Some(&levels));
+        assert_eq!(index, flat, "the levels do not change label equality");
+        assert_eq!(index.clone().row_multiindex(), Some(&levels));
+
+        // take and slice carry the levels at the same positions.
+        let taken = index.take(&[2, 0]);
+        assert_eq!(taken.labels(), &[utf8("x|2"), utf8("y|1")]);
+        let taken_levels = taken.row_multiindex().expect("take carries the levels");
+        assert_eq!(
+            taken_levels.get_tuple(0),
+            Some(vec![&utf8("x"), &2_i64.into()])
+        );
+        assert_eq!(
+            taken_levels.get_tuple(1),
+            Some(vec![&utf8("y"), &1_i64.into()])
+        );
+        assert_eq!(taken_levels.names(), levels.names());
+        let sliced = index.slice(1, 2);
+        assert_eq!(sliced.labels(), &[utf8("x|1"), utf8("x|2")]);
+        let sliced_levels = sliced.row_multiindex().expect("slice carries the levels");
+        assert_eq!(sliced_levels.len(), 2);
+        assert_eq!(
+            sliced_levels.get_tuple(0),
+            Some(vec![&utf8("x"), &1_i64.into()])
+        );
+
+        // NEGATIVE: labels built any other way are flat, never mislabelled.
+        let sorted = index.sort_values();
+        assert_eq!(sorted.labels(), &[utf8("x|1"), utf8("x|2"), utf8("y|1")]);
+        assert!(sorted.row_multiindex().is_none());
+        assert!(index.to_flat_index().row_multiindex().is_none());
+        assert!(matches!(
+            flat.with_row_multiindex(levels.take(&[0]).expect("take")),
+            Err(IndexError::LengthMismatch {
+                expected: 3,
+                actual: 1,
+                ..
+            })
+        ));
     }
 
     #[test]
