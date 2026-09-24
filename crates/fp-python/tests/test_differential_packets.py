@@ -3465,26 +3465,90 @@ _GROUPED_WINDOWS = {
 }
 
 
-@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize("case", list(_GROUPED_WINDOWS.values()), ids=list(_GROUPED_WINDOWS))
-def test_grouped_windows_refuse_rather_than_ignore_the_groups(case: Any) -> None:
-    # br-frankenpandas-pbpli: these ran ONE window over all rows (gb.rolling(2)
-    # .mean() gave [nan, 1.5, 2.5, 3.5] where pandas gives the per-group [nan,
-    # 2.0, nan, 3.0] under a (k, row) MultiIndex). Until the binding can return
-    # that shape they refuse; so does groupby resample.
-    with pytest.raises(NotImplementedError, match="per group"):
-        case(_gwin(fpd))
-    with pytest.raises(NotImplementedError, match="per group"):
-        _gwin(fpd).resample("D")
-    # NEGATIVE: the ungrouped windows still run.
-    assert fpd.Series([1.0, 3.0]).rolling(2).mean().tolist()[1] == 2.0
+def _mi_result(obj: Any) -> Any:
+    def key(label: Any) -> Any:
+        return tuple(_marker(part) for part in label)
+
+    head = (
+        type(obj).__name__,
+        type(obj.index).__name__,
+        list(obj.index.names),
+        [key(label) for label in obj.index],
+    )
+    if hasattr(obj, "columns"):
+        return head + (
+            [str(c) for c in obj.columns],
+            {str(c): (str(obj[c].dtype), [_marker(v) for v in obj[c].tolist()]) for c in obj.columns},
+        )
+    return head + (obj.name, str(obj.dtype), [_marker(v) for v in obj.tolist()])
+
+
+def _gw_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": ["b", "a", "b", "a", "b"],
+            "j": [1, 1, 1, 2, 1],
+            "v": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "w": [5, 4, 3, 2, 1],
+        },
+        index=[10, 11, 12, 13, 14],
+    )
+
+
+# br-frankenpandas-pbpli: pandas runs the window within each group and nests
+# the result under (key..., row label), groups in the groupby's order.
+_GROUPED_WINDOW_FRAMES = {
+    "rolling_sum": lambda m: _gw_frame(m).groupby("k")["v"].rolling(2).sum(),
+    "rolling_sort_false": lambda m: _gw_frame(m).groupby("k", sort=False)["v"].rolling(2).sum(),
+    "rolling_min_periods": lambda m: _gw_frame(m).groupby("k")["v"].rolling(2, min_periods=1).max(),
+    "rolling_count": lambda m: _gw_frame(m).groupby("k")["v"].rolling(2).count(),
+    "rolling_std": lambda m: _gw_frame(m).groupby("k")["v"].rolling(2).std(),
+    "expanding_max": lambda m: _gw_frame(m).groupby("k")["v"].expanding().max(),
+    "frame_rolling": lambda m: _gw_frame(m).groupby("k").rolling(2).sum(),
+    "frame_rolling_selection": lambda m: _gw_frame(m).groupby("k")[["v"]].rolling(2).sum(),
+    "two_keys": lambda m: _gw_frame(m).groupby(["k", "j"])["v"].rolling(2).sum(),
+    "two_keys_frame": lambda m: _gw_frame(m).groupby(["k", "j"]).rolling(2).sum(),
+    "series_by_series": lambda m: _gw_frame(m)["v"].groupby(_gw_frame(m)["k"]).rolling(2).sum(),
+    "named_index": lambda m: _gw_frame(m).rename_axis("r").groupby("k")["v"].rolling(2).sum(),
+    "frame_ewm_alpha": lambda m: _gw_frame(m)[["k", "v"]].groupby("k").ewm(alpha=0.5).mean(),
+}
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_GROUPED_WINDOWS.values()), ids=list(_GROUPED_WINDOWS))
-@pytest.mark.xfail(strict=True, reason="br-frankenpandas-pbpli: grouped windows are refused")
 def test_grouped_windows_match_pandas(case: Any) -> None:
-    assert _nan_marked(_strict_ordered(case(_gwin(fpd)))) == _nan_marked(_strict_ordered(case(_gwin(pd))))
+    assert _mi_result(case(_gwin(fpd))) == _mi_result(case(_gwin(pd)))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case", list(_GROUPED_WINDOW_FRAMES.values()), ids=list(_GROUPED_WINDOW_FRAMES)
+)
+def test_grouped_window_shapes_match_pandas(case: Any) -> None:
+    assert _mi_result(case(fpd)) == _mi_result(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_grouped_windows_run_within_each_group() -> None:
+    # NEGATIVE: the old binding ran ONE window over all rows, [nan, 3.0, 5.0,
+    # 7.0, 9.0]; within the groups the sums are a: [nan, 6.0], b: [nan, 4.0, 8.0].
+    frame = _gw_frame(fpd)
+    grouped = frame.groupby("k")["v"].rolling(2).sum()
+    assert _marker(grouped.tolist()[1]) == 6.0
+    assert [_marker(v) for v in grouped.tolist()] != [
+        _marker(v) for v in frame["v"].rolling(2).sum().tolist()
+    ]
+    # One group is the ungrouped window.
+    one = fpd.DataFrame({"k": ["x"] * 4, "v": [1.0, 2.0, 3.0, 4.0]})
+    assert one.groupby("k")["v"].ewm(span=2).mean().tolist() == one["v"].ewm(span=2).mean().tolist()
+    # The window's own argument checks apply when the grouped window is made.
+    with pytest.raises(Exception) as ungrouped:
+        frame["v"].rolling(-1)
+    with pytest.raises(type(ungrouped.value)):
+        frame.groupby("k")["v"].rolling(-1)
+    # A shape pandas builds another way is refused, not faked.
+    with pytest.raises(NotImplementedError, match="as_index=False"):
+        frame.groupby("k", as_index=False)["v"].rolling(2)
 
 
 def _sr(m: Any) -> Any:

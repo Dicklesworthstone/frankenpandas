@@ -26132,6 +26132,45 @@ impl PyGroupBy {
         op(&numeric.grouped()?)
     }
 
+    /// `kind` (rolling, expanding, ewm, resample) over every group's non-key
+    /// columns (br-frankenpandas-pbpli).
+    fn window(
+        &self,
+        py: Python<'_>,
+        kind: &'static str,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        if !self.as_index {
+            return Err(not_implemented(&format!(
+                "DataFrameGroupBy.{kind} with as_index=False"
+            )));
+        }
+        let (codes, groups) = self
+            .grouped()
+            .and_then(|gb| gb.group_codes())
+            .map_err(frame_error_to_py)?;
+        // The windows leave the key columns out; pandas 2.2's resample still
+        // runs over them (deprecated there, but its output).
+        let values: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .filter(|name| kind == "resample" || !self.by.contains(*name))
+            .map(String::as_str)
+            .collect();
+        let target = self.df.select_columns(&values).map_err(frame_error_to_py)?;
+        PyGroupedWindow::new(
+            py,
+            kind,
+            ResampleTarget::DataFrame(target),
+            window_groups_from_codes(&codes, &groups),
+            self.by.iter().map(|key| Some(key.clone())).collect(),
+            args,
+            kwargs,
+        )
+    }
+
     /// One column grouped by this groupby's key: pandas' `gb["col"]` / `gb.col`.
     fn column_groupby(&self, name: &str) -> PyResult<PySeriesGroupBy> {
         let column = |col: &str| -> PyResult<Series> {
@@ -26904,41 +26943,45 @@ impl PyGroupBy {
         })
     }
 
-    // Grouped windows: refused, see `grouped_window_refused`.
-    #[pyo3(signature = (*_args, **_kwargs))]
+    // Grouped windows: see `PyGroupedWindow`.
+    #[pyo3(signature = (*args, **kwargs))]
     fn ewm(
         &self,
-        _args: &Bound<'_, PyTuple>,
-        _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyExponentialMovingWindow> {
-        Err(grouped_window_refused("DataFrameGroupBy.ewm"))
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        self.window(py, "ewm", args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **_kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn expanding(
         &self,
-        _args: &Bound<'_, PyTuple>,
-        _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyExpanding> {
-        Err(grouped_window_refused("DataFrameGroupBy.expanding"))
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        self.window(py, "expanding", args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **_kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn rolling(
         &self,
-        _args: &Bound<'_, PyTuple>,
-        _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyRolling> {
-        Err(grouped_window_refused("DataFrameGroupBy.rolling"))
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        self.window(py, "rolling", args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **_kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn resample(
         &self,
-        _args: &Bound<'_, PyTuple>,
-        _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyResampler> {
-        Err(grouped_window_refused("DataFrameGroupBy.resample"))
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        self.window(py, "resample", args, kwargs)
     }
 
     fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
@@ -27303,6 +27346,53 @@ impl PySeriesGroupBy {
             })?;
         Series::new(s.name(), groups.take(&positions), s.column().clone())
             .map_err(frame_error_to_py)
+    }
+
+    /// `kind` (rolling, expanding, ewm, resample) over every group's rows
+    /// (br-frankenpandas-pbpli).
+    fn window(
+        &self,
+        py: Python<'_>,
+        kind: &'static str,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        if !self.as_index {
+            return Err(not_implemented(&format!(
+                "SeriesGroupBy.{kind} with as_index=False"
+            )));
+        }
+        let (groups, key_names) = match &self.groups {
+            // Several keys: `by` holds the group codes.
+            Some(groups) => (
+                window_groups_from_codes(self.by.column(), groups),
+                groups
+                    .row_multiindex()
+                    .map(|levels| levels.names().to_vec())
+                    .unwrap_or_default(),
+            ),
+            None => {
+                let (codes, groups) = self
+                    .by
+                    .to_frame(Some("key"))
+                    .and_then(|keys| {
+                        keys.groupby_full_options(&["key"], true, self.sort, true)?
+                            .group_codes()
+                    })
+                    .map_err(frame_error_to_py)?;
+                let key_name = Some(self.by.name().to_owned()).filter(|name| !name.is_empty());
+                (window_groups_from_codes(&codes, &groups), vec![key_name])
+            }
+        };
+        PyGroupedWindow::new(
+            py,
+            kind,
+            ResampleTarget::Series(self.series.clone()),
+            groups,
+            key_names,
+            args,
+            kwargs,
+        )
     }
 
     /// NotImplementedError for an operation whose result is not relabelled
@@ -27991,41 +28081,45 @@ impl PySeriesGroupBy {
         })
     }
 
-    // Grouped windows: refused, see `grouped_window_refused`.
-    #[pyo3(signature = (*_args, **_kwargs))]
+    // Grouped windows: see `PyGroupedWindow`.
+    #[pyo3(signature = (*args, **kwargs))]
     fn ewm(
         &self,
-        _args: &Bound<'_, PyTuple>,
-        _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyExponentialMovingWindow> {
-        Err(grouped_window_refused("SeriesGroupBy.ewm"))
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        self.window(py, "ewm", args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **_kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn expanding(
         &self,
-        _args: &Bound<'_, PyTuple>,
-        _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyExpanding> {
-        Err(grouped_window_refused("SeriesGroupBy.expanding"))
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        self.window(py, "expanding", args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **_kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn rolling(
         &self,
-        _args: &Bound<'_, PyTuple>,
-        _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyRolling> {
-        Err(grouped_window_refused("SeriesGroupBy.rolling"))
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        self.window(py, "rolling", args, kwargs)
     }
 
-    #[pyo3(signature = (*_args, **_kwargs))]
+    #[pyo3(signature = (*args, **kwargs))]
     fn resample(
         &self,
-        _args: &Bound<'_, PyTuple>,
-        _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyResampler> {
-        Err(grouped_window_refused("SeriesGroupBy.resample"))
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyGroupedWindow> {
+        self.window(py, "resample", args, kwargs)
     }
 
     fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -35251,15 +35345,245 @@ fn exponential_window(
     })
 }
 
-/// The groupby window and resample objects the binding cannot build yet.
-/// pandas computes them per group and indexes the result by (key, row
-/// label), and the binding returns no row MultiIndex; these methods wrapped
-/// the UNGROUPED frame and so ran one window over all rows - a silently wrong
-/// number (br-frankenpandas-pbpli). A refusal until the grouped result exists.
-fn grouped_window_refused(what: &str) -> PyErr {
-    not_implemented(&format!(
-        "{what} (pandas computes it per group under a (key, row) MultiIndex)"
-    ))
+/// One group of a grouped window: its key, one label per key level, and its
+/// rows.
+#[derive(Clone)]
+struct WindowGroup {
+    key: Vec<IndexLabel>,
+    rows: Vec<usize>,
+}
+
+/// The rows under each group code, in code order (the groupby's group order),
+/// with each group's key read from the groups' index.
+fn window_groups_from_codes(codes: &Column, groups: &Index) -> Vec<WindowGroup> {
+    let mut out: Vec<WindowGroup> = (0..groups.len())
+        .map(|code| WindowGroup {
+            key: match groups.row_multiindex() {
+                Some(levels) => levels
+                    .get_tuple(code)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                None => vec![groups.labels()[code].clone()],
+            },
+            rows: Vec::new(),
+        })
+        .collect();
+    for (row, code) in codes.values().iter().enumerate() {
+        if let Scalar::Int64(code) = code
+            && let Some(group) = usize::try_from(*code).ok().and_then(|c| out.get_mut(c))
+        {
+            group.rows.push(row);
+        }
+    }
+    out
+}
+
+/// A Series or DataFrame as the Python object.
+fn target_to_py<'py>(py: Python<'py>, target: &ResampleTarget) -> PyResult<Bound<'py, PyAny>> {
+    match target {
+        ResampleTarget::Series(s) => PySeries { inner: s.clone() }.into_bound_py_any(py),
+        ResampleTarget::DataFrame(df) => PyDataFrame { inner: df.clone() }.into_bound_py_any(py),
+    }
+}
+
+/// A window over each group of a groupby: `gb.rolling(...)`, `.expanding(...)`,
+/// `.ewm(...)` and `.resample(...)`. A method runs the ungrouped window of that
+/// kind, with the same arguments, over each group's rows - so it accepts and
+/// refuses exactly what the ungrouped window does - and nests each group's
+/// result under its key: pandas' (key..., row) MultiIndex, groups in the
+/// groupby's order (br-frankenpandas-pbpli; these methods used to run ONE
+/// window over all rows, then refused).
+#[pyclass(name = "GroupbyWindow")]
+pub struct PyGroupedWindow {
+    kind: &'static str,
+    args: Py<PyTuple>,
+    kwargs: Option<Py<PyDict>>,
+    target: ResampleTarget,
+    groups: Vec<WindowGroup>,
+    key_names: Vec<Option<String>>,
+}
+
+impl PyGroupedWindow {
+    fn new(
+        py: Python<'_>,
+        kind: &'static str,
+        target: ResampleTarget,
+        groups: Vec<WindowGroup>,
+        key_names: Vec<Option<String>>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        // pandas checks the window's arguments when the window is made.
+        target_to_py(py, &target)?.call_method(kind, args, kwargs)?;
+        Ok(Self {
+            kind,
+            args: args.clone().unbind(),
+            kwargs: kwargs.map(|k| k.clone().unbind()),
+            target,
+            groups,
+            key_names,
+        })
+    }
+
+    /// The ungrouped window of this kind over `target`.
+    fn window_over<'py>(
+        &self,
+        py: Python<'py>,
+        target: &ResampleTarget,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        target_to_py(py, target)?.call_method(
+            self.kind,
+            self.args.bind(py),
+            self.kwargs.as_ref().map(|k| k.bind(py)),
+        )
+    }
+
+    /// `name(*args, **kwargs)` over every group, nested under the keys.
+    fn run(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let no_groups = [WindowGroup {
+            key: Vec::new(),
+            rows: Vec::new(),
+        }];
+        let groups: &[WindowGroup] = if self.groups.is_empty() {
+            &no_groups
+        } else {
+            &self.groups
+        };
+        let mut series_parts: Vec<Series> = Vec::new();
+        let mut frame_parts: Vec<DataFrame> = Vec::new();
+        let mut outer: Vec<Vec<IndexLabel>> = vec![Vec::new(); self.key_names.len()];
+        let mut inner: Vec<IndexLabel> = Vec::new();
+        let mut inner_name: Option<Option<String>> = None;
+        for group in groups {
+            let sub = match &self.target {
+                ResampleTarget::Series(s) => {
+                    let positions: Vec<i64> = group.rows.iter().map(|&r| r as i64).collect();
+                    ResampleTarget::Series(s.iloc(&positions).map_err(frame_error_to_py)?)
+                }
+                ResampleTarget::DataFrame(df) => {
+                    ResampleTarget::DataFrame(df.take_rows(&group.rows).map_err(frame_error_to_py)?)
+                }
+            };
+            let result = self
+                .window_over(py, &sub)?
+                .call_method(name, args, kwargs)?;
+            let index = if let Ok(s) = result.extract::<PyRef<'_, PySeries>>() {
+                series_parts.push(s.inner.clone());
+                s.inner.index().clone()
+            } else if let Ok(df) = result.extract::<PyRef<'_, PyDataFrame>>() {
+                frame_parts.push(df.inner.clone());
+                df.inner.index().clone()
+            } else {
+                return Err(not_implemented(&format!(
+                    "groupby {}(...).{name}() whose result per group is not a Series or DataFrame",
+                    self.kind
+                )));
+            };
+            if index.row_multiindex().is_some() {
+                return Err(not_implemented(&format!(
+                    "groupby {}(...).{name}() whose result per group has a MultiIndex",
+                    self.kind
+                )));
+            }
+            inner_name.get_or_insert_with(|| index.name().map(str::to_owned));
+            for label in index.labels() {
+                for (level, key) in outer.iter_mut().zip(&group.key) {
+                    level.push(key.clone());
+                }
+                inner.push(label.clone());
+            }
+        }
+        let flat: Vec<IndexLabel> = (0..inner.len())
+            .map(|row| {
+                let parts: Vec<String> = outer
+                    .iter()
+                    .map(|level| level[row].to_string())
+                    .chain(std::iter::once(inner[row].to_string()))
+                    .collect();
+                IndexLabel::Utf8(parts.join("|"))
+            })
+            .collect();
+        let mut names = self.key_names.clone();
+        names.push(inner_name.flatten());
+        let mut arrays = outer;
+        arrays.push(inner);
+        let levels = fp_index::MultiIndex::from_arrays(arrays)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            .set_names(names);
+        if !frame_parts.is_empty() {
+            let refs: Vec<&DataFrame> = frame_parts.iter().collect();
+            let out =
+                fp_frame::concat_dataframes_with_axis_join(&refs, 0, fp_frame::ConcatJoin::Outer)
+                    .and_then(|out| out.set_axis(flat, 0))
+                    .and_then(|out| out.with_row_multiindex(levels))
+                    .map_err(frame_error_to_py)?;
+            return PyDataFrame { inner: out }.into_py_any(py);
+        }
+        let refs: Vec<&Series> = series_parts.iter().collect();
+        let out =
+            fp_frame::concat_series_with_ignore_index(&refs, false).map_err(frame_error_to_py)?;
+        let index = Index::new(flat)
+            .with_row_multiindex(levels)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let out =
+            Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)?;
+        PySeries { inner: out }.into_py_any(py)
+    }
+}
+
+#[pymethods]
+impl PyGroupedWindow {
+    fn __repr__(&self) -> String {
+        format!("GroupbyWindow({}, groups={})", self.kind, self.groups.len())
+    }
+
+    /// A method of the ungrouped window, run per group; a plain attribute
+    /// (`.window`, `.min_periods`) is the same for every group.
+    fn __getattr__(slf: PyRef<'_, Self>, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        if name.starts_with('_') {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                name.to_owned(),
+            ));
+        }
+        let window = slf.window_over(py, &slf.target)?;
+        let attribute = window.getattr(name)?;
+        if !attribute.is_callable() {
+            return Ok(attribute.unbind());
+        }
+        let method = PyGroupedWindowMethod {
+            window: slf.into(),
+            name: name.to_owned(),
+        };
+        Ok(Py::new(py, method)?.into_any())
+    }
+}
+
+/// A method of a [`PyGroupedWindow`], bound to its name.
+#[pyclass(name = "GroupbyWindowMethod")]
+pub struct PyGroupedWindowMethod {
+    window: Py<PyGroupedWindow>,
+    name: String,
+}
+
+#[pymethods]
+impl PyGroupedWindowMethod {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.window.borrow(py).run(py, &self.name, args, kwargs)
+    }
 }
 
 /// A keyword argument that was passed and is not None.
@@ -37248,6 +37572,8 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCategoricalIndex>()?;
     m.add_class::<PyMultiIndex>()?;
     m.add_class::<PyRolling>()?;
+    m.add_class::<PyGroupedWindow>()?;
+    m.add_class::<PyGroupedWindowMethod>()?;
     m.add_class::<PyExpanding>()?;
     m.add_class::<PyExponentialMovingWindow>()?;
     m.add_class::<PySeriesILoc>()?;
