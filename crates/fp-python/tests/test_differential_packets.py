@@ -2914,10 +2914,11 @@ def test_groupby_option_refusals_and_errors_match_pandas() -> None:
         with pytest.raises(TypeError, match="supply one of 'by' and 'level'"):
             _gb_frame(m).groupby()
     # NEGATIVE: options the binding cannot honour raise, never drop.
+    # (groupby(level=0) left this list when fvsao.19 implemented it; it is
+    # compared with pandas in test_groupby_by_array_like_keys_matches_pandas.)
     for call in (
         lambda: _gb_frame(fpd).groupby("k", dropna=False)["a"],
         lambda: _gb_frame(fpd).groupby("k", group_keys=False),
-        lambda: _gb_frame(fpd).groupby(level=0),
         lambda: fpd.Series(series).groupby([1, 1, 2], dropna=False),
     ):
         with pytest.raises(NotImplementedError):
@@ -4223,3 +4224,61 @@ def test_index_is_a_typed_datetime_index_like_pandas(case: str) -> None:
     # raised; DatetimeIndex.tolist() and iteration gave strings.
     run = TYPED_INDEX_CASES[case]
     assert run(fpd) == run(pd)
+
+
+def _keyed_rows(m: Any) -> Any:
+    return m.DataFrame(
+        {"k": ["a", "b", "a", "b"], "v": [1.0, 2.0, 3.0, 4.0]},
+        index=m.to_datetime(["2024-01-05", "2024-02-06", "2024-01-07", "2024-03-01"]),
+    )
+
+
+GROUPBY_KEY_FORMS = {
+    "Series": lambda m: _keyed_rows(m).groupby(_keyed_rows(m)["k"])["v"].sum(),
+    "index.month": lambda m: _keyed_rows(m).groupby(_keyed_rows(m).index.month)["v"].sum(),
+    "list of values": lambda m: _keyed_rows(m).groupby([1, 1, 2, 2])["v"].sum(),
+    "ndarray": lambda m: _keyed_rows(m).groupby(np.array([1, 1, 2, 2]))["v"].sum(),
+    "[column, index.month]": lambda m: _keyed_rows(m).groupby(["k", _keyed_rows(m).index.month])["v"].sum(),
+    "callable": lambda m: _keyed_rows(m).groupby(lambda ts: ts.month)["v"].sum(),
+    "frame level=0": lambda m: _keyed_rows(m).groupby(level=0)["v"].sum(),
+    "series level=0": lambda m: _keyed_rows(m)["v"].groupby(level=0).sum(),
+    "Series.groupby(index.year)": lambda m: _keyed_rows(m)["v"].groupby(_keyed_rows(m).index.year).sum(),
+    "whole-frame sum by index.month": lambda m: _keyed_rows(m).groupby(_keyed_rows(m).index.month).sum(),
+    # A key named like a column but not that column: the column is still
+    # aggregated, and the key names the index.
+    "renamed key collides with a column": lambda m: _keyed_rows(m).groupby(_keyed_rows(m)["k"].str.upper()).sum(),
+}
+
+
+def _grouped_outcome(r: Any) -> Any:
+    names = list(r.index.names) if hasattr(r.index, "names") else [r.index.name]
+    if hasattr(r, "columns"):
+        values = {str(c): [str(v) for v in r[c].tolist()] for c in r.columns}
+    else:
+        values = [str(v) for v in r.tolist()]
+    return ([str(t) for t in r.index], [str(n) for n in names], values)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("form", sorted(GROUPBY_KEY_FORMS))
+def test_groupby_by_array_like_keys_matches_pandas(form: str) -> None:
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.19: DataFrame
+    # groupby took only column names (a Series key's values were read as
+    # column names); arrays, index fields, callables and level= raised.
+    run = GROUPBY_KEY_FORMS[form]
+    assert _grouped_outcome(run(fpd)) == _grouped_outcome(run(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_groupby_key_errors_match_pandas() -> None:
+    for m in (pd, fpd):
+        # NEGATIVE: a list of column names still groups by those columns.
+        assert list(_keyed_rows(m).groupby(["k"])["v"].sum()) == [4.0, 6.0]
+        with pytest.raises(ValueError):
+            _keyed_rows(m).groupby(np.array([1, 2, 3]))["v"].sum()
+        with pytest.raises(KeyError):
+            _keyed_rows(m).groupby("missing")
+    # pandas drops an unnamed array key from as_index=False output; not
+    # modelled, so refused rather than mislabelled.
+    with pytest.raises(NotImplementedError):
+        _keyed_rows(fpd).groupby(np.array([1, 1, 2, 2]), as_index=False)

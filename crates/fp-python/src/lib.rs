@@ -10661,31 +10661,34 @@ fn extract_or_build_series(
     if let Ok(series) = by.extract::<PyRef<'_, PySeries>>() {
         return Ok(series.inner.clone());
     }
-    if let Ok(py_idx) = by.extract::<PyRef<'_, PyIndex>>() {
-        let vals: Vec<Scalar> = py_idx
-            .inner
-            .labels()
+    let labels = like.index().labels().to_vec();
+    // An Index/array key is unnamed unless the Index is named, as pandas
+    // names the group level; these were all named "group", and a
+    // DatetimeIndex or ndarray key raised (fvsao.19).
+    if let Some(column) = py_array_like_column(py, by)? {
+        let name = py_index_arg_name(by).unwrap_or_default();
+        return Series::new(&name, Index::new(labels), column).map_err(frame_error_to_py);
+    }
+    // pandas applies a callable key to each index label.
+    if by.is_callable() {
+        let values = labels
             .iter()
-            .map(index_label_to_scalar)
-            .collect();
-        return Series::from_values("group", like.index().labels().to_vec(), vals)
-            .map_err(frame_error_to_py);
+            .map(|label| {
+                let mapped = by.call1((index_label_to_py(py, label)?,))?;
+                py_to_scalar(py, &mapped)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Series::from_values("", labels, values).map_err(frame_error_to_py);
     }
     if let Ok(list) = by.cast::<PyList>() {
         let scalars: Vec<Scalar> = list
             .iter()
             .map(|v| py_to_scalar(py, &v))
             .collect::<PyResult<Vec<_>>>()?;
-        return Series::from_values("group", like.index().labels().to_vec(), scalars)
-            .map_err(frame_error_to_py);
+        return Series::from_values("", labels, scalars).map_err(frame_error_to_py);
     }
     let scalar = py_to_scalar(py, by)?;
-    Series::from_values(
-        "group",
-        like.index().labels().to_vec(),
-        vec![scalar; like.len()],
-    )
-    .map_err(frame_error_to_py)
+    Series::from_values("", labels, vec![scalar; like.len()]).map_err(frame_error_to_py)
 }
 
 fn check_series_axis(axis: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
@@ -13596,19 +13599,27 @@ impl PySeries {
         }
         unsupported_params(
             "Series.groupby",
-            &[
-                ("level", level.is_none_or(|l| l.is_none())),
-                ("group_keys", group_keys),
-                ("dropna", dropna),
-            ],
+            &[("group_keys", group_keys), ("dropna", dropna)],
         )?;
-        let Some(by) = by.filter(|b| !b.is_none()) else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "You have to supply one of 'by' and 'level'",
-            ));
-        };
         let sort = sort.unwrap_or(true);
-        let by_series = extract_or_build_series(py, by, &self.inner)?;
+        let by_series = match (by.filter(|b| !b.is_none()), level.filter(|l| !l.is_none())) {
+            (Some(by), None) => extract_or_build_series(py, by, &self.inner)?,
+            // pandas' level= groups by the index itself (fvsao.19).
+            (None, Some(level)) => {
+                let index = self.inner.index();
+                let values = flat_index_level_values(index, level)?;
+                Series::new(index.name().unwrap_or(""), index.clone(), values)
+                    .map_err(frame_error_to_py)?
+            }
+            (Some(_), Some(_)) => {
+                return Err(not_implemented("Series.groupby with both by and level"));
+            }
+            (None, None) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "You have to supply one of 'by' and 'level'",
+                ));
+            }
+        };
         check_category_key(by_series.column(), observed, sort)?;
         let (series, by) = if self.inner.index() != by_series.index()
             && !self.inner.index().has_duplicates()
@@ -20036,6 +20047,7 @@ impl PyDataFrame {
     #[pyo3(signature = (by=None, axis=None, level=None, as_index=true, sort=true, group_keys=true, observed=None, dropna=true))]
     fn groupby(
         &self,
+        py: Python<'_>,
         by: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
@@ -20048,34 +20060,42 @@ impl PyDataFrame {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         unsupported_params(
             "DataFrame.groupby",
-            &[
-                ("axis", ax == 0),
-                ("level", level.is_none_or(|l| l.is_none())),
-                ("group_keys", group_keys),
-            ],
+            &[("axis", ax == 0), ("group_keys", group_keys)],
         )?;
-        let Some(by) = by.filter(|b| !b.is_none()) else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "You have to supply one of 'by' and 'level'",
+        let by = by.filter(|b| !b.is_none());
+        let level = level.filter(|l| !l.is_none());
+        let (df, by, key_names) = match (by, level) {
+            (Some(by), None) => resolve_groupby_keys(py, &self.inner, by)?,
+            (None, Some(level)) => group_by_index_level(&self.inner, level)?,
+            (Some(_), Some(_)) => {
+                return Err(not_implemented("DataFrame.groupby with both by and level"));
+            }
+            (None, None) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "You have to supply one of 'by' and 'level'",
+                ));
+            }
+        };
+        // pandas' as_index=False output drops an unnamed array key and
+        // inserts named ones as columns; only column keys are modelled there.
+        let column_keys_only = by
+            .iter()
+            .zip(&key_names)
+            .all(|(column, name)| name.as_deref() == Some(column.as_str()));
+        if !as_index && !column_keys_only {
+            return Err(not_implemented(
+                "DataFrame.groupby(as_index=False) over keys that are not columns",
             ));
-        };
-        let by: Vec<String> = if let Ok(single) = by.extract::<String>() {
-            vec![single]
-        } else {
-            by.extract::<Vec<String>>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "groupby: `by` must be a column name or a list of column names",
-                )
-            })?
-        };
+        }
         for key in &by {
-            if let Some(column) = self.inner.column(key) {
+            if let Some(column) = df.column(key) {
                 check_category_key(column, observed, sort)?;
             }
         }
         let gb = PyGroupBy {
-            df: self.inner.clone(),
+            df,
             by,
+            key_names,
             as_index,
             sort,
             dropna,
@@ -26857,12 +26877,184 @@ impl PyStyler {
     }
 }
 
+/// pandas' groupby key resolution: each key is a column name, an array-like
+/// of the frame's length (a Series aligned on the frame's index, an Index, a
+/// list, an ndarray) or a callable over the index labels, and a list of
+/// values naming no column is itself one array key. A key that is not a
+/// column rides in the returned frame as a key column of its own; returns the
+/// frame, the key columns, and the names the keys give the result. Only
+/// column names were taken, and a Series key's VALUES were read as column
+/// names (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.19).
+fn resolve_groupby_keys(
+    py: Python<'_>,
+    frame: &DataFrame,
+    by: &Bound<'_, PyAny>,
+) -> PyResult<(DataFrame, Vec<String>, Vec<Option<String>>)> {
+    let is_column = |key: &Bound<'_, PyAny>| {
+        key.extract::<String>()
+            .is_ok_and(|name| frame.column(&name).is_some())
+    };
+    let is_array = |key: &Bound<'_, PyAny>| {
+        key.is_callable()
+            || key.cast::<PyList>().is_ok()
+            || key.extract::<PyRef<'_, PySeries>>().is_ok()
+            || key.get_type().name().is_ok_and(|name| name == "ndarray")
+            || key.extract::<PyRef<'_, PyIndex>>().is_ok()
+            || key.extract::<PyRef<'_, PyDatetimeIndex>>().is_ok()
+            || key.extract::<PyRef<'_, PyTimedeltaIndex>>().is_ok()
+            || key.extract::<PyRef<'_, PyRangeIndex>>().is_ok()
+    };
+    let keys: Vec<Bound<'_, PyAny>> = if let Ok(list) = by.cast::<PyList>() {
+        let items: Vec<_> = list.iter().collect();
+        let plain_values = !items.iter().any(|item| is_column(item) || is_array(item));
+        if plain_values && !items.is_empty() && items.len() == frame.len() {
+            vec![by.clone()]
+        } else {
+            items
+        }
+    } else if let Ok(tuple) = by.cast::<PyTuple>() {
+        tuple.iter().collect()
+    } else {
+        vec![by.clone()]
+    };
+    let mut df = frame.clone();
+    let mut columns = Vec::with_capacity(keys.len());
+    let mut names = Vec::with_capacity(keys.len());
+    for (position, key) in keys.iter().enumerate() {
+        if let Ok(name) = key.extract::<String>() {
+            if frame.column(&name).is_none() {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(name));
+            }
+            columns.push(name.clone());
+            names.push(Some(name));
+            continue;
+        }
+        let (column, name) = groupby_key_column(py, frame, key)?;
+        if column.len() != frame.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of grouper ({}) and axis ({}) must be same length",
+                column.len(),
+                frame.len()
+            )));
+        }
+        let mut key_column = format!("__fp_groupby_key_{position}__");
+        while df.column(&key_column).is_some() {
+            key_column.push('_');
+        }
+        df = df
+            .with_column(key_column.clone(), column)
+            .map_err(frame_error_to_py)?;
+        columns.push(key_column);
+        names.push(name);
+    }
+    Ok((df, columns, names))
+}
+
+/// One non-column groupby key as a column of the frame's length, and the
+/// name it gives the result: a Series aligned on the frame's index (its
+/// name), an Index or array positionally (an Index's name), a callable over
+/// the index labels (unnamed).
+fn groupby_key_column(
+    py: Python<'_>,
+    frame: &DataFrame,
+    key: &Bound<'_, PyAny>,
+) -> PyResult<(Column, Option<String>)> {
+    if let Ok(series) = key.extract::<PyRef<'_, PySeries>>() {
+        let name = (!series.inner.name().is_empty()).then(|| series.inner.name().to_owned());
+        let aligned = if series.inner.index().labels() == frame.index().labels() {
+            series.inner.clone()
+        } else {
+            series
+                .inner
+                .reindex(frame.index().labels().to_vec())
+                .map_err(frame_error_to_py)?
+        };
+        return Ok((aligned.column().clone(), name));
+    }
+    if key.is_callable() {
+        let values = frame
+            .index()
+            .labels()
+            .iter()
+            .map(|label| {
+                let mapped = key.call1((index_label_to_py(py, label)?,))?;
+                py_to_scalar(py, &mapped)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok((
+            Column::from_values(values).map_err(column_error_to_py)?,
+            None,
+        ));
+    }
+    if let Some(column) = py_array_like_column(py, key)? {
+        return Ok((column, py_index_arg_name(key)));
+    }
+    if let Ok(list) = key.cast::<PyList>() {
+        let values = list
+            .iter()
+            .map(|value| py_to_scalar(py, &value))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok((
+            Column::from_values(values).map_err(column_error_to_py)?,
+            None,
+        ));
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+        key.repr()?.to_string(),
+    ))
+}
+
+/// The labels of a flat index as a groupby key column, for `level=` 0, -1 or
+/// the index's name; levels of a MultiIndex are not supported yet.
+fn flat_index_level_values(index: &Index, level: &Bound<'_, PyAny>) -> PyResult<Column> {
+    let names_this_level = match level.extract::<i64>() {
+        Ok(position) => position == 0 || position == -1,
+        Err(_) => level
+            .extract::<String>()
+            .is_ok_and(|name| index.name() == Some(name.as_str())),
+    };
+    if index.row_multiindex().is_some() || !names_this_level {
+        return Err(not_implemented(
+            "groupby(level=...) other than the single level of a flat index",
+        ));
+    }
+    let values = index.labels().iter().map(index_label_to_scalar).collect();
+    Column::from_values(values).map_err(column_error_to_py)
+}
+
+/// `DataFrame.groupby(level=...)` over a flat index: the index labels as the
+/// key, named after the index.
+fn group_by_index_level(
+    frame: &DataFrame,
+    level: &Bound<'_, PyAny>,
+) -> PyResult<(DataFrame, Vec<String>, Vec<Option<String>>)> {
+    if frame.row_multiindex().is_some() {
+        return Err(not_implemented(
+            "groupby(level=...) other than the single level of a flat index",
+        ));
+    }
+    let index = frame.index();
+    let column = flat_index_level_values(index, level)?;
+    let mut key_column = "__fp_groupby_level__".to_owned();
+    while frame.column(&key_column).is_some() {
+        key_column.push('_');
+    }
+    let df = frame
+        .with_column(key_column.clone(), column)
+        .map_err(frame_error_to_py)?;
+    Ok((df, vec![key_column], vec![index.name().map(str::to_owned)]))
+}
+
 /// Python wrapper for FrankenPandas GroupBy.
 #[derive(Clone)]
 #[pyclass(name = "DataFrameGroupBy", from_py_object)]
 pub struct PyGroupBy {
     df: DataFrame,
     by: Vec<String>,
+    /// The name each key gives the result (a column key's name; an array,
+    /// Series, Index or callable key's own name, None when unnamed); such a
+    /// key rides in `df` as a key column of its own (fvsao.19).
+    key_names: Vec<Option<String>>,
     /// pandas' `groupby(as_index=, sort=, dropna=)` (br-frankenpandas-n57tz:
     /// fp-frame had all three; the binding took only `by`).
     as_index: bool,
@@ -26876,7 +27068,20 @@ impl PyGroupBy {
     fn grouped(&self) -> Result<fp_frame::DataFrameGroupBy<'_>, FrameError> {
         let by_refs: Vec<&str> = self.by.iter().map(String::as_str).collect();
         self.df
-            .groupby_full_options(&by_refs, self.as_index, self.sort, self.dropna)
+            .groupby_full_options(&by_refs, self.as_index, self.sort, self.dropna)?
+            .with_key_names(self.key_names.clone())
+    }
+
+    /// This groupby over another frame with the same keys and options.
+    fn over(&self, df: DataFrame) -> Self {
+        Self {
+            df,
+            by: self.by.clone(),
+            key_names: self.key_names.clone(),
+            as_index: self.as_index,
+            sort: self.sort,
+            dropna: self.dropna,
+        }
     }
 
     /// `op` over this groupby, or with `numeric_only` over its keys and
@@ -26911,13 +27116,7 @@ impl PyGroupBy {
             })
             .map(String::as_str)
             .collect();
-        let numeric = Self {
-            df: self.df.select_columns(&keep)?,
-            by: self.by.clone(),
-            as_index: self.as_index,
-            sort: self.sort,
-            dropna: self.dropna,
-        };
+        let numeric = self.over(self.df.select_columns(&keep)?);
         op(&numeric.grouped()?)
     }
 
@@ -26954,7 +27153,7 @@ impl PyGroupBy {
             kind,
             ResampleTarget::DataFrame(target),
             window_groups_from_codes(&codes, &groups),
-            self.by.iter().map(|key| Some(key.clone())).collect(),
+            self.key_names.clone(),
             args,
             kwargs,
         )
@@ -26990,9 +27189,17 @@ impl PyGroupBy {
             "selecting a column from DataFrame.groupby",
             &[("dropna", self.dropna)],
         )?;
+        // The key Series carries the key's own name (None -> ""), which
+        // names the result's index (fvsao.19).
+        let key_name = self
+            .key_names
+            .first()
+            .cloned()
+            .flatten()
+            .unwrap_or_default();
         Ok(PySeriesGroupBy {
             series,
-            by: column(key)?,
+            by: column(key)?.rename(&key_name).map_err(frame_error_to_py)?,
             sort: self.sort,
             as_index: self.as_index,
             groups: None,
@@ -27036,17 +27243,7 @@ impl PyGroupBy {
             }
         }
         let df = self.df.select_columns(&keep).map_err(frame_error_to_py)?;
-        Ok(Py::new(
-            py,
-            Self {
-                df,
-                by: self.by.clone(),
-                as_index: self.as_index,
-                sort: self.sort,
-                dropna: self.dropna,
-            },
-        )?
-        .into_any())
+        Ok(Py::new(py, self.over(df))?.into_any())
     }
 
     /// `gb.v` for a column `v`; anything else is pandas' AttributeError.
@@ -27199,8 +27396,8 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .size()
             .map_err(frame_error_to_py)?;
-        let key = match self.by.as_slice() {
-            [key] => Some(key.as_str()),
+        let key = match self.key_names.as_slice() {
+            [key] => key.as_deref(),
             _ => counts.index().name(),
         };
         let index = counts.index().rename_index(key);
@@ -39671,6 +39868,7 @@ mod tests {
         let gb = PyGroupBy {
             df: py_df.inner.clone(),
             by: vec!["grp".to_string()],
+            key_names: vec![Some("grp".to_string())],
             as_index: true,
             sort: true,
             dropna: true,

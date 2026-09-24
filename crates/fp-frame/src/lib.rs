@@ -82260,6 +82260,7 @@ impl DataFrame {
         Ok(DataFrameGroupBy {
             df: self,
             by: by.iter().map(|s| (*s).to_string()).collect(),
+            key_names: by.iter().map(|s| Some((*s).to_string())).collect(),
             as_index,
             sort,
             dropna,
@@ -94489,6 +94490,12 @@ impl DataFrame {
 pub struct DataFrameGroupBy<'a> {
     df: &'a DataFrame,
     by: Vec<String>,
+    /// The name each key gives the result's index level: its column name by
+    /// default, or the name of the array/Series/Index/callable key that a
+    /// caller grouped by through a key column of its own (None for an
+    /// unnamed array), as pandas names it
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.19).
+    key_names: Vec<Option<String>>,
     as_index: bool,
     sort: bool,
     dropna: bool,
@@ -94709,6 +94716,26 @@ impl<'a> DenseMultiMixedGrouping<'a> {
 }
 
 impl DataFrameGroupBy<'_> {
+    /// Name the result's key levels `names` (one per key; None for an
+    /// unnamed key) instead of the key column names - for keys a caller
+    /// grouped by through key columns of its own (fvsao.19).
+    pub fn with_key_names(mut self, names: Vec<Option<String>>) -> Result<Self, FrameError> {
+        if names.len() != self.by.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "groupby: {} key names for {} keys",
+                names.len(),
+                self.by.len()
+            )));
+        }
+        self.key_names = names;
+        Ok(self)
+    }
+
+    /// The result index name of a single-key groupby.
+    fn single_key_name(&self) -> Option<&str> {
+        self.key_names.first().and_then(Option::as_deref)
+    }
+
     fn sum_group_vals(dtype: DType, group_vals: &[Scalar]) -> Scalar {
         match dtype {
             DType::Int64 => {
@@ -95428,7 +95455,7 @@ impl DataFrameGroupBy<'_> {
                 ));
             }
         }
-        let names: Vec<Option<String>> = self.by.iter().map(|n| Some(n.clone())).collect();
+        let names: Vec<Option<String>> = self.key_names.clone();
         Ok(Some(
             fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names),
         ))
@@ -95450,7 +95477,7 @@ impl DataFrameGroupBy<'_> {
             // groupings. Multi-by uses MultiIndex with named levels (already
             // captured by group_keys_as_row_multiindex when applicable).
             let by_name = if self.by.len() == 1 {
-                Some(self.by[0].as_str())
+                self.single_key_name()
             } else {
                 None
             };
@@ -95641,8 +95668,7 @@ impl DataFrameGroupBy<'_> {
             .into_iter()
             .map(|(name, values)| Ok((name, Column::from_values(values)?)))
             .collect::<Result<_, FrameError>>()?;
-        let mut names: Vec<Option<String>> =
-            self.by.iter().map(|name| Some(name.clone())).collect();
+        let mut names: Vec<Option<String>> = self.key_names.clone();
         names.push(Some("index".to_owned()));
 
         DataFrame::new_with_axes(
@@ -97063,7 +97089,7 @@ impl DataFrameGroupBy<'_> {
             std::sync::Arc::from(out_key_bytes),
             std::sync::Arc::from(out_key_offsets),
         )
-        .rename_index(Some(self.by[0].as_str()));
+        .rename_index(self.single_key_name());
 
         self.dense_aggregate_emit(value_cols, &gid_per_row, ng, &order, func_name, out_index)
     }
@@ -97810,7 +97836,7 @@ impl DataFrameGroupBy<'_> {
             .iter()
             .map(|&slot| IndexLabel::Int64((min as i128 + slot as i128) as i64))
             .collect();
-        let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+        let out_index = Index::new(labels).rename_index(self.single_key_name());
 
         let agg_vals: Vec<Scalar> = slots
             .iter()
@@ -98027,7 +98053,7 @@ impl DataFrameGroupBy<'_> {
             .iter()
             .map(|&slot| IndexLabel::Int64((min as i128 + slot as i128) as i64))
             .collect();
-        let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+        let out_index = Index::new(labels).rename_index(self.single_key_name());
         let mut result_cols = BTreeMap::new();
         for (column, name) in value_cols.iter().enumerate() {
             let output: Vec<Scalar> = slots
@@ -98115,7 +98141,7 @@ impl DataFrameGroupBy<'_> {
                     level_arrays[level_idx].push(IndexLabel::Int64(value));
                 }
             }
-            let names: Vec<Option<String>> = self.by.iter().map(|n| Some(n.clone())).collect();
+            let names: Vec<Option<String>> = self.key_names.clone();
             let row_multiindex =
                 Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names));
             let mut frame = self.dense_aggregate_emit(
@@ -98197,7 +98223,7 @@ impl DataFrameGroupBy<'_> {
             .iter()
             .map(|&g| IndexLabel::Utf8(inverse[g].to_string()))
             .collect();
-        let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+        let out_index = Index::new(labels).rename_index(self.single_key_name());
         (gid_per_row, ng, order, out_index)
     }
 
@@ -98239,7 +98265,7 @@ impl DataFrameGroupBy<'_> {
             .iter()
             .map(|&g| IndexLabel::Int64(key_of_gid[g]))
             .collect();
-        let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+        let out_index = Index::new(labels).rename_index(self.single_key_name());
 
         (gid_per_row, ng, order, out_index)
     }
@@ -98280,7 +98306,7 @@ impl DataFrameGroupBy<'_> {
             .iter()
             .map(|&g| IndexLabel::Int64(key_of_gid[g]))
             .collect();
-        let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+        let out_index = Index::new(labels).rename_index(self.single_key_name());
         (gid_per_row, ng, order, out_index)
     }
 
@@ -98339,7 +98365,7 @@ impl DataFrameGroupBy<'_> {
                 }
             })
             .collect();
-        let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+        let out_index = Index::new(labels).rename_index(self.single_key_name());
         (gid_per_row, ng, order, out_index)
     }
 
@@ -99898,7 +99924,7 @@ impl DataFrameGroupBy<'_> {
                 level_arrays[level_idx].push(IndexLabel::Int64(value));
             }
         }
-        let names: Vec<Option<String>> = self.by.iter().map(|n| Some(n.clone())).collect();
+        let names: Vec<Option<String>> = self.key_names.clone();
         let mi = fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names);
         Ok((Index::new(labels), mi))
     }
@@ -99923,7 +99949,7 @@ impl DataFrameGroupBy<'_> {
                 level_arrays[level_idx].push(value.to_index_label());
             }
         }
-        let names: Vec<Option<String>> = self.by.iter().map(|n| Some(n.clone())).collect();
+        let names: Vec<Option<String>> = self.key_names.clone();
         let mi = fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names);
         Ok((Index::new(labels), mi))
     }
@@ -99988,7 +100014,7 @@ impl DataFrameGroupBy<'_> {
                     .iter()
                     .map(|&g| IndexLabel::Utf8(inverse[g].to_string()))
                     .collect();
-                let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+                let out_index = Index::new(labels).rename_index(self.single_key_name());
                 (gid_per_row, ng, order, out_index, None)
             } else {
                 return Ok(None);
@@ -100397,7 +100423,7 @@ impl DataFrameGroupBy<'_> {
                 .iter()
                 .map(|&g| IndexLabel::Utf8(inverse[g].to_string()))
                 .collect();
-            let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+            let out_index = Index::new(labels).rename_index(self.single_key_name());
             (gid_per_row, ng, order, out_index)
         } else {
             return Ok(None);
@@ -100637,7 +100663,7 @@ impl DataFrameGroupBy<'_> {
                 .iter()
                 .map(|&g| IndexLabel::Utf8(inverse[g].to_string()))
                 .collect();
-            let out_index = Index::new(labels).rename_index(Some(self.by[0].as_str()));
+            let out_index = Index::new(labels).rename_index(self.single_key_name());
             (gid_per_row, ng, order, out_index)
         } else {
             return Ok(None);
@@ -101250,7 +101276,7 @@ impl DataFrameGroupBy<'_> {
                 }
             }
 
-            let names: Vec<Option<String>> = self.by.iter().map(|n| Some(n.clone())).collect();
+            let names: Vec<Option<String>> = self.key_names.clone();
             let row_multiindex =
                 Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names));
             return Ok(Some(DataFrame::new_with_axes(
@@ -102122,8 +102148,7 @@ impl DataFrameGroupBy<'_> {
             }
         }
 
-        let mut names: Vec<Option<String>> =
-            self.by.iter().map(|name| Some(name.clone())).collect();
+        let mut names: Vec<Option<String>> = self.key_names.clone();
         names.push(Some("index".to_owned()));
 
         Ok((
@@ -104972,7 +104997,7 @@ impl DataFrameGroupBy<'_> {
         // result is MultiIndex with [by-name, value-col-name]. Flat fallback
         // preserves by-name for the single-by case.
         let by_name = if self.by.len() == 1 {
-            Some(self.by[0].as_str())
+            self.single_key_name()
         } else {
             None
         };
@@ -105095,7 +105120,7 @@ impl DataFrameGroupBy<'_> {
         // Per br-frankenpandas-i7afd: pandas df.groupby(by).describe result
         // has by-name on the group-key axis.
         let by_name = if self.by.len() == 1 {
-            Some(self.by[0].as_str())
+            self.single_key_name()
         } else {
             None
         };
@@ -105508,7 +105533,7 @@ impl DataFrameGroupBy<'_> {
         // Per br-frankenpandas-vxgxx: pandas groupby.sem result has by-name
         // on group-key axis.
         let by_name = if self.by.len() == 1 {
-            Some(self.by[0].as_str())
+            self.single_key_name()
         } else {
             None
         };
@@ -105580,7 +105605,7 @@ impl DataFrameGroupBy<'_> {
 
         // Per br-frankenpandas-rpbjy: groupby.skew result has by-name.
         let by_name = if self.by.len() == 1 {
-            Some(self.by[0].as_str())
+            self.single_key_name()
         } else {
             None
         };
@@ -105649,7 +105674,7 @@ impl DataFrameGroupBy<'_> {
 
         // Per br-frankenpandas-il3zl: groupby.kurtosis result has by-name.
         let by_name = if self.by.len() == 1 {
-            Some(self.by[0].as_str())
+            self.single_key_name()
         } else {
             None
         };
@@ -105754,7 +105779,7 @@ impl DataFrameGroupBy<'_> {
         // Per br-frankenpandas-5u5sq: pandas groupby.ohlc result has by-name
         // on the group-key axis.
         let by_name = if self.by.len() == 1 {
-            Some(self.by[0].as_str())
+            self.single_key_name()
         } else {
             None
         };
