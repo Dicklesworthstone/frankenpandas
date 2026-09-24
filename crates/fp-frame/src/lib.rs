@@ -13293,6 +13293,49 @@ impl Series {
         self.with_values_preserving_index(out)
     }
 
+    /// Whether [`interpolate_with`](Self::interpolate_with) implements this
+    /// combination: linear takes every option, the other methods only `limit`
+    /// in the forward direction.
+    pub fn interpolate_supports(
+        method: &str,
+        limit_direction: Option<&str>,
+        limit_area: Option<&str>,
+    ) -> bool {
+        method == "linear"
+            || (matches!(limit_direction, None | Some("forward")) && limit_area.is_none())
+    }
+
+    /// pandas' `interpolate(method, limit=, limit_direction=, limit_area=)`
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5: the Python
+    /// binding dropped every option and always interpolated linearly).
+    /// Combinations outside [`interpolate_supports`](Self::interpolate_supports)
+    /// are rejected.
+    pub fn interpolate_with(
+        &self,
+        method: &str,
+        limit: Option<usize>,
+        limit_direction: Option<&str>,
+        limit_area: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        if !Self::interpolate_supports(method, limit_direction, limit_area) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "interpolate(method='{method}') with limit_direction or limit_area"
+            )));
+        }
+        let plain_forward =
+            matches!(limit_direction, None | Some("forward")) && limit_area.is_none();
+        match (method, limit) {
+            ("linear", None) if plain_forward => self.interpolate(),
+            ("linear", _) => self.interpolate_with_options(
+                limit,
+                limit_direction.unwrap_or("forward"),
+                limit_area,
+            ),
+            (other, None) => self.interpolate_method(other),
+            (other, Some(l)) => self.interpolate_with_limit(other, l),
+        }
+    }
+
     /// Interpolate missing values using the specified method.
     ///
     /// Matches `s.interpolate(method='linear'|'nearest'|'zero')`.
@@ -90952,6 +90995,19 @@ impl DataFrame {
         self.apply_per_column(|s| s.interpolate_method(method))
     }
 
+    /// [`Series::interpolate_with`] applied to every column, with pandas'
+    /// all-object rejection (fvsao.5).
+    pub fn interpolate_with(
+        &self,
+        method: &str,
+        limit: Option<usize>,
+        limit_direction: Option<&str>,
+        limit_area: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        self.reject_all_object_interpolate()?;
+        self.apply_per_column(|s| s.interpolate_with(method, limit, limit_direction, limit_area))
+    }
+
     /// pandas' DataFrame.interpolate raises TypeError when every column is
     /// object dtype (a Series or a mixed frame interpolates); it returned the
     /// frame unchanged (4qg5w.18).
@@ -147131,6 +147187,88 @@ mod tests {
         assert!(
             s.interpolate_with_options(None, "both", Some("sideways"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn interpolate_with_dispatches_every_option_fvsao5() {
+        // fvsao.5: the Python binding dropped method/limit/limit_direction/
+        // limit_area. Values verified vs pandas 2.2.3:
+        // [1,NaN,NaN,NaN,5].interpolate(limit=1)             -> [1,2,NaN,NaN,5]
+        // [NaN,1,NaN,3,NaN].interpolate(limit_direction='both') -> [1,1,2,3,3]
+        // [NaN,1,NaN,3,NaN].interpolate(limit_area='inside')    -> [NaN,1,2,3,NaN]
+        let nan = || Scalar::Null(NullKind::NaN);
+        let f = Scalar::Float64;
+        let series = |values: Vec<Scalar>| {
+            Series::from_values(
+                "x",
+                (0..values.len() as i64)
+                    .map(IndexLabel::from)
+                    .collect::<Vec<_>>(),
+                values,
+            )
+            .unwrap()
+        };
+        let m = |v: &Series| -> Vec<Option<f64>> {
+            v.values()
+                .iter()
+                .map(|x| {
+                    if x.is_missing() {
+                        None
+                    } else {
+                        x.to_f64().ok()
+                    }
+                })
+                .collect()
+        };
+        let long_gap = series(vec![f(1.0), nan(), nan(), nan(), f(5.0)]);
+        assert_eq!(
+            m(&long_gap
+                .interpolate_with("linear", Some(1), None, None)
+                .unwrap()),
+            vec![Some(1.0), Some(2.0), None, None, Some(5.0)]
+        );
+        let edges = series(vec![nan(), f(1.0), nan(), f(3.0), nan()]);
+        assert_eq!(
+            m(&edges
+                .interpolate_with("linear", None, Some("both"), None)
+                .unwrap()),
+            vec![Some(1.0), Some(1.0), Some(2.0), Some(3.0), Some(3.0)]
+        );
+        assert_eq!(
+            m(&edges
+                .interpolate_with("linear", None, None, Some("inside"))
+                .unwrap()),
+            vec![None, Some(1.0), Some(2.0), Some(3.0), None]
+        );
+        // The plain call is `interpolate()` exactly.
+        assert_eq!(
+            m(&long_gap
+                .interpolate_with("linear", None, None, None)
+                .unwrap()),
+            m(&long_gap.interpolate().unwrap())
+        );
+        // A non-linear method with a direction is not implemented; it is
+        // rejected rather than interpolated some other way.
+        assert!(!Series::interpolate_supports("nearest", Some("both"), None));
+        assert!(
+            edges
+                .interpolate_with("nearest", None, Some("both"), None)
+                .is_err()
+        );
+        // Per column on a frame, with the object-column rule kept.
+        let frame = DataFrame::from_series(vec![long_gap.clone()]).unwrap();
+        let filled = frame
+            .interpolate_with("linear", Some(1), None, None)
+            .unwrap();
+        assert_eq!(
+            m(&Series::new(
+                "x",
+                filled.index().clone(),
+                filled.column("x").unwrap().clone()
+            )
+            .unwrap()),
+            vec![Some(1.0), Some(2.0), None, None, Some(5.0)]
         );
     }
 

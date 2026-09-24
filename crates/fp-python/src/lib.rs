@@ -2340,9 +2340,15 @@ impl PyIndex {
         })
     }
 
+    /// On a flat index a label is missing or not, so how='any' and how='all'
+    /// drop the same labels; only the value is checked.
     #[pyo3(signature = (how=None))]
-    fn dropna(&self, how: Option<&str>) -> Self {
-        let _ = how;
+    fn dropna(&self, how: Option<&str>) -> PyResult<Self> {
+        if let Some(other) = how.filter(|h| !matches!(*h, "any" | "all")) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid how option: {other}"
+            )));
+        }
         let labels = self.inner.labels();
         let non_null: Vec<IndexLabel> = labels
             .iter()
@@ -2357,10 +2363,16 @@ impl PyIndex {
         if let Some(n) = self.inner.name() {
             res = res.rename_index(Some(n));
         }
-        PyIndex { inner: res }
+        Ok(PyIndex { inner: res })
     }
 
-    fn fillna(&self, value: &Bound<'_, PyAny>) -> PyResult<Self> {
+    /// pandas' `Index.fillna(value=None)`: no value leaves the index as it is
+    /// (the argument was required).
+    #[pyo3(signature = (value=None))]
+    fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let Some(value) = value.filter(|v| !v.is_none()) else {
+            return Ok(self.clone());
+        };
         let fill_lbl = py_to_index_label(value)?;
         let labels = self.inner.labels();
         let filled: Vec<IndexLabel> = labels
@@ -2579,7 +2591,8 @@ impl PyIndex {
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
     ) -> PyResult<(usize, usize)> {
-        let _ = step;
+        // A positive step slices forward, which is what this computes.
+        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
         let s_lbl = match start {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
@@ -2753,7 +2766,8 @@ impl PyIndex {
 
     #[pyo3(signature = (names, level=None))]
     fn set_names(&self, names: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Self> {
-        let _ = level;
+        // A flat index has only level 0.
+        unsupported_params("set_names", &[("level", level.is_none_or(|l| l == 0))])?;
         let name_opt = if let Ok(s) = names.extract::<String>() {
             Some(s)
         } else if let Ok(seq) = names.cast::<pyo3::types::PySequence>() {
@@ -2774,11 +2788,26 @@ impl PyIndex {
         self.clone()
     }
 
+    /// pandas' `Index.factorize`: codes in order of first appearance, or
+    /// with `sort=True` in the order of the sorted uniques (fvsao.5: `sort`
+    /// was dropped). Missing values get code -1; coding them is not supported.
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
-        let _ = (sort, use_na_sentinel);
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(Vec<isize>, PyIndex)> {
+        unsupported_params("Index.factorize", &[("use_na_sentinel", use_na_sentinel)])?;
         let (codes, uniques) = self.inner.factorize();
-        (codes, PyIndex { inner: uniques })
+        if !sort {
+            return Ok((codes, PyIndex { inner: uniques }));
+        }
+        let (sorted, order) = uniques.sortlevel();
+        let mut new_code = vec![0_isize; order.len()];
+        for (rank, &old) in order.iter().enumerate() {
+            new_code[old] = isize::try_from(rank).unwrap_or(isize::MAX);
+        }
+        let codes = codes
+            .into_iter()
+            .map(|c| usize::try_from(c).map_or(c, |c| new_code[c]))
+            .collect();
+        Ok((codes, PyIndex { inner: sorted }))
     }
 
     fn format(&self) -> Vec<String> {
@@ -2810,9 +2839,8 @@ impl PyIndex {
 
     #[pyo3(signature = (decimals=0))]
     fn round(&self, decimals: i32) -> Self {
-        let _ = decimals;
         PyIndex {
-            inner: self.inner.round(),
+            inner: self.inner.round(decimals),
         }
     }
 
@@ -2836,7 +2864,7 @@ impl PyIndex {
         side: &str,
         sorter: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<usize> {
-        let _ = sorter;
+        unsupported_params("Index.searchsorted", &[("sorter", sorter.is_none())])?;
         let lbl = py_to_index_label(value)?;
         self.inner
             .searchsorted(&lbl, side)
@@ -2885,7 +2913,16 @@ impl PyIndex {
         ascending: bool,
         sort_remaining: Option<bool>,
     ) -> PyResult<(Self, Vec<usize>)> {
-        let _ = (level, ascending, sort_remaining);
+        // A flat index has only level 0, where sort_remaining has nothing
+        // left to sort; the sort is ascending.
+        let _ = sort_remaining;
+        unsupported_params(
+            "Index.sortlevel",
+            &[
+                ("level", level.is_none_or(|l| l == 0)),
+                ("ascending", ascending),
+            ],
+        )?;
         let (sorted, order) = self.inner.sortlevel();
         Ok((PyIndex { inner: sorted }, order))
     }
@@ -2899,7 +2936,13 @@ impl PyIndex {
         return_indexers: bool,
         sort: bool,
     ) -> PyResult<Self> {
-        let _ = (level, return_indexers, sort);
+        unsupported_params(
+            "Index.join",
+            &[
+                ("level", level.is_none()),
+                ("return_indexers", !return_indexers),
+            ],
+        )?;
         let other_idx = if let Ok(py_idx) = other.extract::<PyRef<'_, PyIndex>>() {
             py_idx.inner.clone()
         } else {
@@ -2910,6 +2953,8 @@ impl PyIndex {
             .inner
             .join(&other_idx, how)
             .map_err(index_error_to_py)?;
+        // sort=True orders the joined labels (it was dropped, fvsao.5).
+        let joined = if sort { joined.sortlevel().0 } else { joined };
         Ok(PyIndex { inner: joined })
     }
 
@@ -2922,7 +2967,15 @@ impl PyIndex {
         limit: Option<usize>,
         tolerance: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(Self, Vec<i64>)> {
-        let _ = (method, level, limit, tolerance);
+        unsupported_params(
+            "Index.reindex",
+            &[
+                ("method", method.is_none()),
+                ("level", level.is_none()),
+                ("limit", limit.is_none()),
+                ("tolerance", tolerance.is_none()),
+            ],
+        )?;
         let target_idx = if let Ok(py_idx) = target.extract::<PyRef<'_, PyIndex>>() {
             py_idx.inner.clone()
         } else {
@@ -3008,6 +3061,25 @@ impl PyIndex {
 #[derive(Clone)]
 pub struct PyDatetimeIndex {
     pub(crate) inner: DatetimeIndex,
+}
+
+impl PyDatetimeIndex {
+    /// The same index (name kept) over new nanosecond labels.
+    fn with_nanos(&self, nanos: Vec<i64>) -> Self {
+        Self {
+            inner: DatetimeIndex::new(nanos).rename_index(self.inner.name()),
+        }
+    }
+
+    /// The nanoseconds a `fillna` value stands for.
+    fn fill_nanos(label: &IndexLabel) -> PyResult<i64> {
+        match label {
+            IndexLabel::Datetime64(nanos) => Ok(*nanos),
+            _ => Err(not_implemented(
+                "DatetimeIndex.fillna with a non-Timestamp value",
+            )),
+        }
+    }
 }
 
 #[pymethods]
@@ -3522,7 +3594,8 @@ impl PyDatetimeIndex {
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
     ) -> PyResult<(usize, usize)> {
-        let _ = step;
+        // A positive step slices forward, which is what this computes.
+        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
         let s_lbl = match start {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
@@ -3549,16 +3622,16 @@ impl PyDatetimeIndex {
     }
 
     #[pyo3(signature = (level=0))]
+    /// pandas refuses to drop the only level of a flat index; this returned
+    /// a plain Index whatever level was asked for (fvsao.5).
     fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
         let _ = level;
-        Ok(PyIndex {
-            inner: self.inner.as_index().clone(),
-        })
+        Err(flat_droplevel_error())
     }
 
     #[pyo3(signature = (level=0))]
     fn get_level_values(&self, level: usize) -> PyResult<Self> {
-        let _ = level;
+        flat_level_check(level)?;
         Ok(self.clone())
     }
 
@@ -3651,13 +3724,7 @@ impl PyDatetimeIndex {
 
     #[pyo3(signature = (ascending=true, na_position="last"))]
     fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<Self> {
-        let mut sorted = self.inner.asi8().to_vec();
-        if ascending {
-            sorted.sort_unstable();
-        } else {
-            sorted.sort_unstable_by(|a, b| b.cmp(a));
-        }
-        let _ = na_position;
+        let sorted = sort_nanos_na(&self.inner.asi8(), ascending, na_position)?;
         let mut out = DatetimeIndex::new(sorted);
         if let Some(n) = self.inner.name() {
             out = out.set_name(n);
@@ -3685,15 +3752,43 @@ impl PyDatetimeIndex {
         })
     }
 
+    /// Drops NaT; a flat index drops the same labels for how='any' and 'all'.
+    /// This returned the index with its NaT (fvsao.5).
     #[pyo3(signature = (how="any"))]
-    fn dropna(&self, how: &str) -> Self {
-        let _ = how;
-        self.clone()
+    fn dropna(&self, how: &str) -> PyResult<Self> {
+        if !matches!(how, "any" | "all") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid how option: {how}"
+            )));
+        }
+        let kept = self
+            .inner
+            .asi8()
+            .into_iter()
+            .filter(|&v| v != i64::MIN)
+            .collect();
+        Ok(self.with_nanos(kept))
     }
 
-    fn fillna(&self, value: &Bound<'_, PyAny>) -> Self {
-        let _ = value;
-        self.clone()
+    /// Fills NaT with a value of the index's own type; this returned the
+    /// index unfilled whatever the value (fvsao.5). Another type (pandas
+    /// casts to object) is not supported.
+    #[pyo3(signature = (value=None))]
+    fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let Some(value) = value.filter(|v| !v.is_none()) else {
+            return Ok(self.clone());
+        };
+        let nanos = self.inner.asi8();
+        if !nanos.contains(&i64::MIN) {
+            return Ok(self.clone());
+        }
+        let fill = Self::fill_nanos(&py_to_index_label(value)?)?;
+        Ok(self.with_nanos(
+            nanos
+                .into_iter()
+                .map(|v| if v == i64::MIN { fill } else { v })
+                .collect(),
+        ))
     }
 
     fn as_py_index(&self) -> PyIndex {
@@ -3742,9 +3837,11 @@ impl PyDatetimeIndex {
         self.as_py_index().array(py)
     }
 
-    fn as_unit(&self, unit: &str) -> Self {
-        let _ = unit;
-        self.clone()
+    /// Labels are nanoseconds; another unit is not supported (it was
+    /// ignored).
+    fn as_unit(&self, unit: &str) -> PyResult<Self> {
+        unsupported_params("as_unit", &[("unit", unit == "ns")])?;
+        Ok(self.clone())
     }
 
     fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -3815,7 +3912,7 @@ impl PyDatetimeIndex {
     }
 
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(Vec<isize>, PyIndex)> {
         self.as_py_index().factorize(sort, use_na_sentinel)
     }
 
@@ -4059,9 +4156,18 @@ impl PyDatetimeIndex {
         Ok(Self { inner: res })
     }
 
-    fn snap(&self, freq: Option<&str>) -> Self {
-        let _ = freq;
-        self.clone()
+    /// pandas snaps a timestamp only when it is off the frequency, and every
+    /// timestamp is on a fixed ("tick") frequency such as 's' or 'D', so
+    /// those leave the index as it is. Calendar frequencies (MS, W, ...) are
+    /// not supported; the frequency used to be ignored (and required).
+    #[pyo3(signature = (freq="S"))]
+    fn snap(&self, freq: &str) -> PyResult<Self> {
+        const TICKS: [&str; 13] = [
+            "D", "h", "H", "min", "T", "s", "S", "ms", "L", "us", "U", "ns", "N",
+        ];
+        let unit = freq.trim_start_matches(|c: char| c.is_ascii_digit());
+        unsupported_params("DatetimeIndex.snap", &[("freq", TICKS.contains(&unit))])?;
+        Ok(self.clone())
     }
 
     #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
@@ -4071,8 +4177,10 @@ impl PyDatetimeIndex {
         ascending: bool,
         sort_remaining: Option<bool>,
     ) -> PyResult<(Self, Vec<usize>)> {
+        // This returned the index unsorted with the identity order, whatever
+        // the labels were (fvsao.5).
         let _ = (level, ascending, sort_remaining);
-        Ok((self.clone(), (0..self.inner.len()).collect()))
+        Err(not_implemented("sortlevel on this index type"))
     }
 
     #[getter]
@@ -4864,7 +4972,15 @@ impl PyMultiIndex {
         ascending: bool,
         dropna: bool,
     ) -> PyResult<PySeries> {
-        let _ = (normalize, sort, ascending, dropna);
+        unsupported_params(
+            "MultiIndex.value_counts",
+            &[
+                ("normalize", !normalize),
+                ("sort", sort),
+                ("ascending", !ascending),
+                ("dropna", dropna),
+            ],
+        )?;
         let pairs = self.inner.value_counts();
         let mut labels = Vec::with_capacity(pairs.len());
         let mut counts = Vec::with_capacity(pairs.len());
@@ -4997,8 +5113,14 @@ impl PyMultiIndex {
             .asof_locs(&where_idx, mask.as_deref()))
     }
 
+    /// A MultiIndex is always object dtype; pandas refuses any other (this
+    /// returned the MultiIndex whatever dtype was asked for).
     fn astype(&self, dtype: &str) -> PyResult<Self> {
-        let _ = dtype;
+        if !matches!(dtype, "object" | "O") {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Setting a MultiIndex dtype to anything other than object is not supported",
+            ));
+        }
         Ok(self.clone())
     }
 
@@ -5056,10 +5178,13 @@ impl PyMultiIndex {
     }
 
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, Self) {
-        let _ = (sort, use_na_sentinel);
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(Vec<isize>, Self)> {
+        unsupported_params(
+            "MultiIndex.factorize",
+            &[("sort", !sort), ("use_na_sentinel", use_na_sentinel)],
+        )?;
         let (codes, uniques) = self.inner.factorize();
-        (codes, Self { inner: uniques })
+        Ok((codes, Self { inner: uniques }))
     }
 
     fn format(&self) -> Vec<String> {
@@ -5439,10 +5564,14 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
+    /// Integer labels (a RangeIndex) are unchanged by rounding to decimals
+    /// >= 0, and pandas' MultiIndex and CategoricalIndex round is a no-op. A
+    /// negative `decimals`, which rounds integers to tens, is not supported
+    /// (it was ignored).
     #[pyo3(signature = (decimals=0))]
-    fn round(&self, decimals: i32) -> Self {
-        let _ = decimals;
-        self.clone()
+    fn round(&self, decimals: i32) -> PyResult<Self> {
+        unsupported_params("round", &[("decimals", decimals >= 0)])?;
+        Ok(self.clone())
     }
 
     #[pyo3(signature = (target, side="left"))]
@@ -5481,9 +5610,11 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
+    /// pandas' `MultiIndex.set_names`: every level's name, or with `level`
+    /// only that level's (fvsao.5: `level` was dropped, so the name went to
+    /// level 0).
     #[pyo3(signature = (names, level=None))]
     fn set_names(&self, names: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Self> {
-        let _ = level;
         let ns = if let Ok(s) = names.extract::<String>() {
             vec![Some(s)]
         } else if let Ok(seq) = names.cast::<pyo3::types::PySequence>() {
@@ -5495,6 +5626,21 @@ impl PyMultiIndex {
             list
         } else {
             Vec::new()
+        };
+        let ns = match level {
+            None => ns,
+            Some(l) => {
+                let mut current = self.inner.names().to_vec();
+                let nlevels = current.len();
+                let slot = current.get_mut(l).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                        "Too many levels: Index has only {nlevels} levels, not {}",
+                        l + 1
+                    ))
+                })?;
+                *slot = ns.into_iter().next().flatten();
+                current
+            }
         };
         Ok(Self {
             inner: self.inner.clone().set_names(ns),
@@ -5612,6 +5758,25 @@ pub struct PyTimedeltaIndex {
     pub(crate) inner: TimedeltaIndex,
 }
 
+impl PyTimedeltaIndex {
+    /// The same index (name kept) over new nanosecond labels.
+    fn with_nanos(&self, nanos: Vec<i64>) -> Self {
+        Self {
+            inner: TimedeltaIndex::new(nanos).rename_index(self.inner.name()),
+        }
+    }
+
+    /// The nanoseconds a `fillna` value stands for.
+    fn fill_nanos(label: &IndexLabel) -> PyResult<i64> {
+        match label {
+            IndexLabel::Timedelta64(nanos) => Ok(*nanos),
+            _ => Err(not_implemented(
+                "TimedeltaIndex.fillna with a non-Timedelta value",
+            )),
+        }
+    }
+}
+
 #[pymethods]
 impl PyTimedeltaIndex {
     #[new]
@@ -5703,11 +5868,13 @@ impl PyTimedeltaIndex {
                 }
             }
         }
+        // pandas validates the labels against `freq` and keeps it on the
+        // index; neither is supported, so it no longer passes silently.
+        unsupported_params("TimedeltaIndex", &[("freq", freq.is_none())])?;
         let mut inner = TimedeltaIndex::new(nanos);
         if let Some(n) = name {
             inner = inner.set_name(n);
         }
-        let _ = freq;
         Ok(Self { inner })
     }
 
@@ -5851,6 +6018,8 @@ impl PyTimedeltaIndex {
         Ok(Self { inner: d })
     }
 
+    /// pandas' default is keep='first' (the argument was required).
+    #[pyo3(signature = (keep=None))]
     pub fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<bool>> {
         let k = parse_duplicate_keep(keep)?;
         Ok(self.inner.duplicated(k))
@@ -5914,7 +6083,7 @@ impl PyTimedeltaIndex {
             .map_err(index_error_to_py)
     }
 
-    #[pyo3(signature = (periods, freq="D"))]
+    #[pyo3(signature = (periods=1, freq="D"))]
     pub fn shift(&self, periods: i64, freq: &str) -> PyResult<Self> {
         let freq_nanos = parse_freq_to_nanos(freq)?;
         Ok(Self {
@@ -6102,7 +6271,8 @@ impl PyTimedeltaIndex {
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
     ) -> PyResult<(usize, usize)> {
-        let _ = step;
+        // A positive step slices forward, which is what this computes.
+        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
         let s_lbl = match start {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
@@ -6129,16 +6299,16 @@ impl PyTimedeltaIndex {
     }
 
     #[pyo3(signature = (level=0))]
+    /// pandas refuses to drop the only level of a flat index; this returned
+    /// a plain Index whatever level was asked for (fvsao.5).
     fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
         let _ = level;
-        Ok(PyIndex {
-            inner: self.inner.as_index().clone(),
-        })
+        Err(flat_droplevel_error())
     }
 
     #[pyo3(signature = (level=0))]
     fn get_level_values(&self, level: usize) -> PyResult<Self> {
-        let _ = level;
+        flat_level_check(level)?;
         Ok(self.clone())
     }
 
@@ -6231,13 +6401,7 @@ impl PyTimedeltaIndex {
 
     #[pyo3(signature = (ascending=true, na_position="last"))]
     fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<Self> {
-        let mut sorted = self.inner.asi8();
-        if ascending {
-            sorted.sort_unstable();
-        } else {
-            sorted.sort_unstable_by(|a, b| b.cmp(a));
-        }
-        let _ = na_position;
+        let sorted = sort_nanos_na(&self.inner.asi8(), ascending, na_position)?;
         let mut out = TimedeltaIndex::new(sorted);
         if let Some(n) = self.inner.name() {
             out = out.set_name(n);
@@ -6265,15 +6429,43 @@ impl PyTimedeltaIndex {
         })
     }
 
+    /// Drops NaT; a flat index drops the same labels for how='any' and 'all'.
+    /// This returned the index with its NaT (fvsao.5).
     #[pyo3(signature = (how="any"))]
-    fn dropna(&self, how: &str) -> Self {
-        let _ = how;
-        self.clone()
+    fn dropna(&self, how: &str) -> PyResult<Self> {
+        if !matches!(how, "any" | "all") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid how option: {how}"
+            )));
+        }
+        let kept = self
+            .inner
+            .asi8()
+            .into_iter()
+            .filter(|&v| v != i64::MIN)
+            .collect();
+        Ok(self.with_nanos(kept))
     }
 
-    fn fillna(&self, value: &Bound<'_, PyAny>) -> Self {
-        let _ = value;
-        self.clone()
+    /// Fills NaT with a value of the index's own type; this returned the
+    /// index unfilled whatever the value (fvsao.5). Another type (pandas
+    /// casts to object) is not supported.
+    #[pyo3(signature = (value=None))]
+    fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let Some(value) = value.filter(|v| !v.is_none()) else {
+            return Ok(self.clone());
+        };
+        let nanos = self.inner.asi8();
+        if !nanos.contains(&i64::MIN) {
+            return Ok(self.clone());
+        }
+        let fill = Self::fill_nanos(&py_to_index_label(value)?)?;
+        Ok(self.with_nanos(
+            nanos
+                .into_iter()
+                .map(|v| if v == i64::MIN { fill } else { v })
+                .collect(),
+        ))
     }
 
     fn as_py_index(&self) -> PyIndex {
@@ -6314,9 +6506,11 @@ impl PyTimedeltaIndex {
         self.as_py_index().array(py)
     }
 
-    fn as_unit(&self, unit: &str) -> Self {
-        let _ = unit;
-        self.clone()
+    /// Labels are nanoseconds; another unit is not supported (it was
+    /// ignored).
+    fn as_unit(&self, unit: &str) -> PyResult<Self> {
+        unsupported_params("as_unit", &[("unit", unit == "ns")])?;
+        Ok(self.clone())
     }
 
     fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -6442,7 +6636,7 @@ impl PyTimedeltaIndex {
     }
 
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(Vec<isize>, PyIndex)> {
         self.as_py_index().factorize(sort, use_na_sentinel)
     }
 
@@ -6606,8 +6800,10 @@ impl PyTimedeltaIndex {
         ascending: bool,
         sort_remaining: Option<bool>,
     ) -> PyResult<(Self, Vec<usize>)> {
+        // This returned the index unsorted with the identity order, whatever
+        // the labels were (fvsao.5).
         let _ = (level, ascending, sort_remaining);
-        Ok((self.clone(), (0..self.inner.len()).collect()))
+        Err(not_implemented("sortlevel on this index type"))
     }
 
     #[getter]
@@ -7012,7 +7208,8 @@ impl PyRangeIndex {
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
     ) -> PyResult<(usize, usize)> {
-        let _ = step;
+        // A positive step slices forward, which is what this computes.
+        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
         let s_lbl = match start {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
@@ -7038,15 +7235,16 @@ impl PyRangeIndex {
     }
 
     #[pyo3(signature = (level=0))]
+    /// pandas refuses to drop the only level of a flat index; this returned
+    /// a plain Index whatever level was asked for (fvsao.5).
     fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
         let _ = level;
-        let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
-        Ok(PyIndex { inner: idx })
+        Err(flat_droplevel_error())
     }
 
     #[pyo3(signature = (level=0))]
     fn get_level_values(&self, level: usize) -> PyResult<Self> {
-        let _ = level;
+        flat_level_check(level)?;
         Ok(self.clone())
     }
 
@@ -7135,7 +7333,12 @@ impl PyRangeIndex {
 
     #[pyo3(signature = (ascending=true, na_position="last"))]
     fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PyIndex> {
-        let _ = na_position;
+        // A range has no missing labels to place.
+        if !matches!(na_position, "last" | "first") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid na_position: {na_position}"
+            )));
+        }
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
         let mut sorted = idx.sort_values();
         if !ascending {
@@ -7170,13 +7373,21 @@ impl PyRangeIndex {
         })
     }
 
+    /// A range has no missing labels, so there is nothing to drop.
     #[pyo3(signature = (how="any"))]
-    fn dropna(&self, how: &str) -> Self {
-        let _ = how;
-        self.clone()
+    fn dropna(&self, how: &str) -> PyResult<Self> {
+        if !matches!(how, "any" | "all") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid how option: {how}"
+            )));
+        }
+        Ok(self.clone())
     }
 
-    fn fillna(&self, value: &Bound<'_, PyAny>) -> Self {
+    /// A range has no missing labels, so there is nothing to fill (the value
+    /// was required).
+    #[pyo3(signature = (value=None))]
+    fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> Self {
         let _ = value;
         self.clone()
     }
@@ -7243,9 +7454,13 @@ impl PyRangeIndex {
         Ok(self.inner.to_index().asof_locs(&where_idx, mask.as_deref()))
     }
 
-    fn astype(&self, dtype: &str) -> PyResult<Self> {
-        let _ = dtype;
-        Ok(self.clone())
+    /// pandas casts the labels (a float RangeIndex becomes a float Index);
+    /// this returned the RangeIndex whatever dtype was asked for.
+    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
+        PyIndex {
+            inner: self.inner.to_index(),
+        }
+        .astype_name(dtype)
     }
 
     fn delete(&self, loc: usize) -> PyResult<PyIndex> {
@@ -7277,11 +7492,15 @@ impl PyRangeIndex {
         vec![false; self.inner.len()]
     }
 
+    /// A range's labels are unique, so the codes are its positions; with
+    /// `sort=True` a descending range's uniques come back ascending (it was
+    /// dropped).
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, Self) {
-        let _ = (sort, use_na_sentinel);
-        let codes: Vec<isize> = (0..self.inner.len() as isize).collect();
-        (codes, self.clone())
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(Vec<isize>, PyIndex)> {
+        PyIndex {
+            inner: self.inner.to_index(),
+        }
+        .factorize(sort, use_na_sentinel)
     }
 
     fn format(&self) -> Vec<String> {
@@ -7483,10 +7702,14 @@ impl PyRangeIndex {
         }
     }
 
+    /// Integer labels (a RangeIndex) are unchanged by rounding to decimals
+    /// >= 0, and pandas' MultiIndex and CategoricalIndex round is a no-op. A
+    /// negative `decimals`, which rounds integers to tens, is not supported
+    /// (it was ignored).
     #[pyo3(signature = (decimals=0))]
-    fn round(&self, decimals: i32) -> Self {
-        let _ = decimals;
-        self.clone()
+    fn round(&self, decimals: i32) -> PyResult<Self> {
+        unsupported_params("round", &[("decimals", decimals >= 0)])?;
+        Ok(self.clone())
     }
 
     #[pyo3(signature = (value, side="left", sorter=None))]
@@ -7503,7 +7726,8 @@ impl PyRangeIndex {
 
     #[pyo3(signature = (names, level=None))]
     fn set_names(&self, names: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Self> {
-        let _ = level;
+        // A flat index has only level 0.
+        unsupported_params("set_names", &[("level", level.is_none_or(|l| l == 0))])?;
         let name_opt = if let Ok(s) = names.extract::<String>() {
             Some(s)
         } else if let Ok(seq) = names.cast::<pyo3::types::PySequence>() {
@@ -7535,8 +7759,10 @@ impl PyRangeIndex {
         ascending: bool,
         sort_remaining: Option<bool>,
     ) -> PyResult<(Self, Vec<usize>)> {
+        // This returned the index unsorted with the identity order, whatever
+        // the labels were (fvsao.5).
         let _ = (level, ascending, sort_remaining);
-        Ok((self.clone(), (0..self.inner.len()).collect()))
+        Err(not_implemented("sortlevel on this index type"))
     }
 
     #[getter]
@@ -7933,7 +8159,8 @@ impl PyPeriodIndex {
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
     ) -> PyResult<(usize, usize)> {
-        let _ = step;
+        // A positive step slices forward, which is what this computes.
+        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
         let s_lbl = match start {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
@@ -7960,16 +8187,16 @@ impl PyPeriodIndex {
     }
 
     #[pyo3(signature = (level=0))]
+    /// pandas refuses to drop the only level of a flat index; this returned
+    /// a plain Index whatever level was asked for (fvsao.5).
     pub fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
         let _ = level;
-        Ok(PyIndex {
-            inner: self.inner.to_index(),
-        })
+        Err(flat_droplevel_error())
     }
 
     #[pyo3(signature = (level=0))]
     pub fn get_level_values(&self, level: usize) -> PyResult<Self> {
-        let _ = level;
+        flat_level_check(level)?;
         Ok(self.clone())
     }
 
@@ -8058,18 +8285,10 @@ impl PyPeriodIndex {
 
     #[pyo3(signature = (ascending=true, na_position="last"))]
     pub fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PyIndex> {
-        let _ = na_position;
-        let idx = self.inner.to_index();
-        let mut sorted = idx.sort_values();
-        if !ascending {
-            let mut rev_labels = sorted.labels().to_vec();
-            rev_labels.reverse();
-            sorted = Index::new(rev_labels);
-            if let Some(n) = self.inner.name() {
-                sorted = sorted.rename_index(Some(n));
-            }
-        }
-        Ok(PyIndex { inner: sorted })
+        let idx = self.inner.to_index().rename_index(self.inner.name());
+        Ok(PyIndex {
+            inner: sort_labels_na(&idx, ascending, na_position)?,
+        })
     }
 
     pub fn sort(&self) -> PyResult<PyIndex> {
@@ -8092,15 +8311,45 @@ impl PyPeriodIndex {
         })
     }
 
+    /// With no missing labels there is nothing to drop; dropping them is not
+    /// supported yet (this returned the index with them).
     #[pyo3(signature = (how="any"))]
-    pub fn dropna(&self, how: &str) -> Self {
-        let _ = how;
-        self.clone()
+    pub fn dropna(&self, how: &str) -> PyResult<Self> {
+        if !matches!(how, "any" | "all") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid how option: {how}"
+            )));
+        }
+        if self
+            .inner
+            .to_index()
+            .labels()
+            .iter()
+            .any(IndexLabel::is_missing)
+        {
+            return Err(not_implemented(
+                "dropna on an index with missing labels of this type",
+            ));
+        }
+        Ok(self.clone())
     }
 
-    pub fn fillna(&self, value: &Bound<'_, PyAny>) -> Self {
-        let _ = value;
-        self.clone()
+    /// With no missing labels there is nothing to fill; filling them is not
+    /// supported yet (this returned the index unfilled whatever the value).
+    #[pyo3(signature = (value=None))]
+    pub fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let has_missing = self
+            .inner
+            .to_index()
+            .labels()
+            .iter()
+            .any(IndexLabel::is_missing);
+        if value.is_some_and(|v| !v.is_none()) && has_missing {
+            return Err(not_implemented(
+                "fillna on an index with missing labels of this type",
+            ));
+        }
+        Ok(self.clone())
     }
 
     fn as_py_index(&self) -> PyIndex {
@@ -8236,7 +8485,7 @@ impl PyPeriodIndex {
     }
 
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(Vec<isize>, PyIndex)> {
         self.as_py_index().factorize(sort, use_na_sentinel)
     }
 
@@ -8255,12 +8504,12 @@ impl PyPeriodIndex {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (fields))]
-    fn from_fields(fields: &Bound<'_, PyAny>) -> PyResult<Self> {
+    /// pandas' keyword-only `from_fields(*, year=, quarter=, ...)`. This
+    /// returned an empty PeriodIndex whatever fields it was given.
+    #[pyo3(signature = (**fields))]
+    fn from_fields(fields: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let _ = fields;
-        Ok(Self {
-            inner: PeriodIndex::new(vec![]),
-        })
+        Err(not_implemented("PeriodIndex.from_fields"))
     }
 
     #[staticmethod]
@@ -8501,8 +8750,10 @@ impl PyPeriodIndex {
         ascending: bool,
         sort_remaining: Option<bool>,
     ) -> PyResult<(Self, Vec<usize>)> {
+        // This returned the index unsorted with the identity order, whatever
+        // the labels were (fvsao.5).
         let _ = (level, ascending, sort_remaining);
-        Ok((self.clone(), (0..self.inner.len()).collect()))
+        Err(not_implemented("sortlevel on this index type"))
     }
 
     #[getter]
@@ -8883,7 +9134,8 @@ impl PyCategoricalIndex {
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
     ) -> PyResult<(usize, usize)> {
-        let _ = step;
+        // A positive step slices forward, which is what this computes.
+        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
         let s_lbl = match start {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
@@ -8910,16 +9162,16 @@ impl PyCategoricalIndex {
     }
 
     #[pyo3(signature = (level=0))]
+    /// pandas refuses to drop the only level of a flat index; this returned
+    /// a plain Index whatever level was asked for (fvsao.5).
     pub fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
         let _ = level;
-        Ok(PyIndex {
-            inner: self.inner.to_index(),
-        })
+        Err(flat_droplevel_error())
     }
 
     #[pyo3(signature = (level=0))]
     pub fn get_level_values(&self, level: usize) -> PyResult<Self> {
-        let _ = level;
+        flat_level_check(level)?;
         Ok(self.clone())
     }
 
@@ -9008,18 +9260,10 @@ impl PyCategoricalIndex {
 
     #[pyo3(signature = (ascending=true, na_position="last"))]
     pub fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PyIndex> {
-        let _ = na_position;
-        let idx = self.inner.to_index();
-        let mut sorted = idx.sort_values();
-        if !ascending {
-            let mut rev_labels = sorted.labels().to_vec();
-            rev_labels.reverse();
-            sorted = Index::new(rev_labels);
-            if let Some(n) = self.inner.name() {
-                sorted = sorted.rename_index(Some(n));
-            }
-        }
-        Ok(PyIndex { inner: sorted })
+        let idx = self.inner.to_index().rename_index(self.inner.name());
+        Ok(PyIndex {
+            inner: sort_labels_na(&idx, ascending, na_position)?,
+        })
     }
 
     pub fn sort(&self) -> PyResult<PyIndex> {
@@ -9042,15 +9286,45 @@ impl PyCategoricalIndex {
         })
     }
 
+    /// With no missing labels there is nothing to drop; dropping them is not
+    /// supported yet (this returned the index with them).
     #[pyo3(signature = (how="any"))]
-    pub fn dropna(&self, how: &str) -> Self {
-        let _ = how;
-        self.clone()
+    pub fn dropna(&self, how: &str) -> PyResult<Self> {
+        if !matches!(how, "any" | "all") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid how option: {how}"
+            )));
+        }
+        if self
+            .inner
+            .to_index()
+            .labels()
+            .iter()
+            .any(IndexLabel::is_missing)
+        {
+            return Err(not_implemented(
+                "dropna on an index with missing labels of this type",
+            ));
+        }
+        Ok(self.clone())
     }
 
-    pub fn fillna(&self, value: &Bound<'_, PyAny>) -> Self {
-        let _ = value;
-        self.clone()
+    /// With no missing labels there is nothing to fill; filling them is not
+    /// supported yet (this returned the index unfilled whatever the value).
+    #[pyo3(signature = (value=None))]
+    pub fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let has_missing = self
+            .inner
+            .to_index()
+            .labels()
+            .iter()
+            .any(IndexLabel::is_missing);
+        if value.is_some_and(|v| !v.is_none()) && has_missing {
+            return Err(not_implemented(
+                "fillna on an index with missing labels of this type",
+            ));
+        }
+        Ok(self.clone())
     }
 
     fn as_py_index(&self) -> PyIndex {
@@ -9153,7 +9427,7 @@ impl PyCategoricalIndex {
     }
 
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> (Vec<isize>, PyIndex) {
+    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(Vec<isize>, PyIndex)> {
         self.as_py_index().factorize(sort, use_na_sentinel)
     }
 
@@ -9312,10 +9586,14 @@ impl PyCategoricalIndex {
         }
     }
 
+    /// Integer labels (a RangeIndex) are unchanged by rounding to decimals
+    /// >= 0, and pandas' MultiIndex and CategoricalIndex round is a no-op. A
+    /// negative `decimals`, which rounds integers to tens, is not supported
+    /// (it was ignored).
     #[pyo3(signature = (decimals=0))]
-    fn round(&self, decimals: i32) -> Self {
-        let _ = decimals;
-        self.clone()
+    fn round(&self, decimals: i32) -> PyResult<Self> {
+        unsupported_params("round", &[("decimals", decimals >= 0)])?;
+        Ok(self.clone())
     }
 
     #[pyo3(signature = (value, side="left", sorter=None))]
@@ -9337,7 +9615,8 @@ impl PyCategoricalIndex {
 
     #[pyo3(signature = (names, level=None))]
     fn set_names(&self, names: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Self> {
-        let _ = level;
+        // A flat index has only level 0.
+        unsupported_params("set_names", &[("level", level.is_none_or(|l| l == 0))])?;
         let name_opt = if let Ok(s) = names.extract::<String>() {
             Some(s)
         } else if let Ok(seq) = names.cast::<pyo3::types::PySequence>() {
@@ -9369,8 +9648,10 @@ impl PyCategoricalIndex {
         ascending: bool,
         sort_remaining: Option<bool>,
     ) -> PyResult<(Self, Vec<usize>)> {
+        // This returned the index unsorted with the identity order, whatever
+        // the labels were (fvsao.5).
         let _ = (level, ascending, sort_remaining);
-        Ok((self.clone(), (0..self.inner.len()).collect()))
+        Err(not_implemented("sortlevel on this index type"))
     }
 
     #[getter]
@@ -9941,6 +10222,37 @@ fn check_series_axis(axis: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
 }
 
 impl PySeries {
+    /// pandas' `key=` for sort_values/sort_index: the callable receives the
+    /// whole Series (or its Index) and returns an array-like of the same
+    /// length, and the rows are ordered by those values. `keyed` is what the
+    /// callable returned. Sorting positions (not labels) keeps duplicate
+    /// labels right (fvsao.5).
+    fn keyed_sort(
+        &self,
+        py: Python<'_>,
+        keyed: &Bound<'_, PyAny>,
+        ascending: bool,
+        na_position: &str,
+    ) -> PyResult<Series> {
+        let keyed = extract_or_build_series(py, keyed, &self.inner)?;
+        if keyed.len() != self.inner.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "User-provided `key` function must not change the shape of the array.",
+            ));
+        }
+        let tagged = Series::from_values(
+            self.inner.name(),
+            position_labels(keyed.len()),
+            keyed.values().to_vec(),
+        )
+        .map_err(frame_error_to_py)?;
+        let sorted = tagged
+            .sort_values_na(ascending, na_position)
+            .map_err(frame_error_to_py)?;
+        let order = positions_from_labels(sorted.index().labels())?;
+        self.inner.take(&order).map_err(frame_error_to_py)
+    }
+
     fn check_numeric_only(&self, name: &str) -> PyResult<()> {
         if !matches!(
             self.inner.dtype(),
@@ -10627,21 +10939,26 @@ impl PySeries {
         self.__ge__(py, other)
     }
 
-    /// Return the sum of the Series.
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    /// Return the sum of the Series. Fewer than `min_count` valid values make
+    /// it NaN, as in pandas.
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
     fn sum(
         &self,
         axis: Option<&Bound<'_, PyAny>>,
         skipna: bool,
         numeric_only: bool,
+        min_count: usize,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = kwargs;
+        numpy_compat_kwargs("sum", kwargs)?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("sum")?;
         }
         Python::attach(|py| {
+            if self.inner.count() < min_count {
+                return scalar_to_py(py, &Scalar::Null(NullKind::NaN));
+            }
             let result = if !skipna {
                 self.inner.sum_skipna(false)
             } else {
@@ -10661,7 +10978,7 @@ impl PySeries {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = kwargs;
+        numpy_compat_kwargs("mean", kwargs)?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("mean")?;
@@ -10688,7 +11005,7 @@ impl PySeries {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = kwargs;
+        numpy_compat_kwargs("min", kwargs)?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("min")?;
@@ -10713,7 +11030,7 @@ impl PySeries {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = kwargs;
+        numpy_compat_kwargs("max", kwargs)?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("max")?;
@@ -10739,7 +11056,7 @@ impl PySeries {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = kwargs;
+        numpy_compat_kwargs("std", kwargs)?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("std")?;
@@ -10751,9 +11068,11 @@ impl PySeries {
         Python::attach(|py| scalar_to_py(py, &result))
     }
 
-    /// Return the first n elements.
+    /// Return the first n elements. pandas slices `iloc[:n]`, so `n=None`
+    /// keeps every element.
+    #[pyo3(signature = (n=Some(5)))]
     fn head(&self, n: Option<i64>) -> PyResult<PySeries> {
-        let n = n.unwrap_or(5);
+        let n = n.unwrap_or(i64::MAX);
         let result = self
             .inner
             .head(n)
@@ -10762,8 +11081,8 @@ impl PySeries {
     }
 
     /// Return the last n elements.
-    fn tail(&self, n: Option<i64>) -> PyResult<PySeries> {
-        let n = n.unwrap_or(5);
+    #[pyo3(signature = (n=5))]
+    fn tail(&self, n: i64) -> PyResult<PySeries> {
         let result = self
             .inner
             .tail(n)
@@ -10792,7 +11111,7 @@ impl PySeries {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = kwargs;
+        numpy_compat_kwargs("median", kwargs)?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("median")?;
@@ -10820,7 +11139,7 @@ impl PySeries {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = kwargs;
+        numpy_compat_kwargs("var", kwargs)?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("var")?;
@@ -10842,7 +11161,7 @@ impl PySeries {
         min_count: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (min_count, kwargs);
+        numpy_compat_kwargs("prod", kwargs)?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("prod")?;
@@ -10850,6 +11169,9 @@ impl PySeries {
             self.require_numeric("prod")?;
         }
         Python::attach(|py| {
+            if self.inner.count() < min_count.unwrap_or(0) {
+                return scalar_to_py(py, &Scalar::Null(NullKind::NaN));
+            }
             let r = if !skipna {
                 self.inner.prod_skipna(false)
             } else {
@@ -10919,12 +11241,15 @@ impl PySeries {
         skipna: bool,
         numeric_only: bool,
     ) -> PyResult<f64> {
-        let _ = skipna;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("skew")?;
         } else {
             self.require_numeric("skew")?;
+        }
+        // skipna=False: a missing value makes the moment NaN, as in pandas.
+        if !skipna && self.inner.count() < self.inner.len() {
+            return Ok(f64::NAN);
         }
         self.inner.skew().map_err(frame_error_to_py)
     }
@@ -10937,12 +11262,15 @@ impl PySeries {
         skipna: bool,
         numeric_only: bool,
     ) -> PyResult<f64> {
-        let _ = skipna;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("kurt")?;
         } else {
             self.require_numeric("kurt")?;
+        }
+        // skipna=False: a missing value makes the moment NaN, as in pandas.
+        if !skipna && self.inner.count() < self.inner.len() {
+            return Ok(f64::NAN);
         }
         self.inner.kurt().map_err(frame_error_to_py)
     }
@@ -11004,6 +11332,7 @@ impl PySeries {
     #[pyo3(signature = (axis=None, ascending=true, inplace=false, kind=None, na_position="last", ignore_index=false, key=None))]
     fn sort_values(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
         ascending: bool,
         inplace: bool,
@@ -11012,8 +11341,7 @@ impl PySeries {
         ignore_index: bool,
         key: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = kind;
-        let _ = key;
+        validate_sort_kind(kind)?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -11025,10 +11353,18 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        let sorted = self
-            .inner
-            .sort_values_na(ascending, na_position)
-            .map_err(frame_error_to_py)?;
+        let sorted = match key {
+            Some(key) => {
+                let keyed = key.call1((PySeries {
+                    inner: self.inner.clone(),
+                },))?;
+                self.keyed_sort(py, &keyed, ascending, na_position)?
+            }
+            None => self
+                .inner
+                .sort_values_na(ascending, na_position)
+                .map_err(frame_error_to_py)?,
+        };
         let final_series = if ignore_index {
             match sorted.reset_index(true).map_err(frame_error_to_py)? {
                 fp_frame::SeriesResetIndexResult::Series(s) => s,
@@ -11055,7 +11391,7 @@ impl PySeries {
         limit: Option<usize>,
         downcast: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = downcast;
+        unsupported_params("Series.fillna", &[("downcast", downcast.is_none())])?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -11254,7 +11590,7 @@ impl PySeries {
         limit: Option<usize>,
         freq: Option<&str>,
     ) -> PyResult<PySeries> {
-        let _ = freq;
+        unsupported_params("Series.pct_change", &[("freq", freq.is_none())])?;
         let r = self
             .inner
             .pct_change_with_fill(periods, fill_method, limit)
@@ -11338,6 +11674,7 @@ impl PySeries {
     #[allow(clippy::too_many_arguments)]
     fn sort_index(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
         ascending: Option<&Bound<'_, PyAny>>,
@@ -11348,7 +11685,13 @@ impl PySeries {
         ignore_index: bool,
         key: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = (level, kind, sort_remaining, key);
+        // A Series index is single-level: level 0 is the default order, and
+        // sort_remaining only acts on the other levels of a MultiIndex, so
+        // pandas ignores it here too.
+        let _ = sort_remaining;
+        let level_is_default = level.is_none_or(|l| matches!(l.extract::<i64>(), Ok(0)));
+        unsupported_params("Series.sort_index", &[("level", level_is_default)])?;
+        validate_sort_kind(kind)?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -11361,10 +11704,18 @@ impl PySeries {
             )));
         }
         let asc = parse_ascending_bool(ascending)?;
-        let sorted = self
-            .inner
-            .sort_index_na(asc, na_position)
-            .map_err(frame_error_to_py)?;
+        let sorted = match key {
+            Some(key) => {
+                let keyed = key.call1((PyIndex {
+                    inner: self.inner.index().clone(),
+                },))?;
+                self.keyed_sort(py, &keyed, asc, na_position)?
+            }
+            None => self
+                .inner
+                .sort_index_na(asc, na_position)
+                .map_err(frame_error_to_py)?,
+        };
         let out = if ignore_index {
             match sorted.reset_index(true).map_err(frame_error_to_py)? {
                 fp_frame::SeriesResetIndexResult::Series(s) => s,
@@ -11520,10 +11871,40 @@ impl PySeries {
             }
         }
 
-        let Some(to_repl) = effective_to_replace else {
-            return Ok(PySeries {
-                inner: self.inner.clone(),
-            });
+        // pandas 2.2 (deprecated there, still its behaviour, fvsao.5): with no
+        // `to_replace` the targets are the missing values, and with no
+        // `value` each target is padded from its neighbour (`method`, default
+        // pad). This returned the Series unchanged.
+        let value_given = value.is_some_and(|v| !v.is_none());
+        let Some(to_repl) = effective_to_replace.filter(|t| !t.is_none()) else {
+            if is_regex {
+                return Ok(PySeries {
+                    inner: self.inner.clone(),
+                });
+            }
+            if value_given {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "'regex' must be a string or a compiled regular expression or a list or dict of strings or regular expressions, you passed a 'bool'",
+                ));
+            }
+            let filled = match method.unwrap_or("pad") {
+                "pad" | "ffill" => self.inner.ffill(limit),
+                "backfill" | "bfill" => self.inner.bfill(limit),
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid fill method. Expecting pad (ffill) or backfill (bfill). Got {other}"
+                    )));
+                }
+            }
+            .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: filled });
+        };
+        let dict_like =
+            to_repl.cast::<PyDict>().is_ok() || to_repl.extract::<PyRef<PySeries>>().is_ok();
+        let method = if !value_given && !is_regex && !dict_like {
+            method.or(Some("pad"))
+        } else {
+            method
         };
 
         if let Some(m) = method {
@@ -11831,7 +12212,10 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         suffix: Option<&str>,
     ) -> PyResult<PySeries> {
-        let _ = (freq, suffix);
+        unsupported_params(
+            "Series.shift",
+            &[("freq", freq.is_none()), ("suffix", suffix.is_none())],
+        )?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -11945,7 +12329,15 @@ impl PySeries {
         inplace: bool,
         allow_duplicates: bool,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (level, allow_duplicates);
+        // A Series index is single-level, so level 0 is the whole index.
+        let level_is_default = level.is_none_or(|l| matches!(l.extract::<i64>(), Ok(0)));
+        unsupported_params(
+            "Series.reset_index",
+            &[
+                ("level", level_is_default),
+                ("allow_duplicates", !allow_duplicates),
+            ],
+        )?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -12026,7 +12418,13 @@ impl PySeries {
         downcast: Option<&Bound<'_, PyAny>>,
         limit_area: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = (downcast, limit_area);
+        unsupported_params(
+            "Series.ffill",
+            &[
+                ("downcast", downcast.is_none()),
+                ("limit_area", limit_area.is_none()),
+            ],
+        )?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -12061,7 +12459,13 @@ impl PySeries {
         downcast: Option<&Bound<'_, PyAny>>,
         limit_area: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = (downcast, limit_area);
+        unsupported_params(
+            "Series.bfill",
+            &[
+                ("downcast", downcast.is_none()),
+                ("limit_area", limit_area.is_none()),
+            ],
+        )?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -12093,7 +12497,12 @@ impl PySeries {
         method: Option<&str>,
         min_periods: Option<usize>,
     ) -> PyResult<f64> {
-        let _ = min_periods;
+        // Fewer than two pairs already correlate to NaN, so min_periods up to
+        // 2 is the default answer; a larger floor needs the pair count.
+        unsupported_params(
+            "Series.corr",
+            &[("min_periods", min_periods.is_none_or(|m| m <= 2))],
+        )?;
         let m = method.unwrap_or("pearson");
         let res = match m {
             "pearson" => self.inner.corr(&other.inner),
@@ -12133,7 +12542,13 @@ impl PySeries {
         axis: Option<&Bound<'_, PyAny>>,
         ignore_index: bool,
     ) -> PyResult<PySeries> {
-        let _ = (weights, axis);
+        unsupported_params("Series.sample", &[("weights", weights.is_none())])?;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         let mut res = self
             .inner
             .sample(n, frac, replace, random_state)
@@ -12305,6 +12720,8 @@ impl PySeries {
         axis: Option<&Bound<'_, PyAny>>,
         copy: Option<bool>,
     ) -> PyResult<PySeries> {
+        // copy= only lets pandas share buffers, which it never guarantees; a
+        // new Series is a valid result for either value.
         let _ = copy;
         if let Some(a) = axis {
             let valid = if let Ok(i) = a.extract::<i64>() {
@@ -12491,7 +12908,7 @@ impl PySeries {
     fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(name) = func.extract::<String>() {
             match name.as_str() {
-                "sum" => self.sum(None, true, false, None),
+                "sum" => self.sum(None, true, false, 0, None),
                 "mean" => self.mean(None, true, false, None),
                 "min" => self.min(None, true, false, None),
                 "max" => self.max(None, true, false, None),
@@ -12701,7 +13118,7 @@ impl PySeries {
         args: Option<&Bound<'_, PyTuple>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = convert_dtype;
+        unsupported_params("Series.apply", &[("convert_dtype", convert_dtype)])?;
         let vals = self.inner.column().values();
         let labels = self.inner.index().labels();
         let mut out = Vec::with_capacity(vals.len());
@@ -12832,7 +13249,7 @@ impl PySeries {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PySeries>> {
-        let _ = level;
+        unsupported_params("Series.where", &[("level", level.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -12860,7 +13277,7 @@ impl PySeries {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PySeries>> {
-        let _ = level;
+        unsupported_params("Series.mask", &[("level", level.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -12914,7 +13331,12 @@ impl PySeries {
         regex: Option<&str>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = axis;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         if let Some(items_list) = items {
             let mut matched_labels = Vec::new();
             let mut matched_values = Vec::new();
@@ -13046,32 +13468,80 @@ impl PySeries {
         self.inner.is_monotonic_decreasing()
     }
 
-    #[pyo3(signature = (index=None, **kwargs))]
+    /// pandas' `Series.reindex`. `method` fills absent labels from the
+    /// neighbouring source label, `fill_value` fills whatever is still missing
+    /// at an absent label (fvsao.5: both used to be dropped through `**kwargs`).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (index=None, *, axis=None, method=None, copy=None, level=None, fill_value=None, limit=None, tolerance=None))]
     fn reindex(
         &self,
+        py: Python<'_>,
         index: Option<&Bound<'_, PyAny>>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+        copy: Option<bool>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
-        if let Some(idx_obj) = index {
-            let labels = if let Ok(py_idx) = idx_obj.extract::<PyRef<'_, PyIndex>>() {
-                py_idx.inner.labels().to_vec()
-            } else if let Ok(list) = idx_obj.cast::<PyList>() {
-                let mut lbls = Vec::with_capacity(list.len());
-                for item in list.iter() {
-                    lbls.push(py_to_index_label(&item)?);
-                }
-                lbls
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "reindex expects Index or list of labels",
-                ));
-            };
-            let s = self.inner.reindex(labels).map_err(frame_error_to_py)?;
-            Ok(PySeries { inner: s })
-        } else {
-            Ok(self.clone())
+        // copy= only lets pandas share buffers; a new Series satisfies it.
+        let _ = copy;
+        unsupported_params(
+            "Series.reindex",
+            &[
+                ("level", level.is_none()),
+                ("limit", limit.is_none()),
+                ("tolerance", tolerance.is_none()),
+            ],
+        )?;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
         }
+        let Some(idx_obj) = index else {
+            return Ok(self.clone());
+        };
+        let labels = if let Ok(py_idx) = idx_obj.extract::<PyRef<'_, PyIndex>>() {
+            py_idx.inner.labels().to_vec()
+        } else if let Ok(list) = idx_obj.cast::<PyList>() {
+            let mut lbls = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                lbls.push(py_to_index_label(&item)?);
+            }
+            lbls
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "reindex expects Index or list of labels",
+            ));
+        };
+        let reindexed = match method {
+            Some(m) => self.inner.reindex_with_method(labels.clone(), m),
+            None => self.inner.reindex(labels.clone()),
+        }
+        .map_err(frame_error_to_py)?;
+        let Some(fill) = fill_value.filter(|fv| !fv.is_none()) else {
+            return Ok(PySeries { inner: reindexed });
+        };
+        let fill = py_to_scalar(py, fill)?;
+        let source_positions = self.inner.index().get_indexer(&Index::new(labels.clone()));
+        let values = reindexed
+            .values()
+            .iter()
+            .zip(&source_positions)
+            .map(|(value, source)| {
+                if source.is_none() && value.is_missing() {
+                    fill.clone()
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
+        let filled =
+            Series::from_values(reindexed.name(), labels, values).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: filled })
     }
 
     fn ravel(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -13119,25 +13589,58 @@ impl PySeries {
 
     #[pyo3(signature = (copy=None))]
     fn infer_objects(&self, copy: Option<bool>) -> PyResult<PySeries> {
+        // copy= only lets pandas share buffers; a new Series satisfies it.
         let _ = copy;
         let s = self.inner.infer_objects().map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (method=None, **kwargs))]
+    /// pandas' `Series.interpolate`: linear honours `limit`,
+    /// `limit_direction` and `limit_area`; nearest/zero/pad/index/values/time
+    /// honour `limit` in the forward direction (fvsao.5: `method` and every
+    /// option used to be dropped, so any call gave linear interpolation).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (method="linear", *, axis=None, limit=None, inplace=false, limit_direction=None, limit_area=None, downcast=None, **kwargs))]
     fn interpolate(
         &self,
-        method: Option<&str>,
+        method: &str,
+        axis: Option<&Bound<'_, PyAny>>,
+        limit: Option<usize>,
+        inplace: bool,
+        limit_direction: Option<&str>,
+        limit_area: Option<&str>,
+        downcast: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = (method, kwargs);
-        let s = self.inner.interpolate().map_err(frame_error_to_py)?;
+        unsupported_params("Series.interpolate", &[("downcast", downcast.is_none())])?;
+        engine_kwargs("Series.interpolate", "scipy", kwargs)?;
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        if !Series::interpolate_supports(method, limit_direction, limit_area) {
+            return Err(not_implemented(&format!(
+                "Series.interpolate(method='{method}') with limit_direction or limit_area"
+            )));
+        }
+        let s = self
+            .inner
+            .interpolate_with(method, limit, limit_direction, limit_area)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
+    /// Drops level 0, the only level frankenpandas' single-level index has.
     #[pyo3(signature = (level=0))]
     fn droplevel(&self, level: usize) -> PyResult<PySeries> {
-        let _ = level;
+        unsupported_params("Series.droplevel", &[("level", level == 0)])?;
         let s = self.inner.droplevel().map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
@@ -13147,57 +13650,41 @@ impl PySeries {
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (indices, **kwargs))]
-    fn take(&self, indices: Vec<i64>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PySeries> {
-        let _ = kwargs;
+    #[pyo3(signature = (indices, axis=None, **kwargs))]
+    fn take(
+        &self,
+        indices: Vec<i64>,
+        axis: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        numpy_compat_kwargs("take", kwargs)?;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         let s = self.inner.take(&indices).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (ignore_index=None, sep=None, **kwargs))]
-    fn explode(
-        &self,
-        ignore_index: Option<&Bound<'_, PyAny>>,
-        sep: Option<&Bound<'_, PyAny>>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PySeries> {
-        let mut actual_ignore_index = false;
-        let mut actual_sep = ",".to_string();
-
-        if let Some(arg) = ignore_index {
-            if let Ok(b) = arg.extract::<bool>() {
-                actual_ignore_index = b;
-            } else if let Ok(s) = arg.extract::<String>() {
-                actual_sep = s;
-            }
+    /// pandas' `Series.explode(ignore_index=False)` expands list-like values
+    /// and leaves every scalar, strings included, as it is. A frankenpandas
+    /// value is always a scalar, so the Series stays as it is. This used to
+    /// split strings on a `sep` keyword pandas does not have (fvsao.5).
+    #[pyo3(signature = (ignore_index=false))]
+    fn explode(&self, ignore_index: bool) -> PyResult<PySeries> {
+        if !ignore_index {
+            return Ok(self.clone());
         }
-        if let Some(arg) = sep {
-            if let Ok(s) = arg.extract::<String>() {
-                actual_sep = s;
-            } else if let Ok(b) = arg.extract::<bool>() {
-                actual_ignore_index = b;
-            }
+        match self
+            .inner
+            .reset_index_with_name(true, None)
+            .map_err(frame_error_to_py)?
+        {
+            fp_frame::SeriesResetIndexResult::Series(res) => Ok(PySeries { inner: res }),
+            fp_frame::SeriesResetIndexResult::DataFrame(_) => unreachable!(),
         }
-        if let Some(kw) = kwargs {
-            if let Some(val) = kw.get_item("ignore_index")? {
-                actual_ignore_index = val.extract::<bool>()?;
-            }
-            if let Some(val) = kw.get_item("sep")? {
-                actual_sep = val.extract::<String>()?;
-            }
-        }
-
-        let mut s = self.inner.explode(&actual_sep).map_err(frame_error_to_py)?;
-        if actual_ignore_index {
-            s = match s
-                .reset_index_with_name(true, None)
-                .map_err(frame_error_to_py)?
-            {
-                fp_frame::SeriesResetIndexResult::Series(res) => res,
-                _ => unreachable!(),
-            };
-        }
-        Ok(PySeries { inner: s })
     }
 
     fn info(&self) -> String {
@@ -13209,39 +13696,68 @@ impl PySeries {
         Ok(())
     }
 
-    #[pyo3(signature = (key, axis=0, **kwargs))]
+    /// pandas' `Series.xs`. On a single-level index `drop_level` changes
+    /// nothing in pandas either; another level needs a MultiIndex.
+    #[pyo3(signature = (key, axis=None, level=None, drop_level=true))]
     fn xs(
         &self,
         key: &Bound<'_, PyAny>,
-        axis: usize,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        drop_level: bool,
     ) -> PyResult<PySeries> {
-        let _ = (axis, kwargs);
+        let _ = drop_level;
+        unsupported_params("Series.xs", &[("level", level.is_none())])?;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         let lbl = py_to_index_label(key)?;
         let s = self.inner.xs(&lbl).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (mapper=None, **kwargs))]
+    /// pandas' `Series.rename_axis`: `mapper` or `index` names the index.
+    #[pyo3(signature = (mapper=None, *, index=None, axis=None, copy=None, inplace=false))]
     fn rename_axis(
         &self,
         mapper: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        index: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        copy: Option<bool>,
+        inplace: bool,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
-        let name = mapper.unwrap_or("");
+        // copy= only lets pandas share buffers; a new Series satisfies it.
+        let _ = copy;
+        unsupported_params("Series.rename_axis", &[("inplace", !inplace)])?;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        let name = mapper.or(index).unwrap_or("");
         let s = self.inner.rename_axis(name).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (labels, axis=0, **kwargs))]
+    #[pyo3(signature = (labels, *, axis=None, copy=None))]
     fn set_axis(
         &self,
         labels: &Bound<'_, PyAny>,
-        axis: usize,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        copy: Option<bool>,
     ) -> PyResult<PySeries> {
-        let _ = (axis, kwargs);
+        // copy= only lets pandas share buffers; a new Series satisfies it.
+        let _ = copy;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
         let lbls = if let Ok(py_idx) = labels.extract::<PyRef<'_, PyIndex>>() {
             py_idx.inner.labels().to_vec()
         } else if let Ok(list) = labels.cast::<PyList>() {
@@ -13340,7 +13856,8 @@ impl PySeries {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (py, args, kwargs);
+        let _ = py;
+        plot_args(args, kwargs)?;
         let spec = self.inner.hist().map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
         Ok(PyPlotResult {
@@ -13376,25 +13893,54 @@ impl PySeries {
         self.inner.plot_to_file(path).map_err(frame_error_to_py)
     }
 
-    #[pyo3(signature = (other, **kwargs))]
+    /// pandas' `Series.reindex_like`: `reindex` onto `other`'s index.
+    #[pyo3(signature = (other, method=None, copy=None, limit=None, tolerance=None))]
     fn reindex_like(
         &self,
+        py: Python<'_>,
         other: &Bound<'_, PyAny>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        method: Option<&str>,
+        copy: Option<bool>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let idx = other.getattr("index")?;
-        self.reindex(Some(&idx), kwargs)
+        self.reindex(
+            py,
+            Some(&idx),
+            None,
+            method,
+            copy,
+            None,
+            None,
+            limit,
+            tolerance,
+        )
     }
 
+    /// A frankenpandas Series index is never hierarchical, which is the case
+    /// where pandas raises this (it used to return the Series unchanged).
     #[pyo3(signature = (order))]
     fn reorder_levels(&self, order: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let _ = order;
-        Ok(self.clone())
+        Err(PyErr::new::<pyo3::exceptions::PyException, _>(
+            "Can only reorder levels on a hierarchical axis.",
+        ))
     }
 
-    #[pyo3(signature = (**kwargs))]
-    fn set_flags(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PySeries> {
-        let _ = kwargs;
+    /// pandas' `set_flags`. frankenpandas always allows duplicate labels,
+    /// which is pandas' default flag; turning it off is not supported yet.
+    #[pyo3(signature = (*, copy=false, allows_duplicate_labels=None))]
+    fn set_flags(&self, copy: bool, allows_duplicate_labels: Option<bool>) -> PyResult<PySeries> {
+        // copy= only lets pandas share buffers; a new Series satisfies it.
+        let _ = copy;
+        unsupported_params(
+            "Series.set_flags",
+            &[(
+                "allows_duplicate_labels",
+                allows_duplicate_labels != Some(false),
+            )],
+        )?;
         Ok(self.clone())
     }
 
@@ -13420,9 +13966,16 @@ impl PySeries {
         })
     }
 
+    /// A Series has one axis, so only swapping it with itself is valid.
     #[pyo3(signature = (axis1, axis2, copy=None))]
     fn swapaxes(&self, axis1: usize, axis2: usize, copy: Option<bool>) -> PyResult<PySeries> {
-        let _ = (axis1, axis2, copy);
+        // copy= only lets pandas share buffers; a new Series satisfies it.
+        let _ = copy;
+        if let Some(bad) = [axis1, axis2].into_iter().find(|&a| a != 0) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {bad} for object type Series"
+            )));
+        }
         Ok(self.clone())
     }
 
@@ -13439,24 +13992,61 @@ impl PySeries {
         ))
     }
 
-    #[pyo3(signature = (path=None, index=true, sep=",", **kwargs))]
+    /// pandas' `Series.to_csv`: the Series is written as a one-column frame
+    /// named after the Series ("0" when unnamed), as pandas does. See
+    /// `write_csv_py` for the keywords honoured (fvsao.5: every keyword but
+    /// sep and index used to be dropped).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path_or_buf=None, *, sep=",", na_rep="", float_format=None, columns=None, header=None, index=true, index_label=None, mode="w", encoding=None, compression=Some("infer"), quoting=None, quotechar="\"", lineterminator=None, chunksize=None, date_format=None, doublequote=true, escapechar=None, decimal=".", errors="strict", storage_options=None))]
     fn to_csv(
         &self,
-        path: Option<&str>,
-        index: Option<bool>,
-        sep: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        path_or_buf: Option<&Bound<'_, PyAny>>,
+        sep: &str,
+        na_rep: &str,
+        float_format: Option<&Bound<'_, PyAny>>,
+        columns: Option<&Bound<'_, PyAny>>,
+        header: Option<&Bound<'_, PyAny>>,
+        index: bool,
+        index_label: Option<&Bound<'_, PyAny>>,
+        mode: &str,
+        encoding: Option<&str>,
+        compression: Option<&str>,
+        quoting: Option<i64>,
+        quotechar: &str,
+        lineterminator: Option<&str>,
+        chunksize: Option<usize>,
+        date_format: Option<&str>,
+        doublequote: bool,
+        escapechar: Option<&str>,
+        decimal: &str,
+        errors: &str,
+        storage_options: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<String>> {
-        let _ = kwargs;
-        let sep_char = sep.and_then(|s| s.chars().next()).unwrap_or(',');
-        let csv = self.inner.to_csv(sep_char, index.unwrap_or(true));
-        if let Some(p) = path {
-            std::fs::write(p, &csv)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            Ok(None)
-        } else {
-            Ok(Some(csv))
-        }
+        // chunksize only batches the writes and errors only handles encoding
+        // failures, which UTF-8 output cannot have.
+        let _ = (chunksize, errors);
+        let args = CsvWriteArgs {
+            sep,
+            na_rep,
+            float_format,
+            columns,
+            header,
+            index,
+            index_label,
+            mode,
+            encoding,
+            compression,
+            quoting,
+            quotechar,
+            lineterminator,
+            date_format,
+            doublequote,
+            escapechar,
+            decimal,
+            storage_options,
+        };
+        let frame = series_as_frame(&self.inner)?;
+        write_csv_py("Series.to_csv", &frame.inner, path_or_buf, &args)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13501,25 +14091,48 @@ impl PySeries {
 
     /// pandas' default orient for a Series is "index" (`{"0": 1.5, ...}`);
     /// this defaulted to "records". (4qg5w.19)
-    #[pyo3(signature = (path_or_buf=None, orient=None, **kwargs))]
+    /// See `write_json_py` for the keywords honoured (fvsao.5). pandas writes
+    /// a Series' JSON Lines as one bare value per line, which fp-io's records
+    /// writer does not produce yet.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path_or_buf=None, *, orient=None, date_format=None, double_precision=10, force_ascii=true, date_unit="ms", default_handler=None, lines=false, compression=Some("infer"), index=None, indent=None, storage_options=None, mode="w"))]
     fn to_json(
         &self,
-        path_or_buf: Option<&str>,
+        path_or_buf: Option<&Bound<'_, PyAny>>,
         orient: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        date_format: Option<&str>,
+        double_precision: i64,
+        force_ascii: bool,
+        date_unit: &str,
+        default_handler: Option<&Bound<'_, PyAny>>,
+        lines: bool,
+        compression: Option<&str>,
+        index: Option<bool>,
+        indent: Option<i64>,
+        storage_options: Option<&Bound<'_, PyAny>>,
+        mode: &str,
     ) -> PyResult<Option<String>> {
-        let _ = kwargs;
-        let s = self
-            .inner
-            .to_json(orient.unwrap_or("index"))
-            .map_err(frame_error_to_py)?;
-        if let Some(p) = path_or_buf {
-            std::fs::write(p, &s)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            Ok(None)
-        } else {
-            Ok(Some(s))
-        }
+        let args = JsonWriteArgs {
+            date_format,
+            double_precision,
+            force_ascii,
+            date_unit,
+            default_handler,
+            lines,
+            compression,
+            index,
+            indent,
+            storage_options,
+            mode,
+        };
+        write_json_py("Series.to_json", path_or_buf, orient, &args, |lines| {
+            if lines {
+                return Err(not_implemented("Series.to_json(lines=True)"));
+            }
+            self.inner
+                .to_json(orient.unwrap_or("index"))
+                .map_err(frame_error_to_py)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13537,53 +14150,70 @@ impl PySeries {
         series_as_frame(&self.inner)?.to_latex(buf, columns, header, index, na_rep, escape, kwargs)
     }
 
-    #[pyo3(signature = (buf=None, mode="wt", index=true, **kwargs))]
+    /// pandas renders `Series.to_markdown` as the one-column frame. This used
+    /// to return `to_string()` text, not a Markdown table, whatever was asked
+    /// (fvsao.5).
+    #[pyo3(signature = (buf=None, mode="wt", index=true, storage_options=None, **kwargs))]
     fn to_markdown(
         &self,
-        buf: Option<&str>,
-        mode: Option<&str>,
-        index: Option<bool>,
+        buf: Option<&Bound<'_, PyAny>>,
+        mode: &str,
+        index: bool,
+        storage_options: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<String>> {
-        let _ = (mode, index, kwargs);
-        let s = self.inner.to_string();
-        if let Some(p) = buf {
-            std::fs::write(p, &s)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            Ok(None)
-        } else {
-            Ok(Some(s))
-        }
+        series_as_frame(&self.inner)?.to_markdown(buf, mode, index, storage_options, kwargs)
     }
 
+    /// A frankenpandas index is never a DatetimeIndex yet (pandas raises
+    /// TypeError for every other index); this returned the Series unchanged.
     #[pyo3(signature = (freq=None, copy=None))]
     fn to_period(&self, freq: Option<&str>, copy: Option<bool>) -> PyResult<PySeries> {
         let _ = (freq, copy);
-        Ok(self.clone())
+        Err(not_implemented("Series.to_period (a PeriodIndex)"))
     }
 
-    #[pyo3(signature = (path, **kwargs))]
+    #[pyo3(signature = (path, *, compression=Some("infer"), protocol=5, storage_options=None))]
     fn to_pickle(
         &self,
         py: Python<'_>,
         path: &Bound<'_, PyAny>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        compression: Option<&str>,
+        protocol: i32,
+        storage_options: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let _ = kwargs;
-        to_pickle(py, &self.clone().into_bound_py_any(py)?, path, None)
+        unsupported_params(
+            "Series.to_pickle",
+            &[
+                (
+                    "compression",
+                    compression_is_plain(compression, Some(path))?,
+                ),
+                ("storage_options", storage_options.is_none()),
+            ],
+        )?;
+        to_pickle(
+            py,
+            &self.clone().into_bound_py_any(py)?,
+            path,
+            Some(protocol),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (name, con, if_exists="fail", index=true, index_label=None, **kwargs))]
+    #[pyo3(signature = (name, con, *, schema=None, if_exists="fail", index=true, index_label=None, chunksize=None, dtype=None, method=None))]
     fn to_sql(
         &self,
         py: Python<'_>,
         name: &str,
         con: &Bound<'_, PyAny>,
+        schema: Option<&str>,
         if_exists: &str,
         index: bool,
         index_label: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        chunksize: Option<usize>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        method: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let col_name = if self.inner.name().is_empty() {
             name
@@ -13595,27 +14225,56 @@ impl PySeries {
             .to_frame(Some(col_name))
             .map_err(frame_error_to_py)?;
         let py_df = PyDataFrame { inner: df };
-        py_df.to_sql(py, name, con, if_exists, index, index_label, kwargs)
+        py_df.to_sql(
+            py,
+            name,
+            con,
+            schema,
+            if_exists,
+            index,
+            index_label,
+            chunksize,
+            dtype,
+            method,
+        )
     }
 
-    #[pyo3(signature = (buf=None, na_rep="NaN", **kwargs))]
+    /// pandas' `Series.to_string` keywords; the formatting keywords are not
+    /// implemented yet and raise instead of being dropped (fvsao.5).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (buf=None, na_rep="NaN", float_format=None, header=true, index=true, length=false, dtype=false, name=false, max_rows=None, min_rows=None))]
     fn to_string(
         &self,
-        buf: Option<&str>,
-        na_rep: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        buf: Option<&Bound<'_, PyAny>>,
+        na_rep: &str,
+        float_format: Option<&Bound<'_, PyAny>>,
+        header: bool,
+        index: bool,
+        length: bool,
+        dtype: bool,
+        name: bool,
+        max_rows: Option<usize>,
+        min_rows: Option<usize>,
     ) -> PyResult<Option<String>> {
-        let _ = (na_rep, kwargs);
-        let s = self.inner.to_string();
-        if let Some(p) = buf {
-            std::fs::write(p, &s)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            Ok(None)
-        } else {
-            Ok(Some(s))
-        }
+        unsupported_params(
+            "Series.to_string",
+            &[
+                ("na_rep", na_rep == "NaN"),
+                ("float_format", float_format.is_none()),
+                ("header", header),
+                ("index", index),
+                ("length", !length),
+                ("dtype", !dtype),
+                ("name", !name),
+                ("max_rows", max_rows.is_none()),
+                ("min_rows", min_rows.is_none()),
+            ],
+        )?;
+        write_text_target(buf, self.inner.to_string(), false)
     }
 
+    /// A frankenpandas index is never a PeriodIndex yet (pandas raises
+    /// TypeError for every other index); this returned the Series unchanged.
     #[pyo3(signature = (freq=None, how="start", copy=None))]
     fn to_timestamp(
         &self,
@@ -13624,7 +14283,9 @@ impl PySeries {
         copy: Option<bool>,
     ) -> PyResult<PySeries> {
         let _ = (freq, how, copy);
-        Ok(self.clone())
+        Err(not_implemented(
+            "Series.to_timestamp (a DatetimeIndex from a PeriodIndex)",
+        ))
     }
 
     fn to_xarray(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -13647,17 +14308,28 @@ impl PySeries {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = axis;
+        if let Some(bad) = axis.filter(|&a| a != 0) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {bad} for object type Series"
+            )));
+        }
         self.apply(py, func, true, Some(args), kwargs)
     }
 
+    /// A Series is its own transpose; the arguments are numpy's, which
+    /// pandas accepts only at their defaults.
     #[pyo3(signature = (*args, **kwargs))]
     fn transpose(
         &self,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = (args, kwargs);
+        if !args.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "the 'axes' parameter is not supported in the pandas implementation of transpose()",
+            ));
+        }
+        numpy_compat_kwargs("transpose", kwargs)?;
         Ok(self.clone())
     }
 
@@ -13700,18 +14372,20 @@ impl PySeries {
         }
     }
 
+    /// Reinterpreting the bytes as another dtype is not supported; this
+    /// returned the Series unchanged whatever dtype was asked for.
     #[pyo3(signature = (dtype=None))]
     fn view(&self, dtype: Option<&str>) -> PyResult<PySeries> {
-        let _ = dtype;
+        unsupported_params("Series.view", &[("dtype", dtype.is_none())])?;
         Ok(self.clone())
     }
 
+    /// pandas needs a MultiIndex to swap levels, which a frankenpandas Series
+    /// index never is; this returned the Series unchanged.
     #[pyo3(signature = (i=-2, j=-1, copy=None))]
-    fn swaplevel(&self, i: isize, j: isize, copy: Option<bool>) -> PySeries {
+    fn swaplevel(&self, i: isize, j: isize, copy: Option<bool>) -> PyResult<PySeries> {
         let _ = (i, j, copy);
-        PySeries {
-            inner: self.inner.swaplevel(),
-        }
+        Err(not_implemented("Series.swaplevel (a MultiIndex)"))
     }
 }
 
@@ -13877,6 +14551,47 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// pandas' `sort_values(key=...)`: `key` is applied to each `by` column
+    /// and the rows are ordered by the keyed values. A positional copy holding
+    /// only the keyed columns is sorted, then the rows are taken in that order
+    /// (fvsao.5: `key` used to be dropped).
+    fn keyed_sort_values(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        by: &[String],
+        ascending: &[bool],
+        na_position: &str,
+    ) -> PyResult<DataFrame> {
+        let mut columns = BTreeMap::new();
+        for name in by {
+            let series = self.column_series(name)?;
+            let keyed = key.call1((series.clone(),))?;
+            let keyed = extract_or_build_series(py, &keyed, &series.inner)?;
+            if keyed.len() != self.inner.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "User-provided `key` function must not change the shape of the array.",
+                ));
+            }
+            columns.insert(name.clone(), keyed.column().clone());
+        }
+        let tagged = DataFrame::new_with_column_order(
+            Index::new(position_labels(self.inner.len())),
+            columns,
+            by.to_vec(),
+        )
+        .map_err(frame_error_to_py)?;
+        let by_refs: Vec<&str> = by.iter().map(String::as_str).collect();
+        let sorted = if let ([one], [asc]) = (by_refs.as_slice(), ascending) {
+            tagged.sort_values_na(one, *asc, na_position)
+        } else {
+            tagged.sort_values_multi(&by_refs, ascending, na_position)
+        }
+        .map_err(frame_error_to_py)?;
+        let order = positions_from_labels(sorted.index().labels())?;
+        self.inner.take(&order, 0).map_err(frame_error_to_py)
+    }
+
     /// One column as a Series, `KeyError` when absent (shared by `__getitem__`
     /// and the Rust-side tests).
     fn column_series(&self, col: &str) -> PyResult<PySeries> {
@@ -13970,10 +14685,10 @@ impl PyDataFrame {
     pub fn median_internal(
         &self,
         axis: usize,
-        _skipna: bool,
+        skipna: bool,
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
-        if axis == 1 {
+        let reduced = if axis == 1 {
             if numeric_only {
                 self.numeric_inner()?.median_axis1()
             } else if self.has_non_numeric() {
@@ -13991,7 +14706,8 @@ impl PyDataFrame {
                 self.inner.clone()
             };
             df.median()
-        }
+        }?;
+        self.missing_is_nan(reduced, axis, numeric_only, skipna)
     }
 
     fn get_reduction_columns(
@@ -14296,10 +15012,10 @@ impl PyDataFrame {
     pub fn min_internal(
         &self,
         axis: usize,
-        _skipna: bool,
+        skipna: bool,
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
-        if axis == 1 {
+        let reduced = if axis == 1 {
             if numeric_only {
                 self.numeric_inner()?.min_axis1()
             } else if self.has_non_numeric() {
@@ -14317,16 +15033,17 @@ impl PyDataFrame {
                 self.inner.clone()
             };
             df.min()
-        }
+        }?;
+        self.missing_is_nan(reduced, axis, numeric_only, skipna)
     }
 
     pub fn max_internal(
         &self,
         axis: usize,
-        _skipna: bool,
+        skipna: bool,
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
-        if axis == 1 {
+        let reduced = if axis == 1 {
             if numeric_only {
                 self.numeric_inner()?.max_axis1()
             } else if self.has_non_numeric() {
@@ -14344,7 +15061,8 @@ impl PyDataFrame {
                 self.inner.clone()
             };
             df.max()
-        }
+        }?;
+        self.missing_is_nan(reduced, axis, numeric_only, skipna)
     }
 
     pub fn prod_internal(
@@ -14390,6 +15108,81 @@ impl PyDataFrame {
         } else {
             self.inner.count()
         }
+    }
+
+    /// pandas' min_count for sum/prod: a column (or row, for axis=1) with
+    /// fewer valid values than `min_count` reduces to NaN (fvsao.5).
+    fn below_min_count_is_nan(
+        &self,
+        reduced: Series,
+        axis: usize,
+        numeric_only: bool,
+        min_count: usize,
+    ) -> Result<Series, FrameError> {
+        if min_count == 0 {
+            return Ok(reduced);
+        }
+        let counts = self.count_internal(axis, numeric_only)?;
+        if counts.index().labels() != reduced.index().labels() {
+            return Err(FrameError::CompatibilityRejected(
+                "min_count: the reduction and its counts cover different labels".to_owned(),
+            ));
+        }
+        let values = reduced
+            .values()
+            .iter()
+            .zip(counts.values())
+            .map(|(value, count)| match count {
+                Scalar::Int64(n) if usize::try_from(*n).unwrap_or(0) < min_count => {
+                    Scalar::Null(NullKind::NaN)
+                }
+                _ => value.clone(),
+            })
+            .collect();
+        Series::from_values(reduced.name(), reduced.index().labels().to_vec(), values)
+    }
+
+    /// pandas' skipna=False for min/max/median: a column (or row, for
+    /// axis=1) holding a missing value reduces to NaN, NaT where the result
+    /// is temporal (fvsao.5).
+    fn missing_is_nan(
+        &self,
+        reduced: Series,
+        axis: usize,
+        numeric_only: bool,
+        skipna: bool,
+    ) -> Result<Series, FrameError> {
+        if skipna {
+            return Ok(reduced);
+        }
+        let counts = self.count_internal(axis, numeric_only)?;
+        if counts.index().labels() != reduced.index().labels() {
+            return Err(FrameError::CompatibilityRejected(
+                "skipna: the reduction and its counts cover different labels".to_owned(),
+            ));
+        }
+        let full = if axis == 1 {
+            if numeric_only {
+                self.numeric_inner()?.num_columns()
+            } else {
+                self.inner.num_columns()
+            }
+        } else {
+            self.inner.len()
+        };
+        let values = reduced
+            .values()
+            .iter()
+            .zip(counts.values())
+            .map(|(value, count)| match count {
+                Scalar::Int64(n) if usize::try_from(*n).unwrap_or(0) < full => match value {
+                    Scalar::Datetime64(_) | Scalar::Timedelta64(_) => Scalar::Null(NullKind::NaT),
+                    _ => Scalar::Null(NullKind::NaN),
+                },
+                _ => value.clone(),
+            })
+            .collect();
+        Series::from_values(reduced.name(), reduced.index().labels().to_vec(), values)
     }
 
     pub fn skew_internal(&self, axis: usize, numeric_only: bool) -> Result<Series, FrameError> {
@@ -15437,9 +16230,12 @@ impl PyDataFrame {
         Ok((constructor, args))
     }
 
-    /// Return the first n rows.
+    /// Return the first n rows. pandas slices `iloc[:n]`, so `n=None` keeps
+    /// every row. (PyO3 0.29 makes an unannotated `Option` argument required,
+    /// which made a bare `head()` raise; fvsao.5.)
+    #[pyo3(signature = (n=Some(5)))]
     fn head(&self, n: Option<i64>) -> PyResult<PyDataFrame> {
-        let n = n.unwrap_or(5);
+        let n = n.unwrap_or(i64::MAX);
         let result = self
             .inner
             .head(n)
@@ -15448,8 +16244,8 @@ impl PyDataFrame {
     }
 
     /// Return the last n rows.
-    fn tail(&self, n: Option<i64>) -> PyResult<PyDataFrame> {
-        let n = n.unwrap_or(5);
+    #[pyo3(signature = (n=5))]
+    fn tail(&self, n: i64) -> PyResult<PyDataFrame> {
         let result = self
             .inner
             .tail(n)
@@ -15940,18 +16736,23 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Return the sum of each column or row.
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    /// Return the sum of each column or row. A column (or row) with fewer
+    /// than `min_count` valid values sums to NaN, as in pandas.
+    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
     fn sum(
         &self,
         axis: Option<&Bound<'_, PyAny>>,
         skipna: bool,
         numeric_only: bool,
+        min_count: usize,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
+        numpy_compat_kwargs("sum", kwargs)?;
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.sum_internal(ax, skipna, numeric_only))
+        let summed = self.sum_internal(ax, skipna, numeric_only);
+        wrap_series(
+            summed.and_then(|s| self.below_min_count_is_nan(s, ax, numeric_only, min_count)),
+        )
     }
 
     /// Return the mean of each column or row.
@@ -15963,7 +16764,7 @@ impl PyDataFrame {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
+        numpy_compat_kwargs("mean", kwargs)?;
         let ax = parse_axis_param(axis)?;
         wrap_series(self.mean_internal(ax, skipna, numeric_only))
     }
@@ -15977,7 +16778,7 @@ impl PyDataFrame {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
+        numpy_compat_kwargs("median", kwargs)?;
         let ax = parse_axis_param(axis)?;
         wrap_series(self.median_internal(ax, skipna, numeric_only))
     }
@@ -15992,7 +16793,7 @@ impl PyDataFrame {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
+        numpy_compat_kwargs("std", kwargs)?;
         let ax = parse_axis_param(axis)?;
         let ddof_val = ddof.unwrap_or(1);
         wrap_series(self.std_internal(ax, skipna, ddof_val, numeric_only))
@@ -16008,7 +16809,7 @@ impl PyDataFrame {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
+        numpy_compat_kwargs("var", kwargs)?;
         let ax = parse_axis_param(axis)?;
         let ddof_val = ddof.unwrap_or(1);
         wrap_series(self.var_internal(ax, skipna, ddof_val, numeric_only))
@@ -16030,7 +16831,7 @@ impl PyDataFrame {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
+        numpy_compat_kwargs("min", kwargs)?;
         let ax = parse_axis_param(axis)?;
         wrap_series(self.min_internal(ax, skipna, numeric_only))
     }
@@ -16044,7 +16845,7 @@ impl PyDataFrame {
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = kwargs;
+        numpy_compat_kwargs("max", kwargs)?;
         let ax = parse_axis_param(axis)?;
         wrap_series(self.max_internal(ax, skipna, numeric_only))
     }
@@ -16057,7 +16858,12 @@ impl PyDataFrame {
         min_periods: Option<usize>,
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = min_periods;
+        // Fewer than two pairs already correlate to NaN, so min_periods up to
+        // 2 is the default answer; a larger floor needs per-pair counts.
+        unsupported_params(
+            "DataFrame.corr",
+            &[("min_periods", min_periods.is_none_or(|m| m <= 2))],
+        )?;
         let m = method.unwrap_or("pearson");
         let result = self
             .inner
@@ -16079,7 +16885,7 @@ impl PyDataFrame {
         limit: Option<usize>,
         downcast: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = downcast;
+        unsupported_params("DataFrame.fillna", &[("downcast", downcast.is_none())])?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -16454,7 +17260,13 @@ impl PyDataFrame {
         col_fill: Option<&Bound<'_, PyAny>>,
         names: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (level, col_level, col_fill);
+        // Columns are single-level, where pandas never reads col_fill.
+        let _ = col_fill;
+        let level_is_default = level.is_none_or(|l| matches!(l.extract::<i64>(), Ok(0)));
+        unsupported_params(
+            "DataFrame.reset_index",
+            &[("level", level_is_default), ("col_level", col_level == 0)],
+        )?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -16465,12 +17277,16 @@ impl PyDataFrame {
             && let Some(n) = names
             && !n.is_none()
         {
+            // Column names are strings here; any other name raised nothing
+            // and was dropped.
             let custom_name: Option<String> = if let Ok(s) = n.extract::<String>() {
                 Some(s)
             } else if let Ok(list) = n.extract::<Vec<String>>() {
                 list.into_iter().next()
             } else {
-                None
+                return Err(not_implemented(
+                    "DataFrame.reset_index(names=<a non-string name>)",
+                ));
             };
             if let Some(cname) = custom_name {
                 if let Some(old_name) = result.column_names().first().map(|s| (*s).clone()) {
@@ -16500,6 +17316,7 @@ impl PyDataFrame {
     #[allow(clippy::too_many_arguments)]
     fn sort_index(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
         ascending: Option<&Bound<'_, PyAny>>,
@@ -16510,7 +17327,12 @@ impl PyDataFrame {
         ignore_index: bool,
         key: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (level, kind, sort_remaining, key);
+        // The row index is single-level: level 0 is the default order, and
+        // sort_remaining only acts on the other levels of a MultiIndex.
+        let _ = sort_remaining;
+        let level_is_default = level.is_none_or(|l| matches!(l.extract::<i64>(), Ok(0)));
+        unsupported_params("DataFrame.sort_index", &[("level", level_is_default)])?;
+        validate_sort_kind(kind)?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -16518,7 +17340,49 @@ impl PyDataFrame {
         }
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         let asc = parse_ascending_bool(ascending)?;
+        if key.is_some() && ax != 0 {
+            return Err(not_implemented("DataFrame.sort_index(axis=1, key=...)"));
+        }
         let sorted = match ax {
+            0 if key.is_some() => {
+                let index = PyIndex {
+                    inner: self.inner.index().clone(),
+                };
+                let keyed = key.expect("checked above").call1((index,))?;
+                // Only the index and length of `like` are read, to shape an
+                // array-like result.
+                let like = Series::from_values(
+                    "key",
+                    self.inner.index().labels().to_vec(),
+                    vec![Scalar::Null(NullKind::Null); self.inner.len()],
+                )
+                .map_err(frame_error_to_py)?;
+                let keyed = extract_or_build_series(py, &keyed, &like)?;
+                if keyed.len() != self.inner.len() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "User-provided `key` function must not change the shape of the array.",
+                    ));
+                }
+                let tagged = Series::from_values(
+                    "key",
+                    position_labels(keyed.len()),
+                    keyed.values().to_vec(),
+                )
+                .map_err(frame_error_to_py)?;
+                let order = positions_from_labels(
+                    tagged
+                        .sort_values_na(asc, na_position)
+                        .map_err(frame_error_to_py)?
+                        .index()
+                        .labels(),
+                )?;
+                let s = self.inner.take(&order, 0).map_err(frame_error_to_py)?;
+                if ignore_index {
+                    s.reset_index(true).map_err(frame_error_to_py)?
+                } else {
+                    s
+                }
+            }
             0 => {
                 let s = self
                     .inner
@@ -16925,10 +17789,39 @@ impl PyDataFrame {
             }
         }
 
-        let Some(to_repl) = effective_to_replace else {
-            return Ok(PyDataFrame {
-                inner: self.inner.clone(),
-            });
+        // pandas 2.2 (deprecated there, still its behaviour, fvsao.5): with no
+        // `to_replace` the targets are the missing values, and with no
+        // `value` each target is padded from its neighbour (`method`, default
+        // pad). This returned the frame unchanged.
+        let value_given = value.is_some_and(|v| !v.is_none());
+        let Some(to_repl) = effective_to_replace.filter(|t| !t.is_none()) else {
+            if is_regex {
+                return Ok(PyDataFrame {
+                    inner: self.inner.clone(),
+                });
+            }
+            if value_given {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "'regex' must be a string or a compiled regular expression or a list or dict of strings or regular expressions, you passed a 'bool'",
+                ));
+            }
+            let filled = match method.unwrap_or("pad") {
+                "pad" | "ffill" => self.inner.ffill(limit),
+                "backfill" | "bfill" => self.inner.bfill(limit),
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid fill method. Expecting pad (ffill) or backfill (bfill). Got {other}"
+                    )));
+                }
+            }
+            .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: filled });
+        };
+        let dict_like = to_repl.cast::<PyDict>().is_ok();
+        let method = if !value_given && !is_regex && !dict_like {
+            method.or(Some("pad"))
+        } else {
+            method
         };
 
         if let Some(m) = method {
@@ -17336,6 +18229,7 @@ impl PyDataFrame {
     #[pyo3(signature = (by, axis=None, ascending=None, inplace=false, kind=None, na_position="last", ignore_index=false, key=None))]
     fn sort_values(
         &self,
+        py: Python<'_>,
         by: &Bound<'_, PyAny>,
         axis: Option<&Bound<'_, PyAny>>,
         ascending: Option<&Bound<'_, PyAny>>,
@@ -17345,8 +18239,7 @@ impl PyDataFrame {
         ignore_index: bool,
         key: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = kind;
-        let _ = key;
+        validate_sort_kind(kind)?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -17397,7 +18290,9 @@ impl PyDataFrame {
         };
 
         let by_refs: Vec<&str> = by_cols.iter().map(String::as_str).collect();
-        let sorted = if by_refs.len() == 1 {
+        let sorted = if let Some(key) = key {
+            self.keyed_sort_values(py, key, &by_cols, &asc_flags, na_position)?
+        } else if by_refs.len() == 1 {
             self.inner
                 .sort_values_na(by_refs[0], asc_flags[0], na_position)
                 .map_err(frame_error_to_py)?
@@ -17503,21 +18398,61 @@ impl PyDataFrame {
         })
     }
 
-    /// Export to CSV. With no `path`, returns the CSV string; with a `path`,
-    /// writes the file and returns `None` (pandas `DataFrame.to_csv`). pandas'
-    /// default is `index=True` (this defaulted to False, dropping e.g. groupby
-    /// keys). (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1)
-    #[pyo3(signature = (path=None, index=true))]
-    fn to_csv(&self, path: Option<&str>, index: bool) -> PyResult<Option<String>> {
-        let csv = self.inner.to_csv(',', index);
-        match path {
-            Some(p) => {
-                std::fs::write(p, csv)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-                Ok(None)
-            }
-            None => Ok(Some(csv)),
-        }
+    /// Export to CSV (pandas `DataFrame.to_csv`). With no `path_or_buf`,
+    /// returns the CSV string; otherwise writes the path or file-like object
+    /// and returns `None`. pandas' default is `index=True`
+    /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1); see
+    /// `write_csv_py` for the keywords honoured (fvsao.5).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path_or_buf=None, *, sep=",", na_rep="", float_format=None, columns=None, header=None, index=true, index_label=None, mode="w", encoding=None, compression=Some("infer"), quoting=None, quotechar="\"", lineterminator=None, chunksize=None, date_format=None, doublequote=true, escapechar=None, decimal=".", errors="strict", storage_options=None))]
+    fn to_csv(
+        &self,
+        path_or_buf: Option<&Bound<'_, PyAny>>,
+        sep: &str,
+        na_rep: &str,
+        float_format: Option<&Bound<'_, PyAny>>,
+        columns: Option<&Bound<'_, PyAny>>,
+        header: Option<&Bound<'_, PyAny>>,
+        index: bool,
+        index_label: Option<&Bound<'_, PyAny>>,
+        mode: &str,
+        encoding: Option<&str>,
+        compression: Option<&str>,
+        quoting: Option<i64>,
+        quotechar: &str,
+        lineterminator: Option<&str>,
+        chunksize: Option<usize>,
+        date_format: Option<&str>,
+        doublequote: bool,
+        escapechar: Option<&str>,
+        decimal: &str,
+        errors: &str,
+        storage_options: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<String>> {
+        // chunksize only batches the writes and errors only handles encoding
+        // failures, which UTF-8 output cannot have.
+        let _ = (chunksize, errors);
+        let args = CsvWriteArgs {
+            sep,
+            na_rep,
+            float_format,
+            columns,
+            header,
+            index,
+            index_label,
+            mode,
+            encoding,
+            compression,
+            quoting,
+            quotechar,
+            lineterminator,
+            date_format,
+            doublequote,
+            escapechar,
+            decimal,
+            storage_options,
+        };
+        write_csv_py("DataFrame.to_csv", &self.inner, path_or_buf, &args)
     }
 
     /// Export to a Python dictionary (pandas `DataFrame.to_dict(orient=...)`).
@@ -17651,12 +18586,30 @@ impl PyDataFrame {
     }
 
     /// Render the DataFrame as a GitHub-flavored Markdown table
-    /// (pandas `DataFrame.to_markdown`).
-    #[pyo3(signature = (index=true))]
-    fn to_markdown(&self, index: bool) -> PyResult<String> {
-        self.inner
+    /// (pandas `DataFrame.to_markdown`). pandas passes `**kwargs` to
+    /// tabulate, which frankenpandas does not use, so they are refused.
+    #[pyo3(signature = (buf=None, mode="wt", index=true, storage_options=None, **kwargs))]
+    fn to_markdown(
+        &self,
+        buf: Option<&Bound<'_, PyAny>>,
+        mode: &str,
+        index: bool,
+        storage_options: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        unsupported_params(
+            "DataFrame.to_markdown",
+            &[
+                ("mode", matches!(mode, "w" | "wt" | "a" | "at")),
+                ("storage_options", storage_options.is_none()),
+            ],
+        )?;
+        engine_kwargs("DataFrame.to_markdown", "tabulate", kwargs)?;
+        let text = self
+            .inner
             .to_markdown(index, None)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        write_text_target(buf, text, mode.starts_with('a'))
     }
 
     /// Render the DataFrame as a plain-text table (pandas `DataFrame.to_string`).
@@ -17863,7 +18816,7 @@ impl PyDataFrame {
         freq: Option<&str>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = freq;
+        unsupported_params("DataFrame.pct_change", &[("freq", freq.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         let res = match ax {
             0 => self
@@ -17946,7 +18899,10 @@ impl PyDataFrame {
         fill_value: Option<&Bound<'_, PyAny>>,
         suffix: Option<&str>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (freq, suffix);
+        unsupported_params(
+            "DataFrame.shift",
+            &[("freq", freq.is_none()), ("suffix", suffix.is_none())],
+        )?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         let fill_sc = match fill_value {
             Some(fv) => Some(py_to_scalar(fv.py(), fv)?),
@@ -18043,15 +18999,23 @@ impl PyDataFrame {
     }
 
     #[pyo3(signature = (window, min_periods=None, center=false))]
-    fn rolling(&self, window: usize, min_periods: Option<usize>, center: bool) -> PyRolling {
-        let _ = center;
-        PyRolling {
+    /// fp-frame's DataFrame windows are trailing only; `center=True` used to
+    /// be accepted and every aggregation still used trailing windows
+    /// (fvsao.5).
+    fn rolling(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: bool,
+    ) -> PyResult<PyRolling> {
+        unsupported_params("DataFrame.rolling", &[("center", !center)])?;
+        Ok(PyRolling {
             series: None,
             dataframe: Some(self.inner.clone()),
             window,
             min_periods,
             center,
-        }
+        })
     }
 
     #[pyo3(signature = (min_periods=None))]
@@ -18083,7 +19047,13 @@ impl PyDataFrame {
         downcast: Option<&Bound<'_, PyAny>>,
         limit_area: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (downcast, limit_area);
+        unsupported_params(
+            "DataFrame.ffill",
+            &[
+                ("downcast", downcast.is_none()),
+                ("limit_area", limit_area.is_none()),
+            ],
+        )?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -18124,7 +19094,13 @@ impl PyDataFrame {
         downcast: Option<&Bound<'_, PyAny>>,
         limit_area: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (downcast, limit_area);
+        unsupported_params(
+            "DataFrame.bfill",
+            &[
+                ("downcast", downcast.is_none()),
+                ("limit_area", limit_area.is_none()),
+            ],
+        )?;
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "inplace=True is not supported",
@@ -18184,7 +19160,11 @@ impl PyDataFrame {
         col_level: Option<usize>,
         ignore_index: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = col_level;
+        // Columns are single-level, so level 0 is all of them.
+        unsupported_params(
+            "DataFrame.melt",
+            &[("col_level", col_level.is_none_or(|l| l == 0))],
+        )?;
         let id_strings = extract_col_names_flexible(id_vars)?;
         let val_strings = extract_col_names_flexible(value_vars)?;
         let id_refs: Vec<&str> = id_strings.iter().map(String::as_str).collect();
@@ -18339,7 +19319,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         ignore_index: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = weights;
+        unsupported_params("DataFrame.sample", &[("weights", weights.is_none())])?;
         let ax = parse_axis_param(axis)?;
         let mut res = if ax == 1 {
             let total = self.inner.column_names().len();
@@ -18478,9 +19458,13 @@ impl PyDataFrame {
         min_count: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        let _ = (min_count, kwargs);
+        numpy_compat_kwargs("prod", kwargs)?;
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.prod_internal(ax, skipna, numeric_only))
+        let product = self.prod_internal(ax, skipna, numeric_only);
+        let min_count = min_count.unwrap_or(0);
+        wrap_series(
+            product.and_then(|s| self.below_min_count_is_nan(s, ax, numeric_only, min_count)),
+        )
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
@@ -18506,7 +19490,10 @@ impl PyDataFrame {
         interpolation: &str,
         method: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = method;
+        unsupported_params(
+            "DataFrame.quantile",
+            &[("method", matches!(method, None | Some("single")))],
+        )?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         let target_df = if numeric_only {
             self.inner
@@ -18664,9 +19651,9 @@ impl PyDataFrame {
         skipna: bool,
         numeric_only: bool,
     ) -> PyResult<PySeries> {
-        let _ = skipna;
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.skew_internal(ax, numeric_only))
+        let skewed = self.skew_internal(ax, numeric_only);
+        wrap_series(skewed.and_then(|s| self.missing_is_nan(s, ax, numeric_only, skipna)))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
@@ -18676,9 +19663,9 @@ impl PyDataFrame {
         skipna: bool,
         numeric_only: bool,
     ) -> PyResult<PySeries> {
-        let _ = skipna;
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.kurt_internal(ax, numeric_only))
+        let kurtosis = self.kurt_internal(ax, numeric_only);
+        wrap_series(kurtosis.and_then(|s| self.missing_is_nan(s, ax, numeric_only, skipna)))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
@@ -19588,7 +20575,12 @@ impl PyDataFrame {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (raw, result_type);
+        // raw=True hands `func` numpy arrays where this passes Series, and
+        // result_type reshapes the output; neither is implemented yet.
+        unsupported_params(
+            "DataFrame.apply",
+            &[("raw", !raw), ("result_type", result_type.is_none())],
+        )?;
         let ax: usize = match axis {
             Some(a) => {
                 if let Ok(i) = a.extract::<usize>() {
@@ -19863,7 +20855,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PyDataFrame>> {
-        let _ = level;
+        unsupported_params("DataFrame.where", &[("level", level.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?;
         let cond_norm = normalize_df_cond(py, &self.inner, cond)?;
         let other_norm = normalize_df_other(py, &self.inner, other)?;
@@ -19886,7 +20878,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PyDataFrame>> {
-        let _ = level;
+        unsupported_params("DataFrame.mask", &[("level", level.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?;
         let cond_norm = normalize_df_cond(py, &self.inner, cond)?;
         let other_norm = normalize_df_other(py, &self.inner, other)?;
@@ -20004,21 +20996,46 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (labels=None, index=None, columns=None, axis=None, **kwargs))]
+    /// pandas' `DataFrame.reindex`. `method` fills absent row labels from the
+    /// neighbouring source row and `fill_value` fills absent row labels and
+    /// new columns (fvsao.5: both used to be dropped through `**kwargs`).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (labels=None, *, index=None, columns=None, axis=None, method=None, copy=None, level=None, fill_value=None, limit=None, tolerance=None))]
     fn reindex(
         &self,
+        py: Python<'_>,
         labels: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
         columns: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        method: Option<&str>,
+        copy: Option<bool>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = kwargs;
+        // copy= only lets pandas share buffers; a new frame satisfies it.
+        let _ = copy;
+        let fill = match fill_value.filter(|fv| !fv.is_none()) {
+            Some(fv) => Some(py_to_scalar(py, fv)?),
+            None => None,
+        };
+        unsupported_params(
+            "DataFrame.reindex",
+            &[
+                ("level", level.is_none()),
+                ("limit", limit.is_none()),
+                ("tolerance", tolerance.is_none()),
+                (
+                    "method",
+                    method.is_none() || (fill.is_none() && columns.is_none()),
+                ),
+            ],
+        )?;
         let mut res = self.inner.clone();
-        let target_index = index.or_else(|| {
-            labels
-                .filter(|_| axis.is_none() || axis.and_then(|a| a.extract::<i64>().ok()) == Some(0))
-        });
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let target_index = index.or_else(|| labels.filter(|_| ax == 0));
         if let Some(idx_obj) = target_index {
             let row_labels = if let Ok(py_idx) = idx_obj.extract::<PyRef<'_, PyIndex>>() {
                 py_idx.inner.labels().to_vec()
@@ -20033,10 +21050,14 @@ impl PyDataFrame {
                     "reindex expects Index or list of labels",
                 ));
             };
-            res = res.reindex(row_labels).map_err(frame_error_to_py)?;
+            res = match (method, &fill) {
+                (Some(m), _) => res.reindex_with_method(row_labels, m),
+                (None, Some(f)) => res.reindex_fill(row_labels, f.clone()),
+                (None, None) => res.reindex(row_labels),
+            }
+            .map_err(frame_error_to_py)?;
         }
-        let target_columns = columns
-            .or_else(|| labels.filter(|_| axis.and_then(|a| a.extract::<i64>().ok()) == Some(1)));
+        let target_columns = columns.or_else(|| labels.filter(|_| ax == 1));
         if let Some(col_obj) = target_columns {
             let col_names: Vec<String> = if let Ok(list) = col_obj.cast::<PyList>() {
                 let mut cols = Vec::with_capacity(list.len());
@@ -20049,6 +21070,16 @@ impl PyDataFrame {
             };
             let str_cols: Vec<&str> = col_names.iter().map(String::as_str).collect();
             res = res.reindex_columns(&str_cols).map_err(frame_error_to_py)?;
+            if let Some(f) = &fill {
+                for name in col_names.iter().filter(|c| self.inner.column(c).is_none()) {
+                    let filled = Column::from_values(vec![f.clone(); res.len()]).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    res = res
+                        .with_column(name.clone(), filled)
+                        .map_err(frame_error_to_py)?;
+                }
+            }
         }
         Ok(PyDataFrame { inner: res })
     }
@@ -20097,7 +21128,6 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
         allow_duplicates: bool,
     ) -> PyResult<()> {
-        let _ = allow_duplicates;
         let col = if let Ok(py_s) = value.extract::<PyRef<'_, PySeries>>() {
             py_s.inner.column().clone()
         } else if let Ok(list) = value.cast::<PyList>() {
@@ -20114,7 +21144,7 @@ impl PyDataFrame {
         };
         self.inner = self
             .inner
-            .insert(loc, column, col)
+            .insert_allow_duplicates(loc, column, col, allow_duplicates)
             .map_err(frame_error_to_py)?;
         Ok(())
     }
@@ -20242,19 +21272,48 @@ impl PyDataFrame {
 
     #[pyo3(signature = (copy=None))]
     fn infer_objects(&self, copy: Option<bool>) -> PyResult<PyDataFrame> {
+        // copy= only lets pandas share buffers; a new frame satisfies it.
         let _ = copy;
         let df = self.inner.infer_objects().map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (method=None, **kwargs))]
+    /// pandas' `DataFrame.interpolate` down each column (fvsao.5: `method`
+    /// and every option used to be dropped, so any call interpolated
+    /// linearly).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (method="linear", *, axis=None, limit=None, inplace=false, limit_direction=None, limit_area=None, downcast=None, **kwargs))]
     fn interpolate(
         &self,
-        method: Option<&str>,
+        method: &str,
+        axis: Option<&Bound<'_, PyAny>>,
+        limit: Option<usize>,
+        inplace: bool,
+        limit_direction: Option<&str>,
+        limit_area: Option<&str>,
+        downcast: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (method, kwargs);
-        let df = self.inner.interpolate().map_err(frame_error_to_py)?;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        unsupported_params(
+            "DataFrame.interpolate",
+            &[("axis", ax == 0), ("downcast", downcast.is_none())],
+        )?;
+        engine_kwargs("DataFrame.interpolate", "scipy", kwargs)?;
+        if inplace {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "inplace=True is not supported",
+            ));
+        }
+        if !Series::interpolate_supports(method, limit_direction, limit_area) {
+            return Err(not_implemented(&format!(
+                "DataFrame.interpolate(method='{method}') with limit_direction or limit_area"
+            )));
+        }
+        let df = self
+            .inner
+            .interpolate_with(method, limit, limit_direction, limit_area)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
@@ -20277,76 +21336,56 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: df })
     }
 
+    /// Swaps the last two row levels, pandas' default; other levels and the
+    /// column axis are not supported yet (they were ignored).
     #[pyo3(signature = (i=-2, j=-1, axis=0))]
-    fn swaplevel(&self, i: isize, j: isize, axis: usize) -> PyDataFrame {
-        let _ = (i, j, axis);
-        PyDataFrame {
+    fn swaplevel(&self, i: isize, j: isize, axis: usize) -> PyResult<PyDataFrame> {
+        unsupported_params(
+            "DataFrame.swaplevel",
+            &[("i", i == -2), ("j", j == -1), ("axis", axis == 0)],
+        )?;
+        Ok(PyDataFrame {
             inner: self.inner.swaplevel(),
-        }
+        })
     }
 
-    #[pyo3(signature = (indices, axis=0, **kwargs))]
+    #[pyo3(signature = (indices, axis=None, **kwargs))]
     fn take(
         &self,
         indices: Vec<i64>,
-        axis: usize,
+        axis: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let _ = kwargs;
+        numpy_compat_kwargs("take", kwargs)?;
+        let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         let df = self.inner.take(&indices, axis).map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (column, ignore_index=None, sep=None, **kwargs))]
-    fn explode(
-        &self,
-        column: &Bound<'_, PyAny>,
-        ignore_index: Option<&Bound<'_, PyAny>>,
-        sep: Option<&Bound<'_, PyAny>>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyDataFrame> {
+    /// pandas' `DataFrame.explode(column, ignore_index=False)` expands
+    /// list-like cells and leaves every scalar, strings included, as it is. A
+    /// frankenpandas cell is always a scalar, so the rows stay as they are.
+    /// This used to split strings on a `sep` keyword pandas does not have,
+    /// turning "Smith, John" into two rows (fvsao.5).
+    #[pyo3(signature = (column, ignore_index=false))]
+    fn explode(&self, column: &Bound<'_, PyAny>, ignore_index: bool) -> PyResult<PyDataFrame> {
         let col_names = extract_col_names_flexible(Some(column))?;
         if col_names.is_empty() {
-            return Ok(PyDataFrame {
-                inner: self.inner.clone(),
-            });
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "column must be nonempty",
+            ));
         }
-        let mut actual_ignore_index = false;
-        let mut actual_sep = ",".to_string();
-
-        if let Some(arg) = ignore_index {
-            if let Ok(b) = arg.extract::<bool>() {
-                actual_ignore_index = b;
-            } else if let Ok(s) = arg.extract::<String>() {
-                actual_sep = s;
-            }
+        if let Some(missing) = col_names.iter().find(|c| self.inner.column(c).is_none()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                missing.clone(),
+            ));
         }
-        if let Some(arg) = sep {
-            if let Ok(s) = arg.extract::<String>() {
-                actual_sep = s;
-            } else if let Ok(b) = arg.extract::<bool>() {
-                actual_ignore_index = b;
-            }
-        }
-        if let Some(kw) = kwargs {
-            if let Some(val) = kw.get_item("ignore_index")? {
-                actual_ignore_index = val.extract::<bool>()?;
-            }
-            if let Some(val) = kw.get_item("sep")? {
-                actual_sep = val.extract::<String>()?;
-            }
-        }
-
-        let mut current = self.inner.clone();
-        for c in &col_names {
-            current = current
-                .explode_with_ignore_index(c, &actual_sep, false)
-                .map_err(frame_error_to_py)?;
-        }
-        if actual_ignore_index {
-            current = current.reset_index(true).map_err(frame_error_to_py)?;
-        }
-        Ok(PyDataFrame { inner: current })
+        let out = if ignore_index {
+            self.inner.reset_index(true).map_err(frame_error_to_py)?
+        } else {
+            self.inner.clone()
+        };
+        Ok(PyDataFrame { inner: out })
     }
 
     fn info(&self) -> String {
@@ -20367,7 +21406,10 @@ impl PyDataFrame {
         ascending: bool,
         dropna: bool,
     ) -> PyResult<PySeries> {
-        let _ = (dropna, sort);
+        unsupported_params(
+            "DataFrame.value_counts",
+            &[("sort", sort), ("dropna", dropna)],
+        )?;
         let cols = extract_col_names_flexible(subset)?;
         let mut s = if cols.is_empty() {
             self.inner.value_counts()
@@ -20425,39 +21467,65 @@ impl PyDataFrame {
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (key, axis=0, **kwargs))]
+    /// pandas' `DataFrame.xs` on the row index. The row comes back as a
+    /// one-row frame, pandas' drop_level=False shape, whatever drop_level
+    /// says (the Series return is fvsao.7's).
+    #[pyo3(signature = (key, axis=None, level=None, drop_level=true))]
     fn xs(
         &self,
         key: &Bound<'_, PyAny>,
-        axis: usize,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        drop_level: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = (axis, kwargs);
+        let _ = drop_level;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        unsupported_params(
+            "DataFrame.xs",
+            &[("axis", ax == 0), ("level", level.is_none())],
+        )?;
         let lbl = py_to_index_label(key)?;
         let df = self.inner.xs(&lbl).map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (mapper=None, **kwargs))]
+    /// pandas' `DataFrame.rename_axis` for the row index (`mapper` or
+    /// `index`); naming the columns axis is not supported yet.
+    #[pyo3(signature = (mapper=None, *, index=None, columns=None, axis=None, copy=None, inplace=false))]
     fn rename_axis(
         &self,
         mapper: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        index: Option<&str>,
+        columns: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        copy: Option<bool>,
+        inplace: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = kwargs;
-        let name = mapper.unwrap_or("");
+        // copy= only lets pandas share buffers; a new frame satisfies it.
+        let _ = copy;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        unsupported_params(
+            "DataFrame.rename_axis",
+            &[
+                ("columns", columns.is_none()),
+                ("axis", ax == 0),
+                ("inplace", !inplace),
+            ],
+        )?;
+        let name = mapper.or(index).unwrap_or("");
         let df = self.inner.rename_axis(name).map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (labels, axis=None, **kwargs))]
+    #[pyo3(signature = (labels, *, axis=None, copy=None))]
     fn set_axis(
         &self,
         labels: &Bound<'_, PyAny>,
         axis: Option<&Bound<'_, PyAny>>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let _ = kwargs;
+        // copy= only lets pandas share buffers; a new frame satisfies it.
+        let _ = copy;
         let axis_idx = match axis {
             None => 0,
             Some(a) => {
@@ -20535,7 +21603,8 @@ impl PyDataFrame {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (py, args, kwargs);
+        let _ = py;
+        plot_args(args, kwargs)?;
         let spec = self.inner.boxplot().map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
         Ok(PyPlotResult {
@@ -20699,7 +21768,13 @@ impl PyDataFrame {
         dtype: Option<&str>,
         columns: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let _ = (orient, dtype);
+        unsupported_params(
+            "DataFrame.from_dict",
+            &[
+                ("orient", matches!(orient, None | Some("columns"))),
+                ("dtype", dtype.is_none()),
+            ],
+        )?;
         Self::new(py, Some(data.as_any()), None, columns)
     }
 
@@ -20716,7 +21791,14 @@ impl PyDataFrame {
         coerce_float: Option<bool>,
         nrows: Option<usize>,
     ) -> PyResult<Self> {
-        let _ = (exclude, coerce_float, nrows);
+        unsupported_params(
+            "DataFrame.from_records",
+            &[
+                ("exclude", exclude.is_none()),
+                ("coerce_float", coerce_float != Some(true)),
+                ("nrows", nrows.is_none()),
+            ],
+        )?;
         Self::new(py, Some(data), index, columns)
     }
 
@@ -20727,7 +21809,8 @@ impl PyDataFrame {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (py, args, kwargs);
+        let _ = py;
+        plot_args(args, kwargs)?;
         let spec = self.inner.hist().map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
         Ok(PyPlotResult {
@@ -20769,15 +21852,33 @@ impl PyDataFrame {
         self.inner.plot_to_file(path).map_err(frame_error_to_py)
     }
 
-    #[pyo3(signature = (other, **kwargs))]
+    /// pandas' `DataFrame.reindex_like`: `reindex` onto `other`'s index and
+    /// columns.
+    #[pyo3(signature = (other, method=None, copy=None, limit=None, tolerance=None))]
     fn reindex_like(
         &self,
+        py: Python<'_>,
         other: &Bound<'_, PyAny>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        method: Option<&str>,
+        copy: Option<bool>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let idx = other.getattr("index")?;
         let cols = other.getattr("columns")?;
-        self.reindex(None, Some(&idx), Some(&cols), None, kwargs)
+        self.reindex(
+            py,
+            None,
+            Some(&idx),
+            Some(&cols),
+            None,
+            method,
+            copy,
+            None,
+            None,
+            limit,
+            tolerance,
+        )
     }
 
     #[pyo3(signature = (order, axis=0))]
@@ -20786,13 +21887,28 @@ impl PyDataFrame {
         order: &Bound<'_, PyAny>,
         axis: Option<usize>,
     ) -> PyResult<PyDataFrame> {
+        // This returned the frame unchanged whatever order was asked for.
         let _ = (order, axis);
-        Ok(self.clone())
+        Err(not_implemented("DataFrame.reorder_levels"))
     }
 
-    #[pyo3(signature = (**kwargs))]
-    fn set_flags(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
-        let _ = kwargs;
+    /// pandas' `set_flags`. frankenpandas always allows duplicate labels,
+    /// which is pandas' default flag; turning it off is not supported yet.
+    #[pyo3(signature = (*, copy=false, allows_duplicate_labels=None))]
+    fn set_flags(
+        &self,
+        copy: bool,
+        allows_duplicate_labels: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        // copy= only lets pandas share buffers; a new frame satisfies it.
+        let _ = copy;
+        unsupported_params(
+            "DataFrame.set_flags",
+            &[(
+                "allows_duplicate_labels",
+                allows_duplicate_labels != Some(false),
+            )],
+        )?;
         Ok(self.clone())
     }
 
@@ -20804,9 +21920,20 @@ impl PyDataFrame {
         })
     }
 
+    /// Swapping an axis with itself is the identity; swapping rows and
+    /// columns transposes (this transposed for every pair).
     #[pyo3(signature = (axis1, axis2, copy=None))]
     fn swapaxes(&self, axis1: usize, axis2: usize, copy: Option<bool>) -> PyResult<PyDataFrame> {
-        let _ = (axis1, axis2, copy);
+        // copy= only lets pandas share buffers; a new frame satisfies it.
+        let _ = copy;
+        if let Some(bad) = [axis1, axis2].into_iter().find(|&a| a > 1) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {bad} for object type DataFrame"
+            )));
+        }
+        if axis1 == axis2 {
+            return Ok(self.clone());
+        }
         self.transpose()
     }
 
@@ -20892,25 +22019,52 @@ impl PyDataFrame {
     /// pandas' default orient for a DataFrame is "columns"; this defaulted
     /// to "records", so fp's default output was not what pandas reads back by
     /// default. (4qg5w.19)
-    #[pyo3(signature = (path_or_buf=None, orient=None, **kwargs))]
+    /// See `write_json_py` for the keywords honoured (fvsao.5).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path_or_buf=None, *, orient=None, date_format=None, double_precision=10, force_ascii=true, date_unit="ms", default_handler=None, lines=false, compression=Some("infer"), index=None, indent=None, storage_options=None, mode="w"))]
     fn to_json(
         &self,
-        path_or_buf: Option<&str>,
+        path_or_buf: Option<&Bound<'_, PyAny>>,
         orient: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        date_format: Option<&str>,
+        double_precision: i64,
+        force_ascii: bool,
+        date_unit: &str,
+        default_handler: Option<&Bound<'_, PyAny>>,
+        lines: bool,
+        compression: Option<&str>,
+        index: Option<bool>,
+        indent: Option<i64>,
+        storage_options: Option<&Bound<'_, PyAny>>,
+        mode: &str,
     ) -> PyResult<Option<String>> {
-        let _ = kwargs;
-        let s = self
-            .inner
-            .to_json(orient.unwrap_or("columns"))
-            .map_err(frame_error_to_py)?;
-        if let Some(p) = path_or_buf {
-            std::fs::write(p, &s)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            Ok(None)
-        } else {
-            Ok(Some(s))
-        }
+        let args = JsonWriteArgs {
+            date_format,
+            double_precision,
+            force_ascii,
+            date_unit,
+            default_handler,
+            lines,
+            compression,
+            index,
+            indent,
+            storage_options,
+            mode,
+        };
+        write_json_py("DataFrame.to_json", path_or_buf, orient, &args, |lines| {
+            if lines {
+                // pandas ends every record line, the last included, with "\n".
+                let mut text = fp_io::write_jsonl_string(&self.inner).map_err(io_error_to_py)?;
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                Ok(text)
+            } else {
+                self.inner
+                    .to_json(orient.unwrap_or("columns"))
+                    .map_err(frame_error_to_py)
+            }
+        })
     }
 
     /// Was `self.inner.to_string()` — an ASCII table, not LaTeX.
@@ -20944,16 +22098,30 @@ impl PyDataFrame {
         py_output_text(buf, text)
     }
 
-    #[pyo3(signature = (path=None, **kwargs))]
+    /// pandas' `DataFrame.to_orc`: writes `path` (a path or a binary
+    /// file-like object), or returns the bytes when there is none. This
+    /// encoded the bytes and threw them away, writing nothing (fvsao.5).
+    #[pyo3(signature = (path=None, *, engine="pyarrow", index=None, engine_kwargs=None))]
     fn to_orc(
         &self,
+        py: Python<'_>,
         path: Option<&Bound<'_, PyAny>>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<()> {
-        let _ = (path, kwargs);
-        fp_io::write_orc_bytes(&self.inner)
-            .map(|_| ())
-            .map_err(io_error_to_py)
+        engine: &str,
+        index: Option<bool>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if engine != "pyarrow" {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "engine must be 'pyarrow'",
+            ));
+        }
+        unsupported_params(
+            "DataFrame.to_orc",
+            &[("engine_kwargs", engine_kwargs.is_none_or(|k| k.is_none()))],
+        )?;
+        arrow_writer_frame("to_orc", &self.inner, index)?;
+        let bytes = fp_io::write_orc_bytes(&self.inner).map_err(io_error_to_py)?;
+        py_output_bytes(py, path, bytes)
     }
 
     #[pyo3(signature = (path=None, engine="auto", compression=Some("snappy"), index=None, **kwargs))]
@@ -20966,11 +22134,27 @@ impl PyDataFrame {
         index: Option<bool>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        // One engine; compression changes file size, not the values read back.
-        let _ = (engine, compression);
+        // The engine only picks the library writing the same format. The file
+        // is written with the codec asked for: pandas' default snappy, or none;
+        // this wrote every file uncompressed whatever was asked (fvsao.5).
+        if !matches!(engine, "auto" | "pyarrow" | "fastparquet") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "engine must be one of 'pyarrow', 'fastparquet'",
+            ));
+        }
+        let codec = match compression {
+            Some("snappy") => fp_io::ParquetCompression::Snappy,
+            None => fp_io::ParquetCompression::Uncompressed,
+            Some(other) => {
+                return Err(not_implemented(&format!(
+                    "to_parquet(compression='{other}')"
+                )));
+            }
+        };
         reject_unsupported_kwargs("to_parquet", kwargs, &[])?;
         arrow_writer_frame("to_parquet", &self.inner, index)?;
-        let bytes = fp_io::write_parquet_bytes(&self.inner).map_err(io_error_to_py)?;
+        let bytes = fp_io::write_parquet_bytes_with_compression(&self.inner, codec)
+            .map_err(io_error_to_py)?;
         py_output_bytes(py, path, bytes)
     }
 
@@ -20982,44 +22166,98 @@ impl PyDataFrame {
         copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
         let _ = (freq, axis, copy);
-        Ok(self.clone())
+        Err(not_implemented("DataFrame.to_period (a PeriodIndex)"))
     }
 
-    #[pyo3(signature = (path, **kwargs))]
+    #[pyo3(signature = (path, *, compression=Some("infer"), protocol=5, storage_options=None))]
     fn to_pickle(
         &self,
         py: Python<'_>,
         path: &Bound<'_, PyAny>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        compression: Option<&str>,
+        protocol: i32,
+        storage_options: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let _ = kwargs;
-        to_pickle(py, &self.clone().into_bound_py_any(py)?, path, None)
+        unsupported_params(
+            "DataFrame.to_pickle",
+            &[
+                (
+                    "compression",
+                    compression_is_plain(compression, Some(path))?,
+                ),
+                ("storage_options", storage_options.is_none()),
+            ],
+        )?;
+        to_pickle(
+            py,
+            &self.clone().into_bound_py_any(py)?,
+            path,
+            Some(protocol),
+        )
     }
 
-    #[pyo3(signature = (index=true, **kwargs))]
+    /// The rows as records, the index first under its name ("index" when
+    /// unnamed) unless `index=False`, as pandas' recarray fields are. The
+    /// records are dicts, not a numpy recarray (fvsao.7); `index` used to be
+    /// dropped, so the index never appeared.
+    #[pyo3(signature = (index=true, column_dtypes=None, index_dtypes=None))]
     fn to_records(
         &self,
         py: Python<'_>,
-        index: Option<bool>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        index: bool,
+        column_dtypes: Option<&Bound<'_, PyAny>>,
+        index_dtypes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (index, kwargs);
-        self.to_dict(py, "records")
+        unsupported_params(
+            "DataFrame.to_records",
+            &[
+                ("column_dtypes", column_dtypes.is_none()),
+                ("index_dtypes", index_dtypes.is_none()),
+            ],
+        )?;
+        let records = self.to_dict(py, "records")?;
+        if !index {
+            return Ok(records);
+        }
+        let key = self.inner.index().name().unwrap_or("index").to_owned();
+        let labels = self.inner.index().labels();
+        let out = PyList::empty(py);
+        for (record, label) in records.bind(py).try_iter()?.zip(labels) {
+            let with_index = PyDict::new(py);
+            with_index.set_item(&key, index_label_to_py(py, label)?)?;
+            with_index.update(record?.cast::<PyDict>()?.as_mapping())?;
+            out.append(with_index)?;
+        }
+        Ok(out.into_any().unbind())
     }
 
+    /// pandas' `DataFrame.to_sql`. `chunksize` only batches the inserts;
+    /// schema, dtype and method are not supported yet and raise instead of
+    /// being dropped through `**kwargs` (fvsao.5).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (name, con, if_exists="fail", index=true, index_label=None, **kwargs))]
+    #[pyo3(signature = (name, con, *, schema=None, if_exists="fail", index=true, index_label=None, chunksize=None, dtype=None, method=None))]
     fn to_sql(
         &self,
         py: Python<'_>,
         name: &str,
         con: &Bound<'_, PyAny>,
+        schema: Option<&str>,
         if_exists: &str,
         index: bool,
         index_label: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        chunksize: Option<usize>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        method: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let _ = kwargs;
+        let _ = chunksize;
+        unsupported_params(
+            "to_sql",
+            &[
+                ("schema", schema.is_none()),
+                ("dtype", dtype.is_none()),
+                ("method", method.is_none()),
+            ],
+        )?;
         let db_conn = if let Ok(s) = con.extract::<String>() {
             let path = if let Some(rest) = s.strip_prefix("sqlite:///") {
                 rest
@@ -21172,7 +22410,9 @@ impl PyDataFrame {
         copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
         let _ = (freq, how, axis, copy);
-        Ok(self.clone())
+        Err(not_implemented(
+            "DataFrame.to_timestamp (a DatetimeIndex from a PeriodIndex)",
+        ))
     }
 
     fn to_xarray(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -21184,37 +22424,106 @@ impl PyDataFrame {
         self.to_dict(py, "list")
     }
 
-    #[pyo3(signature = (path_or_buffer=None, **kwargs))]
+    /// pandas' `DataFrame.to_xml` in its pretty-printed element form: the
+    /// index as the first element (named after the index, else "index"),
+    /// missing values as empty elements (or `na_rep`), text escaped, and the
+    /// declaration quoted as the chosen parser writes it. This dropped every
+    /// keyword, never wrote the index, spelled missing values "NaN" and did
+    /// not escape `<` or `&` (fvsao.5).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path_or_buffer=None, *, index=true, root_name="data", row_name="row", na_rep=None, attr_cols=None, elem_cols=None, namespaces=None, prefix=None, encoding="utf-8", xml_declaration=true, pretty_print=true, parser="lxml", stylesheet=None, compression=Some("infer"), storage_options=None))]
     fn to_xml(
         &self,
-        path_or_buffer: Option<&str>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        path_or_buffer: Option<&Bound<'_, PyAny>>,
+        index: bool,
+        root_name: &str,
+        row_name: &str,
+        na_rep: Option<&str>,
+        attr_cols: Option<&Bound<'_, PyAny>>,
+        elem_cols: Option<&Bound<'_, PyAny>>,
+        namespaces: Option<&Bound<'_, PyAny>>,
+        prefix: Option<&str>,
+        encoding: &str,
+        xml_declaration: bool,
+        pretty_print: bool,
+        parser: &str,
+        stylesheet: Option<&Bound<'_, PyAny>>,
+        compression: Option<&str>,
+        storage_options: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<String>> {
-        let _ = kwargs;
-        let mut xml = String::from("<?xml version=\'1.0\' encoding=\'utf-8\'?>\n<data>\n");
-        let cols = self.inner.column_names();
-        for i in 0..self.inner.len() {
-            xml.push_str("  <row>\n");
-            for c in &cols {
-                if let Some(col) = self.inner.column(c) {
-                    let val_str = col
-                        .values()
-                        .get(i)
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    xml.push_str(&format!("    <{c}>{val_str}</{c}>\n"));
-                }
+        unsupported_params(
+            "DataFrame.to_xml",
+            &[
+                ("attr_cols", attr_cols.is_none()),
+                ("namespaces", namespaces.is_none()),
+                ("prefix", prefix.is_none()),
+                (
+                    "encoding",
+                    matches!(encoding.to_ascii_lowercase().as_str(), "utf-8" | "utf8"),
+                ),
+                ("pretty_print", pretty_print),
+                ("stylesheet", stylesheet.is_none()),
+                (
+                    "compression",
+                    compression_is_plain(compression, path_or_buffer)?,
+                ),
+                ("storage_options", storage_options.is_none()),
+            ],
+        )?;
+        let quote = match parser {
+            "lxml" => '\'',
+            "etree" => '"',
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Values for parser can only be lxml or etree.",
+                ));
             }
-            xml.push_str("  </row>\n");
+        };
+        let columns: Vec<String> = match elem_cols {
+            Some(cols) if !cols.is_none() => extract_col_names_flexible(Some(cols))?,
+            _ => self.inner.column_names().into_iter().cloned().collect(),
+        };
+        let escape = |text: &str| {
+            text.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        };
+        let element = |xml: &mut String, tag: &str, value: Option<String>| match value
+            .or_else(|| na_rep.map(str::to_owned))
+        {
+            Some(text) => xml.push_str(&format!("    <{tag}>{}</{tag}>\n", escape(&text))),
+            None => xml.push_str(&format!("    <{tag}/>\n")),
+        };
+        let mut xml = String::new();
+        if xml_declaration {
+            xml.push_str(&format!(
+                "<?xml version={quote}1.0{quote} encoding={quote}utf-8{quote}?>\n"
+            ));
         }
-        xml.push_str("</data>\n");
-        if let Some(p) = path_or_buffer {
-            std::fs::write(p, &xml)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            Ok(None)
-        } else {
-            Ok(Some(xml))
+        xml.push_str(&format!("<{root_name}>\n"));
+        let index_tag = self.inner.index().name().unwrap_or("index").to_owned();
+        for (i, label) in self.inner.index().labels().iter().enumerate() {
+            xml.push_str(&format!("  <{row_name}>\n"));
+            if index {
+                let text = (!matches!(label, IndexLabel::Null(_))).then(|| label.to_string());
+                element(&mut xml, &index_tag, text);
+            }
+            for c in &columns {
+                let col = self
+                    .inner
+                    .column(c)
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(c.clone()))?;
+                let value = &col.values()[i];
+                element(
+                    &mut xml,
+                    c,
+                    (!value.is_missing()).then(|| value.to_string()),
+                );
+            }
+            xml.push_str(&format!("  </{row_name}>\n"));
         }
+        xml.push_str(&format!("</{root_name}>"));
+        write_text_target(path_or_buffer, xml, false)
     }
 
     #[pyo3(signature = (func, axis=0, *args, **kwargs))]
@@ -21968,12 +23277,14 @@ impl PySeriesListAccessor {
         Ok(PySeries { inner: s })
     }
 
+    /// A frankenpandas Series never holds lists, which is where pandas
+    /// refuses the accessor; this returned the Series unchanged (fvsao.5).
     #[pyo3(signature = (i))]
     fn get(&self, i: i64) -> PyResult<PySeries> {
         let _ = i;
-        Ok(PySeries {
-            inner: self.series.clone(),
-        })
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            "Can only use the .list accessor with a 'list[pyarrow]' dtype, not object.",
+        ))
     }
 }
 
@@ -21993,12 +23304,14 @@ impl PySeriesStructAccessor {
         })
     }
 
+    /// A frankenpandas Series never holds structs, which is where pandas
+    /// refuses the accessor; this returned the Series unchanged (fvsao.5).
     #[pyo3(signature = (name))]
     fn field(&self, name: &str) -> PyResult<PySeries> {
         let _ = name;
-        Ok(PySeries {
-            inner: self.series.clone(),
-        })
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            "Can only use the .struct accessor with a 'struct[pyarrow]' dtype, not object.",
+        ))
     }
 }
 
@@ -22352,7 +23665,16 @@ impl PyRolling {
         interpolation: Option<&str>,
         numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (interpolation, numeric_only);
+        unsupported_params(
+            "Rolling.quantile",
+            &[
+                (
+                    "interpolation",
+                    matches!(interpolation, None | Some("linear")),
+                ),
+                ("numeric_only", !numeric_only),
+            ],
+        )?;
         if let Some(ref s) = self.series {
             let res = s
                 .rolling_with_center(self.window, self.min_periods, self.center)
@@ -22569,7 +23891,17 @@ impl PyRolling {
         args: Option<&Bound<'_, PyTuple>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (raw, engine, engine_kwargs, args, kwargs);
+        // func receives each window as a list, and args/kwargs are passed
+        // through; raw=True (ndarrays) and the numba engine are not
+        // supported yet.
+        unsupported_params(
+            "apply",
+            &[
+                ("raw", !raw),
+                ("engine", matches!(engine, None | Some("cython"))),
+                ("engine_kwargs", engine_kwargs.is_none()),
+            ],
+        )?;
         if func.extract::<String>().is_ok() {
             return self.agg(py, func);
         }
@@ -22591,7 +23923,7 @@ impl PyRolling {
                             .map(|v| scalar_to_py(py, v))
                             .collect::<Result<_, _>>()?;
                         let arg = PyList::new(py, py_slice)?;
-                        let res = func.call1((arg,))?;
+                        let res = call_window_func(func, arg.into_any(), args, kwargs)?;
                         let res_scalar = py_to_scalar(py, &res)?;
                         out_vals.push(res_scalar);
                     }
@@ -22635,7 +23967,7 @@ impl PyRolling {
                                 .map(|v| scalar_to_py(py, v))
                                 .collect::<Result<_, _>>()?;
                             let arg = PyList::new(py, py_slice)?;
-                            let res = func.call1((arg,))?;
+                            let res = call_window_func(func, arg.into_any(), args, kwargs)?;
                             let res_scalar = py_to_scalar(py, &res)?;
                             out_vals.push(res_scalar);
                         }
@@ -22836,7 +24168,16 @@ impl PyExpanding {
         interpolation: Option<&str>,
         numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (interpolation, numeric_only);
+        unsupported_params(
+            "Expanding.quantile",
+            &[
+                (
+                    "interpolation",
+                    matches!(interpolation, None | Some("linear")),
+                ),
+                ("numeric_only", !numeric_only),
+            ],
+        )?;
         if let Some(ref s) = self.series {
             let res = s
                 .expanding(self.min_periods)
@@ -23051,7 +24392,17 @@ impl PyExpanding {
         args: Option<&Bound<'_, PyTuple>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (raw, engine, engine_kwargs, args, kwargs);
+        // func receives each window as a list, and args/kwargs are passed
+        // through; raw=True (ndarrays) and the numba engine are not
+        // supported yet.
+        unsupported_params(
+            "apply",
+            &[
+                ("raw", !raw),
+                ("engine", matches!(engine, None | Some("cython"))),
+                ("engine_kwargs", engine_kwargs.is_none()),
+            ],
+        )?;
         if func.extract::<String>().is_ok() {
             return self.agg(py, func);
         }
@@ -23071,7 +24422,7 @@ impl PyExpanding {
                             .map(|v| scalar_to_py(py, v))
                             .collect::<Result<_, _>>()?;
                         let arg = PyList::new(py, py_slice)?;
-                        let res = func.call1((arg,))?;
+                        let res = call_window_func(func, arg.into_any(), args, kwargs)?;
                         let res_scalar = py_to_scalar(py, &res)?;
                         out_vals.push(res_scalar);
                     }
@@ -23113,7 +24464,7 @@ impl PyExpanding {
                                 .map(|v| scalar_to_py(py, v))
                                 .collect::<Result<_, _>>()?;
                             let arg = PyList::new(py, py_slice)?;
-                            let res = func.call1((arg,))?;
+                            let res = call_window_func(func, arg.into_any(), args, kwargs)?;
                             let res_scalar = py_to_scalar(py, &res)?;
                             out_vals.push(res_scalar);
                         }
@@ -23311,9 +24662,15 @@ impl PyExponentialMovingWindow {
         Ok(set.into_any().unbind())
     }
 
+    /// The engine only chooses how the online updates are compiled; the
+    /// window computed is the same.
     #[pyo3(signature = (engine="numba"))]
     pub fn online(&self, engine: &str) -> PyResult<PyExponentialMovingWindow> {
-        let _ = engine;
+        if engine != "numba" {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "'numba' is the only supported engine",
+            ));
+        }
         Ok(PyExponentialMovingWindow {
             series: self.series.clone(),
             dataframe: self.dataframe.clone(),
@@ -23843,7 +25200,16 @@ impl PyGroupBy {
         interpolation: Option<&str>,
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
-        let _ = (interpolation, numeric_only);
+        unsupported_params(
+            "DataFrameGroupBy.quantile",
+            &[
+                (
+                    "interpolation",
+                    matches!(interpolation, None | Some("linear")),
+                ),
+                ("numeric_only", !numeric_only),
+            ],
+        )?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
             .df
@@ -23923,7 +25289,49 @@ impl PyGroupBy {
         Ok(PySeries { inner: result })
     }
 
-    fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    /// pandas' `DataFrameGroupBy.agg`: a function name, a {column: func}
+    /// dict, or named aggregation `agg(out=('col', 'func'), ...)`, which
+    /// fp-frame's `agg_named` implements (it used to raise, since `func` was
+    /// required). Extra arguments for the function are not supported.
+    #[pyo3(signature = (func=None, *args, **kwargs))]
+    fn agg(
+        &self,
+        py: Python<'_>,
+        func: Option<&Bound<'_, PyAny>>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let named = kwargs.filter(|k| !k.is_empty());
+        if !args.is_empty() || (func.is_some() && named.is_some()) {
+            return Err(not_implemented(
+                "DataFrameGroupBy.agg with arguments for the function",
+            ));
+        }
+        let Some(func) = func.filter(|f| !f.is_none()) else {
+            let missing = || {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Must provide 'func' or tuples of '(column, aggfunc).",
+                )
+            };
+            let named = named.ok_or_else(missing)?;
+            let mut specs = Vec::with_capacity(named.len());
+            for (out, spec) in named.iter() {
+                let (column, function): (String, String) = spec.extract().map_err(|_| missing())?;
+                specs.push((out.extract::<String>()?, column, function));
+            }
+            let spec_refs: Vec<(&str, &str, &str)> = specs
+                .iter()
+                .map(|(out, column, function)| (out.as_str(), column.as_str(), function.as_str()))
+                .collect();
+            let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
+            let res = self
+                .df
+                .groupby(&by_refs)
+                .map_err(frame_error_to_py)?
+                .agg_named(&spec_refs)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        };
         if let Ok(name) = func.extract::<String>() {
             let res = match name.as_str() {
                 "sum" => self.sum()?,
@@ -23967,8 +25375,15 @@ impl PyGroupBy {
         ))
     }
 
-    fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.agg(py, func)
+    #[pyo3(signature = (func=None, *args, **kwargs))]
+    fn aggregate(
+        &self,
+        py: Python<'_>,
+        func: Option<&Bound<'_, PyAny>>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.agg(py, func, args, kwargs)
     }
 
     #[pyo3(signature = (limit=None))]
@@ -24066,7 +25481,7 @@ impl PyGroupBy {
         include_groups: Option<bool>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (args, include_groups, kwargs);
+        let _ = include_groups;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
         let groups = gb.groups();
@@ -24082,8 +25497,10 @@ impl PyGroupBy {
                 _ => format!("{k:?}"),
             };
             if let Ok(group_df) = gb.get_group(&k_str) {
-                let py_df = PyDataFrame { inner: group_df };
-                let res = func.call1((py_df,))?;
+                let py_df = PyDataFrame { inner: group_df }.into_bound_py_any(py)?;
+                // pandas calls func(group, *args, **kwargs); both used to be
+                // dropped (fvsao.5).
+                let res = func.call(prepend_arg(py_df, Some(args))?, kwargs)?;
                 if let Ok(df_res) = res.extract::<PyDataFrame>() {
                     out_dfs.push(df_res.inner);
                 } else if let Ok(s_res) = res.extract::<PySeries>() {
@@ -24119,7 +25536,8 @@ impl PyGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (py, args, kwargs);
+        let _ = py;
+        plot_args(args, kwargs)?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let spec = self
             .df
@@ -24141,7 +25559,8 @@ impl PyGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (py, args, kwargs);
+        let _ = py;
+        plot_args(args, kwargs)?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let spec = self
             .df
@@ -24163,7 +25582,8 @@ impl PyGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (py, args, kwargs);
+        let _ = py;
+        plot_args(args, kwargs)?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let spec = self
             .df
@@ -24244,7 +25664,10 @@ impl PyGroupBy {
 
     #[pyo3(signature = (func, dropna=true))]
     fn filter(&self, func: &Bound<'_, PyAny>, dropna: Option<bool>) -> PyResult<PyDataFrame> {
-        let _ = dropna;
+        unsupported_params(
+            "DataFrameGroupBy.filter",
+            &[("dropna", dropna != Some(false))],
+        )?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
         let groups = gb.groups();
@@ -24313,7 +25736,7 @@ impl PyGroupBy {
 
     #[pyo3(signature = (n, dropna=None))]
     fn nth(&self, n: i64, dropna: Option<&str>) -> PyResult<PyDataFrame> {
-        let _ = dropna;
+        unsupported_params("DataFrameGroupBy.nth", &[("dropna", dropna.is_none())])?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
             .df
@@ -24357,7 +25780,14 @@ impl PyGroupBy {
         skipna: Option<bool>,
         numeric_only: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (axis, skipna, numeric_only);
+        unsupported_params(
+            "DataFrameGroupBy.idxmax",
+            &[
+                ("axis", matches!(axis, None | Some(0))),
+                ("skipna", skipna != Some(false)),
+                ("numeric_only", numeric_only != Some(true)),
+            ],
+        )?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
             .df
@@ -24375,7 +25805,14 @@ impl PyGroupBy {
         skipna: Option<bool>,
         numeric_only: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (axis, skipna, numeric_only);
+        unsupported_params(
+            "DataFrameGroupBy.idxmin",
+            &[
+                ("axis", matches!(axis, None | Some(0))),
+                ("skipna", skipna != Some(false)),
+                ("numeric_only", numeric_only != Some(true)),
+            ],
+        )?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
             .df
@@ -24395,7 +25832,7 @@ impl PyGroupBy {
         weights: Option<&Bound<'_, PyAny>>,
         random_state: Option<u64>,
     ) -> PyResult<PyDataFrame> {
-        let _ = weights;
+        unsupported_params("DataFrameGroupBy.sample", &[("weights", weights.is_none())])?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
             .df
@@ -24415,7 +25852,15 @@ impl PyGroupBy {
         fill_value: Option<&Bound<'_, PyAny>>,
         suffix: Option<&str>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (freq, axis, fill_value, suffix);
+        unsupported_params(
+            "DataFrameGroupBy.shift",
+            &[
+                ("freq", freq.is_none()),
+                ("axis", matches!(axis, None | Some(0))),
+                ("fill_value", fill_value.is_none_or(|f| f.is_none())),
+                ("suffix", suffix.is_none()),
+            ],
+        )?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
             .df
@@ -24428,7 +25873,10 @@ impl PyGroupBy {
 
     #[pyo3(signature = (indices, axis=None))]
     fn take(&self, indices: Vec<i64>, axis: Option<usize>) -> PyResult<PyDataFrame> {
-        let _ = axis;
+        unsupported_params(
+            "DataFrameGroupBy.take",
+            &[("axis", matches!(axis, None | Some(0)))],
+        )?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
             .df
@@ -24450,6 +25898,13 @@ impl PyGroupBy {
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
         if let Ok(func_str) = func.extract::<String>() {
+            // A named transform takes no arguments here; transform('shift',
+            // periods=2) used to shift by one (fvsao.5).
+            if !args.is_empty() || kwargs.is_some_and(|k| !k.is_empty()) {
+                return Err(not_implemented(&format!(
+                    "DataFrameGroupBy.transform('{func_str}') with arguments"
+                )));
+            }
             let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
@@ -24465,7 +25920,16 @@ impl PyGroupBy {
         ascending: Option<bool>,
         dropna: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (subset, normalize, sort, ascending, dropna);
+        unsupported_params(
+            "DataFrameGroupBy.value_counts",
+            &[
+                ("subset", subset.is_none()),
+                ("normalize", normalize != Some(true)),
+                ("sort", sort != Some(false)),
+                ("ascending", ascending != Some(true)),
+                ("dropna", dropna != Some(false)),
+            ],
+        )?;
         let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
             .df
@@ -24770,7 +26234,13 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (q=0.5, interpolation="linear"))]
     fn quantile(&self, q: f64, interpolation: Option<&str>) -> PyResult<PySeries> {
-        let _ = interpolation;
+        unsupported_params(
+            "SeriesGroupBy.quantile",
+            &[(
+                "interpolation",
+                matches!(interpolation, None | Some("linear")),
+            )],
+        )?;
         let res = self
             .series
             .groupby(&self.by)
@@ -24989,7 +26459,6 @@ impl PySeriesGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (args, kwargs);
         let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
         let groups = gb.groups();
         let mut keys: Vec<_> = groups.keys().cloned().collect();
@@ -25003,8 +26472,10 @@ impl PySeriesGroupBy {
                 _ => format!("{k:?}"),
             };
             if let Ok(group_s) = gb.get_group(&k_str) {
-                let py_s = PySeries { inner: group_s };
-                let res = func.call1((py_s,))?;
+                let py_s = PySeries { inner: group_s }.into_bound_py_any(py)?;
+                // pandas calls func(group, *args, **kwargs); both used to be
+                // dropped (fvsao.5).
+                let res = func.call(prepend_arg(py_s, Some(args))?, kwargs)?;
                 if let Ok(s_res) = res.extract::<PySeries>() {
                     out_series.push(s_res.inner);
                 } else if let Ok(sc) = py_to_scalar(py, &res) {
@@ -25034,7 +26505,15 @@ impl PySeriesGroupBy {
         method: Option<&str>,
         min_periods: Option<usize>,
     ) -> PyResult<PySeries> {
-        let _ = (method, min_periods);
+        // Fewer than two pairs already correlate to NaN, so min_periods up to
+        // 2 is the default answer.
+        unsupported_params(
+            "SeriesGroupBy.corr",
+            &[
+                ("method", matches!(method, None | Some("pearson"))),
+                ("min_periods", min_periods.is_none_or(|m| m <= 2)),
+            ],
+        )?;
         let res = self
             .series
             .groupby(&self.by)
@@ -25051,7 +26530,13 @@ impl PySeriesGroupBy {
         min_periods: Option<usize>,
         ddof: Option<usize>,
     ) -> PyResult<PySeries> {
-        let _ = (min_periods, ddof);
+        unsupported_params(
+            "SeriesGroupBy.cov",
+            &[
+                ("min_periods", min_periods.is_none_or(|m| m <= 2)),
+                ("ddof", ddof.is_none_or(|d| d == 1)),
+            ],
+        )?;
         let res = self
             .series
             .groupby(&self.by)
@@ -25126,7 +26611,7 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (func, dropna=true))]
     fn filter(&self, func: &Bound<'_, PyAny>, dropna: Option<bool>) -> PyResult<PySeries> {
-        let _ = dropna;
+        unsupported_params("SeriesGroupBy.filter", &[("dropna", dropna != Some(false))])?;
         let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
         let groups = gb.groups();
         let mut keys: Vec<_> = groups.keys().cloned().collect();
@@ -25170,7 +26655,8 @@ impl PySeriesGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (py, args, kwargs);
+        let _ = py;
+        plot_args(args, kwargs)?;
         let spec = self
             .series
             .groupby(&self.by)
@@ -25186,7 +26672,13 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (axis=0, skipna=true))]
     fn idxmax(&self, axis: Option<usize>, skipna: Option<bool>) -> PyResult<PySeries> {
-        let _ = (axis, skipna);
+        unsupported_params(
+            "SeriesGroupBy.idxmax",
+            &[
+                ("axis", matches!(axis, None | Some(0))),
+                ("skipna", skipna != Some(false)),
+            ],
+        )?;
         let res = self
             .series
             .groupby(&self.by)
@@ -25198,7 +26690,13 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (axis=0, skipna=true))]
     fn idxmin(&self, axis: Option<usize>, skipna: Option<bool>) -> PyResult<PySeries> {
-        let _ = (axis, skipna);
+        unsupported_params(
+            "SeriesGroupBy.idxmin",
+            &[
+                ("axis", matches!(axis, None | Some(0))),
+                ("skipna", skipna != Some(false)),
+            ],
+        )?;
         let res = self
             .series
             .groupby(&self.by)
@@ -25255,7 +26753,7 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (n, dropna=None))]
     fn nth(&self, n: i64, dropna: Option<&str>) -> PyResult<PySeries> {
-        let _ = dropna;
+        unsupported_params("SeriesGroupBy.nth", &[("dropna", dropna.is_none())])?;
         let res = self
             .series
             .groupby(&self.by)
@@ -25283,7 +26781,14 @@ impl PySeriesGroupBy {
         limit: Option<usize>,
         freq: Option<&str>,
     ) -> PyResult<PySeries> {
-        let _ = (fill_method, limit, freq);
+        unsupported_params(
+            "SeriesGroupBy.pct_change",
+            &[
+                ("fill_method", fill_method.is_none()),
+                ("limit", limit.is_none()),
+                ("freq", freq.is_none()),
+            ],
+        )?;
         let res = self
             .series
             .groupby(&self.by)
@@ -25326,7 +26831,8 @@ impl PySeriesGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (py, args, kwargs);
+        let _ = py;
+        plot_args(args, kwargs)?;
         let spec = self
             .series
             .groupby(&self.by)
@@ -25349,7 +26855,7 @@ impl PySeriesGroupBy {
         weights: Option<&Bound<'_, PyAny>>,
         random_state: Option<u64>,
     ) -> PyResult<PySeries> {
-        let _ = weights;
+        unsupported_params("SeriesGroupBy.sample", &[("weights", weights.is_none())])?;
         let res = self
             .series
             .groupby(&self.by)
@@ -25361,7 +26867,10 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (indices, axis=None))]
     fn take(&self, indices: Vec<i64>, axis: Option<usize>) -> PyResult<PySeries> {
-        let _ = axis;
+        unsupported_params(
+            "SeriesGroupBy.take",
+            &[("axis", matches!(axis, None | Some(0)))],
+        )?;
         let res = self
             .series
             .groupby(&self.by)
@@ -25381,6 +26890,13 @@ impl PySeriesGroupBy {
     ) -> PyResult<Py<PyAny>> {
         let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
         if let Ok(func_str) = func.extract::<String>() {
+            // A named transform takes no arguments here; transform('shift',
+            // periods=2) used to shift by one (fvsao.5).
+            if !args.is_empty() || kwargs.is_some_and(|k| !k.is_empty()) {
+                return Err(not_implemented(&format!(
+                    "SeriesGroupBy.transform('{func_str}') with arguments"
+                )));
+            }
             let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
@@ -27648,7 +29164,9 @@ fn cut(
     precision: usize,
     include_lowest: bool,
 ) -> PyResult<PySeries> {
-    let _ = precision;
+    // precision sets the digits of the interval labels; only pandas'
+    // default is produced (it was ignored).
+    unsupported_params("cut", &[("precision", precision == 3)])?;
     let series = if let Ok(s) = x.extract::<PyRef<'_, PySeries>>() {
         s.inner.clone()
     } else if let Ok(list) = x.cast::<PyList>() {
@@ -27747,7 +29265,9 @@ fn qcut(
     labels: Option<Vec<String>>,
     precision: usize,
 ) -> PyResult<PySeries> {
-    let _ = precision;
+    // precision sets the digits of the interval labels; only pandas'
+    // default is produced (it was ignored).
+    unsupported_params("qcut", &[("precision", precision == 3)])?;
     let series = if let Ok(s) = x.extract::<PyRef<'_, PySeries>>() {
         s.inner.clone()
     } else if let Ok(list) = x.cast::<PyList>() {
@@ -27809,7 +29329,16 @@ fn read_sql(
     index_col: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyDataFrame> {
-    let _ = kwargs;
+    // pandas' other read_sql keywords (params, parse_dates, columns,
+    // chunksize, dtype, ...) were dropped; coerce_float=True is its default.
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let key: String = key.extract()?;
+            if !(key == "coerce_float" && value.is_truthy()?) {
+                return Err(not_implemented(&format!("read_sql({key}=...)")));
+            }
+        }
+    }
     let db_conn = if let Ok(s) = con.extract::<String>() {
         let path = if let Some(rest) = s.strip_prefix("sqlite:///") {
             rest
@@ -27901,17 +29430,90 @@ fn read_sql_table(
     read_sql(py, &sql, con, index_col, kwargs)
 }
 
+/// Keywords pandas' `assert_*_equal` take beyond the spelled-out ones: at
+/// their default they change nothing and pass, `obj` only names the object in
+/// messages, and any other value raises instead of silently loosening or
+/// tightening the check (fvsao.5).
+fn assert_equal_kwargs(func: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let Some(kwargs) = kwargs else {
+        return Ok(());
+    };
+    for (key, value) in kwargs.iter() {
+        let key: String = key.extract()?;
+        let at_default = match key.as_str() {
+            "check_freq" | "check_flags" | "check_categorical" | "check_index" => {
+                value.is_truthy()?
+            }
+            "check_like" | "by_blocks" | "check_datetimelike_compat" => !value.is_truthy()?,
+            "obj" => true,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "{func}() got an unexpected keyword argument '{key}'"
+                )));
+            }
+        };
+        if !at_default {
+            return Err(not_implemented(&format!("{func}({key}=...)")));
+        }
+    }
+    Ok(())
+}
+
+/// pandas' `check_index_type` / `check_column_type` / `exact`: `True` and
+/// `'equiv'` compare the labels' types (frankenpandas has no RangeIndex vs
+/// Int64 Index distinction for 'equiv' to relax), `False` compares values.
+fn assert_type_flag(flag: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if flag.extract::<&str>().is_ok_and(|s| s == "equiv") {
+        return Ok(true);
+    }
+    flag.extract::<bool>()
+}
+
+/// Whether two values count as equal for `assert_*_equal`: missing matches
+/// missing, floats within `atol + rtol * |right|` unless `check_exact`, and
+/// with `mix_numeric` (check_dtype=False) an int or bool compared with a
+/// float by value.
+fn assert_scalars_equal(
+    left: &Scalar,
+    right: &Scalar,
+    check_exact: bool,
+    rtol: f64,
+    atol: f64,
+    mix_numeric: bool,
+) -> bool {
+    let as_float = |s: &Scalar| match s {
+        Scalar::Float64(f) => Some(*f),
+        Scalar::Int64(i) if mix_numeric => Some(*i as f64),
+        Scalar::Bool(b) if mix_numeric => Some(f64::from(u8::from(*b))),
+        _ => None,
+    };
+    if left.is_missing() || right.is_missing() {
+        return left.is_missing() && right.is_missing();
+    }
+    let a_float = matches!(left, Scalar::Float64(_)) || matches!(right, Scalar::Float64(_));
+    match (as_float(left), as_float(right)) {
+        (Some(a), Some(b)) if a_float => {
+            if check_exact {
+                a == b
+            } else {
+                (a - b).abs() <= atol + rtol * b.abs()
+            }
+        }
+        _ => left == right,
+    }
+}
+
 /// Assert that two DataFrames are equal.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (left, right, check_dtype=true, check_index_type="equiv", check_column_type="equiv", check_frame_type=true, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+#[pyo3(signature = (left, right, check_dtype=true, check_index_type=None, check_column_type=None, check_frame_type=true, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
 fn assert_frame_equal(
     _py: Python<'_>,
     left: &Bound<'_, PyAny>,
     right: &Bound<'_, PyAny>,
     check_dtype: bool,
-    check_index_type: &str,
-    check_column_type: &str,
+    check_index_type: Option<&Bound<'_, PyAny>>,
+    check_column_type: Option<&Bound<'_, PyAny>>,
     check_frame_type: bool,
     check_names: bool,
     check_exact: bool,
@@ -27919,16 +29521,27 @@ fn assert_frame_equal(
     atol: f64,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
-    let _ = (
-        check_dtype,
-        check_index_type,
-        check_column_type,
-        check_frame_type,
-        check_names,
-        kwargs,
-    );
-    let l_df = left.extract::<PyRef<'_, PyDataFrame>>()?;
-    let r_df = right.extract::<PyRef<'_, PyDataFrame>>()?;
+    // fvsao.5: check_dtype, check_names and the type flags were dropped, so
+    // frames differing in dtype or index name passed. Column labels are
+    // strings here, so check_column_type has nothing more to compare.
+    assert_equal_kwargs("assert_frame_equal", kwargs)?;
+    let check_index_type = check_index_type.map_or(Ok(true), assert_type_flag)?;
+    if let Some(flag) = check_column_type {
+        assert_type_flag(flag)?;
+    }
+    let (Ok(l_df), Ok(r_df)) = (
+        left.extract::<PyRef<'_, PyDataFrame>>(),
+        right.extract::<PyRef<'_, PyDataFrame>>(),
+    ) else {
+        if check_frame_type {
+            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                "DataFrame Expected type <class 'frankenpandas.DataFrame'>",
+            ));
+        }
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "assert_frame_equal compares two frankenpandas DataFrames",
+        ));
+    };
 
     if l_df.inner.shape() != r_df.inner.shape() {
         return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
@@ -27949,49 +29562,74 @@ fn assert_frame_equal(
             ),
         ));
     }
-    if l_df.inner.index().labels() != r_df.inner.index().labels() {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            "DataFrame index labels mismatch",
-        ));
-    }
+    assert_indexes_equal(
+        "DataFrame.index",
+        l_df.inner.index(),
+        r_df.inner.index(),
+        check_index_type,
+        check_names,
+        check_exact,
+        rtol,
+        atol,
+    )?;
     for col in &l_cols {
         let lc = l_df.inner.column(col).unwrap();
         let rc = r_df.inner.column(col).unwrap();
+        if check_dtype && lc.dtype() != rc.dtype() {
+            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                format!(
+                    "Attributes of DataFrame.iloc[:, {}] (column name=\"{col}\") are different\n\n\
+                 Attribute \"dtype\" are different\n[left]:  {}\n[right]: {}",
+                    l_cols.iter().position(|c| c == col).unwrap_or(0),
+                    pandas_dtype_name(&lc.dtype()),
+                    pandas_dtype_name(&rc.dtype()),
+                ),
+            ));
+        }
         for row in 0..lc.len() {
-            let ls = &lc.values()[row];
-            let rs = &rc.values()[row];
-            match (ls, rs) {
-                (Scalar::Float64(f1), Scalar::Float64(f2)) => {
-                    if f1.is_nan() && f2.is_nan() {
-                        continue;
-                    }
-                    if check_exact {
-                        if f1 != f2 {
-                            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                                format!("Values differ at column '{col}', row {row}: {f1} != {f2}"),
-                            ));
-                        }
-                    } else {
-                        let diff = (f1 - f2).abs();
-                        if diff > atol + rtol * f2.abs() {
-                            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                                format!(
-                                    "Values differ at column '{col}', row {row}: {f1} != {f2} (diff {diff})"
-                                ),
-                            ));
-                        }
-                    }
-                }
-                (Scalar::Null(_), Scalar::Null(_)) => continue,
-                (a, b) => {
-                    if a != b {
-                        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                            format!("Values differ at column '{col}', row {row}: {a:?} != {b:?}"),
-                        ));
-                    }
-                }
+            let (ls, rs) = (&lc.values()[row], &rc.values()[row]);
+            if !assert_scalars_equal(ls, rs, check_exact, rtol, atol, !check_dtype) {
+                return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                    format!("Values differ at column '{col}', row {row}: {ls:?} != {rs:?}"),
+                ));
             }
         }
+    }
+    Ok(())
+}
+
+/// The index part of pandas' `assert_*_equal`: the labels (their types
+/// too unless `check_type` is False), and the names when `check_names`.
+#[allow(clippy::too_many_arguments)]
+fn assert_indexes_equal(
+    what: &str,
+    left: &Index,
+    right: &Index,
+    check_type: bool,
+    check_names: bool,
+    check_exact: bool,
+    rtol: f64,
+    atol: f64,
+) -> PyResult<()> {
+    let (l, r) = (left.labels(), right.labels());
+    let same = l.len() == r.len()
+        && l.iter().zip(r).all(|(a, b)| {
+            let (a, b) = (index_label_to_scalar(a), index_label_to_scalar(b));
+            assert_scalars_equal(&a, &b, check_exact, rtol, atol, !check_type)
+        });
+    if !same {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            format!("{what} values are different"),
+        ));
+    }
+    if check_names && left.name() != right.name() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            format!(
+                "{what} are different\n\nAttribute \"names\" are different\n[left]:  [{:?}]\n[right]: [{:?}]",
+                left.name(),
+                right.name()
+            ),
+        ));
     }
     Ok(())
 }
@@ -27999,13 +29637,13 @@ fn assert_frame_equal(
 /// Assert that two Series are equal.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (left, right, check_dtype=true, check_index_type="equiv", check_series_type=true, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+#[pyo3(signature = (left, right, check_dtype=true, check_index_type=None, check_series_type=true, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
 fn assert_series_equal(
     _py: Python<'_>,
     left: &Bound<'_, PyAny>,
     right: &Bound<'_, PyAny>,
     check_dtype: bool,
-    check_index_type: &str,
+    check_index_type: Option<&Bound<'_, PyAny>>,
     check_series_type: bool,
     check_names: bool,
     check_exact: bool,
@@ -28013,15 +29651,23 @@ fn assert_series_equal(
     atol: f64,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
-    let _ = (
-        check_dtype,
-        check_index_type,
-        check_series_type,
-        check_names,
-        kwargs,
-    );
-    let l_s = left.extract::<PyRef<'_, PySeries>>()?;
-    let r_s = right.extract::<PyRef<'_, PySeries>>()?;
+    // fvsao.5: check_dtype, check_names and check_index_type were dropped,
+    // so Series differing in dtype, name or index name passed.
+    assert_equal_kwargs("assert_series_equal", kwargs)?;
+    let check_index_type = check_index_type.map_or(Ok(true), assert_type_flag)?;
+    let (Ok(l_s), Ok(r_s)) = (
+        left.extract::<PyRef<'_, PySeries>>(),
+        right.extract::<PyRef<'_, PySeries>>(),
+    ) else {
+        if check_series_type {
+            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                "Series Expected type <class 'frankenpandas.Series'>",
+            ));
+        }
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "assert_series_equal compares two frankenpandas Series",
+        ));
+    };
 
     if l_s.inner.len() != r_s.inner.len() {
         return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
@@ -28032,76 +29678,79 @@ fn assert_series_equal(
             ),
         ));
     }
-    if l_s.inner.index().labels() != r_s.inner.index().labels() {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            "Series index labels mismatch",
-        ));
-    }
+    assert_indexes_equal(
+        "Series.index",
+        l_s.inner.index(),
+        r_s.inner.index(),
+        check_index_type,
+        check_names,
+        check_exact,
+        rtol,
+        atol,
+    )?;
     let lc = l_s.inner.column();
     let rc = r_s.inner.column();
+    if check_dtype && lc.dtype() != rc.dtype() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            format!(
+                "Attributes of Series are different\n\nAttribute \"dtype\" are different\n[left]:  {}\n[right]: {}",
+                pandas_dtype_name(&lc.dtype()),
+                pandas_dtype_name(&rc.dtype()),
+            ),
+        ));
+    }
     for row in 0..lc.len() {
-        let ls = &lc.values()[row];
-        let rs = &rc.values()[row];
-        match (ls, rs) {
-            (Scalar::Float64(f1), Scalar::Float64(f2)) => {
-                if f1.is_nan() && f2.is_nan() {
-                    continue;
-                }
-                if check_exact {
-                    if f1 != f2 {
-                        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                            format!("Series values differ at row {row}: {f1} != {f2}"),
-                        ));
-                    }
-                } else {
-                    let diff = (f1 - f2).abs();
-                    if diff > atol + rtol * f2.abs() {
-                        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                            format!(
-                                "Series values differ at row {row}: {f1} != {f2} (diff {diff})"
-                            ),
-                        ));
-                    }
-                }
-            }
-            (Scalar::Null(_), Scalar::Null(_)) => continue,
-            (a, b) => {
-                if a != b {
-                    return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                        format!("Series values differ at row {row}: {a:?} != {b:?}"),
-                    ));
-                }
-            }
+        let (ls, rs) = (&lc.values()[row], &rc.values()[row]);
+        if !assert_scalars_equal(ls, rs, check_exact, rtol, atol, !check_dtype) {
+            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                format!("Series values differ at row {row}: {ls:?} != {rs:?}"),
+            ));
         }
+    }
+    if check_names && l_s.inner.name() != r_s.inner.name() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            format!(
+                "Attributes of Series are different\n\nAttribute \"name\" are different\n[left]:  {}\n[right]: {}",
+                l_s.inner.name(),
+                r_s.inner.name()
+            ),
+        ));
     }
     Ok(())
 }
 
-/// Assert that two Indexes are equal.
+/// Assert that two Indexes are equal: the labels (their types too unless
+/// `exact=False`), with `check_exact`/`rtol`/`atol` for floats, and the names
+/// when `check_names` (fvsao.5: every option was dropped and the labels had
+/// to match exactly).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (left, right, exact="equiv", check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+#[pyo3(signature = (left, right, exact=None, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
 fn assert_index_equal(
     _py: Python<'_>,
     left: &Bound<'_, PyAny>,
     right: &Bound<'_, PyAny>,
-    exact: &str,
+    exact: Option<&Bound<'_, PyAny>>,
     check_names: bool,
     check_exact: bool,
     rtol: f64,
     atol: f64,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
-    let _ = (exact, check_names, check_exact, rtol, atol, kwargs);
+    assert_equal_kwargs("assert_index_equal", kwargs)?;
+    let exact = exact.map_or(Ok(true), assert_type_flag)?;
     let l_idx = left.extract::<PyRef<'_, PyIndex>>()?;
     let r_idx = right.extract::<PyRef<'_, PyIndex>>()?;
-
-    if l_idx.inner.labels() != r_idx.inner.labels() {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            "Index labels mismatch",
-        ));
-    }
-    Ok(())
+    assert_indexes_equal(
+        "Index",
+        &l_idx.inner,
+        &r_idx.inner,
+        exact,
+        check_names,
+        check_exact,
+        rtol,
+        atol,
+    )
 }
 
 pyo3::create_exception!(errors, EmptyDataError, pyo3::exceptions::PyValueError);
@@ -28944,7 +30593,19 @@ fn crosstab(
     dropna: bool,
     normalize: bool,
 ) -> PyResult<PyDataFrame> {
-    let _ = (values, rownames, colnames, aggfunc, margins);
+    // This counts co-occurrences. values/aggfunc (which aggregate instead
+    // of counting), margins and the axis names were dropped, so
+    // crosstab(a, b, values=v, aggfunc='sum') returned counts (fvsao.5).
+    unsupported_params(
+        "crosstab",
+        &[
+            ("values", values.is_none()),
+            ("aggfunc", aggfunc.is_none()),
+            ("rownames", rownames.is_none()),
+            ("colnames", colnames.is_none()),
+            ("margins", !margins),
+        ],
+    )?;
     let s_idx = PySeries::new(py, Some(index), None, None)?;
     let s_col = PySeries::new(py, Some(columns), None, None)?;
 
@@ -29050,7 +30711,22 @@ fn json_normalize(
     sep: &str,
     max_level: Option<usize>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (record_path, meta, meta_prefix, record_prefix, errors);
+    // This flattens nested dicts; the record/meta keywords (which unpack
+    // nested lists of records) were dropped. errors only acts on meta keys.
+    unsupported_params(
+        "json_normalize",
+        &[
+            ("record_path", record_path.is_none()),
+            ("meta", meta.is_none()),
+            ("meta_prefix", meta_prefix.is_none()),
+            ("record_prefix", record_prefix.is_none()),
+        ],
+    )?;
+    if !matches!(errors, "raise" | "ignore") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "errors must be 'raise' or 'ignore', got '{errors}'"
+        )));
+    }
     let mut records: Vec<Vec<(String, Py<PyAny>)>> = Vec::new();
     if let Ok(d) = data.cast::<PyDict>() {
         let mut row = Vec::new();
@@ -30990,7 +32666,19 @@ pub fn eval<'py>(
     target: Option<&Bound<'py, PyAny>>,
     inplace: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = (parser, engine, truediv, resolvers, target, inplace);
+    // The engine only changes speed and truediv is deprecated without effect.
+    // Other parsers, resolvers and assignment into `target` are not supported
+    // (all were dropped, fvsao.5).
+    let _ = (engine, truediv);
+    unsupported_params(
+        "eval",
+        &[
+            ("parser", parser.is_none_or(|p| p == "pandas")),
+            ("resolvers", resolvers.is_none_or(|r| r.is_none())),
+            ("target", target.is_none_or(|t| t.is_none())),
+            ("inplace", inplace != Some(true)),
+        ],
+    )?;
     let builtins = py.import("builtins")?;
     let sys = py.import("sys")?;
 
@@ -31229,7 +32917,16 @@ fn merge_asof(
     allow_exact_matches: bool,
     direction: &str,
 ) -> PyResult<PyDataFrame> {
-    let _ = (left_index, right_index, suffixes);
+    // Joining on the index, and suffixes other than pandas' default, were
+    // dropped (fvsao.5).
+    unsupported_params(
+        "merge_asof",
+        &[
+            ("left_index", !left_index),
+            ("right_index", !right_index),
+            ("suffixes", suffixes.is_none_or(|s| s == ("_x", "_y"))),
+        ],
+    )?;
     let on_col = on.or(left_on).or(right_on).ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "merge_asof requires an `on` or `left_on`/`right_on` column",
@@ -31295,7 +32992,17 @@ fn merge_ordered(
     suffixes: Option<(&str, &str)>,
     how: Option<&str>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (left_by, right_by, suffixes, how);
+    // This computes pandas' default outer ordered merge; the by-groups,
+    // suffixes and other join types were dropped (fvsao.5).
+    unsupported_params(
+        "merge_ordered",
+        &[
+            ("left_by", left_by.is_none()),
+            ("right_by", right_by.is_none()),
+            ("suffixes", suffixes.is_none_or(|s| s == ("_x", "_y"))),
+            ("how", how.is_none_or(|h| h == "outer")),
+        ],
+    )?;
     let on_target = on.or(left_on).or(right_on).ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "merge_ordered requires `on` or `left_on` / `right_on`",
@@ -31731,9 +33438,13 @@ impl PyExcelFile {
     ) -> PyResult<Self> {
         // Sheet names come from fp-io's reader. This used to import openpyxl and
         // fall back to a fabricated ["Sheet1"] when anything failed.
-        let _ = (py, engine, engine_kwargs);
+        // engine only picks the library reading the same workbook.
+        let _ = (py, engine);
         if storage_options.is_some() {
             return Err(not_implemented("ExcelFile(storage_options=...)"));
+        }
+        if engine_kwargs.is_some_and(|k| !k.is_empty()) {
+            return Err(not_implemented("ExcelFile(engine_kwargs=...)"));
         }
         let path = py_fspath(path_or_buffer).map_err(|_| not_implemented("ExcelFile(<buffer>)"))?;
         let bytes = py_input_bytes(path_or_buffer)?;
@@ -31866,6 +33577,205 @@ fn not_implemented(what: &str) -> PyErr {
     ))
 }
 
+/// Parameters a binding accepts for pandas signature compatibility but does
+/// not implement: each is paired with whether the caller left it at pandas'
+/// default. The first one that was not raises NotImplementedError naming it,
+/// instead of being ignored (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5).
+fn unsupported_params(method: &str, params: &[(&str, bool)]) -> PyResult<()> {
+    match params.iter().find(|(_, is_default)| !is_default) {
+        Some((param, _)) => Err(not_implemented(&format!("{method}({param}=...)"))),
+        None => Ok(()),
+    }
+}
+
+/// Labels 0..n, so a sorted copy records where each row came from (the
+/// key= sorts, fvsao.5).
+fn position_labels(n: usize) -> Vec<IndexLabel> {
+    (0..n)
+        .map(|i| IndexLabel::Int64(i64::try_from(i).unwrap_or(i64::MAX)))
+        .collect()
+}
+
+/// The row order a sort of a `position_labels` copy produced.
+fn positions_from_labels(labels: &[IndexLabel]) -> PyResult<Vec<i64>> {
+    labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Int64(i) => Ok(*i),
+            other => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "keyed sort lost its position label: {other:?}"
+            ))),
+        })
+        .collect()
+}
+
+/// pandas' `sort_values` on nanosecond labels: NaT (the `i64::MIN`
+/// sentinel) goes to `na_position` and the rest sort by value (fvsao.5:
+/// na_position was dropped and NaT, the smallest i64, always sorted first).
+fn sort_nanos_na(values: &[i64], ascending: bool, na_position: &str) -> PyResult<Vec<i64>> {
+    let (mut valid, nat): (Vec<i64>, Vec<i64>) = values.iter().partition(|&&v| v != i64::MIN);
+    if ascending {
+        valid.sort_unstable();
+    } else {
+        valid.sort_unstable_by(|a, b| b.cmp(a));
+    }
+    match na_position {
+        "last" => {
+            valid.extend(nat);
+            Ok(valid)
+        }
+        "first" => Ok(nat.into_iter().chain(valid).collect()),
+        other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "invalid na_position: {other}"
+        ))),
+    }
+}
+
+/// pandas' `Index.sort_values(ascending, na_position)` over labels: missing
+/// labels go to `na_position` and the rest sort ascending or descending
+/// (fvsao.5: na_position was dropped, and reversing an ascending sort put the
+/// missing labels first for a descending one).
+fn sort_labels_na(index: &Index, ascending: bool, na_position: &str) -> PyResult<Index> {
+    let (valid, missing): (Vec<IndexLabel>, Vec<IndexLabel>) = index
+        .labels()
+        .iter()
+        .cloned()
+        .partition(|l| !l.is_missing());
+    let mut sorted = Index::new(valid).sort_values().labels().to_vec();
+    if !ascending {
+        sorted.reverse();
+    }
+    let labels = match na_position {
+        "last" => sorted.into_iter().chain(missing).collect(),
+        "first" => missing.into_iter().chain(sorted).collect(),
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid na_position: {other}"
+            )));
+        }
+    };
+    Ok(Index::new(labels).rename_index(index.name()))
+}
+
+/// A flat index has one level; pandas' `droplevel` refuses to remove it.
+fn flat_droplevel_error() -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        "Cannot remove 1 levels from an index with 1 levels: at least one level must be left.",
+    )
+}
+
+/// A flat index has only level 0.
+fn flat_level_check(level: usize) -> PyResult<()> {
+    if level == 0 {
+        Ok(())
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+            "Too many levels: Index has only 1 level, not {}",
+            level + 1
+        )))
+    }
+}
+
+/// `kind=` only picks numpy's sort algorithm. frankenpandas' sort is stable,
+/// which is exactly `stable`/`mergesort` and a valid order for the unstable
+/// kinds, so a known kind is honoured and an unknown one raises as numpy does
+/// (fvsao.5).
+fn validate_sort_kind(kind: Option<&str>) -> PyResult<()> {
+    match kind {
+        None
+        | Some("quicksort" | "quick" | "mergesort" | "merge" | "heapsort" | "heap" | "stable") => {
+            Ok(())
+        }
+        Some(other) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "sort kind must be one of 'quick', 'heap', or 'stable' (got '{other}')"
+        ))),
+    }
+}
+
+/// frankenpandas' plots draw a default SVG; pandas hands these arguments to
+/// matplotlib, so any of them raises instead of being dropped (fvsao.5).
+fn plot_args(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    if !args.is_empty() {
+        return Err(not_implemented(
+            "plotting arguments (frankenpandas draws a default SVG, not matplotlib)",
+        ));
+    }
+    plot_kwargs(kwargs)
+}
+
+/// The keyword half of [`plot_args`].
+fn plot_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    if kwargs.is_some_and(|k| !k.is_empty()) {
+        return Err(not_implemented(
+            "plotting arguments (frankenpandas draws a default SVG, not matplotlib)",
+        ));
+    }
+    Ok(())
+}
+
+/// pandas' window `apply(func, args=, kwargs=)` calls
+/// `func(window, *args, **kwargs)`; both used to be dropped (fvsao.5).
+fn call_window_func<'py>(
+    func: &Bound<'py, PyAny>,
+    window: Bound<'py, PyAny>,
+    args: Option<&Bound<'py, PyTuple>>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    func.call(prepend_arg(window, args)?, kwargs)
+}
+
+/// `(first, *rest)`, for pandas' `func(x, *args, **kwargs)` calls.
+fn prepend_arg<'py>(
+    first: Bound<'py, PyAny>,
+    rest: Option<&Bound<'py, PyTuple>>,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let py = first.py();
+    let mut items = vec![first];
+    items.extend(rest.into_iter().flat_map(|r| r.iter()));
+    PyTuple::new(py, items)
+}
+
+/// pandas' rule for the `**kwargs` of reductions, `take` and `transpose`: they
+/// exist for numpy compatibility, so a numpy keyword left at its default
+/// (`None`, or `False` for keepdims) passes, any other value raises ValueError,
+/// and a keyword numpy does not have raises TypeError (fvsao.5).
+fn numpy_compat_kwargs(method: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    const NUMPY_KEYWORDS: [&str; 7] = [
+        "out", "dtype", "keepdims", "axes", "initial", "where", "mode",
+    ];
+    let Some(kwargs) = kwargs else {
+        return Ok(());
+    };
+    for (key, value) in kwargs.iter() {
+        let key: String = key.extract()?;
+        if !NUMPY_KEYWORDS.contains(&key.as_str()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "{method}() got an unexpected keyword argument '{key}'"
+            )));
+        }
+        let at_default =
+            value.is_none() || (key == "keepdims" && matches!(value.extract::<bool>(), Ok(false)));
+        if !at_default {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "the '{key}' parameter is not supported in the pandas implementation of {method}()"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// pandas hands these `**kwargs` to an engine frankenpandas does not use
+/// (tabulate, scipy, pyarrow, the clipboard): any keyword raises
+/// NotImplementedError instead of being dropped (fvsao.5).
+fn engine_kwargs(method: &str, engine: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    match kwargs.and_then(|kw| kw.keys().iter().next()) {
+        Some(key) => Err(not_implemented(&format!(
+            "{method}({key}=...), a keyword pandas passes to {engine},"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// `os.fspath(obj)` for str and os.PathLike inputs.
 fn py_fspath(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(s) = obj.extract::<String>() {
@@ -31964,6 +33874,249 @@ fn has_default_range_index(frame: &DataFrame) -> bool {
 
 /// `Series.to_frame()` for the Series writers: an unnamed Series becomes column
 /// `0`, as in pandas.
+/// pandas' `to_csv` keywords, shared by `DataFrame.to_csv` and
+/// `Series.to_csv` (fvsao.5: Series dropped every keyword but sep/index, and
+/// DataFrame took only path/index).
+struct CsvWriteArgs<'a, 'py> {
+    sep: &'a str,
+    na_rep: &'a str,
+    float_format: Option<&'a Bound<'py, PyAny>>,
+    columns: Option<&'a Bound<'py, PyAny>>,
+    /// `None` is pandas' default, `True`.
+    header: Option<&'a Bound<'py, PyAny>>,
+    index: bool,
+    index_label: Option<&'a Bound<'py, PyAny>>,
+    mode: &'a str,
+    encoding: Option<&'a str>,
+    /// pandas' default is `Some("infer")`; an explicit `None` never compresses.
+    compression: Option<&'a str>,
+    quoting: Option<i64>,
+    quotechar: &'a str,
+    lineterminator: Option<&'a str>,
+    date_format: Option<&'a str>,
+    doublequote: bool,
+    escapechar: Option<&'a str>,
+    decimal: &'a str,
+    storage_options: Option<&'a Bound<'py, PyAny>>,
+}
+
+/// Write `frame` as pandas' `to_csv` does. sep, na_rep, columns, header,
+/// index, index_label and mode ('w'/'a') are honoured; chunksize and errors
+/// cannot change UTF-8 output; every other keyword raises NotImplementedError
+/// at a non-default value. `path_or_buf` may be None (return the text), a
+/// path, or a file-like object with `write`.
+fn write_csv_py(
+    method: &str,
+    frame: &DataFrame,
+    path_or_buf: Option<&Bound<'_, PyAny>>,
+    args: &CsvWriteArgs<'_, '_>,
+) -> PyResult<Option<String>> {
+    let compression_is_default = compression_is_plain(args.compression, path_or_buf)?;
+    unsupported_params(
+        method,
+        &[
+            ("float_format", args.float_format.is_none()),
+            (
+                "header",
+                args.header.is_none_or(|h| h.extract::<bool>().is_ok()),
+            ),
+            (
+                "index_label",
+                args.index_label
+                    .is_none_or(|l| l.is_none() || l.extract::<String>().is_ok()),
+            ),
+            ("mode", matches!(args.mode, "w" | "a")),
+            (
+                "encoding",
+                args.encoding
+                    .is_none_or(|e| matches!(e.to_ascii_lowercase().as_str(), "utf-8" | "utf8")),
+            ),
+            ("compression", compression_is_default),
+            ("quoting", matches!(args.quoting, None | Some(0))),
+            ("quotechar", args.quotechar == "\""),
+            (
+                "lineterminator",
+                matches!(args.lineterminator, None | Some("\n")),
+            ),
+            ("date_format", args.date_format.is_none()),
+            ("doublequote", args.doublequote),
+            ("escapechar", args.escapechar.is_none()),
+            ("decimal", args.decimal == "."),
+            ("storage_options", args.storage_options.is_none()),
+        ],
+    )?;
+    let delimiter = match args.sep.as_bytes() {
+        [b] if b.is_ascii() => *b,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "\"delimiter\" must be a 1-character string",
+            ));
+        }
+    };
+    let selected;
+    let frame = match args.columns {
+        Some(cols) if !cols.is_none() => {
+            let names = extract_col_names_flexible(Some(cols))?;
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            selected = frame.select_columns(&refs).map_err(frame_error_to_py)?;
+            &selected
+        }
+        _ => frame,
+    };
+    let options = fp_io::CsvWriteOptions {
+        delimiter,
+        na_rep: args.na_rep.to_owned(),
+        header: args.header.map_or(Ok(true), |h| h.extract::<bool>())?,
+        include_index: args.index,
+        index_label: args.index_label.and_then(|l| l.extract::<String>().ok()),
+    };
+    let text = fp_io::write_csv_string_with_options(frame, &options).map_err(io_error_to_py)?;
+    write_text_target(path_or_buf, text, args.mode == "a")
+}
+
+/// Where pandas' text writers send their output: no target returns the text,
+/// a path (str / os.PathLike) is written (appended when `append`), and an
+/// object with `write` receives the text.
+fn write_text_target(
+    target: Option<&Bound<'_, PyAny>>,
+    text: String,
+    append: bool,
+) -> PyResult<Option<String>> {
+    let Some(target) = target.filter(|t| !t.is_none()) else {
+        return Ok(Some(text));
+    };
+    if target.hasattr("write")? {
+        target.call_method1("write", (text,))?;
+        return Ok(None);
+    }
+    let path = py_fspath(target)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(&path)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    std::io::Write::write_all(&mut file, text.as_bytes())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    Ok(None)
+}
+
+/// pandas' `to_json` keywords around `orient`, shared by DataFrame and
+/// Series (fvsao.5: they were dropped through `**kwargs`).
+struct JsonWriteArgs<'a, 'py> {
+    date_format: Option<&'a str>,
+    double_precision: i64,
+    force_ascii: bool,
+    date_unit: &'a str,
+    default_handler: Option<&'a Bound<'py, PyAny>>,
+    lines: bool,
+    compression: Option<&'a str>,
+    index: Option<bool>,
+    indent: Option<i64>,
+    storage_options: Option<&'a Bound<'py, PyAny>>,
+    mode: &'a str,
+}
+
+/// Write pandas' `to_json` output. `render(lines)` produces the JSON text
+/// (JSON Lines when `lines`). force_ascii escapes non-ASCII as pandas does
+/// (the default, which frankenpandas used to skip), lines and mode='a' follow
+/// pandas' rules, and every other keyword raises NotImplementedError at a
+/// non-default value.
+fn write_json_py(
+    method: &str,
+    path_or_buf: Option<&Bound<'_, PyAny>>,
+    orient: Option<&str>,
+    args: &JsonWriteArgs<'_, '_>,
+    render: impl FnOnce(bool) -> PyResult<String>,
+) -> PyResult<Option<String>> {
+    unsupported_params(
+        method,
+        &[
+            ("date_format", args.date_format.is_none()),
+            ("double_precision", args.double_precision == 10),
+            ("date_unit", args.date_unit == "ms"),
+            ("default_handler", args.default_handler.is_none()),
+            (
+                "compression",
+                compression_is_plain(args.compression, path_or_buf)?,
+            ),
+            ("index", args.index.is_none()),
+            ("indent", args.indent.is_none()),
+            ("storage_options", args.storage_options.is_none()),
+        ],
+    )?;
+    if args.lines && orient != Some("records") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "'lines' keyword only valid when 'orient' is records",
+        ));
+    }
+    match args.mode {
+        "w" => {}
+        "a" if args.lines => {}
+        "a" => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "mode='a' (append) is only supported when lines is True and orient is 'records'",
+            ));
+        }
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "mode={other} is not a valid option.Only 'w' and 'a' are currently supported."
+            )));
+        }
+    }
+    let text = render(args.lines)?;
+    let text = if args.force_ascii {
+        ascii_escape_json(&text)
+    } else {
+        text
+    };
+    write_text_target(path_or_buf, text, args.mode == "a")
+}
+
+/// pandas' `force_ascii=True`: every non-ASCII character becomes a `\uXXXX`
+/// escape (a surrogate pair above U+FFFF). Non-ASCII only occurs inside JSON
+/// strings, so escaping the whole text is exact.
+fn ascii_escape_json(text: &str) -> String {
+    if text.is_ascii() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    for c in text.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0_u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
+}
+
+/// pandas' `compression='infer'` compresses a path ending in a compression
+/// extension. frankenpandas writes plain text, so that case (and any explicit
+/// compression) is refused rather than written uncompressed (fvsao.5).
+fn compression_is_plain(
+    compression: Option<&str>,
+    target: Option<&Bound<'_, PyAny>>,
+) -> PyResult<bool> {
+    const COMPRESSED: [&str; 7] = [".gz", ".bz2", ".zip", ".xz", ".zst", ".tar", ".tgz"];
+    let path = match target {
+        Some(t) if !t.is_none() && !t.hasattr("write")? => Some(py_fspath(t)?),
+        _ => None,
+    };
+    let infers = path
+        .as_deref()
+        .is_some_and(|p| COMPRESSED.iter().any(|ext| p.ends_with(ext)));
+    Ok(match compression {
+        None => true,
+        Some("infer") => !infers,
+        Some(_) => false,
+    })
+}
+
 fn series_as_frame(series: &Series) -> PyResult<PyDataFrame> {
     let name = if series.name().is_empty() {
         "0"
@@ -32235,7 +34388,9 @@ fn read_fwf(
 ) -> PyResult<PyDataFrame> {
     // Was: call pandas, and without pandas a whitespace splitter that ignored
     // colspecs/widths and read a nonexistent path as literal data.
-    let _ = (py, infer_nrows);
+    let _ = py;
+    // infer_nrows sets how many rows column inference reads.
+    unsupported_params("read_fwf", &[("infer_nrows", infer_nrows == 100)])?;
     reject_unsupported_kwargs("read_fwf", kwds, &[])?;
     let mut options = fp_io::FwfReadOptions::default();
     if let Some(specs) = colspecs.filter(|c| !c.is_none()) {
@@ -32275,7 +34430,20 @@ fn read_html(
     extract_links: Option<&str>,
     storage_options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<PyDataFrame>> {
-    let _ = (py, flavor, encoding, displayed_only);
+    // flavor only picks the parsing library. The text is read as UTF-8, and
+    // showing hidden elements is not supported (both were dropped, fvsao.5).
+    let _ = (py, flavor);
+    unsupported_params(
+        "read_html",
+        &[
+            (
+                "encoding",
+                encoding
+                    .is_none_or(|e| matches!(e.to_ascii_lowercase().as_str(), "utf-8" | "utf8")),
+            ),
+            ("displayed_only", displayed_only),
+        ],
+    )?;
     // Options this reader does not implement raise instead of being ignored.
     let non_default = [
         ("match", r#match != ".+"),
@@ -32342,7 +34510,22 @@ fn read_xml(
     storage_options: Option<&Bound<'_, PyDict>>,
     dtype_backend: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (py, encoding, parser, compression);
+    // parser only picks the parsing library. The text is read as plain UTF-8;
+    // another encoding or a compressed file was dropped (fvsao.5).
+    let _ = (py, parser);
+    unsupported_params(
+        "read_xml",
+        &[
+            (
+                "encoding",
+                matches!(encoding.to_ascii_lowercase().as_str(), "utf-8" | "utf8"),
+            ),
+            (
+                "compression",
+                compression_is_plain(Some(compression), Some(path_or_buffer))?,
+            ),
+        ],
+    )?;
     let non_default = [
         ("namespaces", namespaces.is_some()),
         ("elems_only", elems_only),
@@ -32781,7 +34964,22 @@ impl PyPlotAccessor {
         let mut x_str: Option<String> = None;
         let mut y_str: Option<String> = None;
 
+        // kind, x and y pick the plot; pandas hands every other argument to
+        // matplotlib, and they used to be dropped (fvsao.5).
+        if args.len() > 2 {
+            return Err(not_implemented(
+                "plotting arguments (frankenpandas draws a default SVG, not matplotlib)",
+            ));
+        }
         if let Some(kw) = kwargs {
+            for key in kw.keys() {
+                let key: String = key.extract()?;
+                if !matches!(key.as_str(), "kind" | "x" | "y") {
+                    return Err(not_implemented(&format!(
+                        "plot({key}=...) (frankenpandas draws a default SVG, not matplotlib)"
+                    )));
+                }
+            }
             if let Some(k) = kw.get_item("kind")? {
                 if let Ok(s) = k.extract::<String>() {
                     kind_str = s;
@@ -32824,7 +35022,7 @@ impl PyPlotAccessor {
         y: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("line", x, y)
     }
 
@@ -32835,7 +35033,7 @@ impl PyPlotAccessor {
         y: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("bar", x, y)
     }
 
@@ -32846,7 +35044,7 @@ impl PyPlotAccessor {
         y: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("barh", x, y)
     }
 
@@ -32857,7 +35055,11 @@ impl PyPlotAccessor {
         bins: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (by, bins, kwargs);
+        unsupported_params(
+            "plot.hist",
+            &[("by", by.is_none()), ("bins", bins.is_none())],
+        )?;
+        plot_kwargs(kwargs)?;
         self.plot_internal("hist", None, None)
     }
 
@@ -32867,7 +35069,8 @@ impl PyPlotAccessor {
         by: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (by, kwargs);
+        unsupported_params("plot.box", &[("by", by.is_none())])?;
+        plot_kwargs(kwargs)?;
         self.plot_internal("box", None, None)
     }
 
@@ -32877,19 +35080,20 @@ impl PyPlotAccessor {
         by: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = (by, kwargs);
+        unsupported_params("plot.box", &[("by", by.is_none())])?;
+        plot_kwargs(kwargs)?;
         self.plot_internal("box", None, None)
     }
 
     #[pyo3(signature = (**kwargs))]
     fn kde(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("kde", None, None)
     }
 
     #[pyo3(signature = (**kwargs))]
     fn density(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("density", None, None)
     }
 
@@ -32900,13 +35104,13 @@ impl PyPlotAccessor {
         y: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("area", x, y)
     }
 
     #[pyo3(signature = (y=None, **kwargs))]
     fn pie(&self, y: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("pie", None, y)
     }
 
@@ -32917,7 +35121,7 @@ impl PyPlotAccessor {
         y: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("scatter", Some(x), Some(y))
     }
 
@@ -32928,7 +35132,7 @@ impl PyPlotAccessor {
         y: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyPlotResult> {
-        let _ = kwargs;
+        plot_kwargs(kwargs)?;
         self.plot_internal("hexbin", Some(x), Some(y))
     }
 
@@ -32954,7 +35158,7 @@ fn plotting_scatter_matrix(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(df) = frame.extract::<PyRef<PyDataFrame>>() {
         let spec = fp_frame::plotting::scatter_matrix(&df.inner, None, None, None)
             .map_err(frame_error_to_py)?;
@@ -32965,7 +35169,6 @@ fn plotting_scatter_matrix(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = kwargs;
     Err(plotting_type_error("scatter_matrix"))
 }
 
@@ -32977,7 +35180,7 @@ fn plotting_autocorrelation_plot(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(s) = series.extract::<PyRef<PySeries>>() {
         let spec = fp_frame::plotting::autocorrelation_plot(&s.inner).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -32987,7 +35190,6 @@ fn plotting_autocorrelation_plot(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = kwargs;
     Err(plotting_type_error("autocorrelation_plot"))
 }
 
@@ -32999,7 +35201,7 @@ fn plotting_bootstrap_plot(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(s) = series.extract::<PyRef<PySeries>>() {
         let spec =
             fp_frame::plotting::bootstrap_plot(&s.inner, 50, 50).map_err(frame_error_to_py)?;
@@ -33010,7 +35212,6 @@ fn plotting_bootstrap_plot(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = kwargs;
     Err(plotting_type_error("bootstrap_plot"))
 }
 
@@ -33022,7 +35223,7 @@ fn plotting_lag_plot(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(s) = series.extract::<PyRef<PySeries>>() {
         let spec = fp_frame::plotting::lag_plot(&s.inner, 1).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -33032,7 +35233,6 @@ fn plotting_lag_plot(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = kwargs;
     Err(plotting_type_error("lag_plot"))
 }
 
@@ -33045,7 +35245,7 @@ fn plotting_parallel_coordinates(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(df) = data.extract::<PyRef<PyDataFrame>>() {
         let spec = fp_frame::plotting::parallel_coordinates(&df.inner, class_column, None)
             .map_err(frame_error_to_py)?;
@@ -33056,7 +35256,6 @@ fn plotting_parallel_coordinates(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = (kwargs, class_column);
     Err(plotting_type_error("parallel_coordinates"))
 }
 
@@ -33069,7 +35268,7 @@ fn plotting_radviz(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(df) = data.extract::<PyRef<PyDataFrame>>() {
         let spec =
             fp_frame::plotting::radviz(&df.inner, class_column, None).map_err(frame_error_to_py)?;
@@ -33080,7 +35279,6 @@ fn plotting_radviz(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = (kwargs, class_column);
     Err(plotting_type_error("radviz"))
 }
 
@@ -33093,7 +35291,7 @@ fn plotting_andrews_curves(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(df) = data.extract::<PyRef<PyDataFrame>>() {
         let spec = fp_frame::plotting::andrews_curves(&df.inner, class_column, 50)
             .map_err(frame_error_to_py)?;
@@ -33104,7 +35302,6 @@ fn plotting_andrews_curves(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = (kwargs, class_column);
     Err(plotting_type_error("andrews_curves"))
 }
 
@@ -33116,7 +35313,7 @@ fn plotting_boxplot(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(df) = data.extract::<PyRef<PyDataFrame>>() {
         let spec = fp_frame::plotting::boxplot(&df.inner).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -33126,7 +35323,6 @@ fn plotting_boxplot(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = kwargs;
     Err(plotting_type_error("boxplot"))
 }
 
@@ -33138,7 +35334,7 @@ fn plotting_boxplot_frame(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(py_df) = df.extract::<PyRef<PyDataFrame>>() {
         let spec = fp_frame::plotting::boxplot_frame(&py_df.inner).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -33148,7 +35344,6 @@ fn plotting_boxplot_frame(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = kwargs;
     Err(plotting_type_error("boxplot_frame"))
 }
 
@@ -33160,6 +35355,7 @@ fn plotting_boxplot_frame_groupby(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    plot_args(args, kwargs)?;
     if let Ok(py_gb) = grouped.extract::<PyRef<PyGroupBy>>() {
         let by_refs: Vec<&str> = py_gb.by.iter().map(|s| s.as_str()).collect();
         let spec = py_gb
@@ -33175,8 +35371,6 @@ fn plotting_boxplot_frame_groupby(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = args;
-    let _ = kwargs;
     Err(plotting_type_error("boxplot_frame_groupby"))
 }
 
@@ -33188,7 +35382,7 @@ fn plotting_hist_frame(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(df) = data.extract::<PyRef<PyDataFrame>>() {
         let spec = fp_frame::plotting::hist_frame(&df.inner).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -33198,7 +35392,6 @@ fn plotting_hist_frame(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = kwargs;
     Err(plotting_type_error("hist_frame"))
 }
 
@@ -33210,7 +35403,7 @@ fn plotting_hist_series(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = args;
+    plot_args(args, kwargs)?;
     if let Ok(s) = data.extract::<PyRef<PySeries>>() {
         let spec = fp_frame::plotting::hist_series(&s.inner).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -33220,7 +35413,6 @@ fn plotting_hist_series(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = kwargs;
     Err(plotting_type_error("hist_series"))
 }
 
@@ -33233,7 +35425,9 @@ fn plotting_table(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let _ = (ax, args);
+    // The table comes back as an SVG; there is no matplotlib axes to draw on.
+    let _ = ax;
+    plot_args(args, kwargs)?;
     if let Ok(df) = data.extract::<PyRef<PyDataFrame>>() {
         let spec = fp_frame::plotting::table(&df.inner).map_err(frame_error_to_py)?;
         let svg = spec.to_svg().map_err(frame_error_to_py)?;
@@ -33253,7 +35447,6 @@ fn plotting_table(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    let _ = (kwargs, ax);
     Err(plotting_type_error("table"))
 }
 
@@ -34583,7 +36776,7 @@ mod tests {
             .expect("df"); // ubs:ignore — test fixture
             let py_df = PyDataFrame { inner: df };
 
-            let roll = py_df.rolling(2, None, false);
+            let roll = py_df.rolling(2, None, false).expect("rolling"); // ubs:ignore — test fixture
             assert_eq!(roll.window, 2);
             assert!(!roll.center);
 
@@ -34762,7 +36955,7 @@ mod tests {
         let t_df = py_df.T().expect("T"); // ubs:ignore — test fixture
         assert_eq!(t_df.shape(), (2, 2));
 
-        let roll = py_df.rolling(2, None, false);
+        let roll = py_df.rolling(2, None, false).expect("rolling"); // ubs:ignore — test fixture
         assert_eq!(roll.ndim(), 2);
         let exp = py_df.expanding(None);
         assert_eq!(exp.ndim(), 2);
@@ -34781,7 +36974,7 @@ mod tests {
         };
         assert!(!idx.all());
         assert!(idx.any());
-        let dropped = idx.dropna(None);
+        let dropped = idx.dropna(None).expect("dropna"); // ubs:ignore — test fixture
         assert_eq!(dropped.inner.len(), 2);
         let deleted = idx.delete(0).expect("delete"); // ubs:ignore — test fixture
         assert_eq!(deleted.inner.len(), 2);
@@ -35888,7 +38081,7 @@ mod tests {
 
             // 4. Series sort_values na_position='first', ascending=true, ignore_index=true
             let s_sorted = py_s
-                .sort_values(None, true, false, None, "first", true, None)
+                .sort_values(py, None, true, false, None, "first", true, None)
                 .expect("sort_values");
             assert_eq!(
                 s_sorted.inner.column().values(),
@@ -35902,7 +38095,7 @@ mod tests {
             assert_eq!(s_sorted.inner.index().labels()[0], IndexLabel::Int64(0));
 
             assert!(
-                py_s.sort_values(None, true, true, None, "last", false, None)
+                py_s.sort_values(py, None, true, true, None, "last", false, None)
                     .is_err()
             );
 
@@ -35951,6 +38144,7 @@ mod tests {
             let asc_list = pyo3::types::PyList::new(py, [true, false]).unwrap();
             let df_sorted = py_df
                 .sort_values(
+                    py,
                     by_cols.as_any(),
                     None,
                     Some(asc_list.as_any()),
@@ -35977,6 +38171,7 @@ mod tests {
             assert!(
                 py_df
                     .sort_values(
+                        py,
                         empty_by.as_any(),
                         None,
                         None,
@@ -36014,7 +38209,7 @@ mod tests {
 
             // 1. Series sort_index ascending=True (default)
             let s_asc = py_s
-                .sort_index(None, None, None, false, None, "last", true, false, None)
+                .sort_index(py, None, None, None, false, None, "last", true, false, None)
                 .expect("sort_index asc");
             assert_eq!(
                 s_asc.inner.index().labels(),
@@ -36037,6 +38232,7 @@ mod tests {
             let asc_false = false.into_bound_py_any(py).unwrap();
             let s_desc = py_s
                 .sort_index(
+                    py,
                     None,
                     None,
                     Some(&asc_false),
@@ -36059,7 +38255,7 @@ mod tests {
 
             // 3. Series sort_index ignore_index=True
             let s_ign = py_s
-                .sort_index(None, None, None, false, None, "last", true, true, None)
+                .sort_index(py, None, None, None, false, None, "last", true, true, None)
                 .expect("sort_index ign");
             assert_eq!(
                 s_ign.inner.index().labels(),
@@ -36072,7 +38268,7 @@ mod tests {
 
             // 4. Series sort_index inplace=True error
             assert!(
-                py_s.sort_index(None, None, None, true, None, "last", true, false, None)
+                py_s.sort_index(py, None, None, None, true, None, "last", true, false, None)
                     .is_err()
             );
 
@@ -36080,6 +38276,7 @@ mod tests {
             let ax1 = 1.into_bound_py_any(py).unwrap();
             assert!(
                 py_s.sort_index(
+                    py,
                     Some(&ax1),
                     None,
                     None,
@@ -36116,7 +38313,7 @@ mod tests {
 
             // 6. DataFrame sort_index axis=0 ascending=True
             let df_asc = py_df
-                .sort_index(None, None, None, false, None, "last", true, false, None)
+                .sort_index(py, None, None, None, false, None, "last", true, false, None)
                 .expect("df sort_index asc");
             assert_eq!(
                 df_asc.inner.index().labels(),
@@ -36130,6 +38327,7 @@ mod tests {
             // 7. DataFrame sort_index axis=1 ascending=True
             let df_ax1 = py_df
                 .sort_index(
+                    py,
                     Some(&ax1),
                     None,
                     None,
@@ -36146,6 +38344,7 @@ mod tests {
             // 8. DataFrame sort_index axis=1 ignore_index=True
             let df_ax1_ign = py_df
                 .sort_index(
+                    py,
                     Some(&ax1),
                     None,
                     None,
@@ -36162,7 +38361,7 @@ mod tests {
             // 9. DataFrame sort_index inplace=True error
             assert!(
                 py_df
-                    .sort_index(None, None, None, true, None, "last", true, false, None)
+                    .sort_index(py, None, None, None, true, None, "last", true, false, None)
                     .is_err()
             );
         });

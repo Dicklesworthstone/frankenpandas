@@ -1271,23 +1271,33 @@ def test_melt_pivot_sample_explode_differential():
     assert ser_samp_fp.shape == (3,)
     assert list(ser_samp_fp.index) == [0, 1, 2]
 
-    # 4. explode list of columns and ignore_index
+    # 4. explode list of columns and ignore_index.
+    # GOLDEN-CHANGE (fvsao.5): this block asserted that explode split "1,2" into
+    # two rows and never compared with the pandas frame it built. pandas only
+    # expands list-likes and keeps strings whole, and explode has no `sep`.
     edata = {"A": ["1,2", "3,4"], "B": [10, 20]}
-    df_e_fp = fpd.DataFrame(edata)
-    df_e_pd = pd.DataFrame(edata)
+    df_e_fp = fpd.DataFrame(edata, index=[5, 7])
+    df_e_pd = pd.DataFrame(edata, index=[5, 7])
 
     exp_fp_single = df_e_fp.explode("A")
-    assert exp_fp_single.shape == (4, 2)
-    assert list(exp_fp_single["A"]) == ["1", "2", "3", "4"]
+    exp_pd_single = df_e_pd.explode("A")
+    assert exp_fp_single.shape == exp_pd_single.shape == (2, 2)
+    assert list(exp_fp_single["A"]) == list(exp_pd_single["A"]) == ["1,2", "3,4"]
 
     exp_fp_list = df_e_fp.explode(["A"], ignore_index=True)
-    assert exp_fp_list.shape == (4, 2)
-    assert list(exp_fp_list.index) == [0, 1, 2, 3]
+    exp_pd_list = df_e_pd.explode(["A"], ignore_index=True)
+    assert list(exp_fp_list.index) == list(exp_pd_list.index) == [0, 1]
 
-    ser_e_fp = fpd.Series(["x,y", "z,w"])
-    ser_exp_fp = ser_e_fp.explode(ignore_index=True)
-    assert list(ser_exp_fp.to_list()) == ["x", "y", "z", "w"]
-    assert list(ser_exp_fp.index) == [0, 1, 2, 3]
+    ser_e_fp = fpd.Series(["x,y", "z,w"], index=[3, 4])
+    ser_e_pd = pd.Series(["x,y", "z,w"], index=[3, 4])
+    assert ser_e_fp.explode().to_list() == ser_e_pd.explode().to_list() == ["x,y", "z,w"]
+    assert list(ser_e_fp.explode(ignore_index=True).index) == [0, 1]
+    with pytest.raises(TypeError):
+        ser_e_fp.explode(sep=",")
+    with pytest.raises(KeyError):
+        df_e_fp.explode("missing")
+    with pytest.raises(ValueError, match="column must be nonempty"):
+        df_e_fp.explode([])
 
 
 def test_quantile_corr_cov_nlargest_multiindex_differential():
@@ -2145,12 +2155,17 @@ def _csv_path(tmp_path: Path, text: str, name: str = "t.csv") -> str:
     return str(path)
 
 
+def _read_open_text_file(m: Any, p: Path) -> Any:
+    with open(_csv_path(p, _CSV)) as handle:
+        return m.read_csv(handle)
+
+
 _READ_CSV_CASES = {
     "path": lambda m, p: m.read_csv(_csv_path(p, _CSV)),
     "stringio": lambda m, p: m.read_csv(io.StringIO(_CSV)),
     "bytesio": lambda m, p: m.read_csv(io.BytesIO(_CSV.encode())),
     "quoted_delimiter_newline": lambda m, p: m.read_csv(io.StringIO(_CSV_QUOTED)),
-    "open_text_file": lambda m, p: m.read_csv(open(_csv_path(p, _CSV))),  # noqa: SIM115
+    "open_text_file": _read_open_text_file,
     "sep_semicolon": lambda m, p: m.read_csv(io.StringIO(_CSV.replace(",", ";")), sep=";"),
     "delimiter_alias": lambda m, p: m.read_csv(io.StringIO(_CSV.replace(",", "|")), delimiter="|"),
     "header_none": lambda m, p: m.read_csv(io.StringIO("1,2\n3,4\n"), header=None, names=["p", "q"]),
@@ -2506,5 +2521,239 @@ def test_per_column_ops_on_non_numeric_columns_match_pandas(op: str, kind: str) 
         assert clean(got[1]) == clean(expected[1])
     else:
         assert got == expected
+
+
+# Parameter honesty (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5).
+# Each keyword below used to be accepted and dropped: min_count, skipna and the
+# sort keys changed nothing, reindex never filled, interpolate always went
+# linear, to_json never escaped, to_xml wrote no index, head() needed an
+# argument. test_param_honesty.py proves no parameter is dropped; these pin the
+# values the implemented ones produce against pandas.
+_NAN = float("nan")
+
+
+def _hs(m: Any) -> Any:
+    return m.Series([3.0, _NAN, 1.0, 2.0, 1.0], index=list("dacbe"), name="x")
+
+
+def _hd(m: Any) -> Any:
+    return m.DataFrame({"a": [3, 1, 2, 1, 5], "b": [1.5, _NAN, 2.5, 0.5, 1.5]}, index=list("dacbe"))
+
+
+def _hg(m: Any) -> Any:
+    return m.DataFrame({"k": ["x", "y", "x"], "a": [1, 2, 3], "b": [1.5, 2.5, 3.5]})
+
+
+_HONEST_CASES = {
+    "sum_min_count": lambda m: _hs(m).sum(min_count=5),
+    "prod_min_count": lambda m: _hs(m).prod(min_count=5),
+    "skew_skipna": lambda m: _hs(m).skew(skipna=False),
+    "sort_values_key": lambda m: _hs(m).sort_values(key=lambda s: -s),
+    "sort_values_key_descending": lambda m: _hs(m).sort_values(key=lambda s: s.abs(), ascending=False),
+    "sort_index_key": lambda m: m.Series([10.0, 20.0, 30.0], index=[3, 1, 2]).sort_index(
+        key=lambda i: [-x for x in i]
+    ),
+    "frame_sort_values_key": lambda m: _hd(m).sort_values("a", key=lambda s: -s),
+    "frame_sort_index_key": lambda m: _hd(m).reset_index(drop=True).sort_index(key=lambda i: [-x for x in i]),
+    "reindex_fill_value": lambda m: _hs(m).reindex(list("abz"), fill_value=0.0),
+    "reindex_method": lambda m: m.Series([1.0, 2.0], index=[0, 2]).reindex([0, 1, 2, 3], method="ffill"),
+    "frame_reindex_fill_value": lambda m: _hd(m).reindex(list("abz"), fill_value=0),
+    "frame_reindex_new_column_fill": lambda m: _hd(m).reindex(columns=["a", "z"], fill_value=0),
+    "interpolate_limit": lambda m: m.Series([1.0, _NAN, _NAN, _NAN, 5.0]).interpolate(limit=1),
+    "interpolate_both_directions": lambda m: m.Series([_NAN, 1.0, _NAN, 3.0, _NAN]).interpolate(
+        limit_direction="both"
+    ),
+    "interpolate_inside": lambda m: m.Series([_NAN, 1.0, _NAN, 3.0, _NAN]).interpolate(limit_area="inside"),
+    "frame_interpolate_limit": lambda m: m.DataFrame({"a": [1.0, _NAN, _NAN, 4.0]}).interpolate(limit=1),
+    "replace_without_value_pads": lambda m: _hs(m).replace(1.0),
+    "replace_nothing_pads_missing": lambda m: _hs(m).replace(),
+    "frame_replace_without_value": lambda m: _hd(m).replace(1),
+    "take_axis": lambda m: _hs(m).take([0, 2], axis=0),
+    "head_default": lambda m: _hd(m).head(),
+    "tail_default": lambda m: _hs(m).tail(),
+    "sum_numpy_out_none": lambda m: _hs(m).sum(out=None),
+    "sort_kind_mergesort": lambda m: _hs(m).sort_values(kind="mergesort"),
+    "groupby_named_aggregation": lambda m: _hg(m).groupby("k").agg(total=("a", "sum"), top=("b", "max")),
+    "to_json_escapes_non_ascii": lambda m: m.Series(["é", "x"]).to_json(),
+    "to_json_force_ascii_false": lambda m: m.Series(["é", "x"]).to_json(force_ascii=False),
+    "to_json_lines": lambda m: m.DataFrame({"a": [1, 2], "b": ["x", "é"]}).to_json(orient="records", lines=True),
+    "to_xml_with_index": lambda m: _hd(m).to_xml(parser="etree"),
+    "to_xml_escapes_text": lambda m: m.DataFrame({"s": ["a<b", "x&y"]}).to_xml(parser="etree", index=False),
+    "index_factorize_sort": lambda m: [list(x) for x in m.Index([3, 1, 2, 1]).factorize(sort=True)],
+    "index_round": lambda m: list(m.Index([1.25, 2.5, 0.125]).round(1)),
+    "index_join_sort": lambda m: list(m.Index([3, 1]).join(m.Index([1, 3]), sort=True)),
+    "datetimeindex_nat_sorts_last": lambda m: list(
+        m.DatetimeIndex(["2024-01-02", None, "2024-01-01"]).sort_values().isna()
+    ),
+    "datetimeindex_nat_first": lambda m: list(
+        m.DatetimeIndex(["2024-01-02", None, "2024-01-01"]).sort_values(na_position="first").isna()
+    ),
+    "datetimeindex_dropna": lambda m: len(m.DatetimeIndex(["2024-01-02", None, "2024-01-01"]).dropna()),
+    "timedeltaindex_duplicated_default": lambda m: list(m.TimedeltaIndex(["1D", "1D"]).duplicated()),
+    "index_fillna_default": lambda m: len(m.Index([1.0, 2.0]).fillna()),
+    "series_reset_index_level_0": lambda m: _hs(m).reset_index(level=0),
+}
+
+# The values match pandas; the result's name does not yet (a DataFrame
+# reduction is named after the op, groupby.apply drops the key name), which is
+# fvsao.7's and 4qg5w.10's, not a dropped parameter.
+_HONEST_VALUE_CASES = {
+    "frame_sum_min_count": lambda m: _hd(m).sum(min_count=5),
+    "frame_prod_min_count": lambda m: _hd(m).prod(min_count=5),
+    "frame_max_skipna": lambda m: _hd(m).max(skipna=False),
+    "frame_median_skipna": lambda m: _hd(m).median(skipna=False),
+    "frame_min_axis1_skipna": lambda m: _hd(m).min(axis=1, skipna=False),
+    "groupby_apply_passes_args": lambda m: _hg(m).groupby("k")["a"].apply(lambda g, k: g.sum() * k, 2),
+}
+
+
+def _honest(obj: Any) -> Any:
+    if hasattr(obj, "index") and hasattr(obj, "dtype") or hasattr(obj, "columns"):
+        return _strict_ordered(obj)
+    return _marker(obj) if isinstance(obj, float) else obj
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_HONEST_CASES.values()), ids=list(_HONEST_CASES))
+def test_implemented_parameters_match_pandas(case: Any) -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = _honest(case(pd))
+    assert _honest(case(fpd)) == expected
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_HONEST_VALUE_CASES.values()), ids=list(_HONEST_VALUE_CASES))
+def test_implemented_parameter_values_match_pandas(case: Any) -> None:
+    got, expected = case(fpd), case(pd)
+    assert list(got.index) == list(expected.index)
+    assert [_marker(v) for v in got.tolist()] == [_marker(v) for v in expected.tolist()]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_csv_keywords_and_targets_match_pandas(tmp_path: Path) -> None:
+    frame = {"a": [1.5, _NAN, 3.0], "s": ["x,y", 'q"t', "z"]}
+    pdf, fdf = pd.DataFrame(frame, index=["r1", "r2", "r3"]), fpd.DataFrame(frame, index=["r1", "r2", "r3"])
+    for kw in ({}, {"sep": ";"}, {"na_rep": "NA"}, {"header": False}, {"index": False},
+               {"index_label": "idx"}, {"columns": ["s"]}):
+        assert fdf.to_csv(**kw) == pdf.to_csv(**kw), kw
+    s = [1.5, _NAN]
+    assert fpd.Series(s).to_csv(na_rep="-") == pd.Series(s).to_csv(na_rep="-")
+    buf_fp, buf_pd = io.StringIO(), io.StringIO()
+    fdf.to_csv(buf_fp)
+    pdf.to_csv(buf_pd)
+    assert buf_fp.getvalue() == buf_pd.getvalue()
+    fdf.to_csv(tmp_path / "a.csv")
+    fdf.to_csv(tmp_path / "a.csv", mode="a", header=False)
+    pdf.to_csv(tmp_path / "b.csv")
+    pdf.to_csv(tmp_path / "b.csv", mode="a", header=False)
+    assert (tmp_path / "a.csv").read_text() == (tmp_path / "b.csv").read_text()
+    # NEGATIVE: keywords the writer cannot honour raise instead of vanishing.
+    for kw in ({"float_format": "%.1f"}, {"quoting": 1}, {"decimal": ","}):
+        with pytest.raises(NotImplementedError):
+            fdf.to_csv(**kw)
+    with pytest.raises(NotImplementedError, match="compression"):
+        fdf.to_csv(tmp_path / "c.csv.gz")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_records_carries_the_index_like_pandas() -> None:
+    frame = {"a": [3, 1], "b": [1.5, _NAN]}
+    expected = pd.DataFrame(frame, index=["d", "a"]).to_records()
+    got = fpd.DataFrame(frame, index=["d", "a"]).to_records()
+    # The records are dicts, not a recarray (fvsao.7); the fields and values
+    # must be pandas'. The index used to be missing.
+    assert [list(r) for r in got] == [list(expected.dtype.names)] * len(expected)
+    assert [tuple(_marker(v) for v in r.values()) for r in got] == [
+        tuple(_marker(v) for v in r) for r in expected
+    ]
+    without = pd.DataFrame(frame).to_records(index=False)
+    assert [list(r) for r in fpd.DataFrame(frame).to_records(index=False)] == [list(without.dtype.names)] * 2
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_parquet_writes_the_codec_asked_for() -> None:
+    pyarrow_parquet = pytest.importorskip("pyarrow.parquet")
+    frame = fpd.DataFrame({"a": [3, 1], "b": [1.5, _NAN]})
+
+    def codec(data: bytes) -> str:
+        return pyarrow_parquet.ParquetFile(io.BytesIO(data)).metadata.row_group(0).column(0).compression
+
+    snappy = frame.to_parquet()
+    assert codec(snappy) == "SNAPPY"
+    assert codec(frame.to_parquet(compression=None)) == "UNCOMPRESSED"
+    assert pd.read_parquet(io.BytesIO(snappy)).equals(pd.DataFrame({"a": [3, 1], "b": [1.5, _NAN]}))
+    with pytest.raises(NotImplementedError, match="gzip"):
+        frame.to_parquet(compression="gzip")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_assert_equal_flags_decide_like_pandas() -> None:
+    def verdict(fn: Any, left: Any, right: Any, **kw: Any) -> str:
+        try:
+            fn(left, right, **kw)
+        except AssertionError:
+            return "fails"
+        return "passes"
+
+    for kw in ({}, {"check_dtype": False}):
+        assert verdict(
+            fpd.testing.assert_frame_equal, fpd.DataFrame({"a": [1, 2]}), fpd.DataFrame({"a": [1.0, 2.0]}), **kw
+        ) == verdict(pd.testing.assert_frame_equal, pd.DataFrame({"a": [1, 2]}), pd.DataFrame({"a": [1.0, 2.0]}), **kw)
+        assert verdict(
+            fpd.testing.assert_series_equal, fpd.Series([1, 2]), fpd.Series([1.0, 2.0]), **kw
+        ) == verdict(pd.testing.assert_series_equal, pd.Series([1, 2]), pd.Series([1.0, 2.0]), **kw)
+    for kw in ({}, {"check_names": False}):
+        assert verdict(
+            fpd.testing.assert_frame_equal,
+            fpd.DataFrame({"a": [1]}).rename_axis("x"),
+            fpd.DataFrame({"a": [1]}).rename_axis("y"),
+            **kw,
+        ) == verdict(
+            pd.testing.assert_frame_equal,
+            pd.DataFrame({"a": [1]}).rename_axis("x"),
+            pd.DataFrame({"a": [1]}).rename_axis("y"),
+            **kw,
+        )
+    assert verdict(fpd.testing.assert_index_equal, fpd.Index([1.0]), fpd.Index([1.0 + 1e-9])) == "passes"
+    assert verdict(fpd.testing.assert_index_equal, fpd.Index([1.0]), fpd.Index([1.0 + 1e-9]), check_exact=True) == "fails"
+    with pytest.raises(NotImplementedError, match="check_like"):
+        fpd.testing.assert_frame_equal(fpd.DataFrame({"a": [1]}), fpd.DataFrame({"a": [1]}), check_like=True)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_numpy_keywords_follow_pandas_rule() -> None:
+    s_fp, s_pd = fpd.Series([1.0, 2.0]), pd.Series([1.0, 2.0])
+    for call in (lambda s: s.sum(foo=1), lambda s: s.mean(foo=1), lambda s: s.transpose(foo=1)):
+        with pytest.raises(TypeError, match="unexpected keyword argument 'foo'"):
+            call(s_fp)
+        with pytest.raises(TypeError):
+            call(s_pd)
+    with pytest.raises(ValueError, match="'dtype' parameter is not supported"):
+        s_fp.sum(dtype="float32")
+    with pytest.raises(ValueError, match="sort kind"):
+        s_fp.sort_values(kind="bogus")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), values=fpd.Series([1]), aggfunc="sum"),
+        lambda: _hd(fpd).rolling(2, center=True),
+        lambda: _hd(fpd).groupby("a").value_counts(normalize=True),
+        lambda: _hs(fpd).interpolate(method="nearest", limit_direction="both"),
+        lambda: _hs(fpd).to_string(float_format="{:.1f}".format),
+        lambda: _hs(fpd).view("int64"),
+        lambda: fpd.PeriodIndex.from_fields(year=[2024]),
+        lambda: _hg(fpd).groupby("k").transform("shift", periods=2),
+    ],
+)
+def test_unimplemented_parameters_raise_instead_of_vanishing(call: Any) -> None:
+    # Each of these returned a result computed as if the parameter were absent.
+    with pytest.raises(NotImplementedError):
+        call()
 
 

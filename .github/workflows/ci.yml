@@ -840,6 +840,13 @@ jobs:
         run: |
           "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_differential_packets.py -v
 
+      # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5: fails when a
+      # binding accepts a pandas parameter and drops it (it prints the
+      # honoured/refused/undecided counts).
+      - name: Parameter honesty audit
+        run: |
+          "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_param_honesty.py -v -s
+
       # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.11: every venv
       # above has pandas, so a reader that delegated to pandas (or fell back to
       # an empty frame) passed. This venv has no pandas, pyarrow or openpyxl; the

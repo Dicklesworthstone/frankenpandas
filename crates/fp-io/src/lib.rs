@@ -10263,27 +10263,43 @@ fn arrow_array_to_scalars(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Sca
     Ok(scalars)
 }
 
-/// Write a DataFrame to an in-memory Parquet buffer.
+/// The Parquet codecs this build writes: none, or pandas' default snappy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParquetCompression {
+    Uncompressed,
+    Snappy,
+}
+
+/// Write a DataFrame to an in-memory, uncompressed Parquet buffer.
 pub fn write_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    write_parquet_bytes_with_compression(frame, ParquetCompression::Uncompressed)
+}
+
+/// Write a DataFrame to an in-memory Parquet buffer with the given codec
+/// (pandas' `to_parquet(compression=...)`, br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5).
+pub fn write_parquet_bytes_with_compression(
+    frame: &DataFrame,
+    compression: ParquetCompression,
+) -> Result<Vec<u8>, IoError> {
     let batch = dataframe_to_record_batch(frame)?;
     let mut buf = Vec::new();
+    let codec = match compression {
+        ParquetCompression::Uncompressed => parquet::basic::Compression::UNCOMPRESSED,
+        ParquetCompression::Snappy => parquet::basic::Compression::SNAPPY,
+    };
+    let mut builder = parquet::file::properties::WriterProperties::builder().set_compression(codec);
     // The Arrow schema-level metadata on `batch` does not come back as batch
     // metadata from the Parquet reader, so the row MultiIndex level names also
     // ride in the file's own key-value metadata (br-frankenpandas-wfkzm).
-    let props = frame
-        .row_multiindex()
-        .map(
-            |row_multiindex| -> Result<parquet::file::properties::WriterProperties, IoError> {
-                let encoded = serde_json::to_string(&row_multiindex.names().to_vec())?;
-                Ok(parquet::file::properties::WriterProperties::builder()
-                    .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
-                        ROW_MULTIINDEX_NAMES_METADATA_KEY.to_owned(),
-                        encoded,
-                    )]))
-                    .build())
-            },
-        )
-        .transpose()?;
+    if let Some(row_multiindex) = frame.row_multiindex() {
+        let encoded = serde_json::to_string(&row_multiindex.names().to_vec())?;
+        builder =
+            builder.set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                ROW_MULTIINDEX_NAMES_METADATA_KEY.to_owned(),
+                encoded,
+            )]));
+    }
+    let props = Some(builder.build());
     let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), props)
         .map_err(|e| IoError::Parquet(e.to_string()))?;
     writer
@@ -24379,6 +24395,41 @@ mod tests {
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    /// fvsao.5: to_parquet(compression=) was dropped and every file was
+    /// written uncompressed; pandas' default is snappy.
+    #[test]
+    fn parquet_writes_the_requested_codec_fvsao5() {
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        let frame = make_test_dataframe();
+        let codec_of = |bytes: Vec<u8>| {
+            let reader =
+                SerializedFileReader::new(bytes::Bytes::from(bytes)).expect("parquet reader");
+            reader.metadata().row_group(0).column(0).compression()
+        };
+        let snappy =
+            super::write_parquet_bytes_with_compression(&frame, super::ParquetCompression::Snappy)
+                .expect("write snappy");
+        let plain = super::write_parquet_bytes(&frame).expect("write plain");
+        assert_eq!(
+            codec_of(snappy.clone()),
+            parquet::basic::Compression::SNAPPY
+        );
+        assert_eq!(
+            codec_of(plain.clone()),
+            parquet::basic::Compression::UNCOMPRESSED
+        );
+        assert_ne!(snappy, plain);
+        let back = super::read_parquet_bytes(&snappy).expect("read snappy");
+        assert_eq!(
+            back.column("names").unwrap().values(),
+            frame.column("names").unwrap().values()
+        );
+        assert_eq!(
+            back.column("floats").unwrap().values(),
+            frame.column("floats").unwrap().values()
+        );
     }
 
     #[test]

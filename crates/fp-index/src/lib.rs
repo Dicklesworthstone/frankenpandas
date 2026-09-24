@@ -233,6 +233,18 @@ fn cached_available_parallelism() -> usize {
         .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
 }
 
+/// numpy's `around`: scale by 10^decimals (or divide, for a negative
+/// `decimals`), round halves to even, scale back.
+fn round_half_even(x: f64, decimals: i32) -> f64 {
+    if decimals >= 0 {
+        let scale = 10_f64.powi(decimals);
+        (x * scale).round_ties_even() / scale
+    } else {
+        let scale = 10_f64.powi(-decimals);
+        (x / scale).round_ties_even() * scale
+    }
+}
+
 fn index_label_is_truthy(label: &IndexLabel) -> bool {
     if label.is_missing() {
         return false;
@@ -5890,10 +5902,28 @@ impl Index {
         }
     }
 
-    /// Rounding is a no-op for current discrete flat index labels.
+    /// Round Float64 labels to `decimals` places, halves to even as numpy's
+    /// `around` (which pandas' `Index.round` uses) does; a negative
+    /// `decimals` rounds to tens, hundreds, ... and then changes Int64 labels
+    /// too. Other labels are unchanged. This used to return the index
+    /// unchanged, float labels included
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5).
     #[must_use]
-    pub fn round(&self) -> Self {
-        self.clone()
+    pub fn round(&self, decimals: i32) -> Self {
+        let labels = self
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Float64(f) => {
+                    IndexLabel::Float64(OrderedF64(round_half_even(f.0, decimals)))
+                }
+                IndexLabel::Int64(i) if decimals < 0 => {
+                    IndexLabel::Int64(round_half_even(*i as f64, decimals) as i64)
+                }
+                other => other.clone(),
+            })
+            .collect();
+        Self::new(labels).rename_index(self.name())
     }
 
     /// String accessor for Utf8 labels, matching `pd.Index.str`.
@@ -36907,5 +36937,51 @@ mod interval_index_tests {
         assert!(!ii_dec.is_monotonic_increasing());
         assert!(!ii_dec.is_overlapping());
         assert!(ii_dec.is_non_overlapping_monotonic());
+    }
+
+    /// pandas 2.2.3 (numpy `around`, halves to even):
+    /// Index([1.25, 2.5, 3.5, -0.5, 0.125]).round(0) -> [1.0, 2.0, 4.0, -0.0, 0.0],
+    /// Index([1.25, 2.5, 0.125]).round(1) -> [1.2, 2.5, 0.1],
+    /// Index([15, 25, 14]).round(-1) -> [20, 20, 10]; the name is kept.
+    /// `round` used to return the index unchanged (fvsao.5).
+    #[test]
+    fn round_halves_to_even_like_numpy_fvsao5() {
+        let floats = |xs: &[f64]| {
+            Index::new(
+                xs.iter()
+                    .map(|&x| IndexLabel::Float64(OrderedF64(x)))
+                    .collect(),
+            )
+        };
+        let values = |idx: &Index| -> Vec<IndexLabel> { idx.labels().to_vec() };
+        let named = floats(&[1.25, 2.5, 3.5, -0.5, 0.125]).rename_index(Some("n"));
+        let rounded = named.round(0);
+        assert_eq!(
+            values(&rounded),
+            values(&floats(&[1.0, 2.0, 4.0, -0.0, 0.0]))
+        );
+        assert_eq!(rounded.name(), Some("n"));
+        assert_eq!(
+            values(&floats(&[1.25, 2.5, 0.125]).round(1)),
+            values(&floats(&[1.2, 2.5, 0.1]))
+        );
+        let ints = Index::new(vec![
+            IndexLabel::Int64(15),
+            IndexLabel::Int64(25),
+            IndexLabel::Int64(14),
+        ]);
+        assert_eq!(
+            values(&ints.round(-1)),
+            vec![
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(10)
+            ]
+        );
+        // Integers are untouched by a non-negative decimals, and so is a
+        // string label.
+        assert_eq!(values(&ints.round(2)), values(&ints));
+        let text = Index::new(vec![IndexLabel::Utf8("1.25".to_owned())]);
+        assert_eq!(values(&text.round(0)), values(&text));
     }
 }
