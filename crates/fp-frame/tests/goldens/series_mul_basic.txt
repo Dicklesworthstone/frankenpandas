@@ -1,4 +1,4 @@
 0    10
 1    18
 2    28
-Name: x*y, Length: 3, dtype: Int64
+Name: , Length: 3, dtype: Int64

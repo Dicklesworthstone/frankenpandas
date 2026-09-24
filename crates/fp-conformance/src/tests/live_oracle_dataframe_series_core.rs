@@ -14416,6 +14416,74 @@ fn live_oracle_dataframe_eval_arithmetic() {
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
+/// br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.3: Int64 `//` and `%` with a
+/// Bool operand used to hit `unreachable!()`; `% False` is the pandas quirk that
+/// stays int64 zeros while `// False` goes float64 inf/-inf/nan.
+#[test]
+fn live_oracle_dataframe_eval_int_bool_floordiv_and_mod() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+
+    // `a // b` and `a // False` produce +/-inf, which the oracle cannot encode yet
+    // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.3); they are pinned by
+    // fp-columnar's int_bool_floordiv_and_mod_match_pandas_without_panicking until
+    // then, and must be added here when that lands.
+    for expr in ["a % b", "b % 2", "b // 2", "a // True", "a % False"] {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-LIVE-DF-EVAL-INT-BOOL",
+            "case_id": "dataframe_eval_int_bool_floordiv_mod",
+            "mode": "strict",
+            "operation": "dataframe_eval",
+            "oracle_source": "live_legacy_pandas",
+            "expr": expr,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "columns": {
+                    "a": [
+                        { "kind": "int64", "value": 466 },
+                        { "kind": "int64", "value": -7 },
+                        { "kind": "int64", "value": 0 }
+                    ],
+                    "b": [
+                        { "kind": "bool", "value": true },
+                        { "kind": "bool", "value": false },
+                        { "kind": "bool", "value": true }
+                    ]
+                },
+                "column_order": ["a", "b"]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping df eval int/bool test: {message}");
+            return;
+        }
+        let expected = expected_result.expect("live oracle expected");
+        let super::ResolvedExpected::Series(expected) = expected else {
+            panic!("expected a live oracle series payload for {expr}, got {expected:?}");
+        };
+
+        let frame =
+            super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+        let policy = super::RuntimePolicy::strict();
+        let mut ledger = super::EvidenceLedger::new();
+        let result = fp_expr::eval_str(expr, &frame, &policy, &mut ledger)
+            .unwrap_or_else(|err| panic!("eval {expr}: {err}"));
+        eprintln!(
+            "live_oracle int/bool eval {expr}: dtype={:?}",
+            result.column().dtype()
+        );
+        super::compare_series_expected(&result, &expected)
+            .unwrap_or_else(|err| panic!("pandas parity for {expr}: {err}"));
+    }
+}
+
 #[test]
 fn live_oracle_dataframe_eval_comparison() {
     let mut cfg = super::HarnessConfig::default_paths();

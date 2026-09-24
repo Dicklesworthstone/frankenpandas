@@ -10006,19 +10006,13 @@ impl Series {
         policy: &RuntimePolicy,
         ledger: &mut EvidenceLedger,
     ) -> Result<Self, FrameError> {
-        let op_symbol = match op {
-            ArithmeticOp::Add => "+",
-            ArithmeticOp::Sub => "-",
-            ArithmeticOp::Mul => "*",
-            ArithmeticOp::Div => "/",
-            ArithmeticOp::Mod => "%",
-            ArithmeticOp::Pow => "**",
-            ArithmeticOp::FloorDiv => "//",
-        };
+        // pandas: the result keeps the name only when both operands share it;
+        // otherwise it is unnamed (None). This used to concatenate the names
+        // ("a+b"), which pandas never produces.
         let out_name = if self.name == other.name {
             self.name.clone()
         } else {
-            format!("{}{op_symbol}{}", self.name, other.name)
+            String::new()
         };
 
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
@@ -106633,7 +106627,8 @@ mod tests {
                 Scalar::Null(NullKind::NaN)
             ]
         );
-        assert_eq!(out.name(), "x-y");
+        // pandas: differently named operands give an unnamed (None) result.
+        assert_eq!(out.name(), "");
     }
 
     /// The fused m2/m3 and m2/m4 passes replace `(v - mean).powi(k)` sums. That
@@ -107013,7 +107008,8 @@ mod tests {
                 Scalar::Null(NullKind::NaN)
             ]
         );
-        assert_eq!(out.name(), "x*y");
+        // pandas: differently named operands give an unnamed (None) result.
+        assert_eq!(out.name(), "");
     }
 
     #[test]
@@ -107035,7 +107031,8 @@ mod tests {
         };
         assert!((v - 30.0 / 7.0).abs() < 1e-10);
         assert!(out.values()[3].is_missing());
-        assert_eq!(out.name(), "x/y");
+        // pandas: differently named operands give an unnamed (None) result.
+        assert_eq!(out.name(), "");
     }
 
     #[test]
