@@ -2072,14 +2072,36 @@ _GROUPBY_SELECTION_CASES = {
 }
 
 
-def _strict(obj: Any) -> Any:
+def _is_nan(value: Any) -> bool:
+    return isinstance(value, float) and math.isnan(value)
+
+
+def _marker(value: Any, object_missing: bool) -> Any:
+    """NaN != NaN, so compare it as a marker. With `object_missing`, None and
+    NaN are one marker (see _READ_CSV_CASES)."""
+    if object_missing and (value is None or _is_nan(value)):
+        return "<missing>"
+    # frankenpandas has its own Timestamp/Timedelta classes (pandas-free), so
+    # compare those by type name and repr rather than cross-class ==.
+    if type(value).__name__ in ("Timestamp", "Timedelta"):
+        return (type(value).__name__, repr(value))
+    return "<NaN>" if _is_nan(value) else value
+
+
+def _type_tag(value: Any, object_missing: bool) -> str:
+    if object_missing and (value is None or _is_nan(value)):
+        return "<missing>"
+    return type(value).__name__
+
+
+def _strict(obj: Any, object_missing: bool = False) -> Any:
     if hasattr(obj, "columns"):
         columns = list(obj.columns)
         return (
             "DataFrame",
             columns,
             [str(obj[c].dtype) for c in columns],
-            [_strict(obj[c]) for c in columns],
+            [_strict(obj[c], object_missing) for c in columns],
         )
     as_dict = obj.to_dict()
     return (
@@ -2087,8 +2109,8 @@ def _strict(obj: Any) -> Any:
         str(obj.dtype),
         obj.name,
         obj.index.name,
-        [type(v).__name__ for v in as_dict.values()],
-        as_dict,
+        [_type_tag(v, object_missing) for v in as_dict.values()],
+        {k: _marker(v, object_missing) for k, v in as_dict.items()},
     )
 
 
@@ -2116,5 +2138,76 @@ def test_groupby_missing_selection_raises_like_pandas(select: Any, error: type) 
     with pytest.raises(error) as got:
         select(_gb(fpd))
     assert str(got.value) == str(expected.value)
+
+
+# read_csv sources and core keywords (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.2).
+# read_csv accepted one str path and no keywords; StringIO raised TypeError.
+import io  # noqa: E402
+
+_CSV = "a,b,c,d\n1,x,2.5,2024-01-02\n2,y,,2024-02-03\n3,NA,4.0,2024-03-04\n"
+_CSV_QUOTED = 'a,b\n"x,1\ny",2\nz,3\n'  # a quoted field holding the delimiter and a newline
+
+
+def _csv_path(tmp_path: Path, text: str, name: str = "t.csv") -> str:
+    path = tmp_path / name
+    path.write_text(text)
+    return str(path)
+
+
+_READ_CSV_CASES = {
+    "path": lambda m, p: m.read_csv(_csv_path(p, _CSV)),
+    "stringio": lambda m, p: m.read_csv(io.StringIO(_CSV)),
+    "bytesio": lambda m, p: m.read_csv(io.BytesIO(_CSV.encode())),
+    "quoted_delimiter_newline": lambda m, p: m.read_csv(io.StringIO(_CSV_QUOTED)),
+    "open_text_file": lambda m, p: m.read_csv(open(_csv_path(p, _CSV))),  # noqa: SIM115
+    "sep_semicolon": lambda m, p: m.read_csv(io.StringIO(_CSV.replace(",", ";")), sep=";"),
+    "delimiter_alias": lambda m, p: m.read_csv(io.StringIO(_CSV.replace(",", "|")), delimiter="|"),
+    "header_none": lambda m, p: m.read_csv(io.StringIO("1,2\n3,4\n"), header=None, names=["p", "q"]),
+    "names_infer_header": lambda m, p: m.read_csv(io.StringIO("1,2\n3,4\n"), names=["p", "q"]),
+    "names_replace_header": lambda m, p: m.read_csv(io.StringIO(_CSV), header=0, names=["w", "x", "y", "z"]),
+    "index_col_name": lambda m, p: m.read_csv(io.StringIO(_CSV), index_col="a"),
+    "index_col_position": lambda m, p: m.read_csv(io.StringIO(_CSV), index_col=0),
+    "index_col_false": lambda m, p: m.read_csv(io.StringIO(_CSV), index_col=False),
+    "usecols_names_file_order": lambda m, p: m.read_csv(io.StringIO(_CSV), usecols=["c", "a"]),
+    "usecols_positions": lambda m, p: m.read_csv(io.StringIO(_CSV), usecols=[2, 0]),
+    "dtype_dict_type": lambda m, p: m.read_csv(io.StringIO(_CSV), dtype={"a": float}),
+    "dtype_dict_name": lambda m, p: m.read_csv(io.StringIO(_CSV), dtype={"a": "float64", "b": "str"}),
+    "parse_dates": lambda m, p: m.read_csv(io.StringIO(_CSV), parse_dates=["d"]),
+    "na_values": lambda m, p: m.read_csv(io.StringIO(_CSV), na_values=["x"]),
+    "keep_default_na_false": lambda m, p: m.read_csv(io.StringIO(_CSV), keep_default_na=False),
+    "skiprows": lambda m, p: m.read_csv(io.StringIO("junk\n" + _CSV), skiprows=1),
+    "nrows": lambda m, p: m.read_csv(io.StringIO(_CSV), nrows=2),
+    "encoding_latin1": lambda m, p: m.read_csv(io.BytesIO("a,b\ncafé,1\n".encode("latin-1")), encoding="latin-1"),
+    "utf8_bom": lambda m, p: m.read_csv(io.BytesIO(b"\xef\xbb\xbf" + _CSV.encode())),
+    "read_table": lambda m, p: m.read_table(io.StringIO(_CSV.replace(",", "\t"))),
+}
+
+
+def _strict_frame(frame: Any) -> Any:
+    # object_missing: a missing cell in a string column is None here and NaN in
+    # pandas (br-frankenpandas-audiv, pinned by the xfail below); every other
+    # dtype, name, index and value is compared exactly.
+    return (_strict(frame, object_missing=True), frame.index.name, list(frame.index))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_READ_CSV_CASES.values()), ids=list(_READ_CSV_CASES))
+def test_read_csv_sources_and_keywords_match_pandas(case: Any, tmp_path: Path) -> None:
+    assert _strict_frame(case(fpd, tmp_path)) == _strict_frame(case(pd, tmp_path))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="br-frankenpandas-audiv: missing string cells read as None, pandas gives NaN")
+def test_read_csv_missing_string_cell_is_nan_like_pandas() -> None:
+    assert _is_nan(pd.read_csv(io.StringIO("a\nx\nNA\n"))["a"].to_dict()[1])
+    assert _is_nan(fpd.read_csv(io.StringIO("a\nx\nNA\n"))["a"].to_dict()[1])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_read_csv_unsupported_keyword_is_not_silently_ignored() -> None:
+    with pytest.raises(NotImplementedError, match="converters"):
+        fpd.read_csv(io.StringIO(_CSV), converters={"a": str})
+    with pytest.raises(ValueError, match="only specify one"):
+        fpd.read_csv(io.StringIO(_CSV), sep=",", delimiter=",")
 
 

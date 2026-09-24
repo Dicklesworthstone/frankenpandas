@@ -228,6 +228,24 @@ def test_csv_blank_index_header_reads_as_unnamed(tmp_path):
     assert list(fpd.read_csv(str(path)).columns) == ["Unnamed: 0", "i", "f"]
 
 
+def test_read_csv_takes_file_likes_and_keywords_without_pandas():
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.2: read_csv took
+    # one str path; StringIO raised TypeError. pandas 2.2.3 on the same input:
+    #   read_csv(StringIO('a,b\n"x,1\ny",2\nz,3\n')).to_dict()
+    #     -> {'a': {0: 'x,1\ny', 1: 'z'}, 'b': {0: 2, 1: 3}}
+    #   read_csv(BytesIO(b'k;v\n1;2\n3;4\n'), sep=';', index_col='k', usecols=['v', 'k'])
+    #     -> index [1, 3] named 'k', {'v': {1: 2, 3: 4}}
+    import io
+
+    quoted = fpd.read_csv(io.StringIO('a,b\n"x,1\ny",2\nz,3\n'))
+    assert quoted.to_dict() == {"a": {0: "x,1\ny", 1: "z"}, "b": {0: 2, 1: 3}}
+    frame = fpd.read_csv(
+        io.BytesIO(b"k;v\n1;2\n3;4\n"), sep=";", index_col="k", usecols=["v", "k"]
+    )
+    assert frame.index.name == "k"
+    assert frame.to_dict() == {"v": {1: 2, 3: 4}}
+
+
 def test_to_csv_writes_the_index_by_default_like_pandas():
     # br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1. pandas 2.2.3:
     #   DataFrame({'a': [1, 2], 'b': ['x', None]}).to_csv() -> ',a,b\n0,1,x\n1,2,\n'

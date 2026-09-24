@@ -26166,12 +26166,284 @@ fn concat(frames: Vec<PyRef<'_, PyDataFrame>>) -> PyResult<PyDataFrame> {
     Ok(PyDataFrame { inner })
 }
 
-/// Read a CSV file into a DataFrame.
+/// A pandas dtype argument: a name (`"float64"`), a Python type (`float`), or
+/// anything with a dtype `name` (numpy and pandas dtype objects).
+fn py_dtype_arg(obj: &Bound<'_, PyAny>) -> PyResult<DType> {
+    if let Ok(name) = obj.extract::<String>() {
+        return parse_dtype(&name);
+    }
+    if let Ok(ty) = obj.cast::<pyo3::types::PyType>() {
+        return parse_dtype(&ty.name()?.extract::<String>()?);
+    }
+    if let Ok(name) = obj.getattr("name")
+        && let Ok(name) = name.extract::<String>()
+    {
+        return parse_dtype(&name);
+    }
+    parse_dtype(&obj.str()?.extract::<String>()?)
+}
+
+/// The keywords `read_csv` and `read_table` share (pandas' defaults).
+struct CsvReadArgs<'a, 'py> {
+    sep: Option<&'a str>,
+    delimiter: Option<&'a str>,
+    names: Option<Vec<String>>,
+    index_col: Option<&'a Bound<'py, PyAny>>,
+    usecols: Option<&'a Bound<'py, PyAny>>,
+    dtype: Option<&'a Bound<'py, PyAny>>,
+    parse_dates: Option<&'a Bound<'py, PyAny>>,
+    na_values: Option<&'a Bound<'py, PyAny>>,
+    keep_default_na: bool,
+    skiprows: Option<usize>,
+    nrows: Option<usize>,
+    encoding: Option<&'a str>,
+    kwargs: Option<&'a Bound<'py, PyDict>>,
+}
+
+/// One column label from a pandas position-or-name argument.
+fn csv_column_ref(frame: &DataFrame, item: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(position) = item.extract::<usize>() {
+        return frame
+            .column_names()
+            .get(position)
+            .map(|name| name.to_string())
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "column position {position} is out of range"
+                ))
+            });
+    }
+    item.extract::<String>()
+}
+
+/// pandas `read_csv` over fp-io's CSV reader, never pandas: a path, a file-like
+/// object or bytes, and the core keywords. Any other keyword raises
+/// NotImplementedError rather than being ignored.
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.2)
+fn read_csv_impl(
+    py: Python<'_>,
+    source: &Bound<'_, PyAny>,
+    default_sep: u8,
+    args: &CsvReadArgs<'_, '_>,
+) -> PyResult<PyDataFrame> {
+    // `header` comes through **kwargs so an explicit header=None differs from
+    // pandas' default 'infer' (0, or no header row when `names` is given).
+    let mut header_row: Option<usize> = if args.names.is_some() { None } else { Some(0) };
+    if let Some(kwargs) = args.kwargs
+        && let Some(header) = kwargs.get_item("header")?
+    {
+        header_row = if header.is_none() {
+            None
+        } else if let Ok(row) = header.extract::<usize>() {
+            Some(row)
+        } else if header.extract::<String>().is_ok_and(|s| s == "infer") {
+            header_row
+        } else {
+            return Err(not_implemented("read_csv(header=<list>)"));
+        };
+        kwargs.del_item("header")?;
+    }
+    reject_unsupported_kwargs(
+        "read_csv",
+        args.kwargs,
+        &["engine", "low_memory", "memory_map"],
+    )?;
+
+    let sep = match (args.sep, args.delimiter) {
+        (Some(_), Some(_)) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Specified a sep and a delimiter; you can only specify one.",
+            ));
+        }
+        (Some(sep), None) | (None, Some(sep)) => match sep.as_bytes() {
+            [byte] => *byte,
+            _ => return Err(not_implemented(&format!("read_csv(sep={sep:?})"))),
+        },
+        (None, None) => default_sep,
+    };
+
+    let bytes = py_input_bytes(source)?;
+    let mut text = match args.encoding {
+        Some(encoding)
+            if !matches!(
+                encoding.to_ascii_lowercase().replace('_', "-").as_str(),
+                "utf-8" | "utf8" | "utf-8-sig"
+            ) =>
+        {
+            pyo3::types::PyBytes::new(py, &bytes)
+                .call_method1("decode", (encoding,))?
+                .extract::<String>()?
+        }
+        _ => String::from_utf8(bytes).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "input is not valid UTF-8: {e}"
+            ))
+        })?,
+    };
+    // pandas' C parser drops a UTF-8 byte-order mark.
+    if let Some(stripped) = text.strip_prefix('\u{feff}') {
+        text = stripped.to_owned();
+    }
+
+    let mut opts = fp_io::CsvReadOptions {
+        delimiter: sep,
+        has_headers: header_row.is_some(),
+        keep_default_na: args.keep_default_na,
+        nrows: args.nrows,
+        skiprows: args.skiprows.unwrap_or(0) + header_row.unwrap_or(0),
+        ..Default::default()
+    };
+    if let Some(na) = args.na_values.filter(|v| !v.is_none()) {
+        opts.na_values = if let Ok(one) = na.extract::<String>() {
+            vec![one]
+        } else if na.is_instance_of::<PyDict>() {
+            return Err(not_implemented("read_csv(na_values=<dict>)"));
+        } else {
+            na.extract::<Vec<String>>()?
+        };
+    }
+    let mut frame_dtype: Option<DType> = None;
+    if let Some(dtype) = args.dtype.filter(|d| !d.is_none()) {
+        if let Ok(mapping) = dtype.cast::<PyDict>() {
+            let mut by_column = std::collections::HashMap::new();
+            for (column, spec) in mapping.iter() {
+                by_column.insert(column.extract::<String>()?, py_dtype_arg(&spec)?);
+            }
+            opts.dtype = Some(by_column);
+        } else {
+            frame_dtype = Some(py_dtype_arg(dtype)?);
+        }
+    }
+    if let Some(dates) = args.parse_dates.filter(|d| !d.is_none()) {
+        if let Ok(flag) = dates.extract::<bool>() {
+            if flag {
+                return Err(not_implemented("read_csv(parse_dates=True)"));
+            }
+        } else {
+            opts.parse_dates = Some(dates.extract::<Vec<String>>()?);
+        }
+    }
+    let usecols_by_name = args
+        .usecols
+        .filter(|u| !u.is_none())
+        .and_then(|u| u.extract::<Vec<String>>().ok());
+    if let Some(names) = &usecols_by_name
+        && args.names.is_none()
+    {
+        opts.usecols = Some(names.clone());
+    }
+
+    let mut frame = fp_io::read_csv_with_options(&text, &opts).map_err(io_error_to_py)?;
+
+    if let Some(names) = &args.names {
+        let current: Vec<String> = frame.column_names().iter().map(|n| n.to_string()).collect();
+        if names.len() != current.len() {
+            return Err(not_implemented(&format!(
+                "read_csv(names=...) with {} names for {} columns",
+                names.len(),
+                current.len()
+            )));
+        }
+        let mapping: Vec<(&str, &str)> = current
+            .iter()
+            .map(String::as_str)
+            .zip(names.iter().map(String::as_str))
+            .collect();
+        frame = frame.rename_columns(&mapping).map_err(frame_error_to_py)?;
+    }
+    if let Some(usecols) = args.usecols.filter(|u| !u.is_none())
+        && (usecols_by_name.is_none() || args.names.is_some())
+    {
+        // Positions, or names given alongside `names=`: pandas keeps file order.
+        let mut keep = Vec::new();
+        for item in usecols.try_iter()? {
+            keep.push(csv_column_ref(&frame, &item?)?);
+        }
+        let ordered: Vec<&str> = frame
+            .column_names()
+            .iter()
+            .map(|name| name.as_str())
+            .filter(|name| keep.iter().any(|k| k == name))
+            .collect();
+        frame = frame.select_columns(&ordered).map_err(loc_key_error)?;
+    }
+    if let Some(dtype) = frame_dtype {
+        frame = frame.astype(dtype).map_err(frame_error_to_py)?;
+    }
+    if let Some(index_col) = args.index_col.filter(|i| !i.is_none()) {
+        let columns: Vec<String> = if index_col.extract::<bool>().is_ok_and(|b| !b) {
+            Vec::new()
+        } else if index_col.is_instance_of::<pyo3::types::PyList>() {
+            let mut columns = Vec::new();
+            for item in index_col.try_iter()? {
+                columns.push(csv_column_ref(&frame, &item?)?);
+            }
+            columns
+        } else {
+            vec![csv_column_ref(&frame, index_col)?]
+        };
+        match columns.as_slice() {
+            [] => {}
+            [one] => frame = frame.set_index(one, true).map_err(frame_error_to_py)?,
+            _ => return Err(not_implemented("read_csv(index_col=<several columns>)")),
+        }
+    }
+    Ok(PyDataFrame { inner: frame })
+}
+
+/// Read a CSV into a DataFrame (pandas `read_csv`; see `read_csv_impl`).
 #[pyfunction]
-fn read_csv(path: &str) -> PyResult<PyDataFrame> {
-    let path = std::path::Path::new(path);
-    let df = fp_io::read_csv(path).map_err(io_error_to_py)?;
-    Ok(PyDataFrame { inner: df })
+#[pyo3(signature = (
+    filepath_or_buffer,
+    sep=None,
+    *,
+    delimiter=None,
+    names=None,
+    index_col=None,
+    usecols=None,
+    dtype=None,
+    parse_dates=None,
+    na_values=None,
+    keep_default_na=true,
+    skiprows=None,
+    nrows=None,
+    encoding=None,
+    **kwargs
+))]
+#[allow(clippy::too_many_arguments)]
+fn read_csv(
+    py: Python<'_>,
+    filepath_or_buffer: &Bound<'_, PyAny>,
+    sep: Option<&str>,
+    delimiter: Option<&str>,
+    names: Option<Vec<String>>,
+    index_col: Option<&Bound<'_, PyAny>>,
+    usecols: Option<&Bound<'_, PyAny>>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    parse_dates: Option<&Bound<'_, PyAny>>,
+    na_values: Option<&Bound<'_, PyAny>>,
+    keep_default_na: bool,
+    skiprows: Option<usize>,
+    nrows: Option<usize>,
+    encoding: Option<&str>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let args = CsvReadArgs {
+        sep,
+        delimiter,
+        names,
+        index_col,
+        usecols,
+        dtype,
+        parse_dates,
+        na_values,
+        keep_default_na,
+        skiprows,
+        nrows,
+        encoding,
+        kwargs,
+    };
+    read_csv_impl(py, filepath_or_buffer, b',', &args)
 }
 
 /// Map a pandas `orient=` string to the fp-io `JsonOrient` enum.
@@ -30003,16 +30275,59 @@ fn offset_year_end(n: Option<i64>) -> PyDateOffset {
 }
 
 // 4. Top-level functions
+/// pandas `read_table`: `read_csv` with a tab separator by default.
 #[pyfunction]
-#[pyo3(signature = (path))]
-pub fn read_table(path: &str) -> PyResult<PyDataFrame> {
-    let opts = fp_io::CsvReadOptions {
-        delimiter: b'\t',
-        ..Default::default()
+#[pyo3(signature = (
+    filepath_or_buffer,
+    sep=None,
+    *,
+    delimiter=None,
+    names=None,
+    index_col=None,
+    usecols=None,
+    dtype=None,
+    parse_dates=None,
+    na_values=None,
+    keep_default_na=true,
+    skiprows=None,
+    nrows=None,
+    encoding=None,
+    **kwargs
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn read_table(
+    py: Python<'_>,
+    filepath_or_buffer: &Bound<'_, PyAny>,
+    sep: Option<&str>,
+    delimiter: Option<&str>,
+    names: Option<Vec<String>>,
+    index_col: Option<&Bound<'_, PyAny>>,
+    usecols: Option<&Bound<'_, PyAny>>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    parse_dates: Option<&Bound<'_, PyAny>>,
+    na_values: Option<&Bound<'_, PyAny>>,
+    keep_default_na: bool,
+    skiprows: Option<usize>,
+    nrows: Option<usize>,
+    encoding: Option<&str>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    let args = CsvReadArgs {
+        sep,
+        delimiter,
+        names,
+        index_col,
+        usecols,
+        dtype,
+        parse_dates,
+        na_values,
+        keep_default_na,
+        skiprows,
+        nrows,
+        encoding,
+        kwargs,
     };
-    let df = fp_io::read_csv_with_options_path(std::path::Path::new(path), &opts)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-    Ok(PyDataFrame { inner: df })
+    read_csv_impl(py, filepath_or_buffer, b'\t', &args)
 }
 
 #[pyfunction]

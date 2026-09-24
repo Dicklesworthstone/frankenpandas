@@ -1925,7 +1925,23 @@ def period_range(*args: Any, **kwargs: Any) -> Any: ...
 def pivot(*args: Any, **kwargs: Any) -> Any: ...
 def pivot_table(*args: Any, **kwargs: Any) -> Any: ...
 def qcut(*args: Any, **kwargs: Any) -> Any: ...
-def read_csv(*args: Any, **kwargs: Any) -> Any: ...
+def read_csv(
+    filepath_or_buffer: Any,
+    sep: Optional[str] = None,
+    *,
+    delimiter: Optional[str] = None,
+    header: Union[int, str, None] = "infer",
+    names: Optional[Sequence[str]] = None,
+    index_col: Union[int, str, Sequence[Union[int, str]], bool, None] = None,
+    usecols: Optional[Sequence[Union[int, str]]] = None,
+    dtype: Any = None,
+    parse_dates: Union[bool, Sequence[str], None] = None,
+    na_values: Union[str, Sequence[str], None] = None,
+    keep_default_na: bool = True,
+    skiprows: Optional[int] = None,
+    nrows: Optional[int] = None,
+    encoding: Optional[str] = None,
+) -> DataFrame: ...
 def read_json(*args: Any, **kwargs: Any) -> Any: ...
 def read_jsonl(*args: Any, **kwargs: Any) -> Any: ...
 def read_parquet(*args: Any, **kwargs: Any) -> Any: ...
@@ -2529,7 +2545,23 @@ class _TSeries:
 tseries: _TSeries
 
 # Missing Top-Level Functions
-def read_table(filepath_or_buffer: Any, sep: str = "\t", **kwargs: Any) -> DataFrame: ...
+def read_table(
+    filepath_or_buffer: Any,
+    sep: Optional[str] = None,
+    *,
+    delimiter: Optional[str] = None,
+    header: Union[int, str, None] = "infer",
+    names: Optional[Sequence[str]] = None,
+    index_col: Union[int, str, Sequence[Union[int, str]], bool, None] = None,
+    usecols: Optional[Sequence[Union[int, str]]] = None,
+    dtype: Any = None,
+    parse_dates: Union[bool, Sequence[str], None] = None,
+    na_values: Union[str, Sequence[str], None] = None,
+    keep_default_na: bool = True,
+    skiprows: Optional[int] = None,
+    nrows: Optional[int] = None,
+    encoding: Optional[str] = None,
+) -> DataFrame: ...
 def to_pickle(obj: Any, filepath_or_buffer: Any, compression: str = "infer", protocol: int = 5) -> None: ...
 def read_pickle(filepath_or_buffer: Any, compression: str = "infer") -> Any: ...
 def from_dummies(data: DataFrame, sep: Optional[str] = None) -> DataFrame: ...
