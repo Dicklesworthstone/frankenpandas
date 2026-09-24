@@ -13352,7 +13352,9 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let _ = (excel, sep, kwargs);
-        Ok(())
+        Err(not_implemented(
+            "Series.to_clipboard (no clipboard writer yet)",
+        ))
     }
 
     #[pyo3(signature = (path=None, index=true, sep=",", **kwargs))]
@@ -13375,15 +13377,33 @@ impl PySeries {
         }
     }
 
-    #[pyo3(signature = (excel_writer, sheet_name="Sheet1", **kwargs))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (excel_writer, sheet_name="Sheet1", na_rep="", float_format=None, columns=None, header=true, index=true, index_label=None, **kwargs))]
     fn to_excel(
         &self,
+        py: Python<'_>,
         excel_writer: &Bound<'_, PyAny>,
-        sheet_name: Option<&str>,
+        sheet_name: &str,
+        na_rep: &str,
+        float_format: Option<&str>,
+        columns: Option<&Bound<'_, PyAny>>,
+        header: bool,
+        index: bool,
+        index_label: Option<String>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _ = (excel_writer, sheet_name, kwargs);
-        Ok(())
+        series_as_frame(&self.inner)?.to_excel(
+            py,
+            excel_writer,
+            sheet_name,
+            na_rep,
+            float_format,
+            columns,
+            header,
+            index,
+            index_label,
+            kwargs,
+        )
     }
 
     #[pyo3(signature = (path_or_buf, key, **kwargs))]
@@ -13394,7 +13414,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let _ = (path_or_buf, key, kwargs);
-        Ok(())
+        Err(not_implemented("to_hdf (no HDF5 backend in this build)"))
     }
 
     #[pyo3(signature = (path_or_buf=None, orient="records", **kwargs))]
@@ -13418,21 +13438,19 @@ impl PySeries {
         }
     }
 
-    #[pyo3(signature = (buf=None, **kwargs))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (buf=None, columns=None, header=true, index=true, na_rep="NaN", escape=None, **kwargs))]
     fn to_latex(
         &self,
-        buf: Option<&str>,
+        buf: Option<&Bound<'_, PyAny>>,
+        columns: Option<&Bound<'_, PyAny>>,
+        header: bool,
+        index: bool,
+        na_rep: &str,
+        escape: Option<bool>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<String>> {
-        let _ = kwargs;
-        let s = self.inner.to_string();
-        if let Some(p) = buf {
-            std::fs::write(p, &s)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            Ok(None)
-        } else {
-            Ok(Some(s))
-        }
+        series_as_frame(&self.inner)?.to_latex(buf, columns, header, index, na_rep, escape, kwargs)
     }
 
     #[pyo3(signature = (buf=None, mode="wt", index=true, **kwargs))]
@@ -20638,6 +20656,9 @@ impl PyDataFrame {
         self.transpose()
     }
 
+    // Writers: each either writes through fp-io or raises. These used to be
+    // `let _ = (...); Ok(())` — they returned None and wrote nothing.
+    // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.1
     #[pyo3(signature = (excel=true, sep=None, **kwargs))]
     fn to_clipboard(
         &self,
@@ -20646,30 +20667,61 @@ impl PyDataFrame {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let _ = (excel, sep, kwargs);
-        Ok(())
+        Err(not_implemented(
+            "DataFrame.to_clipboard (no clipboard writer yet)",
+        ))
     }
 
-    #[pyo3(signature = (excel_writer, sheet_name="Sheet1", **kwargs))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (excel_writer, sheet_name="Sheet1", na_rep="", float_format=None, columns=None, header=true, index=true, index_label=None, **kwargs))]
     fn to_excel(
         &self,
+        py: Python<'_>,
         excel_writer: &Bound<'_, PyAny>,
-        sheet_name: Option<&str>,
+        sheet_name: &str,
+        na_rep: &str,
+        float_format: Option<&str>,
+        columns: Option<&Bound<'_, PyAny>>,
+        header: bool,
+        index: bool,
+        index_label: Option<String>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _ = (excel_writer, sheet_name, kwargs);
-        Ok(())
+        if !na_rep.is_empty() || float_format.is_some() {
+            return Err(not_implemented("to_excel(na_rep/float_format=...)"));
+        }
+        reject_unsupported_kwargs("to_excel", kwargs, &["engine"])?;
+        let frame = select_columns_arg(self.inner.clone(), columns)?;
+        let bytes = fp_io::write_excel_bytes_with_options(
+            &frame,
+            &fp_io::ExcelWriteOptions {
+                sheet_name: sheet_name.to_owned(),
+                index,
+                index_label,
+                header,
+            },
+        )
+        .map_err(io_error_to_py)?;
+        py_output_bytes(py, Some(excel_writer), bytes).map(|_| ())
     }
 
     #[pyo3(signature = (path, **kwargs))]
-    fn to_feather(&self, path: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
-        let _ = (path, kwargs);
-        Ok(())
+    fn to_feather(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        reject_unsupported_kwargs("to_feather", kwargs, &[])?;
+        arrow_writer_frame("to_feather", &self.inner, None)?;
+        let bytes = fp_io::write_feather_bytes(&self.inner).map_err(io_error_to_py)?;
+        py_output_bytes(py, Some(path), bytes).map(|_| ())
     }
 
     #[pyo3(signature = (destination_table, **kwargs))]
     fn to_gbq(&self, destination_table: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let _ = (destination_table, kwargs);
-        Ok(())
+        Err(not_implemented("to_gbq (no BigQuery backend)"))
     }
 
     #[pyo3(signature = (path_or_buf, key, **kwargs))]
@@ -20680,7 +20732,7 @@ impl PyDataFrame {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let _ = (path_or_buf, key, kwargs);
-        Ok(())
+        Err(not_implemented("to_hdf (no HDF5 backend in this build)"))
     }
 
     #[pyo3(signature = (path_or_buf=None, orient="records", **kwargs))]
@@ -20704,37 +20756,65 @@ impl PyDataFrame {
         }
     }
 
-    #[pyo3(signature = (buf=None, **kwargs))]
+    /// Was `self.inner.to_string()` — an ASCII table, not LaTeX.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (buf=None, columns=None, header=true, index=true, na_rep="NaN", escape=None, **kwargs))]
     fn to_latex(
         &self,
-        buf: Option<&str>,
+        buf: Option<&Bound<'_, PyAny>>,
+        columns: Option<&Bound<'_, PyAny>>,
+        header: bool,
+        index: bool,
+        na_rep: &str,
+        escape: Option<bool>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<String>> {
-        let _ = kwargs;
-        let s = self.inner.to_string();
-        if let Some(p) = buf {
-            std::fs::write(p, &s)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-            Ok(None)
-        } else {
-            Ok(Some(s))
+        if !header {
+            return Err(not_implemented("to_latex(header=False)"));
         }
+        reject_unsupported_kwargs("to_latex", kwargs, &[])?;
+        let frame = select_columns_arg(self.inner.clone(), columns)?;
+        let text = fp_io::write_latex_string_with_options(
+            &frame,
+            &fp_io::LatexWriteOptions {
+                include_index: index,
+                na_rep: na_rep.to_owned(),
+                index_label: None,
+                escape: escape.unwrap_or(false),
+            },
+        )
+        .map_err(io_error_to_py)?;
+        py_output_text(buf, text)
     }
 
     #[pyo3(signature = (path=None, **kwargs))]
-    fn to_orc(&self, path: Option<&str>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    fn to_orc(
+        &self,
+        path: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
         let _ = (path, kwargs);
-        Ok(())
+        fp_io::write_orc_bytes(&self.inner)
+            .map(|_| ())
+            .map_err(io_error_to_py)
     }
 
-    #[pyo3(signature = (path=None, **kwargs))]
+    #[pyo3(signature = (path=None, engine="auto", compression=Some("snappy"), index=None, **kwargs))]
     fn to_parquet(
         &self,
-        path: Option<&str>,
+        py: Python<'_>,
+        path: Option<&Bound<'_, PyAny>>,
+        engine: &str,
+        compression: Option<&str>,
+        index: Option<bool>,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Option<Vec<u8>>> {
-        let _ = (path, kwargs);
-        Ok(None)
+    ) -> PyResult<Option<Py<PyAny>>> {
+        // One engine; compression changes file size, not the values read back.
+        let _ = (engine, compression);
+        reject_unsupported_kwargs("to_parquet", kwargs, &[])?;
+        arrow_writer_frame("to_parquet", &self.inner, index)?;
+        let bytes = fp_io::write_parquet_bytes(&self.inner).map_err(io_error_to_py)?;
+        py_output_bytes(py, path, bytes)
     }
 
     #[pyo3(signature = (freq=None, axis=0, copy=None))]
@@ -20902,10 +20982,28 @@ impl PyDataFrame {
         Ok(())
     }
 
-    #[pyo3(signature = (path, **kwargs))]
-    fn to_stata(&self, path: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
-        let _ = (path, kwargs);
-        Ok(())
+    #[pyo3(signature = (path, convert_dates=None, write_index=true, **kwargs))]
+    fn to_stata(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        convert_dates: Option<&Bound<'_, PyAny>>,
+        write_index: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        if convert_dates.is_some_and(|c| !c.is_none()) {
+            return Err(not_implemented("to_stata(convert_dates=...)"));
+        }
+        reject_unsupported_kwargs("to_stata", kwargs, &[])?;
+        let bytes = fp_io::write_stata_bytes_with_options(
+            &self.inner,
+            &fp_io::StataWriteOptions {
+                include_index: write_index,
+                index_label: None,
+            },
+        )
+        .map_err(io_error_to_py)?;
+        py_output_bytes(py, Some(path), bytes).map(|_| ())
     }
 
     #[pyo3(signature = (freq=None, how="start", axis=0, copy=None))]
@@ -25972,7 +26070,6 @@ impl PyResampler {
     }
 }
 
-/// Read a CSV file into a DataFrame.
 /// `fp.concat([df1, df2, ...])`: stack frames along the row axis, pandas'
 /// default `axis=0` / `join="outer"` behaviour.
 #[pyfunction]
@@ -25988,11 +26085,11 @@ fn concat(frames: Vec<PyRef<'_, PyDataFrame>>) -> PyResult<PyDataFrame> {
     Ok(PyDataFrame { inner })
 }
 
+/// Read a CSV file into a DataFrame.
 #[pyfunction]
 fn read_csv(path: &str) -> PyResult<PyDataFrame> {
     let path = std::path::Path::new(path);
-    let df = fp_io::read_csv(path)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    let df = fp_io::read_csv(path).map_err(io_error_to_py)?;
     Ok(PyDataFrame { inner: df })
 }
 
@@ -26016,8 +26113,7 @@ fn parse_json_orient(orient: &str) -> PyResult<fp_io::JsonOrient> {
 #[pyo3(signature = (path, orient="records"))]
 fn read_json(path: &str, orient: &str) -> PyResult<PyDataFrame> {
     let orient = parse_json_orient(orient)?;
-    let df = fp_io::read_json(std::path::Path::new(path), orient)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    let df = fp_io::read_json(std::path::Path::new(path), orient).map_err(io_error_to_py)?;
     Ok(PyDataFrame { inner: df })
 }
 
@@ -26025,16 +26121,14 @@ fn read_json(path: &str, orient: &str) -> PyResult<PyDataFrame> {
 /// `read_json(lines=True)`).
 #[pyfunction]
 fn read_jsonl(path: &str) -> PyResult<PyDataFrame> {
-    let df = fp_io::read_jsonl(std::path::Path::new(path))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    let df = fp_io::read_jsonl(std::path::Path::new(path)).map_err(io_error_to_py)?;
     Ok(PyDataFrame { inner: df })
 }
 
 /// Read a Parquet file into a DataFrame (pandas `read_parquet`).
 #[pyfunction]
 fn read_parquet(path: &str) -> PyResult<PyDataFrame> {
-    let df = fp_io::read_parquet(std::path::Path::new(path))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    let df = fp_io::read_parquet(std::path::Path::new(path)).map_err(io_error_to_py)?;
     Ok(PyDataFrame { inner: df })
 }
 
@@ -30761,27 +30855,23 @@ impl PyExcelFile {
         storage_options: Option<&Bound<'_, PyDict>>,
         engine_kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let _ = (engine, storage_options, engine_kwargs);
-        let path = if let Ok(s) = path_or_buffer.extract::<String>() {
-            s
-        } else {
-            path_or_buffer.str()?.to_string()
-        };
-        let sheet_names = if let Ok(openpyxl) = py.import("openpyxl") {
-            if let Ok(wb) = openpyxl.call_method1("load_workbook", (&path,)) {
-                if let Ok(names) = wb.getattr("sheetnames") {
-                    names
-                        .extract::<Vec<String>>()
-                        .unwrap_or_else(|_| vec!["Sheet1".to_string()])
-                } else {
-                    vec!["Sheet1".to_string()]
-                }
-            } else {
-                vec!["Sheet1".to_string()]
-            }
-        } else {
-            vec!["Sheet1".to_string()]
-        };
+        // Sheet names come from fp-io's reader. This used to import openpyxl and
+        // fall back to a fabricated ["Sheet1"] when anything failed.
+        let _ = (py, engine, engine_kwargs);
+        if storage_options.is_some() {
+            return Err(not_implemented("ExcelFile(storage_options=...)"));
+        }
+        let path = py_fspath(path_or_buffer).map_err(|_| not_implemented("ExcelFile(<buffer>)"))?;
+        let bytes = py_input_bytes(path_or_buffer)?;
+        let sheet_names = fp_io::read_excel_sheets_ordered_bytes(
+            &bytes,
+            None,
+            &fp_io::ExcelReadOptions::default(),
+        )
+        .map_err(io_error_to_py)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
 
         Ok(Self { path, sheet_names })
     }
@@ -30791,17 +30881,28 @@ impl PyExcelFile {
         self.sheet_names.clone()
     }
 
-    #[pyo3(signature = (sheet_name=None, **kwargs))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (sheet_name=SheetSelector::Position(0), header=Some(0), names=None, index_col=None, usecols=None, skiprows=None, **kwargs))]
     fn parse(
         &self,
         py: Python<'_>,
-        sheet_name: Option<&Bound<'_, PyAny>>,
+        sheet_name: SheetSelector,
+        header: Option<usize>,
+        names: Option<Vec<String>>,
+        index_col: Option<&Bound<'_, PyAny>>,
+        usecols: Option<Vec<String>>,
+        skiprows: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         read_excel(
             py,
             self.path.as_str().into_bound_py_any(py)?.as_ref(),
             sheet_name,
+            header,
+            names,
+            index_col,
+            usecols,
+            skiprows,
             kwargs,
         )
     }
@@ -30824,15 +30925,11 @@ impl PyExcelFile {
     }
 }
 
+/// Not constructible yet: its `close()`/`sheets`/`book` were stubs, so
+/// `with ExcelWriter(p) as w: df.to_excel(w)` produced no file.
 #[pyclass(name = "ExcelWriter", module = "frankenpandas", skip_from_py_object)]
 #[derive(Clone)]
-pub struct PyExcelWriter {
-    pub path: String,
-    pub engine: String,
-    pub date_format: Option<String>,
-    pub datetime_format: Option<String>,
-    pub mode: String,
-}
+pub struct PyExcelWriter;
 
 #[pymethods]
 impl PyExcelWriter {
@@ -30849,97 +30946,313 @@ impl PyExcelWriter {
         if_sheet_exists: Option<&str>,
         engine_kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let _ = (storage_options, if_sheet_exists, engine_kwargs);
-        let path_str = if let Ok(s) = path.extract::<String>() {
-            s
-        } else {
-            path.str()?.to_string()
-        };
-        Ok(Self {
-            path: path_str,
-            engine: engine.unwrap_or("openpyxl").to_string(),
+        let _ = (
+            path,
+            engine,
             date_format,
             datetime_format,
-            mode: mode.to_string(),
-        })
-    }
-
-    #[getter]
-    fn engine(&self) -> &str {
-        &self.engine
-    }
-
-    #[getter]
-    fn date_format(&self) -> Option<String> {
-        self.date_format.clone()
-    }
-
-    #[getter]
-    fn datetime_format(&self) -> Option<String> {
-        self.datetime_format.clone()
-    }
-
-    #[getter]
-    fn sheets<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        Ok(PyDict::new(py))
-    }
-
-    #[getter]
-    fn book<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        Ok(py.None().into_bound(py))
-    }
-
-    fn close(&self) -> PyResult<()> {
-        Ok(())
-    }
-
-    fn __enter__<'py>(slf: Bound<'py, Self>) -> Bound<'py, Self> {
-        slf
-    }
-
-    fn __exit__(
-        &self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_value: Option<&Bound<'_, PyAny>>,
-        _traceback: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<bool> {
-        Ok(false)
+            mode,
+            storage_options,
+            if_sheet_exists,
+            engine_kwargs,
+        );
+        Err(not_implemented(
+            "ExcelWriter (multi-sheet workbooks); use DataFrame.to_excel(path) for one sheet",
+        ))
     }
 }
 
-#[pyfunction]
-#[pyo3(signature = (io, sheet_name=None, **kwargs))]
-fn read_excel(
+// ── Native IO plumbing ─────────────────────────────────────────────────────
+//
+// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.1. These readers and
+// writers used to call REAL pandas (read_excel -> pandas -> to_csv -> fp
+// read_csv, lossy) or pyarrow, and on ANY failure — including pandas being
+// absent or the path not existing — returned an EMPTY DataFrame; the writers
+// returned None without writing a file. Now every IO entry point either runs on
+// fp-io or raises; nothing imports pandas and nothing fabricates a result.
+
+/// Map an fp-io error onto the exception class pandas raises for the same
+/// failure (callers catch FileNotFoundError / ValueError / NotImplementedError).
+fn io_error_to_py(e: fp_io::IoError) -> PyErr {
+    match &e {
+        fp_io::IoError::Io(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(e.to_string())
+        }
+        fp_io::IoError::Io(_) => PyErr::new::<pyo3::exceptions::PyOSError, _>(e.to_string()),
+        fp_io::IoError::Deferred(_) | fp_io::IoError::Orc(_) => {
+            PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(e.to_string())
+        }
+        _ => PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()),
+    }
+}
+
+fn not_implemented(what: &str) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(format!(
+        "{what} is not supported by frankenpandas yet"
+    ))
+}
+
+/// `os.fspath(obj)` for str and os.PathLike inputs.
+fn py_fspath(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(s);
+    }
+    obj.py()
+        .import("os")?
+        .call_method1("fspath", (obj,))?
+        .extract::<String>()
+}
+
+/// Input bytes from a pandas-style source: raw bytes, a file-like object with
+/// `read()`, or a path (str / os.PathLike). A missing path raises
+/// FileNotFoundError, as pandas does.
+fn py_input_bytes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(b) = obj.cast::<pyo3::types::PyBytes>() {
+        return Ok(b.as_bytes().to_vec());
+    }
+    if !obj.is_instance_of::<pyo3::types::PyString>()
+        && let Ok(read) = obj.getattr("read")
+    {
+        let data = read.call0()?;
+        if let Ok(b) = data.cast::<pyo3::types::PyBytes>() {
+            return Ok(b.as_bytes().to_vec());
+        }
+        return Ok(data.extract::<String>()?.into_bytes());
+    }
+    let path = py_fspath(obj)?;
+    std::fs::read(&path).map_err(|e| {
+        io_error_to_py(fp_io::IoError::Io(std::io::Error::new(
+            e.kind(),
+            format!("{e}: '{path}'"),
+        )))
+    })
+}
+
+/// Input text from a path, a file-like object, or raw bytes (UTF-8). Invalid
+/// UTF-8 is a ValueError (UnicodeDecodeError's base; its own constructor needs
+/// the raw object and offsets).
+fn py_input_text(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    String::from_utf8(py_input_bytes(obj)?).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("input is not valid UTF-8: {e}"))
+    })
+}
+
+/// Write bytes to a pandas-style target (path or binary file-like). With no
+/// target the bytes are returned, as `DataFrame.to_parquet(None)` does.
+fn py_output_bytes(
     py: Python<'_>,
-    io: &Bound<'_, PyAny>,
-    sheet_name: Option<&Bound<'_, PyAny>>,
+    target: Option<&Bound<'_, PyAny>>,
+    bytes: Vec<u8>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(target) = target.filter(|t| !t.is_none()) else {
+        return Ok(Some(
+            pyo3::types::PyBytes::new(py, &bytes).into_any().unbind(),
+        ));
+    };
+    if !target.is_instance_of::<pyo3::types::PyString>()
+        && let Ok(write) = target.getattr("write")
+    {
+        write.call1((pyo3::types::PyBytes::new(py, &bytes),))?;
+        return Ok(None);
+    }
+    let path = py_fspath(target)?;
+    std::fs::write(&path, bytes).map_err(|e| io_error_to_py(fp_io::IoError::Io(e)))?;
+    Ok(None)
+}
+
+/// Text counterpart of `py_output_bytes`: a path, a text file-like, or (no
+/// target) the string itself, as `DataFrame.to_latex(None)` does.
+fn py_output_text(target: Option<&Bound<'_, PyAny>>, text: String) -> PyResult<Option<String>> {
+    let Some(target) = target.filter(|t| !t.is_none()) else {
+        return Ok(Some(text));
+    };
+    if !target.is_instance_of::<pyo3::types::PyString>()
+        && let Ok(write) = target.getattr("write")
+    {
+        write.call1((text,))?;
+        return Ok(None);
+    }
+    let path = py_fspath(target)?;
+    std::fs::write(&path, text).map_err(|e| io_error_to_py(fp_io::IoError::Io(e)))?;
+    Ok(None)
+}
+
+/// True for an unnamed 0..n Int64 row index — the one index fp-io's Arrow
+/// writers can omit without losing information (pandas stores it as metadata).
+fn has_default_range_index(frame: &DataFrame) -> bool {
+    let index = frame.index();
+    frame.row_multiindex().is_none()
+        && index.name().is_none()
+        && index.labels().iter().enumerate().all(|(pos, label)| {
+            matches!(label, IndexLabel::Int64(v) if usize::try_from(*v).ok() == Some(pos))
+        })
+}
+
+/// `Series.to_frame()` for the Series writers: an unnamed Series becomes column
+/// `0`, as in pandas.
+fn series_as_frame(series: &Series) -> PyResult<PyDataFrame> {
+    let name = if series.name().is_empty() {
+        "0"
+    } else {
+        series.name()
+    };
+    Ok(PyDataFrame {
+        inner: series.to_frame(Some(name)).map_err(frame_error_to_py)?,
+    })
+}
+
+/// fp-io's Parquet/Feather writers serialize columns only; refuse rather than
+/// silently drop a label index pandas would have kept.
+fn arrow_writer_frame(func: &str, frame: &DataFrame, index: Option<bool>) -> PyResult<()> {
+    if index != Some(false) && !has_default_range_index(frame) {
+        return Err(not_implemented(&format!(
+            "{func} with a non-default index (call reset_index() first, or pass index=False)"
+        )));
+    }
+    Ok(())
+}
+
+/// Keyword arguments this binding does not implement: any non-None value raises
+/// NotImplementedError naming it, instead of being silently ignored.
+fn reject_unsupported_kwargs(
+    func: &str,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    let _ = sheet_name;
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method("read_excel", (io,), kwargs) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+    ignorable: &[&str],
+) -> PyResult<()> {
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let key = key.extract::<String>()?;
+            if !value.is_none() && !ignorable.contains(&key.as_str()) {
+                return Err(not_implemented(&format!("{func}({key}=...)")));
             }
         }
     }
+    Ok(())
+}
+
+fn select_columns_arg(frame: DataFrame, columns: Option<&Bound<'_, PyAny>>) -> PyResult<DataFrame> {
+    match columns.filter(|c| !c.is_none()) {
+        None => Ok(frame),
+        Some(cols) => {
+            let names = cols.extract::<Vec<String>>()?;
+            frame
+                .select_columns(&names.iter().map(String::as_str).collect::<Vec<_>>())
+                .map_err(loc_key_error)
+        }
+    }
+}
+
+/// pandas' `sheet_name`: a position, a name, or None for every sheet. A
+/// dedicated type so an explicit `None` is distinguishable from the default 0.
+enum SheetSelector {
+    All,
+    Position(usize),
+    Name(String),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for SheetSelector {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_none() {
+            return Ok(Self::All);
+        }
+        if let Ok(pos) = obj.extract::<usize>() {
+            return Ok(Self::Position(pos));
+        }
+        Ok(Self::Name(obj.extract::<String>()?))
+    }
+}
+
+/// `pd.read_excel` on fp-io's calamine reader. sheet_name: str, int (position)
+/// or None (dict of every sheet). `engine` is accepted and ignored (there is one
+/// engine); other unsupported options raise NotImplementedError.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (io, sheet_name=SheetSelector::Position(0), header=Some(0), names=None, index_col=None, usecols=None, skiprows=None, **kwargs))]
+fn read_excel(
+    py: Python<'_>,
+    io: &Bound<'_, PyAny>,
+    sheet_name: SheetSelector,
+    header: Option<usize>,
+    names: Option<Vec<String>>,
+    index_col: Option<&Bound<'_, PyAny>>,
+    usecols: Option<Vec<String>>,
+    skiprows: Option<usize>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    reject_unsupported_kwargs("read_excel", kwargs, &["engine"])?;
+    let bytes = py_input_bytes(io)?;
+    let options = fp_io::ExcelReadOptions {
+        sheet_name: None,
+        has_headers: header.is_some(),
+        usecols,
+        names,
+        index_col: None,
+        skip_rows: skiprows.unwrap_or(0) + header.unwrap_or(0),
+    };
+    let finish = |frame: DataFrame| -> PyResult<DataFrame> {
+        match index_col.filter(|c| !c.is_none()) {
+            None => Ok(frame),
+            Some(col) => {
+                let name = if let Ok(pos) = col.extract::<usize>() {
+                    frame
+                        .column_names()
+                        .get(pos)
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| loc_key_error(format!("index_col {pos}")))?
+                } else {
+                    col.extract::<String>()?
+                };
+                frame.set_index(&name, true).map_err(frame_error_to_py)
+            }
+        }
+    };
+    let sheets =
+        fp_io::read_excel_sheets_ordered_bytes(&bytes, None, &options).map_err(io_error_to_py)?;
+    let (found, wanted) = match sheet_name {
+        SheetSelector::All => {
+            let out = PyDict::new(py);
+            for (name, frame) in sheets {
+                out.set_item(
+                    name,
+                    Py::new(
+                        py,
+                        PyDataFrame {
+                            inner: finish(frame)?,
+                        },
+                    )?,
+                )?;
+            }
+            return Ok(out.into_any().unbind());
+        }
+        SheetSelector::Position(pos) => (
+            sheets.into_iter().nth(pos).map(|(_, f)| f),
+            format!("index {pos}"),
+        ),
+        SheetSelector::Name(want) => {
+            let found = sheets.into_iter().find(|(n, _)| *n == want).map(|(_, f)| f);
+            (found, format!("named '{want}'"))
+        }
+    };
+    let frame = found.ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Worksheet {wanted} not found"))
+    })?;
     Ok(Py::new(
         py,
         PyDataFrame {
-            inner: empty_dataframe(),
+            inner: finish(frame)?,
         },
     )?
     .into_any())
 }
 
+/// `pd.HDFStore` exists so `isinstance`/import checks resolve, but it cannot be
+/// constructed: its methods used to fabricate (keys() empty, get() an empty
+/// frame, put() a no-op).
 #[pyclass(name = "HDFStore", module = "frankenpandas", skip_from_py_object)]
 #[derive(Clone)]
-pub struct PyHDFStore {
-    pub path: String,
-    pub mode: String,
-}
+pub struct PyHDFStore;
 
 #[pymethods]
 impl PyHDFStore {
@@ -30953,74 +31266,10 @@ impl PyHDFStore {
         fletcher32: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let _ = (complevel, complib, fletcher32, kwargs);
-        let path_str = if let Ok(s) = path.extract::<String>() {
-            s
-        } else {
-            path.str()?.to_string()
-        };
-        Ok(Self {
-            path: path_str,
-            mode: mode.to_string(),
-        })
-    }
-
-    #[getter]
-    fn filename(&self) -> &str {
-        &self.path
-    }
-
-    fn keys(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn get(&self, _py: Python<'_>, _key: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame {
-            inner: empty_dataframe(),
-        })
-    }
-
-    fn put(
-        &self,
-        _key: &str,
-        _value: &Bound<'_, PyAny>,
-        _format: Option<&str>,
-        _index: Option<bool>,
-    ) -> PyResult<()> {
-        Ok(())
-    }
-
-    fn select(&self, py: Python<'_>, key: &str) -> PyResult<PyDataFrame> {
-        self.get(py, key)
-    }
-
-    fn close(&self) -> PyResult<()> {
-        Ok(())
-    }
-
-    fn flush(&self) -> PyResult<()> {
-        Ok(())
-    }
-
-    fn __enter__<'py>(slf: Bound<'py, Self>) -> Bound<'py, Self> {
-        slf
-    }
-
-    fn __exit__(
-        &self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_value: Option<&Bound<'_, PyAny>>,
-        _traceback: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<bool> {
-        Ok(false)
-    }
-
-    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<PyDataFrame> {
-        self.get(py, key)
-    }
-
-    fn __setitem__(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.put(key, value, None, None)
+        let _ = (path, mode, complevel, complib, fletcher32, kwargs);
+        Err(not_implemented(
+            "HDFStore (no HDF5 backend in this build; see br-frankenpandas-rc0923-hdf5-pickle-interop-m7ine)",
+        ))
     }
 }
 
@@ -31042,20 +31291,25 @@ fn read_hdf(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyDataFrame> {
     let _ = (
-        key, mode, errors, r#where, start, stop, columns, iterator, chunksize,
+        py,
+        path_or_buf,
+        key,
+        mode,
+        errors,
+        r#where,
+        start,
+        stop,
+        columns,
+        iterator,
+        chunksize,
+        kwargs,
     );
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method("read_hdf", (path_or_buf,), kwargs) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
-        }
-    }
-    Ok(PyDataFrame {
-        inner: empty_dataframe(),
-    })
+    // fp-io's HDF5 backend is an optional cargo feature needing the system HDF5
+    // library; the wheel does not build it, and its keyed-snapshot layout is not
+    // PyTables-compatible anyway (bead 9.2). Refuse instead of fabricating.
+    Err(not_implemented(
+        "read_hdf (no HDF5 backend in this build; see br-frankenpandas-rc0923-hdf5-pickle-interop-m7ine)",
+    ))
 }
 
 #[pyfunction]
@@ -31067,21 +31321,13 @@ fn read_feather(
     use_threads: bool,
     storage_options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (columns, use_threads, storage_options);
-    if let Ok(pa_feather) = py.import("pyarrow.feather") {
-        if let Ok(tbl) = pa_feather.call_method1("read_table", (path,)) {
-            if let Ok(pandas_df) = tbl.call_method0("to_pandas") {
-                if let Ok(csv_str) = pandas_df.call_method0("to_csv")?.extract::<String>() {
-                    let frame = fp_io::read_csv_str(&csv_str).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                    })?;
-                    return Ok(PyDataFrame { inner: frame });
-                }
-            }
-        }
+    let _ = (py, use_threads);
+    if storage_options.is_some() {
+        return Err(not_implemented("read_feather(storage_options=...)"));
     }
+    let frame = fp_io::read_feather_bytes(&py_input_bytes(path)?).map_err(io_error_to_py)?;
     Ok(PyDataFrame {
-        inner: empty_dataframe(),
+        inner: select_columns_arg(frame, columns)?,
     })
 }
 
@@ -31092,19 +31338,15 @@ fn read_clipboard(
     sep: &str,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (sep, kwargs);
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method("read_clipboard", (), kwargs) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
-        }
+    let _ = py;
+    if sep != "\\s+" {
+        return Err(not_implemented("read_clipboard(sep=...)"));
     }
-    Ok(PyDataFrame {
-        inner: empty_dataframe(),
-    })
+    reject_unsupported_kwargs("read_clipboard", kwargs, &[])?;
+    // fp-io shells out to wl-paste/xclip/xsel/pbpaste; with none installed it
+    // raises a typed clipboard error, as pandas does without a backend.
+    let frame = fp_io::read_clipboard().map_err(io_error_to_py)?;
+    Ok(PyDataFrame { inner: frame })
 }
 
 #[pyfunction]
@@ -31117,64 +31359,22 @@ fn read_fwf(
     infer_nrows: usize,
     kwds: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (colspecs, widths, infer_nrows);
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method("read_fwf", (filepath_or_buffer,), kwds) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
+    // Was: call pandas, and without pandas a whitespace splitter that ignored
+    // colspecs/widths and read a nonexistent path as literal data.
+    let _ = (py, infer_nrows);
+    reject_unsupported_kwargs("read_fwf", kwds, &[])?;
+    let mut options = fp_io::FwfReadOptions::default();
+    if let Some(specs) = colspecs.filter(|c| !c.is_none()) {
+        if specs.extract::<String>().is_err() {
+            options.colspecs = Some(specs.extract::<Vec<(usize, usize)>>()?);
         }
+        // colspecs='infer' (a string) is fp-io's default inference.
     }
-    let content = if let Ok(s) = filepath_or_buffer.extract::<String>() {
-        if std::path::Path::new(&s).exists() {
-            std::fs::read_to_string(&s).unwrap_or_default()
-        } else {
-            s
-        }
-    } else if let Ok(read_fn) = filepath_or_buffer.getattr("read") {
-        read_fn.call0()?.extract::<String>().unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.is_empty() {
-        return Ok(PyDataFrame {
-            inner: empty_dataframe(),
-        });
+    if let Some(w) = widths.filter(|w| !w.is_none()) {
+        options.widths = Some(w.extract::<Vec<usize>>()?);
     }
-
-    let header_cols: Vec<&str> = lines[0].split_whitespace().collect();
-    let mut data_rows: Vec<Vec<Scalar>> = Vec::new();
-    for col_idx in 0..header_cols.len() {
-        let mut col_vals = Vec::new();
-        for line in &lines[1..] {
-            let tokens: Vec<&str> = line.split_whitespace().collect();
-            if col_idx < tokens.len() {
-                let tok = tokens[col_idx];
-                if let Ok(val) = tok.parse::<f64>() {
-                    col_vals.push(Scalar::Float64(val));
-                } else {
-                    col_vals.push(Scalar::Utf8(tok.to_string()));
-                }
-            } else {
-                col_vals.push(Scalar::Null(fp_types::NullKind::Null));
-            }
-        }
-        data_rows.push(col_vals);
-    }
-
-    let dict: Vec<(&str, Vec<Scalar>)> = header_cols
-        .iter()
-        .zip(data_rows)
-        .map(|(&h, vals)| (h, vals))
-        .collect();
-
-    let frame = DataFrame::from_dict(&header_cols, dict)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
+    let text = py_input_text(filepath_or_buffer)?;
+    let frame = fp_io::read_fwf_str(&text, &options).map_err(io_error_to_py)?;
     Ok(PyDataFrame { inner: frame })
 }
 
@@ -31201,40 +31401,49 @@ fn read_html(
     extract_links: Option<&str>,
     storage_options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Vec<PyDataFrame>> {
-    let _ = (
-        r#match,
-        flavor,
-        header,
-        index_col,
-        skiprows,
-        attrs,
-        parse_dates,
-        thousands,
-        encoding,
-        decimal,
-        converters,
-        na_values,
-        keep_default_na,
-        displayed_only,
-        extract_links,
-        storage_options,
-    );
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(list_of_dfs) = pd.call_method1("read_html", (io,)) {
-            if let Ok(dfs) = list_of_dfs.extract::<Vec<Bound<'_, PyAny>>>() {
-                let mut out = Vec::new();
-                for d in dfs {
-                    if let Ok(csv_str) = d.call_method0("to_csv")?.extract::<String>() {
-                        if let Ok(frame) = fp_io::read_csv_str(&csv_str) {
-                            out.push(PyDataFrame { inner: frame });
-                        }
-                    }
-                }
-                return Ok(out);
-            }
-        }
+    let _ = (py, flavor, encoding, displayed_only);
+    // Options this reader does not implement raise instead of being ignored.
+    let non_default = [
+        ("match", r#match != ".+"),
+        ("header", header.is_some_and(|h| !h.is_none())),
+        ("index_col", index_col.is_some_and(|h| !h.is_none())),
+        ("skiprows", skiprows.is_some_and(|h| !h.is_none())),
+        ("attrs", attrs.is_some()),
+        ("parse_dates", parse_dates),
+        ("thousands", thousands != ","),
+        ("decimal", decimal != "."),
+        ("converters", converters.is_some()),
+        ("na_values", na_values.is_some_and(|h| !h.is_none())),
+        ("keep_default_na", !keep_default_na),
+        ("extract_links", extract_links.is_some()),
+        ("storage_options", storage_options.is_some()),
+    ];
+    if let Some((name, _)) = non_default.iter().find(|(_, set)| *set) {
+        return Err(not_implemented(&format!("read_html({name}=...)")));
     }
-    Ok(Vec::new())
+    // A literal HTML string is parsed as a document (pandas accepts that too);
+    // any other string is a path. URLs are not fetched.
+    let text = match io.extract::<String>() {
+        Ok(s) if s.trim_start().starts_with('<') => s,
+        Ok(s) if s.starts_with("http://") || s.starts_with("https://") => {
+            return Err(not_implemented("read_html(<url>)"));
+        }
+        _ => py_input_text(io)?,
+    };
+    // pandas returns EVERY table; fp-io parses one table per call by index.
+    let table_count = text.to_ascii_lowercase().matches("<table").count();
+    if table_count == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No tables found",
+        ));
+    }
+    (0..table_count)
+        .map(|table_index| {
+            fp_io::read_html_str_with_options(&text, &fp_io::HtmlReadOptions { table_index })
+                .map(|inner| PyDataFrame { inner })
+                .map_err(io_error_to_py)
+        })
+        .collect()
 }
 
 #[pyfunction]
@@ -31259,35 +31468,78 @@ fn read_xml(
     storage_options: Option<&Bound<'_, PyDict>>,
     dtype_backend: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (
-        xpath,
-        namespaces,
-        elems_only,
-        attrs_only,
-        names,
-        dtype,
-        converters,
-        parse_dates,
-        encoding,
-        parser,
-        stylesheet,
-        iterparse,
-        compression,
-        storage_options,
-        dtype_backend,
-    );
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method1("read_xml", (path_or_buffer,)) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
+    let _ = (py, encoding, parser, compression);
+    let non_default = [
+        ("namespaces", namespaces.is_some()),
+        ("elems_only", elems_only),
+        ("attrs_only", attrs_only),
+        ("names", names.is_some_and(|v| !v.is_none())),
+        ("dtype", dtype.is_some_and(|v| !v.is_none())),
+        ("converters", converters.is_some()),
+        ("parse_dates", parse_dates.is_some_and(|v| !v.is_none())),
+        ("stylesheet", stylesheet.is_some_and(|v| !v.is_none())),
+        ("iterparse", iterparse.is_some()),
+        ("storage_options", storage_options.is_some()),
+        ("dtype_backend", dtype_backend.is_some_and(|v| !v.is_none())),
+    ];
+    if let Some((name, _)) = non_default.iter().find(|(_, set)| *set) {
+        return Err(not_implemented(&format!("read_xml({name}=...)")));
+    }
+    let text = match path_or_buffer.extract::<String>() {
+        Ok(s) if s.trim_start().starts_with('<') => s,
+        _ => py_input_text(path_or_buffer)?,
+    };
+    // pandas' default xpath "./*" makes every child of the root a row; fp-io
+    // reads rows by element name, so resolve the name from the document.
+    let row_name = match xpath {
+        "./*" => first_xml_child_tag(&text).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("xml document has no row elements")
+        })?,
+        other => {
+            let name = other
+                .strip_prefix(".//")
+                .or_else(|| other.strip_prefix("//"))
+                .or_else(|| other.strip_prefix("./"))
+                .filter(|n| {
+                    !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || "_-.".contains(c))
+                })
+                .ok_or_else(|| not_implemented(&format!("read_xml(xpath={other:?})")))?;
+            name.to_owned()
+        }
+    };
+    let frame = fp_io::read_xml_str_with_options(&text, &fp_io::XmlReadOptions { row_name })
+        .map_err(io_error_to_py)?;
+    Ok(PyDataFrame { inner: frame })
+}
+
+/// Tag name of the first element nested directly under the XML root
+/// (skipping the declaration, comments and processing instructions).
+fn first_xml_child_tag(xml: &str) -> Option<String> {
+    let mut depth = 0_usize;
+    let mut rest = xml;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start + 1..];
+        if rest.starts_with('?') || rest.starts_with('!') {
+            continue;
+        }
+        let end = rest.find('>')?;
+        let tag = &rest[..end];
+        if tag.starts_with('/') {
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        let name: String = tag
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '/')
+            .collect();
+        if depth == 1 {
+            return Some(name);
+        }
+        if !tag.ends_with('/') {
+            depth += 1;
         }
     }
-    Ok(PyDataFrame {
-        inner: empty_dataframe(),
-    })
+    None
 }
 
 #[pyfunction]
@@ -31300,19 +31552,13 @@ fn read_orc(
     filesystem: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (columns, dtype_backend, filesystem, kwargs);
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method("read_orc", (path,), kwargs) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
-        }
-    }
-    Ok(PyDataFrame {
-        inner: empty_dataframe(),
-    })
+    let _ = (py, columns, dtype_backend, filesystem, kwargs);
+    // fp-io's ORC backend is fail-closed (no Tokio-free implementation yet);
+    // its error maps to NotImplementedError. The path is still validated so a
+    // missing file reports FileNotFoundError like pandas.
+    let bytes = py_input_bytes(path)?;
+    let frame = fp_io::read_orc_bytes(&bytes).map_err(io_error_to_py)?;
+    Ok(PyDataFrame { inner: frame })
 }
 
 #[pyfunction]
@@ -31328,19 +31574,28 @@ fn read_sas(
     iterator: bool,
     compression: &str,
 ) -> PyResult<PyDataFrame> {
-    let _ = (format, index, encoding, chunksize, iterator, compression);
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method1("read_sas", (filepath_or_buffer,)) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
-        }
+    let _ = (py, format, compression);
+    if encoding.is_some() || chunksize.is_some() || iterator {
+        return Err(not_implemented("read_sas(encoding/chunksize/iterator=...)"));
     }
-    Ok(PyDataFrame {
-        inner: empty_dataframe(),
-    })
+    // fp-io reads sas7bdat and XPORT from a path (format is sniffed).
+    let path = py_fspath(filepath_or_buffer).map_err(|_| not_implemented("read_sas(<buffer>)"))?;
+    let path = std::path::Path::new(&path);
+    // fp-io folds the open error into IoError::Sas; pandas raises
+    // FileNotFoundError for a missing file.
+    if !path.exists() {
+        return Err(PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(
+            format!("No such file or directory: '{}'", path.display()),
+        ));
+    }
+    let frame = fp_io::read_sas(path).map_err(io_error_to_py)?;
+    let frame = match index.filter(|i| !i.is_none()) {
+        None => frame,
+        Some(col) => frame
+            .set_index(&col.extract::<String>()?, true)
+            .map_err(frame_error_to_py)?,
+    };
+    Ok(PyDataFrame { inner: frame })
 }
 
 #[pyfunction]
@@ -31352,19 +31607,10 @@ fn read_spss(
     convert_categoricals: bool,
     dtype_backend: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyDataFrame> {
-    let _ = (usecols, convert_categoricals, dtype_backend);
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method1("read_spss", (path,)) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
-        }
-    }
-    Ok(PyDataFrame {
-        inner: empty_dataframe(),
-    })
+    let _ = (py, path, usecols, convert_categoricals, dtype_backend);
+    Err(not_implemented(
+        "read_spss (no native .sav reader yet; see br-frankenpandas-rc0923-deferred-io-surfaces-ea3b2)",
+    ))
 }
 
 #[pyfunction]
@@ -31386,30 +31632,28 @@ fn read_stata(
     storage_options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyDataFrame> {
     let _ = (
+        py,
         convert_dates,
         convert_categoricals,
-        index_col,
-        convert_missing,
         preserve_dtypes,
-        columns,
         order_categoricals,
-        chunksize,
-        iterator,
         compression,
-        storage_options,
     );
-    if let Ok(pd) = py.import("pandas") {
-        if let Ok(df) = pd.call_method1("read_stata", (filepath_or_buffer,)) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
-        }
+    if convert_missing || chunksize.is_some() || iterator || storage_options.is_some() {
+        return Err(not_implemented(
+            "read_stata(convert_missing/chunksize/iterator/storage_options=...)",
+        ));
     }
-    Ok(PyDataFrame {
-        inner: empty_dataframe(),
-    })
+    let frame =
+        fp_io::read_stata_bytes(&py_input_bytes(filepath_or_buffer)?).map_err(io_error_to_py)?;
+    let frame = select_columns_arg(frame, columns)?;
+    let frame = match index_col.filter(|i| !i.is_none()) {
+        None => frame,
+        Some(col) => frame
+            .set_index(&col.extract::<String>()?, true)
+            .map_err(frame_error_to_py)?,
+    };
+    Ok(PyDataFrame { inner: frame })
 }
 
 #[pyfunction]
@@ -31432,6 +31676,8 @@ fn read_gbq(
     dtypes: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyDataFrame> {
     let _ = (
+        py,
+        query,
         project_id,
         index_col,
         col_order,
@@ -31445,17 +31691,8 @@ fn read_gbq(
         max_results,
         dtypes,
     );
-    if let Ok(gbq) = py.import("pandas_gbq") {
-        if let Ok(df) = gbq.call_method1("read_gbq", (query,)) {
-            if let Ok(csv_str) = df.call_method0("to_csv")?.extract::<String>() {
-                let frame = fp_io::read_csv_str(&csv_str)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: frame });
-            }
-        }
-    }
-    Err(PyErr::new::<pyo3::exceptions::PyImportError, _>(
-        "pandas-gbq library not found",
+    Err(not_implemented(
+        "read_gbq (no BigQuery backend; see br-frankenpandas-rc0923-deferred-io-surfaces-ea3b2)",
     ))
 }
 
@@ -31826,6 +32063,15 @@ impl PyPlotAccessor {
     }
 }
 
+/// The pandas.plotting helpers render natively for frankenpandas objects. A
+/// foreign object used to be handed to real pandas (and yielded None when that
+/// failed); it now raises, like any other wrong-type argument.
+fn plotting_type_error(func: &str) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "{func} expects a frankenpandas DataFrame/Series (plotting is not delegated to pandas)"
+    ))
+}
+
 #[pyfunction(name = "scatter_matrix")]
 #[pyo3(signature = (frame, *args, **kwargs))]
 fn plotting_scatter_matrix(
@@ -31845,12 +32091,8 @@ fn plotting_scatter_matrix(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("scatter_matrix", (frame,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("scatter_matrix"))
 }
 
 #[pyfunction(name = "autocorrelation_plot")]
@@ -31871,12 +32113,8 @@ fn plotting_autocorrelation_plot(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("autocorrelation_plot", (series,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("autocorrelation_plot"))
 }
 
 #[pyfunction(name = "bootstrap_plot")]
@@ -31898,12 +32136,8 @@ fn plotting_bootstrap_plot(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("bootstrap_plot", (series,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("bootstrap_plot"))
 }
 
 #[pyfunction(name = "lag_plot")]
@@ -31924,12 +32158,8 @@ fn plotting_lag_plot(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("lag_plot", (series,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("lag_plot"))
 }
 
 #[pyfunction(name = "parallel_coordinates")]
@@ -31952,12 +32182,8 @@ fn plotting_parallel_coordinates(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("parallel_coordinates", (data, class_column), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = (kwargs, class_column);
+    Err(plotting_type_error("parallel_coordinates"))
 }
 
 #[pyfunction(name = "radviz")]
@@ -31980,12 +32206,8 @@ fn plotting_radviz(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("radviz", (data, class_column), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = (kwargs, class_column);
+    Err(plotting_type_error("radviz"))
 }
 
 #[pyfunction(name = "andrews_curves")]
@@ -32008,12 +32230,8 @@ fn plotting_andrews_curves(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("andrews_curves", (data, class_column), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = (kwargs, class_column);
+    Err(plotting_type_error("andrews_curves"))
 }
 
 #[pyfunction(name = "boxplot")]
@@ -32034,12 +32252,8 @@ fn plotting_boxplot(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("boxplot", (data,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("boxplot"))
 }
 
 #[pyfunction(name = "boxplot_frame")]
@@ -32060,12 +32274,8 @@ fn plotting_boxplot_frame(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("boxplot_frame", (df,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("boxplot_frame"))
 }
 
 #[pyfunction(name = "boxplot_frame_groupby")]
@@ -32092,12 +32302,8 @@ fn plotting_boxplot_frame_groupby(
         return Ok(Py::new(py, res)?.into_any());
     }
     let _ = args;
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("boxplot_frame_groupby", (grouped,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("boxplot_frame_groupby"))
 }
 
 #[pyfunction(name = "hist_frame")]
@@ -32118,12 +32324,8 @@ fn plotting_hist_frame(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("hist_frame", (data,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("hist_frame"))
 }
 
 #[pyfunction(name = "hist_series")]
@@ -32144,12 +32346,8 @@ fn plotting_hist_series(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("hist_series", (data,), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = kwargs;
+    Err(plotting_type_error("hist_series"))
 }
 
 #[pyfunction(name = "table")]
@@ -32181,12 +32379,8 @@ fn plotting_table(
         };
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(pd) = py.import("pandas.plotting") {
-        if let Ok(res) = pd.call_method("table", (ax, data), kwargs) {
-            return Ok(res.unbind());
-        }
-    }
-    Ok(py.None())
+    let _ = (kwargs, ax);
+    Err(plotting_type_error("table"))
 }
 
 #[pyfunction(name = "register_matplotlib_converters")]

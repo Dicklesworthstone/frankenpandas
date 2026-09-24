@@ -120,6 +120,7 @@ use dta::stata::{
         variable::Variable, variable_type::VariableType,
     },
     missing_value::MissingValue,
+    stata_byte::StataByte,
     stata_double::StataDouble,
     stata_long::StataLong,
 };
@@ -2731,8 +2732,19 @@ pub fn write_latex_string_with_options(
     let table_width = headers.len() + usize::from(options.include_index);
     let mut out = String::new();
 
+    // pandas' default column_format: `l` for the index, `r` for every column in
+    // `_get_numeric_data()` (int, float and bool), `l` otherwise.
     out.push_str("\\begin{tabular}{");
-    out.push_str(&"l".repeat(table_width));
+    if options.include_index {
+        out.push('l');
+    }
+    for name in &headers {
+        let numeric = frame.column(name).is_some_and(|column| {
+            let dtype = column.dtype();
+            dtype.is_numeric() || matches!(dtype, DType::Bool | DType::BoolNullable)
+        });
+        out.push(if numeric { 'r' } else { 'l' });
+    }
     out.push_str("}\n\\toprule\n");
 
     let mut header_row = Vec::with_capacity(table_width);
@@ -3305,10 +3317,19 @@ fn stata_fields_for_frame(
             .clone()
             .unwrap_or_else(|| "index".to_owned());
         validate_stata_variable_name(&name)?;
+        // pandas writes the index via reset_index(), so it is typed like any
+        // column: an int index is a Stata long, not a string.
+        let labels = frame
+            .index()
+            .labels()
+            .iter()
+            .map(index_label_to_scalar_value)
+            .collect::<Vec<_>>();
+        let variable_type = infer_stata_variable_type(&labels, &name)?;
         fields.push(StataField {
             variable_name: name,
             source: StataFieldSource::Index,
-            variable_type: stata_index_variable_type(frame)?,
+            variable_type,
         });
     }
 
@@ -3320,7 +3341,7 @@ fn stata_fields_for_frame(
         fields.push(StataField {
             variable_name: name.clone(),
             source: StataFieldSource::Column(name.clone()),
-            variable_type: infer_stata_variable_type(column, name)?,
+            variable_type: infer_stata_variable_type(column.values(), name)?,
         });
     }
 
@@ -3361,44 +3382,35 @@ fn validate_stata_variable_name(name: &str) -> Result<(), IoError> {
     Ok(())
 }
 
-fn stata_index_variable_type(frame: &DataFrame) -> Result<VariableType, IoError> {
-    let max_len = frame
-        .index()
-        .labels()
-        .iter()
-        .map(|label| label.to_string().len())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    stata_fixed_string_type(max_len, "index")
-}
+/// Stata's non-missing `long` range; 2_147_483_621.. are missing-value codes.
+/// pandas `_cast_to_stata_types` uses exactly these bounds.
+const STATA_LONG_RANGE: std::ops::RangeInclusive<i64> = -2_147_483_647..=2_147_483_620;
 
-fn infer_stata_variable_type(column: &Column, name: &str) -> Result<VariableType, IoError> {
-    let mut saw_numeric = false;
+/// pandas `_cast_to_stata_types`: bool -> int8 (byte); int64 -> int32 (long)
+/// inside [`STATA_LONG_RANGE`], else float64 (double); float64 -> double, with
+/// ±inf rejected; anything else -> a fixed-width string.
+fn infer_stata_variable_type(values: &[Scalar], name: &str) -> Result<VariableType, IoError> {
+    let mut saw_bool = false;
+    let mut saw_int = false;
+    let mut ints_fit_long = true;
     let mut saw_float = false;
     let mut saw_string = false;
     let mut max_string_len = 1usize;
 
-    for value in column.values() {
+    for value in values {
         match value {
             Scalar::Null(_) => {}
-            Scalar::Bool(_) => {
-                saw_numeric = true;
-            }
+            Scalar::Bool(_) => saw_bool = true,
             Scalar::Int64(v) => {
-                saw_numeric = true;
-                if i32::try_from(*v).is_err() {
-                    return Err(IoError::Stata(format!(
-                        "Stata long column '{name}' cannot encode i64 value {v}"
-                    )));
-                }
+                saw_int = true;
+                ints_fit_long &= STATA_LONG_RANGE.contains(v);
             }
-            Scalar::Float64(v) => {
-                if !v.is_nan() {
-                    saw_numeric = true;
-                    saw_float = true;
-                }
+            Scalar::Float64(v) if v.is_infinite() => {
+                return Err(IoError::Stata(format!(
+                    "Column {name} contains infinity or -infinity which is outside the range supported by Stata."
+                )));
             }
+            Scalar::Float64(v) => saw_float |= !v.is_nan(),
             Scalar::Utf8(text) => {
                 saw_string = true;
                 max_string_len = max_string_len.max(text.len());
@@ -3412,8 +3424,12 @@ fn infer_stata_variable_type(column: &Column, name: &str) -> Result<VariableType
 
     if saw_string {
         stata_fixed_string_type(max_string_len, name)
-    } else if saw_numeric && !saw_float {
+    } else if saw_float || !ints_fit_long {
+        Ok(VariableType::Double)
+    } else if saw_int {
         Ok(VariableType::Long)
+    } else if saw_bool {
+        Ok(VariableType::Byte)
     } else {
         Ok(VariableType::Double)
     }
@@ -3448,9 +3464,14 @@ fn stata_value_for_field(
     field: &StataField,
 ) -> Result<StataValue<'static>, IoError> {
     match field.source {
-        StataFieldSource::Index => Ok(StataValue::String(std::borrow::Cow::Owned(
-            index_label_string(frame, row_idx)?,
-        ))),
+        StataFieldSource::Index => {
+            let label = frame
+                .index()
+                .labels()
+                .get(row_idx)
+                .map(index_label_to_scalar_value);
+            scalar_to_stata_value(label.as_ref(), field.variable_type, &field.variable_name)
+        }
         StataFieldSource::Column(ref name) => {
             let value = frame.column(name).and_then(|column| column.value(row_idx));
             scalar_to_stata_value(value, field.variable_type, name)
@@ -3464,6 +3485,15 @@ fn scalar_to_stata_value(
     name: &str,
 ) -> Result<StataValue<'static>, IoError> {
     match variable_type {
+        VariableType::Byte => match value {
+            Some(Scalar::Bool(v)) => Ok(StataValue::Byte(StataByte::Present(i8::from(*v)))),
+            Some(Scalar::Null(_)) | None => {
+                Ok(StataValue::Byte(StataByte::Missing(MissingValue::System)))
+            }
+            Some(other) => Err(IoError::Stata(format!(
+                "Stata byte column '{name}' cannot encode {other:?}"
+            ))),
+        },
         VariableType::Long => match value {
             Some(Scalar::Bool(v)) => Ok(StataValue::Long(StataLong::Present(i32::from(*v)))),
             Some(Scalar::Int64(v)) => Ok(StataValue::Long(StataLong::Present(
@@ -3503,11 +3533,9 @@ fn scalar_to_stata_value(
             };
             Ok(StataValue::String(std::borrow::Cow::Owned(text)))
         }
-        VariableType::Byte | VariableType::Int | VariableType::Float | VariableType::LongString => {
-            Err(IoError::Stata(format!(
-                "unsupported Stata variable type for column '{name}': {variable_type:?}"
-            )))
-        }
+        VariableType::Int | VariableType::Float | VariableType::LongString => Err(IoError::Stata(
+            format!("unsupported Stata variable type for column '{name}': {variable_type:?}"),
+        )),
     }
 }
 
@@ -17836,10 +17864,12 @@ mod tests {
         )
         .expect("latex");
 
+        // GOLDEN-CHANGE (fvsao.1): `llr`, not `lll` — the float column is
+        // right-aligned; pandas 2.2.3 prints `\begin{tabular}{llr}` for this frame.
         assert_eq!(
             out,
             concat!(
-                "\\begin{tabular}{lll}\n",
+                "\\begin{tabular}{llr}\n",
                 "\\toprule\n",
                 " & name & value \\\\\n",
                 "row\\_id &  &  \\\\\n",
@@ -17849,6 +17879,56 @@ mod tests {
                 "\\bottomrule\n",
                 "\\end{tabular}\n",
             )
+        );
+    }
+
+    #[test]
+    fn latex_column_format_right_aligns_numeric_and_bool_like_pandas() {
+        // pandas 2.2.3 for {b: bool, i: int64, s: object, d: timedelta64}:
+        //   df.to_latex().splitlines()[0] == r"\begin{tabular}{lrrll}"
+        //   df.to_latex(index=False).splitlines()[0] == r"\begin{tabular}{rrll}"
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "b".to_string(),
+            Column::new(DType::Bool, vec![Scalar::Bool(true)]).expect("b"),
+        );
+        cols.insert(
+            "i".to_string(),
+            Column::new(DType::Int64, vec![Scalar::Int64(1)]).expect("i"),
+        );
+        cols.insert(
+            "s".to_string(),
+            Column::new(DType::Utf8, vec![Scalar::Utf8("x".to_owned())]).expect("s"),
+        );
+        cols.insert(
+            "d".to_string(),
+            Column::new(
+                DType::Timedelta64,
+                vec![Scalar::Timedelta64(86_400_000_000_000)],
+            )
+            .expect("d"),
+        );
+        let order = ["b", "i", "s", "d"].map(str::to_owned).to_vec();
+        let frame =
+            DataFrame::new_with_column_order(Index::from_i64(vec![0]), cols, order).expect("frame");
+
+        let with_index =
+            write_latex_string_with_options(&frame, &LatexWriteOptions::default()).expect("latex");
+        assert!(
+            with_index.starts_with("\\begin{tabular}{lrrll}\n"),
+            "got: {with_index}"
+        );
+        let without_index = write_latex_string_with_options(
+            &frame,
+            &LatexWriteOptions {
+                include_index: false,
+                ..LatexWriteOptions::default()
+            },
+        )
+        .expect("latex");
+        assert!(
+            without_index.starts_with("\\begin{tabular}{rrll}\n"),
+            "got: {without_index}"
         );
     }
 
@@ -19059,6 +19139,84 @@ mod tests {
                 Scalar::Utf8("beta".to_owned()),
                 Scalar::Utf8("gamma".to_owned())
             ]
+        );
+    }
+
+    #[test]
+    fn stata_writer_types_index_bool_and_wide_ints_like_pandas() {
+        // pandas 2.2.3: DataFrame({b: [True, False], big: [1, 2147483621],
+        // small: [1, 2147483620]}).to_stata(p); read_stata(p).dtypes ->
+        // index int32, b int8, big float64, small int32. 2147483621 is past
+        // Stata's non-missing long range, so it must not be written as a long.
+        use super::{VariableType, stata_fields_for_frame};
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "b".to_owned(),
+            Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).expect("b"),
+        );
+        columns.insert(
+            "big".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2_147_483_621)]).expect("big"),
+        );
+        columns.insert(
+            "small".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2_147_483_620)])
+                .expect("small"),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            columns,
+            vec!["b".to_owned(), "big".to_owned(), "small".to_owned()],
+        )
+        .expect("frame");
+
+        let types = stata_fields_for_frame(&frame, &StataWriteOptions::default())
+            .expect("fields")
+            .into_iter()
+            .map(|field| (field.variable_name, field.variable_type))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            vec![
+                ("index".to_owned(), VariableType::Long),
+                ("b".to_owned(), VariableType::Byte),
+                ("big".to_owned(), VariableType::Double),
+                ("small".to_owned(), VariableType::Long),
+            ]
+        );
+
+        let back = read_stata_bytes(&write_stata_bytes(&frame).expect("write")).expect("read");
+        assert_eq!(
+            back.column("index").expect("index").values(),
+            &[Scalar::Int64(0), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            back.column("b").expect("b").values(),
+            &[Scalar::Int64(1), Scalar::Int64(0)]
+        );
+        assert_eq!(
+            back.column("big").expect("big").values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(2_147_483_621.0)]
+        );
+
+        // pandas raises ValueError("Column f contains infinity or -infinity...").
+        let mut inf_columns = BTreeMap::new();
+        inf_columns.insert(
+            "f".to_owned(),
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(f64::INFINITY)])
+                .expect("f"),
+        );
+        let inf_frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            inf_columns,
+            vec!["f".to_owned()],
+        )
+        .expect("inf frame");
+        let err = write_stata_bytes(&inf_frame).expect_err("inf must be rejected");
+        assert!(
+            matches!(&err, IoError::Stata(message) if message.contains("infinity")),
+            "got: {err:?}"
         );
     }
 
