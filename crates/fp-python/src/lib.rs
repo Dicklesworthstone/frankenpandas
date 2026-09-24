@@ -12145,13 +12145,67 @@ impl PySeries {
         Ok(PySeries { inner: out })
     }
 
-    /// Return a copy of the Series renamed to `name`.
-    fn rename(&self, name: &str) -> PyResult<PySeries> {
-        let r = self
-            .inner
-            .rename(name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PySeries { inner: r })
+    /// pandas' `s.rename(index=None, *, axis=None, copy=None, inplace=False,
+    /// level=None, errors='ignore')`: a dict or a callable relabels the index,
+    /// anything else (None included) becomes the name (br-frankenpandas-n57tz:
+    /// only a str name was taken). As in pandas, a new name with inplace=True
+    /// still returns the Series; a relabel with inplace=True returns None.
+    #[pyo3(signature = (
+        index=None,
+        axis=None,
+        copy=None,
+        inplace=false,
+        level=None,
+        errors="ignore"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn rename(
+        &mut self,
+        py: Python<'_>,
+        index: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        copy: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        level: Option<&Bound<'_, PyAny>>,
+        errors: &str,
+    ) -> PyResult<Option<PySeries>> {
+        let _ = copy;
+        parse_axis_param_for_type(axis, "Series")?;
+        unsupported_params(
+            "Series.rename",
+            &[("level", level.is_none_or(|l| l.is_none()))],
+        )?;
+        let relabel = index.filter(|i| i.is_instance_of::<PyDict>() || i.is_callable());
+        if let Some(mapping) = relabel {
+            let labels = self.inner.index().labels().to_vec();
+            let pairs = rename_pairs(py, mapping, &labels, errors == "raise")?;
+            let map: HashMap<&IndexLabel, &IndexLabel> =
+                pairs.iter().map(|(old, new)| (old, new)).collect();
+            let relabeled: Vec<IndexLabel> = labels
+                .iter()
+                .map(|label| {
+                    map.get(label)
+                        .map_or_else(|| label.clone(), |new| (*new).clone())
+                })
+                .collect();
+            let index = Index::new(relabeled).rename_index(self.inner.index().name());
+            let out = Series::new(self.inner.name(), index, self.inner.column().clone())
+                .map_err(frame_error_to_py)?;
+            if inplace {
+                self.inner = out;
+                return Ok(None);
+            }
+            return Ok(Some(PySeries { inner: out }));
+        }
+        let name = match passed(index) {
+            None => String::new(),
+            Some(name) => py_to_index_label(&name)?.to_string(),
+        };
+        let out = self.inner.rename(&name).map_err(frame_error_to_py)?;
+        if inplace {
+            self.inner = out.clone();
+        }
+        Ok(Some(PySeries { inner: out }))
     }
 
     /// Return a boolean Series marking missing values (pandas `Series.isna`).
@@ -13438,24 +13492,71 @@ impl PySeries {
         }
     }
 
-    fn drop(&self, _py: Python<'_>, labels: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        let label_vec: Vec<IndexLabel> = if let Ok(s) = labels.extract::<String>() {
-            vec![IndexLabel::Utf8(s)]
-        } else if let Ok(i) = labels.extract::<i64>() {
-            vec![IndexLabel::Int64(i)]
-        } else if let Ok(list) = labels.extract::<Vec<Bound<'_, PyAny>>>() {
-            let mut v = Vec::with_capacity(list.len());
-            for item in list {
-                v.push(py_to_index_label(&item)?);
+    /// pandas' `s.drop(labels=None, *, axis=0, index=None, columns=None,
+    /// level=None, inplace=False, errors='raise')` (br-frankenpandas-n57tz:
+    /// labels alone). `columns` means nothing for a Series and is ignored, as
+    /// in pandas; `level` is refused.
+    #[pyo3(signature = (
+        labels=None,
+        axis=None,
+        index=None,
+        columns=None,
+        level=None,
+        inplace=false,
+        errors="raise"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn drop(
+        &mut self,
+        py: Python<'_>,
+        labels: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        index: Option<&Bound<'_, PyAny>>,
+        columns: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        errors: &str,
+    ) -> PyResult<Option<PySeries>> {
+        parse_axis_param_for_type(axis, "Series")?;
+        unsupported_params(
+            "Series.drop",
+            &[("level", level.is_none_or(|l| l.is_none()))],
+        )?;
+        let rows = match passed(labels) {
+            Some(labels) => {
+                if passed(index).is_some() || passed(columns).is_some() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Cannot specify both 'labels' and 'index'/'columns'",
+                    ));
+                }
+                Some(labels)
             }
-            v
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "labels must be a label or list of labels",
-            ));
+            None => passed(index),
         };
-        let res = self.inner.drop(&label_vec).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        let out = match rows {
+            Some(rows) => {
+                let wanted = py_label_list(&rows)?;
+                let present: HashSet<&IndexLabel> = self.inner.index().labels().iter().collect();
+                let (found, missing): (Vec<IndexLabel>, Vec<IndexLabel>) = wanted
+                    .into_iter()
+                    .partition(|label| present.contains(label));
+                if !missing.is_empty() && errors != "ignore" {
+                    return Err(not_found_in_axis(py, &missing)?);
+                }
+                self.inner.drop(&found).map_err(frame_error_to_py)?
+            }
+            None if passed(columns).is_some() => self.inner.clone(),
+            None => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Need to specify at least one of 'labels', 'index' or 'columns'",
+                ));
+            }
+        };
+        if inplace {
+            self.inner = out;
+            return Ok(None);
+        }
+        Ok(Some(PySeries { inner: out }))
     }
 
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

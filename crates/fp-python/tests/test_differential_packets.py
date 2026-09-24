@@ -3194,6 +3194,55 @@ def test_drop_rename_errors_match_pandas() -> None:
         _dr(fpd).drop("x", level=0)
 
 
+def _sr(m: Any) -> Any:
+    return m.Series([1, 2, 3], index=["a", "b", "c"], name="v")
+
+
+# br-frankenpandas-n57tz: Series.rename took a str name only, Series.drop
+# positional labels only.
+_SERIES_DROP_RENAME_CASES = {
+    "rename_name": lambda m: _sr(m).rename("x"),
+    "rename_none_clears_name": lambda m: _sr(m).rename(None),
+    "rename_no_argument_clears_name": lambda m: _sr(m).rename(),
+    "rename_dict_relabels": lambda m: _sr(m).rename({"a": "A"}),
+    "rename_callable_relabels": lambda m: _sr(m).rename(str.upper),
+    "rename_index_kw": lambda m: _sr(m).rename(index={"a": "A"}),
+    "drop_label": lambda m: _sr(m).drop("a"),
+    "drop_index_kw": lambda m: _sr(m).drop(index=["a", "b"]),
+    "drop_errors_ignore": lambda m: _sr(m).drop(["q", "a"], errors="ignore"),
+    "drop_columns_ignored": lambda m: _sr(m).drop(columns="x"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SERIES_DROP_RENAME_CASES.values()), ids=list(_SERIES_DROP_RENAME_CASES))
+def test_series_drop_rename_keywords_match_pandas(case: Any) -> None:
+    assert _strict_ordered(case(fpd)) == _strict_ordered(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_series_drop_rename_inplace_and_errors_match_pandas() -> None:
+    for m in (pd, fpd):
+        s = _sr(m)
+        assert s.drop("a", inplace=True) is None
+        assert s.tolist() == [2, 3]
+        t = _sr(m)
+        assert t.rename(str.upper, inplace=True) is None
+        assert list(t.index) == ["A", "B", "C"]
+        # pandas returns the Series itself for a new name, even inplace.
+        u = _sr(m)
+        assert u.rename("w", inplace=True).name == "w"
+        assert u.name == "w"
+        with pytest.raises(KeyError, match=r"\['q'\] not found in axis"):
+            _sr(m).drop(["q"])
+        with pytest.raises(KeyError, match=r"\['q'\] not found in axis"):
+            _sr(m).rename({"q": "Q"}, errors="raise")
+        with pytest.raises(ValueError, match="Need to specify at least one of 'labels', 'index' or 'columns'"):
+            _sr(m).drop()
+        with pytest.raises(ValueError, match="No axis named 1 for object type Series"):
+            _sr(m).drop("a", axis=1)
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.xfail(strict=True, reason="br-frankenpandas-1tkrg: the Index repr omits dtype=")
 def test_set_index_duplicate_keys_message_is_pandas_exactly() -> None:
