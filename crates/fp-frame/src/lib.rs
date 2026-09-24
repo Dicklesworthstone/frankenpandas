@@ -5690,6 +5690,101 @@ fn parse_datetime64_nanos(value: &str) -> Result<i64, FrameError> {
     })
 }
 
+/// The first and last nanosecond a date string names at its own resolution,
+/// as pandas' partial-string indexing reads it: "2024" a year, "2024-01" a
+/// month, "2024-01-05" a day; with a time, its hour, minute or second (a
+/// fractional second is exact).
+fn partial_date_bounds(text: &str) -> Result<(i64, i64), FrameError> {
+    const SECOND: i64 = 1_000_000_000;
+    let text = text.trim();
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let first_of = |year: i64, month: u32| parse_datetime64_nanos(&format!("{year:04}-{month:02}-01"));
+    if text.len() == 4 && digits(text) {
+        let year: i64 = text.parse().unwrap_or_default();
+        return Ok((first_of(year, 1)?, first_of(year + 1, 1)? - 1));
+    }
+    if let Some((year, month)) = text.split_once('-')
+        && year.len() == 4
+        && digits(year)
+        && (1..=2).contains(&month.len())
+        && digits(month)
+    {
+        let year: i64 = year.parse().unwrap_or_default();
+        let month: u32 = month.parse().unwrap_or_default();
+        let (next_year, next_month) = if month == 12 {
+            (year + 1, 1)
+        } else {
+            (year, month + 1)
+        };
+        return Ok((first_of(year, month)?, first_of(next_year, next_month)? - 1));
+    }
+    let first = parse_datetime64_nanos(text)?;
+    let span = match text.split_once([' ', 'T']).map(|(_, time)| time) {
+        None => 86_400 * SECOND,
+        Some(time) if time.contains('.') => 1,
+        Some(time) => match time.matches(':').count() {
+            0 => 3_600 * SECOND,
+            1 => 60 * SECOND,
+            _ => SECOND,
+        },
+    };
+    Ok((first, first + span - 1))
+}
+
+/// The inclusive row positions of `.loc[start:stop]` over `labels`, as pandas
+/// resolves them (`None` for an empty selection): on a datetime index a string
+/// bound names a period at its own resolution, so `"2024-01-05"` as the stop
+/// reaches the day's last instant; on a monotonic index a bound that is not
+/// a label falls where it would sort; otherwise each bound must be a label.
+/// Both exact labels were required, so `df.loc["2024-01-02":"2024-01-05"]`
+/// raised (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
+fn loc_slice_positions(
+    labels: &[IndexLabel],
+    start: Option<&IndexLabel>,
+    stop: Option<&IndexLabel>,
+) -> Result<Option<(usize, usize)>, FrameError> {
+    let datetime_index = labels
+        .iter()
+        .all(|label| matches!(label, IndexLabel::Datetime64(_)));
+    let resolve = |label: Option<&IndexLabel>, end: bool| -> Result<Option<IndexLabel>, FrameError> {
+        Ok(match label {
+            Some(IndexLabel::Utf8(text)) if datetime_index => {
+                let (first, last) = partial_date_bounds(text)?;
+                Some(IndexLabel::Datetime64(if end { last } else { first }))
+            }
+            other => other.cloned(),
+        })
+    };
+    let start = resolve(start, false)?;
+    let stop = resolve(stop, true)?;
+    let kind = labels.first().map(std::mem::discriminant);
+    let same_kind = |label: &IndexLabel| kind == Some(std::mem::discriminant(label));
+    let monotonic = labels.iter().all(same_kind) && labels.windows(2).all(|pair| pair[0] <= pair[1]);
+    if monotonic && start.as_ref().is_none_or(same_kind) && stop.as_ref().is_none_or(same_kind) {
+        let first = start
+            .as_ref()
+            .map_or(0, |bound| labels.partition_point(|label| label < bound));
+        let end = stop
+            .as_ref()
+            .map_or(labels.len(), |bound| labels.partition_point(|label| label <= bound));
+        return Ok((first < end).then(|| (first, end - 1)));
+    }
+    let start_pos = match &start {
+        Some(label) => labels.iter().position(|l| l == label).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("loc slice start label not found: {label:?}"))
+        })?,
+        None => 0,
+    };
+    // Inclusive: the last occurrence of the stop label.
+    let end_pos = match &stop {
+        Some(label) => labels.iter().rposition(|l| l == label).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("loc slice stop label not found: {label:?}"))
+        })?,
+        None => labels.len().saturating_sub(1),
+    };
+    Ok((start_pos <= end_pos).then_some((start_pos, end_pos)))
+}
+
 fn parse_year_month_period_label(label: &str) -> Option<(i32, u32)> {
     let (year, month) = label.split_once('-')?;
     if month.contains('-') {
@@ -12655,32 +12750,10 @@ impl Series {
         if labels.is_empty() {
             return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
         }
-
-        // Find the first occurrence of `start` (or begin at 0).
-        let start_pos = match start {
-            Some(label) => labels.iter().position(|l| l == label).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "loc slice start label not found: {label:?}"
-                ))
-            })?,
-            None => 0,
-        };
-
-        // Find the last occurrence of `stop` (or go to the end). Pandas loc
-        // slicing is inclusive so we want the last match of stop, not the first.
-        let end_pos = match stop {
-            Some(label) => labels.iter().rposition(|l| l == label).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "loc slice stop label not found: {label:?}"
-                ))
-            })?,
-            None => labels.len().saturating_sub(1),
-        };
-
-        if start_pos > end_pos {
+        let Some((start_pos, end_pos)) = loc_slice_positions(labels, start, stop)? else {
             // Empty result when start is after stop.
             return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
-        }
+        };
 
         let out_labels: Vec<_> = labels[start_pos..=end_pos].to_vec();
         let out_values: Vec<_> = self.column.values()[start_pos..=end_pos].to_vec();
@@ -24919,7 +24992,10 @@ impl Series {
                     continue;
                 }
                 let prev = data[prev_idx as usize];
-                let ratio = (data[i] - prev) / prev;
+                // pandas' own formula, `data / shifted - 1`: `(cur - prev) /
+                // prev` rounds differently and gives NaN after an infinite
+                // prev where pandas gives -1 (fvsao.13).
+                let ratio = data[i] / prev - 1.0;
                 out[i] = ratio;
                 if ratio.is_nan() {
                     validity.set(i, false);
@@ -24945,7 +25021,7 @@ impl Series {
                     continue;
                 }
                 let prev = data[prev_idx as usize] as f64;
-                let ratio = (data[i] as f64 - prev) / prev;
+                let ratio = data[i] as f64 / prev - 1.0;
                 out[i] = ratio;
                 if ratio.is_nan() {
                     validity.set(i, false);
@@ -24979,7 +25055,7 @@ impl Series {
                 if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
-                    let ratio = (*cur_ns as f64 - *prev_ns as f64) / (*prev_ns as f64);
+                    let ratio = *cur_ns as f64 / *prev_ns as f64 - 1.0;
                     out.push(Scalar::Float64(ratio));
                 }
                 continue;
@@ -24987,7 +25063,7 @@ impl Series {
 
             match (current.to_f64(), previous.to_f64()) {
                 (Ok(cur), Ok(prev)) => {
-                    out.push(Scalar::Float64((cur - prev) / prev));
+                    out.push(Scalar::Float64(cur / prev - 1.0));
                 }
                 _ => out.push(Scalar::Null(NullKind::NaN)),
             }
@@ -25425,12 +25501,68 @@ impl Series {
         )
     }
 
+    /// `unstack()` of a two-level row MultiIndex, as pandas: the first level's
+    /// values (sorted) are the rows, named after that level, and the second's
+    /// (sorted) the columns; a combination that does not occur is missing,
+    /// and then every int column is float64 (one block, as pandas). The
+    /// composite-label path below reads only "row, col" strings, so a groupby
+    /// result raised (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
+    fn unstack_row_multiindex(
+        &self,
+        levels: &fp_index::MultiIndex,
+    ) -> Result<DataFrame, FrameError> {
+        let outer = levels.get_level_values(0)?;
+        let inner = levels.get_level_values(1)?;
+        let sorted_unique = |labels: &[IndexLabel]| {
+            let mut unique = labels.to_vec();
+            unique.sort();
+            unique.dedup();
+            unique
+        };
+        let rows = sorted_unique(outer.labels());
+        let cols = sorted_unique(inner.labels());
+        let row_of: FxHashMap<&IndexLabel, usize> =
+            rows.iter().enumerate().map(|(i, label)| (label, i)).collect();
+        let col_of: FxHashMap<&IndexLabel, usize> =
+            cols.iter().enumerate().map(|(i, label)| (label, i)).collect();
+        let mut grid: Vec<Vec<Option<Scalar>>> = vec![vec![None; rows.len()]; cols.len()];
+        for (position, value) in self.column.values().iter().enumerate() {
+            let row = row_of[&outer.labels()[position]];
+            let col = col_of[&inner.labels()[position]];
+            // The first value of a repeated combination wins.
+            grid[col][row].get_or_insert_with(|| value.clone());
+        }
+        let any_missing = grid.iter().flatten().any(Option::is_none);
+        let mut columns = BTreeMap::new();
+        let mut order = Vec::with_capacity(cols.len());
+        for (label, cells) in cols.iter().zip(grid) {
+            let values: Vec<Scalar> = cells
+                .into_iter()
+                .map(|cell| match cell {
+                    Some(Scalar::Int64(v)) if any_missing => Scalar::Float64(v as f64),
+                    Some(value) => value,
+                    None => Scalar::Null(NullKind::NaN),
+                })
+                .collect();
+            let name = label.to_string();
+            columns.insert(name.clone(), Column::from_values(values)?);
+            order.push(name);
+        }
+        let index = Index::new(rows).rename_index(levels.names()[0].as_deref());
+        DataFrame::new_with_column_order(index, columns, order)
+    }
+
     /// Unstack a Series with string-composite index into a DataFrame.
     ///
     /// Matches `pd.Series.unstack()`. Expects index labels in the format
     /// "row_key, col_key" (comma-separated composite keys). The first part
     /// becomes the row index, the second part becomes column names.
     pub fn unstack(&self) -> Result<DataFrame, FrameError> {
+        if let Some(levels) = self.index.row_multiindex()
+            && levels.nlevels() == 2
+        {
+            return self.unstack_row_multiindex(levels);
+        }
         // Per br-frankenpandas-0528d: HashSet membership tracking + parallel
         // insertion-ordered Vec. Was O(n × k) Vec::contains per entry per
         // key axis; now O(n) amortized. Same shape as the broader scan-and-
@@ -38979,15 +39111,14 @@ fn dense_groupby_fill_nullable_f64_by_key(
 }
 
 /// Key-offset dense groupby `pct_change(periods)` over an all-valid no-NaN Float64
-/// slice — sister of [`dense_groupby_diff_f64_by_key`] but emits `(v - prev)/prev`
-/// (the value `periods` positions earlier within the group), and marks a row
-/// invalid when it is within the first `periods` of its group OR the divisor is
-/// within `f64::EPSILON` of zero. Bit-identical to the generic pct_change
-/// transform for an all-valid no-NaN column: pandas' default `fill_method='ffill'`
+/// slice — sister of [`dense_groupby_diff_f64_by_key`] but emits pandas'
+/// `v / prev - 1` (prev: the value `periods` positions earlier within the
+/// group), and marks a row invalid when it is within the first `periods` of
+/// its group or the ratio is NaN (0/0). pandas' default `fill_method='ffill'`
 /// is a no-op when nothing is missing, so `prev` is exactly the group member
-/// `periods` rows back; the `prev.abs() < EPSILON -> NaN` guard matches; a set
-/// validity bit always carries a non-NaN result (finite - finite is finite;
-/// dividing by a >=EPSILON magnitude yields finite or inf, never NaN).
+/// `periods` rows back. A zero or tiny divisor gives inf or a huge ratio, as
+/// pandas; an `f64::EPSILON` guard here made them NaN
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
 fn dense_groupby_pct_change_f64_by_key(
     keys: &[i64],
     min: i64,
@@ -39005,9 +39136,9 @@ fn dense_groupby_pct_change_f64_by_key(
             let off = (keys[row] as i128 - min as i128) as usize;
             let v = vals[row];
             if seen[off] != 0 {
-                let prev = last[off];
-                if prev.abs() >= f64::EPSILON {
-                    out[row] = (v - prev) / prev;
+                let ratio = v / last[off] - 1.0;
+                out[row] = ratio;
+                if !ratio.is_nan() {
                     words[row / 64] |= 1u64 << (row % 64);
                 }
             } else {
@@ -39027,9 +39158,9 @@ fn dense_groupby_pct_change_f64_by_key(
         let c = cnt[off];
         let slot = off * periods + (c % periods);
         if c >= periods {
-            let prev = hist[slot];
-            if prev.abs() >= f64::EPSILON {
-                out[row] = (v - prev) / prev;
+            let ratio = v / hist[slot] - 1.0;
+            out[row] = ratio;
+            if !ratio.is_nan() {
                 words[row / 64] |= 1u64 << (row % 64);
             }
         }
@@ -39059,9 +39190,9 @@ fn dense_groupby_pct_change_f64(
         let c = cnt[g];
         let slot = g * periods + (c % periods);
         if c >= periods {
-            let prev = hist[slot];
-            if prev.abs() >= f64::EPSILON {
-                out[row] = (v - prev) / prev;
+            let ratio = v / hist[slot] - 1.0;
+            out[row] = ratio;
+            if !ratio.is_nan() {
                 words[row / 64] |= 1u64 << (row % 64);
             }
         }
@@ -44600,18 +44731,12 @@ impl SeriesGroupBy<'_> {
                         if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
                             return Scalar::Null(NullKind::NaN);
                         }
-                        let prev_f = *prev_ns as f64;
-                        if prev_f.abs() < f64::EPSILON {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        return Scalar::Float64((*cur_ns as f64 - prev_f) / prev_f);
+                        // pandas' `filled / shifted - 1`, no zero guard: a zero
+                        // divisor is inf (or NaN for 0/0), as pandas (fvsao.13).
+                        return Scalar::Float64(*cur_ns as f64 / *prev_ns as f64 - 1.0);
                     }
                     if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
-                        if prev.abs() < f64::EPSILON {
-                            Scalar::Null(NullKind::NaN)
-                        } else {
-                            Scalar::Float64((current - prev) / prev)
-                        }
+                        Scalar::Float64(current / prev - 1.0)
                     } else {
                         Scalar::Null(NullKind::NaN)
                     }
@@ -72767,28 +72892,9 @@ impl DataFrame {
             );
         }
 
-        let start_pos = match start {
-            Some(label) => labels.iter().position(|l| l == label).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "loc slice start label not found: {label:?}"
-                ))
-            })?,
-            None => 0,
-        };
-
-        let end_pos = match stop {
-            Some(label) => labels.iter().rposition(|l| l == label).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "loc slice stop label not found: {label:?}"
-                ))
-            })?,
-            None => labels.len().saturating_sub(1),
-        };
-
-        if start_pos > end_pos {
+        let Some((start_pos, end_pos)) = loc_slice_positions(labels, start, stop)? else {
             return self.take_rows_by_positions(&[]);
-        }
-
+        };
         let positions: Vec<usize> = (start_pos..=end_pos).collect();
         self.take_rows_by_positions(&positions)
     }
@@ -88923,7 +89029,7 @@ impl DataFrame {
                         continue;
                     }
                     match (curr_val.to_f64(), prev_val.to_f64()) {
-                        (Ok(c), Ok(p)) => vals.push(Scalar::Float64((c - p) / p)),
+                        (Ok(c), Ok(p)) => vals.push(Scalar::Float64(c / p - 1.0)),
                         _ => vals.push(Scalar::Null(NullKind::NaN)),
                     }
                 }
@@ -89681,6 +89787,12 @@ impl DataFrame {
     /// Alias for neg(). Matches `np.negative(df)`.
     pub fn negative(&self) -> Result<Self, FrameError> {
         self.neg()
+    }
+
+    /// Element-wise NOT per column: `~df` (logical for bool, bitwise for
+    /// int; a float column refuses, as numpy).
+    pub fn invert(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.invert())
     }
 
     /// Element-wise identity (+x, no-op for numeric).
@@ -202815,6 +202927,75 @@ mod tests {
             big.resample("D").sum().unwrap().values(),
             [Scalar::Int64((1_i64 << 53) + 3)]
         );
+    }
+
+    #[test]
+    fn loc_slices_by_date_period_and_unstacks_a_row_multiindex_fvsao13() {
+        // pandas 2.2.3: on a sorted datetime index, s.loc["2024-01-02":"2024-01-05"]
+        // takes 01-02 00:00 through the END of 01-05 (13:45 included);
+        // "2024-01" takes the month; a bound that is no label falls where it
+        // sorts on a monotonic index.
+        const HOUR: i64 = 3_600_000_000_000;
+        let day = |d: i64| 1_704_067_200_000_000_000 + (d - 1) * 24 * HOUR;
+        let stamps = vec![day(1), day(2) + 10 * HOUR, day(5) + 12 * HOUR, day(5) + 13 * HOUR, day(40)];
+        let s = Series::new(
+            "v",
+            Index::from_datetime64(stamps),
+            Column::from_i64_values(vec![1, 2, 3, 4, 5]),
+        )
+        .unwrap();
+        let text = |t: &str| IndexLabel::Utf8(t.to_owned());
+        let window = s
+            .loc_slice(Some(&text("2024-01-02")), Some(&text("2024-01-05")))
+            .unwrap();
+        assert_eq!(window.values(), [2_i64, 3, 4].map(Scalar::Int64));
+        let january = s.loc_slice(Some(&text("2024-01")), Some(&text("2024-01"))).unwrap();
+        assert_eq!(january.len(), 4);
+        assert_eq!(s.loc_slice(Some(&text("2024")), None).unwrap().len(), 5);
+        // Monotonic int index, bounds that are not labels.
+        let ints = Series::new(
+            "v",
+            Index::new([1_i64, 3, 5].map(IndexLabel::Int64).to_vec()),
+            Column::from_i64_values(vec![10, 30, 50]),
+        )
+        .unwrap();
+        assert_eq!(
+            ints.loc_slice(Some(&IndexLabel::Int64(2)), Some(&IndexLabel::Int64(4)))
+                .unwrap()
+                .values(),
+            [Scalar::Int64(30)]
+        );
+        // NEGATIVE: a non-monotonic index still needs the labels themselves.
+        let shuffled = Series::new(
+            "v",
+            Index::new([3_i64, 1, 5].map(IndexLabel::Int64).to_vec()),
+            Column::from_i64_values(vec![30, 10, 50]),
+        )
+        .unwrap();
+        assert!(shuffled.loc_slice(Some(&IndexLabel::Int64(2)), None).is_err());
+
+        // unstack of a groupby result's two-level row MultiIndex.
+        let frame = DataFrame::from_dict(
+            &["k", "p", "v"],
+            vec![
+                ("k", ["b", "a", "a"].map(text_scalar).to_vec()),
+                ("p", ["x", "y", "x"].map(text_scalar).to_vec()),
+                ("v", [1_i64, 2, 3].map(Scalar::Int64).to_vec()),
+            ],
+        )
+        .unwrap();
+        let grouped = frame.groupby(&["k", "p"]).unwrap().sum().unwrap();
+        let by_key = grouped.column_as_series("v").unwrap();
+        let wide = by_key.unstack().unwrap();
+        assert_eq!(wide.column_names(), vec!["x", "y"]);
+        assert_eq!(wide.index().name(), Some("k"));
+        // (b, y) does not occur: NaN, so the int values are float64.
+        assert_eq!(wide.columns()["x"].values(), [3.0, 1.0].map(Scalar::Float64));
+        assert!(wide.columns()["y"].values()[1].is_missing());
+    }
+
+    fn text_scalar(text: &str) -> Scalar {
+        Scalar::Utf8(text.to_owned())
     }
 
     #[test]

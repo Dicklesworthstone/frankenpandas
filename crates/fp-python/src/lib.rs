@@ -11450,6 +11450,19 @@ impl PySeries {
     fn __neg__(&self) -> PyResult<PySeries> {
         wrap_series(self.inner.neg())
     }
+    /// `~s`: logical NOT of a bool Series, bitwise NOT of ints, as pandas.
+    /// `df[~mask]` raised "bad operand type for unary ~"
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
+    fn __invert__(&self) -> PyResult<PySeries> {
+        wrap_series(self.inner.invert())
+    }
+    /// `abs(s)` and `+s`, as pandas.
+    fn __abs__(&self) -> PyResult<PySeries> {
+        wrap_series(self.inner.abs())
+    }
+    fn __pos__(&self) -> PyResult<PySeries> {
+        wrap_series(self.inner.positive())
+    }
     fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let rhs = self.ordering_operand(py, other)?;
         wrap_series(self.inner.gt(&rhs))
@@ -14758,8 +14771,49 @@ impl PySeries {
         Ok(PySeries { inner: s })
     }
 
-    fn unstack(&self) -> PyResult<PyDataFrame> {
-        let df = self.inner.unstack().map_err(frame_error_to_py)?;
+    /// pandas' `Series.unstack(level=-1, fill_value=None, sort=True)`: the last
+    /// level becomes the columns; `fill_value` fills the combinations that do
+    /// not occur, and an int Series filled with an int stays int, as pandas
+    /// fills during the reshape (the method took no arguments;
+    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13). Other
+    /// levels and sort=False are not supported yet.
+    #[pyo3(signature = (level=None, fill_value=None, sort=true))]
+    fn unstack(
+        &self,
+        py: Python<'_>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        sort: bool,
+    ) -> PyResult<PyDataFrame> {
+        if let Some(level) = level.filter(|level| !level.is_none()) {
+            let levels = self.inner.index().row_multiindex().map(|mi| mi.nlevels());
+            let last = match level.extract::<i64>() {
+                Ok(position) => position == -1 || levels.is_some_and(|n| position == n as i64 - 1),
+                Err(_) => {
+                    let name = level.extract::<String>().ok();
+                    self.inner
+                        .index()
+                        .row_multiindex()
+                        .is_some_and(|mi| mi.names().last().cloned().flatten() == name)
+                }
+            };
+            if !last {
+                return Err(not_implemented(
+                    "Series.unstack of a level other than the last",
+                ));
+            }
+        }
+        if !sort {
+            return Err(not_implemented("Series.unstack(sort=False)"));
+        }
+        let mut df = self.inner.unstack().map_err(frame_error_to_py)?;
+        if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
+            let fill = py_to_scalar(py, fill)?;
+            df = df.fillna(&fill).map_err(frame_error_to_py)?;
+            if self.inner.dtype() == DType::Int64 && matches!(fill, Scalar::Int64(_)) {
+                df = df.astype(DType::Int64).map_err(frame_error_to_py)?;
+            }
+        }
         Ok(PyDataFrame { inner: df })
     }
 
@@ -17817,6 +17871,16 @@ impl PyDataFrame {
     }
     fn __neg__(&self) -> PyResult<PyDataFrame> {
         wrap_frame(self.inner.neg())
+    }
+    /// `~df`, `abs(df)` and `+df`, as pandas (fvsao.13: `~` raised).
+    fn __invert__(&self) -> PyResult<PyDataFrame> {
+        wrap_frame(self.inner.invert())
+    }
+    fn __abs__(&self) -> PyResult<PyDataFrame> {
+        wrap_frame(self.inner.abs())
+    }
+    fn __pos__(&self) -> PyResult<PyDataFrame> {
+        wrap_frame(self.inner.positive())
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         self.cmp_operator(py, other, ComparisonOp::Eq)
@@ -21081,18 +21145,54 @@ impl PyDataFrame {
         }
     }
 
-    #[pyo3(signature = (values, index, columns, aggfunc="mean"))]
+    /// pandas' `pivot_table`, with `fill_value` filling the cells no row
+    /// reached (it was refused as an unknown keyword;
+    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13). margins,
+    /// dropna=False and sort=False are not supported yet; `observed` only
+    /// matters for categorical keys.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (values, index, columns, aggfunc="mean", fill_value=None, margins=false, dropna=true, margins_name="All", observed=None, sort=true))]
     fn pivot_table(
         &self,
+        py: Python<'_>,
         values: &str,
         index: &str,
         columns: &str,
         aggfunc: &str,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        margins: bool,
+        dropna: bool,
+        margins_name: &str,
+        observed: Option<bool>,
+        sort: bool,
     ) -> PyResult<PyDataFrame> {
-        let res = self
+        let _ = (margins_name, observed);
+        unsupported_params(
+            "DataFrame.pivot_table",
+            &[("margins", !margins), ("dropna", dropna), ("sort", sort)],
+        )?;
+        let mut res = self
             .inner
             .pivot_table(values, index, columns, aggfunc)
             .map_err(frame_error_to_py)?;
+        if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
+            let fill = py_to_scalar(py, fill)?;
+            res = res.fillna(&fill).map_err(frame_error_to_py)?;
+            // pandas fills while unstacking the aggregate, so an int
+            // aggregate (sum/min/max/first/last/count of an int column)
+            // filled with an int stays int64.
+            let int_aggregate = self
+                .inner
+                .column(values)
+                .is_some_and(|c| c.dtype() == DType::Int64)
+                && matches!(
+                    aggfunc,
+                    "sum" | "min" | "max" | "first" | "last" | "count" | "size"
+                );
+            if int_aggregate && matches!(fill, Scalar::Int64(_)) {
+                res = res.astype(DType::Int64).map_err(frame_error_to_py)?;
+            }
+        }
         Ok(PyDataFrame { inner: res })
     }
 
@@ -31584,15 +31684,35 @@ fn pivot(
 
 /// Create a spreadsheet-style pivot table as a DataFrame (pandas `pivot_table`).
 #[pyfunction]
-#[pyo3(signature = (data, values, index, columns, aggfunc="mean"))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (data, values, index, columns, aggfunc="mean", fill_value=None, margins=false, dropna=true, margins_name="All", observed=None, sort=true))]
 fn pivot_table(
+    py: Python<'_>,
     data: &PyDataFrame,
     values: &str,
     index: &str,
     columns: &str,
     aggfunc: &str,
+    fill_value: Option<&Bound<'_, PyAny>>,
+    margins: bool,
+    dropna: bool,
+    margins_name: &str,
+    observed: Option<bool>,
+    sort: bool,
 ) -> PyResult<PyDataFrame> {
-    data.pivot_table(values, index, columns, aggfunc)
+    data.pivot_table(
+        py,
+        values,
+        index,
+        columns,
+        aggfunc,
+        fill_value,
+        margins,
+        dropna,
+        margins_name,
+        observed,
+        sort,
+    )
 }
 
 /// Bin values into discrete intervals (pandas `cut`).

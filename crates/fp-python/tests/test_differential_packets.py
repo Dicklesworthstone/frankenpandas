@@ -4282,3 +4282,109 @@ def test_groupby_key_errors_match_pandas() -> None:
     # modelled, so refused rather than mislabelled.
     with pytest.raises(NotImplementedError):
         _keyed_rows(fpd).groupby(np.array([1, 1, 2, 2]), as_index=False)
+
+
+def _dated_sales(m: Any) -> Any:
+    return m.DataFrame(
+        {"k": ["a", "b", "a", "b", "a"], "p": ["x", "x", "y", "y", "x"], "v": [1, 2, 3, 4, 5], "ok": [True, False, True, True, False]},
+        index=m.to_datetime(
+            ["2024-01-01 00:00", "2024-01-02 10:00", "2024-01-05 12:00", "2024-01-05 13:45", "2024-02-09 00:00"]
+        ),
+    )
+
+
+EVERYDAY_OPS = {
+    "~bool mask": lambda m: _dated_sales(m)[~_dated_sales(m)["ok"]],
+    "~int": lambda m: ~m.Series([0, 5, -3]),
+    "~frame": lambda m: ~_dated_sales(m)[["ok"]],
+    "abs(Series)": lambda m: abs(m.Series([-1.5, 2.0])),
+    "abs(frame)": lambda m: abs(m.DataFrame({"a": [-1, 2]})),
+    "+Series": lambda m: +m.Series([1, -2]),
+    "loc date-string window": lambda m: _dated_sales(m).loc["2024-01-02":"2024-01-05"],
+    "loc month": lambda m: _dated_sales(m).loc["2024-01":"2024-01"],
+    "series loc open end": lambda m: _dated_sales(m)["v"].loc["2024-01-05":],
+    "loc missing int bounds": lambda m: m.Series([10, 30, 50], index=[1, 3, 5]).loc[2:4],
+    "unstack groupby result": lambda m: _dated_sales(m).groupby(["k", "p"])["v"].sum().unstack(),
+    "unstack fill_value": lambda m: _dated_sales(m).iloc[:4].groupby(["k", "p"])["v"].sum().unstack(fill_value=0),
+    "pivot_table fill_value": lambda m: _dated_sales(m).iloc[:4].pivot_table(index="k", columns="p", values="v", aggfunc="sum", fill_value=0),
+}
+
+
+def _plain(obj: Any) -> Any:
+    if hasattr(obj, "columns"):
+        return ("frame", [str(c) for c in obj.columns], [str(obj[c].dtype) for c in obj.columns],
+                [str(t) for t in obj.index], [[str(v) for v in obj[c].tolist()] for c in obj.columns])
+    return (str(obj.dtype), [str(t) for t in obj.index], [str(v) for v in obj.tolist()])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", sorted(EVERYDAY_OPS))
+def test_everyday_selection_and_reshape_match_pandas(op: str) -> None:
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13 (found by the
+    # time-series journey): ~mask raised, abs()/+ were missing, .loc needed
+    # exact labels (no date-period strings, no bounds between labels), and
+    # unstack/pivot_table took no fill_value; unstack could not read a
+    # groupby result's MultiIndex.
+    run = EVERYDAY_OPS[op]
+    assert _plain(run(fpd)) == _plain(run(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_everyday_refusals_match_pandas() -> None:
+    for m in (pd, fpd):
+        # NEGATIVES: ~float is refused, and a non-monotonic index needs the
+        # slice's labels themselves.
+        with pytest.raises(TypeError):
+            ~m.Series([1.5])
+        with pytest.raises(KeyError):
+            m.Series([30, 10, 50], index=[3, 1, 5]).loc[2:]
+    with pytest.raises(NotImplementedError):
+        _dated_sales(fpd).groupby(["k", "p"])["v"].sum().unstack(level=0)
+
+
+JOURNEY_CSV = """date,store,product,units,price,returned
+2024-01-01 09:15:00,north,apple,3,1.20,False
+2024-01-01 11:40:00,south,pear,5,0.80,False
+2024-01-02 10:05:00,north,pear,2,0.85,True
+2024-01-02 16:30:00,north,apple,,1.25,False
+2024-01-03 08:00:00,south,apple,7,1.10,False
+2024-01-05 12:00:00,south,plum,1,2.50,False
+2024-01-05 13:45:00,north,plum,4,2.40,True
+2024-01-06 18:20:00,north,apple,6,1.30,False
+2024-01-08 09:00:00,south,pear,3,0.90,False
+2024-01-09 17:10:00,south,apple,2,1.15,False
+"""
+
+
+def _journey(m: Any) -> dict:
+    out = {}
+    raw = m.read_csv(io.StringIO(JOURNEY_CSV), parse_dates=["date"])
+    sales = raw.set_index("date").assign(revenue=lambda d: d["units"] * d["price"]).fillna({"units": 0})
+    kept = sales[~sales["returned"]]
+    daily = kept["revenue"].resample("D").sum()
+    out["daily"] = daily
+    out["rolling"] = daily.rolling(3, min_periods=1).mean()
+    out["unstacked"] = kept.groupby(["store", "product"])["units"].sum().unstack(fill_value=0)
+    out["pivot"] = kept.pivot_table(index="store", columns="product", values="revenue", aggfunc="sum", fill_value=0)
+    out["by weekday"] = kept.groupby(kept.index.dayofweek)["revenue"].mean()
+    out["window"] = kept.loc["2024-01-02":"2024-01-05"]
+    out["pct"] = daily.pct_change()
+    out["top"] = kept.groupby("product")["revenue"].sum().nlargest(2)
+    out["summary"] = kept.groupby("store").agg(total=("revenue", "sum"), n=("units", "count"))
+    out["merged"] = out["summary"].reset_index().merge(m.DataFrame({"store": ["north", "south"], "region": ["N", "S"]}), on="store")
+    out["round trip"] = m.read_csv(io.StringIO(out["merged"].to_csv(index=False)))
+    out["weekly"] = kept[["units", "revenue"]].resample("W").sum()
+    out["ewm"] = daily.ewm(span=3).mean()
+    return out
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_time_series_journey_matches_pandas() -> None:
+    # fvsao.13: a whole time-series ETL (read_csv with dates, set_index,
+    # assign, fillna, ~mask filter, resample, rolling, groupby + unstack,
+    # pivot_table, groupby by index field, date-string .loc window,
+    # pct_change, nlargest, named agg, merge, to_csv round trip, ewm) run
+    # under both libraries, every intermediate compared.
+    want, got = _journey(pd), _journey(fpd)
+    for step in want:
+        assert _plain(got[step]) == _plain(want[step]), step
