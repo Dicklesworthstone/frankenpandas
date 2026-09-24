@@ -2942,6 +2942,92 @@ def test_groupby_numeric_reductions_match_pandas(op: str, select: Any) -> None:
     assert _nan_marked(_strict(call(fpd))) == _nan_marked(_strict(call(pd)))
 
 
+def _align_frames(m: Any) -> Any:
+    return (
+        m.DataFrame({"b": [1.0, 2.0], "a": [3.0, 4.0]}, index=["z", "x"]),
+        m.DataFrame({"c": [5.0], "a": [6.0]}, index=["y"]),
+    )
+
+
+# br-frankenpandas-daigh: an outer alignment kept first-seen label order;
+# pandas sorts the union of two different indexes (rows and columns).
+_ALIGN_CASES = {
+    "series_align": lambda m: m.Series([10, 20, 30], index=["x", "y", "z"]).align(
+        m.Series([1, 2], index=["x", "w"])
+    )[0],
+    "series_align_other_side": lambda m: m.Series([10, 20, 30], index=["x", "y", "z"]).align(
+        m.Series([1, 2], index=["x", "w"])
+    )[1],
+    "frame_align": lambda m: _align_frames(m)[0].align(_align_frames(m)[1])[0],
+    "frame_add": lambda m: _align_frames(m)[0] + _align_frames(m)[1],
+    "frame_add_same_columns_reordered": lambda m: m.DataFrame({"b": [1.0], "a": [2.0]})
+    + m.DataFrame({"a": [1.0], "b": [2.0]}),
+    # NEGATIVE: equal indexes keep their (unsorted) order; a left join keeps
+    # the left order.
+    "frame_align_equal_keeps_order": lambda m: _align_frames(m)[0].align(_align_frames(m)[0])[0],
+    "series_align_left": lambda m: m.Series([1, 2], index=["z", "a"]).align(
+        m.Series([3], index=["b"]), join="left"
+    )[0],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ALIGN_CASES.values()), ids=list(_ALIGN_CASES))
+def test_outer_alignment_order_matches_pandas(case: Any) -> None:
+    assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
+
+
+def _flex_s(m: Any, vals: Any = (10, 20, 30), idx: Any = ("x", "y", "z")) -> Any:
+    return m.Series(list(vals), index=list(idx))
+
+
+# br-frankenpandas-n57tz: the Series flex methods took `other` alone.
+_SERIES_FLEX_CASES = {
+    "add_fill_same_index_int": lambda m: _flex_s(m).add(_flex_s(m, (1, 2, 3)), fill_value=0),
+    "add_fill_misaligned": lambda m: _flex_s(m).add(_flex_s(m, (1, 2), ("x", "w")), fill_value=0),
+    "add_fill_both_missing_stays_missing": lambda m: _flex_s(m, (1.0, _NAN, 3.0)).add(
+        _flex_s(m, (_NAN, _NAN, 1.0)), fill_value=0
+    ),
+    "add_scalar_fill": lambda m: _flex_s(m, (1.0, _NAN, 3.0)).add(5, fill_value=0),
+    "sub_fill_float": lambda m: _flex_s(m).sub(_flex_s(m, (1, 2), ("x", "w")), fill_value=1.5),
+    "rsub_fill": lambda m: _flex_s(m).rsub(_flex_s(m, (1, 2), ("x", "w")), fill_value=0),
+    "mul_fill": lambda m: _flex_s(m).mul(_flex_s(m, (2,), ("y",)), fill_value=1),
+    "pow_fill": lambda m: _flex_s(m, (2, 3, 4)).pow(_flex_s(m, (2,), ("x",)), fill_value=1),
+    "floordiv_fill": lambda m: _flex_s(m).floordiv(_flex_s(m, (3,), ("x",)), fill_value=1),
+    "mod_fill": lambda m: _flex_s(m).mod(_flex_s(m, (3,), ("x",)), fill_value=7),
+    "truediv_fill": lambda m: _flex_s(m).truediv(_flex_s(m, (4,), ("x",)), fill_value=2),
+    "rtruediv_fill": lambda m: _flex_s(m).rtruediv(_flex_s(m, (4,), ("x",)), fill_value=2),
+    "eq_fill": lambda m: _flex_s(m, (1.0, _NAN, 3.0)).eq(_flex_s(m, (1.0, 2.0, _NAN)), fill_value=2.0),
+    "lt_fill": pytest.param(
+        lambda m: _flex_s(m, (1.0, _NAN), ("x", "y")).lt(_flex_s(m, (2.0, 0.5), ("x", "w")), fill_value=0),
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason="br-frankenpandas-zwfz3: a comparison with NaN (y, missing on both "
+            "sides) is None where pandas gives False",
+        ),
+    ),
+    "divmod_fill": lambda m: _flex_s(m).divmod(_flex_s(m, (3,), ("x",)), fill_value=7)[1],
+    "axis_index": lambda m: _flex_s(m).add(_flex_s(m), axis="index"),
+    "axis_zero_no_fill": lambda m: _flex_s(m).sub(_flex_s(m, (1, 2, 3)), axis=0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SERIES_FLEX_CASES.values()), ids=list(_SERIES_FLEX_CASES))
+def test_series_flex_keywords_match_pandas(case: Any) -> None:
+    assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_series_flex_keyword_errors_and_refusals() -> None:
+    for m in (pd, fpd):
+        with pytest.raises(ValueError, match="No axis named 1 for object type Series"):
+            _flex_s(m).add(_flex_s(m), axis=1)
+    # level= broadcasts over a MultiIndex level, which the binding cannot.
+    with pytest.raises(NotImplementedError, match="level"):
+        _flex_s(fpd).add(_flex_s(fpd), level=0)
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_sample_without_random_state_draws_fresh_rows() -> None:
     # br-frankenpandas-u1e54: random_state=None meant seed 42, so every

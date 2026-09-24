@@ -11175,7 +11175,8 @@ impl Series {
     /// Uses duplicate-aware alignment for outer joins when duplicate labels exist.
     pub fn align(&self, other: &Self, mode: AlignMode) -> Result<(Self, Self), FrameError> {
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
-        let plan = if matches!(mode, AlignMode::Outer) && has_duplicate_labels {
+        let outer = matches!(mode, AlignMode::Outer);
+        let plan = if outer && has_duplicate_labels {
             let (union_index, left_positions, right_positions) =
                 align_union_duplicate_aware(&self.index, &other.index);
             AlignmentPlan {
@@ -11183,6 +11184,11 @@ impl Series {
                 left_positions,
                 right_positions,
             }
+        } else if outer && self.index.labels() != other.index.labels() {
+            // pandas' outer join of two different unique indexes is their
+            // sorted union, as Series arithmetic already aligns
+            // (br-frankenpandas-daigh).
+            align_union_sorted_unique(&self.index, &other.index)
         } else {
             align(&self.index, &other.index, mode)
         };
@@ -89393,7 +89399,9 @@ impl DataFrame {
                             _ => Scalar::Null(NullKind::NaN),
                         })
                         .collect();
-                    Ok(Column::from_values(vals)?)
+                    // Float64 even when every row is NaN, which from_values
+                    // would leave untyped (br-frankenpandas-qmru2).
+                    Ok(Column::new(DType::Float64, vals)?)
                 } else {
                     Ok(lc.clone())
                 }
@@ -89490,7 +89498,8 @@ impl DataFrame {
                         _ => Scalar::Null(NullKind::NaN),
                     })
                     .collect();
-                result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+                // Float64 even when every row is NaN (br-frankenpandas-qmru2).
+                result_cols.insert(col_name.clone(), Column::new(DType::Float64, vals)?);
             } else {
                 result_cols.insert(col_name.clone(), lc.clone());
             }
@@ -92092,7 +92101,8 @@ impl DataFrame {
         mode: AlignMode,
     ) -> Result<(Self, Self), FrameError> {
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
-        let plan = if matches!(mode, AlignMode::Outer) && has_duplicate_labels {
+        let outer = matches!(mode, AlignMode::Outer);
+        let plan = if outer && has_duplicate_labels {
             let (union_index, left_positions, right_positions) =
                 align_union_duplicate_aware(&self.index, &other.index);
             AlignmentPlan {
@@ -92100,17 +92110,25 @@ impl DataFrame {
                 left_positions,
                 right_positions,
             }
+        } else if outer && self.index.labels() != other.index.labels() {
+            // pandas' outer join of two different unique indexes is their
+            // sorted union; first-seen order was fp's (br-frankenpandas-daigh).
+            align_union_sorted_unique(&self.index, &other.index)
         } else {
             align(&self.index, &other.index, mode)
         };
         validate_alignment_plan(&plan)?;
 
-        // Build union column set (self's columns first, then new from other)
+        // Build union column set (self's columns first, then new from other);
+        // an outer join of different column sets sorts it, as pandas does.
         let mut all_columns: Vec<String> = self.column_order.to_vec();
         for name in &other.column_order {
             if !self.columns.contains_key(name) {
                 all_columns.push(name.clone());
             }
+        }
+        if outer && self.column_order != other.column_order {
+            all_columns.sort();
         }
 
         let n = plan.union_index.labels().len();
@@ -92186,7 +92204,9 @@ impl DataFrame {
                 };
                 Column::new(output_dtype, values).map_err(FrameError::from)
             } else {
-                Column::from_values(vec![null.clone(); n]).map_err(FrameError::from)
+                // A column this side lacks is pandas' all-NaN float64 column;
+                // from_values left it untyped (br-frankenpandas-qmru2).
+                Column::new(DType::Float64, vec![null.clone(); n]).map_err(FrameError::from)
             }
         };
 
@@ -153992,6 +154012,59 @@ mod tests {
     }
 
     #[test]
+    fn outer_alignment_sorts_the_union_like_pandas_daigh() {
+        // pandas 2.2.3:
+        //   Series([10,20,30], index=['x','y','z']).align(Series([1,2], index=['x','w']))
+        //     -> index ['w','x','y','z']
+        //   DataFrame({'b':[1.,2.],'a':[3.,4.]}, index=['z','x'])
+        //     .align(DataFrame({'c':[5.],'a':[6.]}, index=['y']))
+        //     -> rows ['x','y','z'], columns ['a','b','c']; d1 + d2 the same.
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let labels = |xs: &[&str]| xs.iter().map(|s| utf8(s)).collect::<Vec<_>>();
+        let series = |xs: &[&str], vals: &[i64]| {
+            Series::from_values(
+                "s",
+                labels(xs),
+                vals.iter().map(|&v| Scalar::Int64(v)).collect(),
+            )
+            .unwrap()
+        };
+        let s = series(&["x", "y", "z"], &[10, 20, 30]);
+        let (left, right) = s
+            .align(&series(&["x", "w"], &[1, 2]), AlignMode::Outer)
+            .unwrap();
+        assert_eq!(left.index().labels(), labels(&["w", "x", "y", "z"]));
+        assert_eq!(right.index().labels(), labels(&["w", "x", "y", "z"]));
+        let frame = |rows: &[&str], cols: Vec<(&'static str, Vec<f64>)>| {
+            let data = cols
+                .into_iter()
+                .map(|(n, v)| (n, v.into_iter().map(Scalar::Float64).collect()))
+                .collect();
+            DataFrame::from_dict_with_index(data, labels(rows)).unwrap()
+        };
+        let d1 = frame(
+            &["z", "x"],
+            vec![("b", vec![1.0, 2.0]), ("a", vec![3.0, 4.0])],
+        );
+        let d2 = frame(&["y"], vec![("c", vec![5.0]), ("a", vec![6.0])]);
+        let (aligned, _) = d1.align(&d2, AlignMode::Outer).unwrap();
+        assert_eq!(aligned.index().labels(), labels(&["x", "y", "z"]));
+        assert_eq!(aligned.column_names(), ["a", "b", "c"]);
+        let sum = d1.add_df(&d2).unwrap();
+        assert_eq!(sum.index().labels(), labels(&["x", "y", "z"]));
+        assert_eq!(sum.column_names(), ["a", "b", "c"]);
+        // NEGATIVE: equal (unsorted) indexes and columns keep their order, and
+        // a left join keeps the left order.
+        let (same, _) = d1.align(&d1, AlignMode::Outer).unwrap();
+        assert_eq!(same.index().labels(), labels(&["z", "x"]));
+        assert_eq!(same.column_names(), ["b", "a"]);
+        let (left_join, _) = s
+            .align(&series(&["x", "w"], &[1, 2]), AlignMode::Left)
+            .unwrap();
+        assert_eq!(left_join.index().labels(), labels(&["x", "y", "z"]));
+    }
+
+    #[test]
     fn groupby_rank() {
         let df = DataFrame::from_dict(
             &["g", "v"],
@@ -159779,13 +159852,17 @@ mod tests {
                 _ => Scalar::Null(NullKind::NaN),
             })
             .unwrap();
+        // GOLDEN-CHANGE (br-frankenpandas-daigh): this pinned the first-seen
+        // union [0, 2, 1]; pandas 2.2.3's combine uses the sorted union:
+        // Series([10,20],[0,2]).combine(Series([5,30],[1,2]), max).index
+        // == [0, 1, 2].
         assert_eq!(
             result.index().labels(),
-            &vec![0_i64.into(), 2_i64.into(), 1_i64.into()]
+            &vec![0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
         assert_eq!(result.values()[0], Scalar::Float64(10.0));
-        assert_eq!(result.values()[1], Scalar::Float64(30.0));
-        assert_eq!(result.values()[2], Scalar::Float64(5.0));
+        assert_eq!(result.values()[1], Scalar::Float64(5.0));
+        assert_eq!(result.values()[2], Scalar::Float64(30.0));
     }
 
     // ── DataFrame: corrwith, dot ──

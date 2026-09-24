@@ -10235,6 +10235,69 @@ fn check_series_axis(axis: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
 }
 
 impl PySeries {
+    /// pandas' Series flex methods (`s.add(other, level=, fill_value=, axis=)`
+    /// and the rest): after the indexes are aligned, `fill_value` stands in for
+    /// a value missing on exactly one side before `op` runs (missing on both
+    /// stays missing); `axis` can only name a Series' one axis, and `level` is
+    /// refused (br-frankenpandas-n57tz; the binding took `other` alone).
+    #[allow(clippy::too_many_arguments)]
+    fn flex(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        op: impl Fn(&Self, Python<'_>, &Bound<'_, PyAny>) -> PyResult<Self>,
+    ) -> PyResult<Self> {
+        parse_axis_param_for_type(axis, "Series")?;
+        unsupported_params(
+            &format!("Series.{method}"),
+            &[("level", level.is_none_or(|l| l.is_none()))],
+        )?;
+        let Some(fill) = fill_value.filter(|f| !f.is_none()) else {
+            return op(self, py, other);
+        };
+        let fill = py_to_scalar(py, fill)?;
+        let rhs = series_operand(py, other, &self.inner)?;
+        let (left, right) = if self.inner.index().labels() == rhs.index().labels() {
+            (self.inner.clone(), rhs)
+        } else {
+            self.inner
+                .align(&rhs, fp_index::AlignMode::Outer)
+                .map_err(frame_error_to_py)?
+        };
+        let fill_one_side = |side: &Series, against: &Series| -> PyResult<Series> {
+            let values = side
+                .values()
+                .iter()
+                .zip(against.values())
+                .map(|(v, w)| {
+                    if v.is_missing() && !w.is_missing() {
+                        fill.clone()
+                    } else {
+                        v.clone()
+                    }
+                })
+                .collect();
+            let column = Column::from_values(values).map_err(column_error_to_py)?;
+            Series::new(side.name(), side.index().clone(), column).map_err(frame_error_to_py)
+        };
+        let filled_left = fill_one_side(&left, &right)?;
+        let filled_right = Py::new(
+            py,
+            Self {
+                inner: fill_one_side(&right, &left)?,
+            },
+        )?;
+        op(
+            &Self { inner: filled_left },
+            py,
+            filled_right.bind(py).as_any(),
+        )
+    }
+
     /// pandas' `key=` for sort_values/sort_index: the callable receives the
     /// whole Series (or its Index) and returns an array-like of the same
     /// length, and the rows are ordered by those values. `keyed` is what the
@@ -10876,80 +10939,350 @@ impl PySeries {
         wrap_series(self.inner.ne(&rhs))
     }
 
-    fn add(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__add__(py, other)
+    // The flex forms of the operators: pandas' (other, level=, fill_value=,
+    // axis=), through `flex` (br-frankenpandas-n57tz).
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn add(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "add", other, level, fill_value, axis, Self::__add__)
     }
-    fn radd(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__radd__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn radd(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "radd", other, level, fill_value, axis, Self::__radd__)
     }
-    fn sub(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__sub__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn sub(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "sub", other, level, fill_value, axis, Self::__sub__)
     }
-    fn subtract(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__sub__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn subtract(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(
+            py,
+            "subtract",
+            other,
+            level,
+            fill_value,
+            axis,
+            Self::__sub__,
+        )
     }
-    fn rsub(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__rsub__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn rsub(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "rsub", other, level, fill_value, axis, Self::__rsub__)
     }
-    fn mul(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__mul__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn mul(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "mul", other, level, fill_value, axis, Self::__mul__)
     }
-    fn multiply(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__mul__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn multiply(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(
+            py,
+            "multiply",
+            other,
+            level,
+            fill_value,
+            axis,
+            Self::__mul__,
+        )
     }
-    fn rmul(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__rmul__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn rmul(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "rmul", other, level, fill_value, axis, Self::__rmul__)
     }
-    fn div(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__truediv__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn div(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "div", other, level, fill_value, axis, Self::__truediv__)
     }
-    fn divide(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__truediv__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn divide(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(
+            py,
+            "divide",
+            other,
+            level,
+            fill_value,
+            axis,
+            Self::__truediv__,
+        )
     }
-    fn truediv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__truediv__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn truediv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(
+            py,
+            "truediv",
+            other,
+            level,
+            fill_value,
+            axis,
+            Self::__truediv__,
+        )
     }
-    fn rtruediv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__rtruediv__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn rtruediv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(
+            py,
+            "rtruediv",
+            other,
+            level,
+            fill_value,
+            axis,
+            Self::__rtruediv__,
+        )
     }
-    fn rdiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__rtruediv__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn rdiv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(
+            py,
+            "rdiv",
+            other,
+            level,
+            fill_value,
+            axis,
+            Self::__rtruediv__,
+        )
     }
-    fn floordiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__floordiv__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn floordiv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(
+            py,
+            "floordiv",
+            other,
+            level,
+            fill_value,
+            axis,
+            Self::__floordiv__,
+        )
     }
-    fn rfloordiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__rfloordiv__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn rfloordiv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(
+            py,
+            "rfloordiv",
+            other,
+            level,
+            fill_value,
+            axis,
+            Self::__rfloordiv__,
+        )
     }
-    fn r#mod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__mod__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn r#mod(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "mod", other, level, fill_value, axis, Self::__mod__)
     }
-    fn rmod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__rmod__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn rmod(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "rmod", other, level, fill_value, axis, Self::__rmod__)
     }
-    fn pow(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__pow__(py, other, None)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn pow(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "pow", other, level, fill_value, axis, |s, py, o| {
+            s.__pow__(py, o, None)
+        })
     }
-    fn rpow(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__rpow__(py, other, None)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn rpow(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "rpow", other, level, fill_value, axis, |s, py, o| {
+            s.__rpow__(py, o, None)
+        })
     }
-    fn eq(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__eq__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn eq(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "eq", other, level, fill_value, axis, Self::__eq__)
     }
-    fn ne(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__ne__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn ne(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "ne", other, level, fill_value, axis, Self::__ne__)
     }
-    fn lt(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__lt__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn lt(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "lt", other, level, fill_value, axis, Self::__lt__)
     }
-    fn le(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__le__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn le(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "le", other, level, fill_value, axis, Self::__le__)
     }
-    fn gt(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__gt__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn gt(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "gt", other, level, fill_value, axis, Self::__gt__)
     }
-    fn ge(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.__ge__(py, other)
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn ge(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.flex(py, "ge", other, level, fill_value, axis, Self::__ge__)
     }
 
     /// Return the sum of the Series. Fewer than `min_count` valid values make
@@ -13629,15 +13962,31 @@ impl PySeries {
         Ok(PySeries { inner: s })
     }
 
-    fn divmod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<(PySeries, PySeries)> {
-        let q = self.floordiv(py, other)?;
-        let r = self.r#mod(py, other)?;
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn divmod(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(PySeries, PySeries)> {
+        let q = self.floordiv(py, other, level, fill_value, axis)?;
+        let r = self.r#mod(py, other, level, fill_value, axis)?;
         Ok((q, r))
     }
 
-    fn rdivmod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<(PySeries, PySeries)> {
-        let q = self.rfloordiv(py, other)?;
-        let r = self.rmod(py, other)?;
+    #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
+    fn rdivmod(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(PySeries, PySeries)> {
+        let q = self.rfloordiv(py, other, level, fill_value, axis)?;
+        let r = self.rmod(py, other, level, fill_value, axis)?;
         Ok((q, r))
     }
 
