@@ -93307,6 +93307,49 @@ pub struct DataFrameGroupBy<'a> {
     dropna: bool,
 }
 
+/// A groupby cumulative fold, run in int64 when pandas keeps the column int64.
+#[derive(Clone, Copy)]
+enum CumOp {
+    Sum,
+    Prod,
+    Min,
+    Max,
+}
+
+impl CumOp {
+    /// The fold's identity, so a group's first row folds to itself.
+    const fn identity_i64(self) -> i64 {
+        match self {
+            Self::Sum => 0,
+            Self::Prod => 1,
+            Self::Min => i64::MAX,
+            Self::Max => i64::MIN,
+        }
+    }
+
+    /// One fold step in numpy's int64 arithmetic, which wraps on overflow.
+    const fn step_i64(self, acc: i64, x: i64) -> i64 {
+        match self {
+            Self::Sum => acc.wrapping_add(x),
+            Self::Prod => acc.wrapping_mul(x),
+            Self::Min => {
+                if x < acc {
+                    x
+                } else {
+                    acc
+                }
+            }
+            Self::Max => {
+                if x > acc {
+                    x
+                } else {
+                    acc
+                }
+            }
+        }
+    }
+}
+
 struct DenseMultiInt64Grouping {
     gid_per_row: Vec<usize>,
     ngroups: usize,
@@ -101432,11 +101475,15 @@ impl DataFrameGroupBy<'_> {
     /// all-valid no-NaN Float64 slice and a dense gid layout applies. Bit-
     /// identical: rows visited in ascending order reproduce the generic
     /// per-group scan; the all-valid no-NaN gate means no missing positions.
+    /// An all-valid Int64 column folds in int64 by `int_op` and stays Int64, as
+    /// in pandas (br-frankenpandas-azq6g); every dense layout has all-valid
+    /// keys, so every row is in a group.
     fn try_cum_dense(
         &self,
         init: f64,
         nan_aware: bool,
         step: impl Fn(f64, f64) -> f64 + Sync,
+        int_op: CumOp,
     ) -> Option<DataFrame> {
         if self.by.is_empty() {
             return None;
@@ -101524,12 +101571,21 @@ impl DataFrameGroupBy<'_> {
                         keys, min, range, data, validity, init, &step,
                     );
                     Column::from_f64_values_with_validity(out, mask)
+                } else if let Some(vals) = col.as_i64_slice() {
+                    let mut acc = vec![int_op.identity_i64(); range];
+                    let mut out = vec![0_i64; nrows];
+                    for row in 0..nrows {
+                        let off = (keys[row] as i128 - min as i128) as usize;
+                        acc[off] = int_op.step_i64(acc[off], vals[row]);
+                        out[row] = acc[off];
+                    }
+                    Column::from_i64_values_owned(out)
                 } else if let Some((data, validity)) = col.as_i64_slice_with_validity() {
-                    // Int64 cumsum/cumprod/cummax/cummin → Float64 (was falling to
-                    // the generic Scalar path, ~25x slower). The generic accumulates
-                    // via `to_f64`, so cast to f64 and reuse the nullable f64 kernel
-                    // (skipna + cumprod-NaN-clears-bit). Bit-identical to the generic
-                    // for all-valid AND nullable Int64.
+                    // Nullable Int64 cumsum/cumprod/cummax/cummin → Float64, as pandas
+                    // holds an int column with missing values (was falling to the
+                    // generic Scalar path, ~25x slower). The generic accumulates via
+                    // `to_f64`, so cast to f64 and reuse the nullable f64 kernel
+                    // (skipna + cumprod-NaN-clears-bit). Bit-identical to the generic.
                     let f64_data: Vec<f64> = data.iter().map(|&v| v as f64).collect();
                     let (out, mask) = dense_groupby_cum_nullable_f64_by_key(
                         keys, min, range, &f64_data, validity, init, &step,
@@ -101566,9 +101622,19 @@ impl DataFrameGroupBy<'_> {
                         &step,
                     );
                     Column::from_f64_values_with_validity(out, mask)
+                } else if let Some(vals) = col.as_i64_slice() {
+                    let mut acc = vec![int_op.identity_i64(); *ngroups];
+                    let mut out = vec![0_i64; nrows];
+                    #[allow(clippy::needless_range_loop)] // row indexes vals, gids and out
+                    for row in 0..nrows {
+                        let g = gid_per_row[row];
+                        acc[g] = int_op.step_i64(acc[g], vals[row]);
+                        out[row] = acc[g];
+                    }
+                    Column::from_i64_values_owned(out)
                 } else if let Some((data, validity)) = col.as_i64_slice_with_validity() {
-                    // Int64 cum* → Float64 via f64 cast + the nullable kernel (see
-                    // the by-key arm above). Bit-identical to the generic.
+                    // Nullable Int64 cum* → Float64 via f64 cast + the nullable kernel
+                    // (see the by-key arm above). Bit-identical to the generic.
                     let f64_data: Vec<f64> = data.iter().map(|&v| v as f64).collect();
                     let (out, mask) = dense_groupby_cum_nullable_f64(
                         gid_per_row,
@@ -102431,11 +102497,93 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
-    /// GroupBy cumulative sum.
-    ///
-    /// Matches `df.groupby(col).cumsum()`.
+    /// GroupBy cumulative sum. Matches `df.groupby(col).cumsum()`, dtype
+    /// included: int64 and bool columns come back int64.
     pub fn cumsum(&self) -> Result<DataFrame, FrameError> {
-        if let Some(df) = self.try_cum_dense(0.0, false, |a, v| a + v) {
+        self.keep_integral_cum_columns(self.cumsum_f64()?, CumOp::Sum)
+    }
+
+    /// GroupBy cumulative product. Matches `df.groupby(col).cumprod()`, dtype
+    /// included: int64 and bool columns come back int64.
+    pub fn cumprod(&self) -> Result<DataFrame, FrameError> {
+        self.keep_integral_cum_columns(self.cumprod_f64()?, CumOp::Prod)
+    }
+
+    /// GroupBy cumulative max. Matches `df.groupby(col).cummax()`, dtype
+    /// included: int64 stays int64 and bool stays bool.
+    pub fn cummax(&self) -> Result<DataFrame, FrameError> {
+        self.keep_integral_cum_columns(self.cummax_f64()?, CumOp::Max)
+    }
+
+    /// GroupBy cumulative min. Matches `df.groupby(col).cummin()`, dtype
+    /// included: int64 stays int64 and bool stays bool.
+    pub fn cummin(&self) -> Result<DataFrame, FrameError> {
+        self.keep_integral_cum_columns(self.cummin_f64()?, CumOp::Min)
+    }
+
+    /// pandas keeps an all-valid int64 column int64 through groupby
+    /// cumsum/cumprod/cummin/cummax, and a bool column int64 (cumsum,
+    /// cumprod) or bool (cummin, cummax), whenever every row has a group; a
+    /// row whose key is dropped makes the column float64 with NaN there, which
+    /// the f64 folds already produce. The dense path folds all-valid int64 in
+    /// i64 itself; any such column the f64 folds still returned as float64
+    /// (br-frankenpandas-azq6g) is redone here in int64 and swapped into `out`.
+    fn keep_integral_cum_columns(
+        &self,
+        mut out: DataFrame,
+        op: CumOp,
+    ) -> Result<DataFrame, FrameError> {
+        let integral: Vec<(String, bool)> = out
+            .column_order
+            .iter()
+            .filter(|name| out.columns[*name].dtype() == DType::Float64)
+            .filter_map(|name| {
+                let col = self.df.column(name)?;
+                let valid = col.validity().all();
+                match col.dtype() {
+                    DType::Int64 if valid => Some((name.clone(), false)),
+                    DType::Bool if valid => Some((name.clone(), true)),
+                    _ => None,
+                }
+            })
+            .collect();
+        if integral.is_empty() {
+            return Ok(out);
+        }
+        let (group_order, groups) = self.build_groups();
+        let grouped_rows: usize = group_order.iter().map(|key| groups[key].len()).sum();
+        if grouped_rows != self.df.len() {
+            return Ok(out);
+        }
+        for (name, is_bool) in integral {
+            let values = self.df.columns[&name].values();
+            let bool_out = is_bool && matches!(op, CumOp::Min | CumOp::Max);
+            let mut result = vec![Scalar::Null(NullKind::NaN); values.len()];
+            for key in &group_order {
+                let mut acc = op.identity_i64();
+                for &row in &groups[key] {
+                    let x = match &values[row] {
+                        Scalar::Int64(v) => *v,
+                        Scalar::Bool(b) => i64::from(*b),
+                        _ => 0,
+                    };
+                    acc = op.step_i64(acc, x);
+                    result[row] = if bool_out {
+                        Scalar::Bool(acc != 0)
+                    } else {
+                        Scalar::Int64(acc)
+                    };
+                }
+            }
+            out = out.with_column(name, Column::from_values(result)?)?;
+        }
+        Ok(out)
+    }
+
+    /// The per-group cumulative sum folded in f64 (the dtype is settled by
+    /// [`cumsum`](Self::cumsum)).
+    fn cumsum_f64(&self) -> Result<DataFrame, FrameError> {
+        if let Some(df) = self.try_cum_dense(0.0, false, |a, v| a + v, CumOp::Sum) {
             return Ok(df);
         }
         // Per br-frankenpandas-ccf67: per-column Timedelta detection — the
@@ -102477,11 +102625,10 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
-    /// GroupBy cumulative product.
-    ///
-    /// Matches `df.groupby(col).cumprod()`.
-    pub fn cumprod(&self) -> Result<DataFrame, FrameError> {
-        if let Some(df) = self.try_cum_dense(1.0, true, |a, v| a * v) {
+    /// The per-group cumulative product folded in f64 (the dtype is settled by
+    /// [`cumprod`](Self::cumprod)).
+    fn cumprod_f64(&self) -> Result<DataFrame, FrameError> {
+        if let Some(df) = self.try_cum_dense(1.0, true, |a, v| a * v, CumOp::Prod) {
             return Ok(df);
         }
         // Per br-frankenpandas-ccf67: Timedelta² is dimensionless; emit NaT
@@ -102509,13 +102656,15 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
-    /// GroupBy cumulative max.
-    ///
-    /// Matches `df.groupby(col).cummax()`.
-    pub fn cummax(&self) -> Result<DataFrame, FrameError> {
-        if let Some(df) =
-            self.try_cum_dense(f64::NEG_INFINITY, false, |a, v| if v > a { v } else { a })
-        {
+    /// The per-group cumulative max folded in f64 (the dtype is settled by
+    /// [`cummax`](Self::cummax)).
+    fn cummax_f64(&self) -> Result<DataFrame, FrameError> {
+        if let Some(df) = self.try_cum_dense(
+            f64::NEG_INFINITY,
+            false,
+            |a, v| if v > a { v } else { a },
+            CumOp::Max,
+        ) {
             return Ok(df);
         }
         // Per br-frankenpandas-ccf67: Timedelta cummax preserves dtype.
@@ -102551,12 +102700,15 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
-    /// GroupBy cumulative min.
-    ///
-    /// Matches `df.groupby(col).cummin()`.
-    pub fn cummin(&self) -> Result<DataFrame, FrameError> {
-        if let Some(df) = self.try_cum_dense(f64::INFINITY, false, |a, v| if v < a { v } else { a })
-        {
+    /// The per-group cumulative min folded in f64 (the dtype is settled by
+    /// [`cummin`](Self::cummin)).
+    fn cummin_f64(&self) -> Result<DataFrame, FrameError> {
+        if let Some(df) = self.try_cum_dense(
+            f64::INFINITY,
+            false,
+            |a, v| if v < a { v } else { a },
+            CumOp::Min,
+        ) {
             return Ok(df);
         }
         // Per br-frankenpandas-ccf67: Timedelta cummin preserves dtype.
@@ -153165,11 +153317,13 @@ mod tests {
         let v = result.column_as_series("v").unwrap();
         // Group a: 1, 1+2=3, 3+3=6
         // Group b: 10, 10+20=30
-        assert_eq!(v.values()[0], Scalar::Float64(1.0));
-        assert_eq!(v.values()[1], Scalar::Float64(3.0));
-        assert_eq!(v.values()[2], Scalar::Float64(10.0));
-        assert_eq!(v.values()[3], Scalar::Float64(6.0));
-        assert_eq!(v.values()[4], Scalar::Float64(30.0));
+        // GOLDEN-CHANGE (br-frankenpandas-azq6g): these were Float64; pandas
+        // 2.2.3 keeps an int64 column int64 through groupby cumsum.
+        assert_eq!(v.values()[0], Scalar::Int64(1));
+        assert_eq!(v.values()[1], Scalar::Int64(3));
+        assert_eq!(v.values()[2], Scalar::Int64(10));
+        assert_eq!(v.values()[3], Scalar::Int64(6));
+        assert_eq!(v.values()[4], Scalar::Int64(30));
     }
 
     #[test]
@@ -153195,9 +153349,10 @@ mod tests {
 
         let result = df.groupby(&["g"]).unwrap().cumprod().unwrap();
         let v = result.column_as_series("v").unwrap();
-        assert_eq!(v.values()[0], Scalar::Float64(2.0));
-        assert_eq!(v.values()[1], Scalar::Float64(6.0));
-        assert_eq!(v.values()[2], Scalar::Float64(5.0));
+        // GOLDEN-CHANGE (br-frankenpandas-azq6g): Float64 before; pandas keeps int64.
+        assert_eq!(v.values()[0], Scalar::Int64(2));
+        assert_eq!(v.values()[1], Scalar::Int64(6));
+        assert_eq!(v.values()[2], Scalar::Int64(5));
     }
 
     #[test]
@@ -153223,9 +153378,10 @@ mod tests {
 
         let result = df.groupby(&["g"]).unwrap().cummax().unwrap();
         let v = result.column_as_series("v").unwrap();
-        assert_eq!(v.values()[0], Scalar::Float64(3.0));
-        assert_eq!(v.values()[1], Scalar::Float64(3.0));
-        assert_eq!(v.values()[2], Scalar::Float64(5.0));
+        // GOLDEN-CHANGE (br-frankenpandas-azq6g): Float64 before; pandas keeps int64.
+        assert_eq!(v.values()[0], Scalar::Int64(3));
+        assert_eq!(v.values()[1], Scalar::Int64(3));
+        assert_eq!(v.values()[2], Scalar::Int64(5));
     }
 
     #[test]
@@ -153251,9 +153407,73 @@ mod tests {
 
         let result = df.groupby(&["g"]).unwrap().cummin().unwrap();
         let v = result.column_as_series("v").unwrap();
-        assert_eq!(v.values()[0], Scalar::Float64(3.0));
-        assert_eq!(v.values()[1], Scalar::Float64(1.0));
-        assert_eq!(v.values()[2], Scalar::Float64(1.0));
+        // GOLDEN-CHANGE (br-frankenpandas-azq6g): Float64 before; pandas keeps int64.
+        assert_eq!(v.values()[0], Scalar::Int64(3));
+        assert_eq!(v.values()[1], Scalar::Int64(1));
+        assert_eq!(v.values()[2], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn groupby_cum_ops_keep_pandas_dtypes_azq6g() {
+        // pandas 2.2.3 over k=['y','x','y','x'], a=[1,2,3,4], b=[T,F,T,T]:
+        // cumsum a=[1,2,4,6] int64, b=[1,0,2,1] int64; cumprod b=[1,0,1,0];
+        // cummin/cummax keep b bool: cummin b=[T,F,T,F], cummax b=[T,F,T,T].
+        let frame = |keys: Vec<Scalar>| {
+            DataFrame::from_dict(
+                &["k", "a", "b", "f"],
+                vec![
+                    ("k", keys),
+                    ("a", (1..=4_i64).map(Scalar::Int64).collect()),
+                    ("b", [true, false, true, true].map(Scalar::Bool).to_vec()),
+                    ("f", [0.5, 1.5, 2.5, 3.5].map(Scalar::Float64).to_vec()),
+                ],
+            )
+            .unwrap()
+        };
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        let df = frame(vec![utf8("y"), utf8("x"), utf8("y"), utf8("x")]);
+        let gb = df.groupby(&["k"]).unwrap();
+        let col = |out: &DataFrame, name: &str| out.column(name).unwrap().values().to_vec();
+        let ints = |xs: &[i64]| xs.iter().copied().map(Scalar::Int64).collect::<Vec<_>>();
+        let bools = |xs: &[bool]| xs.iter().copied().map(Scalar::Bool).collect::<Vec<_>>();
+        let cumsum = gb.cumsum().unwrap();
+        assert_eq!(col(&cumsum, "a"), ints(&[1, 2, 4, 6]));
+        assert_eq!(col(&cumsum, "b"), ints(&[1, 0, 2, 1]));
+        assert_eq!(col(&gb.cumprod().unwrap(), "b"), ints(&[1, 0, 1, 0]));
+        assert_eq!(
+            col(&gb.cummin().unwrap(), "b"),
+            bools(&[true, false, true, false])
+        );
+        assert_eq!(
+            col(&gb.cummax().unwrap(), "b"),
+            bools(&[true, false, true, true])
+        );
+        // NEGATIVE: a float column stays float.
+        assert_eq!(cumsum.column("f").unwrap().dtype(), DType::Float64);
+        // A row whose key is dropped makes the column float64 with NaN, as in
+        // pandas ([1.0, NaN, 4.0, 4.0]).
+        let with_null = frame(vec![
+            utf8("y"),
+            Scalar::Null(NullKind::Null),
+            utf8("y"),
+            utf8("x"),
+        ]);
+        let dropped = with_null.groupby(&["k"]).unwrap().cumsum().unwrap();
+        assert_eq!(dropped.column("a").unwrap().dtype(), DType::Float64);
+        assert!(dropped.column("a").unwrap().values()[1].is_missing());
+        // numpy wraps int64 overflow; so does pandas' groupby cumsum.
+        let big = DataFrame::from_dict(
+            &["k", "a"],
+            vec![
+                ("k", vec![utf8("x"), utf8("x")]),
+                ("a", vec![Scalar::Int64(1 << 62), Scalar::Int64(1 << 62)]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            col(&big.groupby(&["k"]).unwrap().cumsum().unwrap(), "a"),
+            ints(&[1 << 62, i64::MIN])
+        );
     }
 
     #[test]

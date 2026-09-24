@@ -2788,6 +2788,13 @@ _GB_OPS = {
     "named_agg": lambda g: g.agg(t=("a", "sum")),
     "column_sum": lambda g: g["a"].sum(),
     "column_mean": lambda g: g["b"].mean(),
+    # br-frankenpandas-azq6g: int64 "a" stays int64 when every row has a
+    # group (dropna=False) and turns float64 with NaN when one is dropped.
+    "cumsum": lambda g: g.cumsum(),
+    "cumprod": lambda g: g.cumprod(),
+    "cummin": lambda g: g.cummin(),
+    "cummax": lambda g: g.cummax(),
+    "column_cumsum": lambda g: g["a"].cumsum(),
 }
 _GB_OPTIONS = {
     "default": {},
