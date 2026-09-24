@@ -2578,12 +2578,34 @@ pub fn write_csv_string_with_options(
     frame: &DataFrame,
     options: &CsvWriteOptions,
 ) -> Result<String, IoError> {
-    if options.include_index && frame.row_multiindex().is_some() {
+    if options.include_index
+        && let Some(row_multiindex) = frame.row_multiindex()
+    {
         let materialized = materialize_named_row_multiindex_columns(frame)?;
         let mut nested_options = options.clone();
         nested_options.include_index = false;
         nested_options.index_label = None;
-        return write_csv_string_with_options(&materialized, &nested_options);
+        if !options.header || row_multiindex.names().iter().all(Option::is_some) {
+            return write_csv_string_with_options(&materialized, &nested_options);
+        }
+        // pandas heads an UNNAMED level with a blank cell - MultiIndex
+        // levels (p, 1) unnamed -> ",,v" - where reset_index names it
+        // level_{i}. Frame columns cannot all be named "", so write the body
+        // headerless and put pandas' header line on top. (4qg5w.1)
+        nested_options.header = false;
+        let body = write_csv_string_with_options(&materialized, &nested_options)?;
+        let mut header: Vec<String> = row_multiindex
+            .names()
+            .iter()
+            .map(|name| name.clone().unwrap_or_default())
+            .collect();
+        header.extend(frame.column_names().into_iter().cloned());
+        let mut writer = WriterBuilder::new()
+            .delimiter(options.delimiter)
+            .from_writer(Vec::new());
+        writer.write_record(&header)?;
+        let header_line = String::from_utf8(writer.into_inner().map_err(|err| err.into_error())?)?;
+        return Ok(header_line + &body);
     }
 
     // Typed fast path (br-frankenpandas-qk2i9): when every column is an all-valid
@@ -13071,11 +13093,19 @@ fn resolve_sql_index_label(
         return Ok(None);
     }
 
-    let label = options
+    // pandas: the index name, else "index", else "level_0" when a column is
+    // already called "index" (to_sql of DataFrame({'index': ...}) writes
+    // ['level_0', 'index', ...]); a clash with an explicit or named label, or
+    // with level_0 as well, is an error there too. (4qg5w.1)
+    let label = match options
         .index_label
         .clone()
         .or_else(|| frame.index().name().map(str::to_owned))
-        .unwrap_or_else(|| "index".to_owned());
+    {
+        Some(label) => label,
+        None if frame.column("index").is_some() => "level_0".to_owned(),
+        None => "index".to_owned(),
+    };
 
     if frame.column(&label).is_some() {
         return Err(IoError::DuplicateColumnName(label));
@@ -16296,6 +16326,19 @@ pub fn write_sql_with_options<C: SqlConnection>(
         )));
     }
 
+    // A row MultiIndex becomes one column per level named like pandas'
+    // to_sql: the level name, else level_{i} - exactly reset_index's naming.
+    // (It was written as ONE column of composite labels.) (4qg5w.1)
+    if options.index && frame.row_multiindex().is_some() {
+        let materialized = materialize_named_row_multiindex_columns(frame)?;
+        let flat_options = SqlWriteOptions {
+            index: false,
+            index_label: None,
+            ..options.clone()
+        };
+        return write_sql_with_options(&materialized, conn, table_name, &flat_options);
+    }
+
     let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let index_label = resolve_sql_index_label(frame, options)?;
     let mut sql_col_names =
@@ -17534,6 +17577,105 @@ mod tests {
             },
         )
         .expect("write csv without index")
+    }
+
+    /// A frame with a 2-level row MultiIndex ((p, 1), (q, 2)) and one column
+    /// v = [1, 2], with the given level names.
+    fn multiindex_frame(names: [Option<&str>; 2]) -> DataFrame {
+        let frame = DataFrame::from_dict(
+            &["l0", "l1", "v"],
+            vec![
+                (
+                    "l0",
+                    vec![Scalar::Utf8("p".into()), Scalar::Utf8("q".into())],
+                ),
+                ("l1", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .expect("frame")
+        .set_index_multi(&["l0", "l1"], true, "|")
+        .expect("multiindex");
+        let renamed = frame
+            .row_multiindex()
+            .expect("row multiindex")
+            .clone()
+            .set_names(names.iter().map(|n| n.map(str::to_owned)).collect());
+        frame.with_row_multiindex(renamed).expect("renamed levels")
+    }
+
+    #[test]
+    fn csv_multiindex_levels_are_columns_like_pandas() {
+        // pandas 2.2.3, MultiIndex [('p', 1), ('q', 2)], column v = [1, 2]:
+        //   names ['l0', None] -> to_csv() 'l0,,v\np,1,1\nq,2,2\n'
+        //   names [None, None] -> to_csv() ',,v\np,1,1\nq,2,2\n'
+        //   names ['l0', 'l1'] -> to_csv() 'l0,l1,v\np,1,1\nq,2,2\n'
+        assert_eq!(
+            write_csv_string(&multiindex_frame([Some("l0"), None])).expect("write"),
+            "l0,,v\np,1,1\nq,2,2\n"
+        );
+        assert_eq!(
+            write_csv_string(&multiindex_frame([None, None])).expect("write"),
+            ",,v\np,1,1\nq,2,2\n"
+        );
+        assert_eq!(
+            write_csv_string(&multiindex_frame([Some("l0"), Some("l1")])).expect("write"),
+            "l0,l1,v\np,1,1\nq,2,2\n"
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_index_columns_are_named_like_pandas_to_sql() {
+        // pandas 2.2.3 to_sql(index=True) column names (sqlite PRAGMA table_info):
+        //   DataFrame({'index': [1, 2], 'v': [3, 4]})      -> level_0, index, v
+        //   MultiIndex names ['l0', None], column v          -> l0, level_1, v
+        //   MultiIndex names [None, None], column v          -> level_0, level_1, v
+        let conn = make_sql_test_conn();
+        let names_of = |table: &str| {
+            super::read_sql_table(&conn, table)
+                .expect("read back")
+                .column_names()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "index".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("index col"),
+        );
+        cols.insert(
+            "v".to_owned(),
+            Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(4)]).expect("v"),
+        );
+        let taken = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            cols,
+            vec!["index".to_owned(), "v".to_owned()],
+        )
+        .expect("frame");
+        write_sql(&taken, &conn, "t_taken", SqlIfExists::Fail).expect("write");
+        assert_eq!(names_of("t_taken"), vec!["level_0", "index", "v"]);
+
+        write_sql(
+            &multiindex_frame([Some("l0"), None]),
+            &conn,
+            "t_mi_named",
+            SqlIfExists::Fail,
+        )
+        .expect("write");
+        assert_eq!(names_of("t_mi_named"), vec!["l0", "level_1", "v"]);
+
+        write_sql(
+            &multiindex_frame([None, None]),
+            &conn,
+            "t_mi_unnamed",
+            SqlIfExists::Fail,
+        )
+        .expect("write");
+        assert_eq!(names_of("t_mi_unnamed"), vec!["level_0", "level_1", "v"]);
     }
 
     #[test]
