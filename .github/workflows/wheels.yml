@@ -45,14 +45,17 @@ jobs:
           python-version: '3.11'
       # The manylinux containers do not see setup-python's interpreter: without
       # --find-interpreter the x86_64 leg built only the image's default cp39
-      # wheel and the aarch64 cross image found no interpreter at all. (0zz8y.3)
+      # wheel and the aarch64 cross image found no interpreter at all. The
+      # manylinux2014 aarch64 cross gcc rejects libmimalloc-sys's
+      # -Werror=date-time ("no option -Wdate-time"), so that leg builds on
+      # manylinux_2_28. (0zz8y.3)
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter --manifest-path crates/fp-python/Cargo.toml
           sccache: 'true'
-          manylinux: auto
+          manylinux: ${{ matrix.target == 'aarch64' && '2_28' || 'auto' }}
       # Only the leg whose wheel this runner can import (aarch64 is cross-built).
       # Fails on a wrong __version__ or an empty read_csv. (0zz8y.3)
       - name: Smoke-test the wheel
