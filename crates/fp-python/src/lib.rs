@@ -19423,7 +19423,7 @@ impl PyDataFrame {
                     "cannot sample {sample_n} columns from {total} without replacement"
                 )));
             }
-            let mut rng_state = random_state.unwrap_or(42);
+            let mut rng_state = fp_frame::sample_seed(random_state);
             let mut next_rand = || -> usize {
                 rng_state = rng_state
                     .wrapping_mul(6_364_136_223_846_793_005)

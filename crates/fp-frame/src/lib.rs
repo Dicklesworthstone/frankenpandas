@@ -3783,6 +3783,24 @@ fn null_kind_rank(kind: NullKind) -> u8 {
     }
 }
 
+/// The generator seed for `sample`: the caller's `random_state`, or with none
+/// a fresh one per call, as pandas draws from numpy's global generator. A
+/// missing seed used to mean 42, so every unseeded sample was the same draw
+/// (br-frankenpandas-u1e54). std's `RandomState` is keyed randomly per
+/// process and advances per call, and the clock is mixed in besides.
+#[must_use]
+pub fn sample_seed(random_state: Option<u64>) -> u64 {
+    random_state.unwrap_or_else(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        hasher.write_u128(nanos);
+        hasher.finish()
+    })
+}
+
 /// Public (hidden) view of the pivot/groupby axis key ordering for
 /// conformance invariants (br-frankenpandas-s3x7k): sorts scalars exactly as
 /// pivot_table sorts its row/column keys (ascending, nulls last, stable).
@@ -23658,7 +23676,7 @@ impl Series {
             )));
         }
 
-        let mut rng_state = seed.unwrap_or(42);
+        let mut rng_state = sample_seed(seed);
         let mut next_rand = || -> usize {
             rng_state = rng_state
                 .wrapping_mul(6_364_136_223_846_793_005)
@@ -44834,7 +44852,7 @@ impl SeriesGroupBy<'_> {
     ) -> Result<Series, FrameError> {
         let (_order, order_keys, groups) = self.build_groups();
         let mut positions = Vec::new();
-        let mut rng_state = seed.unwrap_or(42);
+        let mut rng_state = sample_seed(seed);
 
         for key in &order_keys {
             let row_indices = groups.get(key).ok_or_else(|| {
@@ -83226,7 +83244,7 @@ impl DataFrame {
         }
 
         // Simple LCG for deterministic sampling
-        let mut rng_state = seed.unwrap_or(42);
+        let mut rng_state = sample_seed(seed);
         let mut next_rand = || -> usize {
             rng_state = rng_state
                 .wrapping_mul(6_364_136_223_846_793_005)
@@ -83317,7 +83335,7 @@ impl DataFrame {
         }
 
         // LCG for deterministic RNG
-        let mut rng_state = seed.unwrap_or(42);
+        let mut rng_state = sample_seed(seed);
         let mut next_f64 = || -> f64 {
             rng_state = rng_state
                 .wrapping_mul(6_364_136_223_846_793_005)
@@ -103065,7 +103083,7 @@ impl DataFrameGroupBy<'_> {
     ) -> Result<DataFrame, FrameError> {
         let (group_order, groups) = self.build_groups();
         let mut keep_indices = Vec::new();
-        let mut rng_state = seed.unwrap_or(42);
+        let mut rng_state = sample_seed(seed);
 
         for gkey in &group_order {
             let row_indices = &groups[gkey];
@@ -127968,6 +127986,39 @@ mod tests {
         let s2 = df.sample(Some(2), None, false, Some(99)).unwrap();
         // Same seed → same result
         assert_eq!(s1.columns["val"].values(), s2.columns["val"].values());
+    }
+
+    #[test]
+    fn sample_without_seed_draws_fresh_rows_u1e54() {
+        // br-frankenpandas-u1e54: random_state=None meant seed 42, so every
+        // unseeded sample was the same draw; pandas draws anew each call.
+        let values: Vec<Scalar> = (0..1000_i64).map(Scalar::Int64).collect();
+        let s = Series::from_values("v", (0..1000_i64).map(IndexLabel::from).collect(), values)
+            .unwrap();
+        let draw = || {
+            s.sample(Some(5), None, false, None)
+                .unwrap()
+                .index()
+                .labels()
+                .to_vec()
+        };
+        let first = draw();
+        // Five rows of 1000 repeat by chance with probability ~1e-13 per pair.
+        assert!(
+            (0..8).any(|_| draw() != first),
+            "eight unseeded samples all equal the first"
+        );
+        // A seed still gives the same rows every time.
+        let seeded = |seed| {
+            s.sample(Some(5), None, false, Some(seed))
+                .unwrap()
+                .index()
+                .labels()
+                .to_vec()
+        };
+        assert_eq!(seeded(7), seeded(7));
+        assert_eq!(crate::sample_seed(Some(7)), 7);
+        assert_ne!(crate::sample_seed(None), crate::sample_seed(None));
     }
 
     // ── info test ──
@@ -168060,7 +168111,10 @@ mod tests {
         )?;
         let gb = values.groupby(&groups)?;
 
-        let default_sample = gb.sample(None, None, false, None)?;
+        // GOLDEN-CHANGE (br-frankenpandas-u1e54): these rows were pinned for
+        // random_state=None, which meant seed 42, so every unseeded sample was
+        // the same draw. They are seed 42's draw, now asked for explicitly.
+        let default_sample = gb.sample(None, None, false, Some(42))?;
         assert_eq!(
             default_sample.index().labels(),
             &[IndexLabel::Int64(2), IndexLabel::Int64(4)]

@@ -2833,3 +2833,17 @@ def test_groupby_option_refusals_and_errors_match_pandas() -> None:
             call()
 
 
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_sample_without_random_state_draws_fresh_rows() -> None:
+    # br-frankenpandas-u1e54: random_state=None meant seed 42, so every
+    # unseeded sample was the same draw; pandas draws anew each call.
+    frame = fpd.DataFrame({"v": list(range(1000))})
+    first = list(frame.sample(5).index)
+    assert any(list(frame.sample(5).index) != first for _ in range(8))
+    wide = fpd.DataFrame({f"c{i}": [i] for i in range(200)})
+    first_cols = list(wide.sample(5, axis=1).columns)
+    assert any(list(wide.sample(5, axis=1).columns) != first_cols for _ in range(8))
+    # NEGATIVE: a seed still repeats its draw.
+    assert list(frame.sample(5, random_state=7).index) == list(frame.sample(5, random_state=7).index)
+
+
