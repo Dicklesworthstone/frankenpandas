@@ -2757,3 +2757,79 @@ def test_unimplemented_parameters_raise_instead_of_vanishing(call: Any) -> None:
         call()
 
 
+# groupby(as_index=, sort=, dropna=) (br-frankenpandas-n57tz): DataFrame.groupby
+# took only `by` (TypeError for each keyword) although fp-frame implements all
+# three; size() came back named "size" with an unnamed index.
+def _gb_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["y", "x", None, "y", "x"], "a": [1, 2, 3, 4, 5], "b": [1.5, 2.5, 3.5, _NAN, 0.5]})
+
+
+def _nan_marked(obj: Any) -> Any:
+    """A NaN group label is unequal to itself; compare it as a marker."""
+    if isinstance(obj, float) and obj != obj:
+        return "<NaN>"
+    if isinstance(obj, dict):
+        return {_nan_marked(k): _nan_marked(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_nan_marked(v) for v in obj)
+    return obj
+
+
+_GB_OPS = {
+    "sum": lambda g: g.sum(),
+    "mean": lambda g: g.mean(),
+    "count": lambda g: g.count(),
+    "max": lambda g: g.max(),
+    "first": lambda g: g.first(),
+    "size": lambda g: g.size(),
+    "nunique": lambda g: g.nunique(),
+    "std": lambda g: g.std(),
+    "agg_name": lambda g: g.agg("sum"),
+    "named_agg": lambda g: g.agg(t=("a", "sum")),
+    "column_sum": lambda g: g["a"].sum(),
+    "column_mean": lambda g: g["b"].mean(),
+}
+_GB_OPTIONS = {
+    "default": {},
+    "as_index_false": {"as_index": False},
+    "sort_false": {"sort": False},
+    "dropna_false": {"dropna": False},
+    "as_index_false_sort_false": {"as_index": False, "sort": False},
+}
+# Selecting a column keeps missing keys only through fp-frame's SeriesGroupBy,
+# which cannot yet; that combination raises (asserted below) instead.
+_GB_CASES = {
+    f"{opt}-{op}": (kw, fn)
+    for opt, kw in _GB_OPTIONS.items()
+    for op, fn in _GB_OPS.items()
+    if not (kw.get("dropna") is False and op.startswith("column_"))
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GB_CASES.values()), ids=list(_GB_CASES))
+def test_groupby_options_match_pandas(case: Any) -> None:
+    kw, op = case
+    expected = _nan_marked(_strict_ordered(op(_gb_frame(pd).groupby("k", **kw))))
+    assert _nan_marked(_strict_ordered(op(_gb_frame(fpd).groupby("k", **kw)))) == expected
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_groupby_option_refusals_and_errors_match_pandas() -> None:
+    series = [1.0, 2.0, 3.0]
+    for m in (pd, fpd):
+        with pytest.raises(TypeError, match="as_index=False only valid with DataFrame"):
+            m.Series(series).groupby([1, 1, 2], as_index=False)
+        with pytest.raises(TypeError, match="supply one of 'by' and 'level'"):
+            _gb_frame(m).groupby()
+    # NEGATIVE: options the binding cannot honour raise, never drop.
+    for call in (
+        lambda: _gb_frame(fpd).groupby("k", dropna=False)["a"],
+        lambda: _gb_frame(fpd).groupby("k", group_keys=False),
+        lambda: _gb_frame(fpd).groupby(level=0),
+        lambda: fpd.Series(series).groupby([1, 1, 2], dropna=False),
+    ):
+        with pytest.raises(NotImplementedError):
+            call()
+
+

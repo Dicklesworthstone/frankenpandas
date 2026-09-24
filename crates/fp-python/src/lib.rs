@@ -12565,13 +12565,49 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (by, sort=true))]
+    /// pandas' `Series.groupby` signature (br-frankenpandas-n57tz: only `by`
+    /// and `sort` were accepted). Grouping by index level, dropna=False and
+    /// group_keys=False are not supported yet; as_index=False raises as it
+    /// does in pandas; `observed` changes nothing without a categorical dtype.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (by=None, axis=None, level=None, as_index=true, sort=true, group_keys=true, observed=None, dropna=true))]
     pub fn groupby(
         &self,
         py: Python<'_>,
-        by: &Bound<'_, PyAny>,
+        by: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        as_index: bool,
         sort: Option<bool>,
+        group_keys: bool,
+        observed: Option<bool>,
+        dropna: bool,
     ) -> PyResult<PySeriesGroupBy> {
+        let _ = observed;
+        if !as_index {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "as_index=False only valid with DataFrame",
+            ));
+        }
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        unsupported_params(
+            "Series.groupby",
+            &[
+                ("level", level.is_none_or(|l| l.is_none())),
+                ("group_keys", group_keys),
+                ("dropna", dropna),
+            ],
+        )?;
+        let Some(by) = by.filter(|b| !b.is_none()) else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "You have to supply one of 'by' and 'level'",
+            ));
+        };
         let sort = sort.unwrap_or(true);
         let by_series = extract_or_build_series(py, by, &self.inner)?;
         let (series, by) = if self.inner.index() != by_series.index()
@@ -12597,7 +12633,12 @@ impl PySeries {
         } else {
             (self.inner.clone(), by_series)
         };
-        Ok(PySeriesGroupBy { series, by, sort })
+        Ok(PySeriesGroupBy {
+            series,
+            by,
+            sort,
+            as_index: true,
+        })
     }
 
     #[pyo3(signature = (freq, closed=None, label=None, origin=None))]
@@ -18376,8 +18417,39 @@ impl PyDataFrame {
     }
 
     /// Group by one column name or a list of them, as `df.groupby("city")`
-    /// and `df.groupby(["city", "year"])` both do in pandas.
-    fn groupby(&self, by: &Bound<'_, PyAny>) -> PyResult<PyGroupBy> {
+    /// and `df.groupby(["city", "year"])` both do in pandas, with pandas'
+    /// `as_index`, `sort` and `dropna` (br-frankenpandas-n57tz: only `by` was
+    /// accepted). Grouping by index level and group_keys=False are not
+    /// supported yet; `observed` changes nothing here, since a frankenpandas
+    /// frame stores category labels rather than a categorical dtype.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (by=None, axis=None, level=None, as_index=true, sort=true, group_keys=true, observed=None, dropna=true))]
+    fn groupby(
+        &self,
+        by: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        as_index: bool,
+        sort: bool,
+        group_keys: bool,
+        observed: Option<bool>,
+        dropna: bool,
+    ) -> PyResult<PyGroupBy> {
+        let _ = observed;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        unsupported_params(
+            "DataFrame.groupby",
+            &[
+                ("axis", ax == 0),
+                ("level", level.is_none_or(|l| l.is_none())),
+                ("group_keys", group_keys),
+            ],
+        )?;
+        let Some(by) = by.filter(|b| !b.is_none()) else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "You have to supply one of 'by' and 'level'",
+            ));
+        };
         let by: Vec<String> = if let Ok(single) = by.extract::<String>() {
             vec![single]
         } else {
@@ -18387,15 +18459,16 @@ impl PyDataFrame {
                 )
             })?
         };
-        let by_refs: Vec<&str> = by.iter().map(|s| s.as_str()).collect();
-        let _gb = self
-            .inner
-            .groupby(&by_refs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyGroupBy {
+        let gb = PyGroupBy {
             df: self.inner.clone(),
             by,
-        })
+            as_index,
+            sort,
+            dropna,
+        };
+        gb.grouped()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(gb)
     }
 
     /// Export to CSV (pandas `DataFrame.to_csv`). With no `path_or_buf`,
@@ -24803,9 +24876,22 @@ impl PyStyler {
 pub struct PyGroupBy {
     df: DataFrame,
     by: Vec<String>,
+    /// pandas' `groupby(as_index=, sort=, dropna=)` (br-frankenpandas-n57tz:
+    /// fp-frame had all three; the binding took only `by`).
+    as_index: bool,
+    sort: bool,
+    dropna: bool,
 }
 
 impl PyGroupBy {
+    /// The fp-frame groupby over `by` with this object's options; every
+    /// aggregation goes through it.
+    fn grouped(&self) -> Result<fp_frame::DataFrameGroupBy<'_>, FrameError> {
+        let by_refs: Vec<&str> = self.by.iter().map(String::as_str).collect();
+        self.df
+            .groupby_full_options(&by_refs, self.as_index, self.sort, self.dropna)
+    }
+
     /// One column grouped by this groupby's key: pandas' `gb["col"]` / `gb.col`.
     fn column_groupby(&self, name: &str) -> PyResult<PySeriesGroupBy> {
         let [key] = self.by.as_slice() else {
@@ -24821,10 +24907,16 @@ impl PyGroupBy {
             })?;
             Series::new(col, self.df.index().clone(), values.clone()).map_err(frame_error_to_py)
         };
+        // A Series groupby drops missing keys; keeping them is not supported.
+        unsupported_params(
+            "selecting a column from DataFrame.groupby",
+            &[("dropna", self.dropna)],
+        )?;
         Ok(PySeriesGroupBy {
             series: column(name)?,
             by: column(key)?,
-            sort: true,
+            sort: self.sort,
+            as_index: self.as_index,
         })
     }
 }
@@ -24870,6 +24962,9 @@ impl PyGroupBy {
             Self {
                 df,
                 by: self.by.clone(),
+                as_index: self.as_index,
+                sort: self.sort,
+                dropna: self.dropna,
             },
         )?
         .into_any())
@@ -24886,10 +24981,8 @@ impl PyGroupBy {
     }
 
     fn sum(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .sum()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24897,10 +24990,8 @@ impl PyGroupBy {
     }
 
     fn mean(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .mean()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24908,10 +24999,8 @@ impl PyGroupBy {
     }
 
     fn count(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .count()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24919,10 +25008,8 @@ impl PyGroupBy {
     }
 
     fn min(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .min()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24930,10 +25017,8 @@ impl PyGroupBy {
     }
 
     fn max(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .max()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24941,10 +25026,8 @@ impl PyGroupBy {
     }
 
     fn var(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .var()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24952,10 +25035,8 @@ impl PyGroupBy {
     }
 
     fn std(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .std()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24963,10 +25044,8 @@ impl PyGroupBy {
     }
 
     fn median(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .median()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24974,10 +25053,8 @@ impl PyGroupBy {
     }
 
     fn prod(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .prod()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -24985,10 +25062,8 @@ impl PyGroupBy {
     }
 
     fn first(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .first()
             .map_err(frame_error_to_py)?;
@@ -24996,32 +25071,47 @@ impl PyGroupBy {
     }
 
     fn last(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .last()
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
-    fn size(&self) -> PyResult<PySeries> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
-        let result = self
-            .df
-            .groupby(&by_refs)
+    /// pandas' `gb.size()`: an unnamed count per group whose index is named
+    /// after the key, or with as_index=False a frame of the key and a `size`
+    /// column (br-frankenpandas-n57tz: it came back named "size" with an
+    /// unnamed index whatever as_index said).
+    fn size(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let counts = self
+            .grouped()
             .map_err(frame_error_to_py)?
             .size()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: result })
+        let key = match self.by.as_slice() {
+            [key] => Some(key.as_str()),
+            _ => counts.index().name(),
+        };
+        let index = counts.index().rename_index(key);
+        let name = if self.as_index { "" } else { "size" };
+        let named = Series::new(name, index, counts.column().clone()).map_err(frame_error_to_py)?;
+        if self.as_index {
+            return Ok(Py::new(py, PySeries { inner: named })?.into_any());
+        }
+        match named.reset_index(false).map_err(frame_error_to_py)? {
+            fp_frame::SeriesResetIndexResult::DataFrame(df) => {
+                Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
+            }
+            fp_frame::SeriesResetIndexResult::Series(s) => {
+                Ok(Py::new(py, PySeries { inner: s })?.into_any())
+            }
+        }
     }
 
     fn nunique(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .nunique()
             .map_err(frame_error_to_py)?;
@@ -25029,10 +25119,8 @@ impl PyGroupBy {
     }
 
     fn any(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .any()
             .map_err(frame_error_to_py)?;
@@ -25040,10 +25128,8 @@ impl PyGroupBy {
     }
 
     fn all(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .all()
             .map_err(frame_error_to_py)?;
@@ -25051,10 +25137,8 @@ impl PyGroupBy {
     }
 
     fn cumsum(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .cumsum()
             .map_err(frame_error_to_py)?;
@@ -25062,10 +25146,8 @@ impl PyGroupBy {
     }
 
     fn cumprod(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .cumprod()
             .map_err(frame_error_to_py)?;
@@ -25073,10 +25155,8 @@ impl PyGroupBy {
     }
 
     fn cummin(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .cummin()
             .map_err(frame_error_to_py)?;
@@ -25084,10 +25164,8 @@ impl PyGroupBy {
     }
 
     fn cummax(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .cummax()
             .map_err(frame_error_to_py)?;
@@ -25096,10 +25174,8 @@ impl PyGroupBy {
 
     #[pyo3(signature = (periods=1))]
     fn diff(&self, periods: usize) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .diff(periods)
             .map_err(frame_error_to_py)?;
@@ -25108,10 +25184,8 @@ impl PyGroupBy {
 
     #[pyo3(signature = (periods=1))]
     fn pct_change(&self, periods: i64) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .pct_change(periods)
             .map_err(frame_error_to_py)?;
@@ -25120,10 +25194,8 @@ impl PyGroupBy {
 
     #[pyo3(signature = (n=5))]
     fn head(&self, n: i64) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .head(n)
             .map_err(frame_error_to_py)?;
@@ -25132,10 +25204,8 @@ impl PyGroupBy {
 
     #[pyo3(signature = (n=5))]
     fn tail(&self, n: i64) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .tail(n)
             .map_err(frame_error_to_py)?;
@@ -25143,10 +25213,8 @@ impl PyGroupBy {
     }
 
     fn corr(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .corr()
             .map_err(frame_error_to_py)?;
@@ -25154,10 +25222,8 @@ impl PyGroupBy {
     }
 
     fn cov(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .cov()
             .map_err(frame_error_to_py)?;
@@ -25165,10 +25231,8 @@ impl PyGroupBy {
     }
 
     fn ohlc(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .ohlc()
             .map_err(frame_error_to_py)?;
@@ -25176,12 +25240,7 @@ impl PyGroupBy {
     }
 
     fn ngroups(&self) -> PyResult<usize> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
-        Ok(self
-            .df
-            .groupby(&by_refs)
-            .map_err(frame_error_to_py)?
-            .ngroups())
+        Ok(self.grouped().map_err(frame_error_to_py)?.ngroups())
     }
 
     #[getter]
@@ -25210,10 +25269,8 @@ impl PyGroupBy {
                 ("numeric_only", !numeric_only),
             ],
         )?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .quantile(q)
             .map_err(frame_error_to_py)?;
@@ -25221,10 +25278,8 @@ impl PyGroupBy {
     }
 
     fn sem(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .sem()
             .map_err(frame_error_to_py)?;
@@ -25232,10 +25287,8 @@ impl PyGroupBy {
     }
 
     fn skew(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .skew()
             .map_err(frame_error_to_py)?;
@@ -25243,10 +25296,8 @@ impl PyGroupBy {
     }
 
     fn kurt(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .kurtosis()
             .map_err(frame_error_to_py)?;
@@ -25267,10 +25318,8 @@ impl PyGroupBy {
         let m = method.unwrap_or("average");
         let asc = ascending.unwrap_or(true);
         let na = na_option.unwrap_or("keep");
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .rank(m, asc, na)
             .map_err(frame_error_to_py)?;
@@ -25279,10 +25328,8 @@ impl PyGroupBy {
 
     #[pyo3(signature = (ascending=true))]
     fn cumcount(&self, ascending: bool) -> PyResult<PySeries> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let result = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .cumcount_with_ascending(ascending)
             .map_err(frame_error_to_py)?;
@@ -25323,10 +25370,8 @@ impl PyGroupBy {
                 .iter()
                 .map(|(out, column, function)| (out.as_str(), column.as_str(), function.as_str()))
                 .collect();
-            let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
             let res = self
-                .df
-                .groupby(&by_refs)
+                .grouped()
                 .map_err(frame_error_to_py)?
                 .agg_named(&spec_refs)
                 .map_err(frame_error_to_py)?;
@@ -25361,10 +25406,8 @@ impl PyGroupBy {
             };
             return Ok(Py::new(py, res)?.into_any());
         } else if let Ok(dict) = func.extract::<std::collections::HashMap<String, String>>() {
-            let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
             let res = self
-                .df
-                .groupby(&by_refs)
+                .grouped()
                 .map_err(frame_error_to_py)?
                 .agg(&dict)
                 .map_err(frame_error_to_py)?;
@@ -25388,10 +25431,8 @@ impl PyGroupBy {
 
     #[pyo3(signature = (limit=None))]
     fn ffill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .ffill(limit)
             .map_err(frame_error_to_py)?;
@@ -25400,10 +25441,8 @@ impl PyGroupBy {
 
     #[pyo3(signature = (limit=None))]
     fn bfill(&self, limit: Option<usize>) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .bfill(limit)
             .map_err(frame_error_to_py)?;
@@ -25411,10 +25450,8 @@ impl PyGroupBy {
     }
 
     fn describe(&self) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .describe()
             .map_err(frame_error_to_py)?;
@@ -25425,10 +25462,8 @@ impl PyGroupBy {
         let s = name
             .extract::<String>()
             .or_else(|_| name.str().map(|py_s| py_s.to_string()))?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .get_group(&s)
             .map_err(frame_error_to_py)?;
@@ -25437,8 +25472,7 @@ impl PyGroupBy {
 
     #[getter]
     fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
-        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let gb = self.grouped().map_err(frame_error_to_py)?;
         let dict = PyDict::new(py);
         for (lbl, indices) in gb.groups() {
             let py_key = index_label_to_py(py, &lbl)?;
@@ -25455,17 +25489,14 @@ impl PyGroupBy {
 
     #[getter]
     fn dtypes(&self) -> PyResult<PySeries> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
-        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let gb = self.grouped().map_err(frame_error_to_py)?;
         let first = gb.first().map_err(frame_error_to_py)?;
         PyDataFrame { inner: first }.dtypes()
     }
 
     fn corrwith(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .corrwith(&other.inner)
             .map_err(frame_error_to_py)?;
@@ -25482,8 +25513,7 @@ impl PyGroupBy {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let _ = include_groups;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
-        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let gb = self.grouped().map_err(frame_error_to_py)?;
         let groups = gb.groups();
         let mut keys: Vec<_> = groups.keys().cloned().collect();
         keys.sort();
@@ -25538,10 +25568,8 @@ impl PyGroupBy {
     ) -> PyResult<PyPlotResult> {
         let _ = py;
         plot_args(args, kwargs)?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let spec = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .boxplot()
             .map_err(frame_error_to_py)?;
@@ -25561,10 +25589,8 @@ impl PyGroupBy {
     ) -> PyResult<PyPlotResult> {
         let _ = py;
         plot_args(args, kwargs)?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let spec = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .hist()
             .map_err(frame_error_to_py)?;
@@ -25584,10 +25610,8 @@ impl PyGroupBy {
     ) -> PyResult<PyPlotResult> {
         let _ = py;
         plot_args(args, kwargs)?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let spec = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .plot()
             .map_err(frame_error_to_py)?;
@@ -25652,10 +25676,8 @@ impl PyGroupBy {
 
     fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let sc = py_to_scalar(py, value)?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .fillna(&sc)
             .map_err(frame_error_to_py)?;
@@ -25668,8 +25690,7 @@ impl PyGroupBy {
             "DataFrameGroupBy.filter",
             &[("dropna", dropna != Some(false))],
         )?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
-        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let gb = self.grouped().map_err(frame_error_to_py)?;
         let groups = gb.groups();
         let mut keys: Vec<_> = groups.keys().cloned().collect();
         keys.sort();
@@ -25724,10 +25745,8 @@ impl PyGroupBy {
 
     #[pyo3(signature = (ascending=true))]
     fn ngroup(&self, ascending: Option<bool>) -> PyResult<PySeries> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .ngroup_with_ascending(ascending.unwrap_or(true))
             .map_err(frame_error_to_py)?;
@@ -25737,10 +25756,8 @@ impl PyGroupBy {
     #[pyo3(signature = (n, dropna=None))]
     fn nth(&self, n: i64, dropna: Option<&str>) -> PyResult<PyDataFrame> {
         unsupported_params("DataFrameGroupBy.nth", &[("dropna", dropna.is_none())])?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .nth(n)
             .map_err(frame_error_to_py)?;
@@ -25788,10 +25805,8 @@ impl PyGroupBy {
                 ("numeric_only", numeric_only != Some(true)),
             ],
         )?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .idxmax()
             .map_err(frame_error_to_py)?;
@@ -25813,10 +25828,8 @@ impl PyGroupBy {
                 ("numeric_only", numeric_only != Some(true)),
             ],
         )?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .idxmin()
             .map_err(frame_error_to_py)?;
@@ -25833,10 +25846,8 @@ impl PyGroupBy {
         random_state: Option<u64>,
     ) -> PyResult<PyDataFrame> {
         unsupported_params("DataFrameGroupBy.sample", &[("weights", weights.is_none())])?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .sample(n, frac, replace.unwrap_or(false), random_state)
             .map_err(frame_error_to_py)?;
@@ -25861,10 +25872,8 @@ impl PyGroupBy {
                 ("suffix", suffix.is_none()),
             ],
         )?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .shift(periods.unwrap_or(1))
             .map_err(frame_error_to_py)?;
@@ -25877,10 +25886,8 @@ impl PyGroupBy {
             "DataFrameGroupBy.take",
             &[("axis", matches!(axis, None | Some(0)))],
         )?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .take(&indices)
             .map_err(frame_error_to_py)?;
@@ -25895,8 +25902,7 @@ impl PyGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
-        let gb = self.df.groupby(&by_refs).map_err(frame_error_to_py)?;
+        let gb = self.grouped().map_err(frame_error_to_py)?;
         if let Ok(func_str) = func.extract::<String>() {
             // A named transform takes no arguments here; transform('shift',
             // periods=2) used to shift by one (fvsao.5).
@@ -25930,10 +25936,8 @@ impl PyGroupBy {
                 ("dropna", dropna != Some(false)),
             ],
         )?;
-        let by_refs: Vec<&str> = self.by.iter().map(|s| s.as_str()).collect();
         let res = self
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .value_counts()
             .map_err(frame_error_to_py)?;
@@ -25948,16 +25952,34 @@ pub struct PySeriesGroupBy {
     series: Series,
     by: Series,
     sort: bool,
+    /// `df.groupby(k, as_index=False)["a"]`: reductions come back as a frame
+    /// holding the key and the result (br-frankenpandas-n57tz). Always true
+    /// for a Series' own groupby, where pandas refuses as_index=False.
+    as_index: bool,
 }
 
 impl PySeriesGroupBy {
-    fn wrap_result(&self, s: Series) -> PyResult<PySeries> {
+    /// A reduction's result: sorted by key when `sort`, and with
+    /// as_index=False the keys moved into a column beside it, as pandas does.
+    fn wrap_result(&self, s: Series) -> PyResult<Py<PyAny>> {
         let res = if self.sort {
             s.sort_index(true).map_err(frame_error_to_py)?
         } else {
             s
         };
-        Ok(PySeries { inner: res })
+        Python::attach(|py| {
+            if self.as_index {
+                return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            }
+            match res.reset_index(false).map_err(frame_error_to_py)? {
+                fp_frame::SeriesResetIndexResult::DataFrame(df) => {
+                    Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
+                }
+                fp_frame::SeriesResetIndexResult::Series(s) => {
+                    Ok(Py::new(py, PySeries { inner: s })?.into_any())
+                }
+            }
+        })
     }
 }
 
@@ -25971,7 +25993,7 @@ impl PySeriesGroupBy {
         )
     }
 
-    fn sum(&self) -> PyResult<PySeries> {
+    fn sum(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -25981,7 +26003,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn mean(&self) -> PyResult<PySeries> {
+    fn mean(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -25991,7 +26013,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn std(&self) -> PyResult<PySeries> {
+    fn std(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26001,7 +26023,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn var(&self) -> PyResult<PySeries> {
+    fn var(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26011,7 +26033,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn min(&self) -> PyResult<PySeries> {
+    fn min(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26021,7 +26043,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn max(&self) -> PyResult<PySeries> {
+    fn max(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26031,7 +26053,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn count(&self) -> PyResult<PySeries> {
+    fn count(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26041,7 +26063,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn first(&self) -> PyResult<PySeries> {
+    fn first(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26051,7 +26073,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn last(&self) -> PyResult<PySeries> {
+    fn last(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26061,7 +26083,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn median(&self) -> PyResult<PySeries> {
+    fn median(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26071,7 +26093,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn prod(&self) -> PyResult<PySeries> {
+    fn prod(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26081,7 +26103,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn size(&self) -> PyResult<PySeries> {
+    fn size(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26091,7 +26113,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn nunique(&self) -> PyResult<PySeries> {
+    fn nunique(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26101,7 +26123,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn any(&self) -> PyResult<PySeries> {
+    fn any(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26111,7 +26133,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn all(&self) -> PyResult<PySeries> {
+    fn all(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26121,7 +26143,7 @@ impl PySeriesGroupBy {
         self.wrap_result(res)
     }
 
-    fn value_counts(&self) -> PyResult<PySeries> {
+    fn value_counts(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
@@ -26228,7 +26250,7 @@ impl PySeriesGroupBy {
         1
     }
 
-    fn product(&self) -> PyResult<PySeries> {
+    fn product(&self) -> PyResult<Py<PyAny>> {
         self.prod()
     }
 
@@ -26250,37 +26272,37 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    fn sem(&self) -> PyResult<PySeries> {
+    fn sem(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .sem()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
-    fn skew(&self) -> PyResult<PySeries> {
+    fn skew(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .skew()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
-    fn kurt(&self) -> PyResult<PySeries> {
+    fn kurt(&self) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .kurtosis()
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        self.wrap_result(res)
     }
 
-    fn kurtosis(&self) -> PyResult<PySeries> {
+    fn kurtosis(&self) -> PyResult<Py<PyAny>> {
         self.kurt()
     }
 
@@ -26332,17 +26354,17 @@ impl PySeriesGroupBy {
                 "nunique" => self.nunique()?,
                 "any" => self.any()?,
                 "all" => self.all()?,
-                "cumsum" => self.cumsum()?,
-                "cumprod" => self.cumprod()?,
-                "cummin" => self.cummin()?,
-                "cummax" => self.cummax()?,
+                "cumsum" => Py::new(py, self.cumsum()?)?.into_any(),
+                "cumprod" => Py::new(py, self.cumprod()?)?.into_any(),
+                "cummin" => Py::new(py, self.cummin()?)?.into_any(),
+                "cummax" => Py::new(py, self.cummax()?)?.into_any(),
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "unsupported aggregation '{name}'"
                     )));
                 }
             };
-            return Ok(Py::new(py, res)?.into_any());
+            return Ok(res);
         } else if let Ok(list) = func.extract::<Vec<String>>() {
             let refs: Vec<&str> = list.iter().map(String::as_str).collect();
             let df = self
@@ -35357,10 +35379,8 @@ fn plotting_boxplot_frame_groupby(
 ) -> PyResult<Py<PyAny>> {
     plot_args(args, kwargs)?;
     if let Ok(py_gb) = grouped.extract::<PyRef<PyGroupBy>>() {
-        let by_refs: Vec<&str> = py_gb.by.iter().map(|s| s.as_str()).collect();
         let spec = py_gb
-            .df
-            .groupby(&by_refs)
+            .grouped()
             .map_err(frame_error_to_py)?
             .boxplot()
             .map_err(frame_error_to_py)?;
@@ -36852,25 +36872,31 @@ mod tests {
             series: py_s.inner.clone(),
             by: by_s,
             sort: true,
+            as_index: true,
         };
 
-        let sum_s = sgb.sum().expect("sum"); // ubs:ignore — test fixture
+        // Reductions return a Series (or, with as_index=False, a frame).
+        let as_series = |obj: PyResult<Py<PyAny>>| -> PySeries {
+            Python::attach(|py| obj.and_then(|o| o.extract::<PySeries>(py).map_err(PyErr::from)))
+                .expect("a Series") // ubs:ignore — test fixture
+        };
+        let sum_s = as_series(sgb.sum());
         assert_eq!(sum_s.inner.len(), 2);
-        let mean_s = sgb.mean().expect("mean"); // ubs:ignore — test fixture
+        let mean_s = as_series(sgb.mean());
         assert_eq!(mean_s.inner.len(), 2);
-        let count_s = sgb.count().expect("count"); // ubs:ignore — test fixture
+        let count_s = as_series(sgb.count());
         assert_eq!(count_s.inner.len(), 2);
-        let min_s = sgb.min().expect("min"); // ubs:ignore — test fixture
+        let min_s = as_series(sgb.min());
         assert_eq!(min_s.inner.len(), 2);
-        let max_s = sgb.max().expect("max"); // ubs:ignore — test fixture
+        let max_s = as_series(sgb.max());
         assert_eq!(max_s.inner.len(), 2);
-        let first_s = sgb.first().expect("first"); // ubs:ignore — test fixture
+        let first_s = as_series(sgb.first());
         assert_eq!(first_s.inner.len(), 2);
-        let last_s = sgb.last().expect("last"); // ubs:ignore — test fixture
+        let last_s = as_series(sgb.last());
         assert_eq!(last_s.inner.len(), 2);
-        let size_s = sgb.size().expect("size"); // ubs:ignore — test fixture
+        let size_s = as_series(sgb.size());
         assert_eq!(size_s.inner.len(), 2);
-        let nq = sgb.nunique().expect("nunique"); // ubs:ignore — test fixture
+        let nq = as_series(sgb.nunique());
         assert_eq!(nq.inner.len(), 2);
         assert_eq!(sgb.ngroups().expect("ngroups"), 2); // ubs:ignore — test fixture
 
@@ -36901,12 +36927,19 @@ mod tests {
         let gb = PyGroupBy {
             df: py_df.inner.clone(),
             by: vec!["grp".to_string()],
+            as_index: true,
+            sort: true,
+            dropna: true,
         };
         let gb_first = gb.first().expect("first"); // ubs:ignore — test fixture
         assert_eq!(gb_first.shape(), (2, 1));
         let gb_last = gb.last().expect("last"); // ubs:ignore — test fixture
         assert_eq!(gb_last.shape(), (2, 1));
-        let gb_size = gb.size().expect("size"); // ubs:ignore — test fixture
+        let gb_size = Python::attach(|py| {
+            gb.size(py)
+                .and_then(|o| o.extract::<PySeries>(py).map_err(PyErr::from))
+        })
+        .expect("size"); // ubs:ignore — test fixture
         assert_eq!(gb_size.inner.len(), 2);
         let gb_nq = gb.nunique().expect("nunique"); // ubs:ignore — test fixture
         assert_eq!(gb_nq.shape(), (2, 1));
