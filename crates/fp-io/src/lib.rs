@@ -25385,12 +25385,12 @@ mod tests {
             );
 
             // Float (700, 701)
-            let s = pg_text_cell_to_scalar(Some(b"2.718"), 701);
-            assert!(matches!(s, Scalar::Float64(v) if (v - 2.718).abs() < 1e-6));
+            let s = pg_text_cell_to_scalar(Some(b"2.625"), 701);
+            assert!(matches!(s, Scalar::Float64(v) if (v - 2.625).abs() < 1e-12));
 
             // Numeric (1700)
-            let s = pg_text_cell_to_scalar(Some(b"3.14159"), 1700);
-            assert!(matches!(s, Scalar::Float64(v) if (v - 3.14159).abs() < 1e-5));
+            let s = pg_text_cell_to_scalar(Some(b"1234.5678"), 1700);
+            assert!(matches!(s, Scalar::Float64(v) if (v - 1234.5678).abs() < 1e-9));
             let s = pg_text_cell_to_scalar(Some(b"nan"), 1700);
             assert!(matches!(s, Scalar::Float64(v) if v.is_nan()));
             let s = pg_text_cell_to_scalar(Some(b"infinity"), 1700);
@@ -25469,18 +25469,33 @@ mod tests {
             assert_eq!(postgres_sql_dtype_from_index(&str_idx), "TEXT");
         }
 
-        #[test]
-        fn test_postgres_live_roundtrip_and_inspector() {
+        /// Connects to the live server named by PG_URL / DATABASE_URL.
+        ///
+        /// FP_REQUIRE_LIVE_PG=1 (set by CI's postgres-service job) turns an
+        /// unreachable server into a FAILURE. Without it the caller skips LOUDLY:
+        /// before this, an unreachable server read as a silent pass and the
+        /// adapter's live tests had never executed anywhere.
+        fn live_pg_conn() -> Option<PostgresConnection> {
             let pg_url = std::env::var("PG_URL")
                 .or_else(|_| std::env::var("DATABASE_URL"))
                 .unwrap_or_else(|_| "postgres://ubuntu:ubuntu@127.0.0.1:5432/ubuntu".to_string());
-
-            let conn = match PostgresConnection::open(&pg_url) {
-                Ok(c) => c,
+            match PostgresConnection::open(&pg_url) {
+                Ok(c) => Some(c),
                 Err(e) => {
-                    eprintln!("SKIPPING live PostgreSQL test: unable to connect to {pg_url}: {e}");
-                    return;
+                    assert!(
+                        std::env::var_os("FP_REQUIRE_LIVE_PG").is_none(),
+                        "FP_REQUIRE_LIVE_PG is set but {pg_url} is unreachable: {e}"
+                    );
+                    eprintln!("SKIP live_pg: unable to connect to {pg_url}: {e}");
+                    None
                 }
+            }
+        }
+
+        #[test]
+        fn test_postgres_live_roundtrip_and_inspector() {
+            let Some(conn) = live_pg_conn() else {
+                return;
             };
 
             // Server version check
@@ -25544,14 +25559,17 @@ mod tests {
             #[cfg(feature = "sql-sqlite")]
             {
                 let sqlite_conn = rusqlite::Connection::open_in_memory().expect("sqlite in memory");
-                write_sql(&df, &sqlite_conn, "sqlite_tbl", SqlIfExists::Fail)
+                // Not `sqlite_*`: SQLite reserves that prefix for internal
+                // objects, which this test never noticed because it never ran.
+                write_sql(&df, &sqlite_conn, "pg_parity_tbl", SqlIfExists::Fail)
                     .expect("sqlite write");
-                let sqlite_read = read_sql_table(&sqlite_conn, "sqlite_tbl").expect("sqlite read");
+                let sqlite_read =
+                    read_sql_table(&sqlite_conn, "pg_parity_tbl").expect("sqlite read");
                 assert_eq!(read_back.index().len(), sqlite_read.index().len());
                 assert_eq!(read_back.column_names(), sqlite_read.column_names());
                 for col in read_back.column_names() {
-                    let pg_col = read_back.column(&col).unwrap();
-                    let sl_col = sqlite_read.column(&col).unwrap();
+                    let pg_col = read_back.column(col).unwrap();
+                    let sl_col = sqlite_read.column(col).unwrap();
                     assert_eq!(
                         pg_col.values(),
                         sl_col.values(),
@@ -25579,6 +25597,131 @@ mod tests {
 
             // Cleanup
             let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+        }
+
+        /// Bool, missing values (NULL vs float NaN), tz-aware timestamps and
+        /// nullable strings through a real server: the paths the text-protocol
+        /// decoder has to get right and that the int/float/str fixture never hit.
+        #[test]
+        fn test_postgres_live_roundtrip_dtypes_and_nulls() {
+            let Some(conn) = live_pg_conn() else {
+                return;
+            };
+            let table_name = "fp_test_dtypes_nulls_tbl";
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+
+            // 2024-01-15T10:30:00.123456Z
+            let ts = 1_705_314_600_123_456_000_i64;
+            let mut columns = BTreeMap::new();
+            columns.insert(
+                "flags".to_string(),
+                Column::new(
+                    DType::Bool,
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                )
+                .unwrap(),
+            );
+            columns.insert(
+                "floats".to_string(),
+                Column::new(
+                    DType::Float64,
+                    vec![
+                        Scalar::Float64(-0.25),
+                        Scalar::Float64(f64::NAN),
+                        Scalar::Null(fp_types::NullKind::Null),
+                    ],
+                )
+                .unwrap(),
+            );
+            columns.insert(
+                "stamps".to_string(),
+                Column::new(
+                    DType::datetime64_naive(),
+                    vec![
+                        Scalar::Datetime64(ts),
+                        Scalar::Null(fp_types::NullKind::NaT),
+                        Scalar::Datetime64(0),
+                    ],
+                )
+                .unwrap(),
+            );
+            columns.insert(
+                "names".to_string(),
+                Column::from_values(vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Utf8("z".into()),
+                ])
+                .unwrap(),
+            );
+            let order = ["flags", "floats", "stamps", "names"]
+                .map(str::to_owned)
+                .to_vec();
+            let df = DataFrame::new_with_column_order(
+                Index::new(vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                ]),
+                columns,
+                order.clone(),
+            )
+            .unwrap();
+
+            write_sql(&df, &conn, table_name, SqlIfExists::Fail).expect("write_sql");
+            let back = read_sql_table(&conn, table_name).expect("read_sql_table");
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+
+            let got: Vec<String> = back.column_names().iter().map(|s| s.to_string()).collect();
+            assert_eq!(got, order);
+            for name in &order {
+                eprintln!(
+                    "live_pg dtypes_nulls: {name} dtype={:?} values={:?}",
+                    back.column(name).unwrap().dtype(),
+                    back.column(name).unwrap().values()
+                );
+            }
+
+            let flags = back.column("flags").unwrap().values();
+            assert_eq!(
+                flags,
+                &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+            );
+
+            let floats = back.column("floats").unwrap().values();
+            assert_eq!(floats[0], Scalar::Float64(-0.25));
+            assert!(
+                floats[1].is_missing(),
+                "NaN must read back missing: {:?}",
+                floats[1]
+            );
+            assert!(
+                floats[2].is_missing(),
+                "NULL must read back missing: {:?}",
+                floats[2]
+            );
+
+            let stamps = back.column("stamps").unwrap().values();
+            assert_eq!(
+                stamps[0],
+                Scalar::Datetime64(ts),
+                "microsecond timestamp round-trip"
+            );
+            assert!(
+                stamps[1].is_missing(),
+                "NaT must read back missing: {:?}",
+                stamps[1]
+            );
+            assert_eq!(stamps[2], Scalar::Datetime64(0), "epoch round-trip");
+
+            let names = back.column("names").unwrap().values();
+            assert_eq!(names[0], Scalar::Utf8("x".into()));
+            assert!(
+                names[1].is_missing(),
+                "NULL text must read back missing: {:?}",
+                names[1]
+            );
+            assert_eq!(names[2], Scalar::Utf8("z".into()));
         }
     }
 

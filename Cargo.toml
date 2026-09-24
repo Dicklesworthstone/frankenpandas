@@ -56,7 +56,13 @@ parquet = { version = "60.0.0", default-features = false, features = ["arrow", "
 mysql = "28.0.2"
 memchr = "2.8.3"
 mimalloc = "0.1.52"
-fallible-iterator = "0.3.0"
+# MUST be the fallible-iterator major that postgres-protocol implements its
+# message iterators with (0.6.x uses 0.2): fp-io calls `.next()` through the
+# `FallibleIterator` trait on postgres-protocol types, and a different major is
+# a different trait. The dependabot bump to 0.3.0 (7442ac090) broke
+# `--features sql-postgresql` with 5x E0599; .github/dependabot.yml now ignores
+# this crate so the pair can only move together, by hand.
+fallible-iterator = "0.2.0"
 postgres-protocol = "0.6.12"
 # `extension-module` is DELIBERATELY NOT ENABLED HERE — it is opt-in via
 # `fp-python`'s own `extension-module` feature. The flag tells PyO3 to omit

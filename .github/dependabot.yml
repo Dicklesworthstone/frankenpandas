@@ -15,6 +15,10 @@ updates:
       rust-deps:
         patterns:
           - "*"
+    ignore:
+      # Must match the major postgres-protocol implements (see the workspace
+      # Cargo.toml comment); a lone bump broke `--features sql-postgresql`.
+      - dependency-name: "fallible-iterator"
 
   - package-ecosystem: "github-actions"
     directory: "/"

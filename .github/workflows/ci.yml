@@ -279,6 +279,53 @@ jobs:
       - name: Core fp-frame and fp-columnar tests
         run: cargo test -p fp-frame -p fp-columnar --no-fail-fast
 
+  sql-live:
+    # The PostgreSQL adapter's live-server tests had never executed: no job
+    # enabled `sql-postgresql` for tests, no server existed, and an unreachable
+    # server read as a pass. FP_REQUIRE_LIVE_PG=1 makes unreachable a FAILURE.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: fp
+          POSTGRES_PASSWORD: fp
+          POSTGRES_DB: fp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target-sql-live
+      PG_URL: postgres://fp:fp@127.0.0.1:5432/fp
+      FP_REQUIRE_LIVE_PG: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: PostgreSQL adapter tests against the live service
+        run: cargo test -p fp-io --features sql-postgresql --lib -- postgres --nocapture
+
   eager-frame:
     # br-frankenpandas-it6kj: the default build uses lazy transpose storage,
     # so exercise the non-default eager store separately before it silently
