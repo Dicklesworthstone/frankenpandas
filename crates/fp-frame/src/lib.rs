@@ -40898,8 +40898,15 @@ impl SeriesGroupBy<'_> {
         self.agg_numeric(|nums| nums.iter().sum(), self.series.name())
     }
 
+    /// pandas' error for `func_name` over a string series, if there is one
+    /// (see [`groupby_text_reduction_refusal`]).
+    fn refuse_text(&self, func_name: &str) -> Result<(), FrameError> {
+        groupby_text_reduction_refusal(func_name, self.series.column()).map_or(Ok(()), Err)
+    }
+
     /// Mean of each group.
     pub fn mean(&self) -> Result<Series, FrameError> {
+        self.refuse_text("mean")?;
         // Per br-frankenpandas-c1bxu: Timedelta64-aware groupby mean.
         if self.column_is_timedelta() {
             return self.agg_timedelta(|sum, count| {
@@ -42598,6 +42605,7 @@ impl SeriesGroupBy<'_> {
     }
 
     pub fn sem(&self) -> Result<Series, FrameError> {
+        self.refuse_text("sem")?;
         if let Some(result) = self.group_moment_dense(|n, m2, _, _| {
             if n <= 1.0 {
                 Scalar::Null(NullKind::NaN)
@@ -42612,6 +42620,7 @@ impl SeriesGroupBy<'_> {
 
     /// Skewness of each group.
     pub fn skew(&self) -> Result<Series, FrameError> {
+        self.refuse_text("skew")?;
         if let Some(result) = self.group_moment_dense(|n, m2, m3, _| {
             if n < 3.0 {
                 return Scalar::Null(NullKind::NaN);
@@ -43043,6 +43052,7 @@ impl SeriesGroupBy<'_> {
 
     /// Standard deviation of each group (ddof=1).
     pub fn std(&self) -> Result<Series, FrameError> {
+        self.refuse_text("std")?;
         // Per br-frankenpandas-pwt7r: Timedelta64 std preserves dtype
         // (mirror fp-types nanstd j8ntk path).
         if self.column_is_timedelta() {
@@ -43087,6 +43097,7 @@ impl SeriesGroupBy<'_> {
 
     /// Variance of each group (ddof=1).
     pub fn var(&self) -> Result<Series, FrameError> {
+        self.refuse_text("var")?;
         // Per br-frankenpandas-pwt7r: Timedelta64 var preserves dtype
         // (mirror fp-types nanvar j8ntk path).
         if self.column_is_timedelta() {
@@ -43127,6 +43138,7 @@ impl SeriesGroupBy<'_> {
 
     /// Median of each group.
     pub fn median(&self) -> Result<Series, FrameError> {
+        self.refuse_text("median")?;
         // Per br-frankenpandas-pwt7r: Timedelta64 median preserves dtype.
         if self.column_is_timedelta() {
             return self.agg_timedelta_values(|ns_vals| {
@@ -43198,6 +43210,7 @@ impl SeriesGroupBy<'_> {
 
     /// Product of each group.
     pub fn prod(&self) -> Result<Series, FrameError> {
+        self.refuse_text("prod")?;
         // Per br-frankenpandas-s13rm: pandas raises TypeError on
         // td_series.groupby(...).prod() because Timedelta² has no dimension.
         // Mirror fp-types nanprod (br-szq6a) and Series::prod (br-mpw1f) by
@@ -93350,6 +93363,31 @@ impl CumOp {
     }
 }
 
+/// pandas' refusal of a numeric groupby reduction over a string column: std,
+/// sem and skew fail converting the column's first string to float, and mean,
+/// median, var and prod with "agg function failed". These returned NaN (or
+/// dropped the column) instead (br-frankenpandas-bcj6d).
+fn groupby_text_reduction_refusal(func_name: &str, col: &Column) -> Option<FrameError> {
+    if col.dtype() != DType::Utf8 {
+        return None;
+    }
+    match func_name {
+        "mean" | "median" | "var" | "prod" => Some(FrameError::CompatibilityRejected(format!(
+            "agg function failed [how->{func_name},dtype->object]"
+        ))),
+        "std" | "sem" | "skew" => {
+            let first = col.values().iter().find_map(|v| match v {
+                Scalar::Utf8(s) => Some(s.as_str()),
+                _ => None,
+            })?;
+            Some(FrameError::CompatibilityRejected(format!(
+                "could not convert string to float: '{first}'"
+            )))
+        }
+        _ => None,
+    }
+}
+
 struct DenseMultiInt64Grouping {
     gid_per_row: Vec<usize>,
     ngroups: usize,
@@ -94392,6 +94430,17 @@ impl DataFrameGroupBy<'_> {
         Series::from_values("dtypes".to_owned(), labels, values)
     }
 
+    /// pandas' error for `func_name` over a string value column, if there is
+    /// one (see [`groupby_text_reduction_refusal`]).
+    fn refuse_text_columns(&self, func_name: &str) -> Result<(), FrameError> {
+        for name in self.df.column_order.iter().filter(|c| !self.by.contains(c)) {
+            if let Some(err) = groupby_text_reduction_refusal(func_name, &self.df.columns[name]) {
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
     /// Aggregate each value column per group with the given function.
     fn aggregate_named_func(&self, func_name: &str) -> Result<DataFrame, FrameError> {
         // br-frankenpandas-groupby-idxmax-idxmin, third slice: the TRANSFORM-SHAPED
@@ -94474,6 +94523,7 @@ impl DataFrameGroupBy<'_> {
             .filter(|c| !self.by.contains(c))
             .cloned()
             .collect();
+        self.refuse_text_columns(func_name)?;
 
         // Dedicated single-column contiguous-Utf8 `sum` bypass
         // (br-frankenpandas-s7b7q). For a high-cardinality string key,
@@ -99316,6 +99366,9 @@ impl DataFrameGroupBy<'_> {
             }
 
             let col = &self.df.columns[col_name];
+            if let Some(err) = groupby_text_reduction_refusal(func_name, col) {
+                return Err(err);
+            }
             let mut agg_vals = Vec::with_capacity(n_groups);
 
             for gkey in &group_order {
@@ -104012,6 +104065,7 @@ impl DataFrameGroupBy<'_> {
     }
 
     pub fn sem(&self) -> Result<DataFrame, FrameError> {
+        self.refuse_text_columns("sem")?;
         if let Some(df) = self.try_moment_dense("sem")? {
             return Ok(df);
         }
@@ -104085,6 +104139,7 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `groupby.skew()`.
     pub fn skew(&self) -> Result<DataFrame, FrameError> {
+        self.refuse_text_columns("skew")?;
         if let Some(df) = self.try_moment_dense("skew")? {
             return Ok(df);
         }
@@ -153473,6 +153528,65 @@ mod tests {
         assert_eq!(
             col(&big.groupby(&["k"]).unwrap().cumsum().unwrap(), "a"),
             ints(&[1 << 62, i64::MIN])
+        );
+    }
+
+    #[test]
+    fn groupby_numeric_reductions_refuse_strings_like_pandas_bcj6d() {
+        // pandas 2.2.3 over k=['y','x','y'], s=['p','q','r'], a=[1,2,3].
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        let df = DataFrame::from_dict(
+            &["k", "s", "a"],
+            vec![
+                ("k", vec![utf8("y"), utf8("x"), utf8("y")]),
+                ("s", vec![utf8("p"), utf8("q"), utf8("r")]),
+                ("a", (1..=3_i64).map(Scalar::Int64).collect()),
+            ],
+        )
+        .unwrap();
+        let gb = df.groupby(&["k"]).unwrap();
+        let key = df.column_as_series("k").unwrap();
+        let text = df.column_as_series("s").unwrap();
+        let sgb = text.groupby(&key).unwrap();
+        fn message<T>(result: Result<T, FrameError>) -> String {
+            result.err().expect("pandas raises here").to_string()
+        }
+        let agg_failed = |how: &str| format!("agg function failed [how->{how},dtype->object]");
+        for (how, frame_err, series_err) in [
+            ("mean", message(gb.mean()), message(sgb.mean())),
+            ("median", message(gb.median()), message(sgb.median())),
+            ("var", message(gb.var()), message(sgb.var())),
+            ("prod", message(gb.prod()), message(sgb.prod())),
+        ] {
+            assert!(frame_err.ends_with(&agg_failed(how)), "{frame_err}");
+            assert!(series_err.ends_with(&agg_failed(how)), "{series_err}");
+        }
+        let to_float = "could not convert string to float: 'p'";
+        for (frame_err, series_err) in [
+            (message(gb.std()), message(sgb.std())),
+            (message(gb.sem()), message(sgb.sem())),
+            (message(gb.skew()), message(sgb.skew())),
+        ] {
+            assert!(frame_err.ends_with(to_float), "{frame_err}");
+            assert!(series_err.ends_with(to_float), "{series_err}");
+        }
+        let by_col = std::collections::HashMap::from([("s".to_owned(), "mean".to_owned())]);
+        assert!(message(gb.agg(&by_col)).ends_with(&agg_failed("mean")));
+        // NEGATIVE: sum/min/first still reduce strings, as pandas does, and a
+        // numeric-only frame's mean is unchanged.
+        assert_eq!(
+            gb.sum().unwrap().column("s").unwrap().values(),
+            &[utf8("q"), utf8("pr")]
+        );
+        assert_eq!(
+            gb.min().unwrap().column("s").unwrap().values(),
+            &[utf8("q"), utf8("p")]
+        );
+        let numeric = df.select_columns(&["k", "a"]).unwrap();
+        let mean = numeric.groupby(&["k"]).unwrap().mean().unwrap();
+        assert_eq!(
+            mean.column("a").unwrap().values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(2.0)]
         );
     }
 

@@ -9756,6 +9756,7 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                     format!("compatibility gate rejected operation: {msg}"),
                 )
             } else if lower.contains("cannot reduce non-numeric")
+                || lower.contains("agg function failed")
                 || lower.contains("could not convert")
                 || lower.contains("not allowed for dtype")
                 || lower.contains("unsupported operand type")
@@ -9801,6 +9802,18 @@ fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
             PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(msg)
         }
     }
+}
+
+/// [`frame_error_to_py`] for groupby std/sem/skew: over a string column pandas
+/// lets Python's `float("x")` ValueError through, where the shared text rules
+/// call "could not convert" a TypeError, as DataFrame.std raises
+/// (br-frankenpandas-bcj6d).
+fn groupby_moment_error_to_py(err: fp_frame::FrameError) -> PyErr {
+    let (_, msg) = classify_frame_error(&err);
+    if msg.contains("could not convert string to float") {
+        return PyErr::new::<pyo3::exceptions::PyValueError, _>(msg);
+    }
+    frame_error_to_py(err)
 }
 
 fn column_error_to_py(err: fp_columnar::ColumnError) -> PyErr {
@@ -24994,7 +25007,7 @@ impl PyGroupBy {
             .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .mean()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -25030,7 +25043,7 @@ impl PyGroupBy {
             .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .var()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -25039,7 +25052,7 @@ impl PyGroupBy {
             .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .std()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .map_err(groupby_moment_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -25048,7 +25061,7 @@ impl PyGroupBy {
             .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .median()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -25057,7 +25070,7 @@ impl PyGroupBy {
             .grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .prod()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -25282,7 +25295,7 @@ impl PyGroupBy {
             .grouped()
             .map_err(frame_error_to_py)?
             .sem()
-            .map_err(frame_error_to_py)?;
+            .map_err(groupby_moment_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -25291,7 +25304,7 @@ impl PyGroupBy {
             .grouped()
             .map_err(frame_error_to_py)?
             .skew()
-            .map_err(frame_error_to_py)?;
+            .map_err(groupby_moment_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -26019,7 +26032,7 @@ impl PySeriesGroupBy {
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .std()
-            .map_err(frame_error_to_py)?;
+            .map_err(groupby_moment_error_to_py)?;
         self.wrap_result(res)
     }
 
@@ -26278,7 +26291,7 @@ impl PySeriesGroupBy {
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .sem()
-            .map_err(frame_error_to_py)?;
+            .map_err(groupby_moment_error_to_py)?;
         self.wrap_result(res)
     }
 
@@ -26288,7 +26301,7 @@ impl PySeriesGroupBy {
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .skew()
-            .map_err(frame_error_to_py)?;
+            .map_err(groupby_moment_error_to_py)?;
         self.wrap_result(res)
     }
 

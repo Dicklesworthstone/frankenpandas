@@ -2841,6 +2841,46 @@ def test_groupby_option_refusals_and_errors_match_pandas() -> None:
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["mean", "median", "var", "prod", "std", "sem", "skew"])
+@pytest.mark.parametrize("select", [None, "s"], ids=["frame", "column"])
+def test_groupby_numeric_reductions_refuse_strings_like_pandas(op: str, select: Any) -> None:
+    # br-frankenpandas-bcj6d: these returned NaN (or dropped the column) for a
+    # string column; pandas raises TypeError or ValueError.
+    def call(m: Any) -> Any:
+        gb = m.DataFrame({"k": ["y", "x", "y"], "s": ["p", "q", "r"], "a": [1, 2, 3]}).groupby("k")
+        return getattr(gb if select is None else gb[select], op)()
+
+    with pytest.raises((TypeError, ValueError)) as expected:
+        call(pd)
+    with pytest.raises(type(expected.value)) as got:
+        call(fpd)
+    assert type(got.value) is type(expected.value)
+    assert str(expected.value) in str(got.value)
+
+
+_OPEN_7HXQV = pytest.mark.xfail(
+    strict=True,
+    reason="br-frankenpandas-7hxqv: groupby sem is std/sqrt(n) (pandas sqrt(var/n)); "
+    "an all-NaN groupby skew column comes back object",
+)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "op",
+    ["mean", "median", "var", "prod", "std"]
+    + [pytest.param(op, marks=_OPEN_7HXQV) for op in ("sem", "skew")],
+)
+def test_groupby_numeric_reductions_match_pandas(op: str) -> None:
+    # The NEGATIVE of the string refusal above: without a string column these
+    # reduce, to pandas' values.
+    def call(m: Any) -> Any:
+        return getattr(m.DataFrame({"k": ["y", "x", "y"], "a": [1.0, 2.0, 4.0]}).groupby("k"), op)()
+
+    assert _nan_marked(_strict(call(fpd))) == _nan_marked(_strict(call(pd)))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_sample_without_random_state_draws_fresh_rows() -> None:
     # br-frankenpandas-u1e54: random_state=None meant seed 42, so every
     # unseeded sample was the same draw; pandas draws anew each call.
