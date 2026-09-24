@@ -522,6 +522,12 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          # Install rust-toolchain.toml's components here. Left to rustup's
+          # on-demand install at the first cargo call, this job (which first ran
+          # on 2026-09-24, once conformance went green) failed with
+          # "failed to install component: 'clippy-preview...', detected
+          # conflict: 'bin/cargo-clippy'".
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Python
         uses: actions/setup-python@v7
