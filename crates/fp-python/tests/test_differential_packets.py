@@ -4388,3 +4388,105 @@ def test_time_series_journey_matches_pandas() -> None:
     want, got = _journey(pd), _journey(fpd)
     for step in want:
         assert _plain(got[step]) == _plain(want[step]), step
+
+
+STR_VALUES = ["  Alice Smith ", "bob", None, "CAROL-ann 42", "x1y2", "Äbc déf", ""]
+
+STR_METHOD_CASES = {
+    "title": lambda s: s.str.title(),
+    "capitalize": lambda s: s.str.capitalize(),
+    "swapcase": lambda s: s.str.swapcase(),
+    "casefold": lambda s: s.str.casefold(),
+    "isdigit": lambda s: s.str.isdigit(),
+    "isalpha": lambda s: s.str.isalpha(),
+    "isalnum": lambda s: s.str.isalnum(),
+    "isspace": lambda s: s.str.isspace(),
+    "islower": lambda s: s.str.islower(),
+    "isupper": lambda s: s.str.isupper(),
+    "isnumeric": lambda s: s.str.isnumeric(),
+    "istitle": lambda s: s.str.istitle(),
+    "zfill": lambda s: s.str.zfill(6),
+    "pad both": lambda s: s.str.pad(8, side="both", fillchar="*"),
+    "center": lambda s: s.str.center(9, "-"),
+    "ljust": lambda s: s.str.ljust(7, "."),
+    "rjust": lambda s: s.str.rjust(7),
+    "repeat": lambda s: s.str.repeat(2),
+    "removeprefix": lambda s: s.str.removeprefix("bo"),
+    "removesuffix": lambda s: s.str.removesuffix("42"),
+    "count regex": lambda s: s.str.count(r"[a-z]"),
+    "find": lambda s: s.str.find("l"),
+    "rfind": lambda s: s.str.rfind("l"),
+    "find with start": lambda s: s.str.find("l", 3),
+    "get": lambda s: s.str.get(1),
+    "str[0]": lambda s: s.str[0],
+    "str[-1]": lambda s: s.str[-1],
+    "str[1:4]": lambda s: s.str[1:4],
+    "str[::2]": lambda s: s.str[::2],
+    "slice": lambda s: s.str.slice(1, 3),
+    "slice_replace": lambda s: s.str.slice_replace(1, 3, "ZZ"),
+    "fullmatch": lambda s: s.str.fullmatch(r"[a-z]+"),
+    "match": lambda s: s.str.match(r"[a-z]"),
+    "match case=False": lambda s: s.str.match(r"[a-z]", case=False),
+    "contains regex": lambda s: s.str.contains(r"\d"),
+    "contains literal": lambda s: s.str.contains(".", regex=False),
+    "contains na=False": lambda s: s.str.contains("o", na=False),
+    "contains case=False": lambda s: s.str.contains("ALICE", case=False),
+    "startswith tuple": lambda s: s.str.startswith(("b", "x")),
+    "endswith na=False": lambda s: s.str.endswith("2", na=False),
+    "replace regex": lambda s: s.str.replace(r"\s+", "_", regex=True),
+    "replace literal": lambda s: s.str.replace("a", "@"),
+    "replace n": lambda s: s.str.replace("l", "L", n=1),
+    "replace case=False": lambda s: s.str.replace("ALICE", "Al", case=False),
+    "extract one group": lambda s: s.str.extract(r"([a-z]+)"),
+    "extract expand=False": lambda s: s.str.extract(r"([a-z]+)", expand=False),
+    "extract two groups": lambda s: s.str.extract(r"([a-zA-Z]+)\s*(\w+)?"),
+    "extract named groups": lambda s: s.str.extract(r"(?P<first>[a-z])(?P<rest>\w*)"),
+    "split expand": lambda s: s.str.split("-", expand=True),
+    "split expand n": lambda s: s.str.split(" ", n=1, expand=True),
+    "rsplit expand n": lambda s: s.str.rsplit(" ", n=1, expand=True),
+    "partition": lambda s: s.str.partition(" "),
+    "rpartition": lambda s: s.str.rpartition("-"),
+    "get_dummies": lambda s: s.str.get_dummies(sep=" "),
+    "cat to one string": lambda s: s.str.cat(sep="|"),
+    "cat others na_rep": lambda s: s.str.cat(s.str.upper(), sep="+", na_rep="?"),
+    "cat others": lambda s: s.str.cat(s.str.upper(), sep="+"),
+    "strip chars": lambda s: s.str.strip(" A"),
+    "lstrip chars": lambda s: s.str.lstrip(" A"),
+    "wrap": lambda s: s.str.wrap(4),
+}
+
+
+def _str_outcome(obj: Any) -> Any:
+    def one(v: Any) -> str:
+        return "nan" if isinstance(v, float) and v != v else repr(v)
+
+    if hasattr(obj, "columns"):
+        return ("frame", [str(c) for c in obj.columns], [str(obj[c].dtype) for c in obj.columns],
+                [[one(v) for v in obj[c].tolist()] for c in obj.columns])
+    if hasattr(obj, "tolist"):
+        return (str(obj.dtype), [one(v) for v in obj.tolist()], obj.name)
+    return one(obj)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", sorted(STR_METHOD_CASES))
+def test_str_methods_match_pandas(case: str) -> None:
+    # fvsao.13 (text journey): the .str accessor exposed ten methods; the
+    # rest raised AttributeError, contains/replace/startswith refused
+    # pandas' keywords, a missing string came back NaN where pandas keeps
+    # None, and a bool result with a missing value reported bool, not object.
+    run = STR_METHOD_CASES[case]
+    assert _str_outcome(run(fpd.Series(STR_VALUES, name="t"))) == _str_outcome(run(pd.Series(STR_VALUES, name="t")))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_str_refusals() -> None:
+    s = fpd.Series(["a,b"])
+    # A Series of lists needs list values the columns do not hold yet.
+    with pytest.raises(NotImplementedError):
+        s.str.split(",")
+    with pytest.raises(NotImplementedError):
+        s.str.contains("a", flags=2)
+    # NEGATIVE: an all-present bool result stays bool, as pandas.
+    for m in (pd, fpd):
+        assert str(m.Series(["ab", "c"]).str.contains("a").dtype) == "bool"

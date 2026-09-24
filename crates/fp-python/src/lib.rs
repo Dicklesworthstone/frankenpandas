@@ -102,6 +102,16 @@ fn parse_dtype(name: &str) -> PyResult<fp_types::DType> {
     }
 }
 
+/// pandas' dtype name for a column: numpy bool cannot hold a missing value,
+/// so a bool column with one is pandas' object (it said bool; fvsao.13).
+fn column_pandas_dtype_name(column: &Column) -> String {
+    let dtype = column.dtype();
+    if dtype == DType::Bool && column.has_any_missing() {
+        return "object".to_owned();
+    }
+    pandas_dtype_name(&dtype)
+}
+
 /// pandas' name for a dtype, as `Series.dtype` / `DataFrame.dtypes` print it.
 fn pandas_dtype_name(dtype: &fp_types::DType) -> String {
     use fp_types::DType;
@@ -11216,7 +11226,7 @@ impl PySeries {
 
     #[getter]
     fn dtype(&self) -> String {
-        pandas_dtype_name(&self.inner.dtype())
+        column_pandas_dtype_name(self.inner.column())
     }
 
     #[getter]
@@ -17547,7 +17557,7 @@ impl PyDataFrame {
         for col in cols {
             labels.push(IndexLabel::Utf8(col.clone()));
             let dt = match self.inner.column(col) {
-                Some(c) => pandas_dtype_name(&c.dtype()),
+                Some(c) => column_pandas_dtype_name(c),
                 None => "object".to_string(),
             };
             dtypes.push(Scalar::Utf8(dt));
@@ -24958,19 +24968,30 @@ impl PySeriesStringAccessor {
         Ok(PySeries { inner: s })
     }
 
-    fn strip(&self) -> PyResult<PySeries> {
-        let s = self.series.str().strip().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+    /// pandas' `strip(to_strip=None)`: whitespace, or the given characters
+    /// (lstrip/rstrip likewise; they took no argument; fvsao.13).
+    #[pyo3(signature = (to_strip=None))]
+    fn strip(&self, to_strip: Option<&str>) -> PyResult<PySeries> {
+        match to_strip {
+            Some(chars) => self.wrap(|s| s.strip_chars(chars)),
+            None => self.wrap(|s| s.strip()),
+        }
     }
 
-    fn lstrip(&self) -> PyResult<PySeries> {
-        let s = self.series.str().lstrip().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+    #[pyo3(signature = (to_strip=None))]
+    fn lstrip(&self, to_strip: Option<&str>) -> PyResult<PySeries> {
+        match to_strip {
+            Some(chars) => self.wrap(|s| s.lstrip_chars(chars)),
+            None => self.wrap(|s| s.lstrip()),
+        }
     }
 
-    fn rstrip(&self) -> PyResult<PySeries> {
-        let s = self.series.str().rstrip().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+    #[pyo3(signature = (to_strip=None))]
+    fn rstrip(&self, to_strip: Option<&str>) -> PyResult<PySeries> {
+        match to_strip {
+            Some(chars) => self.wrap(|s| s.rstrip_chars(chars)),
+            None => self.wrap(|s| s.rstrip()),
+        }
     }
 
     fn len(&self) -> PyResult<PySeries> {
@@ -24978,36 +24999,363 @@ impl PySeriesStringAccessor {
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (pat))]
-    fn startswith(&self, pat: &str) -> PyResult<PySeries> {
-        let s = self
+    /// pandas' `startswith(pat, na=None)`: `pat` a string or a tuple of them.
+    #[pyo3(signature = (pat, na=None))]
+    fn startswith(&self, pat: &Bound<'_, PyAny>, na: Option<bool>) -> PyResult<PySeries> {
+        let pats = str_patterns(pat)?;
+        let refs: Vec<&str> = pats.iter().map(String::as_str).collect();
+        self.wrap(|s| s.startswith_any_with_na(&refs, na))
+    }
+
+    /// pandas' `endswith(pat, na=None)`: `pat` a string or a tuple of them.
+    #[pyo3(signature = (pat, na=None))]
+    fn endswith(&self, pat: &Bound<'_, PyAny>, na: Option<bool>) -> PyResult<PySeries> {
+        let pats = str_patterns(pat)?;
+        let refs: Vec<&str> = pats.iter().map(String::as_str).collect();
+        self.wrap(|s| s.endswith_any_with_na(&refs, na))
+    }
+
+    /// pandas' `contains(pat, case=True, flags=0, na=None, regex=True)`.
+    #[pyo3(signature = (pat, case=true, flags=0, na=None, regex=true))]
+    fn contains(
+        &self,
+        pat: &str,
+        case: bool,
+        flags: i64,
+        na: Option<bool>,
+        regex: bool,
+    ) -> PyResult<PySeries> {
+        require_no_regex_flags(flags)?;
+        self.wrap(|s| s.contains_with_options(pat, case, na, regex))
+    }
+
+    /// pandas' `replace(pat, repl, n=-1, case=None, flags=0, regex=False)`.
+    #[pyo3(signature = (pat, repl, n=-1, case=None, flags=0, regex=false))]
+    fn replace(
+        &self,
+        pat: &str,
+        repl: &str,
+        n: i64,
+        case: Option<bool>,
+        flags: i64,
+        regex: bool,
+    ) -> PyResult<PySeries> {
+        require_no_regex_flags(flags)?;
+        let n = usize::try_from(n).ok();
+        self.wrap(|s| s.replace_with_options(pat, repl, n, case.unwrap_or(true), regex))
+    }
+
+    // The rest of pandas' string methods over fp-frame's StringAccessor; the
+    // binding exposed only ten, so title/split/extract/count/zfill/cat/
+    // get_dummies/str[i] ... raised AttributeError
+    // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
+    fn title(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.title())
+    }
+    fn capitalize(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.capitalize())
+    }
+    fn swapcase(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.swapcase())
+    }
+    fn casefold(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.casefold())
+    }
+    fn isdigit(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.isdigit())
+    }
+    fn isalpha(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.isalpha())
+    }
+    fn isalnum(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.isalnum())
+    }
+    fn isspace(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.isspace())
+    }
+    fn islower(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.islower())
+    }
+    fn isupper(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.isupper())
+    }
+    fn isnumeric(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.isnumeric())
+    }
+    fn isdecimal(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.isdecimal())
+    }
+    fn istitle(&self) -> PyResult<PySeries> {
+        self.wrap(|s| s.istitle())
+    }
+    fn zfill(&self, width: usize) -> PyResult<PySeries> {
+        self.wrap(|s| s.zfill(width))
+    }
+    #[pyo3(signature = (width, side="left", fillchar=' '))]
+    fn pad(&self, width: usize, side: &str, fillchar: char) -> PyResult<PySeries> {
+        self.wrap(|s| s.pad(width, side, fillchar))
+    }
+    #[pyo3(signature = (width, fillchar=' '))]
+    fn center(&self, width: usize, fillchar: char) -> PyResult<PySeries> {
+        self.wrap(|s| s.center(width, fillchar))
+    }
+    #[pyo3(signature = (width, fillchar=' '))]
+    fn ljust(&self, width: usize, fillchar: char) -> PyResult<PySeries> {
+        self.wrap(|s| s.ljust(width, fillchar))
+    }
+    #[pyo3(signature = (width, fillchar=' '))]
+    fn rjust(&self, width: usize, fillchar: char) -> PyResult<PySeries> {
+        self.wrap(|s| s.rjust(width, fillchar))
+    }
+    fn repeat(&self, repeats: usize) -> PyResult<PySeries> {
+        self.wrap(|s| s.repeat(repeats))
+    }
+    #[pyo3(name = "wrap")]
+    fn wrap_text(&self, width: usize) -> PyResult<PySeries> {
+        self.wrap(|s| s.wrap(width))
+    }
+    fn normalize(&self, form: &str) -> PyResult<PySeries> {
+        self.wrap(|s| s.normalize(form))
+    }
+    fn removeprefix(&self, prefix: &str) -> PyResult<PySeries> {
+        self.wrap(|s| s.removeprefix(prefix))
+    }
+    fn removesuffix(&self, suffix: &str) -> PyResult<PySeries> {
+        self.wrap(|s| s.removesuffix(suffix))
+    }
+    /// pandas' `count(pat, flags=0)`: regex matches per string.
+    #[pyo3(signature = (pat, flags=0))]
+    fn count(&self, pat: &str, flags: i64) -> PyResult<PySeries> {
+        require_no_regex_flags(flags)?;
+        self.wrap(|s| s.count(pat))
+    }
+    #[pyo3(signature = (sub, start=0, end=None))]
+    fn find(&self, sub: &str, start: i64, end: Option<i64>) -> PyResult<PySeries> {
+        self.wrap(|s| s.find_with_bounds(sub, start, end))
+    }
+    #[pyo3(signature = (sub, start=0, end=None))]
+    fn rfind(&self, sub: &str, start: i64, end: Option<i64>) -> PyResult<PySeries> {
+        self.wrap(|s| s.rfind_with_bounds(sub, start, end))
+    }
+    /// pandas' `get(i)`: the i-th character (NaN past the end).
+    fn get(&self, i: i64) -> PyResult<PySeries> {
+        self.wrap(|s| s.get(i))
+    }
+    /// `s.str[i]` / `s.str[a:b:c]`.
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Ok(i) = key.extract::<i64>() {
+            return self.get(i);
+        }
+        let Ok(slice) = key.cast::<pyo3::types::PySlice>() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "str accessor indices must be integers or slices",
+            ));
+        };
+        let bound = |name: &str| -> PyResult<Option<i64>> {
+            let value = slice.getattr(name)?;
+            if value.is_none() {
+                Ok(None)
+            } else {
+                value.extract::<i64>().map(Some)
+            }
+        };
+        let (start, stop, step) = (bound("start")?, bound("stop")?, bound("step")?);
+        self.wrap(|s| s.slice(start, stop, step))
+    }
+    #[pyo3(signature = (start=None, stop=None, step=None))]
+    fn slice(
+        &self,
+        start: Option<i64>,
+        stop: Option<i64>,
+        step: Option<i64>,
+    ) -> PyResult<PySeries> {
+        self.wrap(|s| s.slice(start, stop, step))
+    }
+    #[pyo3(signature = (start=None, stop=None, repl=""))]
+    fn slice_replace(
+        &self,
+        start: Option<i64>,
+        stop: Option<i64>,
+        repl: &str,
+    ) -> PyResult<PySeries> {
+        self.wrap(|s| s.slice_replace(start, stop, repl))
+    }
+    /// pandas' `fullmatch(pat, case=True, flags=0, na=None)`.
+    #[pyo3(signature = (pat, case=true, flags=0, na=None))]
+    fn fullmatch(&self, pat: &str, case: bool, flags: i64, na: Option<bool>) -> PyResult<PySeries> {
+        require_no_regex_flags(flags)?;
+        self.wrap(|s| s.fullmatch_with_options(pat, case, na))
+    }
+    /// pandas' `match(pat, case=True, flags=0, na=None)`: a match at the start.
+    #[pyo3(name = "match", signature = (pat, case=true, flags=0, na=None))]
+    fn match_start(
+        &self,
+        pat: &str,
+        case: bool,
+        flags: i64,
+        na: Option<bool>,
+    ) -> PyResult<PySeries> {
+        require_no_regex_flags(flags)?;
+        self.wrap(|s| s.match_regex_with_options(pat, case, na))
+    }
+    /// pandas' `extract(pat, flags=0, expand=True)`: a DataFrame of the
+    /// groups, or with `expand=False` and one group a Series.
+    #[pyo3(signature = (pat, flags=0, expand=true))]
+    fn extract(&self, py: Python<'_>, pat: &str, flags: i64, expand: bool) -> PyResult<Py<PyAny>> {
+        require_no_regex_flags(flags)?;
+        let df = self
             .series
             .str()
-            .startswith(pat)
+            .extract_to_frame(pat)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        if df.num_columns() == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "pattern contains no capture groups",
+            ));
+        }
+        if !expand && df.num_columns() == 1 {
+            let s = self.series.str().extract(pat).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
     }
-
-    #[pyo3(signature = (pat))]
-    fn endswith(&self, pat: &str) -> PyResult<PySeries> {
-        let s = self.series.str().endswith(pat).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
-    }
-
-    #[pyo3(signature = (pat))]
-    fn contains(&self, pat: &str) -> PyResult<PySeries> {
-        let s = self.series.str().contains(pat).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
-    }
-
-    #[pyo3(signature = (pat, repl))]
-    fn replace(&self, pat: &str, repl: &str) -> PyResult<PySeries> {
-        let s = self
+    /// pandas' `split(pat=None, n=-1, expand=False, regex=None)` with
+    /// `expand=True`: a DataFrame of the pieces. A Series of lists
+    /// (`expand=False`) needs list values the columns do not hold yet.
+    #[pyo3(signature = (pat=None, n=-1, expand=false, regex=None))]
+    fn split(
+        &self,
+        pat: Option<&str>,
+        n: i64,
+        expand: bool,
+        regex: Option<bool>,
+    ) -> PyResult<PyDataFrame> {
+        if !expand {
+            return Err(not_implemented(
+                "str.split without expand=True (a Series of lists)",
+            ));
+        }
+        if regex == Some(true) || pat.is_none() {
+            return Err(not_implemented(
+                "str.split(expand=True) with pat=None or regex=True",
+            ));
+        }
+        let n = usize::try_from(n).ok().filter(|&n| n > 0);
+        let df = self
             .series
             .str()
-            .replace(pat, repl)
+            .split_expand_n(pat.unwrap_or_default(), n)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        Ok(PyDataFrame { inner: df })
+    }
+    /// pandas' `rsplit(pat=None, n=-1, expand=False)` with `expand=True`.
+    #[pyo3(signature = (pat=None, n=-1, expand=false))]
+    fn rsplit(&self, pat: Option<&str>, n: i64, expand: bool) -> PyResult<PyDataFrame> {
+        if !expand || pat.is_none() {
+            return Err(not_implemented(
+                "str.rsplit without expand=True (a Series of lists) or with pat=None",
+            ));
+        }
+        let n = usize::try_from(n).ok().filter(|&n| n > 0);
+        let df = self
+            .series
+            .str()
+            .rsplit_df(pat.unwrap_or_default(), n)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: df })
+    }
+    /// pandas' `partition(sep=' ', expand=True)` / `rpartition`.
+    #[pyo3(signature = (sep=" ", expand=true))]
+    fn partition(&self, sep: &str, expand: bool) -> PyResult<PyDataFrame> {
+        if !expand {
+            return Err(not_implemented("str.partition(expand=False)"));
+        }
+        wrap_frame(self.series.str().partition_df(sep))
+    }
+    #[pyo3(signature = (sep=" ", expand=true))]
+    fn rpartition(&self, sep: &str, expand: bool) -> PyResult<PyDataFrame> {
+        if !expand {
+            return Err(not_implemented("str.rpartition(expand=False)"));
+        }
+        wrap_frame(self.series.str().rpartition_df(sep))
+    }
+    /// pandas' `get_dummies(sep='|')`: a 0/1 column per distinct token.
+    #[pyo3(signature = (sep="|"))]
+    fn get_dummies(&self, sep: &str) -> PyResult<PyDataFrame> {
+        wrap_frame(self.series.str().get_dummies(sep))
+    }
+    /// pandas' `cat(others=None, sep=None, na_rep=None, join='left')`: with
+    /// no others, the strings joined into one; with a Series (or a list of
+    /// them) each row joined with the aligned rows.
+    #[pyo3(signature = (others=None, sep=None, na_rep=None, join="left"))]
+    fn cat(
+        &self,
+        py: Python<'_>,
+        others: Option<&Bound<'_, PyAny>>,
+        sep: Option<&str>,
+        na_rep: Option<&str>,
+        join: &str,
+    ) -> PyResult<Py<PyAny>> {
+        if join != "left" {
+            return Err(not_implemented("str.cat(join=...) other than 'left'"));
+        }
+        let sep = sep.unwrap_or("");
+        let Some(others) = others.filter(|others| !others.is_none()) else {
+            if na_rep.is_some() {
+                return Err(not_implemented("str.cat(na_rep=...) without others"));
+            }
+            let joined = self.series.str().cat(sep).map_err(frame_error_to_py)?;
+            return joined.into_py_any(py);
+        };
+        let others: Vec<Series> = if let Ok(series) = others.extract::<PyRef<'_, PySeries>>() {
+            vec![series.inner.clone()]
+        } else {
+            others
+                .try_iter()?
+                .map(|item| item.and_then(|item| extract_or_build_series(py, &item, &self.series)))
+                .collect::<PyResult<Vec<_>>>()?
+        };
+        let refs: Vec<&Series> = others.iter().collect();
+        let joined = self
+            .series
+            .str()
+            .cat_list(&refs, sep, na_rep)
+            .map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PySeries { inner: joined })?.into_any())
+    }
+}
+
+impl PySeriesStringAccessor {
+    fn wrap(
+        &self,
+        op: impl FnOnce(&fp_frame::StringAccessor<'_>) -> Result<Series, FrameError>,
+    ) -> PyResult<PySeries> {
+        op(&self.series.str())
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
+    }
+}
+
+/// A string method's pattern: a string, or pandas' tuple of strings.
+fn str_patterns(pat: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(text) = pat.extract::<String>() {
+        return Ok(vec![text]);
+    }
+    if let Ok(tuple) = pat.cast::<PyTuple>() {
+        return tuple.iter().map(|item| item.extract::<String>()).collect();
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "expected a string or tuple, not {}",
+        pat.get_type().name()?
+    )))
+}
+
+/// pandas' `flags=` (re module flags) are not modelled; only 0 is taken.
+fn require_no_regex_flags(flags: i64) -> PyResult<()> {
+    if flags == 0 {
+        Ok(())
+    } else {
+        Err(not_implemented("string methods with regex flags"))
     }
 }
 

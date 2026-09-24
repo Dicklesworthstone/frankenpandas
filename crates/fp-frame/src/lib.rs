@@ -50135,10 +50135,10 @@ impl StringAccessor<'_> {
             .iter()
             .map(|v| match v {
                 Scalar::Utf8(s) => Scalar::Bool(pred(s)),
-                _ if v.is_missing() => match na {
-                    Some(b) => Scalar::Bool(b),
-                    None => Scalar::Null(NullKind::NaN),
-                },
+                // Without `na`, pandas answers a missing string with that
+                // same missing value (None stays None, NaN stays NaN); this
+                // gave NaN for both (fvsao.13).
+                _ if v.is_missing() => na.map_or_else(|| v.clone(), Scalar::Bool),
                 _ => v.clone(),
             })
             .collect();
@@ -51793,9 +51793,16 @@ impl StringAccessor<'_> {
                     }
                 }
                 _ => {
-                    before.push(Scalar::Null(NullKind::NaN));
-                    sep_out.push(Scalar::Null(NullKind::NaN));
-                    after.push(Scalar::Null(NullKind::NaN));
+                    // A missing string stays that missing value in every
+                    // part (None stays None), as pandas (fvsao.13).
+                    let gap = if val.is_missing() {
+                        val.clone()
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    };
+                    before.push(gap.clone());
+                    sep_out.push(gap.clone());
+                    after.push(gap);
                 }
             }
         }
@@ -51848,9 +51855,16 @@ impl StringAccessor<'_> {
                     }
                 }
                 _ => {
-                    before.push(Scalar::Null(NullKind::NaN));
-                    sep_out.push(Scalar::Null(NullKind::NaN));
-                    after.push(Scalar::Null(NullKind::NaN));
+                    // A missing string stays that missing value in every
+                    // part (None stays None), as pandas (fvsao.13).
+                    let gap = if val.is_missing() {
+                        val.clone()
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    };
+                    before.push(gap.clone());
+                    sep_out.push(gap.clone());
+                    after.push(gap);
                 }
             }
         }
@@ -52382,6 +52396,13 @@ fn textwrap_handle_long_word(
     width: usize,
 ) {
     let space_left = if width < 1 { 1 } else { width - cur_len };
+    // CPython breaks only when `space_left > 0`; on a full line the word
+    // waits for the next one. Appending an empty head here made the drop of
+    // a trailing space remove the empty head instead ("ice " for "ice";
+    // fvsao.13). A full line is never empty here (cur_len 0 leaves the width).
+    if space_left == 0 {
+        return;
+    }
     let Some((chunk, _)) = rev.last() else {
         return;
     };
@@ -147091,7 +147112,12 @@ mod tests {
             ("ab-cd-ef-gh", 15, true, "ab-cd-ef-gh"),
             ("ab-cd-ef-gh", 20, true, "ab-cd-ef-gh"),
             ("x86-64 architecture", 5, true, "x86-\n64 ar\nchite\ncture"),
-            ("x86-64 architecture", 7, true, "x86-64 \narchite\ncture"),
+            // GOLDEN-CHANGE (fvsao.13): CPython 3.13.12 (the pinned oracle's
+            // Python) gives "x86-64\narchite\ncture" - its _handle_long_word
+            // breaks only when space_left > 0, so the full line drops its
+            // trailing space. 137 of the table's 141 rows agree with it
+            // unchanged; the 4 changed rows are marked GOLDEN-CHANGE.
+            ("x86-64 architecture", 7, true, "x86-64\narchite\ncture"),
             ("x86-64 architecture", 10, true, "x86-64 arc\nhitecture"),
             ("x86-64 architecture", 15, true, "x86-64\narchitecture"),
             ("x86-64 architecture", 20, true, "x86-64 architecture"),
@@ -147417,13 +147443,18 @@ mod tests {
                 "b ia-\njic-\ncaef\nddb\ngjcdc-\nga gde",
             ),
             ("h-dh", 8, true, "h-dh"),
-            ("ad ebe-igi b-cje", 4, true, "ad\nebe-\nigi \nb-\ncje"),
+            // GOLDEN-CHANGE (fvsao.13): CPython 3.13.12 gives "igi" (no
+            // trailing space) for the same space_left > 0 reason as the
+            // x86-64 row.
+            ("ad ebe-igi b-cje", 4, true, "ad\nebe-\nigi\nb-\ncje"),
             ("ffgj-bgjde-g", 4, true, "ffgj\n-bgj\nde-g"),
             (
                 "fg-f-fbeie fgei-dg-cjje aeedg-jfhhh ih-be-jfbde ca",
                 4,
                 true,
-                "fg-\nf-fb\neie \nfgei\n-dg-\ncjje\naeed\ng-jf\nhhh\nih-\nbe-j\nfbde\nca",
+                // GOLDEN-CHANGE (fvsao.13): CPython 3.13.12 gives "eie" (see
+                // the x86-64 row).
+                "fg-\nf-fb\neie\nfgei\n-dg-\ncjje\naeed\ng-jf\nhhh\nih-\nbe-j\nfbde\nca",
             ),
             ("bhgjd-hgdc b-dcih-i", 6, true, "bhgjd-\nhgdc b\n-dcih-\ni"),
             ("hi-jfhji", 11, true, "hi-jfhji"),
@@ -147476,7 +147507,9 @@ mod tests {
                 "abd-jaeja-hi ecjg-bhfg-fbc hegi-h",
                 4,
                 true,
-                "abd-\njaej\na-hi\necjg\n-bhf\ng-\nfbc \nhegi\n-h",
+                // GOLDEN-CHANGE (fvsao.13): CPython 3.13.12 gives "fbc" (see
+                // the x86-64 row).
+                "abd-\njaej\na-hi\necjg\n-bhf\ng-\nfbc\nhegi\n-h",
             ),
             (
                 "bgi-i adif-hhade eh-bajd-ei",
@@ -202937,7 +202970,13 @@ mod tests {
         // sorts on a monotonic index.
         const HOUR: i64 = 3_600_000_000_000;
         let day = |d: i64| 1_704_067_200_000_000_000 + (d - 1) * 24 * HOUR;
-        let stamps = vec![day(1), day(2) + 10 * HOUR, day(5) + 12 * HOUR, day(5) + 13 * HOUR, day(40)];
+        let stamps = vec![
+            day(1),
+            day(2) + 10 * HOUR,
+            day(5) + 12 * HOUR,
+            day(5) + 13 * HOUR,
+            day(40),
+        ];
         let s = Series::new(
             "v",
             Index::from_datetime64(stamps),
@@ -202949,7 +202988,9 @@ mod tests {
             .loc_slice(Some(&text("2024-01-02")), Some(&text("2024-01-05")))
             .unwrap();
         assert_eq!(window.values(), [2_i64, 3, 4].map(Scalar::Int64));
-        let january = s.loc_slice(Some(&text("2024-01")), Some(&text("2024-01"))).unwrap();
+        let january = s
+            .loc_slice(Some(&text("2024-01")), Some(&text("2024-01")))
+            .unwrap();
         assert_eq!(january.len(), 4);
         assert_eq!(s.loc_slice(Some(&text("2024")), None).unwrap().len(), 5);
         // Monotonic int index, bounds that are not labels.
@@ -202972,7 +203013,11 @@ mod tests {
             Column::from_i64_values(vec![30, 10, 50]),
         )
         .unwrap();
-        assert!(shuffled.loc_slice(Some(&IndexLabel::Int64(2)), None).is_err());
+        assert!(
+            shuffled
+                .loc_slice(Some(&IndexLabel::Int64(2)), None)
+                .is_err()
+        );
 
         // unstack of a groupby result's two-level row MultiIndex.
         let frame = DataFrame::from_dict(
@@ -202990,8 +203035,35 @@ mod tests {
         assert_eq!(wide.column_names(), vec!["x", "y"]);
         assert_eq!(wide.index().name(), Some("k"));
         // (b, y) does not occur: NaN, so the int values are float64.
-        assert_eq!(wide.columns()["x"].values(), [3.0, 1.0].map(Scalar::Float64));
+        assert_eq!(
+            wide.columns()["x"].values(),
+            [3.0, 1.0].map(Scalar::Float64)
+        );
         assert!(wide.columns()["y"].values()[1].is_missing());
+
+        // CPython's textwrap keeps a full line's word for the next line, so
+        // the trailing space drops: pandas "  Al\nice\nSmit\nh".
+        let text_series = Series::from_values(
+            "t",
+            (0..2).map(IndexLabel::Int64).collect(),
+            vec![text_scalar("  Alice Smith "), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+        assert_eq!(
+            text_series.str().wrap(4).unwrap().values()[0],
+            text_scalar("  Al\nice\nSmit\nh")
+        );
+        // A missing string keeps its own missing value (None), as pandas.
+        assert_eq!(
+            text_series
+                .str()
+                .contains_with_options("A", true, None, true)
+                .unwrap()
+                .values()[1],
+            Scalar::Null(NullKind::Null)
+        );
+        let (before, _, _) = text_series.str().partition(" ").unwrap();
+        assert_eq!(before.values()[1], Scalar::Null(NullKind::Null));
     }
 
     fn text_scalar(text: &str) -> Scalar {
