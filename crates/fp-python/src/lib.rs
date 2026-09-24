@@ -13623,46 +13623,66 @@ pub struct PySeriesLoc {
 
 #[pymethods]
 impl PySeriesLoc {
+    /// Same resolution order as `DataFrame.loc` (see `resolve_loc_rows`): label
+    /// slices are inclusive, boolean masks are recognised before integer
+    /// labels, and a duplicated label returns every matching row.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
-            let s = self
-                .inner
-                .loc_bool_series(&series_mask.inner)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-        }
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
-            let s = self
-                .inner
-                .loc_bool(&mask)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-        }
-        if let Ok(labels) = key.extract::<Vec<String>>() {
-            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Utf8).collect();
-            let s = self
-                .inner
-                .loc(&idx_labels)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-        }
-        if let Ok(labels) = key.extract::<Vec<i64>>() {
-            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Int64).collect();
-            let s = self
-                .inner
-                .loc(&idx_labels)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-        }
-        if let Ok(label) = py_to_index_label(key) {
-            match self.inner.at(&label) {
-                Ok(scalar) => return scalar_to_py(py, &scalar),
-                Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())),
+        let series = |s: Series| -> PyResult<Py<PyAny>> {
+            Ok(Py::new(py, PySeries { inner: s })?.into_any())
+        };
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+            if !slice.getattr("step")?.is_none() {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "loc label slices with a step are not supported yet",
+                ));
             }
+            let bound = |name: &str| -> PyResult<Option<IndexLabel>> {
+                let v = slice.getattr(name)?;
+                if v.is_none() {
+                    Ok(None)
+                } else {
+                    py_to_index_label(&v).map(Some)
+                }
+            };
+            let (start, stop) = (bound("start")?, bound("stop")?);
+            return series(
+                self.inner
+                    .loc_slice(start.as_ref(), stop.as_ref())
+                    .map_err(loc_key_error)?,
+            );
         }
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "loc requires label, list of labels, or boolean mask",
-        ))
+        if let Some(mask) = loc_bool_series_mask(key) {
+            return series(
+                self.inner
+                    .loc_bool_series(&mask.inner)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?,
+            );
+        }
+        if (key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok())
+            && let Ok(mask) = key.extract::<Vec<bool>>()
+        {
+            return series(
+                self.inner
+                    .loc_bool(&mask)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?,
+            );
+        }
+        if let Some(labels) = loc_label_list(key) {
+            return series(self.inner.loc(&labels?).map_err(loc_key_error)?);
+        }
+        let label = py_to_index_label(key)?;
+        match self
+            .inner
+            .index()
+            .labels()
+            .iter()
+            .filter(|l| **l == label)
+            .count()
+        {
+            0 => Err(loc_key_error(format!("{label:?}"))),
+            1 => scalar_to_py(py, &self.inner.at(&label).map_err(loc_key_error)?),
+            _ => series(self.inner.loc(&[label]).map_err(loc_key_error)?),
+        }
     }
 }
 
@@ -21150,6 +21170,152 @@ impl PyDataFrameILoc {
     }
 }
 
+/// A `.loc` row indexer resolved against a frame.
+enum LocRows {
+    /// A label that occurs exactly once: pandas returns a row Series (or a
+    /// scalar when a single column is also named).
+    Label(IndexLabel),
+    /// Every other selection: boolean mask, label list, inclusive label slice,
+    /// or a DUPLICATED label (pandas returns all matching rows as a frame).
+    Frame(Box<DataFrame>),
+}
+
+impl LocRows {
+    fn frame(frame: DataFrame) -> Self {
+        Self::Frame(Box::new(frame))
+    }
+}
+
+fn loc_key_error(e: impl std::fmt::Display) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
+}
+
+/// The boolean mask carried by a Series indexer, if it is one.
+fn loc_bool_series_mask<'py>(key: &Bound<'py, PyAny>) -> Option<PyRef<'py, PySeries>> {
+    key.extract::<PyRef<'_, PySeries>>()
+        .ok()
+        .filter(|s| matches!(s.inner.column().dtype(), DType::Bool | DType::BoolNullable))
+}
+
+/// Labels from a list-like indexer (list, tuple of labels, ndarray, Index,
+/// non-boolean Series). Strings are scalars, not list-likes.
+fn loc_label_list(key: &Bound<'_, PyAny>) -> Option<PyResult<Vec<IndexLabel>>> {
+    if key.extract::<String>().is_ok() {
+        return None;
+    }
+    if let Ok(series) = key.extract::<PyRef<'_, PySeries>>() {
+        return Some(Ok(series
+            .inner
+            .values()
+            .iter()
+            .map(scalar_to_index_label_converter)
+            .collect()));
+    }
+    let list = if let Ok(list) = key.cast::<PyList>() {
+        list.clone()
+    } else if let Ok(tolist) = key.getattr("tolist").and_then(|f| f.call0()) {
+        match tolist.cast_into::<PyList>() {
+            Ok(list) => list,
+            Err(_) => return None,
+        }
+    } else {
+        return None;
+    };
+    Some(list.iter().map(|item| py_to_index_label(&item)).collect())
+}
+
+/// Resolve a `.loc` row indexer the way pandas does. ORDER MATTERS: a Python
+/// bool is an int, so boolean masks must be recognised before any integer-label
+/// extraction (the old order read `df.loc[df.a > 2, 'b']`'s mask as labels 1/0).
+fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows> {
+    if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+        if !slice.getattr("step")?.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "loc label slices with a step are not supported yet",
+            ));
+        }
+        let bound = |name: &str| -> PyResult<Option<IndexLabel>> {
+            let v = slice.getattr(name)?;
+            if v.is_none() {
+                Ok(None)
+            } else {
+                py_to_index_label(&v).map(Some)
+            }
+        };
+        let (start, stop) = (bound("start")?, bound("stop")?);
+        // pandas label slices are INCLUSIVE of the stop label.
+        return df
+            .loc_slice(start.as_ref(), stop.as_ref())
+            .map(LocRows::frame)
+            .map_err(loc_key_error);
+    }
+    if let Some(mask) = loc_bool_series_mask(key) {
+        return df
+            .loc_bool_series(&mask.inner)
+            .map(LocRows::frame)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()));
+    }
+    if key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok() {
+        if let Ok(mask) = key.extract::<Vec<bool>>() {
+            return df
+                .loc_bool(&mask)
+                .map(LocRows::frame)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()));
+        }
+    }
+    if let Some(labels) = loc_label_list(key) {
+        return df.loc(&labels?).map(LocRows::frame).map_err(loc_key_error);
+    }
+    let label = py_to_index_label(key)?;
+    match df.index().labels().iter().filter(|l| **l == label).count() {
+        0 => Err(loc_key_error(format!("{label:?}"))),
+        1 => Ok(LocRows::Label(label)),
+        _ => df.loc(&[label]).map(LocRows::frame).map_err(loc_key_error),
+    }
+}
+
+/// Column names selected by a `.loc` column indexer: one name, a list, or an
+/// inclusive label slice over the column order.
+fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<String>>> {
+    if key.extract::<String>().is_ok() {
+        return Ok(None);
+    }
+    if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
+        if !slice.getattr("step")?.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "loc column slices with a step are not supported yet",
+            ));
+        }
+        let names: Vec<String> = df.column_names().iter().map(|s| s.to_string()).collect();
+        let find = |name: &str, last: bool| -> PyResult<usize> {
+            let pos = if last {
+                names.iter().rposition(|n| n == name)
+            } else {
+                names.iter().position(|n| n == name)
+            };
+            pos.ok_or_else(|| loc_key_error(name))
+        };
+        let start = slice.getattr("start")?;
+        let stop = slice.getattr("stop")?;
+        let lo = if start.is_none() {
+            0
+        } else {
+            find(&start.extract::<String>()?, false)?
+        };
+        let hi = if stop.is_none() {
+            names.len()
+        } else {
+            find(&stop.extract::<String>()?, true)? + 1
+        };
+        return Ok(Some(if lo < hi {
+            names[lo..hi].to_vec()
+        } else {
+            Vec::new()
+        }));
+    }
+    key.extract::<Vec<String>>().map(Some)
+}
+
 #[pyclass(name = "_DataFrameLoc")]
 pub struct PyDataFrameLoc {
     inner: DataFrame,
@@ -21165,159 +21331,54 @@ impl PyDataFrameLoc {
                     "Too many indexers; DataFrame loc takes at most 2",
                 ));
             }
-            let row_key = tuple.get_item(0)?;
+            let rows = resolve_loc_rows(&self.inner, &tuple.get_item(0)?)?;
             let col_key = tuple.get_item(1)?;
 
-            // Row is single label, col is single str: df.loc['r', 'c'] -> scalar
-            if let Ok(col_name) = col_key.extract::<String>() {
-                if let Ok(label) = py_to_index_label(&row_key)
-                    && let Ok(scalar) = self.inner.at(&label, &col_name)
-                {
-                    return scalar_to_py(py, &scalar);
+            match (rows, resolve_loc_columns(&self.inner, &col_key)?) {
+                // df.loc['r', 'c'] with a unique label -> scalar
+                (LocRows::Label(label), None) => {
+                    let col_name = col_key.extract::<String>()?;
+                    let scalar = self.inner.at(&label, &col_name).map_err(loc_key_error)?;
+                    scalar_to_py(py, &scalar)
                 }
-                // Col is single str, row is list or slice or mask: df.loc[:, 'c'] -> Series
-                let col = self.inner.column(&col_name).ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(col_name.clone())
-                })?;
-                let col_series = Series::new(&col_name, self.inner.index().clone(), col.clone())
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-                if let Ok(labels) = row_key.extract::<Vec<String>>() {
-                    let idx_labels: Vec<IndexLabel> =
-                        labels.into_iter().map(IndexLabel::Utf8).collect();
-                    let s = col_series.loc(&idx_labels).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
-                    })?;
-                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-                } else if let Ok(labels) = row_key.extract::<Vec<i64>>() {
-                    let idx_labels: Vec<IndexLabel> =
-                        labels.into_iter().map(IndexLabel::Int64).collect();
-                    let s = col_series.loc(&idx_labels).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
-                    })?;
-                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-                } else if let Ok(slice) = row_key.cast::<pyo3::types::PySlice>() {
-                    let idx = slice.indices(self.inner.len() as isize)?;
-                    let s = col_series
-                        .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
-                        .map_err(|e| {
+                // df.loc[rows, 'c'] -> Series named 'c' over the selected rows
+                (LocRows::Frame(sub), None) => {
+                    let col_name = col_key.extract::<String>()?;
+                    let col = sub
+                        .column(&col_name)
+                        .ok_or_else(|| loc_key_error(&col_name))?;
+                    let s =
+                        Series::new(&col_name, sub.index().clone(), col.clone()).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?;
-                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-                } else if let Ok(mask) = row_key.extract::<Vec<bool>>() {
-                    let s = col_series.iloc_bool(&mask).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                    })?;
-                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-                } else if let Ok(series_mask) = row_key.extract::<PyRef<'_, PySeries>>() {
-                    let s = col_series
-                        .iloc_bool_series(&series_mask.inner)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                    return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+                    Ok(Py::new(py, PySeries { inner: s })?.into_any())
                 }
-            }
-
-            // Col is list of str: df.loc[..., ['c1', 'c2']]
-            if let Ok(col_names) = col_key.extract::<Vec<String>>() {
-                if let Ok(label) = py_to_index_label(&row_key) {
-                    let row_series = self.inner.loc_row(&label).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
-                    })?;
+                // df.loc['r', ['c1', 'c2']] with a unique label -> row Series
+                (LocRows::Label(label), Some(col_names)) => {
+                    let row_series = self.inner.loc_row(&label).map_err(loc_key_error)?;
                     let col_labels: Vec<IndexLabel> =
                         col_names.into_iter().map(IndexLabel::Utf8).collect();
-                    let sub = row_series.loc(&col_labels).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
-                    })?;
-                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                    let sub = row_series.loc(&col_labels).map_err(loc_key_error)?;
+                    Ok(Py::new(py, PySeries { inner: sub })?.into_any())
                 }
-                if let Ok(labels) = row_key.extract::<Vec<String>>() {
-                    let idx_labels: Vec<IndexLabel> =
-                        labels.into_iter().map(IndexLabel::Utf8).collect();
-                    let res = self
-                        .inner
-                        .loc_with_columns(&idx_labels, Some(&col_names))
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
-                        })?;
-                    return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-                }
-                if let Ok(labels) = row_key.extract::<Vec<i64>>() {
-                    let idx_labels: Vec<IndexLabel> =
-                        labels.into_iter().map(IndexLabel::Int64).collect();
-                    let res = self
-                        .inner
-                        .loc_with_columns(&idx_labels, Some(&col_names))
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
-                        })?;
-                    return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-                }
-                if let Ok(slice) = row_key.cast::<pyo3::types::PySlice>() {
-                    let idx = slice.indices(self.inner.len() as isize)?;
-                    let sliced = self
-                        .inner
-                        .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                    let res = sliced
+                // df.loc[rows, cols] -> DataFrame
+                (LocRows::Frame(sub), Some(col_names)) => {
+                    let res = sub
                         .select_columns(&col_names.iter().map(String::as_str).collect::<Vec<_>>())
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                    return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+                        .map_err(loc_key_error)?;
+                    Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
                 }
             }
-
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported indexer combination for loc",
-            ));
+        } else {
+            // Case 2: single row indexer
+            match resolve_loc_rows(&self.inner, key)? {
+                LocRows::Label(label) => {
+                    let row = self.inner.loc_row(&label).map_err(loc_key_error)?;
+                    Ok(Py::new(py, PySeries { inner: row })?.into_any())
+                }
+                LocRows::Frame(frame) => Ok(Py::new(py, PyDataFrame { inner: *frame })?.into_any()),
+            }
         }
-
-        // Case 2: Single indexer
-        if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
-            let frame = self
-                .inner
-                .loc_bool_series(&series_mask.inner)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
-        }
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
-            let frame = self
-                .inner
-                .loc_bool(&mask)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
-        }
-        if let Ok(labels) = key.extract::<Vec<String>>() {
-            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Utf8).collect();
-            let frame = self
-                .inner
-                .loc(&idx_labels)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
-        }
-        if let Ok(labels) = key.extract::<Vec<i64>>() {
-            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Int64).collect();
-            let frame = self
-                .inner
-                .loc(&idx_labels)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
-        }
-        if let Ok(label) = py_to_index_label(key) {
-            let row = self
-                .inner
-                .loc_row(&label)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-            return Ok(Py::new(py, PySeries { inner: row })?.into_any());
-        }
-
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "loc indexer must be label, list of labels, or boolean mask",
-        ))
     }
 }
 

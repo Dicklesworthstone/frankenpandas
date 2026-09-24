@@ -1909,3 +1909,72 @@ def test_ddof_cov_reductions_parity():
     assert list(df_str_fp.sem(numeric_only=True).to_dict().keys()) == ["a"]
 
 
+def _loc_view(obj: Any) -> Any:
+    """(kind, index, values, name) with NaN normalised, for strict comparison."""
+
+    def clean(v: Any) -> Any:
+        if hasattr(v, "item"):
+            v = v.item()
+        if isinstance(v, float) and math.isnan(v):
+            return "NaN"
+        return v
+
+    if hasattr(obj, "columns") and hasattr(obj, "index"):
+        cols = [str(c) for c in list(obj.columns)]
+        return (
+            "frame",
+            [clean(x) for x in list(obj.index)],
+            cols,
+            {c: [clean(x) for x in list(obj[c])] for c in cols},
+        )
+    if hasattr(obj, "index") and hasattr(obj, "name"):
+        return ("series", [clean(x) for x in list(obj.index)], [clean(x) for x in list(obj)], obj.name)
+    return ("scalar", clean(obj))
+
+
+_LOC_CASES = {
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.2: the boolean mask
+    # used to be read as integer labels 1/0 (a Python bool is an int).
+    "mask_single_column": lambda df, dk, s: df.loc[df["a"] > 2, "b"],
+    "mask_rows": lambda df, dk, s: df.loc[df["a"] > 2],
+    "mask_column_list": lambda df, dk, s: df.loc[df["a"] > 2, ["a", "b"]],
+    "bool_list_single_column": lambda df, dk, s: df.loc[[True, False, True, False], "a"],
+    # label slices are INCLUSIVE of the stop label (was positional, stop-exclusive)
+    "label_slice_single_column": lambda df, dk, s: df.loc[1:2, "a"],
+    "label_slice_column_list": lambda df, dk, s: df.loc[1:2, ["a", "b"]],
+    "column_label_slice": lambda df, dk, s: df.loc[:, "a":"b"],
+    # a duplicated label returns EVERY matching row (was only the first)
+    "duplicate_label_rows": lambda df, dk, s: dk.loc["x"],
+    "duplicate_label_column": lambda df, dk, s: dk.loc["y", "a"],
+    "duplicate_label_list": lambda df, dk, s: dk.loc[["x"]],
+    "unique_label_scalar": lambda df, dk, s: df.loc[2, "a"],
+    "series_label_slice": lambda df, dk, s: s.loc[6:7],
+    "series_mask": lambda df, dk, s: s.loc[s > 15],
+    "series_label_list": lambda df, dk, s: s.loc[[8, 5]],
+    "series_unique_label": lambda df, dk, s: s.loc[6],
+    "missing_label_raises": lambda df, dk, s: dk.loc["zz"],
+    "unique_label_row": pytest.param(
+        lambda df, dk, s: df.loc[2],
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason="row Series name is '2' (str) not 2 (int): Series names are strings "
+            "(br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.7)",
+        ),
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LOC_CASES.values()), ids=list(_LOC_CASES))
+def test_loc_indexing_matches_pandas(case: Any) -> None:
+    def run(mod: Any) -> Any:
+        df = mod.DataFrame({"k": ["x", "y", "x", "y"], "a": [4, 1, 3, 2], "b": [1.5, None, 3.5, 4.0]})
+        s = mod.Series([10, 20, 30, 40], index=[5, 6, 7, 8], name="s")
+        try:
+            return _loc_view(case(df, df.set_index("k"), s))
+        except Exception as exc:  # compare the exception CLASS, like pandas users do
+            return ("raise", type(exc).__name__)
+
+    assert run(fpd) == run(pd)
+
+
