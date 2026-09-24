@@ -3054,6 +3054,60 @@ def test_frame_integer_negative_power_raises_like_pandas() -> None:
             _int_frame(m)[["i"]] ** -1
 
 
+def _fs_frame(m: Any) -> Any:
+    return m.DataFrame({"b": [1, 2, 3], "a": [1.5, _NAN, 3.5]}, index=["x", "y", "z"])
+
+
+def _row_s(m: Any, vals: Any = (1, 2, 3), idx: Any = ("x", "y", "z")) -> Any:
+    return m.Series(list(vals), index=list(idx))
+
+
+# br-frankenpandas-ini2u (a DataFrame took no Series operand) and the
+# DataFrame flex keywords axis/fill_value (br-frankenpandas-n57tz).
+_FRAME_SERIES_CASES = {
+    "plus_series_columns": lambda m: _fs_frame(m) + m.Series([10, 20], index=["a", "b"]),
+    "plus_series_extra_label": lambda m: _fs_frame(m) + m.Series([10, 20], index=["a", "c"]),
+    "plus_series_float": lambda m: _fs_frame(m) + m.Series([0.5, 1.0], index=["a", "b"]),
+    "plus_series_same_order_keeps_columns": lambda m: m.DataFrame({"b": [1], "a": [2]})
+    + m.Series([1, 2], index=["b", "a"]),
+    "add_axis0": lambda m: _fs_frame(m).add(_row_s(m), axis=0),
+    "add_axis0_misaligned": lambda m: _fs_frame(m).add(_row_s(m, (1, 2), ("y", "w")), axis=0),
+    "sub_axis_index": lambda m: _fs_frame(m).sub(_row_s(m), axis="index"),
+    "rsub_axis0": lambda m: _fs_frame(m).rsub(_row_s(m), axis=0),
+    "mul_axis1": lambda m: _fs_frame(m).mul(m.Series([2, 3], index=["a", "b"]), axis=1),
+    "truediv_axis0": lambda m: _fs_frame(m).truediv(_row_s(m, (2, 4, 8)), axis=0),
+    "floordiv_axis0_zero": lambda m: _fs_frame(m).floordiv(_row_s(m, (2, 0, 8)), axis=0),
+    "eq_axis0": lambda m: _fs_frame(m).eq(_row_s(m), axis=0),
+    "eq_series_columns": lambda m: _fs_frame(m) == m.Series([1, 1.5], index=["b", "a"]),
+    "fill_frame_misaligned": lambda m: _fs_frame(m).add(
+        m.DataFrame({"a": [1.0], "c": [2.0]}, index=["y"]), fill_value=0
+    ),
+    "fill_frame_complete_keeps_int": lambda m: _fs_frame(m)[["b"]].add(_fs_frame(m)[["b"]], fill_value=0),
+    "fill_frame_int_beside_nan_column": lambda m: _fs_frame(m).add(_fs_frame(m), fill_value=0),
+    "fill_scalar": lambda m: _fs_frame(m).add(1, fill_value=0),
+    "axis_ignored_for_scalar": lambda m: _fs_frame(m).add(1, axis=0),
+    "axis_ignored_for_frame": lambda m: _fs_frame(m).add(_fs_frame(m), axis=0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FRAME_SERIES_CASES.values()), ids=list(_FRAME_SERIES_CASES))
+def test_frame_series_arithmetic_and_flex_keywords_match_pandas(case: Any) -> None:
+    assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_flex_keyword_errors_and_refusals() -> None:
+    for m in (pd, fpd):
+        with pytest.raises(NotImplementedError, match="fill_value 0 not supported"):
+            _fs_frame(m).add(_row_s(m), axis=0, fill_value=0)
+        with pytest.raises(ValueError, match="No axis named 2 for object type DataFrame"):
+            _fs_frame(m).add(_row_s(m), axis=2)
+    # level= broadcasts over a MultiIndex level, which the binding cannot.
+    with pytest.raises(NotImplementedError, match="level"):
+        _fs_frame(fpd).add(fpd.Series([1, 2], index=["a", "b"]), level=0)
+
+
 def _nan_pair(m: Any) -> Any:
     return m.Series([1.0, _NAN, 3.0]), m.Series([2.0, _NAN, 1.0])
 

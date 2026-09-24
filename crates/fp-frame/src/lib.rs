@@ -89046,6 +89046,131 @@ impl DataFrame {
         self.apply_scalar_op(value, |a, b| a + b)
     }
 
+    /// `df <op> series`, or `series <op> df` when `reflected`, broadcast as
+    /// pandas does (br-frankenpandas-ini2u: fp had no DataFrame x Series op).
+    /// With `axis = 1` (pandas' default, "columns") the Series' labels name
+    /// columns: column labels are outer-joined, each column combines with its
+    /// label's value, and a label on one side only gives an all-NaN float64
+    /// column. With `axis = 0` ("index") the Series runs down the rows and each
+    /// column combines with it as Series arithmetic over the outer-joined row
+    /// labels. An outer join keeps equal labels in order and sorts different
+    /// ones; dtypes follow Series arithmetic.
+    pub fn arith_series(
+        &self,
+        series: &Series,
+        op: ArithmeticOp,
+        axis: usize,
+        reflected: bool,
+    ) -> Result<Self, FrameError> {
+        self.broadcast_series(series, axis, |left, right| {
+            let (left, right) = if reflected {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            match op {
+                ArithmeticOp::Add => left.add(right),
+                ArithmeticOp::Sub => left.sub(right),
+                ArithmeticOp::Mul => left.mul(right),
+                ArithmeticOp::Div => left.truediv(right),
+                ArithmeticOp::FloorDiv => left.floordiv(right),
+                ArithmeticOp::Mod => left.modulo(right),
+                ArithmeticOp::Pow => left.pow(right),
+            }
+        })
+    }
+
+    /// `df <op> series` for a comparison, broadcast like
+    /// [`arith_series`](Self::arith_series): a missing operand compares False
+    /// (True under `!=`), as pandas' flex comparisons do.
+    pub fn cmp_series(
+        &self,
+        series: &Series,
+        op: ComparisonOp,
+        axis: usize,
+    ) -> Result<Self, FrameError> {
+        self.broadcast_series(series, axis, |left, right| left.comparison_op(right, op))
+    }
+
+    /// The shared shape of [`arith_series`](Self::arith_series) and
+    /// [`cmp_series`](Self::cmp_series): `combine(column, operand)` per
+    /// column, the operand being `series` itself down the rows (`axis = 0`) or
+    /// the column's label value broadcast over the rows (`axis = 1`).
+    fn broadcast_series(
+        &self,
+        series: &Series,
+        axis: usize,
+        combine: impl Fn(&Series, &Series) -> Result<Series, FrameError>,
+    ) -> Result<Self, FrameError> {
+        let as_series = |name: &str, column: Column| Series::new(name, self.index.clone(), column);
+        let mut columns = BTreeMap::new();
+        if axis == 0 {
+            let mut index = None;
+            for name in &self.column_order {
+                let column = as_series(name, self.columns[name.as_str()].clone())?;
+                let out = combine(&column, series)?;
+                index.get_or_insert_with(|| out.index().clone());
+                columns.insert(name.clone(), out.column().clone());
+            }
+            let index = index.unwrap_or_else(|| self.index.clone());
+            return Self::new_with_column_order(index, columns, self.column_order.to_vec());
+        }
+        let labels: Vec<String> = series
+            .index()
+            .labels()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let mut names: Vec<String> = self.column_order.to_vec();
+        for label in &labels {
+            if !self.columns.contains_key(label) && !names.contains(label) {
+                names.push(label.clone());
+            }
+        }
+        if self.column_order.as_slice() != labels.as_slice() {
+            names.sort();
+        }
+        let n = self.len();
+        let values = series.values();
+        for name in &names {
+            let value = labels
+                .iter()
+                .position(|label| label == name)
+                .map(|i| &values[i]);
+            let column = match (self.columns.get(name.as_str()), value) {
+                (Some(column), Some(value)) if !value.is_missing() => {
+                    let left = as_series(name, column.clone())?;
+                    let right = as_series(name, Column::from_values(vec![value.clone(); n])?)?;
+                    combine(&left, &right)?.column().clone()
+                }
+                (Some(column), _) => {
+                    let left = as_series(name, column.clone())?;
+                    let nan = vec![Scalar::Null(NullKind::NaN); n];
+                    let right = as_series(name, Column::new(DType::Float64, nan)?)?;
+                    combine(&left, &right)?.column().clone()
+                }
+                (None, _) => {
+                    // A label the frame lacks: the column is all missing, and
+                    // the combination with it all NaN (comparisons: all False
+                    // or, under !=, all True - combine decides).
+                    let nan = vec![Scalar::Null(NullKind::NaN); n];
+                    let missing = as_series(name, Column::new(DType::Float64, nan.clone())?)?;
+                    let other = match value {
+                        Some(value) if !value.is_missing() => {
+                            Column::from_values(vec![value.clone(); n])?
+                        }
+                        _ => Column::new(DType::Float64, nan)?,
+                    };
+                    combine(&missing, &as_series(name, other)?)?
+                        .column()
+                        .clone()
+                }
+            };
+            columns.insert(name.clone(), column);
+        }
+        Self::new_with_column_order(self.index.clone(), columns, names)
+    }
+
     /// `df <op> scalar`, or `scalar <op> df` when `reflected`, with pandas'
     /// dtypes: an all-valid Int64 column (and a Bool column under + - * // %)
     /// with an integer scalar goes through the Series kernel
@@ -89825,10 +89950,29 @@ impl DataFrame {
     /// When one operand is NaN/missing and the other is not, the missing operand
     /// is replaced by `fill_value` before applying `op`. When both are missing,
     /// the result is NaN.
-    fn binary_df_op_fill<F>(&self, other: &Self, op: F, fill_value: f64) -> Result<Self, FrameError>
+    fn binary_df_op_fill<F>(
+        &self,
+        other: &Self,
+        op: F,
+        fill_value: f64,
+        int_op: Option<ArithmeticOp>,
+    ) -> Result<Self, FrameError>
     where
         F: Fn(f64, f64) -> f64 + Sync,
     {
+        // A pair of all-valid int64 columns over the same rows has nothing to
+        // fill, so it keeps pandas' int64 through the Series kernel, as
+        // binary_df_op does (br-frankenpandas-ini2u); `int_op` is None for true
+        // division.
+        let int_pair = |lc: &Column, rc: &Column| {
+            int_op.filter(|_| {
+                lc.dtype() == DType::Int64
+                    && rc.dtype() == DType::Int64
+                    && lc.validity().all()
+                    && rc.validity().all()
+            })
+        };
+        let same_rows = self.index == other.index;
         // (df.add(fill_value=) unaligned was 0.14x pandas). Bit-identical to the
         // Scalar per-cell fill loop below.
         if self.row_multiindex.is_none()
@@ -89848,10 +89992,14 @@ impl DataFrame {
                 right_positions,
             } = align_union_sorted_plan(&self.index, &other.index);
             let computed = self.par_map_columns(&self.column_order, |name| {
+                let (lc, rc) = (&self.columns[name], &other.columns[name]);
+                if same_rows && let Some(int_op) = int_pair(lc, rc) {
+                    return Ok(lc.binary_numeric(rc, int_op)?);
+                }
                 binary_gather_op_fill_numeric(
-                    &self.columns[name],
+                    lc,
                     &left_positions,
-                    &other.columns[name],
+                    rc,
                     &right_positions,
                     &op,
                     fill_value,
@@ -89878,7 +90026,11 @@ impl DataFrame {
             let rc = &right.columns[col_name];
             let left_numlike = matches!(lc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
             let right_numlike = matches!(rc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
-            if left_numlike && right_numlike {
+            // After alignment an int64 column is still all-valid Int64 only if
+            // no gap landed in it.
+            if let Some(int_op) = int_pair(lc, rc) {
+                result_cols.insert(col_name.clone(), lc.binary_numeric(rc, int_op)?);
+            } else if left_numlike && right_numlike {
                 let vals: Vec<Scalar> = lc
                     .values()
                     .iter()
@@ -89928,21 +90080,21 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.add(other, fill_value=X)`.
     pub fn add_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
-        self.binary_df_op_fill(other, |a, b| a + b, fill_value)
+        self.binary_df_op_fill(other, |a, b| a + b, fill_value, Some(ArithmeticOp::Add))
     }
 
     /// Subtract another DataFrame element-wise with fill_value for NaN handling.
     ///
     /// Matches `pd.DataFrame.sub(other, fill_value=X)`.
     pub fn sub_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
-        self.binary_df_op_fill(other, |a, b| a - b, fill_value)
+        self.binary_df_op_fill(other, |a, b| a - b, fill_value, Some(ArithmeticOp::Sub))
     }
 
     /// Multiply another DataFrame element-wise with fill_value for NaN handling.
     ///
     /// Matches `pd.DataFrame.mul(other, fill_value=X)`.
     pub fn mul_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
-        self.binary_df_op_fill(other, |a, b| a * b, fill_value)
+        self.binary_df_op_fill(other, |a, b| a * b, fill_value, Some(ArithmeticOp::Mul))
     }
 
     /// Divide by another DataFrame element-wise with fill_value for NaN handling.
@@ -89952,7 +90104,7 @@ impl DataFrame {
         // pandas div by zero -> +/-inf (numerator sign), 0/0 -> NaN; Rust IEEE
         // division already does this, so do NOT special-case a zero divisor.
         // (Sibling of the Series fix 457ad27b / br 5btt1.)
-        self.binary_df_op_fill(other, |a, b| a / b, fill_value)
+        self.binary_df_op_fill(other, |a, b| a / b, fill_value, None)
     }
 
     /// Floor-divide by another DataFrame element-wise with fill_value for NaN handling.
@@ -89960,7 +90112,8 @@ impl DataFrame {
     /// Matches `pd.DataFrame.floordiv(other, fill_value=X)`.
     pub fn floordiv_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
         // floor(a/b): +/-inf for a non-zero numerator over zero, NaN for 0/0.
-        self.binary_df_op_fill(other, |a, b| (a / b).floor(), fill_value)
+        let op = Some(ArithmeticOp::FloorDiv);
+        self.binary_df_op_fill(other, |a, b| (a / b).floor(), fill_value, op)
     }
 
     /// Modulo with another DataFrame element-wise with fill_value for NaN handling.
@@ -89970,7 +90123,8 @@ impl DataFrame {
         // pandas mod takes the DIVISOR's sign (floored remainder), unlike Rust's
         // % (dividend sign): 3 % -2 == -1. Floored identity a - floor(a/b)*b
         // also yields NaN for a zero divisor.
-        self.binary_df_op_fill(other, |a, b| a - (a / b).floor() * b, fill_value)
+        let op = Some(ArithmeticOp::Mod);
+        self.binary_df_op_fill(other, |a, b| a - (a / b).floor() * b, fill_value, op)
     }
 
     /// Floor-divide all numeric columns by a scalar.
@@ -154288,6 +154442,85 @@ mod tests {
             .align(&series(&["x", "w"], &[1, 2]), AlignMode::Left)
             .unwrap();
         assert_eq!(left_join.index().labels(), labels(&["x", "y", "z"]));
+    }
+
+    #[test]
+    fn frame_series_broadcast_matches_pandas_ini2u() {
+        // pandas 2.2.3, df = DataFrame({'b': [1, 2, 3], 'a': [1.5, nan, 3.5]},
+        // index=['x', 'y', 'z']):
+        //   df + Series([10, 20], index=['a', 'c'])  -> columns a, b, c (sorted
+        //     union); a [11.5, nan, 13.5], b and c all-NaN float64
+        //   df.add(Series([1, 2, 3], index=['x','y','z']), axis=0) -> b int64
+        //     [2, 4, 6], a [2.5, nan, 6.5]
+        //   df.eq(Series([1, 2, 3], index=['x','y','z']), axis=0) -> b all True,
+        //     a all False (NaN compares False)
+        let label = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let rows = vec![label("x"), label("y"), label("z")];
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("b", [1, 2, 3].map(Scalar::Int64).to_vec()),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(3.5),
+                    ],
+                ),
+            ],
+            rows.clone(),
+        )
+        .unwrap();
+        let by_column = Series::from_values(
+            "s",
+            vec![label("a"), label("c")],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        use fp_columnar::{ArithmeticOp, ComparisonOp};
+        let sum = df
+            .arith_series(&by_column, ArithmeticOp::Add, 1, false)
+            .unwrap();
+        assert_eq!(sum.column_names(), ["a", "b", "c"]);
+        assert_eq!(sum.column("a").unwrap().values()[0], Scalar::Float64(11.5));
+        for name in ["b", "c"] {
+            let column = sum.column(name).unwrap();
+            assert_eq!(column.dtype(), DType::Float64);
+            assert!(column.values().iter().all(Scalar::is_missing));
+        }
+        let by_row = Series::from_values("r", rows, [1, 2, 3].map(Scalar::Int64).to_vec()).unwrap();
+        let down = df
+            .arith_series(&by_row, ArithmeticOp::Add, 0, false)
+            .unwrap();
+        assert_eq!(
+            down.column("b").unwrap().values(),
+            [2, 4, 6].map(Scalar::Int64)
+        );
+        let eq = df.cmp_series(&by_row, ComparisonOp::Eq, 0).unwrap();
+        assert_eq!(
+            eq.column("b").unwrap().values(),
+            [true; 3].map(Scalar::Bool)
+        );
+        assert_eq!(
+            eq.column("a").unwrap().values(),
+            [false; 3].map(Scalar::Bool)
+        );
+        // NEGATIVE: reflected subtraction flips the operands (1 - 1, 2 - 2, 3 - 3
+        // is 0; 1 - 1.5 is -0.5), and a complete int pair under fill_value
+        // stays int64 while its NaN-bearing sibling fills.
+        let flipped = df
+            .arith_series(&by_row, ArithmeticOp::Sub, 0, true)
+            .unwrap();
+        assert_eq!(
+            flipped.column("a").unwrap().values()[0],
+            Scalar::Float64(-0.5)
+        );
+        let filled = df.add_df_fill(&df, 0.0).unwrap();
+        assert_eq!(
+            filled.column("b").unwrap().values(),
+            [2, 4, 6].map(Scalar::Int64)
+        );
+        assert!(filled.column("a").unwrap().values()[1].is_missing());
     }
 
     #[test]

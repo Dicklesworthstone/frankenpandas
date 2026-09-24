@@ -22,7 +22,7 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use fp_columnar::{ArithmeticOp, Column};
+use fp_columnar::{ArithmeticOp, Column, ComparisonOp};
 use fp_expr::DataFrameExprExt;
 use fp_frame::{
     DataFrame, DropNaHow, FrameError, PlotKind, Series, concat_dataframes, concat_series,
@@ -10207,6 +10207,39 @@ fn fill_one_side(side: &Series, against: &Series, fill: &Scalar) -> PyResult<Ser
     Series::new(side.name(), side.index().clone(), column).map_err(frame_error_to_py)
 }
 
+/// `left <op> right` for two DataFrames.
+fn frame_arith(
+    left: &DataFrame,
+    right: &DataFrame,
+    op: ArithmeticOp,
+) -> Result<DataFrame, FrameError> {
+    match op {
+        ArithmeticOp::Add => left.add(right),
+        ArithmeticOp::Sub => left.sub(right),
+        ArithmeticOp::Mul => left.mul(right),
+        ArithmeticOp::Div => left.div(right),
+        ArithmeticOp::FloorDiv => left.floordiv(right),
+        ArithmeticOp::Mod => left.r#mod(right),
+        ArithmeticOp::Pow => left.pow(right),
+    }
+}
+
+/// `left <op> right` comparing two DataFrames.
+fn frame_cmp(
+    left: &DataFrame,
+    right: &DataFrame,
+    op: ComparisonOp,
+) -> Result<DataFrame, FrameError> {
+    match op {
+        ComparisonOp::Eq => left.eq(right),
+        ComparisonOp::Ne => left.ne(right),
+        ComparisonOp::Lt => left.lt(right),
+        ComparisonOp::Le => left.le(right),
+        ComparisonOp::Gt => left.gt(right),
+        ComparisonOp::Ge => left.ge(right),
+    }
+}
+
 /// A Python number as a DataFrame arithmetic scalar: an int stays an Int64
 /// scalar so int64 columns stay int64 (br-frankenpandas-c74wi: ints went
 /// through as f64); a bool stays Bool, which keeps the f64 path.
@@ -14993,6 +15026,157 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// `self <op> other` (or `other <op> self` when `reflected`) for the
+    /// arithmetic operators: another DataFrame aligns, a Series broadcasts
+    /// along the columns as pandas' operators do (br-frankenpandas-ini2u: it
+    /// raised TypeError), and a number keeps int64 columns int64 for an int
+    /// (br-frankenpandas-c74wi).
+    fn arith_operator(
+        &self,
+        other: &Bound<'_, PyAny>,
+        op: ArithmeticOp,
+        reflected: bool,
+        symbol: &str,
+    ) -> PyResult<PyDataFrame> {
+        if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            let (left, right) = if reflected {
+                (&frame.inner, &self.inner)
+            } else {
+                (&self.inner, &frame.inner)
+            };
+            return wrap_frame(frame_arith(left, right, op));
+        }
+        if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+            return wrap_frame(self.inner.arith_series(&series.inner, op, 1, reflected));
+        }
+        if let Some(scalar) = number_scalar(other) {
+            return wrap_frame(self.inner.arith_scalar(&scalar, op, reflected));
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Unsupported operand type for {symbol}"
+        )))
+    }
+
+    /// The comparison operators: another DataFrame, a Series broadcast along
+    /// the columns (br-frankenpandas-ini2u), or a scalar.
+    fn cmp_operator(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        op: ComparisonOp,
+    ) -> PyResult<PyDataFrame> {
+        if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+            return wrap_frame(self.inner.cmp_series(&series.inner, op, 1));
+        }
+        if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            return wrap_frame(frame_cmp(&self.inner, &frame.inner, op));
+        }
+        let scalar = py_to_scalar(py, other)?;
+        wrap_frame(self.inner.compare_scalar_df(&scalar, op))
+    }
+
+    /// pandas' DataFrame flex arithmetic (`df.add(other, axis=, level=,
+    /// fill_value=)` and the rest; br-frankenpandas-n57tz, the binding took
+    /// `other` alone): `axis` says which labels a Series operand matches
+    /// ('columns' by default, or 'index'); `fill_value` fills a value missing
+    /// on exactly one side against another DataFrame, fills the frame's own
+    /// missing values against a scalar, and against a Series is pandas'
+    /// NotImplementedError; `level` is refused.
+    #[allow(clippy::too_many_arguments)]
+    fn flex_arith(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        op: ArithmeticOp,
+        reflected: bool,
+    ) -> PyResult<PyDataFrame> {
+        let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(1);
+        unsupported_params(
+            &format!("DataFrame.{method}"),
+            &[("level", level.is_none_or(|l| l.is_none()))],
+        )?;
+        let fill = fill_value.filter(|f| !f.is_none());
+        if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+            if let Some(fill) = fill {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    format!("fill_value {} not supported.", fill.repr()?),
+                ));
+            }
+            return wrap_frame(self.inner.arith_series(&series.inner, op, axis, reflected));
+        }
+        let Some(fill) = fill else {
+            return self.arith_operator(other, op, reflected, method);
+        };
+        let fill = py_to_scalar(py, fill)?;
+        if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            return self.fill_frame_arith(&frame.inner, &fill, op, reflected, method);
+        }
+        let filled = self.inner.fillna(&fill).map_err(frame_error_to_py)?;
+        PyDataFrame { inner: filled }.arith_operator(other, op, reflected, method)
+    }
+
+    /// `fill_value` against another DataFrame: a value missing on exactly one
+    /// side is `fill` before `op` runs (fp-frame's `*_df_fill`, which keeps a
+    /// complete int64 column pair int64).
+    fn fill_frame_arith(
+        &self,
+        other: &DataFrame,
+        fill: &Scalar,
+        op: ArithmeticOp,
+        reflected: bool,
+        method: &str,
+    ) -> PyResult<PyDataFrame> {
+        let (left, right) = if reflected {
+            (other, &self.inner)
+        } else {
+            (&self.inner, other)
+        };
+        let value = fill.to_f64().map_err(|_| {
+            not_implemented(&format!(
+                "DataFrame.{method}(fill_value={fill}) that is not a number"
+            ))
+        })?;
+        wrap_frame(match op {
+            ArithmeticOp::Add => left.add_df_fill(right, value),
+            ArithmeticOp::Sub => left.sub_df_fill(right, value),
+            ArithmeticOp::Mul => left.mul_df_fill(right, value),
+            ArithmeticOp::Div => left.div_df_fill(right, value),
+            ArithmeticOp::FloorDiv => left.floordiv_df_fill(right, value),
+            ArithmeticOp::Mod => left.mod_df_fill(right, value),
+            ArithmeticOp::Pow => {
+                return Err(not_implemented(&format!(
+                    "DataFrame.{method}(fill_value=...) against a DataFrame"
+                )));
+            }
+        })
+    }
+
+    /// pandas' DataFrame flex comparisons (`df.eq(other, axis=, level=)`):
+    /// `axis` places a Series operand; `level` is refused.
+    fn flex_cmp(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        op: ComparisonOp,
+    ) -> PyResult<PyDataFrame> {
+        let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(1);
+        unsupported_params(
+            &format!("DataFrame.{method}"),
+            &[("level", level.is_none_or(|l| l.is_none()))],
+        )?;
+        if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+            return wrap_frame(self.inner.cmp_series(&series.inner, op, axis));
+        }
+        self.cmp_operator(py, other, op)
+    }
+
     /// pandas' `sort_values(key=...)`: `key` is applied to each `by` column
     /// and the rows are ordered by the keyed values. A positional copy holding
     /// only the keyed columns is sorted, then the rows are taken in that order
@@ -16864,286 +17048,504 @@ impl PyDataFrame {
         ))
     }
 
-    fn __add__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.add(&other_df.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Add, false))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for +",
-            ))
-        }
+    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Add, false, "+")
     }
-    fn __radd__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__add__(_py, other)
+    fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Add, true, "+")
     }
-    fn __sub__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.sub(&other_df.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Sub, false))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for -",
-            ))
-        }
+    fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Sub, false, "-")
     }
-    fn __rsub__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(other_df.inner.sub(&self.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Sub, true))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for -",
-            ))
-        }
+    fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Sub, true, "-")
     }
-    fn __mul__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.mul(&other_df.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Mul, false))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for *",
-            ))
-        }
+    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Mul, false, "*")
     }
-    fn __rmul__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__mul__(_py, other)
+    fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Mul, true, "*")
     }
-    fn __truediv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.div(&other_df.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Div, false))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for /",
-            ))
-        }
+    fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Div, false, "/")
     }
-    fn __rtruediv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(other_df.inner.div(&self.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Div, true))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for /",
-            ))
-        }
+    fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Div, true, "/")
     }
-    fn __floordiv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.floordiv(&other_df.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(
-                self.inner
-                    .arith_scalar(&scalar, ArithmeticOp::FloorDiv, false),
-            )
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for //",
-            ))
-        }
+    fn __floordiv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::FloorDiv, false, "//")
     }
-    fn __rfloordiv__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(other_df.inner.floordiv(&self.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(
-                self.inner
-                    .arith_scalar(&scalar, ArithmeticOp::FloorDiv, true),
-            )
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for //",
-            ))
-        }
+    fn __rfloordiv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::FloorDiv, true, "//")
     }
-    fn __mod__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.r#mod(&other_df.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Mod, false))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for %",
-            ))
-        }
+    fn __mod__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Mod, false, "%")
     }
-    fn __rmod__(&self, _py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(other_df.inner.r#mod(&self.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Mod, true))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for %",
-            ))
-        }
+    fn __rmod__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.arith_operator(other, ArithmeticOp::Mod, true, "%")
     }
     fn __pow__(
         &self,
-        _py: Python<'_>,
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.pow(&other_df.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Pow, false))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for **",
-            ))
-        }
+        self.arith_operator(other, ArithmeticOp::Pow, false, "**")
     }
     fn __rpow__(
         &self,
-        _py: Python<'_>,
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(other_df.inner.pow(&self.inner))
-        } else if let Some(scalar) = number_scalar(other) {
-            wrap_frame(self.inner.arith_scalar(&scalar, ArithmeticOp::Pow, true))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Unsupported operand type for **",
-            ))
-        }
+        self.arith_operator(other, ArithmeticOp::Pow, true, "**")
     }
     fn __neg__(&self) -> PyResult<PyDataFrame> {
         wrap_frame(self.inner.neg())
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.eq(&other_df.inner))
-        } else {
-            let scalar = py_to_scalar(py, other)?;
-            wrap_frame(self.inner.eq(scalar))
-        }
+        self.cmp_operator(py, other, ComparisonOp::Eq)
     }
     fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.ne(&other_df.inner))
-        } else {
-            let scalar = py_to_scalar(py, other)?;
-            wrap_frame(self.inner.ne(scalar))
-        }
+        self.cmp_operator(py, other, ComparisonOp::Ne)
     }
     fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.lt(&other_df.inner))
-        } else {
-            let scalar = py_to_scalar(py, other)?;
-            wrap_frame(self.inner.lt(scalar))
-        }
+        self.cmp_operator(py, other, ComparisonOp::Lt)
     }
     fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.le(&other_df.inner))
-        } else {
-            let scalar = py_to_scalar(py, other)?;
-            wrap_frame(self.inner.le(scalar))
-        }
+        self.cmp_operator(py, other, ComparisonOp::Le)
     }
     fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.gt(&other_df.inner))
-        } else {
-            let scalar = py_to_scalar(py, other)?;
-            wrap_frame(self.inner.gt(scalar))
-        }
+        self.cmp_operator(py, other, ComparisonOp::Gt)
     }
     fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if let Ok(other_df) = other.extract::<PyRef<'_, PyDataFrame>>() {
-            wrap_frame(self.inner.ge(&other_df.inner))
-        } else {
-            let scalar = py_to_scalar(py, other)?;
-            wrap_frame(self.inner.ge(scalar))
-        }
+        self.cmp_operator(py, other, ComparisonOp::Ge)
     }
 
-    fn add(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__add__(py, other)
+    // The flex forms: pandas' (other, axis='columns', level=None,
+    // fill_value=None), through `flex_arith` (br-frankenpandas-n57tz,
+    // br-frankenpandas-ini2u).
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn add(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "add",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Add,
+            false,
+        )
     }
-    fn radd(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__radd__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn radd(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "radd",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Add,
+            true,
+        )
     }
-    fn sub(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__sub__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn sub(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "sub",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Sub,
+            false,
+        )
     }
-    fn subtract(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__sub__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn subtract(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "subtract",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Sub,
+            false,
+        )
     }
-    fn rsub(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__rsub__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn rsub(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "rsub",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Sub,
+            true,
+        )
     }
-    fn mul(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__mul__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn mul(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "mul",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Mul,
+            false,
+        )
     }
-    fn multiply(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__mul__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn multiply(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "multiply",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Mul,
+            false,
+        )
     }
-    fn rmul(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__rmul__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn rmul(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "rmul",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Mul,
+            true,
+        )
     }
-    fn div(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__truediv__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn div(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "div",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Div,
+            false,
+        )
     }
-    fn divide(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__truediv__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn divide(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "divide",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Div,
+            false,
+        )
     }
-    fn truediv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__truediv__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn truediv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "truediv",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Div,
+            false,
+        )
     }
-    fn rtruediv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__rtruediv__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn rtruediv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "rtruediv",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Div,
+            true,
+        )
     }
-    fn rdiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__rtruediv__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn rdiv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "rdiv",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Div,
+            true,
+        )
     }
-    fn floordiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__floordiv__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn floordiv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let op = ArithmeticOp::FloorDiv;
+        self.flex_arith(py, "floordiv", other, axis, level, fill_value, op, false)
     }
-    fn rfloordiv(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__rfloordiv__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn rfloordiv(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let op = ArithmeticOp::FloorDiv;
+        self.flex_arith(py, "rfloordiv", other, axis, level, fill_value, op, true)
     }
-    fn r#mod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__mod__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn r#mod(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "mod",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Mod,
+            false,
+        )
     }
-    fn rmod(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__rmod__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn rmod(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "rmod",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Mod,
+            true,
+        )
     }
-    fn pow(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__pow__(py, other, None)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn pow(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "pow",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Pow,
+            false,
+        )
     }
-    fn rpow(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__rpow__(py, other, None)
+    #[pyo3(signature = (other, axis=None, level=None, fill_value=None))]
+    fn rpow(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_arith(
+            py,
+            "rpow",
+            other,
+            axis,
+            level,
+            fill_value,
+            ArithmeticOp::Pow,
+            true,
+        )
     }
-    fn eq(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__eq__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None))]
+    fn eq(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_cmp(py, "eq", other, axis, level, ComparisonOp::Eq)
     }
-    fn ne(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__ne__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None))]
+    fn ne(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_cmp(py, "ne", other, axis, level, ComparisonOp::Ne)
     }
-    fn lt(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__lt__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None))]
+    fn lt(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_cmp(py, "lt", other, axis, level, ComparisonOp::Lt)
     }
-    fn le(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__le__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None))]
+    fn le(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_cmp(py, "le", other, axis, level, ComparisonOp::Le)
     }
-    fn gt(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__gt__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None))]
+    fn gt(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_cmp(py, "gt", other, axis, level, ComparisonOp::Gt)
     }
-    fn ge(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.__ge__(py, other)
+    #[pyo3(signature = (other, axis=None, level=None))]
+    fn ge(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        axis: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        self.flex_cmp(py, "ge", other, axis, level, ComparisonOp::Ge)
     }
 
     /// `"a" in df` checks the column labels, as in pandas.
@@ -22037,8 +22439,8 @@ impl PyDataFrame {
         py: Python<'_>,
         other: &Bound<'_, PyAny>,
     ) -> PyResult<(PyDataFrame, PyDataFrame)> {
-        let q = self.floordiv(py, other)?;
-        let r = self.r#mod(py, other)?;
+        let q = self.floordiv(py, other, None, None, None)?;
+        let r = self.r#mod(py, other, None, None, None)?;
         Ok((q, r))
     }
 
@@ -22047,8 +22449,8 @@ impl PyDataFrame {
         py: Python<'_>,
         other: &Bound<'_, PyAny>,
     ) -> PyResult<(PyDataFrame, PyDataFrame)> {
-        let q = self.rfloordiv(py, other)?;
-        let r = self.rmod(py, other)?;
+        let q = self.rfloordiv(py, other, None, None, None)?;
+        let r = self.rmod(py, other, None, None, None)?;
         Ok((q, r))
     }
 
