@@ -4,6 +4,7 @@ Differential conformance test harness for frankenpandas vs pandas oracle on pack
 
 from __future__ import annotations
 
+import datetime
 import glob
 import itertools
 import json
@@ -3912,3 +3913,94 @@ def test_duplicate_column_labels_keep_their_own_data() -> None:
         assert built.iloc[:, 0].tolist() == [1, 2]
     # NEGATIVE: distinct names are untouched.
     assert fpd.concat([fpd.Series([1], name="a"), fpd.Series([2], name="b")], axis=1).iloc[:, 1].tolist() == [2]
+
+
+ARRAY_LIKE_COLUMN_VALUES = {
+    "np_int": lambda m: np.array([1, 2]),
+    "np_float": lambda m: np.array([1.5, np.nan]),
+    "np_str": lambda m: np.array(["a", "b"]),
+    "np_bool": lambda m: np.array([True, False]),
+    "np_dt64": lambda m: np.array(["2020-01-05T06:07:08.000000009", "NaT"], dtype="datetime64[ns]"),
+    "np_td64": lambda m: np.array([3_600_000_000_000, -7], dtype="timedelta64[ns]"),
+    "range": lambda m: range(2),
+    "dti": lambda m: m.to_datetime(["2020-01-05", "2020-01-02"]),
+    "dti_nat": lambda m: m.to_datetime(["2020-01-05", None]),
+    "date_range": lambda m: m.date_range("2020-01-01", periods=2),
+    "tdi": lambda m: m.to_timedelta(["1D", "2h"]),
+    "index_int": lambda m: m.Index([7, 8]),
+    "index_str": lambda m: m.Index(["p", "q"]),
+    "list_datetime": lambda m: [datetime.datetime(2020, 1, 5, 6, 7, 8, 9), datetime.datetime(2020, 1, 2)],
+    "list_datetime_none": lambda m: [datetime.datetime(2020, 1, 5), None],
+    "list_timedelta": lambda m: [datetime.timedelta(days=1, seconds=2, microseconds=3), datetime.timedelta(hours=-1)],
+    "list_np_dt64": lambda m: [np.datetime64("2020-01-05"), np.datetime64("NaT")],
+}
+
+
+def _with_column(m: Any, value: Any) -> Any:
+    df = m.DataFrame({"x": [1, 2]})
+    df["c"] = value
+    return df["c"]
+
+
+ARRAY_LIKE_COLUMN_PATHS = {
+    "Series": lambda m, v: m.Series(v),
+    "Series(index=)": lambda m, v: m.Series(v, index=[10, 11]),
+    "DataFrame(dict)": lambda m, v: m.DataFrame({"c": v})["c"],
+    "setitem": _with_column,
+    "assign": lambda m, v: m.DataFrame({"x": [1, 2]}).assign(c=v)["c"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("path", sorted(ARRAY_LIKE_COLUMN_PATHS))
+def test_array_like_column_values_match_pandas(path: str) -> None:
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.15: numpy arrays,
+    # ranges, Index/DatetimeIndex/TimedeltaIndex and datetime/timedelta
+    # objects build the column pandas builds (the DataFrame paths raised
+    # "Cannot convert ndarray to Scalar"; a DatetimeIndex became strings, NaT
+    # as 1970-01-01).
+    build = ARRAY_LIKE_COLUMN_PATHS[path]
+    for name, make in ARRAY_LIKE_COLUMN_VALUES.items():
+        got, want = (build(m, make(m)) for m in (fpd, pd))
+        assert str(got.dtype) == str(want.dtype), (name, got.dtype, want.dtype)
+        assert [str(v) for v in got.tolist()] == [str(v) for v in want.tolist()], name
+        assert [str(v) for v in got.isna().tolist()] == [str(v) for v in want.isna().tolist()], name
+        assert [str(v) for v in got.index] == [str(v) for v in want.index], name
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_array_like_column_refusals_match_pandas() -> None:
+    # fvsao.15 negatives: what pandas refuses stays refused, and a list of
+    # date STRINGS stays object (no datetime inference).
+    for m in (pd, fpd):
+        assert str(m.Series(["2020-01-05"]).dtype) == "object"
+        assert str(m.DataFrame({"c": ["2020-01-05"]})["c"].dtype) == "object"
+        assert m.Series(m.Index([1, 2], name="a")).name == "a"
+        assert m.Series(m.to_datetime(["2020-01-01"]).rename("d")).name == "d"
+        with pytest.raises(TypeError, match="unordered"):
+            m.Series({1, 2})
+        with pytest.raises(TypeError, match="unordered"):
+            m.DataFrame({"c": {1, 2}})
+        with pytest.raises(ValueError):
+            m.Series(np.array([[1, 2]]))
+        with pytest.raises(ValueError):
+            m.DataFrame({"x": [1, 2]}).__setitem__("c", np.array([1, 2, 3]))
+        with pytest.raises(ValueError):
+            m.DataFrame({"c": np.array([1, 2]), "d": [1, 2, 3]})
+    # pandas builds a datetime64[ns, UTC] column from tz-aware datetimes; the
+    # binding's columns built from Python objects are tz-naive, so it refuses
+    # instead of dropping the zone.
+    aware = [datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)]
+    assert str(pd.Series(aware).dtype) == "datetime64[ns, UTC]"
+    with pytest.raises(NotImplementedError, match="tz-aware"):
+        fpd.Series(aware)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(
+    strict=True,
+    reason="br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.16: only nanosecond resolution",
+)
+def test_numpy_second_resolution_is_kept_like_pandas() -> None:
+    values = np.array(["2020-01-05", "NaT"], dtype="datetime64[D]")
+    assert str(fpd.Series(values).dtype) == str(pd.Series(values).dtype) == "datetime64[s]"

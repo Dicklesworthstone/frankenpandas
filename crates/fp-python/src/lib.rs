@@ -38,7 +38,10 @@ use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
     prelude::*,
-    types::{PyDict, PyFrozenSet, PyList, PySet, PyTuple},
+    types::{
+        PyDateAccess, PyDateTime, PyDelta, PyDeltaAccess, PyDict, PyFrozenSet, PyList, PySet,
+        PyTimeAccess, PyTuple, PyTzInfoAccess,
+    },
 };
 
 #[global_allocator]
@@ -1438,6 +1441,45 @@ impl PyPeriod {
     }
 }
 
+/// Nanoseconds since the epoch of a naive `datetime.datetime`, as pandas
+/// reads one into a datetime64[ns] column. A tz-aware one is refused: the
+/// columns built here are tz-naive, and dropping its zone would shift what
+/// the value means.
+fn py_datetime_nanos(dt: &Bound<'_, PyDateTime>) -> PyResult<i64> {
+    if dt.get_tzinfo().is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "tz-aware datetime values are not supported yet; frankenpandas datetime columns \
+             built from Python objects are tz-naive",
+        ));
+    }
+    let days = days_from_ymd(
+        i64::from(dt.get_year()),
+        i64::from(dt.get_month()),
+        i64::from(dt.get_day()),
+    );
+    Ok(days * 86_400_000_000_000
+        + i64::from(dt.get_hour()) * 3_600_000_000_000
+        + i64::from(dt.get_minute()) * 60_000_000_000
+        + i64::from(dt.get_second()) * 1_000_000_000
+        + i64::from(dt.get_microsecond()) * 1_000)
+}
+
+/// Nanoseconds of a `datetime.timedelta`.
+fn py_delta_nanos(delta: &Bound<'_, PyDelta>) -> i64 {
+    (i64::from(delta.get_days()) * 86_400 + i64::from(delta.get_seconds())) * 1_000_000_000
+        + i64::from(delta.get_microseconds()) * 1_000
+}
+
+/// A numpy datetime64/timedelta64 scalar or array cast to `ns_dtype` and read
+/// as int64 nanoseconds; `None` for NaT.
+fn numpy_temporal_nanos(obj: &Bound<'_, PyAny>, ns_dtype: &str) -> PyResult<Option<i64>> {
+    let nanos = obj
+        .call_method1("astype", (ns_dtype,))?
+        .call_method1("astype", ("int64",))?
+        .extract::<i64>()?;
+    Ok((nanos != i64::MIN).then_some(nanos))
+}
+
 /// Convert a Python value to a FrankenPandas Scalar.
 #[allow(clippy::only_used_in_recursion)]
 fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
@@ -1469,6 +1511,23 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
         {
             return Ok(Scalar::Datetime64(ns));
         }
+        // numpy's datetime64/timedelta64 scalars converted as float
+        // nanoseconds (or raised for a date unit); pandas reads them as
+        // instants and durations (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.15).
+        if type_name == "datetime64" {
+            return Ok(numpy_temporal_nanos(obj, "datetime64[ns]")?
+                .map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64));
+        }
+        if type_name == "timedelta64" {
+            return Ok(numpy_temporal_nanos(obj, "timedelta64[ns]")?
+                .map_or(Scalar::Null(NullKind::NaT), Scalar::Timedelta64));
+        }
+    }
+    if let Ok(dt) = obj.cast::<PyDateTime>() {
+        return py_datetime_nanos(dt).map(Scalar::Datetime64);
+    }
+    if let Ok(delta) = obj.cast::<PyDelta>() {
+        return Ok(Scalar::Timedelta64(py_delta_nanos(delta)));
     }
     if let Ok(p) = obj.extract::<PyRef<'_, PyPeriod>>() {
         return Ok(Scalar::Period(p.inner));
@@ -1562,6 +1621,124 @@ fn parse_duplicate_keep(keep: Option<&Bound<'_, PyAny>>) -> PyResult<DuplicateKe
     }
 }
 
+/// The values of an array-like argument as one column, the way pandas'
+/// Series and DataFrame constructors, `df[col] = ...` and `assign` take them:
+/// an Index keeps its typed values (a DatetimeIndex gives datetime64 with
+/// NaT, a TimedeltaIndex timedelta64), a 1-D numpy array its elements
+/// (datetime64/timedelta64 as nanoseconds), a `range` its ints. `None` for
+/// anything else. These raised "Cannot convert ndarray to Scalar" in the
+/// DataFrame paths, and a DatetimeIndex became its formatted strings with NaT
+/// as 1970-01-01 (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.15).
+fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    let temporal = |dtype: DType, nanos: Vec<Option<i64>>, wrap: fn(i64) -> Scalar| {
+        let values = nanos
+            .into_iter()
+            .map(|ns| ns.map_or(Scalar::Null(NullKind::NaT), wrap))
+            .collect();
+        Column::new(dtype, values).map_err(column_error_to_py)
+    };
+    if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        let column = temporal(
+            DType::Datetime64 { tz: None },
+            dti.inner.nanos(),
+            Scalar::Datetime64,
+        )?;
+        return Ok(Some(column));
+    }
+    if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+        let column = temporal(DType::Timedelta64, tdi.inner.nanos(), Scalar::Timedelta64)?;
+        return Ok(Some(column));
+    }
+    let labels = if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+        Some(idx.inner.labels().to_vec())
+    } else if let Ok(ri) = obj.extract::<PyRef<'_, PyRangeIndex>>() {
+        Some(ri.inner.to_index().labels().to_vec())
+    } else {
+        None
+    };
+    if let Some(labels) = labels {
+        let values = labels.iter().map(index_label_to_scalar).collect();
+        return Column::from_values(values)
+            .map(Some)
+            .map_err(column_error_to_py);
+    }
+    if let Ok(range) = obj.cast::<pyo3::types::PyRange>() {
+        let values = range
+            .try_iter()?
+            .map(|v| v.and_then(|v| v.extract::<i64>()))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(Some(Column::from_i64_values(values)));
+    }
+    if obj.get_type().name()? != "ndarray" {
+        return Ok(None);
+    }
+    if obj.getattr("ndim")?.extract::<usize>()? != 1 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Data must be 1-dimensional, got ndarray of shape {} instead",
+            obj.getattr("shape")?.str()?
+        )));
+    }
+    let kind = obj.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    let temporal_array = |ns_dtype: &str| -> PyResult<Vec<Option<i64>>> {
+        Ok(obj
+            .call_method1("astype", (ns_dtype,))?
+            .call_method1("astype", ("int64",))?
+            .call_method0("tolist")?
+            .extract::<Vec<i64>>()?
+            .into_iter()
+            .map(|ns| (ns != i64::MIN).then_some(ns))
+            .collect())
+    };
+    let column = match kind.as_str() {
+        "M" => temporal(
+            DType::Datetime64 { tz: None },
+            temporal_array("datetime64[ns]")?,
+            Scalar::Datetime64,
+        )?,
+        "m" => temporal(
+            DType::Timedelta64,
+            temporal_array("timedelta64[ns]")?,
+            Scalar::Timedelta64,
+        )?,
+        "i" => Column::from_i64_values(obj.call_method0("tolist")?.extract::<Vec<i64>>()?),
+        _ => {
+            let values = obj
+                .call_method0("tolist")?
+                .try_iter()?
+                .map(|v| v.and_then(|v| py_to_scalar(py, &v)))
+                .collect::<PyResult<Vec<_>>>()?;
+            Column::from_values(values).map_err(column_error_to_py)?
+        }
+    };
+    Ok(Some(column))
+}
+
+/// pandas refuses a set as column data: its order is arbitrary.
+fn refuse_unordered_set(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+    if obj.is_instance_of::<PySet>() || obj.is_instance_of::<PyFrozenSet>() {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "'set' type is unordered",
+        ));
+    }
+    Ok(())
+}
+
+/// The name an Index argument gives the Series built from it, as pandas'
+/// `Series(Index([1, 2], name='a')).name == 'a'`.
+fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<String> {
+    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+        idx.inner.name().map(str::to_owned)
+    } else if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        dti.inner.name().map(str::to_owned)
+    } else if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+        tdi.inner.name().map(str::to_owned)
+    } else if let Ok(ri) = obj.extract::<PyRef<'_, PyRangeIndex>>() {
+        ri.inner.name().map(str::to_owned)
+    } else {
+        None
+    }
+}
+
 /// Convert an arbitrary Python value (Series, list, tuple, or scalar) into a Column.
 fn py_value_to_column(
     py: Python<'_>,
@@ -1577,6 +1754,16 @@ fn py_value_to_column(
             )));
         }
         return Ok(s.inner.column().clone());
+    }
+    if let Some(column) = py_array_like_column(py, val)? {
+        if column.len() != expected_len {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of values ({}) does not match length of index ({})",
+                column.len(),
+                expected_len
+            )));
+        }
+        return Ok(column);
     }
     if let Ok(list) = val.cast::<PyList>() {
         let scalars: Vec<Scalar> = pandas_promote_int_with_missing(
@@ -10661,23 +10848,19 @@ impl PySeries {
             }
         }
 
-        if let Ok(idx) = data.extract::<PyRef<'_, PyIndex>>() {
-            let labels = extract_index_labels(index, idx.inner.len())?;
-            let scalars: Vec<Scalar> = idx
-                .inner
-                .labels()
-                .iter()
-                .map(index_label_to_scalar)
-                .collect();
-            if labels.len() != scalars.len() {
+        if let Some(column) = py_array_like_column(py, data)? {
+            let labels = extract_index_labels(index, column.len())?;
+            if labels.len() != column.len() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Length of values ({}) does not match length of index ({})",
-                    scalars.len(),
+                    column.len(),
                     labels.len()
                 )));
             }
-            let series = Series::from_values(series_name, labels, scalars)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let index_name = py_index_arg_name(data);
+            let series_name = name.or(index_name.as_deref()).unwrap_or("");
+            let series =
+                Series::new(series_name, Index::new(labels), column).map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: series });
         }
 
@@ -10748,6 +10931,7 @@ impl PySeries {
             return Ok(PySeries { inner: series });
         }
 
+        refuse_unordered_set(data)?;
         if !data.is_instance_of::<pyo3::types::PyString>()
             && let Ok(iter) = data.try_iter()
         {
@@ -16711,6 +16895,7 @@ impl PyDataFrame {
                 } else {
                     key.str()?.to_str()?.to_string()
                 };
+                refuse_unordered_set(&value)?;
 
                 let col = if let Ok(s) = value.extract::<PyRef<'_, PySeries>>() {
                     if let Some(target_labels) = &common_labels {
@@ -16729,6 +16914,17 @@ impl PyDataFrame {
                         if column.len() != nr {
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                                 "All columns must have the same length",
+                            ));
+                        }
+                    } else {
+                        detected_nrows = Some(column.len());
+                    }
+                    column
+                } else if let Some(column) = py_array_like_column(py, &value)? {
+                    if let Some(nr) = detected_nrows {
+                        if column.len() != nr {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "All arrays must be of the same length",
                             ));
                         }
                     } else {
@@ -16769,6 +16965,26 @@ impl PyDataFrame {
                     Column::from_values(scalars).map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                     })?
+                } else if !value.is_instance_of::<pyo3::types::PyString>()
+                    && !value.is_instance_of::<pyo3::types::PyBytes>()
+                    && !value.is_instance_of::<PyDict>()
+                    && let Ok(iter) = value.try_iter()
+                {
+                    // Any other ordered iterable (a generator) is its values,
+                    // as pandas takes it.
+                    let scalars = iter
+                        .map(|v| v.and_then(|v| py_to_scalar(py, &v)))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    if let Some(nr) = detected_nrows {
+                        if scalars.len() != nr {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "All arrays must be of the same length",
+                            ));
+                        }
+                    } else {
+                        detected_nrows = Some(scalars.len());
+                    }
+                    Column::from_values(scalars).map_err(column_error_to_py)?
                 } else {
                     let scalar = py_to_scalar(py, &value)?;
                     let nr = common_labels
@@ -17275,6 +17491,14 @@ impl PyDataFrame {
                     )));
                 }
                 series.inner.column().values().to_vec()
+            } else if let Some(column) = py_array_like_column(py, value)? {
+                if column.len() != n {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Length of values ({}) does not match length of index ({n})",
+                        column.len()
+                    )));
+                }
+                column.values().to_vec()
             } else if let Ok(list) = value.cast::<PyList>() {
                 let values = list
                     .iter()
@@ -30448,6 +30672,20 @@ fn to_numeric(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> PyResult<
     ))
 }
 
+/// The nanoseconds of a `to_datetime` result for a DatetimeIndex, a missing
+/// value kept as NaT (it became 0, i.e. 1970-01-01;
+/// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.15).
+fn datetime_nanos_or_nat(converted: &Series) -> Vec<i64> {
+    converted
+        .values()
+        .iter()
+        .map(|s| match s {
+            Scalar::Datetime64(ns) => *ns,
+            _ => Timestamp::NAT,
+        })
+        .collect()
+}
+
 /// Convert argument to datetime (pandas `to_datetime`).
 #[pyfunction]
 #[pyo3(signature = (arg, format=None, unit=None, utc=false))]
@@ -30495,18 +30733,10 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res = fp_frame::to_datetime_with_options(&temp_series, opts)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let nanos: Vec<i64> = res
-            .values()
-            .iter()
-            .map(|s| match s {
-                Scalar::Datetime64(ns) => *ns,
-                _ => 0,
-            })
-            .collect();
         return Ok(Py::new(
             py,
             PyDatetimeIndex {
-                inner: DatetimeIndex::new(nanos),
+                inner: DatetimeIndex::new(datetime_nanos_or_nat(&res)),
             },
         )?
         .into_any());
@@ -30526,18 +30756,10 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res = fp_frame::to_datetime_with_options(&temp_series, opts)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let nanos: Vec<i64> = res
-            .values()
-            .iter()
-            .map(|s| match s {
-                Scalar::Datetime64(ns) => *ns,
-                _ => 0,
-            })
-            .collect();
         return Ok(Py::new(
             py,
             PyDatetimeIndex {
-                inner: DatetimeIndex::new(nanos),
+                inner: DatetimeIndex::new(datetime_nanos_or_nat(&res)),
             },
         )?
         .into_any());
