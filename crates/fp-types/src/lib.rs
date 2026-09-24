@@ -6401,6 +6401,22 @@ pub fn nansem(values: &[Scalar], ddof: usize) -> Scalar {
     Scalar::Float64(std / (n as f64).sqrt())
 }
 
+/// Standard error of the mean as pandas' groupby, resample and pivot_table
+/// compute it: `sqrt(var / n)` (libgroupby's `group_var(name="sem")`), which
+/// can differ in the last bit from [`nansem`]'s `std / sqrt(n)` (Series.sem):
+/// for `[1.0, 4.0]` this is `1.5` and nansem `1.4999999999999998`
+/// (br-frankenpandas-7hxqv). Timedelta input keeps [`nansem`].
+pub fn nansem_grouped(values: &[Scalar], ddof: usize) -> Scalar {
+    if collect_timedelta_ns_f64(values).is_some() {
+        return nansem(values, ddof);
+    }
+    let n = collect_finite(values).len();
+    match nanvar(values, ddof) {
+        Scalar::Float64(var) => Scalar::Float64((var / n as f64).sqrt()),
+        other => other,
+    }
+}
+
 /// Peak-to-peak range of non-missing values (max − min).
 ///
 /// Matches `np.ptp` behavior on nan-safe inputs. Returns `Null(NaN)`
@@ -13837,6 +13853,24 @@ mod tests {
             return;
         };
         assert!((v - 0.7559289460184544).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nansem_grouped_is_sqrt_var_over_n_7hxqv() {
+        // pandas 2.2.3: Series([1.0, 4.0]).groupby([0, 0]).sem() == 1.5 while
+        // Series([1.0, 4.0]).sem() == 1.4999999999999998.
+        let values = [
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+        ];
+        assert_eq!(super::nansem_grouped(&values, 1), Scalar::Float64(1.5));
+        // NEGATIVE: Series.sem keeps std / sqrt(n).
+        assert_eq!(
+            super::nansem(&values, 1),
+            Scalar::Float64(1.499_999_999_999_999_8)
+        );
+        assert!(super::nansem_grouped(&values[..1], 1).is_missing());
     }
 
     #[test]

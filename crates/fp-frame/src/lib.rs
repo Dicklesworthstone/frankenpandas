@@ -2359,12 +2359,13 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
         }
         // Delegate sem/skew to the audited fp_types kernels rather than inlining
         // the formula (an inline groupby copy of skew/kurtosis was the f4dc5540
-        // bug). nansem(ddof=1) = std/sqrt(n); nanskew = adjusted Fisher-Pearson
-        // G1. Both return NaN below their min sample size, matching pandas.
+        // bug). nansem_grouped(ddof=1) = sqrt(var/n), pandas' groupby sem
+        // (br-frankenpandas-7hxqv); nanskew = adjusted Fisher-Pearson G1. Both
+        // return NaN below their min sample size, matching pandas.
         "sem" | "skew" => {
             let scalars: Vec<Scalar> = vals.iter().map(|&v| Scalar::Float64(v)).collect();
             let agg = if aggfunc == "sem" {
-                fp_types::nansem(&scalars, 1)
+                fp_types::nansem_grouped(&scalars, 1)
             } else {
                 fp_types::nanskew(&scalars)
             };
@@ -36115,14 +36116,14 @@ impl Resample<'_> {
     /// Resample standard error of the mean.
     pub fn sem(&self) -> Result<Series, FrameError> {
         // Typed path (f64 borrows its slice rejecting any NaN; all-valid Int64 builds
-        // the `v as f64` view once): `nansem(_, 1)` returns `nanstd(_, 1) / sqrt(n)`
-        // (Float64) and `Null(NaN)` when `n <= 1`, so Int64 sem widens to Float64.
-        // Mirror `resample_var_typed`'s per-bin two-pass (mean, ssd, std with ddof=1)
-        // then divide by `sqrt(n)`. Bit-identical to aggregate_scalar(|v| nansem(v,1))
-        // on an all-valid Int64 column: the mean/ssd/std are the same operations
-        // `resample_var_typed` already reproduces bit-for-bit from `nanstd`, the
-        // `n <= 1 -> Null(NaN)` gate matches (empty/singleton bins included), and the
-        // final `std / sqrt(n)` matches nansem's `s / sqrt(nums.len())`.
+        // the `v as f64` view once): `nansem_grouped(_, 1)` returns
+        // `sqrt(nanvar(_, 1) / n)` (Float64) and `Null(NaN)` when `n <= 1`, so Int64
+        // sem widens to Float64. Mirror `resample_var_typed`'s per-bin two-pass (mean,
+        // ssd, var with ddof=1) then take `sqrt(var / n)`. Bit-identical to
+        // aggregate_scalar(|v| nansem_grouped(v,1)) on an all-valid Int64 column: the
+        // mean/ssd/var are the same operations `resample_var_typed` already reproduces
+        // bit-for-bit from `nanvar`, and the `n <= 1 -> Null(NaN)` gate matches
+        // (empty/singleton bins included).
         let owned_i64: Vec<f64>;
         let typed: Option<&[f64]> = if let Some(v) = self.series.column().as_f64_slice() {
             if v.iter().any(|x| x.is_nan()) {
@@ -36149,8 +36150,9 @@ impl Resample<'_> {
                 } else {
                     let mean = g.iter().map(|&i| vals[i]).sum::<f64>() / n as f64;
                     let ssd = g.iter().map(|&i| (vals[i] - mean).powi(2)).sum::<f64>();
-                    let std = (ssd / (n - 1) as f64).sqrt();
-                    Scalar::Float64(std / (n as f64).sqrt())
+                    // pandas' group_var sem: sqrt(var / n), not std / sqrt(n)
+                    // (br-frankenpandas-7hxqv).
+                    Scalar::Float64((ssd / (n - 1) as f64 / n as f64).sqrt())
                 };
                 out_labels.push(IndexLabel::Utf8(key.clone()));
                 out.push(s);
@@ -36158,7 +36160,7 @@ impl Resample<'_> {
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_values(out)?);
         }
-        self.aggregate_scalar(|vals| fp_types::nansem(vals, 1))
+        self.aggregate_scalar(|vals| fp_types::nansem_grouped(vals, 1))
     }
 
     /// Resample skewness (Fisher's definition, bias=False).
@@ -42610,12 +42612,16 @@ impl SeriesGroupBy<'_> {
             if n <= 1.0 {
                 Scalar::Null(NullKind::NaN)
             } else {
-                Scalar::Float64((m2 / (n - 1.0)).sqrt() / n.sqrt())
+                // pandas' group_var sem: sqrt(var / n) (br-frankenpandas-7hxqv).
+                Scalar::Float64((m2 / (n - 1.0) / n).sqrt())
             }
         }) {
-            return result;
+            return result.and_then(float_moment_series);
         }
-        self.agg_values_scalar(self.series.name(), |values| fp_types::nansem(values, 1))
+        self.agg_values_scalar(self.series.name(), |values| {
+            fp_types::nansem_grouped(values, 1)
+        })
+        .and_then(float_moment_series)
     }
 
     /// Skewness of each group.
@@ -42631,9 +42637,10 @@ impl SeriesGroupBy<'_> {
             }
             Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s2.powf(1.5)))
         }) {
-            return result;
+            return result.and_then(float_moment_series);
         }
         self.agg_values_scalar(self.series.name(), fp_types::nanskew)
+            .and_then(float_moment_series)
     }
 
     /// Excess kurtosis (Fisher's definition, bias=False) of each group.
@@ -42654,9 +42661,10 @@ impl SeriesGroupBy<'_> {
             let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
             Scalar::Float64(adj * (m4 / (s2 * s2)) - sub)
         }) {
-            return result;
+            return result.and_then(float_moment_series);
         }
         self.agg_values_scalar(self.series.name(), fp_types::nankurt)
+            .and_then(float_moment_series)
     }
 
     /// Alias for `kurtosis()` — pandas exposes both `.kurt()` and
@@ -44648,7 +44656,7 @@ impl SeriesGroupBy<'_> {
                 // br-frankenpandas-e96wv (same kernels as the agg dispatch).
                 "skew" => fp_types::nanskew(&group_vals),
                 "kurt" | "kurtosis" => fp_types::nankurt(&group_vals),
-                "sem" => fp_types::nansem(&group_vals, 1),
+                "sem" => fp_types::nansem_grouped(&group_vals, 1),
                 other => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "SeriesGroupBy.transform: unsupported function '{other}'"
@@ -93388,6 +93396,34 @@ fn groupby_text_reduction_refusal(func_name: &str, col: &Column) -> Option<Frame
     }
 }
 
+/// A groupby sem/skew/kurt result is float64 even when every group is NaN, as
+/// in pandas; `Column::from_values` infers no dtype from all-NaN values, which
+/// surfaced as object (br-frankenpandas-7hxqv).
+fn float_moment_column(column: &Column) -> Result<Option<Column>, FrameError> {
+    if column.dtype() != DType::Null {
+        return Ok(None);
+    }
+    Ok(Some(Column::new(DType::Float64, column.values().to_vec())?))
+}
+
+/// [`float_moment_column`] over every column of a groupby moment result.
+fn float_moment_frame(mut df: DataFrame) -> Result<DataFrame, FrameError> {
+    for name in df.column_order.clone() {
+        if let Some(column) = float_moment_column(&df.columns[&name])? {
+            df = df.with_column(name, column)?;
+        }
+    }
+    Ok(df)
+}
+
+/// [`float_moment_column`] for a SeriesGroupBy moment result.
+fn float_moment_series(series: Series) -> Result<Series, FrameError> {
+    match float_moment_column(series.column())? {
+        Some(column) => Series::new(series.name(), series.index().clone(), column),
+        None => Ok(series),
+    }
+}
+
 struct DenseMultiInt64Grouping {
     gid_per_row: Vec<usize>,
     ngroups: usize,
@@ -95495,7 +95531,7 @@ impl DataFrameGroupBy<'_> {
                     // dense gate, so they reach this generic per-group path.
                     "skew" => fp_types::nanskew(&group_vals),
                     "kurt" | "kurtosis" => fp_types::nankurt(&group_vals),
-                    "sem" => fp_types::nansem(&group_vals, 1),
+                    "sem" => fp_types::nansem_grouped(&group_vals, 1),
                     // br-frankenpandas-groupby-idxmax-idxmin: pandas' idxmax/idxmin
                     // are the only string-dispatchable groupby aggregations that
                     // return an INDEX LABEL rather than a number, which is likely why
@@ -100123,10 +100159,11 @@ impl DataFrameGroupBy<'_> {
                         m4v[g] += d2 * d2;
                     }
                 }
-                // sem / skew / kurt reproduce fp_types::nansem/nanskew/nankurt
-                // exactly (two-pass mean-centered moments over the same finite
-                // ascending-row values; here the column is all-valid f64 so every
-                // value is included). Bit-identical to the agg_values_scalar path.
+                // sem / skew / kurt reproduce fp_types::nansem_grouped/nanskew/
+                // nankurt exactly (two-pass mean-centered moments over the same
+                // finite ascending-row values; here the column is all-valid f64 so
+                // every value is included). Bit-identical to the agg_values_scalar
+                // path.
                 if needs("sem") {
                     let out: Vec<Scalar> = emit
                         .iter()
@@ -100135,7 +100172,7 @@ impl DataFrameGroupBy<'_> {
                                 Scalar::Null(NullKind::NaN)
                             } else {
                                 let n = cnt[g] as f64;
-                                Scalar::Float64((sumsq[g] / (n - 1.0)).sqrt() / n.sqrt())
+                                Scalar::Float64((sumsq[g] / (n - 1.0) / n).sqrt())
                             }
                         })
                         .collect();
@@ -100535,7 +100572,7 @@ impl DataFrameGroupBy<'_> {
             // Statistical moments (br-frankenpandas-zge5s).
             "skew" => Ok(fp_types::nanskew(group_vals)),
             "kurt" | "kurtosis" => Ok(fp_types::nankurt(group_vals)),
-            "sem" => Ok(fp_types::nansem(group_vals, 1)),
+            "sem" => Ok(fp_types::nansem_grouped(group_vals, 1)),
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported groupby aggregation: '{other}'"
             ))),
@@ -104067,7 +104104,7 @@ impl DataFrameGroupBy<'_> {
     pub fn sem(&self) -> Result<DataFrame, FrameError> {
         self.refuse_text_columns("sem")?;
         if let Some(df) = self.try_moment_dense("sem")? {
-            return Ok(df);
+            return float_moment_frame(df);
         }
         let (group_order, groups) = self.build_groups();
         // Per br-frankenpandas-5fbpy: allow Timedelta64 columns through.
@@ -104111,7 +104148,7 @@ impl DataFrameGroupBy<'_> {
                     .iter()
                     .map(|&i| col.values()[i].clone())
                     .collect();
-                vals.push(fp_types::nansem(&group_scalars, 1));
+                vals.push(fp_types::nansem_grouped(&group_scalars, 1));
             }
 
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);
@@ -104125,7 +104162,7 @@ impl DataFrameGroupBy<'_> {
         } else {
             None
         };
-        Ok(DataFrame {
+        float_moment_frame(DataFrame {
             columns: result_cols.into(),
             column_order: col_order.into(),
             index: Index::new(out_labels).rename_index(by_name),
@@ -104141,7 +104178,7 @@ impl DataFrameGroupBy<'_> {
     pub fn skew(&self) -> Result<DataFrame, FrameError> {
         self.refuse_text_columns("skew")?;
         if let Some(df) = self.try_moment_dense("skew")? {
-            return Ok(df);
+            return float_moment_frame(df);
         }
         let (group_order, groups) = self.build_groups();
         let value_cols: Vec<String> = self
@@ -104197,7 +104234,7 @@ impl DataFrameGroupBy<'_> {
         } else {
             None
         };
-        Ok(DataFrame {
+        float_moment_frame(DataFrame {
             columns: result_cols.into(),
             column_order: col_order.into(),
             index: Index::new(out_labels).rename_index(by_name),
@@ -104212,7 +104249,7 @@ impl DataFrameGroupBy<'_> {
     /// Matches `groupby.kurtosis()`.
     pub fn kurtosis(&self) -> Result<DataFrame, FrameError> {
         if let Some(df) = self.try_moment_dense("kurt")? {
-            return Ok(df);
+            return float_moment_frame(df);
         }
         let (group_order, groups) = self.build_groups();
         let value_cols: Vec<String> = self
@@ -104266,7 +104303,7 @@ impl DataFrameGroupBy<'_> {
         } else {
             None
         };
-        Ok(DataFrame {
+        float_moment_frame(DataFrame {
             columns: result_cols.into(),
             column_order: col_order.into(),
             index: Index::new(out_labels).rename_index(by_name),
@@ -153588,6 +153625,46 @@ mod tests {
             mean.column("a").unwrap().values(),
             &[Scalar::Float64(2.0), Scalar::Float64(2.0)]
         );
+    }
+
+    #[test]
+    fn groupby_sem_and_all_nan_skew_match_pandas_7hxqv() {
+        // pandas 2.2.3 over k=['y','x','y'], a=[1.0, 2.0, 4.0]: groupby sem is
+        // sqrt(var/n), y = 1.5 (Series.sem's std/sqrt(n) is 1.4999999999999998),
+        // and skew is float64 [NaN, NaN] with every group shorter than 3.
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        let df = DataFrame::from_dict(
+            &["k", "a"],
+            vec![
+                ("k", vec![utf8("y"), utf8("x"), utf8("y")]),
+                ("a", [1.0, 2.0, 4.0].map(Scalar::Float64).to_vec()),
+            ],
+        )
+        .unwrap();
+        let gb = df.groupby(&["k"]).unwrap();
+        let sem = gb.sem().unwrap();
+        assert_eq!(sem.column("a").unwrap().values()[1], Scalar::Float64(1.5));
+        let key = df.column_as_series("k").unwrap();
+        let a = df.column_as_series("a").unwrap();
+        let sgb = a.groupby(&key).unwrap();
+        // SeriesGroupBy keeps first-seen group order: y, then x.
+        assert_eq!(sgb.sem().unwrap().values()[0], Scalar::Float64(1.5));
+        for skew in [
+            gb.skew().unwrap().column("a").unwrap().clone(),
+            sgb.skew().unwrap().column().clone(),
+            gb.kurtosis().unwrap().column("a").unwrap().clone(),
+        ] {
+            assert_eq!(skew.dtype(), DType::Float64);
+            assert!(skew.values().iter().all(Scalar::is_missing));
+        }
+        // NEGATIVE: Series.sem keeps pandas' nanops formula, std / sqrt(n).
+        let pair = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(4.0)],
+        )
+        .unwrap();
+        assert_eq!(pair.sem().unwrap(), 1.499_999_999_999_999_8);
     }
 
     #[test]

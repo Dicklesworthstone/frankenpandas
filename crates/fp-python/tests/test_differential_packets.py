@@ -2858,24 +2858,16 @@ def test_groupby_numeric_reductions_refuse_strings_like_pandas(op: str, select: 
     assert str(expected.value) in str(got.value)
 
 
-_OPEN_7HXQV = pytest.mark.xfail(
-    strict=True,
-    reason="br-frankenpandas-7hxqv: groupby sem is std/sqrt(n) (pandas sqrt(var/n)); "
-    "an all-NaN groupby skew column comes back object",
-)
-
-
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize(
-    "op",
-    ["mean", "median", "var", "prod", "std"]
-    + [pytest.param(op, marks=_OPEN_7HXQV) for op in ("sem", "skew")],
-)
-def test_groupby_numeric_reductions_match_pandas(op: str) -> None:
+@pytest.mark.parametrize("op", ["mean", "median", "var", "prod", "std", "sem", "skew"])
+@pytest.mark.parametrize("select", [None, "a"], ids=["frame", "column"])
+def test_groupby_numeric_reductions_match_pandas(op: str, select: Any) -> None:
     # The NEGATIVE of the string refusal above: without a string column these
-    # reduce, to pandas' values.
+    # reduce, to pandas' values. sem is pandas' groupby sqrt(var/n), and skew
+    # over groups shorter than 3 is float64 NaN (br-frankenpandas-7hxqv).
     def call(m: Any) -> Any:
-        return getattr(m.DataFrame({"k": ["y", "x", "y"], "a": [1.0, 2.0, 4.0]}).groupby("k"), op)()
+        gb = m.DataFrame({"k": ["y", "x", "y"], "a": [1.0, 2.0, 4.0]}).groupby("k")
+        return getattr(gb if select is None else gb[select], op)()
 
     assert _nan_marked(_strict(call(fpd))) == _nan_marked(_strict(call(pd)))
 
