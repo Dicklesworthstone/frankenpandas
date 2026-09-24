@@ -3256,6 +3256,42 @@ def test_ewm_refuses_what_it_cannot_run() -> None:
             _ewm_s(fpd).ewm(**kwargs)
 
 
+def _gwin(m: Any) -> Any:
+    return m.DataFrame({"k": ["x", "y", "x", "y"], "v": [1.0, 2.0, 3.0, 4.0]}).groupby("k")
+
+
+_GROUPED_WINDOWS = {
+    "rolling": lambda g: g.rolling(2).mean(),
+    "expanding": lambda g: g.expanding().mean(),
+    "ewm": lambda g: g.ewm(span=2).mean(),
+    "column_rolling": lambda g: g["v"].rolling(2).mean(),
+    "column_expanding": lambda g: g["v"].expanding().mean(),
+    "column_ewm": lambda g: g["v"].ewm(span=2).mean(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GROUPED_WINDOWS.values()), ids=list(_GROUPED_WINDOWS))
+def test_grouped_windows_refuse_rather_than_ignore_the_groups(case: Any) -> None:
+    # br-frankenpandas-pbpli: these ran ONE window over all rows (gb.rolling(2)
+    # .mean() gave [nan, 1.5, 2.5, 3.5] where pandas gives the per-group [nan,
+    # 2.0, nan, 3.0] under a (k, row) MultiIndex). Until the binding can return
+    # that shape they refuse; so does groupby resample.
+    with pytest.raises(NotImplementedError, match="per group"):
+        case(_gwin(fpd))
+    with pytest.raises(NotImplementedError, match="per group"):
+        _gwin(fpd).resample("D")
+    # NEGATIVE: the ungrouped windows still run.
+    assert fpd.Series([1.0, 3.0]).rolling(2).mean().tolist()[1] == 2.0
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GROUPED_WINDOWS.values()), ids=list(_GROUPED_WINDOWS))
+@pytest.mark.xfail(strict=True, reason="br-frankenpandas-pbpli: grouped windows are refused")
+def test_grouped_windows_match_pandas(case: Any) -> None:
+    assert _nan_marked(_strict_ordered(case(_gwin(fpd)))) == _nan_marked(_strict_ordered(case(_gwin(pd))))
+
+
 def _sr(m: Any) -> Any:
     return m.Series([1, 2, 3], index=["a", "b", "c"], name="v")
 

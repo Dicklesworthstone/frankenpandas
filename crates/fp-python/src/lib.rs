@@ -26834,58 +26834,41 @@ impl PyGroupBy {
         })
     }
 
-    #[pyo3(signature = (span=None, alpha=None))]
-    fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> PyResult<PyExponentialMovingWindow> {
-        Ok(PyExponentialMovingWindow {
-            series: None,
-            dataframe: Some(self.df.clone()),
-            span,
-            alpha,
-            adjust: true,
-            min_periods: 0,
-        })
+    // Grouped windows: refused, see `grouped_window_refused`.
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn ewm(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyExponentialMovingWindow> {
+        Err(grouped_window_refused("DataFrameGroupBy.ewm"))
     }
 
-    #[pyo3(signature = (min_periods=None))]
-    fn expanding(&self, min_periods: Option<usize>) -> PyResult<PyExpanding> {
-        Ok(PyExpanding {
-            series: None,
-            dataframe: Some(self.df.clone()),
-            min_periods,
-        })
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn expanding(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyExpanding> {
+        Err(grouped_window_refused("DataFrameGroupBy.expanding"))
     }
 
-    #[pyo3(signature = (window, min_periods=None, center=false))]
+    #[pyo3(signature = (*_args, **_kwargs))]
     fn rolling(
         &self,
-        window: usize,
-        min_periods: Option<usize>,
-        center: Option<bool>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRolling> {
-        Ok(PyRolling {
-            series: None,
-            dataframe: Some(self.df.clone()),
-            window,
-            min_periods,
-            center: center.unwrap_or(false),
-        })
+        Err(grouped_window_refused("DataFrameGroupBy.rolling"))
     }
 
-    #[pyo3(signature = (rule, closed=None, label=None, origin=None))]
+    #[pyo3(signature = (*_args, **_kwargs))]
     fn resample(
         &self,
-        rule: String,
-        closed: Option<String>,
-        label: Option<String>,
-        origin: Option<String>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyResampler> {
-        Ok(PyResampler {
-            target: ResampleTarget::DataFrame(self.df.clone()),
-            freq: rule,
-            closed,
-            label,
-            origin,
-        })
+        Err(grouped_window_refused("DataFrameGroupBy.resample"))
     }
 
     fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
@@ -27871,58 +27854,41 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (span=None, alpha=None))]
-    fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> PyResult<PyExponentialMovingWindow> {
-        Ok(PyExponentialMovingWindow {
-            series: Some(self.series.clone()),
-            dataframe: None,
-            span,
-            alpha,
-            adjust: true,
-            min_periods: 0,
-        })
+    // Grouped windows: refused, see `grouped_window_refused`.
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn ewm(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyExponentialMovingWindow> {
+        Err(grouped_window_refused("SeriesGroupBy.ewm"))
     }
 
-    #[pyo3(signature = (min_periods=None))]
-    fn expanding(&self, min_periods: Option<usize>) -> PyResult<PyExpanding> {
-        Ok(PyExpanding {
-            series: Some(self.series.clone()),
-            dataframe: None,
-            min_periods,
-        })
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn expanding(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyExpanding> {
+        Err(grouped_window_refused("SeriesGroupBy.expanding"))
     }
 
-    #[pyo3(signature = (window, min_periods=None, center=false))]
+    #[pyo3(signature = (*_args, **_kwargs))]
     fn rolling(
         &self,
-        window: usize,
-        min_periods: Option<usize>,
-        center: Option<bool>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRolling> {
-        Ok(PyRolling {
-            series: Some(self.series.clone()),
-            dataframe: None,
-            window,
-            min_periods,
-            center: center.unwrap_or(false),
-        })
+        Err(grouped_window_refused("SeriesGroupBy.rolling"))
     }
 
-    #[pyo3(signature = (rule, closed=None, label=None, origin=None))]
+    #[pyo3(signature = (*_args, **_kwargs))]
     fn resample(
         &self,
-        rule: String,
-        closed: Option<String>,
-        label: Option<String>,
-        origin: Option<String>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyResampler> {
-        Ok(PyResampler {
-            target: ResampleTarget::Series(self.series.clone()),
-            freq: rule,
-            closed,
-            label,
-            origin,
-        })
+        Err(grouped_window_refused("SeriesGroupBy.resample"))
     }
 
     fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -35014,6 +34980,17 @@ fn exponential_window(
         adjust,
         min_periods,
     })
+}
+
+/// The groupby window and resample objects the binding cannot build yet.
+/// pandas computes them per group and indexes the result by (key, row
+/// label), and the binding returns no row MultiIndex; these methods wrapped
+/// the UNGROUPED frame and so ran one window over all rows - a silently wrong
+/// number (br-frankenpandas-pbpli). A refusal until the grouped result exists.
+fn grouped_window_refused(what: &str) -> PyErr {
+    not_implemented(&format!(
+        "{what} (pandas computes it per group under a (key, row) MultiIndex)"
+    ))
 }
 
 /// A keyword argument that was passed and is not None.
