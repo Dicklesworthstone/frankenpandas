@@ -259,7 +259,13 @@ fn e2e_step7_export_sql() {
     fp_io::write_sql(&frame, &conn, "trades", fp_io::SqlIfExists::Fail).expect("SQL write failed");
     let sql_back = fp_io::read_sql_table(&conn, "trades").expect("SQL re-read failed");
     assert_eq!(sql_back.index().len(), frame.index().len());
-    assert_eq!(sql_back.column_names().len(), frame.column_names().len());
+    // pandas' to_sql default index=True: read_sql_table returns the unnamed
+    // index as a leading "index" column (4qg5w.1).
+    assert_eq!(
+        sql_back.column_names().len(),
+        frame.column_names().len() + 1
+    );
+    assert_eq!(sql_back.column_names()[0].as_str(), "index");
 }
 
 // ── Full pipeline ────────────────────────────────────────────────────

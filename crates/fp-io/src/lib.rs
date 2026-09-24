@@ -120,6 +120,7 @@ use dta::stata::{
         variable::Variable, variable_type::VariableType,
     },
     missing_value::MissingValue,
+    stata_byte::StataByte,
     stata_double::StataDouble,
     stata_long::StataLong,
 };
@@ -685,7 +686,8 @@ fn build_csv_object_aware_column(
             .enumerate()
             .map(|(i, parsed)| {
                 if parsed.is_missing() {
-                    Scalar::Null(NullKind::Null)
+                    // pandas: a missing cell in an object column is NaN (audiv).
+                    Scalar::Null(NullKind::NaN)
                 } else {
                     let field = &raw_bytes[raw_offsets[i]..raw_offsets[i + 1]];
                     // Fields originate from a `&str` CSV input, so every slice is
@@ -1400,7 +1402,7 @@ fn try_read_csv_with_options_no_na_numeric_fast_path(
     if headers_record.is_empty() {
         return Err(IoError::MissingHeaders);
     }
-    let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
+    let headers: Vec<String> = pandas_header_names(headers_record.iter());
     reject_duplicate_headers(&headers)?;
 
     try_read_csv_str_simple_typed_numeric(input, &headers)
@@ -1513,7 +1515,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     if headers_record.is_empty() {
         return Err(IoError::MissingHeaders);
     }
-    let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
+    let headers: Vec<String> = pandas_header_names(headers_record.iter());
     reject_duplicate_headers(&headers)?;
     let header_count = headers.len();
     // pandas treats a uniformly one-field-wider body as an implicit first
@@ -1848,7 +1850,7 @@ impl Default for CsvWriteOptions {
             delimiter: b',',
             na_rep: String::new(),
             header: true,
-            include_index: false,
+            include_index: true,
             index_label: None,
         }
     }
@@ -2577,12 +2579,34 @@ pub fn write_csv_string_with_options(
     frame: &DataFrame,
     options: &CsvWriteOptions,
 ) -> Result<String, IoError> {
-    if options.include_index && frame.row_multiindex().is_some() {
+    if options.include_index
+        && let Some(row_multiindex) = frame.row_multiindex()
+    {
         let materialized = materialize_named_row_multiindex_columns(frame)?;
         let mut nested_options = options.clone();
         nested_options.include_index = false;
         nested_options.index_label = None;
-        return write_csv_string_with_options(&materialized, &nested_options);
+        if !options.header || row_multiindex.names().iter().all(Option::is_some) {
+            return write_csv_string_with_options(&materialized, &nested_options);
+        }
+        // pandas heads an UNNAMED level with a blank cell - MultiIndex
+        // levels (p, 1) unnamed -> ",,v" - where reset_index names it
+        // level_{i}. Frame columns cannot all be named "", so write the body
+        // headerless and put pandas' header line on top. (4qg5w.1)
+        nested_options.header = false;
+        let body = write_csv_string_with_options(&materialized, &nested_options)?;
+        let mut header: Vec<String> = row_multiindex
+            .names()
+            .iter()
+            .map(|name| name.clone().unwrap_or_default())
+            .collect();
+        header.extend(frame.column_names().into_iter().cloned());
+        let mut writer = WriterBuilder::new()
+            .delimiter(options.delimiter)
+            .from_writer(Vec::new());
+        writer.write_record(&header)?;
+        let header_line = String::from_utf8(writer.into_inner().map_err(|err| err.into_error())?)?;
+        return Ok(header_line + &body);
     }
 
     // Typed fast path (br-frankenpandas-qk2i9): when every column is an all-valid
@@ -2731,8 +2755,19 @@ pub fn write_latex_string_with_options(
     let table_width = headers.len() + usize::from(options.include_index);
     let mut out = String::new();
 
+    // pandas' default column_format: `l` for the index, `r` for every column in
+    // `_get_numeric_data()` (int, float and bool), `l` otherwise.
     out.push_str("\\begin{tabular}{");
-    out.push_str(&"l".repeat(table_width));
+    if options.include_index {
+        out.push('l');
+    }
+    for name in &headers {
+        let numeric = frame.column(name).is_some_and(|column| {
+            let dtype = column.dtype();
+            dtype.is_numeric() || matches!(dtype, DType::Bool | DType::BoolNullable)
+        });
+        out.push(if numeric { 'r' } else { 'l' });
+    }
     out.push_str("}\n\\toprule\n");
 
     let mut header_row = Vec::with_capacity(table_width);
@@ -3187,6 +3222,62 @@ struct StataField {
     variable_name: String,
     source: StataFieldSource,
     variable_type: VariableType,
+    /// Written as `%tc` (milliseconds since 1960-01-01), as pandas does.
+    datetime: bool,
+}
+
+/// Stata's date epoch, 1960-01-01T00:00:00, in Unix nanoseconds.
+const STATA_EPOCH_NS: i64 = -315_619_200_000_000_000;
+
+/// pandas `_datetime_to_stata_elapsed_vec(.., "tc")`: whole microseconds since
+/// the Stata epoch (floor), then divided by 1000 as a float.
+fn stata_tc_millis(ns: i64) -> f64 {
+    let micros = (i128::from(ns) - i128::from(STATA_EPOCH_NS)).div_euclid(1_000);
+    micros as f64 / 1_000.0
+}
+
+/// A `%tc`/`%td` variable read back as a Datetime64 column, as pandas'
+/// `convert_dates=True` does: `%tc` truncates the stored double to integer
+/// milliseconds; `%td` counts days. `None` for any other display format.
+fn stata_dates_column(values: &[Scalar], format: &str) -> Result<Option<Column>, IoError> {
+    let unit_ns: i64 = if format.starts_with("%tc") {
+        1_000_000
+    } else if format.starts_with("%td") || format.starts_with("%d") {
+        NANOS_PER_DAY
+    } else {
+        return Ok(None);
+    };
+    let mut data = Vec::with_capacity(values.len());
+    let mut validity = fp_columnar::ValidityMask::all_valid(values.len());
+    for (i, value) in values.iter().enumerate() {
+        let elapsed = match value {
+            Scalar::Int64(v) => Some(*v),
+            Scalar::Float64(v) if v.is_finite() => Some(v.trunc() as i64),
+            _ => None,
+        };
+        let nanos = elapsed
+            .map(|elapsed| {
+                elapsed
+                    .checked_mul(unit_ns)
+                    .and_then(|delta| delta.checked_add(STATA_EPOCH_NS))
+                    .ok_or_else(|| {
+                        IoError::Stata(format!(
+                            "Stata {format} value {elapsed} is out of bounds for nanosecond precision"
+                        ))
+                    })
+            })
+            .transpose()?;
+        match nanos {
+            Some(nanos) => data.push(nanos),
+            None => {
+                data.push(Timestamp::NAT);
+                validity.set(i, false);
+            }
+        }
+    }
+    Ok(Some(Column::from_datetime64_values_with_validity(
+        data, validity,
+    )))
 }
 
 #[derive(Debug, Clone)]
@@ -3207,7 +3298,11 @@ pub fn write_stata_bytes_with_options(
     let header = Header::builder(Release::V118, ByteOrder::LittleEndian).build();
     let mut schema = StataSchema::builder();
     for field in &fields {
-        let format = stata_format_for_type(field.variable_type);
+        let format = if field.datetime {
+            "%tc"
+        } else {
+            stata_format_for_type(field.variable_type)
+        };
         schema = schema.add_variable(
             Variable::builder(field.variable_type, &field.variable_name).format(format),
         );
@@ -3260,6 +3355,12 @@ pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
         .iter()
         .map(|variable| variable.name().to_owned())
         .collect::<Vec<_>>();
+    let formats = record_reader
+        .schema()
+        .variables()
+        .iter()
+        .map(|variable| variable.format().to_owned())
+        .collect::<Vec<_>>();
     reject_duplicate_headers(&column_order)?;
 
     let mut columns = column_order
@@ -3281,11 +3382,17 @@ pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
     }
 
     let mut out = BTreeMap::new();
-    for name in &column_order {
+    for (name, format) in column_order.iter().zip(&formats) {
         let values = columns
             .remove(name)
             .ok_or_else(|| IoError::Stata(format!("missing Stata column '{name}'")))?;
-        out.insert(name.clone(), Column::from_values(values)?);
+        // Date-formatted variables were returned as their raw elapsed number
+        // (float milliseconds since 1960). (4qg5w.20)
+        let column = match stata_dates_column(&values, format)? {
+            Some(dates) => dates,
+            None => Column::from_values(values)?,
+        };
+        out.insert(name.clone(), column);
     }
     Ok(DataFrame::new_with_column_order(
         Index::from_i64((0..row_count).collect()),
@@ -3305,10 +3412,30 @@ fn stata_fields_for_frame(
             .clone()
             .unwrap_or_else(|| "index".to_owned());
         validate_stata_variable_name(&name)?;
+        // pandas writes the index via reset_index(), so it is typed like any
+        // column: an int index is a Stata long, not a string.
+        let labels = frame
+            .index()
+            .labels()
+            .iter()
+            .map(index_label_to_scalar_value)
+            .collect::<Vec<_>>();
+        let datetime = labels
+            .iter()
+            .any(|label| matches!(label, Scalar::Datetime64(v) if *v != Timestamp::NAT))
+            && labels
+                .iter()
+                .all(|label| label.is_missing() || matches!(label, Scalar::Datetime64(_)));
+        let variable_type = if datetime {
+            VariableType::Double
+        } else {
+            infer_stata_variable_type(&labels, &name)?
+        };
         fields.push(StataField {
             variable_name: name,
             source: StataFieldSource::Index,
-            variable_type: stata_index_variable_type(frame)?,
+            variable_type,
+            datetime,
         });
     }
 
@@ -3317,10 +3444,32 @@ fn stata_fields_for_frame(
         let column = frame
             .column(name)
             .ok_or_else(|| IoError::Stata(format!("missing DataFrame column '{name}'")))?;
+        // pandas raises NotImplementedError("Data type ... not supported.") for
+        // both; these were written as text before.
+        let dtype = column.dtype();
+        match &dtype {
+            DType::Datetime64 { tz: Some(tz) } => {
+                return Err(IoError::Deferred(format!(
+                    "Data type datetime64[ns, {tz}] not supported."
+                )));
+            }
+            DType::Timedelta64 => {
+                return Err(IoError::Deferred(
+                    "Data type timedelta64[ns] not supported.".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        let datetime = matches!(dtype, DType::Datetime64 { tz: None });
         fields.push(StataField {
             variable_name: name.clone(),
             source: StataFieldSource::Column(name.clone()),
-            variable_type: infer_stata_variable_type(column, name)?,
+            variable_type: if datetime {
+                VariableType::Double
+            } else {
+                infer_stata_variable_type(column.values(), name)?
+            },
+            datetime,
         });
     }
 
@@ -3361,44 +3510,35 @@ fn validate_stata_variable_name(name: &str) -> Result<(), IoError> {
     Ok(())
 }
 
-fn stata_index_variable_type(frame: &DataFrame) -> Result<VariableType, IoError> {
-    let max_len = frame
-        .index()
-        .labels()
-        .iter()
-        .map(|label| label.to_string().len())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    stata_fixed_string_type(max_len, "index")
-}
+/// Stata's non-missing `long` range; 2_147_483_621.. are missing-value codes.
+/// pandas `_cast_to_stata_types` uses exactly these bounds.
+const STATA_LONG_RANGE: std::ops::RangeInclusive<i64> = -2_147_483_647..=2_147_483_620;
 
-fn infer_stata_variable_type(column: &Column, name: &str) -> Result<VariableType, IoError> {
-    let mut saw_numeric = false;
+/// pandas `_cast_to_stata_types`: bool -> int8 (byte); int64 -> int32 (long)
+/// inside [`STATA_LONG_RANGE`], else float64 (double); float64 -> double, with
+/// ±inf rejected; anything else -> a fixed-width string.
+fn infer_stata_variable_type(values: &[Scalar], name: &str) -> Result<VariableType, IoError> {
+    let mut saw_bool = false;
+    let mut saw_int = false;
+    let mut ints_fit_long = true;
     let mut saw_float = false;
     let mut saw_string = false;
     let mut max_string_len = 1usize;
 
-    for value in column.values() {
+    for value in values {
         match value {
             Scalar::Null(_) => {}
-            Scalar::Bool(_) => {
-                saw_numeric = true;
-            }
+            Scalar::Bool(_) => saw_bool = true,
             Scalar::Int64(v) => {
-                saw_numeric = true;
-                if i32::try_from(*v).is_err() {
-                    return Err(IoError::Stata(format!(
-                        "Stata long column '{name}' cannot encode i64 value {v}"
-                    )));
-                }
+                saw_int = true;
+                ints_fit_long &= STATA_LONG_RANGE.contains(v);
             }
-            Scalar::Float64(v) => {
-                if !v.is_nan() {
-                    saw_numeric = true;
-                    saw_float = true;
-                }
+            Scalar::Float64(v) if v.is_infinite() => {
+                return Err(IoError::Stata(format!(
+                    "Column {name} contains infinity or -infinity which is outside the range supported by Stata."
+                )));
             }
+            Scalar::Float64(v) => saw_float |= !v.is_nan(),
             Scalar::Utf8(text) => {
                 saw_string = true;
                 max_string_len = max_string_len.max(text.len());
@@ -3412,8 +3552,12 @@ fn infer_stata_variable_type(column: &Column, name: &str) -> Result<VariableType
 
     if saw_string {
         stata_fixed_string_type(max_string_len, name)
-    } else if saw_numeric && !saw_float {
+    } else if saw_float || !ints_fit_long {
+        Ok(VariableType::Double)
+    } else if saw_int {
         Ok(VariableType::Long)
+    } else if saw_bool {
+        Ok(VariableType::Byte)
     } else {
         Ok(VariableType::Double)
     }
@@ -3448,9 +3592,14 @@ fn stata_value_for_field(
     field: &StataField,
 ) -> Result<StataValue<'static>, IoError> {
     match field.source {
-        StataFieldSource::Index => Ok(StataValue::String(std::borrow::Cow::Owned(
-            index_label_string(frame, row_idx)?,
-        ))),
+        StataFieldSource::Index => {
+            let label = frame
+                .index()
+                .labels()
+                .get(row_idx)
+                .map(index_label_to_scalar_value);
+            scalar_to_stata_value(label.as_ref(), field.variable_type, &field.variable_name)
+        }
         StataFieldSource::Column(ref name) => {
             let value = frame.column(name).and_then(|column| column.value(row_idx));
             scalar_to_stata_value(value, field.variable_type, name)
@@ -3464,6 +3613,15 @@ fn scalar_to_stata_value(
     name: &str,
 ) -> Result<StataValue<'static>, IoError> {
     match variable_type {
+        VariableType::Byte => match value {
+            Some(Scalar::Bool(v)) => Ok(StataValue::Byte(StataByte::Present(i8::from(*v)))),
+            Some(Scalar::Null(_)) | None => {
+                Ok(StataValue::Byte(StataByte::Missing(MissingValue::System)))
+            }
+            Some(other) => Err(IoError::Stata(format!(
+                "Stata byte column '{name}' cannot encode {other:?}"
+            ))),
+        },
         VariableType::Long => match value {
             Some(Scalar::Bool(v)) => Ok(StataValue::Long(StataLong::Present(i32::from(*v)))),
             Some(Scalar::Int64(v)) => Ok(StataValue::Long(StataLong::Present(
@@ -3485,6 +3643,13 @@ fn scalar_to_stata_value(
                 0.0
             }))),
             Some(Scalar::Int64(v)) => Ok(StataValue::Double(StataDouble::Present(*v as f64))),
+            // A datetime field (`%tc`): milliseconds since 1960-01-01.
+            Some(Scalar::Datetime64(v)) if *v != Timestamp::NAT => Ok(StataValue::Double(
+                StataDouble::Present(stata_tc_millis(*v)),
+            )),
+            Some(Scalar::Datetime64(_)) => Ok(StataValue::Double(StataDouble::Missing(
+                MissingValue::System,
+            ))),
             Some(Scalar::Float64(v)) if v.is_nan() => Ok(StataValue::Double(StataDouble::Missing(
                 MissingValue::System,
             ))),
@@ -3503,11 +3668,9 @@ fn scalar_to_stata_value(
             };
             Ok(StataValue::String(std::borrow::Cow::Owned(text)))
         }
-        VariableType::Byte | VariableType::Int | VariableType::Float | VariableType::LongString => {
-            Err(IoError::Stata(format!(
-                "unsupported Stata variable type for column '{name}': {variable_type:?}"
-            )))
-        }
+        VariableType::Int | VariableType::Float | VariableType::LongString => Err(IoError::Stata(
+            format!("unsupported Stata variable type for column '{name}': {variable_type:?}"),
+        )),
     }
 }
 
@@ -4319,8 +4482,10 @@ fn parse_scalar(field: &str) -> Scalar {
     // padded " NA " or "true " is NOT null/bool), and plain strings keep their
     // original whitespace. Verified vs live pandas 2.2.3: " abc " stays
     // " abc "; "true " / " NA " stay strings; but " 1 " parses to Int64(1).
+    // NaN, not Null: pandas' text parser marks a missing cell NaN in every
+    // column, strings included (br-frankenpandas-audiv).
     if is_pandas_default_na(field) {
-        return Scalar::Null(NullKind::Null);
+        return Scalar::Null(NullKind::NaN);
     }
 
     let trimmed = field.trim();
@@ -4493,7 +4658,8 @@ fn parse_scalar_with_options(
         let is_default_na = keep_default_na && is_pandas_default_na(field);
         let is_custom_na = na_set.contains(field);
         if is_default_na || is_custom_na {
-            return Scalar::Null(NullKind::Null);
+            // NaN in every column, as pandas marks it (br-frankenpandas-audiv).
+            return Scalar::Null(NullKind::NaN);
         }
     }
 
@@ -4544,6 +4710,26 @@ fn parse_scalar_with_options(
         return Scalar::Bool(false);
     }
     Scalar::Utf8(field.to_owned())
+}
+
+/// Header names as pandas' readers give them: an EMPTY header cell becomes
+/// `Unnamed: {position}` (a whitespace-only one is kept as is). The blank cell
+/// is exactly what `DataFrame.to_csv` / `to_excel` write above an unnamed
+/// index, so every pandas-written file with its index has one. MEASURED,
+/// pandas 2.2.3: `read_csv(",a,\n1,2,3")` -> ['Unnamed: 0', 'a', 'Unnamed: 2'].
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
+fn pandas_header_names<'a>(cells: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    cells
+        .into_iter()
+        .enumerate()
+        .map(|(position, cell)| {
+            if cell.is_empty() {
+                format!("Unnamed: {position}")
+            } else {
+                cell.to_owned()
+            }
+        })
+        .collect()
 }
 
 fn reject_duplicate_headers(headers: &[String]) -> Result<(), IoError> {
@@ -5465,10 +5651,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
 
             let header_count = headers_record.len();
             let row_hint = input.len() / (header_count * 8).max(1);
-            let headers = headers_record
-                .iter()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
+            let headers = pandas_header_names(headers_record.iter());
             let columns: Vec<Vec<Scalar>> = (0..header_count)
                 .map(|_| Vec::with_capacity(row_hint))
                 .collect();
@@ -5486,8 +5669,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
 
             let header_count = first_record.len();
             let row_hint = input.len() / (header_count * 8).max(1);
+            // header=None: pandas labels the columns 0..n-1. (4qg5w.19)
             let headers = (0..header_count)
-                .map(|idx| format!("column_{idx}"))
+                .map(|idx| idx.to_string())
                 .collect::<Vec<_>>();
             let mut columns: Vec<Vec<Scalar>> = (0..header_count)
                 .map(|_| Vec::with_capacity(row_hint))
@@ -9185,14 +9369,23 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Int64 | DType::Int64Nullable => ArrowDataType::Int64,
         DType::Float64 | DType::Float64Nullable => ArrowDataType::Float64,
         DType::Utf8 => ArrowDataType::Utf8,
-        DType::Categorical => ArrowDataType::Utf8,
+        // pyarrow's encoding of pandas' `category`: keys into the categories.
+        DType::Categorical => ArrowDataType::Dictionary(
+            Box::new(ArrowDataType::Int32),
+            Box::new(ArrowDataType::Utf8),
+        ),
         DType::Bool | DType::BoolNullable => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
-        DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
-        DType::Datetime64 { .. } => ArrowDataType::Int64, // store as nanoseconds
+        // Real Arrow temporal types, as pyarrow writes them for pandas; these
+        // were plain Int64, which every reader (fp included) took for integers.
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
+        DType::Timedelta64 => ArrowDataType::Duration(TimeUnit::Nanosecond),
+        DType::Datetime64 { tz } => {
+            ArrowDataType::Timestamp(TimeUnit::Nanosecond, tz.map(|tz| fp_tz_to_arrow(tz).into()))
+        }
         DType::Period => ArrowDataType::Int64, // store as ordinal
         DType::Interval => ArrowDataType::Utf8, // store as string until arrow interval lands
-        DType::Sparse => ArrowDataType::Utf8, // marker fallback until sparse arrays land
+        DType::Sparse => ArrowDataType::Utf8,  // marker fallback until sparse arrays land
     }
 }
 
@@ -9244,7 +9437,8 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             }
             Arc::new(builder.finish())
         }
-        DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => {
+        DType::Categorical => categorical_to_arrow_dictionary(column)?,
+        DType::Utf8 | DType::Null | DType::Sparse => {
             if column.dtype() == DType::Utf8
                 && let Some((bytes, offsets)) = column.as_utf8_contiguous()
             {
@@ -9267,38 +9461,28 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             Arc::new(builder.finish())
         }
         DType::Timedelta64 => {
-            let mut builder = Int64Builder::with_capacity(column.len());
-            for value in column.values() {
-                match value {
-                    Scalar::Timedelta64(nanos) => {
-                        if *nanos == Timedelta::NAT {
-                            builder.append_null();
-                        } else {
-                            builder.append_value(*nanos);
-                        }
-                    }
-                    _ if value.is_missing() => builder.append_null(),
-                    _ => builder.append_null(),
-                }
-            }
-            Arc::new(builder.finish())
+            let nanos: Vec<Option<i64>> = column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => Some(*nanos),
+                    _ => None,
+                })
+                .collect();
+            Arc::new(arrow::array::DurationNanosecondArray::from(nanos))
         }
-        DType::Datetime64 { .. } => {
-            let mut builder = Int64Builder::with_capacity(column.len());
-            for value in column.values() {
-                match value {
-                    Scalar::Datetime64(nanos) => {
-                        if *nanos == Timestamp::NAT {
-                            builder.append_null();
-                        } else {
-                            builder.append_value(*nanos);
-                        }
-                    }
-                    _ if value.is_missing() => builder.append_null(),
-                    _ => builder.append_null(),
-                }
-            }
-            Arc::new(builder.finish())
+        DType::Datetime64 { tz } => {
+            let nanos: Vec<Option<i64>> = column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => Some(*nanos),
+                    _ => None,
+                })
+                .collect();
+            Arc::new(
+                TimestampNanosecondArray::from(nanos).with_timezone_opt(tz.map(fp_tz_to_arrow)),
+            )
         }
         DType::Period => {
             let mut builder = Int64Builder::with_capacity(column.len());
@@ -9351,6 +9535,12 @@ pub fn series_from_arrow_array(
     dt: &ArrowDataType,
 ) -> Result<Series, IoError> {
     let values = arrow_array_to_scalars(arr, dt)?;
+    if let ArrowDataType::Timestamp(_, Some(_)) = dt {
+        // The zone lives on the dtype; value inference alone would drop it, and
+        // Column::new refuses a naive->tz cast, so relabel the inferred column.
+        let column = Column::from_values(values)?.with_dtype(fp_dtype_for_arrow_data_type(dt));
+        return Series::new(name, Index::new(index_labels), column).map_err(IoError::from);
+    }
     Series::from_values(name, index_labels, values).map_err(IoError::from)
 }
 
@@ -9444,7 +9634,8 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
             .column(name)
             .ok_or_else(|| IoError::Parquet(format!("missing column: {name}")))?;
         let dt = col.dtype();
-        let mut field = Field::new(name.as_str(), dtype_to_arrow(dt.clone()), true);
+        let mut field = Field::new(name.as_str(), dtype_to_arrow(dt.clone()), true)
+            .with_dict_is_ordered(col.categorical().is_some_and(|meta| meta.ordered));
         if let Some(tag) = nullable_extension_tag(dt) {
             field = field.with_metadata(std::collections::HashMap::from([(
                 FP_DTYPE_METADATA_KEY.to_owned(),
@@ -9553,7 +9744,12 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
         // contiguous-nullable constructor). Bit-identical to the Scalar path's
         // per-type null-kind conventions (Int/Bool/Utf8 → Null(Null); Float →
         // Null(NaN)); validity constructors reproduce those exactly (verified).
-        let col = match arrow_array_to_column_typed(arr.as_ref(), field.data_type()) {
+        let typed = if matches!(field.data_type(), ArrowDataType::Dictionary(_, _)) {
+            Some(arrow_dictionary_to_categorical(arr.as_ref(), field)?)
+        } else {
+            arrow_array_to_column_typed(arr.as_ref(), field.data_type())
+        };
+        let col = match typed {
             Some(c) => c,
             None => {
                 let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
@@ -9592,11 +9788,14 @@ fn fp_dtype_for_arrow_data_type(dt: &ArrowDataType) -> DType {
         | ArrowDataType::UInt64 => DType::Int64,
         ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => DType::Float64,
         ArrowDataType::Boolean => DType::Bool,
+        ArrowDataType::Timestamp(_, tz) => DType::Datetime64 {
+            tz: tz.as_deref().map(arrow_tz_to_fp),
+        },
+        ArrowDataType::Duration(_) => DType::Timedelta64,
         ArrowDataType::Utf8
         | ArrowDataType::LargeUtf8
         | ArrowDataType::Date32
-        | ArrowDataType::Date64
-        | ArrowDataType::Timestamp(_, _) => DType::Utf8,
+        | ArrowDataType::Date64 => DType::Utf8,
         _ => DType::Utf8,
     }
 }
@@ -9699,7 +9898,210 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
                 None => Column::from_utf8_contiguous(bytes, offsets),
             })
         }
+        // Temporal columns stay temporal (br-frankenpandas-rc0923-epic-rust-
+        // parity-bugs-4qg5w.20): they used to come back as formatted strings.
+        // An out-of-range value falls through to the Scalar path, which reports it.
+        ArrowDataType::Timestamp(_, tz) => {
+            let nanos = arrow_temporal_nanos(arr, dt).ok()?;
+            let data: Vec<i64> = nanos.iter().map(|v| v.unwrap_or(Timestamp::NAT)).collect();
+            let naive = match arrow_validity_mask(arr) {
+                Some(m) => Column::from_datetime64_values_with_validity(data, m),
+                None => Column::from_datetime64_values(data),
+            };
+            // The zone is column metadata over UTC nanoseconds; relabel the
+            // naive column the way fp-frame's tz_convert does.
+            Some(match tz {
+                Some(tz) => naive.with_dtype(DType::datetime64_tz(arrow_tz_to_fp(tz))),
+                None => naive,
+            })
+        }
+        ArrowDataType::Duration(_) => {
+            let nanos = arrow_temporal_nanos(arr, dt).ok()?;
+            let validity = arrow_validity_mask(arr)
+                .unwrap_or_else(|| fp_columnar::ValidityMask::all_valid(nanos.len()));
+            let data: Vec<i64> = nanos.iter().map(|v| v.unwrap_or(Timedelta::NAT)).collect();
+            Some(Column::from_timedelta64_values_with_validity(
+                data, validity,
+            ))
+        }
         _ => None,
+    }
+}
+
+/// A categorical column as pyarrow writes pandas' `category`: Int32 keys into
+/// a dictionary holding the categories in their order, unused ones included.
+/// Only string categories are encoded; any other kind refuses (this column
+/// used to be written as each value's Debug text, e.g. `Int64(1)`).
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
+fn categorical_to_arrow_dictionary(column: &Column) -> Result<Arc<dyn Array>, IoError> {
+    let categories: Vec<Scalar> = match column.categorical() {
+        Some(meta) => meta.categories.clone(),
+        None => {
+            let mut seen = BTreeSet::new();
+            let mut firsts = Vec::new();
+            for value in column.values() {
+                if let Scalar::Utf8(text) = value
+                    && seen.insert(text.clone())
+                {
+                    firsts.push(value.clone());
+                }
+            }
+            firsts
+        }
+    };
+    let mut labels = Vec::with_capacity(categories.len());
+    for category in &categories {
+        match category {
+            Scalar::Utf8(text) => labels.push(text.as_str()),
+            other => {
+                return Err(IoError::Parquet(format!(
+                    "categorical columns with non-string categories are not supported \
+                     by the Arrow writer (category {other:?})"
+                )));
+            }
+        }
+    }
+    let position: std::collections::HashMap<&str, i32> = labels
+        .iter()
+        .enumerate()
+        .map(|(pos, label)| Ok((*label, i32::try_from(pos)?)))
+        .collect::<Result<_, std::num::TryFromIntError>>()
+        .map_err(|e| IoError::Parquet(format!("too many categories: {e}")))?;
+    let mut keys = Vec::with_capacity(column.len());
+    for value in column.values() {
+        keys.push(match value {
+            Scalar::Utf8(text) => Some(*position.get(text.as_str()).ok_or_else(|| {
+                IoError::Parquet(format!(
+                    "value {text:?} is not among the column's categories"
+                ))
+            })?),
+            _ => None,
+        });
+    }
+    let dictionary = arrow::array::DictionaryArray::<arrow::datatypes::Int32Type>::try_new(
+        arrow::array::Int32Array::from(keys),
+        Arc::new(StringArray::from(labels)),
+    )
+    .map_err(|e| IoError::Parquet(e.to_string()))?;
+    Ok(Arc::new(dictionary))
+}
+
+/// pandas' `category` columns arrive as Arrow dictionaries (they used to be
+/// rejected as "unsupported Arrow data type"). Decode to fp's categorical
+/// column: the labels, with the dictionary as the categories in dictionary
+/// order and the field's ordered flag. String dictionaries only.
+fn arrow_dictionary_to_categorical(arr: &dyn Array, field: &Field) -> Result<Column, IoError> {
+    use arrow::array::AsArray;
+
+    let dictionary = arr
+        .as_any_dictionary_opt()
+        .ok_or_else(|| IoError::Parquet(format!("expected a dictionary array for {field:?}")))?;
+    let dictionary_values = dictionary.values();
+    let labels = arrow_array_to_scalars(dictionary_values.as_ref(), dictionary_values.data_type())?;
+    if let Some(other) = labels
+        .iter()
+        .find(|label| !matches!(label, Scalar::Utf8(_)))
+    {
+        return Err(IoError::Parquet(format!(
+            "categorical columns with non-string categories are not supported \
+             by the Arrow reader (category {other:?})"
+        )));
+    }
+    // normalized_keys panics on an empty dictionary; every row is null then.
+    let keys = if labels.is_empty() {
+        vec![0; arr.len()]
+    } else {
+        dictionary.normalized_keys()
+    };
+    let values = keys
+        .iter()
+        .enumerate()
+        .map(|(row, key)| {
+            if arr.is_null(row) || labels.is_empty() {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                labels[*key].clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let column = Column::new(DType::Categorical, values)?;
+    Ok(
+        column.with_categorical(Some(fp_types::CategoricalMetadata::new(
+            labels,
+            field.dict_is_ordered().unwrap_or(false),
+        ))),
+    )
+}
+
+/// fp spells a fixed-offset zone `UTC+05:30` (pandas' repr); Arrow and
+/// pyarrow spell it `+05:30`. Named zones are the same on both sides.
+fn arrow_tz_to_fp(tz: &str) -> String {
+    if tz.starts_with('+') || tz.starts_with('-') {
+        format!("UTC{tz}")
+    } else {
+        tz.to_owned()
+    }
+}
+
+fn fp_tz_to_arrow(tz: String) -> String {
+    match tz.strip_prefix("UTC") {
+        Some(offset) if offset.starts_with('+') || offset.starts_with('-') => offset.to_owned(),
+        _ => tz,
+    }
+}
+
+/// An Arrow Timestamp/Duration array's values widened to nanoseconds, fp's
+/// only temporal unit; `None` marks a null. A value outside the i64 nanosecond
+/// range is an error, as pandas' OutOfBoundsDatetime, never a wrapped number.
+fn arrow_temporal_nanos(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Option<i64>>, IoError> {
+    use arrow::array::{
+        DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
+        DurationSecondArray,
+    };
+
+    let unit = match dt {
+        ArrowDataType::Timestamp(unit, _) | ArrowDataType::Duration(unit) => unit,
+        other => {
+            return Err(IoError::Parquet(format!(
+                "not a temporal Arrow type: {other:?}"
+            )));
+        }
+    };
+    let scale: i64 = match unit {
+        TimeUnit::Second => 1_000_000_000,
+        TimeUnit::Millisecond => 1_000_000,
+        TimeUnit::Microsecond => 1_000,
+        TimeUnit::Nanosecond => 1,
+    };
+    macro_rules! widen {
+        ($ty:ty) => {{
+            let typed = arr.as_any().downcast_ref::<$ty>().ok_or_else(|| {
+                IoError::Parquet(format!("expected {} for {dt:?}", stringify!($ty)))
+            })?;
+            (0..typed.len())
+                .map(|i| {
+                    if typed.is_null(i) {
+                        return Ok(None);
+                    }
+                    let raw = typed.value(i);
+                    raw.checked_mul(scale).map(Some).ok_or_else(|| {
+                        IoError::Parquet(format!(
+                            "{dt:?} value {raw} is out of bounds for nanosecond precision"
+                        ))
+                    })
+                })
+                .collect()
+        }};
+    }
+    match dt {
+        ArrowDataType::Timestamp(TimeUnit::Second, _) => widen!(TimestampSecondArray),
+        ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => widen!(TimestampMillisecondArray),
+        ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => widen!(TimestampMicrosecondArray),
+        ArrowDataType::Timestamp(TimeUnit::Nanosecond, _) => widen!(TimestampNanosecondArray),
+        ArrowDataType::Duration(TimeUnit::Second) => widen!(DurationSecondArray),
+        ArrowDataType::Duration(TimeUnit::Millisecond) => widen!(DurationMillisecondArray),
+        ArrowDataType::Duration(TimeUnit::Microsecond) => widen!(DurationMicrosecondArray),
+        _ => widen!(DurationNanosecondArray),
     }
 }
 
@@ -9840,90 +10242,17 @@ fn arrow_array_to_scalars(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Sca
                 }
             }
         }
-        ArrowDataType::Timestamp(unit, _tz) => match unit {
-            TimeUnit::Second => {
-                let typed = arr
-                    .as_any()
-                    .downcast_ref::<TimestampSecondArray>()
-                    .ok_or_else(|| IoError::Parquet("expected TimestampSecondArray".into()))?;
-                for i in 0..len {
-                    if typed.is_null(i) {
-                        scalars.push(Scalar::Null(NullKind::NaT));
-                    } else {
-                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
-                            arrow::datatypes::TimestampSecondType,
-                        >(typed.value(i))
-                        {
-                            scalars.push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
-                        } else {
-                            scalars.push(Scalar::Null(NullKind::NaT));
-                        }
-                    }
-                }
+        // Was: chrono-formatted STRINGS, so a datetime column came back as Utf8.
+        ArrowDataType::Timestamp(_, _) => {
+            for value in arrow_temporal_nanos(arr, dt)? {
+                scalars.push(value.map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64));
             }
-            TimeUnit::Millisecond => {
-                let typed = arr
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .ok_or_else(|| IoError::Parquet("expected TimestampMillisecondArray".into()))?;
-                for i in 0..len {
-                    if typed.is_null(i) {
-                        scalars.push(Scalar::Null(NullKind::NaT));
-                    } else {
-                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
-                            arrow::datatypes::TimestampMillisecondType,
-                        >(typed.value(i))
-                        {
-                            scalars.push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
-                        } else {
-                            scalars.push(Scalar::Null(NullKind::NaT));
-                        }
-                    }
-                }
+        }
+        ArrowDataType::Duration(_) => {
+            for value in arrow_temporal_nanos(arr, dt)? {
+                scalars.push(value.map_or(Scalar::Null(NullKind::NaT), Scalar::Timedelta64));
             }
-            TimeUnit::Microsecond => {
-                let typed = arr
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .ok_or_else(|| IoError::Parquet("expected TimestampMicrosecondArray".into()))?;
-                for i in 0..len {
-                    if typed.is_null(i) {
-                        scalars.push(Scalar::Null(NullKind::NaT));
-                    } else {
-                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
-                            arrow::datatypes::TimestampMicrosecondType,
-                        >(typed.value(i))
-                        {
-                            scalars
-                                .push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string()));
-                        } else {
-                            scalars.push(Scalar::Null(NullKind::NaT));
-                        }
-                    }
-                }
-            }
-            TimeUnit::Nanosecond => {
-                let typed = arr
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .ok_or_else(|| IoError::Parquet("expected TimestampNanosecondArray".into()))?;
-                for i in 0..len {
-                    if typed.is_null(i) {
-                        scalars.push(Scalar::Null(NullKind::NaT));
-                    } else {
-                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
-                            arrow::datatypes::TimestampNanosecondType,
-                        >(typed.value(i))
-                        {
-                            scalars
-                                .push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string()));
-                        } else {
-                            scalars.push(Scalar::Null(NullKind::NaT));
-                        }
-                    }
-                }
-            }
-        },
+        }
         other => {
             return Err(IoError::Parquet(format!(
                 "unsupported Arrow data type: {other:?}"
@@ -10117,18 +10446,29 @@ fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
                 Scalar::Float64(*v)
             }
         }
+        // pandas marks an empty cell NaN in every column, strings included
+        // (br-frankenpandas-audiv).
         calamine::Data::String(s) => {
             if s.is_empty() {
-                Scalar::Null(NullKind::Null)
+                Scalar::Null(NullKind::NaN)
             } else {
                 Scalar::Utf8(s.clone())
             }
         }
         calamine::Data::Bool(b) => Scalar::Bool(*b),
-        calamine::Data::Empty => Scalar::Null(NullKind::Null),
+        calamine::Data::Empty => Scalar::Null(NullKind::NaN),
+        // Date cells were returned as their serial number formatted as TEXT
+        // ("45293.1278..."). (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
+        calamine::Data::DateTime(dt) if dt.is_duration() => {
+            let millis = (dt.as_f64() * 86_400_000.0).round();
+            if millis.is_finite() && millis.abs() < 9.2e15 {
+                Scalar::Timedelta64(millis as i64 * 1_000_000)
+            } else {
+                Scalar::Null(NullKind::NaT)
+            }
+        }
         calamine::Data::DateTime(dt) => {
-            // Convert ExcelDateTime to string representation for now.
-            Scalar::Utf8(format!("{dt}"))
+            excel_datetime_to_epoch_ns(dt).map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64)
         }
         calamine::Data::DateTimeIso(s) => Scalar::Utf8(s.clone()),
         calamine::Data::DurationIso(s) => Scalar::Utf8(s.clone()),
@@ -10146,39 +10486,25 @@ fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
         }
         Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
         Scalar::Bool(b) => IndexLabel::Utf8(if b { "True" } else { "False" }.to_string()),
+        Scalar::Datetime64(v) => IndexLabel::Datetime64(v),
+        Scalar::Timedelta64(v) => IndexLabel::Timedelta64(v),
         _ => IndexLabel::Utf8(String::new()),
     }
 }
 
-fn infer_writer_emitted_default_excel_index_col(
-    headers: &[String],
-    header_generated: &[bool],
-    columns: &[Vec<Scalar>],
-    options: &ExcelReadOptions,
-) -> Option<usize> {
-    if !options.has_headers
-        || options.index_col.is_some()
-        || options.usecols.is_some()
-        || options.names.is_some()
-    {
-        return None;
-    }
-
-    if headers.first()?.as_str() != "column_0"
-        || !header_generated.first().copied().unwrap_or(false)
-    {
-        return None;
-    }
-
-    let first_col = columns.first()?;
-    if first_col
-        .iter()
-        .enumerate()
-        .all(|(idx, scalar)| matches!(scalar, Scalar::Int64(value) if *value == idx as i64))
-    {
-        Some(0)
-    } else {
-        None
+/// A header-row cell as pandas names the column: a non-empty string as is, a
+/// number/bool/date by its value (pandas keeps e.g. 2020 as the label; fp
+/// labels are strings, so "2020"), and an empty cell `Unnamed: {position}`.
+/// The flag marks a generated name (no index name when it becomes the index).
+fn excel_header_name(cell: &calamine::Data, position: usize) -> (String, bool) {
+    match excel_cell_to_scalar(cell) {
+        Scalar::Utf8(text) => (text, false),
+        Scalar::Null(_) => (format!("Unnamed: {position}"), true),
+        Scalar::Int64(v) => (v.to_string(), false),
+        Scalar::Float64(v) => (format_pandas_float(v), false),
+        Scalar::Bool(v) => ((if v { "True" } else { "False" }).to_owned(), false),
+        Scalar::Datetime64(ns) => (format_datetime_ns(ns), false),
+        other => (other.to_string(), false),
     }
 }
 
@@ -10212,13 +10538,15 @@ fn parse_excel_rows(
         let (headers, header_generated): (Vec<_>, Vec<_>) = if let Some(names) = provided_names {
             (names, vec![false; header_width])
         } else {
+            // pandas names a blank header cell `Unnamed: {i}` - the cell
+            // to_excel writes above an unnamed index - and keeps numeric
+            // headers as their value. (These were `column_{i}`, and a blank
+            // first header over 0..n was then DROPPED as a guessed index.)
+            // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
             let header_pairs: Vec<(String, bool)> = header_row
                 .iter()
                 .enumerate()
-                .map(|(i, cell)| match cell {
-                    calamine::Data::String(s) if !s.is_empty() => (s.clone(), false),
-                    _ => (format!("column_{i}"), true),
-                })
+                .map(|(i, cell)| excel_header_name(cell, i))
                 .collect();
             header_pairs.into_iter().unzip()
         };
@@ -10229,7 +10557,8 @@ fn parse_excel_rows(
         let (headers, header_generated) = if let Some(names) = provided_names {
             (names, vec![false; ncols])
         } else {
-            let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
+            // header=None: pandas labels the columns 0..n-1.
+            let headers: Vec<String> = (0..ncols).map(|i| i.to_string()).collect();
             let header_generated = vec![true; ncols];
             (headers, header_generated)
         };
@@ -10271,7 +10600,7 @@ fn parse_excel_rows(
         (headers, header_generated, columns)
     };
 
-    // Handle index_col if specified.
+    // Only index_col makes an index; pandas never guesses one.
     let index_col_idx = if let Some(ref idx_name) = options.index_col {
         let pos = headers.iter().position(|h| h == idx_name);
         if pos.is_none() {
@@ -10279,7 +10608,7 @@ fn parse_excel_rows(
         }
         pos
     } else {
-        infer_writer_emitted_default_excel_index_col(&headers, &header_generated, &columns, options)
+        None
     };
 
     let index_name = index_col_idx.and_then(|idx_pos| {
@@ -10297,7 +10626,27 @@ fn parse_excel_rows(
         if Some(idx) == index_col_idx {
             continue; // skip index column from data columns
         }
-        out_columns.insert(name.clone(), Column::from_values(values)?);
+        // A blank cell is NaN, except beside datetimes/timedeltas where pandas
+        // gives NaT.
+        let mut values = values;
+        if values
+            .iter()
+            .any(|v| matches!(v, Scalar::Datetime64(_) | Scalar::Timedelta64(_)))
+        {
+            for value in &mut values {
+                if matches!(value, Scalar::Null(NullKind::NaN)) {
+                    *value = Scalar::Null(NullKind::NaT);
+                }
+            }
+        }
+        let mut column = Column::from_values(values)?;
+        // pandas reads a whole-number column with a blank cell as float64 (NaN);
+        // the default Int64-with-validity inference (DISC-011) kept int64 here
+        // (br-frankenpandas-audiv).
+        if column.dtype() == DType::Int64 && column.has_nulls() {
+            column = column.astype(DType::Float64)?;
+        }
+        out_columns.insert(name.clone(), column);
         column_order.push(name);
     }
 
@@ -10617,11 +10966,78 @@ pub fn write_excel(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
+// Excel temporal cells, as pandas writes them through openpyxl
+// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20). They used to be
+// written as text, so no reader got a datetime back.
+
+/// pandas' default `datetime_format` for `to_excel`.
+const EXCEL_DATETIME_FORMAT: &str = "YYYY-MM-DD HH:MM:SS";
+/// The number format openpyxl gives the fractional-day value of a timedelta.
+const EXCEL_TIMEDELTA_FORMAT: &str = "0";
+const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+
+struct ExcelTemporalFormats {
+    datetime: rust_xlsxwriter::Format,
+    timedelta: rust_xlsxwriter::Format,
+}
+
+impl ExcelTemporalFormats {
+    fn new() -> Self {
+        Self {
+            datetime: rust_xlsxwriter::Format::new().set_num_format(EXCEL_DATETIME_FORMAT),
+            timedelta: rust_xlsxwriter::Format::new().set_num_format(EXCEL_TIMEDELTA_FORMAT),
+        }
+    }
+}
+
+/// Epoch nanoseconds -> Excel 1900-epoch serial, computed as openpyxl's
+/// `to_excel` does for the microsecond datetime pandas passes it: days since
+/// 1899-12-30 (one fewer up to day 60, Excel's phantom 1900-02-29), plus the
+/// time of day as `(seconds + microseconds / 1e6) / 86400`.
+fn epoch_ns_to_excel_serial(ns: i64) -> f64 {
+    let mut days = ns.div_euclid(NANOS_PER_DAY) + 25_569;
+    if 0 < days && days <= 60 {
+        days -= 1;
+    }
+    let time_ns = ns.rem_euclid(NANOS_PER_DAY);
+    let seconds = time_ns / 1_000_000_000;
+    let micros = (time_ns % 1_000_000_000) / 1_000;
+    days as f64 + (seconds as f64 + micros as f64 / 1e6) / 86_400.0
+}
+
+/// A timedelta as pandas writes it: `total_seconds() / 86400` of the
+/// microsecond timedelta.
+fn timedelta_ns_to_excel_days(ns: i64) -> f64 {
+    (ns / 1_000) as f64 / 1e6 / 86_400.0
+}
+
+/// An Excel date cell -> epoch nanoseconds via calamine's calendar components
+/// (millisecond precision, both workbook epochs), which is what openpyxl hands
+/// pandas. Excel's phantom 1900-02-29 reads as 1900-02-28, as in openpyxl.
+fn excel_datetime_to_epoch_ns(dt: &calamine::ExcelDateTime) -> Option<i64> {
+    let (year, month, day, hour, minute, second, milli) = dt.to_ymd_hms_milli();
+    let date = chrono::NaiveDate::from_ymd_opt(i32::from(year), u32::from(month), u32::from(day))
+        .or_else(|| {
+        ((year, month, day) == (1900, 2, 29))
+            .then(|| chrono::NaiveDate::from_ymd_opt(1900, 2, 28))
+            .flatten()
+    })?;
+    date.and_hms_milli_opt(
+        u32::from(hour),
+        u32::from(minute),
+        u32::from(second),
+        u32::from(milli),
+    )?
+    .and_utc()
+    .timestamp_nanos_opt()
+}
+
 fn write_excel_index_label(
     worksheet: &mut rust_xlsxwriter::Worksheet,
     excel_row: u32,
     excel_col: u16,
     label: &IndexLabel,
+    formats: &ExcelTemporalFormats,
 ) -> Result<(), IoError> {
     match label {
         IndexLabel::Int64(v) => {
@@ -10637,14 +11053,24 @@ fn write_excel_index_label(
         IndexLabel::Timedelta64(v) => {
             if *v != Timedelta::NAT {
                 worksheet
-                    .write_string(excel_row, excel_col, Timedelta::format(*v))
+                    .write_number_with_format(
+                        excel_row,
+                        excel_col,
+                        timedelta_ns_to_excel_days(*v),
+                        &formats.timedelta,
+                    )
                     .map_err(|e| IoError::Excel(format!("write index timedelta: {e}")))?;
             }
         }
         IndexLabel::Datetime64(v) => {
-            if *v != i64::MIN {
+            if *v != Timestamp::NAT {
                 worksheet
-                    .write_string(excel_row, excel_col, label.to_string())
+                    .write_number_with_format(
+                        excel_row,
+                        excel_col,
+                        epoch_ns_to_excel_serial(*v),
+                        &formats.datetime,
+                    )
                     .map_err(|e| IoError::Excel(format!("write index datetime: {e}")))?;
             }
         }
@@ -10670,6 +11096,7 @@ fn write_excel_scalar(
     excel_row: u32,
     excel_col: u16,
     scalar: &Scalar,
+    formats: &ExcelTemporalFormats,
 ) -> Result<(), IoError> {
     match scalar {
         Scalar::Int64(v) => {
@@ -10695,14 +11122,24 @@ fn write_excel_scalar(
         Scalar::Timedelta64(v) => {
             if *v != Timedelta::NAT {
                 worksheet
-                    .write_string(excel_row, excel_col, Timedelta::format(*v))
+                    .write_number_with_format(
+                        excel_row,
+                        excel_col,
+                        timedelta_ns_to_excel_days(*v),
+                        &formats.timedelta,
+                    )
                     .map_err(|e| IoError::Excel(format!("write timedelta: {e}")))?;
             }
         }
         Scalar::Datetime64(v) => {
             if *v != Timestamp::NAT {
                 worksheet
-                    .write_string(excel_row, excel_col, format_datetime_ns(*v))
+                    .write_number_with_format(
+                        excel_row,
+                        excel_col,
+                        epoch_ns_to_excel_serial(*v),
+                        &formats.datetime,
+                    )
                     .map_err(|e| IoError::Excel(format!("write datetime: {e}")))?;
             }
         }
@@ -10782,13 +11219,27 @@ pub fn write_excel_bytes_with_options(
 
     use rust_xlsxwriter::Workbook;
 
+    let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+    // pandas refuses before writing anything; Excel cells carry no zone.
+    if col_names.iter().any(|name| {
+        frame
+            .column(name)
+            .is_some_and(|column| column.timezone().is_some())
+    }) {
+        return Err(IoError::Excel(
+            "Excel does not support datetimes with timezones. Please ensure that datetimes \
+             are timezone unaware before writing to Excel."
+                .to_owned(),
+        ));
+    }
+    let formats = ExcelTemporalFormats::new();
+
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
     worksheet
         .set_name(options.sheet_name.as_str())
         .map_err(|e| IoError::Excel(format!("set sheet name: {e}")))?;
 
-    let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let data_col_offset: u16 = if options.index { 1 } else { 0 };
 
     // Header row (optional).
@@ -10818,7 +11269,7 @@ pub fn write_excel_bytes_with_options(
         if options.index
             && let Some(label) = frame.index().labels().get(row_idx)
         {
-            write_excel_index_label(worksheet, excel_row, 0, label)?;
+            write_excel_index_label(worksheet, excel_row, 0, label, &formats)?;
         }
         for (col_idx, name) in col_names.iter().enumerate() {
             if let Some(col) = frame.column(name)
@@ -10829,6 +11280,7 @@ pub fn write_excel_bytes_with_options(
                     excel_row,
                     data_col_offset + col_idx as u16,
                     scalar,
+                    &formats,
                 )?;
             }
         }
@@ -12667,11 +13119,19 @@ fn resolve_sql_index_label(
         return Ok(None);
     }
 
-    let label = options
+    // pandas: the index name, else "index", else "level_0" when a column is
+    // already called "index" (to_sql of DataFrame({'index': ...}) writes
+    // ['level_0', 'index', ...]); a clash with an explicit or named label, or
+    // with level_0 as well, is an error there too. (4qg5w.1)
+    let label = match options
         .index_label
         .clone()
         .or_else(|| frame.index().name().map(str::to_owned))
-        .unwrap_or_else(|| "index".to_owned());
+    {
+        Some(label) => label,
+        None if frame.column("index").is_some() => "level_0".to_owned(),
+        None => "index".to_owned(),
+    };
 
     if frame.column(&label).is_some() {
         return Err(IoError::DuplicateColumnName(label));
@@ -15849,7 +16309,10 @@ fn projection_with_index_col<'a>(
 
 /// Write a DataFrame to a SQL table.
 ///
-/// Matches `pd.DataFrame.to_sql(name, con)`.
+/// Matches `pd.DataFrame.to_sql(name, con)`, whose default is `index=True`: the
+/// index becomes a leading column named after the index, or "index" when it is
+/// unnamed. (This wrote no index, silently dropping e.g. groupby keys.)
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1)
 pub fn write_sql<C: SqlConnection>(
     frame: &DataFrame,
     conn: &C,
@@ -15862,7 +16325,7 @@ pub fn write_sql<C: SqlConnection>(
         table_name,
         &SqlWriteOptions {
             if_exists,
-            index: false,
+            index: true,
             index_label: None,
             schema: None,
             dtype: None,
@@ -15887,6 +16350,19 @@ pub fn write_sql_with_options<C: SqlConnection>(
         return Err(IoError::Sql(format!(
             "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
         )));
+    }
+
+    // A row MultiIndex becomes one column per level named like pandas'
+    // to_sql: the level name, else level_{i} - exactly reset_index's naming.
+    // (It was written as ONE column of composite labels.) (4qg5w.1)
+    if options.index && frame.row_multiindex().is_some() {
+        let materialized = materialize_named_row_multiindex_columns(frame)?;
+        let flat_options = SqlWriteOptions {
+            index: false,
+            index_label: None,
+            ..options.clone()
+        };
+        return write_sql_with_options(&materialized, conn, table_name, &flat_options);
     }
 
     let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
@@ -17109,7 +17585,161 @@ mod tests {
         .unwrap();
         let csv = write_csv_string(&df).expect("write");
         let header = csv.lines().next().expect("header line");
-        assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
+        // GOLDEN-CHANGE (4qg5w.1): write_csv_string now writes the index like
+        // pandas' to_csv() (and like to_csv_string, sseeh), so the header starts
+        // with the blank index cell: pandas -> ",alpha,beta,gamma".
+        assert_eq!(header, ",alpha,beta,gamma", "header order; csv={csv:?}");
+    }
+
+    /// `to_csv(index=False)`: the form the CSV tests below were written against
+    /// before write_csv_string took pandas' index=True default (4qg5w.1).
+    /// Tests about quoting/formatting keep testing exactly that.
+    fn csv_no_index(frame: &DataFrame) -> String {
+        super::write_csv_string_with_options(
+            frame,
+            &CsvWriteOptions {
+                include_index: false,
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write csv without index")
+    }
+
+    /// A frame with a 2-level row MultiIndex ((p, 1), (q, 2)) and one column
+    /// v = [1, 2], with the given level names.
+    fn multiindex_frame(names: [Option<&str>; 2]) -> DataFrame {
+        let frame = DataFrame::from_dict(
+            &["l0", "l1", "v"],
+            vec![
+                (
+                    "l0",
+                    vec![Scalar::Utf8("p".into()), Scalar::Utf8("q".into())],
+                ),
+                ("l1", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .expect("frame")
+        .set_index_multi(&["l0", "l1"], true, "|")
+        .expect("multiindex");
+        let renamed = frame
+            .row_multiindex()
+            .expect("row multiindex")
+            .clone()
+            .set_names(names.iter().map(|n| n.map(str::to_owned)).collect());
+        frame.with_row_multiindex(renamed).expect("renamed levels")
+    }
+
+    #[test]
+    fn csv_multiindex_levels_are_columns_like_pandas() {
+        // pandas 2.2.3, MultiIndex [('p', 1), ('q', 2)], column v = [1, 2]:
+        //   names ['l0', None] -> to_csv() 'l0,,v\np,1,1\nq,2,2\n'
+        //   names [None, None] -> to_csv() ',,v\np,1,1\nq,2,2\n'
+        //   names ['l0', 'l1'] -> to_csv() 'l0,l1,v\np,1,1\nq,2,2\n'
+        assert_eq!(
+            write_csv_string(&multiindex_frame([Some("l0"), None])).expect("write"),
+            "l0,,v\np,1,1\nq,2,2\n"
+        );
+        assert_eq!(
+            write_csv_string(&multiindex_frame([None, None])).expect("write"),
+            ",,v\np,1,1\nq,2,2\n"
+        );
+        assert_eq!(
+            write_csv_string(&multiindex_frame([Some("l0"), Some("l1")])).expect("write"),
+            "l0,l1,v\np,1,1\nq,2,2\n"
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_index_columns_are_named_like_pandas_to_sql() {
+        // pandas 2.2.3 to_sql(index=True) column names (sqlite PRAGMA table_info):
+        //   DataFrame({'index': [1, 2], 'v': [3, 4]})      -> level_0, index, v
+        //   MultiIndex names ['l0', None], column v          -> l0, level_1, v
+        //   MultiIndex names [None, None], column v          -> level_0, level_1, v
+        let conn = make_sql_test_conn();
+        let names_of = |table: &str| {
+            super::read_sql_table(&conn, table)
+                .expect("read back")
+                .column_names()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "index".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("index col"),
+        );
+        cols.insert(
+            "v".to_owned(),
+            Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(4)]).expect("v"),
+        );
+        let taken = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            cols,
+            vec!["index".to_owned(), "v".to_owned()],
+        )
+        .expect("frame");
+        write_sql(&taken, &conn, "t_taken", SqlIfExists::Fail).expect("write");
+        assert_eq!(names_of("t_taken"), vec!["level_0", "index", "v"]);
+
+        write_sql(
+            &multiindex_frame([Some("l0"), None]),
+            &conn,
+            "t_mi_named",
+            SqlIfExists::Fail,
+        )
+        .expect("write");
+        assert_eq!(names_of("t_mi_named"), vec!["l0", "level_1", "v"]);
+
+        write_sql(
+            &multiindex_frame([None, None]),
+            &conn,
+            "t_mi_unnamed",
+            SqlIfExists::Fail,
+        )
+        .expect("write");
+        assert_eq!(names_of("t_mi_unnamed"), vec!["level_0", "level_1", "v"]);
+    }
+
+    #[test]
+    fn write_csv_string_defaults_to_pandas_index_true() {
+        // NEGATIVE for 4qg5w.1: pandas 2.2.3
+        //   DataFrame({'a': [1, 2], 'b': ['x', None]}).to_csv()
+        //     -> ',a,b\n0,1,x\n1,2,\n'
+        // A writer that omits the index (the old default) fails this.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("a"),
+        );
+        cols.insert(
+            "b".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("b"),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            cols,
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .expect("frame");
+        assert_eq!(
+            write_csv_string(&frame).expect("write"),
+            ",a,b\n0,1,x\n1,2,\n"
+        );
+        // A named index heads its column: rename_axis('k').to_csv() -> 'k,a,b\n...'.
+        let named = frame.rename_axis("k").expect("rename_axis");
+        assert_eq!(
+            write_csv_string(&named).expect("write"),
+            "k,a,b\n0,1,x\n1,2,\n"
+        );
+        assert_eq!(csv_no_index(&frame), "a,b\n1,x\n2,\n");
     }
 
     /// Bare DataFrame and Series CSV writers follow pandas' index default, while
@@ -17836,10 +18466,12 @@ mod tests {
         )
         .expect("latex");
 
+        // GOLDEN-CHANGE (fvsao.1): `llr`, not `lll` — the float column is
+        // right-aligned; pandas 2.2.3 prints `\begin{tabular}{llr}` for this frame.
         assert_eq!(
             out,
             concat!(
-                "\\begin{tabular}{lll}\n",
+                "\\begin{tabular}{llr}\n",
                 "\\toprule\n",
                 " & name & value \\\\\n",
                 "row\\_id &  &  \\\\\n",
@@ -17849,6 +18481,56 @@ mod tests {
                 "\\bottomrule\n",
                 "\\end{tabular}\n",
             )
+        );
+    }
+
+    #[test]
+    fn latex_column_format_right_aligns_numeric_and_bool_like_pandas() {
+        // pandas 2.2.3 for {b: bool, i: int64, s: object, d: timedelta64}:
+        //   df.to_latex().splitlines()[0] == r"\begin{tabular}{lrrll}"
+        //   df.to_latex(index=False).splitlines()[0] == r"\begin{tabular}{rrll}"
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "b".to_string(),
+            Column::new(DType::Bool, vec![Scalar::Bool(true)]).expect("b"),
+        );
+        cols.insert(
+            "i".to_string(),
+            Column::new(DType::Int64, vec![Scalar::Int64(1)]).expect("i"),
+        );
+        cols.insert(
+            "s".to_string(),
+            Column::new(DType::Utf8, vec![Scalar::Utf8("x".to_owned())]).expect("s"),
+        );
+        cols.insert(
+            "d".to_string(),
+            Column::new(
+                DType::Timedelta64,
+                vec![Scalar::Timedelta64(86_400_000_000_000)],
+            )
+            .expect("d"),
+        );
+        let order = ["b", "i", "s", "d"].map(str::to_owned).to_vec();
+        let frame =
+            DataFrame::new_with_column_order(Index::from_i64(vec![0]), cols, order).expect("frame");
+
+        let with_index =
+            write_latex_string_with_options(&frame, &LatexWriteOptions::default()).expect("latex");
+        assert!(
+            with_index.starts_with("\\begin{tabular}{lrrll}\n"),
+            "got: {with_index}"
+        );
+        let without_index = write_latex_string_with_options(
+            &frame,
+            &LatexWriteOptions {
+                include_index: false,
+                ..LatexWriteOptions::default()
+            },
+        )
+        .expect("latex");
+        assert!(
+            without_index.starts_with("\\begin{tabular}{rrll}\n"),
+            "got: {without_index}"
         );
     }
 
@@ -18781,9 +19463,15 @@ mod tests {
             .into_iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["column_0", "sales"]);
+        // GOLDEN-CHANGE (4qg5w.19): the blank index header reads as
+        // "Unnamed: 0" (pandas: Series(..., name='sales').to_excel(p);
+        // read_excel(p).columns -> ['Unnamed: 0', 'sales']), not "column_0".
+        assert_eq!(names, vec!["Unnamed: 0", "sales"]);
         assert_eq!(
-            roundtrip.column("column_0").expect("index column").values(),
+            roundtrip
+                .column("Unnamed: 0")
+                .expect("index column")
+                .values(),
             &[Scalar::Utf8("r1".into()), Scalar::Utf8("r2".into())]
         );
         assert_eq!(
@@ -19059,6 +19747,156 @@ mod tests {
                 Scalar::Utf8("beta".to_owned()),
                 Scalar::Utf8("gamma".to_owned())
             ]
+        );
+    }
+
+    #[test]
+    fn stata_writer_types_index_bool_and_wide_ints_like_pandas() {
+        // pandas 2.2.3: DataFrame({b: [True, False], big: [1, 2147483621],
+        // small: [1, 2147483620]}).to_stata(p); read_stata(p).dtypes ->
+        // index int32, b int8, big float64, small int32. 2147483621 is past
+        // Stata's non-missing long range, so it must not be written as a long.
+        use super::{VariableType, stata_fields_for_frame};
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "b".to_owned(),
+            Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).expect("b"),
+        );
+        columns.insert(
+            "big".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2_147_483_621)]).expect("big"),
+        );
+        columns.insert(
+            "small".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2_147_483_620)])
+                .expect("small"),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            columns,
+            vec!["b".to_owned(), "big".to_owned(), "small".to_owned()],
+        )
+        .expect("frame");
+
+        let types = stata_fields_for_frame(&frame, &StataWriteOptions::default())
+            .expect("fields")
+            .into_iter()
+            .map(|field| (field.variable_name, field.variable_type))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            vec![
+                ("index".to_owned(), VariableType::Long),
+                ("b".to_owned(), VariableType::Byte),
+                ("big".to_owned(), VariableType::Double),
+                ("small".to_owned(), VariableType::Long),
+            ]
+        );
+
+        let back = read_stata_bytes(&write_stata_bytes(&frame).expect("write")).expect("read");
+        assert_eq!(
+            back.column("index").expect("index").values(),
+            &[Scalar::Int64(0), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            back.column("b").expect("b").values(),
+            &[Scalar::Int64(1), Scalar::Int64(0)]
+        );
+        assert_eq!(
+            back.column("big").expect("big").values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(2_147_483_621.0)]
+        );
+
+        // pandas raises ValueError("Column f contains infinity or -infinity...").
+        let mut inf_columns = BTreeMap::new();
+        inf_columns.insert(
+            "f".to_owned(),
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(f64::INFINITY)])
+                .expect("f"),
+        );
+        let inf_frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            inf_columns,
+            vec!["f".to_owned()],
+        )
+        .expect("inf frame");
+        let err = write_stata_bytes(&inf_frame).expect_err("inf must be rejected");
+        assert!(
+            matches!(&err, IoError::Stata(message) if message.contains("infinity")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn stata_datetimes_write_as_tc_and_read_back_like_pandas() {
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20. pandas 2.2.3:
+        // DataFrame({t: [2024-01-02 03:04:05, NaT]}).to_stata(p) stores
+        // format %tc, raw value 2019783845000.0 (ms since 1960-01-01), and
+        // read_stata(p) returns datetime64[ns]; an ALL-NaT column still reads
+        // as datetime64; timedelta64 raises NotImplementedError.
+        use super::{VariableType, stata_fields_for_frame, stata_tc_millis};
+
+        assert_eq!(
+            stata_tc_millis(1_704_164_645_000_000_000),
+            2_019_783_845_000.0
+        );
+
+        let naive = |values: Vec<Scalar>| {
+            Column::new(DType::datetime64_naive(), values).expect("datetime column")
+        };
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "t".to_owned(),
+            naive(vec![
+                Scalar::Datetime64(1_704_164_645_000_000_000),
+                Scalar::Null(NullKind::NaT),
+            ]),
+        );
+        columns.insert(
+            "gone".to_owned(),
+            naive(vec![
+                Scalar::Null(NullKind::NaT),
+                Scalar::Null(NullKind::NaT),
+            ])
+            .with_dtype(DType::datetime64_naive()),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            columns,
+            vec!["t".to_owned(), "gone".to_owned()],
+        )
+        .expect("frame");
+
+        let fields = stata_fields_for_frame(&frame, &StataWriteOptions::default()).expect("fields");
+        let t_field = fields.iter().find(|f| f.variable_name == "t").expect("t");
+        assert!(t_field.datetime);
+        assert_eq!(t_field.variable_type, VariableType::Double);
+
+        let back = read_stata_bytes(&write_stata_bytes(&frame).expect("write")).expect("read");
+        let t = back.column("t").expect("t");
+        assert_eq!(t.dtype(), DType::datetime64_naive());
+        assert_eq!(t.values()[0], Scalar::Datetime64(1_704_164_645_000_000_000));
+        assert!(t.values()[1].is_missing());
+        let gone = back.column("gone").expect("gone");
+        assert_eq!(gone.dtype(), DType::datetime64_naive());
+        assert_eq!(gone.validity().count_invalid(), 2);
+
+        let mut deltas = BTreeMap::new();
+        deltas.insert(
+            "d".to_owned(),
+            Column::new(DType::Timedelta64, vec![Scalar::Timedelta64(1)]).expect("d"),
+        );
+        let deltas = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0]),
+            deltas,
+            vec!["d".to_owned()],
+        )
+        .expect("deltas");
+        let err = write_stata_bytes(&deltas).expect_err("timedelta must be refused");
+        assert!(
+            matches!(&err, IoError::Deferred(message) if message.contains("timedelta64[ns] not supported")),
+            "got: {err:?}"
         );
     }
 
@@ -19518,7 +20356,8 @@ mod tests {
         ];
         for (input, expected_csv) in cases {
             let frame = read_csv_str(input).expect("read");
-            let out = write_csv_string(&frame).expect("write");
+            // to_csv(index=False): the pandas call these expectations mirror.
+            let out = csv_no_index(&frame);
             assert_eq!(
                 &out, expected_csv,
                 "round-trip mismatch for input {input:?}"
@@ -19551,10 +20390,7 @@ mod tests {
         );
         let object_frame = read_csv_str(object_input).expect("fallback read");
         assert_eq!(object_frame.index().int64_unit_range_labels(), Some((0, 2)));
-        assert_eq!(
-            write_csv_string(&object_frame).expect("fallback write"),
-            object_input
-        );
+        assert_eq!(csv_no_index(&object_frame), object_input);
     }
 
     #[test]
@@ -19854,22 +20690,22 @@ mod tests {
 
         // All midnight -> date only.
         assert_eq!(
-            write_csv_string(&dt_frame(&[MIDNIGHT_JAN1, MIDNIGHT_JAN2])).expect("w"),
+            csv_no_index(&dt_frame(&[MIDNIGHT_JAN1, MIDNIGHT_JAN2])),
             "d\n2020-01-01\n2020-01-02\n"
         );
         // Sub-second present -> whole column gets .fff (millis), incl. .000.
         assert_eq!(
-            write_csv_string(&dt_frame(&[JAN1_HALF, MIDNIGHT_JAN1])).expect("w"),
+            csv_no_index(&dt_frame(&[JAN1_HALF, MIDNIGHT_JAN1])),
             "d\n2020-01-01 00:00:00.500\n2020-01-01 00:00:00.000\n"
         );
         // Time present, no sub-second -> HH:MM:SS for all (midnight -> 00:00:00).
         assert_eq!(
-            write_csv_string(&dt_frame(&[JAN2_0300, MIDNIGHT_JAN1])).expect("w"),
+            csv_no_index(&dt_frame(&[JAN2_0300, MIDNIGHT_JAN1])),
             "d\n2020-01-02 03:00:00\n2020-01-01 00:00:00\n"
         );
         // NaT in an otherwise date-only column -> date only, NaT -> quoted "".
         assert_eq!(
-            write_csv_string(&dt_frame(&[MIDNIGHT_JAN1, i64::MIN])).expect("w"),
+            csv_no_index(&dt_frame(&[MIDNIGHT_JAN1, i64::MIN])),
             "d\n2020-01-01\n\"\"\n"
         );
     }
@@ -20148,24 +20984,19 @@ mod tests {
 
     #[test]
     fn read_csv_skipinitialspace_strips_field_leading_spaces_i4h5g() {
-        use super::{CsvReadOptions, read_csv_with_options, write_csv_string};
+        use super::{CsvReadOptions, read_csv_with_options};
         let opts = CsvReadOptions {
             skipinitialspace: true,
             ..Default::default()
         };
         // Object columns: leading spaces at each field start are dropped.
+        // (Checked through to_csv(index=False).)
         let frame = read_csv_with_options("k,v\n  aa,bb\n cc,  dd\n", &opts).expect("read");
-        assert_eq!(
-            write_csv_string(&frame).expect("write"),
-            "k,v\naa,bb\ncc,dd\n"
-        );
+        assert_eq!(csv_no_index(&frame), "k,v\naa,bb\ncc,dd\n");
         // Default (skipinitialspace=false) keeps the leading spaces.
         let frame_def =
             read_csv_with_options("k,v\n  aa,bb\n", &CsvReadOptions::default()).expect("read");
-        assert_eq!(
-            write_csv_string(&frame_def).expect("write"),
-            "k,v\n  aa,bb\n"
-        );
+        assert_eq!(csv_no_index(&frame_def), "k,v\n  aa,bb\n");
     }
 
     #[test]
@@ -20178,18 +21009,19 @@ mod tests {
             delimiter: b'\t',
             ..Default::default()
         };
+        // (Checked through to_csv(index=False).)
         let frame = read_csv_with_options("c\ntrue\nfalse\nmaybe\n", &tsv).expect("read");
         assert_eq!(frame.index().int64_unit_range_labels(), Some((0, 3)));
-        let out = write_csv_string(&frame).expect("write");
+        let out = csv_no_index(&frame);
         assert_eq!(out, "c\ntrue\nfalse\nmaybe\n");
 
         let frame2 = read_csv_with_options("c\n01\n02\nabc\n", &tsv).expect("read");
-        let out2 = write_csv_string(&frame2).expect("write");
+        let out2 = csv_no_index(&frame2);
         assert_eq!(out2, "c\n01\n02\nabc\n");
 
         // Pure-bool column still infers bool dtype (writes True/False).
         let frame3 = read_csv_with_options("c\ntrue\nfalse\n", &tsv).expect("read");
-        let out3 = write_csv_string(&frame3).expect("write");
+        let out3 = csv_no_index(&frame3);
         assert_eq!(out3, "c\nTrue\nFalse\n");
 
         // Custom na_values: an NA cell in an object column stays missing while
@@ -20200,7 +21032,7 @@ mod tests {
             ..Default::default()
         };
         let frame4 = read_csv_with_options("c\ntrue\nMISSING\nmaybe\n", &na_opts).expect("read");
-        let out4 = write_csv_string(&frame4).expect("write");
+        let out4 = csv_no_index(&frame4);
         // The lone empty NaN field in a single-column object frame is quoted "".
         assert_eq!(out4, "c\ntrue\n\"\"\nmaybe\n");
     }
@@ -20326,7 +21158,7 @@ mod tests {
         // float repr: 1.0/3.0 must stay "1.0"/"3.0", not collapse to "1"/"3".
         let frame = read_csv_str("x\n1.0\nNaN\n3.0\n").expect("read");
         assert!(frame.column("x").unwrap().values()[1].is_missing());
-        let out = write_csv_string(&frame).expect("write");
+        let out = csv_no_index(&frame);
         assert_eq!(out, "x\n1.0\n\"\"\n3.0\n");
     }
 
@@ -20353,14 +21185,11 @@ mod tests {
             vec!["a".to_string()],
         )
         .unwrap();
-        assert_eq!(write_csv_string(&frame).expect("write"), "a\n\"\"\nx\ny\n");
+        assert_eq!(csv_no_index(&frame), "a\n\"\"\nx\ny\n");
 
         // Empty header for a sole column is quoted too (DataFrame({'':['a','b']})).
         let named = frame.rename_columns(&[("a", "")]).expect("rename");
-        assert_eq!(
-            write_csv_string(&named).expect("write2"),
-            "\"\"\n\"\"\nx\ny\n"
-        );
+        assert_eq!(csv_no_index(&named), "\"\"\n\"\"\nx\ny\n");
     }
 
     #[test]
@@ -20383,7 +21212,7 @@ mod tests {
             vec!["a".to_string(), "b".to_string()],
         )
         .unwrap();
-        assert_eq!(write_csv_string(&frame).expect("write"), "a,b\n,y\nx,\n");
+        assert_eq!(csv_no_index(&frame), "a,b\n,y\nx,\n");
     }
 
     #[test]
@@ -20487,13 +21316,18 @@ mod tests {
             ],
         )
         .unwrap();
+        // to_csv(index=False) (4qg5w.1 made the index the default).
+        let no_index = CsvWriteOptions {
+            include_index: false,
+            ..CsvWriteOptions::default()
+        };
         let expected = "\"comma,name\",\"quote\"\"name\",\"line\nname\"\n1,1.0,x\n2,2.5,y\n";
 
         assert_eq!(
-            super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
+            super::try_write_csv_typed(&frame, &no_index).as_deref(),
             Some(expected)
         );
-        assert_eq!(write_csv_string(&frame).expect("write"), expected);
+        assert_eq!(csv_no_index(&frame), expected);
     }
 
     #[test]
@@ -20526,12 +21360,16 @@ mod tests {
         .unwrap();
         let expected = "a,b,t\n10,1.5,2000-01-01 00:00:00\n20,2.0,2000-01-01 01:01:01\n30,3.5,\n";
         // Typed fast path fires (no datetime fallback) and is byte-identical to
-        // the public writer (which routes through it).
+        // the public writer (which routes through it). to_csv(index=False).
+        let no_index = CsvWriteOptions {
+            include_index: false,
+            ..CsvWriteOptions::default()
+        };
         assert_eq!(
-            super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
+            super::try_write_csv_typed(&frame, &no_index).as_deref(),
             Some(expected),
         );
-        assert_eq!(write_csv_string(&frame).expect("write"), expected);
+        assert_eq!(csv_no_index(&frame), expected);
     }
 
     #[test]
@@ -21299,9 +22137,9 @@ mod tests {
             },
         )
         .expect("write");
-        assert!(output.starts_with("a;b\n"));
-        assert!(output.contains("1;x\n"));
-        assert!(output.contains("2;y\n"));
+        // GOLDEN-CHANGE (4qg5w.1): the default now writes the index, as pandas:
+        // read_csv('a,b\n1,x\n2,y\n').to_csv(sep=';') -> ';a;b\n0;1;x\n1;2;y\n'.
+        assert_eq!(output, ";a;b\n0;1;x\n1;2;y\n");
     }
 
     #[test]
@@ -21730,7 +22568,9 @@ mod tests {
             },
         )
         .expect("write");
-        assert_eq!(output, "1,2\n");
+        // GOLDEN-CHANGE (4qg5w.1): pandas read_csv('a,b\n1,2\n')
+        // .to_csv(header=False) -> '0,1,2\n' (the index is written by default).
+        assert_eq!(output, "0,1,2\n");
     }
 
     #[test]
@@ -21900,7 +22740,7 @@ mod tests {
         // Fixed CSV input -> write_csv_string output matches golden reference exactly.
         let input = "a,b,c\n1,hello,3.14\n2,,true\n3,world,\n";
         let frame = read_csv_str(input).expect("parse");
-        let output = write_csv_string(&frame).expect("write");
+        let output = csv_no_index(&frame);
 
         // GOLDEN-CHANGE (live pandas 2.2.3): read_csv keeps c as object because it
         // contains the string token "true"; to_csv(index=False) therefore emits
@@ -21938,22 +22778,52 @@ mod tests {
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
         assert_eq!(frame.index().len(), 2);
-        assert_eq!(
-            frame.column("column_0").unwrap().values()[0],
-            Scalar::Int64(1)
-        );
-        assert_eq!(
-            frame.column("column_1").unwrap().values()[0],
-            Scalar::Int64(2)
-        );
-        assert_eq!(
-            frame.column("column_0").unwrap().values()[1],
-            Scalar::Int64(3)
-        );
-        assert_eq!(
-            frame.column("column_1").unwrap().values()[1],
-            Scalar::Int64(4)
-        );
+        // GOLDEN-CHANGE (4qg5w.19): "0"/"1", not "column_0"/"column_1" -
+        // pandas 2.2.3 read_csv(header=None) labels the columns 0 and 1.
+        assert_eq!(frame.column_names(), vec!["0", "1"]);
+        assert_eq!(frame.column("0").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("1").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(frame.column("0").unwrap().values()[1], Scalar::Int64(3));
+        assert_eq!(frame.column("1").unwrap().values()[1], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn csv_blank_headers_are_named_unnamed_like_pandas() {
+        // pandas 2.2.3: read_csv(",a,\n1,2,3") -> ['Unnamed: 0', 'a',
+        // 'Unnamed: 2']; a whitespace-only header is kept:
+        // read_csv(",a, ,b\n1,2,3,4") -> ['Unnamed: 0', 'a', ' ', 'b'].
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
+        for (input, want) in [
+            (",a,\n1,2,3\n", vec!["Unnamed: 0", "a", "Unnamed: 2"]),
+            (",a, ,b\n1,2,3,4\n", vec!["Unnamed: 0", "a", " ", "b"]),
+        ] {
+            let default = read_csv_str(input).expect("default path");
+            assert_eq!(default.column_names(), want, "read_csv_str {input:?}");
+            let with_options =
+                read_csv_with_options(input, &CsvReadOptions::default()).expect("options path");
+            assert_eq!(with_options.column_names(), want, "options {input:?}");
+        }
+    }
+
+    #[test]
+    fn excel_numeric_header_cells_keep_their_value_as_the_name() {
+        // pandas keeps a numeric header cell as the label (2020 -> 2020); fp
+        // labels are strings, so "2020". These used to become "column_{i}".
+        let rows = vec![
+            vec![
+                calamine::Data::Float(2020.0),
+                calamine::Data::String("x".to_owned()),
+                calamine::Data::Float(1.5),
+            ],
+            vec![
+                calamine::Data::Int(1),
+                calamine::Data::Int(2),
+                calamine::Data::Int(3),
+            ],
+        ];
+        let frame = super::parse_excel_rows(rows, &super::ExcelReadOptions::default())
+            .expect("parse excel rows");
+        assert_eq!(frame.column_names(), vec!["2020", "x", "1.5"]);
     }
 
     #[test]
@@ -21972,22 +22842,24 @@ mod tests {
     #[test]
     fn csv_without_headers_supports_generated_index_col_name() {
         let input = "10,alpha\n20,beta\n";
+        // GOLDEN-CHANGE (4qg5w.19): the header-less names are "0"/"1" as in
+        // pandas (read_csv(header=None, index_col=0) -> index 10/20, column 1).
         let opts = CsvReadOptions {
             has_headers: false,
-            index_col: Some("column_0".into()),
+            index_col: Some("0".into()),
             ..Default::default()
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
         assert_eq!(frame.index().len(), 2);
         assert_eq!(frame.index().labels()[0], IndexLabel::Int64(10));
         assert_eq!(frame.index().labels()[1], IndexLabel::Int64(20));
-        assert!(frame.column("column_0").is_none());
+        assert!(frame.column("0").is_none());
         assert_eq!(
-            frame.column("column_1").unwrap().values()[0],
+            frame.column("1").unwrap().values()[0],
             Scalar::Utf8("alpha".into())
         );
         assert_eq!(
-            frame.column("column_1").unwrap().values()[1],
+            frame.column("1").unwrap().values()[1],
             Scalar::Utf8("beta".into())
         );
     }
@@ -23947,6 +24819,106 @@ mod tests {
     }
 
     #[test]
+    fn excel_serials_match_openpyxl_to_excel() {
+        // openpyxl.utils.datetime.to_excel (pandas' writer path), recorded:
+        //   datetime(2024,1,2,3,4,5)              -> 45293.12783564815
+        //   datetime(2024,12,31,23,59,59,500000)  -> 45657.999994212965
+        //   datetime(1900,2,28) -> 59.0; datetime(1900,3,1) -> 61.0 (phantom 02-29)
+        //   datetime(1969,12,31,23,59,59,999999) -> 25568.99999999999
+        //   timedelta(days=1) -> 1.0; hours=2 -> 0.08333333333333333;
+        //   microseconds=1500 -> 1.736111111111111e-08
+        use super::{epoch_ns_to_excel_serial, timedelta_ns_to_excel_days};
+
+        assert_eq!(
+            epoch_ns_to_excel_serial(1_704_164_645_000_000_000),
+            45293.12783564815
+        );
+        assert_eq!(
+            epoch_ns_to_excel_serial(1_735_689_599_500_000_000),
+            45657.999994212965
+        );
+        assert_eq!(epoch_ns_to_excel_serial(-2_203_977_600_000_000_000), 59.0);
+        assert_eq!(epoch_ns_to_excel_serial(-2_203_891_200_000_000_000), 61.0);
+        assert_eq!(epoch_ns_to_excel_serial(-1_000), 25568.99999999999);
+        assert_eq!(timedelta_ns_to_excel_days(86_400_000_000_000), 1.0);
+        assert_eq!(
+            timedelta_ns_to_excel_days(7_200_000_000_000),
+            0.08333333333333333
+        );
+        assert_eq!(timedelta_ns_to_excel_days(1_500_000), 1.736111111111111e-08);
+    }
+
+    #[test]
+    fn excel_datetime_columns_round_trip_as_pandas_does() {
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20. pandas 2.2.3:
+        // DataFrame({t: [2024-01-02 03:04:05, NaT, 2024-12-31 23:59:59.5],
+        // d: ['1D', NaT, '2h']}).to_excel(p, index=False); read_excel(p) ->
+        // t datetime64[ns] with the same values and NaT, d float64 days
+        // [1.0, NaN, 0.08333333333333333]; a tz-aware column raises ValueError.
+        let t = Column::new(
+            DType::datetime64_naive(),
+            vec![
+                Scalar::Datetime64(1_704_164_645_000_000_000),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Datetime64(1_735_689_599_500_000_000),
+            ],
+        )
+        .expect("t");
+        let d = Column::new(
+            DType::Timedelta64,
+            vec![
+                Scalar::Timedelta64(86_400_000_000_000),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Timedelta64(7_200_000_000_000),
+            ],
+        )
+        .expect("d");
+        let mut cols = BTreeMap::new();
+        cols.insert("t".to_owned(), t.clone());
+        cols.insert("d".to_owned(), d);
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            cols,
+            vec!["t".to_owned(), "d".to_owned()],
+        )
+        .expect("frame");
+        let options = super::ExcelWriteOptions {
+            index: false,
+            ..super::ExcelWriteOptions::default()
+        };
+        let bytes = super::write_excel_bytes_with_options(&frame, &options).expect("write");
+        let back = read_excel_bytes(&bytes, &ExcelReadOptions::default()).expect("read");
+
+        let t_back = back.column("t").expect("t");
+        assert_eq!(t_back.dtype(), DType::datetime64_naive());
+        // The blank cell is missing (validity + is_missing); fp spells a
+        // missing datetime either Null(NaT) or the NaT sentinel, both missing.
+        assert_eq!(t_back.validity().count_invalid(), 1);
+        assert!(t_back.values()[1].is_missing());
+        assert_eq!(t_back.values()[0], t.values()[0]);
+        assert_eq!(t_back.values()[2], t.values()[2]);
+        let d_back = back.column("d").expect("d").values();
+        assert_eq!(d_back[0], Scalar::Float64(1.0));
+        assert!(d_back[1].is_missing());
+        assert_eq!(d_back[2], Scalar::Float64(0.08333333333333333));
+
+        let mut zoned = BTreeMap::new();
+        zoned.insert("z".to_owned(), t.with_dtype(DType::datetime64_tz("UTC")));
+        let zoned = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            zoned,
+            vec!["z".to_owned()],
+        )
+        .expect("zoned");
+        let err = super::write_excel_bytes_with_options(&zoned, &options)
+            .expect_err("tz-aware must be refused");
+        assert!(
+            format!("{err}").contains("does not support datetimes with timezones"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn write_excel_with_options_index_label_overrides_header() {
         let frame = make_test_dataframe();
         let bytes = super::write_excel_bytes_with_options(
@@ -24201,7 +25173,9 @@ mod tests {
         let frame2 = super::read_excel_bytes(
             &bytes,
             &super::ExcelReadOptions {
-                index_col: Some("column_0".into()),
+                // GOLDEN-CHANGE (4qg5w.19): the blank index header is
+                // "Unnamed: 0", as pandas names it (was "column_0").
+                index_col: Some("Unnamed: 0".into()),
                 ..Default::default()
             },
         )
@@ -24248,7 +25222,9 @@ mod tests {
         let frame2 = super::read_excel(
             &path,
             &super::ExcelReadOptions {
-                index_col: Some("column_0".into()),
+                // GOLDEN-CHANGE (4qg5w.19): the blank index header is
+                // "Unnamed: 0", as pandas names it (was "column_0").
+                index_col: Some("Unnamed: 0".into()),
                 ..Default::default()
             },
         )
@@ -24293,17 +25269,22 @@ mod tests {
         let frame2 = super::read_excel_bytes(
             &bytes,
             &super::ExcelReadOptions {
-                index_col: Some("column_0".into()),
+                // GOLDEN-CHANGE (4qg5w.19): the blank index header is
+                // "Unnamed: 0", as pandas names it (was "column_0").
+                index_col: Some("Unnamed: 0".into()),
                 ..Default::default()
             },
         )
         .expect("read");
 
-        // Non-null values round-trip.
-        assert_eq!(frame2.column("vals").unwrap().values()[0], Scalar::Int64(1));
-        // NaN written as empty cell, read back as Null.
-        assert!(frame2.column("vals").unwrap().values()[1].is_missing());
-        assert_eq!(frame2.column("vals").unwrap().values()[2], Scalar::Int64(3));
+        // GOLDEN-CHANGE (br-frankenpandas-audiv): pandas 2.2.3 reads this
+        // column as float64 [1.0, nan, 3.0]; it came back int64 with a gap.
+        let vals = frame2.column("vals").unwrap();
+        assert_eq!(vals.dtype(), DType::Float64);
+        assert_eq!(vals.values()[0], Scalar::Float64(1.0));
+        // NaN written as an empty cell, read back as NaN.
+        assert!(vals.values()[1].is_missing());
+        assert_eq!(vals.values()[2], Scalar::Float64(3.0));
     }
 
     #[test]
@@ -24336,7 +25317,9 @@ mod tests {
         let frame2 = super::read_excel_bytes(
             &bytes,
             &super::ExcelReadOptions {
-                index_col: Some("column_0".into()),
+                // GOLDEN-CHANGE (4qg5w.19): the blank index header is
+                // "Unnamed: 0", as pandas names it (was "column_0").
+                index_col: Some("Unnamed: 0".into()),
                 ..Default::default()
             },
         )
@@ -24384,9 +25367,10 @@ mod tests {
         .expect("read with skip");
 
         // Skipped the header row, so first data row becomes first row.
-        // With has_headers=false, column names are auto-generated.
+        // With has_headers=false, columns are named 0..n-1 as in pandas
+        // (GOLDEN-CHANGE 4qg5w.19: was "column_0").
         assert_eq!(frame2.index().len(), 2);
-        assert!(frame2.column("column_0").is_some());
+        assert_eq!(frame2.column_names(), vec!["0", "1"]);
     }
 
     #[test]
@@ -24562,17 +25546,36 @@ mod tests {
     }
 
     #[test]
-    fn excel_default_read_promotes_writer_range_index_back_to_index() {
+    fn excel_default_read_keeps_the_unnamed_index_column_as_data_like_pandas() {
+        // GOLDEN-CHANGE (4qg5w.19). This test used to pin a heuristic that
+        // treated a blank first header over 0..n as a writer-emitted index and
+        // DROPPED the column. pandas never guesses: DataFrame(...).to_excel(p);
+        // read_excel(p).columns -> ['Unnamed: 0', ...] with the 0..n values as
+        // DATA and a fresh RangeIndex. A real data column that happens to hold
+        // 0..n under a blank header must survive, so the old behaviour fails
+        // this test.
         let frame = make_test_dataframe();
         let bytes = super::write_excel_bytes(&frame).expect("write excel");
 
         let frame2 = super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default())
             .expect("read excel");
 
-        assert_eq!(frame2.index().labels(), frame.index().labels());
-        assert_eq!(frame2.index().name(), None);
-        assert_eq!(frame2.column_names(), vec!["ints", "floats", "names"],);
-        assert!(frame2.column("column_0").is_none());
+        assert_eq!(
+            frame2.column_names(),
+            vec!["Unnamed: 0", "ints", "floats", "names"]
+        );
+        assert_eq!(
+            frame2.column("Unnamed: 0").expect("kept as data").values(),
+            &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            frame2.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2)
+            ]
+        );
     }
 
     #[test]
@@ -24593,9 +25596,10 @@ mod tests {
             frame.index().labels(),
             &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
         );
-        assert_eq!(frame.column_names(), vec!["column_0", "value"]);
+        // GOLDEN-CHANGE (4qg5w.19): pandas names the blank header "Unnamed: 0".
+        assert_eq!(frame.column_names(), vec!["Unnamed: 0", "value"]);
         assert_eq!(
-            frame.column("column_0").unwrap().values(),
+            frame.column("Unnamed: 0").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(20)],
         );
     }
@@ -25385,12 +26389,12 @@ mod tests {
             );
 
             // Float (700, 701)
-            let s = pg_text_cell_to_scalar(Some(b"2.718"), 701);
-            assert!(matches!(s, Scalar::Float64(v) if (v - 2.718).abs() < 1e-6));
+            let s = pg_text_cell_to_scalar(Some(b"2.625"), 701);
+            assert!(matches!(s, Scalar::Float64(v) if (v - 2.625).abs() < 1e-12));
 
             // Numeric (1700)
-            let s = pg_text_cell_to_scalar(Some(b"3.14159"), 1700);
-            assert!(matches!(s, Scalar::Float64(v) if (v - 3.14159).abs() < 1e-5));
+            let s = pg_text_cell_to_scalar(Some(b"1234.5678"), 1700);
+            assert!(matches!(s, Scalar::Float64(v) if (v - 1234.5678).abs() < 1e-9));
             let s = pg_text_cell_to_scalar(Some(b"nan"), 1700);
             assert!(matches!(s, Scalar::Float64(v) if v.is_nan()));
             let s = pg_text_cell_to_scalar(Some(b"infinity"), 1700);
@@ -25469,18 +26473,33 @@ mod tests {
             assert_eq!(postgres_sql_dtype_from_index(&str_idx), "TEXT");
         }
 
-        #[test]
-        fn test_postgres_live_roundtrip_and_inspector() {
+        /// Connects to the live server named by PG_URL / DATABASE_URL.
+        ///
+        /// FP_REQUIRE_LIVE_PG=1 (set by CI's postgres-service job) turns an
+        /// unreachable server into a FAILURE. Without it the caller skips LOUDLY:
+        /// before this, an unreachable server read as a silent pass and the
+        /// adapter's live tests had never executed anywhere.
+        fn live_pg_conn() -> Option<PostgresConnection> {
             let pg_url = std::env::var("PG_URL")
                 .or_else(|_| std::env::var("DATABASE_URL"))
                 .unwrap_or_else(|_| "postgres://ubuntu:ubuntu@127.0.0.1:5432/ubuntu".to_string());
-
-            let conn = match PostgresConnection::open(&pg_url) {
-                Ok(c) => c,
+            match PostgresConnection::open(&pg_url) {
+                Ok(c) => Some(c),
                 Err(e) => {
-                    eprintln!("SKIPPING live PostgreSQL test: unable to connect to {pg_url}: {e}");
-                    return;
+                    assert!(
+                        std::env::var_os("FP_REQUIRE_LIVE_PG").is_none(),
+                        "FP_REQUIRE_LIVE_PG is set but {pg_url} is unreachable: {e}"
+                    );
+                    eprintln!("SKIP live_pg: unable to connect to {pg_url}: {e}");
+                    None
                 }
+            }
+        }
+
+        #[test]
+        fn test_postgres_live_roundtrip_and_inspector() {
+            let Some(conn) = live_pg_conn() else {
+                return;
             };
 
             // Server version check
@@ -25544,14 +26563,17 @@ mod tests {
             #[cfg(feature = "sql-sqlite")]
             {
                 let sqlite_conn = rusqlite::Connection::open_in_memory().expect("sqlite in memory");
-                write_sql(&df, &sqlite_conn, "sqlite_tbl", SqlIfExists::Fail)
+                // Not `sqlite_*`: SQLite reserves that prefix for internal
+                // objects, which this test never noticed because it never ran.
+                write_sql(&df, &sqlite_conn, "pg_parity_tbl", SqlIfExists::Fail)
                     .expect("sqlite write");
-                let sqlite_read = read_sql_table(&sqlite_conn, "sqlite_tbl").expect("sqlite read");
+                let sqlite_read =
+                    read_sql_table(&sqlite_conn, "pg_parity_tbl").expect("sqlite read");
                 assert_eq!(read_back.index().len(), sqlite_read.index().len());
                 assert_eq!(read_back.column_names(), sqlite_read.column_names());
                 for col in read_back.column_names() {
-                    let pg_col = read_back.column(&col).unwrap();
-                    let sl_col = sqlite_read.column(&col).unwrap();
+                    let pg_col = read_back.column(col).unwrap();
+                    let sl_col = sqlite_read.column(col).unwrap();
                     assert_eq!(
                         pg_col.values(),
                         sl_col.values(),
@@ -25580,6 +26602,139 @@ mod tests {
             // Cleanup
             let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
         }
+
+        /// Bool, missing values (NULL vs float NaN), tz-aware timestamps and
+        /// nullable strings through a real server: the paths the text-protocol
+        /// decoder has to get right and that the int/float/str fixture never hit.
+        #[test]
+        fn test_postgres_live_roundtrip_dtypes_and_nulls() {
+            let Some(conn) = live_pg_conn() else {
+                return;
+            };
+            let table_name = "fp_test_dtypes_nulls_tbl";
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+
+            // 2024-01-15T10:30:00.123456Z
+            let ts = 1_705_314_600_123_456_000_i64;
+            let mut columns = BTreeMap::new();
+            columns.insert(
+                "flags".to_string(),
+                Column::new(
+                    DType::Bool,
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                )
+                .unwrap(),
+            );
+            columns.insert(
+                "floats".to_string(),
+                Column::new(
+                    DType::Float64,
+                    vec![
+                        Scalar::Float64(-0.25),
+                        Scalar::Float64(f64::NAN),
+                        Scalar::Null(fp_types::NullKind::Null),
+                    ],
+                )
+                .unwrap(),
+            );
+            columns.insert(
+                "stamps".to_string(),
+                Column::new(
+                    DType::datetime64_naive(),
+                    vec![
+                        Scalar::Datetime64(ts),
+                        Scalar::Null(fp_types::NullKind::NaT),
+                        Scalar::Datetime64(0),
+                    ],
+                )
+                .unwrap(),
+            );
+            columns.insert(
+                "names".to_string(),
+                Column::from_values(vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Utf8("z".into()),
+                ])
+                .unwrap(),
+            );
+            let order = ["flags", "floats", "stamps", "names"]
+                .map(str::to_owned)
+                .to_vec();
+            let df = DataFrame::new_with_column_order(
+                Index::new(vec![
+                    IndexLabel::Int64(0),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(2),
+                ]),
+                columns,
+                order.clone(),
+            )
+            .unwrap();
+
+            write_sql(&df, &conn, table_name, SqlIfExists::Fail).expect("write_sql");
+            let back = read_sql_table(&conn, table_name).expect("read_sql_table");
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+
+            // pandas' to_sql default index=True: the unnamed index comes back
+            // as a leading "index" column (4qg5w.1).
+            let got: Vec<String> = back.column_names().iter().map(|s| s.to_string()).collect();
+            let mut want = vec!["index".to_owned()];
+            want.extend(order.iter().cloned());
+            assert_eq!(got, want);
+            assert_eq!(
+                back.column("index").unwrap().values(),
+                &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)]
+            );
+            for name in &order {
+                eprintln!(
+                    "live_pg dtypes_nulls: {name} dtype={:?} values={:?}",
+                    back.column(name).unwrap().dtype(),
+                    back.column(name).unwrap().values()
+                );
+            }
+
+            let flags = back.column("flags").unwrap().values();
+            assert_eq!(
+                flags,
+                &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+            );
+
+            let floats = back.column("floats").unwrap().values();
+            assert_eq!(floats[0], Scalar::Float64(-0.25));
+            assert!(
+                floats[1].is_missing(),
+                "NaN must read back missing: {:?}",
+                floats[1]
+            );
+            assert!(
+                floats[2].is_missing(),
+                "NULL must read back missing: {:?}",
+                floats[2]
+            );
+
+            let stamps = back.column("stamps").unwrap().values();
+            assert_eq!(
+                stamps[0],
+                Scalar::Datetime64(ts),
+                "microsecond timestamp round-trip"
+            );
+            assert!(
+                stamps[1].is_missing(),
+                "NaT must read back missing: {:?}",
+                stamps[1]
+            );
+            assert_eq!(stamps[2], Scalar::Datetime64(0), "epoch round-trip");
+
+            let names = back.column("names").unwrap().values();
+            assert_eq!(names[0], Scalar::Utf8("x".into()));
+            assert!(
+                names[1].is_missing(),
+                "NULL text must read back missing: {:?}",
+                names[1]
+            );
+            assert_eq!(names[2], Scalar::Utf8("z".into()));
+        }
     }
 
     #[test]
@@ -25590,16 +26745,19 @@ mod tests {
         write_sql(&frame, &conn, "portable_tbl", SqlIfExists::Fail)
             .expect("write through marker-aware mock backend");
 
+        // GOLDEN-CHANGE (4qg5w.1): write_sql follows pandas' to_sql default
+        // index=True, so the unnamed index leads as an "index" column.
         let insert_sql = conn.insert_sql.borrow();
         assert_eq!(
             insert_sql.as_slice(),
-            &["INSERT INTO \"portable_tbl\" (\"ints\", \"floats\", \"names\") VALUES ($1, $2, $3)"
+            &["INSERT INTO \"portable_tbl\" (\"index\", \"ints\", \"floats\", \"names\") VALUES ($1, $2, $3, $4)"
                 .to_owned()]
         );
         let inserted_rows = conn.inserted_rows.borrow();
         assert_eq!(inserted_rows[0].len(), frame.index().len());
-        assert_eq!(inserted_rows[0][0][0], Scalar::Int64(10));
-        assert_eq!(inserted_rows[0][2][2], Scalar::Utf8("carol".into()));
+        assert_eq!(inserted_rows[0][0][0], Scalar::Int64(0));
+        assert_eq!(inserted_rows[0][0][1], Scalar::Int64(10));
+        assert_eq!(inserted_rows[0][2][3], Scalar::Utf8("carol".into()));
     }
 
     #[cfg(feature = "sql-sqlite")]
@@ -27979,6 +29137,269 @@ mod tests {
     }
 
     #[test]
+    fn feather_reader_decodes_lz4_compressed_ipc_like_pyarrow_writes() {
+        // pyarrow's feather v2 writer compresses with LZ4 by default, so every
+        // feather file pandas writes needs this; it used to fail with "lz4 IPC
+        // decompression requires the lz4 feature".
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
+        use arrow::{
+            array::{Float64Array, StringArray},
+            datatypes::{Field, Schema},
+            ipc::{
+                CompressionType,
+                writer::{FileWriter, IpcWriteOptions},
+            },
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, true),
+            Field::new("s", ArrowDataType::Utf8, true),
+        ]));
+        let batch = arrow::array::RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![Some(1.5), None, Some(-2.0)])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])),
+            ],
+        )
+        .expect("batch");
+        let options = IpcWriteOptions::default()
+            .try_with_compression(Some(CompressionType::LZ4_FRAME))
+            .expect("lz4 option");
+        let mut bytes = Vec::new();
+        {
+            let mut writer =
+                FileWriter::try_new_with_options(&mut bytes, &schema, options).expect("writer");
+            writer.write(&batch).expect("write");
+            writer.finish().expect("finish");
+        }
+
+        let frame = read_feather_bytes(&bytes).expect("lz4 feather must read");
+        assert_eq!(
+            frame.column("x").expect("x").values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-2.0)
+            ]
+        );
+        assert_eq!(
+            frame.column("s").expect("s").values()[0],
+            Scalar::Utf8("a".to_owned())
+        );
+        assert!(frame.column("s").expect("s").values()[2].is_missing());
+    }
+
+    #[test]
+    fn arrow_temporal_columns_round_trip_as_temporal_types() {
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20: Datetime64 and
+        // Timedelta64 were written as plain Int64 and Timestamps were read back
+        // as strings, so neither pandas nor fp got a datetime column back.
+        // pyarrow writes pandas' datetime64[ns] / datetime64[ns, tz] /
+        // timedelta64[ns] as exactly these three Arrow types.
+        use arrow::datatypes::TimeUnit;
+
+        // 1_704_164_645_000_000_000 ns = 2024-01-02T03:04:05Z; 86_400e9 ns = 1 day.
+        let column = |dtype: DType, value: Scalar| {
+            Column::new(dtype, vec![value, Scalar::Null(NullKind::NaT)]).expect("column")
+        };
+        let naive = column(
+            DType::datetime64_naive(),
+            Scalar::Datetime64(1_704_164_645_000_000_000),
+        );
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "z".to_owned(),
+            naive.with_dtype(DType::datetime64_tz("US/Eastern")),
+        );
+        cols.insert(
+            "o".to_owned(),
+            naive.with_dtype(DType::datetime64_tz("UTC+05:30")),
+        );
+        cols.insert("t".to_owned(), naive);
+        cols.insert(
+            "d".to_owned(),
+            column(DType::Timedelta64, Scalar::Timedelta64(86_400_000_000_000)),
+        );
+        let order = ["t", "z", "o", "d"].map(str::to_owned).to_vec();
+        let frame = DataFrame::new_with_column_order(Index::from_i64(vec![0, 1]), cols, order)
+            .expect("frame");
+
+        let batch = super::dataframe_to_record_batch(&frame).expect("batch");
+        let schema = batch.schema();
+        assert_eq!(
+            schema.field(0).data_type(),
+            &ArrowDataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(
+            schema.field(1).data_type(),
+            &ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("US/Eastern".into()))
+        );
+        // pyarrow's spelling of pandas' UTC+05:30.
+        assert_eq!(
+            schema.field(2).data_type(),
+            &ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("+05:30".into()))
+        );
+        assert_eq!(
+            schema.field(3).data_type(),
+            &ArrowDataType::Duration(TimeUnit::Nanosecond)
+        );
+
+        let parquet = read_parquet_bytes(&super::write_parquet_bytes(&frame).expect("write pq"))
+            .expect("read pq");
+        let feather = read_feather_bytes(&super::write_feather_bytes(&frame).expect("write ft"))
+            .expect("read ft");
+        for (label, back) in [("parquet", parquet), ("feather", feather)] {
+            for name in ["t", "z", "o", "d"] {
+                let got = back.column(name).expect("round-tripped column");
+                let want = frame.column(name).expect("source column");
+                assert_eq!(got.dtype(), want.dtype(), "{label} {name} dtype");
+                assert_eq!(got.values(), want.values(), "{label} {name} values");
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_categorical_columns_round_trip_as_dictionaries() {
+        // pandas' category dtype travels as an Arrow dictionary (pyarrow writes
+        // Dictionary(Int8, Utf8) with the ordered flag); fp rejected those on
+        // read and wrote categoricals as plain strings (or Debug text).
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
+        let values = vec![
+            Scalar::Utf8("b".to_owned()),
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Utf8("b".to_owned()),
+        ];
+        // Category order b, a plus an unused "z", ordered: all must survive.
+        let categories = vec![
+            Scalar::Utf8("b".to_owned()),
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Utf8("z".to_owned()),
+        ];
+        let column = Column::new(DType::Categorical, values)
+            .expect("categorical")
+            .with_categorical(Some(fp_types::CategoricalMetadata::new(
+                categories.clone(),
+                true,
+            )));
+        let mut cols = BTreeMap::new();
+        cols.insert("c".to_owned(), column.clone());
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2, 3]),
+            cols,
+            vec!["c".to_owned()],
+        )
+        .expect("frame");
+
+        let batch = super::dataframe_to_record_batch(&frame).expect("batch");
+        let field = batch.schema().field(0).clone();
+        assert_eq!(
+            field.data_type(),
+            &ArrowDataType::Dictionary(
+                Box::new(ArrowDataType::Int32),
+                Box::new(ArrowDataType::Utf8)
+            )
+        );
+        assert_eq!(field.dict_is_ordered(), Some(true));
+
+        let parquet = read_parquet_bytes(&super::write_parquet_bytes(&frame).expect("write pq"))
+            .expect("read pq");
+        let feather = read_feather_bytes(&super::write_feather_bytes(&frame).expect("write ft"))
+            .expect("read ft");
+        // KNOWN DIVERGENCE (Parquet only): arrow-rs' Parquet writer re-encodes
+        // the dictionary from the values present, so the unused category "z"
+        // is lost; pyarrow keeps it. Feather/IPC writes the dictionary as is.
+        for (label, back, want) in [
+            ("parquet", parquet, &categories[..2]),
+            ("feather", feather, &categories[..]),
+        ] {
+            let got = back.column("c").expect("c");
+            assert_eq!(got.dtype(), DType::Categorical, "{label}");
+            assert_eq!(got.values(), column.values(), "{label}");
+            let meta = got.categorical().expect("categorical metadata");
+            assert_eq!(meta.categories, want, "{label}");
+            assert!(meta.ordered, "{label}");
+        }
+
+        let mut ints = BTreeMap::new();
+        ints.insert(
+            "n".to_owned(),
+            Column::new(DType::Categorical, vec![Scalar::Int64(1), Scalar::Int64(2)])
+                .expect("int categorical"),
+        );
+        let ints = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            ints,
+            vec!["n".to_owned()],
+        )
+        .expect("ints");
+        let err = super::write_parquet_bytes(&ints).expect_err("non-string categories refuse");
+        assert!(
+            format!("{err}").contains("non-string categories"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn arrow_temporal_units_widen_to_nanoseconds_and_overflow_is_an_error() {
+        // pyarrow files can carry s/ms/us units; fp stores ns. A value that does
+        // not fit in i64 nanoseconds must be an error (pandas raises
+        // OutOfBoundsDatetime), never a wrapped timestamp.
+        use arrow::{
+            array::{DurationMillisecondArray, TimestampMicrosecondArray, TimestampSecondArray},
+            datatypes::{Field, Schema, TimeUnit},
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t", ArrowDataType::Timestamp(TimeUnit::Second, None), true),
+            Field::new("d", ArrowDataType::Duration(TimeUnit::Millisecond), true),
+        ]));
+        let batch = arrow::array::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampSecondArray::from(vec![Some(1_704_164_645), None])),
+                Arc::new(DurationMillisecondArray::from(vec![Some(1_500), None])),
+            ],
+        )
+        .expect("batch");
+        let frame = super::record_batch_to_dataframe(&batch).expect("frame");
+        assert_eq!(
+            frame.column("t").expect("t").dtype(),
+            DType::datetime64_naive()
+        );
+        assert_eq!(
+            frame.column("t").expect("t").values(),
+            &[
+                Scalar::Datetime64(1_704_164_645_000_000_000),
+                Scalar::Null(NullKind::NaT)
+            ]
+        );
+        assert_eq!(
+            frame.column("d").expect("d").values(),
+            &[
+                Scalar::Timedelta64(1_500_000_000),
+                Scalar::Null(NullKind::NaT)
+            ]
+        );
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        )]));
+        let batch = arrow::array::RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMicrosecondArray::from(vec![Some(
+                i64::MAX,
+            )]))],
+        )
+        .expect("batch");
+        let err = super::record_batch_to_dataframe(&batch).expect_err("overflow must error");
+        assert!(format!("{err}").contains("out of bounds"), "got: {err}");
+    }
+
+    #[test]
     fn feather_row_multiindex_roundtrip_restores_logical_row_axis() {
         let frame = make_row_multiindex_test_dataframe();
         let bytes = super::write_feather_bytes(&frame).expect("write feather");
@@ -28698,9 +30119,11 @@ mod tests {
         assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Float64(1.0));
         assert!(frame.column("b").unwrap().values()[0].is_missing());
         assert!(frame.column("b").unwrap().values()[1].is_missing());
+        // pandas 2.2.3: read_csv(...)['c'].tolist() == [nan, 'x'] - the missing
+        // cell of an object column is NaN, not None (br-frankenpandas-audiv).
         assert_eq!(
             frame.column("c").unwrap().values(),
-            &[Scalar::Null(NullKind::Null), Scalar::Utf8("x".to_owned())]
+            &[Scalar::Null(NullKind::NaN), Scalar::Utf8("x".to_owned())]
         );
     }
 
@@ -28856,16 +30279,18 @@ mod tests {
     #[test]
     fn csv_parse_dates_deferred_mask_tracks_usecols_and_headerless() {
         let input = "2024-01-15 10:30:00,10\n2024-01-16 11:45:30,20\n";
+        // GOLDEN-CHANGE (4qg5w.19): header-less columns are "0"/"1" (pandas'
+        // 0/1), not "column_0"/"column_1".
         let opts = CsvReadOptions {
             has_headers: false,
-            parse_dates: Some(vec!["column_0".to_owned()]),
-            usecols: Some(vec!["column_0".to_owned()]),
+            parse_dates: Some(vec!["0".to_owned()]),
+            usecols: Some(vec!["0".to_owned()]),
             ..Default::default()
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
-        assert_eq!(frame.column_names(), vec!["column_0"]);
+        assert_eq!(frame.column_names(), vec!["0"]);
         assert_eq!(
-            frame.column("column_0").unwrap().values(),
+            frame.column("0").unwrap().values(),
             &[
                 Scalar::Datetime64(1_705_314_600_000_000_000),
                 Scalar::Datetime64(1_705_405_530_000_000_000),

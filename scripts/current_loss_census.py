@@ -21,6 +21,13 @@ So: group by the FULL lane key including dtype, keep the newest certified row pe
 lane, and flag any surviving loss whose ELF is not the newest ELF that lane has
 ever been measured with -- those need a re-measure before they are believed.
 
+"Newest" means the MEASUREMENT time each bench document carries, never the file
+mtime (br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.1). A checkout
+gives every file the same mtime, so the census of a fresh clone depended on
+directory order (3.14x with 35 losses against 3.93x with 14 on the same commit),
+and commit 0cf20bc43, which landed 89 rows late, gave four 2026-08 LOSING rows
+2026-09-04 mtimes that outranked later winning reruns.
+
 This script does not measure and does not edit anything.
 
 Usage:
@@ -34,6 +41,33 @@ import datetime
 import glob
 import json
 import os
+import sys
+
+# Where a bench document records when it was measured: the harness writes
+# `timestamp` (ISO 8601); a few hand-assembled documents use the others.
+TIMESTAMP_KEYS = ("timestamp", "timestamp_utc", "created_at", "date")
+
+
+def measured_at(document: dict, path: str) -> tuple[float, bool]:
+    """When `document` was measured, as POSIX seconds, and whether the document
+    itself said so. Only a document with no parseable stamp falls back to its
+    file mtime; callers report those, because that order is not reproducible."""
+    for key in TIMESTAMP_KEYS:
+        value = document.get(key)
+        if not isinstance(value, str):
+            continue
+        try:
+            stamp = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+        return stamp.timestamp(), True
+    return os.path.getmtime(path), False
+
+
+def measured_date(seconds: float) -> str:
+    return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).date().isoformat()
 
 
 def certified(row: dict) -> bool:
@@ -65,14 +99,22 @@ def main() -> int:
 
     newest_certified: dict[tuple, tuple] = {}
     newest_elf_seen: dict[tuple, tuple] = {}
+    unstamped: list[str] = []
 
-    for path in glob.glob(os.path.join(args.dir, "*.json")):
+    for path in sorted(glob.glob(os.path.join(args.dir, "*.json"))):
         try:
             with open(path, encoding="utf-8") as handle:
                 document = json.load(handle)
         except (OSError, json.JSONDecodeError):
             continue
-        mtime = os.path.getmtime(path)
+        if not isinstance(document, dict):
+            continue
+        when, stamped = measured_at(document, path)
+        if not stamped and document.get("results"):
+            unstamped.append(os.path.basename(path))
+        # Ties (one invocation writing several files) break on the file name,
+        # so the census never depends on directory order.
+        order = (when, os.path.basename(path))
         for row in document.get("results") or []:
             if not isinstance(row, dict):
                 continue
@@ -81,17 +123,21 @@ def main() -> int:
             # Track the newest ELF this lane was EVER run with, certified or not:
             # an uncertified run on a newer build still proves the old build is
             # superseded.
-            if key not in newest_elf_seen or mtime > newest_elf_seen[key][0]:
-                newest_elf_seen[key] = (mtime, elf_of(row))
+            if key not in newest_elf_seen or order > newest_elf_seen[key][0]:
+                newest_elf_seen[key] = (order, elf_of(row))
             if not certified(row):
                 continue
             try:
                 ratio = float(row["ratio"])
             except (KeyError, TypeError, ValueError):
                 continue
-            if key not in newest_certified or mtime > newest_certified[key][0]:
-                newest_certified[key] = (mtime, ratio, row.get("verdict"),
+            if key not in newest_certified or order > newest_certified[key][0]:
+                newest_certified[key] = (order, ratio, row.get("verdict"),
                                          elf_of(row), peak_load(row))
+
+    if unstamped:
+        print(f"warning: {len(unstamped)} bench document(s) carry no timestamp and "
+              f"were ordered by file mtime: {', '.join(unstamped)}", file=sys.stderr)
 
     lanes = sorted(newest_certified.items(), key=lambda kv: kv[1][1])
     losses = [(k, v) for k, v in lanes if v[1] < 1.0]
@@ -106,7 +152,7 @@ def main() -> int:
     print("-" * len(header))
 
     suspect = 0
-    for key, (mtime, ratio, verdict, elf, load) in shown:
+    for key, ((when, _), ratio, verdict, elf, load) in shown:
         category, workload, size, dtype = key
         newest_elf = newest_elf_seen.get(key, (0, elf))[1]
         note = ""
@@ -117,7 +163,7 @@ def main() -> int:
             note = f"peak load {load:.0f} — load-contaminated, re-measure"
         print(f"{ratio:8.3f}  {str(workload)[:34]:34s} {str(size):>5s} {str(dtype):8s} "
               f"{elf:13s} {('%.0f' % load) if load is not None else '?':>6s}  "
-              f"{datetime.date.fromtimestamp(mtime)!s:10s} {note}")
+              f"{measured_date(when):10s} {note}")
 
     if suspect:
         print(f"\n{suspect} of the rows above were measured on an ELF the lane has "

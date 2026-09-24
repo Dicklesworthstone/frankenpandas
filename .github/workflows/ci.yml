@@ -53,7 +53,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          components: rustfmt
+          components: rustfmt, clippy, rust-src
 
       # br-frankenpandas-3bu58: a bare `cargo fmt --check` was VACUOUS here.
       # On 2026-09-01 (run 33488811029) it printed 90 diffs, then rustfmt
@@ -120,7 +120,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          components: clippy, rust-src
+          components: rustfmt, clippy, rust-src
 
       - name: Install HDF5 (all-features leg)
         # ey5sl triage of run 32393665943: both `--all-features` lint legs
@@ -213,7 +213,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          components: clippy, rust-src, rustfmt
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -275,9 +275,104 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Core fp-frame and fp-columnar tests
         run: cargo test -p fp-frame -p fp-columnar --no-fail-fast
+
+  sql-live:
+    # The PostgreSQL adapter's live-server tests had never executed: no job
+    # enabled `sql-postgresql` for tests, no server existed, and an unreachable
+    # server read as a pass. FP_REQUIRE_LIVE_PG=1 makes unreachable a FAILURE.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: fp
+          POSTGRES_PASSWORD: fp
+          POSTGRES_DB: fp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target-sql-live
+      PG_URL: postgres://fp:fp@127.0.0.1:5432/fp
+      FP_REQUIRE_LIVE_PG: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
+
+      - name: PostgreSQL adapter tests against the live service
+        run: cargo test -p fp-io --features sql-postgresql --lib -- postgres --nocapture
+
+  downstream-consumer:
+    # br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.2: 0.3.0 shipped an
+    # sse4.1 compile-time lock that fired only in RELEASE builds, because nothing
+    # in CI built the library the way a user does. This job builds a crate
+    # outside the workspace against it in release and runs it, checks the same
+    # crate for aarch64, and packages every crate and verifies the packages build
+    # against each other (what crates.io users get).
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target-downstream
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install the aarch64 C compiler (rusqlite builds bundled SQLite)
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build and run a downstream crate in release
+        run: cargo run --release --manifest-path ci/downstream-consumer/Cargo.toml
+
+      - name: Check the downstream crate for aarch64 (release)
+        run: cargo check --release --target aarch64-unknown-linux-gnu --manifest-path ci/downstream-consumer/Cargo.toml
+
+      - name: Package every crate and build the packages against each other
+        run: cargo package --workspace
 
   eager-frame:
     # br-frankenpandas-it6kj: the default build uses lazy transpose storage,
@@ -306,6 +401,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Eager fp-frame tests
         # br-frankenpandas-n35k2: deliberately NO --no-fail-fast here. `--lib`
@@ -357,12 +453,14 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Rust (pinned nightly, retry after transient failure)
         if: steps.rust_setup.outcome == 'failure'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -475,6 +573,15 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          # EVERY setup step installs rust-toolchain.toml's components. Left to
+          # rustup's on-demand install at the first cargo call, jobs whose
+          # harness spawns nested cargo processes (gates on 35952586335,
+          # conformance on 35958461422) died with "failed to install component:
+          # 'clippy-preview...', detected conflict: 'bin/cargo-clippy'" - two
+          # concurrent on-demand installs racing. Nothing left to install means
+          # nothing to race. (kyvo0.6)
+          # llvm-tools-preview: G7 runs `cargo llvm-cov` (below).
+          components: rustfmt, clippy, rust-src, llvm-tools-preview
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -483,6 +590,12 @@ jobs:
 
       - name: Create temp dirs
         run: mkdir -p .tmp .target-gates
+
+      # G7 (Coverage Floor) shells out to `cargo llvm-cov --workspace
+      # --summary-only`; on 35961608652 it failed in 18ms with "no such command:
+      # llvm-cov" because nothing installed it. (kyvo0.6)
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
 
       - name: Install and verify required pandas oracle
         run: |
@@ -551,6 +664,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -599,6 +713,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -644,6 +759,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -698,6 +814,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -722,6 +839,26 @@ jobs:
       - name: Run differential pytest suite
         run: |
           "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_differential_packets.py -v
+
+      # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.11: every venv
+      # above has pandas, so a reader that delegated to pandas (or fell back to
+      # an empty frame) passed. This venv has no pandas, pyarrow or openpyxl; the
+      # battery's expected values are literals recorded from pandas 2.2.3.
+      - name: Pandas-absent native IO battery
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/nopd"
+          NOPD="$RUNNER_TEMP/nopd/bin/python"
+          "$NOPD" -m pip install --quiet pytest
+          "$NOPD" -m pip install --no-deps dist/*.whl
+          for module in pandas pyarrow openpyxl; do
+            if "$NOPD" -c "import $module" 2>/dev/null; then
+              echo "$module is importable in the pandas-absent venv" >&2
+              exit 1
+            fi
+          done
+          "$NOPD" -c "import pandas" || true
+          "$NOPD" -m pytest crates/fp-python/tests/test_native_io.py -v
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7

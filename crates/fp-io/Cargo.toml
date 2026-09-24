@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 arrow = { workspace = true }
+arrow-ipc = { workspace = true }
 bytes = { workspace = true }
 calamine = { workspace = true }
 chrono = { workspace = true }
@@ -45,6 +46,11 @@ zmij = { workspace = true }
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 targets = ["x86_64-unknown-linux-gnu"]
+
+# arrow-ipc is depended on only to enable its `lz4` feature inside arrow's IPC
+# reader (pandas' default feather compression); no code names it directly.
+[package.metadata.cargo-machete]
+ignored = ["arrow-ipc"]
 
 # hdf5 is OPT-IN: hdf5-metno-sys requires a system HDF5 library/headers at
 # build time, which is absent on CI runners and most end-user machines and

@@ -94,6 +94,10 @@ ERROR_ORIGIN_PANDAS = "pandas"
 ERROR_ORIGIN_ADAPTER = "oracle_adapter"
 ERROR_ORIGIN_REQUEST = "request"
 ERROR_ORIGIN_UNEXPECTED = "unexpected"
+# pandas never loaded (setup_pandas failed): the one origin the Rust harness
+# treats as "oracle unavailable". Every other origin means the oracle RAN, so a
+# test must compare or fail rather than skip (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.2).
+ERROR_ORIGIN_UNAVAILABLE = "oracle_unavailable"
 
 
 def oracle_error_origin(exc: BaseException) -> str:
@@ -289,7 +293,9 @@ def scalar_from_json(value: dict[str, Any]) -> Any:
     if kind == "int64":
         return int(raw)
     if kind == "float64":
-        return float(raw)
+        # Rust writes NaN as null and +/-inf as "inf"/"-inf"; float() parses
+        # the latter. (4qg5w.3)
+        return float("nan") if raw is None else float(raw)
     # "str"/"string" are serde aliases for the canonical "utf8" string kind
     # (see fp-types Scalar: #[serde(alias = "string", alias = "str")]).
     if kind in ("utf8", "str", "string"):
@@ -355,37 +361,12 @@ def scalar_to_json(value: Any) -> dict[str, Any]:
         if math.isnan(value):
             return {"kind": "null", "value": "na_n"}
         if math.isinf(value):
-            # br-frankenpandas-oracle-float-label-asymmetry-ab1gd flagged this
-            # hole; measuring it upgraded it from "latent" to REACHABLE. An
-            # infinite value used to be returned as {"kind":"float64","value":
-            # inf}, and json.dumps writes the bare token `Infinity`, which is not
-            # JSON. MEASURED consequence, not inferred: a fixture carrying that
-            # token makes fp-conformance-cli abort with
-            #     Json(Error("expected value", line: 8, column: 112))
-            # and the abort is PACKET-WIDE — no per-fixture result is produced at
-            # all, so one such fixture takes down every sibling in its packet.
-            #
-            # MEASURED reachability: `series_div` with a zero denominator emits
-            # it TODAY through the normal dispatcher. It is not a function-level
-            # curiosity.
-            #
-            # This REFUSES rather than inventing a spelling. There is no encoding
-            # for +/-inf that both sides accept: the Rust `NullKind` is
-            # Null/NaN/NaT with no Inf, so routing it to a null kind would claim
-            # an infinite value is MISSING, which is false and would be the quiet
-            # wrong answer rather than the loud one. Choosing a real spelling
-            # needs a matching Rust-side change and belongs with ab1gd's batched
-            # emitter work, which is itself blocked on p6srr. Until then the
-            # honest behaviour is to fail where the problem is, with a message
-            # that names it.
-            raise OracleError(
-                "cannot encode a non-finite float value "
-                f"({value!r}): JSON has no representation for it and serde_json "
-                "rejects the bare `Infinity` token, which aborts the whole "
-                "packet rather than the single fixture. The +/-inf spelling is "
-                "undecided — see br-frankenpandas-oracle-float-label-asymmetry-"
-                "ab1gd"
-            )
+            # JSON has no infinity (json.dumps would write the invalid bare
+            # token `Infinity`, which serde_json rejects packet-wide). +/-inf is
+            # spelled "inf"/"-inf", the spelling fp-types' Scalar::Float64 reads
+            # and writes. It is a VALUE, never a null kind: an infinite result
+            # is not missing. br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.3
+            return {"kind": "float64", "value": "inf" if value > 0 else "-inf"}
         return {"kind": "float64", "value": value}
     return {"kind": "utf8", "value": str(value)}
 
@@ -9498,16 +9479,16 @@ def main() -> int:
         json.dump(response, sys.stdout)
         return 0
     except OracleError as exc:
-        json.dump(error_response(str(exc), pd, oracle_error_origin(exc)), sys.stdout)
+        origin = ERROR_ORIGIN_UNAVAILABLE if pd is None else oracle_error_origin(exc)
+        json.dump(error_response(str(exc), pd, origin), sys.stdout)
         return 1
     except Exception as exc:  # pragma: no cover - defensive
         # Escaped every adapter try-block. It may be the engine or it may be a
         # bug in this adapter; UNEXPECTED says so rather than guessing "pandas"
         # and lending it an authority it has not earned.
+        origin = ERROR_ORIGIN_UNAVAILABLE if pd is None else ERROR_ORIGIN_UNEXPECTED
         json.dump(
-            error_response(
-                f"unexpected oracle failure: {exc}", pd, ERROR_ORIGIN_UNEXPECTED
-            ),
+            error_response(f"unexpected oracle failure: {exc}", pd, origin),
             sys.stdout,
         )
         return 2

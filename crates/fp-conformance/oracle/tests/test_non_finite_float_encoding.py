@@ -1,32 +1,16 @@
-"""±inf has no JSON encoding, so the oracle must REFUSE it rather than emit it.
+"""±inf is encoded as the strings "inf"/"-inf", the spelling fp-types reads.
 
-br-frankenpandas-oracle-float-label-asymmetry-ab1gd flagged this as a latent hole
-in `scalar_to_json`. Measuring it upgraded it twice over:
+History (br-frankenpandas-oracle-float-label-asymmetry-ab1gd): `json.dumps` writes
+a bare `Infinity` token, which is not JSON; serde_json rejects it and the whole
+packet aborts, and `series_div` by zero reaches it through the ordinary
+dispatcher. Until both sides agreed on a spelling, the oracle refused. The spelling
+now exists on both sides (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.3):
 
-REACHABLE, not hypothetical. `series_div` with a zero denominator produces an
-infinite value through the ordinary dispatcher today — no exotic input required.
+    Scalar::Float64(f64::INFINITY)  <->  {"kind": "float64", "value": "inf"}
 
-PACKET-WIDE, not fixture-local. `json.dumps` writes the bare token `Infinity`,
-which is not JSON. Feeding fp-conformance-cli a fixture carrying it gives
-
-    Error: Json(Error("expected value", line: 8, column: 112))
-
-and the run produces NO per-fixture results at all — one unparseable fixture takes
-down every sibling in its packet, so the blast radius of emitting it is far larger
-than the fixture that contains it.
-
-⚠️ THE FIX REFUSES; IT DOES NOT INVENT A SPELLING. There is no encoding for ±inf
-that both sides accept. The Rust `NullKind` is Null/NaN/NaT with no Inf, so routing
-an infinity to a null kind would assert that an infinite value is MISSING — false,
-and precisely the quiet wrong answer this repo keeps choosing loudness over.
-Picking a real spelling requires a matching Rust-side change and belongs with
-ab1gd's batched emitter work, which is blocked on p6srr. Refusing is what can be
-done honestly today.
-
-MEASURED RADIUS: dispatching all 1277 corpus fixtures through the oracle in-process,
-ZERO hit the new refusal. (The packet run does not exercise this at all — it
-compares FrankenPandas against STORED expectations and never calls the emitter — so
-the dispatch sweep is the measurement that actually applies.)
+(pinned on the Rust side by fp-types `float64_json_spells_infinity_and_round_trips`,
+which parses these exact bytes). An infinity stays a float64 VALUE: routing it to a
+null kind would claim an infinite result is missing.
 """
 
 from __future__ import annotations
@@ -41,8 +25,8 @@ def _strict_loads(raw: str):
     """`json.loads` that REJECTS the bare NaN/Infinity tokens Python accepts.
 
     Plain `json.loads` is lenient and parses them happily, which is exactly why
-    this hole survived: a round-trip test written in Python alone would pass while
-    serde_json on the Rust side refused the same bytes.
+    the original hole survived: a Python-only round trip passed while serde_json
+    refused the same bytes.
     """
 
     def reject(token):
@@ -51,60 +35,49 @@ def _strict_loads(raw: str):
     return json.loads(raw, parse_constant=reject)
 
 
-@pytest.mark.parametrize("value", [math.inf, -math.inf])
-def test_scalar_to_json_refuses_non_finite_floats_ab1gd(oracle, value):
-    with pytest.raises(oracle.OracleError) as excinfo:
-        oracle.scalar_to_json(value)
-    message = str(excinfo.value)
-    assert "non-finite float value" in message, (
-        "the refusal must name what it refused; a generic error here sends readers "
-        "looking for a broken operation instead of an unencodable value"
-    )
-    assert "ab1gd" in message, (
-        "the message must point at the bead that owns the spelling decision, so "
-        "whoever hits it knows this is undecided rather than unimplementable"
-    )
+@pytest.mark.parametrize("value, spelling", [(math.inf, "inf"), (-math.inf, "-inf")])
+def test_scalar_to_json_spells_non_finite_floats(oracle, value, spelling):
+    assert oracle.scalar_to_json(value) == {"kind": "float64", "value": spelling}
 
 
-def test_finite_and_nan_floats_still_encode_ab1gd(oracle):
-    """Non-vacuity. Without this the refusal could be 'achieved' by rejecting every
-    float, and NaN in particular already HAS a working encoding that must not move.
-    """
+def test_finite_and_nan_floats_keep_their_encodings(oracle):
+    """NaN already had a working encoding (a typed null) that must not move."""
     assert oracle.scalar_to_json(1.5) == {"kind": "float64", "value": 1.5}
     assert oracle.scalar_to_json(math.nan) == {"kind": "null", "value": "na_n"}
 
 
-def test_the_encodings_that_survive_are_strict_json_ab1gd(oracle):
-    """Pins the actual property at stake, which is not 'no exception' but 'parses
-    where it will be parsed'. The old inf form is included as the counter-example
-    so the test states what it is protecting against, not just what it allows.
-    """
-    for value in (1.5, -0.25, math.nan):
-        raw = json.dumps(oracle.scalar_to_json(value))
-        assert _strict_loads(raw) is not None
+def test_every_float_encoding_is_strict_json_and_reads_back(oracle):
+    """The property at stake is 'parses where it will be parsed' (serde_json).
+    The old bare-token form stays as the counter-example."""
+    for value in (1.5, -0.25, math.nan, math.inf, -math.inf):
+        encoded = oracle.scalar_to_json(value)
+        decoded = _strict_loads(json.dumps(encoded))
+        back = oracle.scalar_from_json(decoded)
+        if math.isnan(value):
+            assert math.isnan(back)
+        else:
+            assert back == value
 
-    # What the emitter used to produce for an infinity, verified to be the thing
-    # serde_json refuses. This is a fixed literal rather than a call, because the
-    # emitter can no longer be made to produce it.
     with pytest.raises(ValueError, match="bare non-JSON constant"):
         _strict_loads(json.dumps({"kind": "float64", "value": math.inf}))
 
 
-def test_series_div_by_zero_is_the_reachable_path_ab1gd(oracle):
-    """The reachability claim, asserted rather than described.
-
-    If a future change gives ±inf a real encoding, this test fails and points at
-    the one place that has to agree with it — which is the right outcome, not a
-    nuisance: the refusal and the reachable operation must be decided together.
-    """
+def test_series_div_by_zero_answers_with_infinity(oracle):
+    """The reachable path that used to abort: pandas' 1.0 / 0.0 == inf and
+    -1.0 / 0.0 == -inf now come back as encodable values."""
+    pd = pytest.importorskip("pandas")
     payload = {
         "name": "a",
-        "index": [{"kind": "int64", "value": 0}],
-        "values": [{"kind": "float64", "value": 1.0}],
+        "index": [{"kind": "int64", "value": 0}, {"kind": "int64", "value": 1}],
+        "values": [{"kind": "float64", "value": 1.0}, {"kind": "float64", "value": -1.0}],
     }
-    zero = dict(payload, values=[{"kind": "float64", "value": 0.0}])
-    with pytest.raises(oracle.OracleError, match="non-finite float value"):
-        oracle.dispatch(
-            __import__("pandas"),
-            {"operation": "series_div", "left": payload, "right": zero},
-        )
+    zero = dict(
+        payload,
+        values=[{"kind": "float64", "value": 0.0}, {"kind": "float64", "value": 0.0}],
+    )
+    result = oracle.dispatch(pd, {"operation": "series_div", "left": payload, "right": zero})
+    values = _strict_loads(json.dumps(result))["expected_series"]["values"]
+    assert values == [
+        {"kind": "float64", "value": "inf"},
+        {"kind": "float64", "value": "-inf"},
+    ]

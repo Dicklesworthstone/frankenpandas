@@ -1121,13 +1121,58 @@ pub enum NullKind {
     NaT,
 }
 
+/// JSON spelling of a `Scalar::Float64` payload. JSON has no infinity:
+/// serde_json writes a non-finite `f64` as `null` and cannot read that back,
+/// so a division-by-zero answer could not travel through a fixture or the
+/// oracle at all. ±inf is spelled `"inf"` / `"-inf"` (the pandas oracle emits
+/// the same strings); finite values and NaN serialize exactly as before, and
+/// the `null` serde_json writes for NaN now reads back as NaN.
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.3)
+mod float64_json {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        if value.is_infinite() {
+            serializer.serialize_str(if value.is_sign_positive() {
+                "inf"
+            } else {
+                "-inf"
+            })
+        } else {
+            serializer.serialize_f64(*value)
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Number(f64),
+        Text(String),
+        Null(()),
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        match Repr::deserialize(deserializer)? {
+            Repr::Number(value) => Ok(value),
+            Repr::Text(text) => match text.as_str() {
+                "inf" => Ok(f64::INFINITY),
+                "-inf" => Ok(f64::NEG_INFINITY),
+                other => Err(D::Error::custom(format!(
+                    "float64 value must be a number, \"inf\" or \"-inf\", got {other:?}"
+                ))),
+            },
+            Repr::Null(()) => Ok(f64::NAN),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Scalar {
     Null(NullKind),
     Bool(bool),
     Int64(i64),
-    Float64(f64),
+    Float64(#[serde(with = "float64_json")] f64),
     #[serde(alias = "string", alias = "str")]
     Utf8(String),
     Timedelta64(i64),
@@ -8058,6 +8103,49 @@ mod tests {
         DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType,
         cast_scalar, common_dtype, infer_dtype,
     };
+
+    #[test]
+    fn float64_json_spells_infinity_and_round_trips() {
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.3: serde_json
+        // wrote +-inf as `null` and could not read it back, so pandas'
+        // division-by-zero answers could not reach a fixture.
+        let json = |s: &Scalar| serde_json::to_string(s).expect("serialize");
+        let back = |text: &str| serde_json::from_str::<Scalar>(text);
+        assert_eq!(
+            json(&Scalar::Float64(f64::INFINITY)),
+            r#"{"kind":"float64","value":"inf"}"#
+        );
+        assert_eq!(
+            json(&Scalar::Float64(f64::NEG_INFINITY)),
+            r#"{"kind":"float64","value":"-inf"}"#
+        );
+        // Unchanged spellings: finite numbers, -0.0, and NaN as null.
+        assert_eq!(
+            json(&Scalar::Float64(1.5)),
+            r#"{"kind":"float64","value":1.5}"#
+        );
+        assert_eq!(
+            json(&Scalar::Float64(-0.0)),
+            r#"{"kind":"float64","value":-0.0}"#
+        );
+        assert_eq!(
+            json(&Scalar::Float64(f64::NAN)),
+            r#"{"kind":"float64","value":null}"#
+        );
+        for value in [f64::INFINITY, f64::NEG_INFINITY, 1.5, -2.25e300] {
+            let scalar = Scalar::Float64(value);
+            assert_eq!(back(&json(&scalar)).expect("round trip"), scalar);
+        }
+        let negative_zero = back(r#"{"kind":"float64","value":-0.0}"#).expect("-0.0");
+        assert!(matches!(negative_zero, Scalar::Float64(v) if v == 0.0 && v.is_sign_negative()));
+        assert!(matches!(
+            back(r#"{"kind":"float64","value":null}"#).expect("null"),
+            Scalar::Float64(v) if v.is_nan()
+        ));
+        // Anything else is an error, not a silent NaN.
+        assert!(back(r#"{"kind":"float64","value":"Infinity"}"#).is_err());
+        assert!(back(r#"{"kind":"float64","value":"1.5"}"#).is_err());
+    }
 
     /// br-frankenpandas-ay8o9: Scalar::semantic_cmp underpins ALL ordering in
     /// the library (sort, min/max, is_monotonic, searchsorted, groupby key

@@ -4418,6 +4418,64 @@ impl Index {
         ))
     }
 
+    /// Convert labels to Float64 (`pd.Index.astype('float64')`): integers and
+    /// bools widen, numeric strings parse, a missing label becomes NaN;
+    /// datetimes, timedeltas and non-numeric strings are pandas' TypeError /
+    /// ValueError, reported as `InvalidArgument`. (fvsao.4)
+    pub fn astype_float(&self) -> Result<Self, IndexError> {
+        let labels = self
+            .labels
+            .iter()
+            .map(|label| {
+                let value = match label {
+                    IndexLabel::Int64(v) => *v as f64,
+                    IndexLabel::Float64(v) => v.0,
+                    IndexLabel::Bool(b) => f64::from(u8::from(*b)),
+                    IndexLabel::Utf8(s) => s.parse::<f64>().map_err(|_| {
+                        IndexError::InvalidArgument(format!(
+                            "could not convert string to float: '{s}'"
+                        ))
+                    })?,
+                    IndexLabel::Null(_) => f64::NAN,
+                    IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => {
+                        return Err(IndexError::InvalidArgument(
+                            "Cannot cast a datetime-like Index to dtype float64".to_owned(),
+                        ));
+                    }
+                };
+                Ok(IndexLabel::Float64(OrderedF64(value)))
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+        Ok(self.propagate_name(Self::new(labels)))
+    }
+
+    /// Convert labels to bool (`pd.Index.astype(bool)`): nonzero numbers and
+    /// non-empty strings are true; missing and datetime-like labels are
+    /// refused. (fvsao.4)
+    pub fn astype_bool(&self) -> Result<Self, IndexError> {
+        let labels = self
+            .labels
+            .iter()
+            .map(|label| {
+                let flag = match label {
+                    IndexLabel::Int64(v) => *v != 0,
+                    IndexLabel::Float64(v) => v.0 != 0.0,
+                    IndexLabel::Bool(b) => *b,
+                    IndexLabel::Utf8(s) => !s.is_empty(),
+                    IndexLabel::Null(_)
+                    | IndexLabel::Timedelta64(_)
+                    | IndexLabel::Datetime64(_) => {
+                        return Err(IndexError::InvalidArgument(format!(
+                            "cannot cast index label {label:?} to bool"
+                        )));
+                    }
+                };
+                Ok(IndexLabel::Bool(flag))
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+        Ok(self.propagate_name(Self::new(labels)))
+    }
+
     /// Convert all labels to Utf8 strings.
     ///
     /// Matches `pd.Index.astype(str)`.
@@ -4477,6 +4535,8 @@ impl Index {
     pub fn astype(&self, dtype: &str) -> Result<Self, IndexError> {
         match dtype {
             "int" | "int64" => Ok(self.astype_int()),
+            "float" | "float64" => self.astype_float(),
+            "bool" => self.astype_bool(),
             "str" | "string" | "object" => Ok(self.astype_str()),
             "datetime64[ns]" => {
                 ensure_index_kind(
@@ -5395,6 +5455,8 @@ impl Index {
     pub fn dtype(&self) -> &'static str {
         match self.inferred_type() {
             "integer" => "int64",
+            "floating" => "float64",
+            "boolean" => "bool",
             "string" => "object",
             "timedelta64" => "timedelta64[ns]",
             "datetime64" => "datetime64[ns]",
@@ -23920,6 +23982,43 @@ mod tests {
         let int_idx = idx.astype_int();
         assert_eq!(int_idx.labels()[0], IndexLabel::Int64(10));
         assert_eq!(int_idx.labels()[1], IndexLabel::Int64(20));
+    }
+
+    /// pandas 2.2.3: Index([1, 2]).astype('float64') -> Index([1.0, 2.0],
+    /// dtype='float64'); astype(bool) -> [True, False] for [3, 0]; a
+    /// non-numeric string refuses the float cast. Index.astype used to accept
+    /// only int/str (and the binding ignored the dtype altogether). (fvsao.4)
+    #[test]
+    fn index_astype_float_and_bool_fvsao4() {
+        let ints = Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]).set_name("n");
+        let floats = ints.astype("float64").expect("float cast");
+        assert_eq!(
+            floats.labels(),
+            &[
+                IndexLabel::Float64(OrderedF64(1.0)),
+                IndexLabel::Float64(OrderedF64(2.0))
+            ]
+        );
+        assert_eq!(floats.dtype(), "float64");
+        assert_eq!(floats.name(), Some("n"));
+        let flags = Index::new(vec![IndexLabel::Int64(3), IndexLabel::Int64(0)])
+            .astype("bool")
+            .expect("bool cast");
+        assert_eq!(
+            flags.labels(),
+            &[IndexLabel::Bool(true), IndexLabel::Bool(false)]
+        );
+        assert_eq!(flags.dtype(), "bool");
+        assert!(
+            Index::new(vec![IndexLabel::Utf8("x".into())])
+                .astype("float64")
+                .is_err()
+        );
+        assert!(
+            Index::new(vec![IndexLabel::Datetime64(0)])
+                .astype("float64")
+                .is_err()
+        );
     }
 
     #[test]

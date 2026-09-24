@@ -1,0 +1,15 @@
+# A crate OUTSIDE the workspace that depends on frankenpandas the way a user
+# does (br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.2). CI builds and
+# runs it in release - the 0.3.0 sse4.1 lock fired only in release builds - and
+# checks it for aarch64. The empty [workspace] keeps it out of the repository
+# workspace.
+[package]
+name = "frankenpandas-downstream-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+frankenpandas = { path = "../../crates/frankenpandas" }
+
+[workspace]

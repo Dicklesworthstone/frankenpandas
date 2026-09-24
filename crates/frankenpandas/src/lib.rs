@@ -383,7 +383,7 @@ pub use fp_join::{
     merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options, merge_ordered,
 };
 
-/// Target container types supported by the polymorphic [`concat`] entrypoint.
+/// Target container types supported by the polymorphic [`concat()`] entrypoint.
 pub trait ConcatTarget {
     /// Output container type produced by concatenation.
     type Output;

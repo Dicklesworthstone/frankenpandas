@@ -922,6 +922,21 @@ fn fuzz_dataframe_eval_bytes_accepts_arith_chain_seed_fixture() {
     fuzz_dataframe_eval_bytes(seed).expect("arith_chain eval seed should satisfy invariants");
 }
 
+/// Fuzz Nightly crash inputs (2026-09-21/23): Int64 `//` / `%` with a Bool
+/// operand reached `unreachable!()` in fp-columnar's scalar arithmetic fallback.
+/// br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.3.
+#[test]
+fn fuzz_dataframe_eval_bytes_int_bool_floordiv_and_mod_do_not_panic() {
+    let floordiv = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_eval/int_floordiv_bool_kyvo0_3.bin"
+    );
+    fuzz_dataframe_eval_bytes(floordiv).expect("466//True/7 must evaluate, not panic");
+    let modulo = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_eval/int_mod_false_kyvo0_3.bin"
+    );
+    fuzz_dataframe_eval_bytes(modulo).expect("466%False%1 must evaluate, not panic");
+}
+
 #[test]
 fn fuzz_dataframe_eval_bytes_accepts_arith_div_seed_fixture() {
     let seed =

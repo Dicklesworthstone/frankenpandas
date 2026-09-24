@@ -387,8 +387,17 @@ fn e2e_scenario3_csv_round_trip() {
     assert_eq!(df.index().len(), 1000);
     assert_eq!(df.columns().len(), 3);
 
-    // Write CSV back and re-parse.
-    let csv_out = fp_io::write_csv_string(&df).expect("write CSV");
+    // Write CSV back and re-parse: to_csv(index=False) -> read_csv round-trips
+    // a RangeIndex frame (write_csv_string's default, like pandas' to_csv(),
+    // writes the index, which would read back as an 'Unnamed: 0' column).
+    let csv_out = fp_io::write_csv_string_with_options(
+        &df,
+        &fp_io::CsvWriteOptions {
+            include_index: false,
+            ..fp_io::CsvWriteOptions::default()
+        },
+    )
+    .expect("write CSV");
     let df2 = fp_io::read_csv_str(&csv_out).expect("re-parse CSV");
     assert_eq!(df2.index().len(), df.index().len());
     assert_eq!(df2.columns().len(), df.columns().len());

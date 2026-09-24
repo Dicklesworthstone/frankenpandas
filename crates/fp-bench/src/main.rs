@@ -1001,6 +1001,21 @@ where
     }
 }
 
+/// fp's side of pandas' `df.to_csv(index=False)`, which every CSV lane's pandas
+/// arm uses. `write_csv_string` now defaults to pandas' index=True
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1); these are the exact
+/// options its old default was, so the timed path is unchanged.
+fn csv_index_false(frame: &DataFrame) -> String {
+    fp_io::write_csv_string_with_options(
+        frame,
+        &fp_io::CsvWriteOptions {
+            include_index: false,
+            ..fp_io::CsvWriteOptions::default()
+        },
+    )
+    .expect("csv serialize")
+}
+
 /// Time a closure after warmup and emit a same-invocation A/A control.
 fn time_us<F, T>(op: F) -> PairedSamples
 where
@@ -1046,7 +1061,7 @@ fn build_distinct_f64_csvs(rows: usize, cols: usize, k: usize) -> Vec<String> {
             }
             let frame = DataFrame::new_with_column_order(index, columns, column_order)
                 .expect("fp-bench distinct-csv frame construction");
-            fp_io::write_csv_string(&frame).expect("csv serialize")
+            csv_index_false(&frame)
         })
         .collect()
 }
@@ -3629,7 +3644,7 @@ fn run(
         ("io", "csv_read") => {
             // pandas: df.to_csv(file, index=False) [setup]; time pd.read_csv(file).
             // FP: serialize once (setup), time read_csv_str of the same text.
-            let csv = fp_io::write_csv_string(&df).expect("csv serialize");
+            let csv = csv_index_false(&df);
             time_us(|| {
                 let _ = fp_io::read_csv_str(&csv).expect("read_csv");
             })
@@ -3697,7 +3712,7 @@ fn run(
             // parser is deliberately inside the timed closure; each A/A arm
             // therefore proves a fresh frame becomes block-backed before its
             // first array observation. CSV serialization remains setup.
-            let csv = fp_io::write_csv_string(&df).expect("csv serialize");
+            let csv = csv_index_false(&df);
             time_us(|| {
                 let frame = fp_io::read_csv_str(&csv).expect("read_csv");
                 let view = frame
@@ -3711,9 +3726,9 @@ fn run(
             panic!("csv_read_block_view requires fp-bench --features block-storage")
         }
         ("io", "csv_write") => {
-            // pandas: time df.to_csv(file, index=False). FP: time write_csv_string.
+            // pandas: time df.to_csv(file, index=False). FP: the same, index=False.
             time_us(|| {
-                let _ = fp_io::write_csv_string(&df).expect("write_csv");
+                let _ = csv_index_false(&df);
             })
         }
         ("io", "parquet_read") => {
@@ -4567,8 +4582,47 @@ fn run(
     Some(times)
 }
 
+/// The certified `floordiv @10M` / `mod @10M` vs-pandas rows (br-frankenpandas-85clb)
+/// describe an fp-columnar built WITH `+sse4.1`. That used to be enforced by a
+/// compile-time assert inside fp-columnar, which also broke every downstream and
+/// every aarch64 optimized build; it now lives here, in the instrument. fp-bench's
+/// own `cfg!` cannot see fp-columnar's per-package flag, so it reads
+/// `fp_columnar::BUILT_WITH_SSE41`. `FP_BENCH_ALLOW_NO_SSE41=1` is the explicit,
+/// logged escape hatch for exploratory runs whose rows must not be certified.
+fn sse41_build_refusal(
+    optimized: bool,
+    x86_64: bool,
+    columnar_sse41: bool,
+    override_set: bool,
+) -> Option<&'static str> {
+    if optimized && x86_64 && !columnar_sse41 && !override_set {
+        Some(
+            "fp-bench: refusing to measure: this optimized build's fp-columnar lacks +sse4.1 \
+             (fp_columnar::BUILT_WITH_SSE41 == false), so its rows would not describe the \
+             binary the certified floordiv/mod rows were measured on (br-frankenpandas-85clb). \
+             Build through the workspace's release/release-perf profiles, or set \
+             FP_BENCH_ALLOW_NO_SSE41=1 for an exploratory, non-certifiable run.",
+        )
+    } else {
+        None
+    }
+}
+
 fn main() {
     println!("bench_elf_sha256={}", self_identity());
+    let allow_no_sse41 = std::env::var_os("FP_BENCH_ALLOW_NO_SSE41").is_some();
+    if let Some(refusal) = sse41_build_refusal(
+        !cfg!(debug_assertions),
+        cfg!(target_arch = "x86_64"),
+        fp_columnar::BUILT_WITH_SSE41,
+        allow_no_sse41,
+    ) {
+        eprintln!("{refusal}");
+        std::process::exit(3);
+    }
+    if allow_no_sse41 && !fp_columnar::BUILT_WITH_SSE41 {
+        eprintln!("fp_columnar_built_with_sse41=false (FP_BENCH_ALLOW_NO_SSE41: NOT certifiable)");
+    }
 
     let args: Vec<String> = std::env::args().collect();
     if let Some(status) = run_remote_python_harness(&args) {
@@ -4732,6 +4786,19 @@ mod harness_contract_tests {
             samples.thread_probe.peak_process_threads
                 >= samples.thread_probe.process_threads_before_probe
         );
+    }
+
+    #[test]
+    fn sse41_refusal_fires_only_for_an_unflagged_optimized_x86_64_build() {
+        use super::sse41_build_refusal;
+        // The one case the old fp-columnar compile-time lock existed for.
+        assert!(sse41_build_refusal(true, true, false, false).is_some());
+        // Everything else measures: flagged build, debug build, non-x86 target,
+        // or the explicit exploratory override.
+        assert!(sse41_build_refusal(true, true, true, false).is_none());
+        assert!(sse41_build_refusal(false, true, false, false).is_none());
+        assert!(sse41_build_refusal(true, false, false, false).is_none());
+        assert!(sse41_build_refusal(true, true, false, true).is_none());
     }
 
     #[test]

@@ -696,44 +696,37 @@ pub fn evaluate(
             context.broadcast_local(name, value)
         }
         Expr::Add { left, right } => {
-            let lhs = evaluate(left, context, policy, ledger)?;
-            let rhs = evaluate(right, context, policy, ledger)?;
+            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
             lhs.add_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::Sub { left, right } => {
-            let lhs = evaluate(left, context, policy, ledger)?;
-            let rhs = evaluate(right, context, policy, ledger)?;
+            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
             lhs.sub_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::Mul { left, right } => {
-            let lhs = evaluate(left, context, policy, ledger)?;
-            let rhs = evaluate(right, context, policy, ledger)?;
+            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
             lhs.mul_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::Div { left, right } => {
-            let lhs = evaluate(left, context, policy, ledger)?;
-            let rhs = evaluate(right, context, policy, ledger)?;
+            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
             lhs.div_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::Modulo { left, right } => {
-            let lhs = evaluate(left, context, policy, ledger)?;
-            let rhs = evaluate(right, context, policy, ledger)?;
+            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
             lhs.modulo_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::FloorDiv { left, right } => {
-            let lhs = evaluate(left, context, policy, ledger)?;
-            let rhs = evaluate(right, context, policy, ledger)?;
+            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
             lhs.floordiv_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::Pow { left, right } => {
-            let lhs = evaluate(left, context, policy, ledger)?;
-            let rhs = evaluate(right, context, policy, ledger)?;
+            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
             lhs.pow_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
@@ -1222,6 +1215,64 @@ fn reverse_comparison_op(op: ComparisonOp) -> ComparisonOp {
         ComparisonOp::Ne => ComparisonOp::Ne,
         ComparisonOp::Ge => ComparisonOp::Le,
         ComparisonOp::Le => ComparisonOp::Ge,
+    }
+}
+
+/// A literal or `@local` operand: pandas treats it as a SCALAR, and
+/// `Series <op> scalar` keeps the Series' name.
+fn is_scalar_operand(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal { .. } | Expr::Local { .. })
+}
+
+/// Broadcast a scalar operand under `name` (the other operand's name).
+fn evaluate_scalar_operand_named(
+    expr: &Expr,
+    context: &EvalContext,
+    name: &str,
+) -> Result<Series, ExprError> {
+    let (value, anchor_error) = match expr {
+        Expr::Literal { value } => (value.clone(), ExprError::UnanchoredLiteral),
+        Expr::Local { name: local } => (
+            context
+                .get_local(local)
+                .ok_or_else(|| ExprError::UnknownLocal(local.clone()))?
+                .clone(),
+            ExprError::UnanchoredLocal(local.clone()),
+        ),
+        _ => unreachable!("guarded by is_scalar_operand"),
+    };
+    let index = context.anchor_index.as_ref().ok_or(anchor_error)?;
+    Series::broadcast(name, value, index.labels().to_vec()).map_err(ExprError::from)
+}
+
+/// Evaluate both operands of an arithmetic node. A scalar operand (literal or
+/// `@local`) is broadcast under the OTHER operand's name, so `df.eval("b % 2")`
+/// is named `b` like pandas' `Series % scalar`, instead of a broadcast named
+/// `_literal` making the names differ. (Found by
+/// live_oracle_dataframe_eval_int_bool_floordiv_and_mod; comparisons already
+/// special-case literals via `compare_scalar`.)
+fn evaluate_arith_operands(
+    left: &Expr,
+    right: &Expr,
+    context: &EvalContext,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<(Series, Series), ExprError> {
+    match (is_scalar_operand(left), is_scalar_operand(right)) {
+        (false, true) => {
+            let lhs = evaluate(left, context, policy, ledger)?;
+            let rhs = evaluate_scalar_operand_named(right, context, lhs.name())?;
+            Ok((lhs, rhs))
+        }
+        (true, false) => {
+            let rhs = evaluate(right, context, policy, ledger)?;
+            let lhs = evaluate_scalar_operand_named(left, context, rhs.name())?;
+            Ok((lhs, rhs))
+        }
+        _ => Ok((
+            evaluate(left, context, policy, ledger)?,
+            evaluate(right, context, policy, ledger)?,
+        )),
     }
 }
 
@@ -6854,6 +6905,41 @@ mod tests {
             vec![1, 3, 5],
             "not in"
         );
+    }
+
+    /// pandas result names for eval arithmetic: `Series <op> scalar` keeps the
+    /// Series name (literal or @local on either side); two differently named
+    /// Series give an unnamed result; the same name is kept.
+    #[test]
+    fn eval_arithmetic_result_names_follow_pandas() {
+        let policy = RuntimePolicy::strict();
+        let mut ledger = EvidenceLedger::new();
+        let col = |name: &str, v: [i64; 3]| {
+            fp_frame::Series::from_values(
+                name,
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                v.iter().map(|x| Scalar::Int64(*x)).collect(),
+            )
+            .unwrap()
+        };
+        let frame =
+            fp_frame::DataFrame::from_series(vec![col("a", [1, 2, 3]), col("b", [4, 5, 6])])
+                .unwrap();
+        let mut locals = std::collections::BTreeMap::new();
+        locals.insert("k".to_string(), Scalar::Int64(3));
+        for (expr, want) in [
+            ("b % 2", "b"),
+            ("2 * a", "a"),
+            ("a + @k", "a"),
+            ("@k - b", "b"),
+            ("a + b", ""),
+            ("a * a", "a"),
+            ("(a + 1) * 2", "a"),
+        ] {
+            let got = super::eval_str_with_locals(expr, &frame, &locals, &policy, &mut ledger)
+                .unwrap_or_else(|err| panic!("{expr}: {err}"));
+            assert_eq!(got.name(), want, "result name of {expr}");
+        }
     }
 
     #[test]

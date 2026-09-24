@@ -10006,19 +10006,13 @@ impl Series {
         policy: &RuntimePolicy,
         ledger: &mut EvidenceLedger,
     ) -> Result<Self, FrameError> {
-        let op_symbol = match op {
-            ArithmeticOp::Add => "+",
-            ArithmeticOp::Sub => "-",
-            ArithmeticOp::Mul => "*",
-            ArithmeticOp::Div => "/",
-            ArithmeticOp::Mod => "%",
-            ArithmeticOp::Pow => "**",
-            ArithmeticOp::FloorDiv => "//",
-        };
+        // pandas: the result keeps the name only when both operands share it;
+        // otherwise it is unnamed (None). This used to concatenate the names
+        // ("a+b"), which pandas never produces.
         let out_name = if self.name == other.name {
             self.name.clone()
         } else {
-            format!("{}{op_symbol}{}", self.name, other.name)
+            String::new()
         };
 
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
@@ -13695,11 +13689,31 @@ impl Series {
     /// That is the shadow-reimplementation pattern of
     /// `br-frankenpandas-oxodo` — FrankenPandas must own its own observable
     /// semantics. (br-frankenpandas-nywa8)
-    #[must_use]
-    pub fn asof_value(&self, label: &IndexLabel) -> Scalar {
-        self.asof(label)
+    ///
+    /// A string `where` is converted with `Timestamp(where)` before anything
+    /// else, so a string that is not a date raises whatever the index holds.
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// pd.Series([1., 2., 3.], index=['a', 'b', 'c']).asof('c')
+    ///     -> DateParseError: Unknown datetime string format, unable to parse: c
+    /// ```
+    ///
+    /// (A date string against a non-datetime index raises TypeError in pandas;
+    /// fp keeps answering it, because fp also spells datetime indexes as ISO
+    /// strings.) br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.6
+    pub fn asof_value(&self, label: &IndexLabel) -> Result<Scalar, FrameError> {
+        if let IndexLabel::Utf8(text) = label
+            && matches!(parse_datetime_string(text, None), Scalar::Null(_))
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Unknown datetime string format, unable to parse: {text}"
+            )));
+        }
+        Ok(self
+            .asof(label)
             .cloned()
-            .unwrap_or(Scalar::Null(NullKind::NaN))
+            .unwrap_or(Scalar::Null(NullKind::NaN)))
     }
 
     /// Return a boolean mask where missing values are `true`.
@@ -16955,10 +16969,25 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.fix()?)
     }
 
+    /// numpy's floating-point predicates refuse an object column with TypeError
+    /// ("ufunc 'isnan' not supported for the input types, ..."); they answered
+    /// False for every string (4qg5w.18).
+    fn reject_object_ufunc(&self, ufunc: &str) -> Result<(), FrameError> {
+        if self.column.dtype() == DType::Utf8 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "ufunc '{ufunc}' not supported for the input types, and the inputs could \
+                 not be safely coerced to any supported types according to the casting \
+                 rule ''safe''"
+            )));
+        }
+        Ok(())
+    }
+
     /// Element-wise check for finite values.
     ///
     /// Matches `np.isfinite(series)`. Returns boolean Series.
     pub fn isfinite(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isfinite")?;
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -16970,6 +16999,7 @@ impl Series {
     ///
     /// Matches `np.isinf(series)`. Returns boolean Series.
     pub fn isinf(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isinf")?;
         Self::new(self.name.clone(), self.index.clone(), self.column.isinf()?)
     }
 
@@ -16977,6 +17007,7 @@ impl Series {
     ///
     /// Matches `np.isnan(series)`. Returns boolean Series.
     pub fn isnan(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isnan")?;
         Self::new(self.name.clone(), self.index.clone(), self.column.isnan()?)
     }
 
@@ -16984,6 +17015,7 @@ impl Series {
     ///
     /// Matches `np.isneginf(series)`. Returns boolean Series.
     pub fn isneginf(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isneginf")?;
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -16995,6 +17027,7 @@ impl Series {
     ///
     /// Matches `np.isposinf(series)`. Returns boolean Series.
     pub fn isposinf(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isposinf")?;
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -24574,6 +24607,21 @@ impl Series {
         fill_method: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Self, FrameError> {
+        // pandas cannot divide strings or datetimes and raises TypeError; this
+        // returned an all-NaN Series for them (4qg5w.18).
+        match self.column.dtype() {
+            DType::Utf8 => {
+                return Err(FrameError::CompatibilityRejected(
+                    "unsupported operand type(s) for /: 'str' and 'str'".to_owned(),
+                ));
+            }
+            DType::Datetime64 { .. } => {
+                return Err(FrameError::CompatibilityRejected(
+                    "cannot perform __truediv__ with this index type: DatetimeArray".to_owned(),
+                ));
+            }
+            _ => {}
+        }
         // Validate fill_method up front (preserve the error for unknown methods
         // regardless of data), then short-circuit the fill when there is nothing
         // missing to fill: ffill/bfill on an all-valid column is the identity, so
@@ -40777,6 +40825,10 @@ impl SeriesGroupBy<'_> {
                 sum
             });
         }
+        // int64 / bool sums are int64 in pandas (wrapping, as numpy does).
+        if let Some(r) = self.integral_reduce(i64::wrapping_add, false) {
+            return r;
+        }
         // Dense single-fold fast path (no per-group Vec<f64> buckets) — see
         // dense_group_fold. Bit-identical to agg_numeric's `nums.iter().sum()`.
         if let Some(r) = self.dense_group_fold(0.0, |a, x| a + x, |a, _| Scalar::Float64(a)) {
@@ -41239,6 +41291,9 @@ impl SeriesGroupBy<'_> {
         if self.column_is_timedelta() {
             return self.agg_timedelta_extrema(|a, b| a.min(b));
         }
+        if let Some(r) = self.integral_reduce(std::cmp::min, true) {
+            return r;
+        }
         if let Some(r) = self.dense_group_fold(f64::INFINITY, f64::min, |a, _| Scalar::Float64(a)) {
             return r;
         }
@@ -41262,6 +41317,9 @@ impl SeriesGroupBy<'_> {
         if self.column_is_timedelta() {
             return self.agg_timedelta_extrema(|a, b| a.max(b));
         }
+        if let Some(r) = self.integral_reduce(std::cmp::max, true) {
+            return r;
+        }
         if let Some(r) =
             self.dense_group_fold(f64::NEG_INFINITY, f64::max, |a, _| Scalar::Float64(a))
         {
@@ -41270,6 +41328,161 @@ impl SeriesGroupBy<'_> {
         self.agg_numeric(
             |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             self.series.name(),
+        )
+    }
+
+    /// The values of an all-valid Int64 or Bool column as i64, and whether the
+    /// column is Bool. pandas keeps these integral where the f64 paths below
+    /// widened them to float64 (`df.groupby("k")["v"].sum()` gave 4.0 for 4):
+    /// sum/prod and their cumulative and transform forms are int64 for an int64
+    /// or bool column, and min/max/cummin/cummax keep int64 or bool. A column
+    /// with missing values is float64 in pandas (DISC-011) and keeps the f64
+    /// paths. (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.1)
+    fn integral_values(&self) -> Option<(std::borrow::Cow<'_, [i64]>, bool)> {
+        let column = &self.series.column;
+        let is_bool = match column.dtype() {
+            DType::Int64 => false,
+            DType::Bool => true,
+            _ => return None,
+        };
+        if !column.validity().all() {
+            return None;
+        }
+        if let Some(values) = column.as_i64_slice() {
+            return Some((std::borrow::Cow::Borrowed(values), false));
+        }
+        if let Some(values) = column.as_bool_slice() {
+            let widened = values.iter().map(|&v| i64::from(v)).collect();
+            return Some((std::borrow::Cow::Owned(widened), true));
+        }
+        // A Scalar-backed column: read the cells.
+        let widened = column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(v) => Some(*v),
+                Scalar::Bool(v) => Some(i64::from(*v)),
+                _ => None,
+            })
+            .collect::<Option<Vec<i64>>>()?;
+        Some((std::borrow::Cow::Owned(widened), is_bool))
+    }
+
+    /// Per-row group ids (`usize::MAX` for a row whose key the grouping drops),
+    /// the group count, and the group labels in first-seen order when
+    /// `want_labels`: the dense layout when it applies, else `build_groups`.
+    fn row_group_layout(
+        &self,
+        want_labels: bool,
+    ) -> (std::rc::Rc<[usize]>, usize, Vec<IndexLabel>) {
+        if let Some((gids, ngroups)) = self.dense_group_ids() {
+            if !want_labels {
+                return (gids, ngroups, Vec::new());
+            }
+            if let Some(labels) = self.dense_group_labels(&gids, ngroups) {
+                return (gids, ngroups, labels);
+            }
+        }
+        let (order, keys, groups) = self.build_groups();
+        let mut gids = vec![usize::MAX; self.series.len()];
+        for (g, key) in keys.iter().enumerate() {
+            for &row in &groups[key] {
+                gids[row] = g;
+            }
+        }
+        (std::rc::Rc::from(gids), keys.len(), order)
+    }
+
+    /// `values` as an Int64 column, or as Bool when the input was Bool and
+    /// `keep_bool` (min/max/cummin/cummax).
+    fn integral_column(
+        values: Vec<i64>,
+        is_bool: bool,
+        keep_bool: bool,
+    ) -> Result<Column, FrameError> {
+        if is_bool && keep_bool {
+            let flags = values.into_iter().map(|v| Scalar::Bool(v != 0)).collect();
+            Ok(Column::from_values(flags)?)
+        } else {
+            Ok(Column::from_i64_values_owned(values))
+        }
+    }
+
+    /// Group-wise fold of `integral_values` in row order: one result per group,
+    /// indexed by the group labels (see `integral_values` for which ops).
+    /// `None` when the column is not all-valid Int64/Bool.
+    fn integral_reduce(
+        &self,
+        fold: impl Fn(i64, i64) -> i64,
+        keep_bool: bool,
+    ) -> Option<Result<Series, FrameError>> {
+        let (values, is_bool) = self.integral_values()?;
+        let (gids, ngroups, labels) = self.row_group_layout(true);
+        let mut acc = vec![0_i64; ngroups];
+        let mut seen = vec![false; ngroups];
+        for (row, &g) in gids.iter().enumerate() {
+            if g == usize::MAX {
+                continue;
+            }
+            acc[g] = if seen[g] {
+                fold(acc[g], values[row])
+            } else {
+                seen[g] = true;
+                values[row]
+            };
+        }
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
+        let index = Index::new(labels).rename_index(idx_name);
+        Some(
+            Self::integral_column(acc, is_bool, keep_bool)
+                .and_then(|column| Series::new(self.series.name(), index, column)),
+        )
+    }
+
+    /// Row-aligned integral result: each row's group reduction (`broadcast`,
+    /// transform) or its group's running fold up to that row (cumulative ops).
+    /// `None` when the column is not all-valid Int64/Bool, or when a row's key
+    /// is dropped: pandas gives that row NaN, so the result is float64.
+    fn integral_by_row(
+        &self,
+        fold: impl Fn(i64, i64) -> i64,
+        keep_bool: bool,
+        broadcast: bool,
+    ) -> Option<Result<Series, FrameError>> {
+        let (values, is_bool) = self.integral_values()?;
+        let (gids, ngroups, _) = self.row_group_layout(false);
+        if gids.contains(&usize::MAX) {
+            return None;
+        }
+        let mut acc = vec![0_i64; ngroups];
+        let mut seen = vec![false; ngroups];
+        let mut out: Vec<i64> = gids
+            .iter()
+            .zip(values.iter())
+            .map(|(&g, &v)| {
+                acc[g] = if seen[g] {
+                    fold(acc[g], v)
+                } else {
+                    seen[g] = true;
+                    v
+                };
+                acc[g]
+            })
+            .collect();
+        if broadcast {
+            for (slot, &g) in out.iter_mut().zip(gids.iter()) {
+                *slot = acc[g];
+            }
+        }
+        Some(
+            Self::integral_column(out, is_bool, keep_bool).and_then(|column| {
+                Series::new(self.series.name(), self.series.index.clone(), column)
+            }),
         )
     }
 
@@ -42392,9 +42605,11 @@ impl SeriesGroupBy<'_> {
     /// pandas). A single sequential pass tracks the best value + its row per
     /// group with SEQUENTIAL `data[row]` reads. BIT-IDENTICAL to the numeric
     /// `agg_scalar` path: same first-seen group order, the same first-row-wins
-    /// strictly-better tie rule, and the same `Scalar::Utf8(label.to_string())`
-    /// output. Int64 values are cast to f64 before comparison, matching the
-    /// generic path's `Scalar::Int64(v).to_f64()` semantics above 2^53. Returns
+    /// strictly-better tie rule, and the same label output: the winning row's
+    /// index label with its own type, as pandas returns it (an int label stays
+    /// int64; it was stringified, fvsao.4). Int64 values are cast to f64
+    /// before comparison, matching the generic path's
+    /// `Scalar::Int64(v).to_f64()` semantics above 2^53. Returns
     /// `None` (→ `agg_scalar`) for non-numeric values / non-dense Int64 keys.
     fn idx_extreme_dense(&self, want_max: bool) -> Option<Result<Series, FrameError>> {
         let f64_data = self.series.column.as_f64_slice();
@@ -42439,7 +42654,7 @@ impl SeriesGroupBy<'_> {
         let labels: Vec<IndexLabel> = key_of_gid.iter().map(|&k| IndexLabel::Int64(k)).collect();
         let values: Vec<Scalar> = best_row
             .iter()
-            .map(|&r| Scalar::Utf8(idx_labels[r].to_string()))
+            .map(|&r| index_label_to_scalar(&idx_labels[r]))
             .collect();
         let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
@@ -42522,7 +42737,7 @@ impl SeriesGroupBy<'_> {
                 }
             }
             best_idx.map_or(Scalar::Null(NullKind::NaN), |idx| {
-                Scalar::Utf8(self.series.index.labels()[idx].to_string())
+                index_label_to_scalar(&self.series.index.labels()[idx])
             })
         })
     }
@@ -42591,7 +42806,7 @@ impl SeriesGroupBy<'_> {
                 }
             }
             best_idx.map_or(Scalar::Null(NullKind::NaN), |idx| {
-                Scalar::Utf8(self.series.index.labels()[idx].to_string())
+                index_label_to_scalar(&self.series.index.labels()[idx])
             })
         })
     }
@@ -42929,6 +43144,9 @@ impl SeriesGroupBy<'_> {
         if self.column_is_timedelta() {
             return self.agg_timedelta_values(|_| fp_types::Timedelta::NAT);
         }
+        if let Some(r) = self.integral_reduce(i64::wrapping_mul, false) {
+            return r;
+        }
         // Dense single-fold fast path (no per-group Vec<f64> buckets). Bit-
         // identical to `nums.iter().product()`: 1.0 * x0 * x1 * ... folds
         // left-to-right in value order, same as `product()`'s left fold.
@@ -43073,6 +43291,9 @@ impl SeriesGroupBy<'_> {
                     .collect()
             });
         }
+        if let Some(r) = self.integral_by_row(i64::wrapping_add, false, false) {
+            return r;
+        }
         if let Some(s) = self.try_cum_dense(0.0, false, |a, v| a + v) {
             return Ok(s);
         }
@@ -43107,6 +43328,9 @@ impl SeriesGroupBy<'_> {
                     .map(|_| Scalar::Timedelta64(fp_types::Timedelta::NAT))
                     .collect()
             });
+        }
+        if let Some(r) = self.integral_by_row(i64::wrapping_mul, false, false) {
+            return r;
         }
         if let Some(s) = self.try_cum_dense(1.0, true, |a, v| a * v) {
             return Ok(s);
@@ -43148,6 +43372,9 @@ impl SeriesGroupBy<'_> {
                     })
                     .collect()
             });
+        }
+        if let Some(r) = self.integral_by_row(std::cmp::min, true, false) {
+            return r;
         }
         if let Some(s) = self.try_cum_dense(f64::INFINITY, false, |a, v| if v < a { v } else { a })
         {
@@ -43193,6 +43420,9 @@ impl SeriesGroupBy<'_> {
                     })
                     .collect()
             });
+        }
+        if let Some(r) = self.integral_by_row(std::cmp::max, true, false) {
+            return r;
         }
         if let Some(s) =
             self.try_cum_dense(f64::NEG_INFINITY, false, |a, v| if v > a { v } else { a })
@@ -44030,6 +44260,18 @@ impl SeriesGroupBy<'_> {
     /// Matches `series.groupby(by).transform("mean")` for supported reduction
     /// names. The output keeps the original index and length.
     pub fn transform(&self, func: &str) -> Result<Series, FrameError> {
+        // int64 / bool: transform("sum"/"prod") is int64 and ("min"/"max")
+        // keeps the dtype in pandas; the f64 paths below widened them.
+        let integral = match func {
+            "sum" => self.integral_by_row(i64::wrapping_add, false, true),
+            "prod" => self.integral_by_row(i64::wrapping_mul, false, true),
+            "min" => self.integral_by_row(std::cmp::min, true, true),
+            "max" => self.integral_by_row(std::cmp::max, true, true),
+            _ => None,
+        };
+        if let Some(r) = integral {
+            return r;
+        }
         // Dense direct-address fast path for the two hottest transforms
         // (group-normalization is `transform("mean")`): a dense gid per row
         // (bounded-Int64 OR contiguous-Utf8 key — covers categorical group keys,
@@ -44793,7 +45035,14 @@ impl SeriesGroupBy<'_> {
         // same first-seen gids/labels, same by-name index. Gated on int64/Utf8
         // key + all-valid numeric values; count excluded (Int64 output).
         const BUCKET_FUNCS: &[&str] = &["sum", "mean", "min", "max", "std", "var", "prod"];
+        // The buckets are f64: an int64/bool column's sum/min/max/prod must come
+        // from the integral per-func methods instead.
+        let integral_func = matches!(self.series.column.dtype(), DType::Int64 | DType::Bool)
+            && funcs
+                .iter()
+                .any(|f| matches!(*f, "sum" | "min" | "max" | "prod"));
         if !funcs.is_empty()
+            && !integral_func
             && funcs.iter().all(|f| BUCKET_FUNCS.contains(f))
             && let Some((gids, ngroups)) = self.dense_group_ids()
         {
@@ -85492,14 +85741,29 @@ impl DataFrame {
             "sum" | "mean" | "min" | "max" | "std" | "var" | "median" | "prod"
         );
         let includes_non_numeric = matches!(func, "sum" | "min" | "max");
+        // pandas counts bool and the nullable Int64/Float64/boolean dtypes as
+        // NUMERIC for reductions and for numeric_only (live 2.2.3: a bool column
+        // sums to its True count, means to the true fraction, and survives
+        // numeric_only=True). Treating Bool as an object column made
+        // `df.isna().sum()` concatenate "FalseTrue..." strings.
+        // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3.
+        let numeric_dtype = |dt: &DType| {
+            matches!(
+                dt,
+                DType::Int64
+                    | DType::Float64
+                    | DType::Bool
+                    | DType::Int64Nullable
+                    | DType::Float64Nullable
+                    | DType::BoolNullable
+            )
+        };
         let allowed: Vec<String> = self
             .column_order
             .iter()
             .filter(|name| {
                 let dt = self.columns[name.as_str()].dtype();
-                if matches!(dt, DType::Int64 | DType::Float64)
-                    || (timedelta_safe && matches!(dt, DType::Timedelta64))
-                {
+                if numeric_dtype(&dt) || (timedelta_safe && matches!(dt, DType::Timedelta64)) {
                     return true;
                 }
                 // pandas 2.x keeps non-numeric columns for the ops that can
@@ -85530,10 +85794,9 @@ impl DataFrame {
             // version of this flip. (br-frankenpandas-reductions-numeric-only-default-zx21n)
             if let Some(offender) = allowed.iter().find(|name| {
                 let column = &self.columns[name.as_str()];
-                !matches!(
-                    column.dtype(),
-                    DType::Int64 | DType::Float64 | DType::Timedelta64
-                ) && column.values().iter().any(|v| !v.is_missing())
+                let dt = column.dtype();
+                !(numeric_dtype(&dt) || matches!(dt, DType::Timedelta64))
+                    && column.values().iter().any(|v| !v.is_missing())
             }) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "could not convert column '{offender}' to numeric for {func}"
@@ -85543,10 +85806,8 @@ impl DataFrame {
 
         let values = self.par_map_columns(&allowed, |name| {
             let column = &self.columns[name];
-            let is_numeric = matches!(
-                column.dtype(),
-                DType::Int64 | DType::Float64 | DType::Timedelta64
-            );
+            let dt = column.dtype();
+            let is_numeric = numeric_dtype(&dt) || matches!(dt, DType::Timedelta64);
             // Object-column semantics for the include-ops, measured on pandas
             // 2.2.3: `sum` CONCATENATES the strings in row order and min/max
             // compare LEXICOGRAPHICALLY. Nulls are skipped, as they are for the
@@ -87895,16 +88156,25 @@ impl DataFrame {
                     out,
                     fp_columnar::ValidityMask::from_words(words, n),
                 ))
-            } else if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+            } else {
+                // EVERY dtype shifts: pandas moves object/datetime/timedelta/
+                // categorical/nullable columns too. This arm used to return non-
+                // numeric columns UNSHIFTED, silently misaligning rows (e.g.
+                // df.shift() on {'k': str, 'a': int} moved 'a' but not 'k').
+                // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3
                 Ok(self
                     .column_at_as_series(pos)?
                     .shift(periods)?
                     .column()
                     .clone())
-            } else {
-                Ok(col.clone())
             }
         })?;
+        self.with_columns_in_position_order(transformed)
+    }
+
+    /// Rebuild this frame (same index, axes and flags) from one replacement
+    /// column per existing column, in stored column order.
+    fn with_columns_in_position_order(&self, transformed: Vec<Column>) -> Result<Self, FrameError> {
         let pairs: Vec<(String, Column)> = self
             .columns
             .ordered_names()
@@ -87936,7 +88206,16 @@ impl DataFrame {
         periods: i64,
         fill_value: Scalar,
     ) -> Result<Self, FrameError> {
-        self.apply_per_column(|s| s.shift_with_fill_value(periods, fill_value.clone()))
+        // Every dtype shifts (see `shift`): `apply_per_column` passes non-numeric
+        // columns through untouched, which left object columns unshifted.
+        let transformed = self.par_map_column_positions_min(131_072, |pos| {
+            Ok(self
+                .column_at_as_series(pos)?
+                .shift_with_fill_value(periods, fill_value.clone())?
+                .column()
+                .clone())
+        })?;
+        self.with_columns_in_position_order(transformed)
     }
 
     /// Shift index horizontally by desired number of periods.
@@ -88232,7 +88511,7 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.round(decimals)`.
     pub fn round(&self, decimals: i32) -> Result<Self, FrameError> {
-        self.apply_per_column(|s| s.round(decimals))
+        self.apply_per_numeric_column(|s| s.round(decimals))
     }
 
     /// Round each named column to its own number of decimal places.
@@ -90661,6 +90940,7 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.interpolate()`. Non-numeric columns are preserved.
     pub fn interpolate(&self) -> Result<Self, FrameError> {
+        self.reject_all_object_interpolate()?;
         self.apply_per_column(|s| s.interpolate())
     }
 
@@ -90668,7 +90948,27 @@ impl DataFrame {
     ///
     /// Matches `df.interpolate(method='linear'|'nearest'|'zero')`.
     pub fn interpolate_method(&self, method: &str) -> Result<Self, FrameError> {
+        self.reject_all_object_interpolate()?;
         self.apply_per_column(|s| s.interpolate_method(method))
+    }
+
+    /// pandas' DataFrame.interpolate raises TypeError when every column is
+    /// object dtype (a Series or a mixed frame interpolates); it returned the
+    /// frame unchanged (4qg5w.18).
+    fn reject_all_object_interpolate(&self) -> Result<(), FrameError> {
+        if !self.column_order.is_empty()
+            && self
+                .column_order
+                .iter()
+                .all(|name| self.columns[name].dtype() == DType::Utf8)
+        {
+            return Err(FrameError::CompatibilityRejected(
+                "Cannot interpolate with all object-dtype columns in the DataFrame. Try \
+                 setting at least one column to a numeric dtype."
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Convert dtypes to best-possible types.
@@ -90894,6 +91194,25 @@ impl DataFrame {
         self.apply_per_column_min(16_384, func)
     }
 
+    /// `apply_per_column` over the numeric columns only, every other column
+    /// (bool included) returned as is: pandas' `DataFrame.round` skips them,
+    /// where the other per-column ops apply or raise (4qg5w.18).
+    fn apply_per_numeric_column<F>(&self, func: F) -> Result<Self, FrameError>
+    where
+        F: Fn(&Series) -> Result<Series, FrameError> + Sync,
+    {
+        self.apply_per_column(|s| {
+            if matches!(
+                s.column().dtype(),
+                DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable
+            ) {
+                func(s)
+            } else {
+                Ok(s.clone())
+            }
+        })
+    }
+
     /// Per-column cumulative fold (cumsum/cumprod/cummin/cummax) with a
     /// direct-typed-column fast path for Float64 columns. `apply_per_column`
     /// routes through `column_as_series` -> `col.clone()`, and `Column::clone`
@@ -90999,24 +91318,16 @@ impl DataFrame {
                     out,
                     fp_columnar::ValidityMask::from_words(words, n),
                 ))
-            } else if matches!(
-                col.dtype(),
-                DType::Int64 | DType::Float64 | DType::Bool | DType::Datetime64 { .. }
-            ) {
-                // Numeric columns and Datetime64 use the Series operation. The
-                // latter accumulates extrema but correctly refuses sum/product.
-                Ok(series_op(&self.column_as_series(name)?)?.column().clone())
             } else if col.dtype() == DType::Utf8 {
                 Self::cum_utf8_column(func, name, col)
             } else {
-                // Other non-numeric dtypes (Datetime64/...) still pass through
-                // unchanged, as apply_per_column's gate does. NOT verified
-                // against pandas — `cummax` on a datetime64 column does run a
-                // real accumulation there, so this arm is likely wrong too, but
-                // it is a different dtype family than the object-column
-                // question br-frankenpandas-reductions-numeric-only-default-zx21n
-                // covers and is left for its own measurement.
-                Ok(col.clone())
+                // Every other dtype uses the Series operation, which accumulates
+                // or refuses per pandas' rule (Datetime64 accumulates extrema and
+                // refuses sum/product). Timedelta64 and the nullable dtypes were
+                // returned UNCHANGED here: df.cummax() on a timedelta column and
+                // df.cumsum() on a Float64Nullable column were silent no-ops
+                // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18).
+                Ok(series_op(&self.column_as_series(name)?)?.column().clone())
             }
         })?;
         let mut result_cols = BTreeMap::new();
@@ -91046,34 +91357,21 @@ impl DataFrame {
         // Each column is transformed INDEPENDENTLY by the same `func`, so
         // spreading columns across par_map_columns scope workers is bit-identical
         // — results are reassembled in column_order. The serial loop left all but
-        // one core idle. Per br-frankenpandas-fcf80: pandas treats Bool as numeric
-        // in cumsum/cumprod/diff/shift/abs (Series ops handle the cast); the gate
-        // delegates Bool columns and passes other non-numeric dtypes through.
+        // one core idle.
+        //
+        // Every column goes to the per-Series op, which applies pandas'
+        // per-dtype rule (apply, or raise). This gate used to delegate only
+        // Int64/Float64/Bool (then Int64Nullable/BoolNullable,
+        // br-frankenpandas-77x9g) and return every other column UNTOUCHED: a
+        // silent no-op, not an error. df.abs() on a string column "succeeded"
+        // where pandas raises TypeError, and df.abs() on a Float64Nullable
+        // column left -2.5 in place
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18). The one op
+        // pandas does skip non-numeric columns for, DataFrame.round, uses
+        // `apply_per_numeric_column`.
         let transformed = self.par_map_columns_min(&self.column_order, par_min_values, |name| {
-            let col = &self.columns[name];
-            // The NULLABLE extension dtypes belong on the delegating side of this
-            // gate (br-frankenpandas-77x9g). They were landing in the `else`, which
-            // returns the column UNTOUCHED — so every op routed through this helper
-            // was a silent NO-OP on an `Int64Nullable`/`BoolNullable` column, not an
-            // error and not a fallback. That is how `df.clip(-1, 4)` returned its
-            // input `-5` unchanged: the pass-through, not clip, produced the answer.
-            //
-            // This is the shared helper behind ~54 elementwise/scan/math ops, so the
-            // no-op was never clip-specific. `Series` handles these dtypes (clip does
-            // so as of this bead); the gate simply never let them through.
-            if matches!(
-                col.dtype(),
-                DType::Int64
-                    | DType::Float64
-                    | DType::Bool
-                    | DType::Int64Nullable
-                    | DType::BoolNullable
-            ) {
-                let s = self.column_as_series(name)?;
-                Ok(func(&s)?.column().clone())
-            } else {
-                Ok(col.clone())
-            }
+            let s = self.column_as_series(name)?;
+            Ok(func(&s)?.column().clone())
         })?;
         let mut result_cols = BTreeMap::new();
         for (name, column) in self.column_order.iter().zip(transformed) {
@@ -106633,7 +106931,8 @@ mod tests {
                 Scalar::Null(NullKind::NaN)
             ]
         );
-        assert_eq!(out.name(), "x-y");
+        // pandas: differently named operands give an unnamed (None) result.
+        assert_eq!(out.name(), "");
     }
 
     /// The fused m2/m3 and m2/m4 passes replace `(v - mean).powi(k)` sums. That
@@ -107013,7 +107312,8 @@ mod tests {
                 Scalar::Null(NullKind::NaN)
             ]
         );
-        assert_eq!(out.name(), "x*y");
+        // pandas: differently named operands give an unnamed (None) result.
+        assert_eq!(out.name(), "");
     }
 
     #[test]
@@ -107035,7 +107335,8 @@ mod tests {
         };
         assert!((v - 30.0 / 7.0).abs() < 1e-10);
         assert!(out.values()[3].is_missing());
-        assert_eq!(out.name(), "x/y");
+        // pandas: differently named operands give an unnamed (None) result.
+        assert_eq!(out.name(), "");
     }
 
     #[test]
@@ -108128,6 +108429,73 @@ mod tests {
 
         let max = df.max_agg_with_numeric_only(false).expect("max");
         assert_eq!(at(&max, "label"), Scalar::Utf8("z".into()));
+    }
+
+    /// A BOOL column is numeric for pandas reductions. Live pandas 2.2.3 on
+    /// pd.DataFrame({'b': [True, False, True], 'label': ['x', 'y', 'z']}):
+    ///   df.sum()                  -> {'b': 2, 'label': 'xyz'}
+    ///   df.min()                  -> {'b': False, 'label': 'x'}
+    ///   df.mean(numeric_only=True)-> {'b': 0.6666666666666666}
+    ///   df.sum(numeric_only=True) -> {'b': 2}
+    /// FrankenPandas used to CONCATENATE the bool column ("TrueFalseTrue"), which
+    /// is what `df.isna().sum()` hit. br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3
+    #[test]
+    fn dataframe_reductions_treat_bool_columns_as_numeric() {
+        let df = DataFrame::from_dict(
+            &["b", "label"],
+            vec![
+                (
+                    "b",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .expect("frame");
+        let at = |s: &Series, label: &str| -> Scalar {
+            let pos = s
+                .index()
+                .labels()
+                .iter()
+                .position(|l| matches!(l, IndexLabel::Utf8(t) if t == label))
+                .unwrap_or_else(|| panic!("label {label} missing"));
+            s.column().values()[pos].clone()
+        };
+
+        let sum = df.sum_with_numeric_only(false).expect("sum");
+        assert_eq!(at(&sum, "b"), Scalar::Int64(2), "bool sums to its True count");
+        assert_eq!(at(&sum, "label"), Scalar::Utf8("xyz".into()), "object still concatenates");
+
+        let min = df.min_agg_with_numeric_only(false).expect("min");
+        assert_eq!(at(&min, "b"), Scalar::Bool(false));
+
+        let mean = df.mean_with_numeric_only(true).expect("mean");
+        match at(&mean, "b") {
+            Scalar::Float64(v) => assert!((v - 2.0 / 3.0).abs() < 1e-12, "mean {v}"),
+            other => panic!("bool mean must be float, got {other:?}"),
+        }
+
+        let numeric_sum = df.sum_with_numeric_only(true).expect("numeric_only sum");
+        assert!(
+            numeric_sum
+                .index()
+                .labels()
+                .iter()
+                .any(|l| matches!(l, IndexLabel::Utf8(t) if t == "b")),
+            "numeric_only=True keeps the bool column"
+        );
+
+        // isna().sum(): the reported bug.
+        let isna_sum = df.isna().expect("isna").sum().expect("sum");
+        assert_eq!(at(&isna_sum, "b"), Scalar::Int64(0));
+        assert_eq!(at(&isna_sum, "label"), Scalar::Int64(0));
     }
 
     /// The other half of the split: pandas 2.x RAISES for these eight when a
@@ -141241,6 +141609,64 @@ mod tests {
         assert_eq!(col.values()[2], Scalar::Float64(2.0));
     }
 
+    /// Every column shifts, whatever its dtype. pandas 2.2.3 on
+    /// pd.DataFrame({'k': ['x','y','z'], 'a': [1, 2, 3], 't': <3 timestamps>}).shift()
+    /// gives k=[None,'x','y'], a=[NaN,1.0,2.0], t=[NaT,t0,t1]. The object and
+    /// datetime columns used to come back UNSHIFTED (a silent row misalignment).
+    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3
+    #[test]
+    fn dataframe_shift_moves_object_and_datetime_columns_too() {
+        let t0 = 1_704_067_200_000_000_000_i64; // 2024-01-01
+        let day = 86_400_000_000_000_i64;
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "k".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("z".into()),
+            ])
+            .unwrap(),
+        );
+        columns.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
+        );
+        columns.insert(
+            "t".to_owned(),
+            Column::new(
+                DType::datetime64_naive(),
+                vec![
+                    Scalar::Datetime64(t0),
+                    Scalar::Datetime64(t0 + day),
+                    Scalar::Datetime64(t0 + 2 * day),
+                ],
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            columns,
+            vec!["k".to_owned(), "a".to_owned(), "t".to_owned()],
+        )
+        .unwrap();
+
+        for shifted in [
+            df.shift(1).unwrap(),
+            df.shift_with_fill_value(1, Scalar::Null(NullKind::Null)).unwrap(),
+        ] {
+            let k = shifted.column("k").unwrap().values().to_vec();
+            assert!(k[0].is_missing(), "object column vacated slot is missing");
+            assert_eq!(&k[1..], &[Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]);
+            let t = shifted.column("t").unwrap().values().to_vec();
+            assert!(t[0].is_missing(), "datetime column vacated slot is NaT");
+            assert_eq!(&t[1..], &[Scalar::Datetime64(t0), Scalar::Datetime64(t0 + day)]);
+            let a = shifted.column("a").unwrap().values().to_vec();
+            assert!(a[0].is_missing());
+        }
+    }
+
     #[test]
     fn dataframe_shift_fill_value_preserves_int_dtype_per_column() {
         // br-frankenpandas-twqkf follow-up: DataFrame.shift(periods,
@@ -154161,6 +154587,270 @@ mod tests {
         );
     }
 
+    /// br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18: the per-column
+    /// DataFrame ops returned every column outside Int64/Float64/Bool (and the
+    /// Int64/Bool nullables) UNCHANGED. Expectations read off pandas 2.2.3 on a
+    /// one-column frame of each dtype: `R` = raises TypeError, `A` = applies,
+    /// `S` = returns the column unchanged. NEGATIVE: every `R` and every
+    /// Float64Nullable `A` was an `S` before the fix.
+    #[test]
+    fn per_column_ops_follow_pandas_per_dtype_4qg5w18() {
+        type Op = fn(&DataFrame) -> Result<DataFrame, FrameError>;
+        let one = |dtype: DType, values: Vec<Scalar>| {
+            let index = Index::new((0..values.len() as i64).map(IndexLabel::Int64).collect());
+            let column = Column::new(dtype, values).expect("column");
+            DataFrame::new_with_column_order(
+                index,
+                BTreeMap::from([("c".to_owned(), column)]),
+                vec!["c".to_owned()],
+            )
+            .expect("frame")
+        };
+        let hour = 3_600_000_000_000_i64;
+        let object = one(
+            DType::Utf8,
+            vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())],
+        );
+        let datetime = one(
+            DType::datetime64_naive(),
+            vec![Scalar::Datetime64(2 * hour), Scalar::Datetime64(hour)],
+        );
+        let timedelta = one(
+            DType::Timedelta64,
+            vec![Scalar::Timedelta64(2 * hour), Scalar::Timedelta64(hour)],
+        );
+        let nullable = one(
+            DType::Float64Nullable,
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(-2.5),
+            ],
+        );
+        let cases: Vec<(&str, Op, &DataFrame, char)> = vec![
+            ("abs", |d| d.abs(), &object, 'R'),
+            ("abs", |d| d.abs(), &datetime, 'R'),
+            ("abs", |d| d.abs(), &nullable, 'A'),
+            ("sqrt", |d| d.sqrt(), &object, 'R'),
+            ("sin", |d| d.sin(), &datetime, 'R'),
+            ("log", |d| d.log(), &timedelta, 'R'),
+            ("exp", |d| d.exp(), &nullable, 'A'),
+            ("clip", |d| d.clip(Some(0.0), Some(1.0)), &object, 'R'),
+            ("cumprod", |d| d.cumprod(), &object, 'R'),
+            ("cumprod", |d| d.cumprod(), &nullable, 'A'),
+            ("cummax", |d| d.cummax(), &timedelta, 'A'),
+            ("pct_change", |d| d.pct_change(1), &object, 'R'),
+            ("pct_change", |d| d.pct_change(1), &datetime, 'R'),
+            ("isnan", |d| d.isnan(), &object, 'R'),
+            ("isfinite", |d| d.isfinite(), &datetime, 'A'),
+            ("interpolate", |d| d.interpolate(), &object, 'R'),
+            ("round", |d| d.round(0), &object, 'S'),
+            ("round", |d| d.round(0), &datetime, 'S'),
+            ("round", |d| d.round(0), &nullable, 'A'),
+        ];
+        for (name, op, frame, want) in cases {
+            let got = match op(frame) {
+                Err(_) => 'R',
+                Ok(out) => {
+                    let (a, b) = (out.column("c").expect("c"), frame.column("c").expect("c"));
+                    if a.values() == b.values() && a.dtype() == b.dtype() {
+                        'S'
+                    } else {
+                        'A'
+                    }
+                }
+            };
+            let dtype = frame.column("c").expect("c").dtype();
+            assert_eq!(got, want, "{name} on {dtype:?}");
+        }
+        // The Float64Nullable no-op, concretely: abs left -2.5 in place.
+        let abs = nullable.abs().expect("abs");
+        assert_eq!(
+            abs.column("c").expect("c").values()[2],
+            Scalar::Float64(2.5)
+        );
+    }
+
+    /// pandas 2.2.3: `pd.Series(v).groupby(k)` over an int64 column keeps int64
+    /// for sum/prod/min/max, the cumulative forms and transform; the f64 paths
+    /// returned float64. (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.1)
+    #[test]
+    fn series_groupby_int64_reductions_stay_int64_fvsao61() {
+        let index: Vec<IndexLabel> = (0..5_i64).map(IndexLabel::Int64).collect();
+        let values = Series::new(
+            "v",
+            Index::new(index.clone()),
+            Column::from_i64_values_owned(vec![-1, 2, -3, 4, 5]),
+        )
+        .unwrap();
+        let utf8_keys = Series::from_values(
+            "k",
+            index.clone(),
+            ["a", "b", "a", "c", "b"]
+                .iter()
+                .map(|k| Scalar::Utf8((*k).to_owned()))
+                .collect(),
+        )
+        .unwrap();
+        let int_keys = Series::new(
+            "k",
+            Index::new(index),
+            Column::from_i64_values_owned(vec![10, 20, 10, 30, 20]),
+        )
+        .unwrap();
+        // Both group layouts: dense int64 ids and the build_groups fallback.
+        for keys in [&utf8_keys, &int_keys] {
+            let gb = values.groupby(keys).unwrap();
+            let ints = |s: Series| -> Vec<Scalar> {
+                assert_eq!(s.column().dtype(), DType::Int64, "{s:?}");
+                s.values().to_vec()
+            };
+            let i = |v: &[i64]| v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>();
+            // Groups in first-seen order: a=[-1,-3], b=[2,5], c=[4].
+            assert_eq!(ints(gb.sum().unwrap()), i(&[-4, 7, 4]));
+            assert_eq!(ints(gb.prod().unwrap()), i(&[3, 10, 4]));
+            assert_eq!(ints(gb.min().unwrap()), i(&[-3, 2, 4]));
+            assert_eq!(ints(gb.max().unwrap()), i(&[-1, 5, 4]));
+            assert_eq!(ints(gb.cumsum().unwrap()), i(&[-1, 2, -4, 4, 7]));
+            assert_eq!(ints(gb.cumprod().unwrap()), i(&[-1, 2, 3, 4, 10]));
+            assert_eq!(ints(gb.cummin().unwrap()), i(&[-1, 2, -3, 4, 2]));
+            assert_eq!(ints(gb.cummax().unwrap()), i(&[-1, 2, -1, 4, 5]));
+            assert_eq!(ints(gb.transform("sum").unwrap()), i(&[-4, 7, -4, 4, 7]));
+            assert_eq!(ints(gb.transform("max").unwrap()), i(&[-1, 5, -1, 4, 5]));
+            let agg = gb.agg(&["sum", "mean", "max"]).unwrap();
+            assert_eq!(agg.column("sum").unwrap().dtype(), DType::Int64);
+            assert_eq!(agg.column("max").unwrap().dtype(), DType::Int64);
+            assert_eq!(agg.column("mean").unwrap().dtype(), DType::Float64);
+        }
+    }
+
+    /// Negative for a compute-in-f64-then-cast shortcut: above 2^53 the f64
+    /// fold rounds (2^53 + 1 + 1 == 2^53 in f64), and numpy's int64 sum wraps.
+    #[test]
+    fn series_groupby_int64_sum_is_exact_above_2_pow_53_and_wraps_fvsao61() {
+        let index: Vec<IndexLabel> = (0..3_i64).map(IndexLabel::Int64).collect();
+        let big = (1_i64 << 53) + 1;
+        let values = Series::new(
+            "v",
+            Index::new(index.clone()),
+            Column::from_i64_values_owned(vec![big, 1, i64::MAX]),
+        )
+        .unwrap();
+        let keys = Series::new(
+            "k",
+            Index::new(index),
+            Column::from_i64_values_owned(vec![0, 0, 1]),
+        )
+        .unwrap();
+        let gb = values.groupby(&keys).unwrap();
+        assert_eq!(
+            gb.sum().unwrap().values().to_vec(),
+            vec![Scalar::Int64(big + 1), Scalar::Int64(i64::MAX)]
+        );
+        // pandas: pd.Series([i64max, 1]).groupby([0, 0]).sum() == i64min (wraps).
+        let wrap = Series::new(
+            "v",
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            Column::from_i64_values_owned(vec![i64::MAX, 1]),
+        )
+        .unwrap();
+        let zero_keys = Series::new(
+            "k",
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            Column::from_i64_values_owned(vec![0, 0]),
+        )
+        .unwrap();
+        assert_eq!(
+            wrap.groupby(&zero_keys)
+                .unwrap()
+                .sum()
+                .unwrap()
+                .values()
+                .to_vec(),
+            vec![Scalar::Int64(i64::MIN)]
+        );
+    }
+
+    /// Bool: sum/prod/cumsum are int64, min/max/cummax stay bool (pandas 2.2.3).
+    /// A column with missing values keeps the float64 paths (DISC-011), and so
+    /// does a cumulative op whose key drops rows (pandas gives those rows NaN).
+    #[test]
+    fn series_groupby_bool_and_missing_value_dtypes_fvsao61() {
+        let index: Vec<IndexLabel> = (0..5_i64).map(IndexLabel::Int64).collect();
+        let keys = Series::from_values(
+            "k",
+            index.clone(),
+            ["a", "b", "a", "c", "b"]
+                .iter()
+                .map(|k| Scalar::Utf8((*k).to_owned()))
+                .collect(),
+        )
+        .unwrap();
+        let flags = Series::from_values(
+            "f",
+            index.clone(),
+            [true, false, true, true, false]
+                .iter()
+                .map(|&b| Scalar::Bool(b))
+                .collect(),
+        )
+        .unwrap();
+        let gb = flags.groupby(&keys).unwrap();
+        let sum = gb.sum().unwrap();
+        assert_eq!(sum.column().dtype(), DType::Int64);
+        assert_eq!(
+            sum.values().to_vec(),
+            vec![Scalar::Int64(2), Scalar::Int64(0), Scalar::Int64(1)]
+        );
+        let max = gb.max().unwrap();
+        assert_eq!(max.column().dtype(), DType::Bool);
+        assert_eq!(
+            max.values().to_vec(),
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(gb.cumsum().unwrap().column().dtype(), DType::Int64);
+        assert_eq!(gb.cummax().unwrap().column().dtype(), DType::Bool);
+
+        let with_missing = Series::from_values(
+            "v",
+            index.clone(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        let sum = with_missing.groupby(&keys).unwrap().sum().unwrap();
+        assert_eq!(sum.column().dtype(), DType::Float64, "{sum:?}");
+
+        let dropped_key = Series::from_values(
+            "k",
+            index.clone(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::new(
+            "v",
+            Index::new(index),
+            Column::from_i64_values_owned(vec![1, 2, 3, 4, 5]),
+        )
+        .unwrap();
+        let gb = values.groupby(&dropped_key).unwrap();
+        assert_eq!(gb.sum().unwrap().column().dtype(), DType::Int64);
+        let cumsum = gb.cumsum().unwrap();
+        assert_eq!(cumsum.column().dtype(), DType::Float64, "{cumsum:?}");
+        assert!(cumsum.values()[1].is_missing(), "{cumsum:?}");
+    }
+
     #[test]
     fn series_groupby_sum_mean_timedelta64_c1bxu() {
         // Per br-frankenpandas-c1bxu: SeriesGroupBy::sum and mean on a
@@ -161979,6 +162669,60 @@ mod tests {
     }
 
     #[test]
+    fn series_asof_value_rejects_a_non_date_string_label_like_pandas() {
+        // pandas 2.2.3: Series([10., 20., 30.], index=['a','b','c']).asof('c')
+        //   -> DateParseError: Unknown datetime string format, unable to parse: c
+        // (asof converts a string `where` with Timestamp(where) first).
+        let strings = Series::from_values(
+            "s",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+        let err = strings
+            .asof_value(&IndexLabel::Utf8("c".to_owned()))
+            .expect_err("non-date string label");
+        assert!(
+            err.to_string()
+                .contains("Unknown datetime string format, unable to parse: c"),
+            "got {err}"
+        );
+
+        // A date-string label still answers against fp's ISO-string datetime
+        // index, and non-string labels are untouched.
+        let dates = Series::from_values(
+            "d",
+            vec!["2024-01-01".into(), "2024-01-02".into(), "2024-01-03".into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            dates
+                .asof_value(&IndexLabel::Utf8("2024-01-02".to_owned()))
+                .expect("date label"),
+            Scalar::Float64(2.0)
+        );
+        let ints = Series::from_values(
+            "i",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            ints.asof_value(&2_i64.into()).expect("int label"),
+            Scalar::Float64(2.0)
+        );
+    }
+
+    #[test]
     fn series_asof_between() {
         let s = Series::from_values(
             "test",
@@ -166595,13 +167339,15 @@ mod tests {
             gb.nunique().unwrap().column().values(),
             &[Scalar::Int64(2), Scalar::Int64(3)]
         );
+        // GOLDEN-CHANGE (fvsao.4): idxmin/idxmax return the index labels with
+        // their type (int64 here), as pandas 2.2.3 does, not "11"/"12".
         assert_eq!(
             gb.idxmin().unwrap().column().values(),
-            &[Scalar::Utf8("11".into()), Scalar::Utf8("12".into())]
+            &[Scalar::Int64(11), Scalar::Int64(12)]
         );
         assert_eq!(
             gb.idxmax().unwrap().column().values(),
-            &[Scalar::Utf8("10".into()), Scalar::Utf8("14".into())]
+            &[Scalar::Int64(10), Scalar::Int64(14)]
         );
         assert_eq!(
             gb.is_monotonic_increasing().unwrap().column().values(),
@@ -205850,17 +206596,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let result = gb.idxmin().expect("idxmin ok");
         // group 0: ["banana"@0, "apple"@1] -> min "apple" at original index 1
         // group 1: ["cherry"@2, "ant"@3]  -> min "ant" at original index 3
-        let labels: Vec<&Scalar> = result.values().iter().collect();
-        // Result is per-group; the group axis is 0 then 1.
-        // Each value is the original index label as Utf8.
-        match labels[0] {
-            Scalar::Utf8(s) => assert_eq!(s, "1", "group 0 min idx, got {labels:?}"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
-        match labels[1] {
-            Scalar::Utf8(s) => assert_eq!(s, "3", "group 1 min idx, got {labels:?}"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
+        // Result is per-group; the group axis is 0 then 1. Each value is the
+        // original index label with its own type. GOLDEN-CHANGE (fvsao.4): it was
+        // the label stringified ("1"); pandas 2.2.3 returns the int64 label.
+        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
     }
 
     #[test]
@@ -205869,17 +206608,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let groups = make_int_series("g", &[0, 0, 1, 1]);
         let gb = series.groupby(&groups).expect("groupby ok");
         let result = gb.idxmax().expect("idxmax ok");
-        let labels: Vec<&Scalar> = result.values().iter().collect();
         // group 0: ["banana", "apple"] -> max "banana" at idx 0
         // group 1: ["cherry", "ant"]   -> max "cherry" at idx 2
-        match labels[0] {
-            Scalar::Utf8(s) => assert_eq!(s, "0"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
-        match labels[1] {
-            Scalar::Utf8(s) => assert_eq!(s, "2"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
+        // GOLDEN-CHANGE (fvsao.4): int64 labels, not "0"/"2".
+        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(0), Scalar::Int64(2)]);
     }
 
     #[test]
@@ -205891,15 +206623,8 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let result = gb.idxmin().expect("idxmin ok");
         // group 0: [10, 5] -> min 5 at idx 1
         // group 1: [30, 20] -> min 20 at idx 3
-        let labels: Vec<&Scalar> = result.values().iter().collect();
-        match labels[0] {
-            Scalar::Utf8(s) => assert_eq!(s, "1"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
-        match labels[1] {
-            Scalar::Utf8(s) => assert_eq!(s, "3"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
+        // GOLDEN-CHANGE (fvsao.4): int64 labels, not "1"/"3".
+        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
     }
 
     #[test]
@@ -205980,10 +206705,8 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let groups = make_int_series("g", &[0, 0, 0]);
         let gb = series.groupby(&groups).expect("groupby ok");
         let result = gb.idxmin().expect("idxmin ok");
-        match &result.values()[0] {
-            Scalar::Utf8(s) => assert_eq!(s, "2", "expected idx of \"ant\""),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
+        // GOLDEN-CHANGE (fvsao.4): the int64 label of "ant", not "2".
+        assert_eq!(result.values()[0], Scalar::Int64(2), "expected idx of \"ant\"");
     }
 }
 
@@ -208984,21 +209707,22 @@ mod test_select_columns_perf_76e1fd {
             )
             .unwrap();
 
-            // Reference: first-seen group order, accumulate f64 values.
+            // Reference: first-seen group order; int64 sums (pandas keeps an int64
+            // column's groupby sum int64, fvsao.6.1) and f64 means.
             let mut order: Vec<i64> = Vec::new();
-            let mut sums: Vec<f64> = Vec::new();
+            let mut sums: Vec<i64> = Vec::new();
             let mut counts: Vec<usize> = Vec::new();
             for (&k, &v) in keys.iter().zip(&vals) {
                 let g = match order.iter().position(|&o| o == k) {
                     Some(p) => p,
                     None => {
                         order.push(k);
-                        sums.push(0.0);
+                        sums.push(0);
                         counts.push(0);
                         order.len() - 1
                     }
                 };
-                sums[g] += v as f64;
+                sums[g] += v;
                 counts[g] += 1;
             }
 
@@ -209006,32 +209730,37 @@ mod test_select_columns_perf_76e1fd {
             let mean_ref: Vec<f64> = sums
                 .iter()
                 .zip(&counts)
-                .map(|(s, &c)| s / c as f64)
+                .map(|(&s, &c)| s as f64 / c as f64)
                 .collect();
-            for (opname, want) in [("sum", sums.clone()), ("mean", mean_ref)] {
-                let got = if opname == "sum" { gb.sum() } else { gb.mean() }.unwrap();
-                let glabels: Vec<i64> = got
-                    .index()
+            let group_labels = |got: &Series| -> Vec<i64> {
+                got.index()
                     .labels()
                     .iter()
                     .map(|l| match l {
                         IndexLabel::Int64(v) => *v,
                         other => panic!("{other:?}"),
                     })
-                    .collect();
-                let gvals: Vec<f64> = got
-                    .values()
-                    .iter()
-                    .map(|v| match v {
-                        Scalar::Float64(f) => *f,
-                        other => panic!("{other:?}"),
-                    })
-                    .collect();
-                assert_eq!(glabels, order, "trial {trial} {opname} labels");
-                assert_eq!(gvals.len(), want.len());
-                for (g, w) in gvals.iter().zip(&want) {
-                    assert!((g - w).abs() < 1e-9, "trial {trial} {opname}: {g} vs {w}");
-                }
+                    .collect()
+            };
+
+            let got = gb.sum().unwrap();
+            assert_eq!(group_labels(&got), order, "trial {trial} sum labels");
+            let want: Vec<Scalar> = sums.iter().map(|&s| Scalar::Int64(s)).collect();
+            assert_eq!(got.values().to_vec(), want, "trial {trial} sum");
+
+            let got = gb.mean().unwrap();
+            assert_eq!(group_labels(&got), order, "trial {trial} mean labels");
+            let gvals: Vec<f64> = got
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(f) => *f,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(gvals.len(), mean_ref.len());
+            for (g, w) in gvals.iter().zip(&mean_ref) {
+                assert!((g - w).abs() < 1e-9, "trial {trial} mean: {g} vs {w}");
             }
         }
     }
@@ -214199,11 +214928,13 @@ mod clip_nullable_int64_77x9g {
         assert_eq!(b_vals[3], Scalar::Float64(4.0));
     }
 
-    /// Guard the gate change itself: widening `apply_per_column_min` must not
-    /// start transforming columns it is supposed to pass through. A Utf8 column
-    /// is still returned as-is by `df.clip`.
+    /// GOLDEN-CHANGE (4qg5w.18): this pinned `df.clip` returning a Utf8 column
+    /// untouched. pandas 2.2.3 raises for it -
+    /// `pd.DataFrame({'a': pd.array([-5, 8], dtype='Int64'), 's': ['keep', 'me']})
+    /// .clip(-1, 4)` -> TypeError ('>=' not supported between 'str' and 'int') -
+    /// and the pass-through was the silent no-op that bead removed.
     #[test]
-    fn a_non_numeric_column_is_still_passed_through_untouched() {
+    fn a_non_numeric_column_makes_clip_raise_like_pandas() {
         let a = Column::new(
             DType::Int64Nullable,
             vec![Scalar::Int64(-5), Scalar::Int64(8)],
@@ -214225,11 +214956,13 @@ mod clip_nullable_int64_77x9g {
         )
         .expect("frame");
 
-        let clipped = frame.clip(Some(-1.0), Some(4.0)).expect("clip");
-        let s_out = clipped.column("s").expect("column s");
-        assert_eq!(s_out.dtype(), DType::Utf8);
-        assert_eq!(s_out.values()[0], Scalar::Utf8("keep".to_owned()));
-        assert_eq!(s_out.values()[1], Scalar::Utf8("me".to_owned()));
+        assert!(frame.clip(Some(-1.0), Some(4.0)).is_err());
+        // Without the string column the nullable Int64 column is clipped.
+        let numeric = frame.select_columns(&["a"]).expect("select a");
+        let clipped = numeric.clip(Some(-1.0), Some(4.0)).expect("clip");
+        let a_out = clipped.column("a").expect("column a");
+        assert_eq!(a_out.values()[0], Scalar::Int64(-1));
+        assert_eq!(a_out.values()[1], Scalar::Int64(4));
     }
 
     // ---- br-frankenpandas-8x4r2: the 3ugrk guard over-rejected -------------

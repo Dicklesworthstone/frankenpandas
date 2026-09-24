@@ -7340,11 +7340,9 @@ fn live_oracle_series_pct_change_with_zero_baseline() {
     .expect("fixture");
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
-    if let Err(
-        super::HarnessError::OracleUnavailable(message)
-        | super::HarnessError::LiveOracleRequired(message),
-    ) = &expected_result
-    {
+    // Skip only on a missing oracle: LiveOracleRequired (FP_REQUIRE_LIVE_ORACLE=1)
+    // must fail this test, as must a pandas-raised error (4qg5w.2).
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
         eprintln!("live pandas unavailable; skipping pct_change zero baseline test: {message}");
         return;
     }
@@ -14416,6 +14414,74 @@ fn live_oracle_dataframe_eval_arithmetic() {
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
+/// br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.3: Int64 `//` and `%` with a
+/// Bool operand used to hit `unreachable!()`; `% False` is the pandas quirk that
+/// stays int64 zeros while `// False` goes float64 inf/-inf/nan.
+#[test]
+fn live_oracle_dataframe_eval_int_bool_floordiv_and_mod() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+
+    // `a // b` and `a // False` produce +/-inf, which the oracle cannot encode yet
+    // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.3); they are pinned by
+    // fp-columnar's int_bool_floordiv_and_mod_match_pandas_without_panicking until
+    // then, and must be added here when that lands.
+    for expr in ["a % b", "b % 2", "b // 2", "a // True", "a % False"] {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-LIVE-DF-EVAL-INT-BOOL",
+            "case_id": "dataframe_eval_int_bool_floordiv_mod",
+            "mode": "strict",
+            "operation": "dataframe_eval",
+            "oracle_source": "live_legacy_pandas",
+            "expr": expr,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "columns": {
+                    "a": [
+                        { "kind": "int64", "value": 466 },
+                        { "kind": "int64", "value": -7 },
+                        { "kind": "int64", "value": 0 }
+                    ],
+                    "b": [
+                        { "kind": "bool", "value": true },
+                        { "kind": "bool", "value": false },
+                        { "kind": "bool", "value": true }
+                    ]
+                },
+                "column_order": ["a", "b"]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping df eval int/bool test: {message}");
+            return;
+        }
+        let expected = expected_result.expect("live oracle expected");
+        let super::ResolvedExpected::Series(expected) = expected else {
+            panic!("expected a live oracle series payload for {expr}, got {expected:?}");
+        };
+
+        let frame =
+            super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+        let policy = super::RuntimePolicy::strict();
+        let mut ledger = super::EvidenceLedger::new();
+        let result = fp_expr::eval_str(expr, &frame, &policy, &mut ledger)
+            .unwrap_or_else(|err| panic!("eval {expr}: {err}"));
+        eprintln!(
+            "live_oracle int/bool eval {expr}: dtype={:?}",
+            result.column().dtype()
+        );
+        super::compare_series_expected(&result, &expected)
+            .unwrap_or_else(|err| panic!("pandas parity for {expr}: {err}"));
+    }
+}
+
 #[test]
 fn live_oracle_dataframe_eval_comparison() {
     let mut cfg = super::HarnessConfig::default_paths();
@@ -15396,7 +15462,7 @@ fn live_oracle_series_asof_int_index_match() {
     // Delegates the missing-marker decision to FrankenPandas
     // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
     // is at or before the label, in EVERY dtype.
-    let actual = series.asof_value(label);
+    let actual = series.asof_value(label).expect("asof");
     super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
 }
 
@@ -20834,11 +20900,9 @@ fn live_oracle_series_div_with_zero_divisor() {
     .expect("fixture");
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
-    if let Err(
-        super::HarnessError::OracleUnavailable(message)
-        | super::HarnessError::LiveOracleRequired(message),
-    ) = &expected_result
-    {
+    // Skip only on a missing oracle: LiveOracleRequired (FP_REQUIRE_LIVE_ORACLE=1)
+    // must fail this test, as must a pandas-raised error (4qg5w.2).
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
         eprintln!("live pandas unavailable; skipping series_div zero test: {message}");
         return;
     }
@@ -25235,7 +25299,7 @@ fn live_oracle_series_asof_intermediate_label() {
     // Delegates the missing-marker decision to FrankenPandas
     // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
     // is at or before the label, in EVERY dtype.
-    let actual = series.asof_value(label);
+    let actual = series.asof_value(label).expect("asof");
     super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
 }
 
@@ -39971,6 +40035,10 @@ fn live_oracle_series_asof_string_index() {
         "operation": "series_asof",
         "oracle_source": "live_legacy_pandas",
         "asof_label": { "kind": "utf8", "value": "c" },
+        // pandas converts a string `where` with Timestamp(where) first, and
+        // 'c' is not a date. This case used to treat pandas' error as "oracle
+        // unavailable" and skip. (kyvo0.6)
+        "expected_error_contains": "Unknown datetime string format",
         "left": {
             "name": "vals",
             "index": [
@@ -39989,28 +40057,29 @@ fn live_oracle_series_asof_string_index() {
     }))
     .expect("fixture");
 
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label = fixture.asof_label.as_ref().expect("asof_label");
+    let err = series
+        .asof_value(label)
+        .expect_err("a non-date string label must raise, as in pandas");
+    assert!(
+        err.to_string()
+            .contains("Unknown datetime string format, unable to parse: c"),
+        "got {err}"
+    );
+
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
-    if let Err(
-        super::HarnessError::OracleUnavailable(message)
-        | super::HarnessError::LiveOracleRequired(message),
-    ) = &expected_result
-    {
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
         eprintln!("live pandas unavailable; skipping asof string: {message}");
         return;
     }
-    let expected = expected_result.expect("live oracle expected");
-    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else {
-        return;
-    };
-
-    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let label = fixture.asof_label.as_ref().expect("asof_label");
-    // Delegates the missing-marker decision to FrankenPandas
-    // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
-    // is at or before the label, in EVERY dtype.
-    let actual = series.asof_value(label);
-    super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
+    assert!(
+        matches!(
+            expected_result.expect("live oracle expected"),
+            super::ResolvedExpected::ErrorContains(_) | super::ResolvedExpected::ErrorAny
+        ),
+        "pandas must raise for asof('c') on a string index"
+    );
 }
 
 #[test]

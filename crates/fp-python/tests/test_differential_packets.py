@@ -657,9 +657,13 @@ def test_api_types_differential() -> None:
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_top_level_missing_functions_differential() -> None:
-    # __version__
-    assert hasattr(fpd, "__version__")
-    assert fpd.__version__ == "0.2.0"
+    # __version__ is the Cargo workspace version (0zz8y.3: the 0.3.0 wheel said
+    # 0.2.0, and this line pinned the stale literal).
+    import tomllib
+
+    with open(Path(__file__).resolve().parents[3] / "Cargo.toml", "rb") as fh:
+        cargo_version = tomllib.load(fh)["workspace"]["package"]["version"]
+    assert fpd.__version__ == cargo_version
 
     # unique
     u_pd = list(pd.unique([3, 1, 2, 1, 3]))
@@ -1907,5 +1911,600 @@ def test_ddof_cov_reductions_parity():
     assert list(df_str_fp.std(numeric_only=True).to_dict().keys()) == ["a"]
     assert list(df_str_fp.var(numeric_only=True).to_dict().keys()) == ["a"]
     assert list(df_str_fp.sem(numeric_only=True).to_dict().keys()) == ["a"]
+
+
+def _loc_view(obj: Any) -> Any:
+    """(kind, index, values, name) with NaN normalised, for strict comparison."""
+
+    def clean(v: Any) -> Any:
+        if hasattr(v, "item"):
+            v = v.item()
+        if isinstance(v, float) and math.isnan(v):
+            return "NaN"
+        return v
+
+    if hasattr(obj, "columns") and hasattr(obj, "index"):
+        cols = [str(c) for c in list(obj.columns)]
+        return (
+            "frame",
+            [clean(x) for x in list(obj.index)],
+            cols,
+            {c: [clean(x) for x in list(obj[c])] for c in cols},
+        )
+    if hasattr(obj, "index") and hasattr(obj, "name"):
+        return ("series", [clean(x) for x in list(obj.index)], [clean(x) for x in list(obj)], obj.name)
+    return ("scalar", clean(obj))
+
+
+_LOC_CASES = {
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.2: the boolean mask
+    # used to be read as integer labels 1/0 (a Python bool is an int).
+    "mask_single_column": lambda df, dk, s: df.loc[df["a"] > 2, "b"],
+    "mask_rows": lambda df, dk, s: df.loc[df["a"] > 2],
+    "mask_column_list": lambda df, dk, s: df.loc[df["a"] > 2, ["a", "b"]],
+    "bool_list_single_column": lambda df, dk, s: df.loc[[True, False, True, False], "a"],
+    # label slices are INCLUSIVE of the stop label (was positional, stop-exclusive)
+    "label_slice_single_column": lambda df, dk, s: df.loc[1:2, "a"],
+    "label_slice_column_list": lambda df, dk, s: df.loc[1:2, ["a", "b"]],
+    "column_label_slice": lambda df, dk, s: df.loc[:, "a":"b"],
+    # a duplicated label returns EVERY matching row (was only the first)
+    "duplicate_label_rows": lambda df, dk, s: dk.loc["x"],
+    "duplicate_label_column": lambda df, dk, s: dk.loc["y", "a"],
+    "duplicate_label_list": lambda df, dk, s: dk.loc[["x"]],
+    "unique_label_scalar": lambda df, dk, s: df.loc[2, "a"],
+    "series_label_slice": lambda df, dk, s: s.loc[6:7],
+    "series_mask": lambda df, dk, s: s.loc[s > 15],
+    "series_label_list": lambda df, dk, s: s.loc[[8, 5]],
+    "series_unique_label": lambda df, dk, s: s.loc[6],
+    "missing_label_raises": lambda df, dk, s: dk.loc["zz"],
+    "unique_label_row": pytest.param(
+        lambda df, dk, s: df.loc[2],
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason="row Series name is '2' (str) not 2 (int): Series names are strings "
+            "(br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.7)",
+        ),
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LOC_CASES.values()), ids=list(_LOC_CASES))
+def test_loc_indexing_matches_pandas(case: Any) -> None:
+    def run(mod: Any) -> Any:
+        df = mod.DataFrame({"k": ["x", "y", "x", "y"], "a": [4, 1, 3, 2], "b": [1.5, None, 3.5, 4.0]})
+        s = mod.Series([10, 20, 30, 40], index=[5, 6, 7, 8], name="s")
+        try:
+            return _loc_view(case(df, df.set_index("k"), s))
+        except Exception as exc:  # compare the exception CLASS, like pandas users do
+            return ("raise", type(exc).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+def _values(obj: Any) -> list[Any]:
+    out = []
+    for v in list(obj):
+        if hasattr(v, "item"):
+            v = v.item()
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            out.append("<missing>")
+        else:
+            out.append(v)
+    return out
+
+
+_VALUE_CASES = {
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.3: bool columns are
+    # numeric for reductions (was string concatenation "FalseTrue...").
+    "isna_sum": lambda m: m.DataFrame({"a": [1.0, None, 3.0], "b": ["x", None, None]}).isna().sum(),
+    "bool_column_sum": lambda m: m.DataFrame({"a": [True, False, True]}).sum(),
+    "bool_column_mean": lambda m: m.DataFrame({"a": [True, False, True, True]}).mean(),
+    # every column shifts, object columns included (was left unshifted)
+    "shift_object_column": lambda m: m.DataFrame({"k": ["x", "y", "z"], "a": [1, 2, 3]}).shift()["k"],
+    # ints mixed with None infer float64 with NaN (was int64 holding None)
+    "series_int_with_none": lambda m: m.Series([1, 2, None]),
+    "frame_int_with_none": lambda m: m.DataFrame({"a": [1, None, 3]})["a"],
+    # default fill_method='pad' forward-fills before the change (was no fill)
+    "pct_change_default_pad": lambda m: m.Series([4.0, 2.0, None, 3.0, 6.0]).pct_change(),
+    "pct_change_explicit_no_fill": lambda m: m.Series([4.0, 2.0, None, 3.0, 6.0]).pct_change(
+        fill_method=None
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VALUE_CASES.values()), ids=list(_VALUE_CASES))
+def test_values_match_pandas(case: Any) -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)  # pandas' pct_change default warns
+        expected = _values(case(pd))
+    assert _values(case(fpd)) == pytest.approx(expected) if all(
+        isinstance(v, float) for v in expected
+    ) else _values(case(fpd)) == expected
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_int_list_with_none_infers_float64_dtype() -> None:
+    assert str(fpd.Series([1, 2, None]).dtype) == str(pd.Series([1, 2, None]).dtype) == "float64"
+
+
+# Groupby column selection (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.1).
+# Every case raised TypeError ("not subscriptable") or AttributeError before, and
+# a SeriesGroupBy over an int64 column returned float64 sums. _strict compares
+# dtypes, names and value types, not just values: 4.0 == 4 in Python.
+_GB_DATA = {
+    "k": ["a", "b", "a", "c", "b"],
+    "v": [1, -2, 3, 4, 5],
+    "w": [10.0, 20.0, 30.0, 40.0, 50.0],
+    "b": [True, False, True, True, False],
+    "s": ["x", "y", "z", "u", "t"],
+}
+
+
+def _gb(m: Any) -> Any:
+    return m.DataFrame(_GB_DATA).groupby("k")
+
+
+_GROUPBY_SELECTION_CASES = {
+    "col_sum": lambda m: _gb(m)["v"].sum(),
+    "col_mean": lambda m: _gb(m)["v"].mean(),
+    "col_min": lambda m: _gb(m)["v"].min(),
+    "col_prod": lambda m: _gb(m)["v"].prod(),
+    "col_count": lambda m: _gb(m)["v"].count(),
+    "col_first_str": lambda m: _gb(m)["s"].first(),
+    "col_cumsum": lambda m: _gb(m)["v"].cumsum(),
+    "col_cummax": lambda m: _gb(m)["v"].cummax(),
+    "col_agg_max": lambda m: _gb(m)["w"].agg("max"),
+    "col_agg_list": lambda m: _gb(m)["v"].agg(["sum", "max"]),
+    "col_transform_sum": lambda m: _gb(m)["v"].transform("sum"),
+    "col_transform_mean": lambda m: _gb(m)["v"].transform("mean"),
+    "bool_col_sum": lambda m: _gb(m)["b"].sum(),
+    "bool_col_max": lambda m: _gb(m)["b"].max(),
+    "key_col_count": lambda m: _gb(m)["k"].count(),
+    "attr_sum": lambda m: _gb(m).v.sum(),
+    "cols_sum": lambda m: _gb(m)[["v", "w"]].sum(),
+    "cols_mean": lambda m: _gb(m)[["v", "w"]].mean(),
+    "one_col_list_sum": lambda m: _gb(m)[["v"]].sum(),
+    "cols_transform_sum": lambda m: _gb(m)[["v", "w"]].transform("sum"),
+}
+
+
+def _is_nan(value: Any) -> bool:
+    return isinstance(value, float) and math.isnan(value)
+
+
+def _marker(value: Any) -> Any:
+    """NaN != NaN, so compare it as a marker."""
+    # frankenpandas has its own Timestamp/Timedelta classes (pandas-free), so
+    # compare those by type name and repr rather than cross-class ==.
+    if type(value).__name__ in ("Timestamp", "Timedelta", "NaTType"):
+        return (type(value).__name__, repr(value))
+    return "<NaN>" if _is_nan(value) else value
+
+
+def _strict(obj: Any) -> Any:
+    if hasattr(obj, "columns"):
+        columns = list(obj.columns)
+        return (
+            "DataFrame",
+            columns,
+            [str(obj[c].dtype) for c in columns],
+            [_strict(obj[c]) for c in columns],
+        )
+    as_dict = obj.to_dict()
+    return (
+        "Series",
+        str(obj.dtype),
+        obj.name,
+        obj.index.name,
+        [type(v).__name__ for v in as_dict.values()],
+        {k: _marker(v) for k, v in as_dict.items()},
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case", list(_GROUPBY_SELECTION_CASES.values()), ids=list(_GROUPBY_SELECTION_CASES)
+)
+def test_groupby_column_selection_matches_pandas(case: Any) -> None:
+    assert _strict(case(fpd)) == _strict(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("select", "error"),
+    [
+        (lambda g: g["zz"], KeyError),
+        (lambda g: g[["v", "zz"]], KeyError),
+        (lambda g: g.zz, AttributeError),
+    ],
+    ids=["missing_column", "missing_in_list", "missing_attribute"],
+)
+def test_groupby_missing_selection_raises_like_pandas(select: Any, error: type) -> None:
+    with pytest.raises(error) as expected:
+        select(_gb(pd))
+    with pytest.raises(error) as got:
+        select(_gb(fpd))
+    assert str(got.value) == str(expected.value)
+
+
+# read_csv sources and core keywords (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.2).
+# read_csv accepted one str path and no keywords; StringIO raised TypeError.
+import io  # noqa: E402
+
+_CSV = "a,b,c,d\n1,x,2.5,2024-01-02\n2,y,,2024-02-03\n3,NA,4.0,2024-03-04\n"
+_CSV_QUOTED = 'a,b\n"x,1\ny",2\nz,3\n'  # a quoted field holding the delimiter and a newline
+
+
+def _csv_path(tmp_path: Path, text: str, name: str = "t.csv") -> str:
+    path = tmp_path / name
+    path.write_text(text)
+    return str(path)
+
+
+_READ_CSV_CASES = {
+    "path": lambda m, p: m.read_csv(_csv_path(p, _CSV)),
+    "stringio": lambda m, p: m.read_csv(io.StringIO(_CSV)),
+    "bytesio": lambda m, p: m.read_csv(io.BytesIO(_CSV.encode())),
+    "quoted_delimiter_newline": lambda m, p: m.read_csv(io.StringIO(_CSV_QUOTED)),
+    "open_text_file": lambda m, p: m.read_csv(open(_csv_path(p, _CSV))),  # noqa: SIM115
+    "sep_semicolon": lambda m, p: m.read_csv(io.StringIO(_CSV.replace(",", ";")), sep=";"),
+    "delimiter_alias": lambda m, p: m.read_csv(io.StringIO(_CSV.replace(",", "|")), delimiter="|"),
+    "header_none": lambda m, p: m.read_csv(io.StringIO("1,2\n3,4\n"), header=None, names=["p", "q"]),
+    "names_infer_header": lambda m, p: m.read_csv(io.StringIO("1,2\n3,4\n"), names=["p", "q"]),
+    "names_replace_header": lambda m, p: m.read_csv(io.StringIO(_CSV), header=0, names=["w", "x", "y", "z"]),
+    "index_col_name": lambda m, p: m.read_csv(io.StringIO(_CSV), index_col="a"),
+    "index_col_position": lambda m, p: m.read_csv(io.StringIO(_CSV), index_col=0),
+    "index_col_false": lambda m, p: m.read_csv(io.StringIO(_CSV), index_col=False),
+    "usecols_names_file_order": lambda m, p: m.read_csv(io.StringIO(_CSV), usecols=["c", "a"]),
+    "usecols_positions": lambda m, p: m.read_csv(io.StringIO(_CSV), usecols=[2, 0]),
+    "dtype_dict_type": lambda m, p: m.read_csv(io.StringIO(_CSV), dtype={"a": float}),
+    "dtype_dict_name": lambda m, p: m.read_csv(io.StringIO(_CSV), dtype={"a": "float64", "b": "str"}),
+    "parse_dates": lambda m, p: m.read_csv(io.StringIO(_CSV), parse_dates=["d"]),
+    "na_values": lambda m, p: m.read_csv(io.StringIO(_CSV), na_values=["x"]),
+    "keep_default_na_false": lambda m, p: m.read_csv(io.StringIO(_CSV), keep_default_na=False),
+    "skiprows": lambda m, p: m.read_csv(io.StringIO("junk\n" + _CSV), skiprows=1),
+    "nrows": lambda m, p: m.read_csv(io.StringIO(_CSV), nrows=2),
+    "encoding_latin1": lambda m, p: m.read_csv(io.BytesIO("a,b\ncafé,1\n".encode("latin-1")), encoding="latin-1"),
+    "utf8_bom": lambda m, p: m.read_csv(io.BytesIO(b"\xef\xbb\xbf" + _CSV.encode())),
+    "read_table": lambda m, p: m.read_table(io.StringIO(_CSV.replace(",", "\t"))),
+}
+
+
+def _strict_frame(frame: Any) -> Any:
+    return (_strict(frame), frame.index.name, list(frame.index))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_READ_CSV_CASES.values()), ids=list(_READ_CSV_CASES))
+def test_read_csv_sources_and_keywords_match_pandas(case: Any, tmp_path: Path) -> None:
+    assert _strict_frame(case(fpd, tmp_path)) == _strict_frame(case(pd, tmp_path))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_read_csv_missing_string_cell_is_nan_like_pandas() -> None:
+    # br-frankenpandas-audiv: fp-io marked NA cells NullKind::Null, which the
+    # binding renders None; pandas' text parser gives NaN in string columns too.
+    # The explicit-None constructor must keep None (pandas does).
+    assert _is_nan(pd.read_csv(io.StringIO("a\nx\nNA\n"))["a"].to_dict()[1])
+    assert _is_nan(fpd.read_csv(io.StringIO("a\nx\nNA\n"))["a"].to_dict()[1])
+    assert fpd.Series(["a", None]).to_dict()[1] is None
+    assert pd.Series(["a", None]).to_dict()[1] is None
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_read_excel_blank_cells_match_pandas(tmp_path: Path) -> None:
+    # audiv: blank cells read as None, and a whole-number column with a blank
+    # stayed int64; pandas gives NaN / float64 (and NaT beside datetimes).
+    path = tmp_path / "blanks.xlsx"
+    pd.DataFrame(
+        {
+            "s": ["x", None, "z"],
+            "n": [1.0, None, 3.0],
+            "t": pd.to_datetime(["2024-01-02", None, "2024-03-04"]),
+        }
+    ).to_excel(path, index=False)
+    got, expected = fpd.read_excel(str(path)), pd.read_excel(str(path))
+    assert _strict_frame(got) == _strict_frame(expected)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_read_csv_unsupported_keyword_is_not_silently_ignored() -> None:
+    with pytest.raises(NotImplementedError, match="converters"):
+        fpd.read_csv(io.StringIO(_CSV), converters={"a": str})
+    with pytest.raises(ValueError, match="only specify one"):
+        fpd.read_csv(io.StringIO(_CSV), sep=",", delimiter=",")
+
+
+# merge / concat keywords (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3).
+# Every keyword below raised "unexpected keyword argument", and concat took
+# DataFrames only.
+_ML = {"k": ["a", "b", "c"], "v": [1, 2, 3]}
+_MR = {"k": ["a", "b", "d"], "v": [10, 20, 40], "w": [0.5, 1.5, 2.5]}
+_CA = {"x": [1, 2], "y": ["p", "q"]}
+_CB = {"x": [3, 4], "z": [1.5, 2.5]}
+_CC = {"u": [7, 8], "t": ["s", "r"]}
+
+
+def _mframes(m: Any) -> Any:
+    return m.DataFrame(_ML), m.DataFrame(_MR)
+
+
+_MERGE_CONCAT_CASES = {
+    "merge_on": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k"),
+    "merge_how_positional": lambda m: _mframes(m)[0].merge(_mframes(m)[1], "left", "k"),
+    "merge_outer": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k", how="outer"),
+    "merge_right": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k", how="right"),
+    "merge_suffixes": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k", suffixes=("_l", "_r")),
+    "merge_validate_ok": lambda m: _mframes(m)[0].merge(_mframes(m)[1], on="k", validate="1:1"),
+    "merge_left_right_on": lambda m: _mframes(m)[0].merge(
+        _mframes(m)[1].rename(columns={"k": "kk"}), left_on="k", right_on="kk"
+    ),
+    "merge_common_columns": lambda m: _mframes(m)[0].merge(m.DataFrame({"k": ["b", "c"], "q": [1, 2]})),
+    "merge_index": lambda m: _mframes(m)[0].set_index("k").merge(
+        _mframes(m)[1].set_index("k"), left_index=True, right_index=True, how="outer"
+    ),
+    "merge_sort": lambda m: _mframes(m)[1].merge(_mframes(m)[0], on="k", how="outer", sort=True),
+    "merge_function": lambda m: m.merge(*_mframes(m), on="k", how="left", suffixes=("_a", "_b")),
+    # The indicator column's dtype is pinned separately (hrxn9, xfail below);
+    # its values are compared in test_merge_indicator_values_match_pandas.
+    "merge_indicator_other_columns": lambda m: _mframes(m)[0]
+    .merge(_mframes(m)[1], on="k", how="outer", indicator="src")
+    .drop(columns=["src"]),
+    "concat_rows": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CA)]),
+    "concat_ignore_index": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CA)], ignore_index=True),
+    "concat_axis1": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CC)], axis=1),
+    "concat_axis_columns": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CC)], axis="columns"),
+    "concat_join_inner": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CB)], join="inner"),
+    "concat_outer_float_gap": lambda m: m.concat([m.DataFrame(_CA), m.DataFrame(_CB)]),
+    "concat_skips_none": lambda m: m.concat([None, m.DataFrame(_CA)]),
+    "concat_series_rows": lambda m: m.concat([m.Series([1, 2], name="a"), m.Series([3], name="a")]),
+    "concat_series_ignore_index": lambda m: m.concat(
+        [m.Series([1, 2], name="a"), m.Series([3], name="a")], ignore_index=True
+    ),
+    "concat_series_axis1": lambda m: m.concat([m.Series([1, 2], name="a"), m.Series([3, 4], name="b")], axis=1),
+}
+
+
+def _strict_ordered(obj: Any) -> Any:
+    # concat repeats labels, and to_dict keeps only the last one per label, so
+    # also compare the values in row order.
+    if hasattr(obj, "columns"):
+        ordered = [[_marker(v) for v in obj[c].tolist()] for c in obj.columns]
+    else:
+        ordered = [_marker(v) for v in obj.tolist()]
+    return (_strict(obj), obj.index.name, list(obj.index), ordered)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MERGE_CONCAT_CASES.values()), ids=list(_MERGE_CONCAT_CASES))
+def test_merge_and_concat_keywords_match_pandas(case: Any) -> None:
+    assert _strict_ordered(case(fpd)) == _strict_ordered(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_merge_errors_match_pandas() -> None:
+    dup = {"k": ["a", "a"], "u": [1, 2]}
+    for mod in (pd, fpd):
+        left = mod.DataFrame(_ML)
+        with pytest.raises(mod.errors.MergeError) as err:
+            left.merge(mod.DataFrame(dup), on="k", validate="one_to_one")
+        assert str(err.value) == "Merge keys are not unique in right dataset; not a one-to-one merge"
+        with pytest.raises(mod.errors.MergeError) as err:
+            left.merge(mod.DataFrame({"z": [1]}))
+        assert str(err.value).startswith("No common columns to perform merge on.")
+    assert issubclass(fpd.errors.MergeError, ValueError)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_concat_refuses_what_it_cannot_match() -> None:
+    frame = fpd.DataFrame(_CA)
+    with pytest.raises(NotImplementedError, match="keys"):
+        fpd.concat([frame, frame], keys=["p", "q"])
+    with pytest.raises(NotImplementedError, match="sort"):
+        fpd.concat([frame, frame], sort=True)
+    with pytest.raises(ValueError, match="No objects to concatenate"):
+        fpd.concat([])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_merge_indicator_values_match_pandas() -> None:
+    def indicator(m: Any, flag: Any) -> list:
+        return m.DataFrame(_ML).merge(m.DataFrame(_MR), on="k", how="outer", indicator=flag)[
+            "_merge" if flag is True else flag
+        ].tolist()
+
+    for flag in (True, "src"):
+        assert indicator(fpd, flag) == [str(v) for v in indicator(pd, flag)]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="br-frankenpandas-hrxn9: _merge is object, pandas category")
+def test_merge_indicator_dtype_is_category_like_pandas() -> None:
+    merged = fpd.DataFrame(_ML).merge(fpd.DataFrame(_MR), on="k", how="outer", indicator=True)
+    assert str(merged["_merge"].dtype) == "category"
+
+
+# astype specs and loc slices (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.4).
+# astype took a str only (float/np.float64/np.dtype/dict raised TypeError) and
+# mapped "Int64" to int64; an unnamed Series reported name '' (pandas None).
+_AD = {"a": [1, 2, 3, 4], "b": [1.5, 2.5, 3.5, 4.5], "c": ["x", "y", "z", "w"]}
+_AN = {"a": [1, 2, 3, 4], "b": [1.5, 2.5, 3.5, 4.5]}
+
+_ASTYPE_LOC_CASES = {
+    "astype_float_type": lambda m: m.DataFrame(_AN).astype(float),
+    "astype_int_type_from_float": lambda m: m.DataFrame({"b": [1.0, 2.0]}).astype(int),
+    "astype_str_type": lambda m: m.DataFrame(_AN).astype(str),
+    "astype_bool_type": lambda m: m.DataFrame({"a": [0, 1, 2]}).astype(bool),
+    "astype_name": lambda m: m.DataFrame(_AN).astype("float64"),
+    "astype_numpy_type": lambda m: m.DataFrame(_AN).astype(np.float64),
+    "astype_numpy_dtype": lambda m: m.DataFrame(_AN).astype(np.dtype("float64")),
+    "astype_dict_names": lambda m: m.DataFrame(_AD).astype({"a": "float64", "b": str}),
+    "astype_dict_type": lambda m: m.DataFrame(_AD).astype({"a": float}),
+    "astype_nullable_Int64": lambda m: m.DataFrame(_AN).astype({"a": "Int64"}),
+    "series_astype_float": lambda m: m.Series([1, 2]).astype(float),
+    "series_astype_numpy": lambda m: m.Series([1, 2], name="s").astype(np.float64),
+    "series_astype_str": lambda m: m.Series([1, 2]).astype(str),
+    "series_astype_Int64": lambda m: m.Series([1, 2]).astype("Int64"),
+    "series_astype_dict": lambda m: m.Series([1, 2], name="s").astype({"s": "float64"}),
+    "series_astype_errors_ignore": lambda m: m.Series(["x", "1"]).astype("int64", errors="ignore"),
+    "loc_slice_cols_list": lambda m: m.DataFrame(_AD).loc[1:2, ["a", "c"]],
+    "loc_slice_col_slice": lambda m: m.DataFrame(_AD).loc[1:2, "a":"b"],
+    "loc_all_rows_cols": lambda m: m.DataFrame(_AD).loc[:, ["b", "a"]],
+    "loc_mask_cols": lambda m: m.DataFrame(_AD).loc[m.DataFrame(_AD)["a"] > 2, ["a", "c"]],
+    "loc_str_index_slice": lambda m: m.DataFrame(_AD, index=["p", "q", "r", "s"]).loc["q":"r", ["b"]],
+    "loc_slice_one_col": lambda m: m.DataFrame(_AD).loc[1:2, "a"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ASTYPE_LOC_CASES.values()), ids=list(_ASTYPE_LOC_CASES))
+def test_astype_specs_and_loc_slices_match_pandas(case: Any) -> None:
+    assert _strict_ordered(case(fpd)) == _strict_ordered(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_astype_errors_match_pandas() -> None:
+    for mod in (pd, fpd):
+        with pytest.raises(KeyError):
+            mod.DataFrame(_AD).astype({"zz": float})
+        with pytest.raises(TypeError, match="data type 'nonsense' not understood"):
+            mod.DataFrame(_AD).astype("nonsense")
+    with pytest.raises(NotImplementedError, match="category"):
+        fpd.Series(["a", "b"]).astype("category")
+
+
+# Type leaks and no-ops (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.4):
+# groupby idxmax/idxmin stringified the labels, Index.astype returned the index
+# unchanged, and Series/DataFrame.tz_localize/tz_convert were silent no-ops.
+_TYPE_LEAK_CASES = {
+    "gb_idxmax_int_labels": lambda m: m.Series([3.0, 1.0, 9.0, 2.0])
+    .groupby(m.Series(["p", "q", "p", "q"]))
+    .idxmax(),
+    "gb_idxmin_int_labels": lambda m: m.Series([3.0, 1.0, 9.0, 2.0], name="v")
+    .groupby(m.Series(["p", "q", "p", "q"], name="k"))
+    .idxmin(),
+    "gb_idxmax_str_labels": lambda m: m.Series([3, 1, 9], index=["a", "b", "c"])
+    .groupby(m.Series([0, 1, 0], index=["a", "b", "c"]))
+    .idxmax(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TYPE_LEAK_CASES.values()), ids=list(_TYPE_LEAK_CASES))
+def test_type_leaks_match_pandas(case: Any) -> None:
+    assert _strict_ordered(case(fpd)) == _strict_ordered(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_index_astype_casts_like_pandas() -> None:
+    for spec in ("float64", float, np.float64, "int64", str):
+        got, expected = fpd.Index([1, 2]).astype(spec), pd.Index([1, 2]).astype(spec)
+        assert (str(got.dtype), list(got)) == (str(expected.dtype), list(expected)), spec
+    got, expected = fpd.Index([3, 0]).astype(bool), pd.Index([3, 0]).astype(bool)
+    assert (str(got.dtype), list(got)) == (str(expected.dtype), list(expected))
+    got, expected = fpd.Index(["a", "b"]).astype("object"), pd.Index(["a", "b"]).astype("object")
+    assert (str(got.dtype), list(got)) == (str(expected.dtype), list(expected))
+    # pandas keeps the ints in an object index; a typed index cannot, so it
+    # refuses rather than stringifying them.
+    with pytest.raises(NotImplementedError, match="object"):
+        fpd.Index([1, 2]).astype("object")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_period_index_yields_periods_like_pandas() -> None:
+    # It yielded the ordinals ('648' for 2024-01) from tolist/values/[i]/copy.
+    def periods(m: Any) -> Any:
+        index = m.period_range("2024-01", periods=3, freq="M")
+        return (
+            [repr(p) for p in index.tolist()],
+            [repr(p) for p in index.copy().tolist()],
+            repr(index[1]),
+            [str(p) for p in index],
+        )
+
+    assert periods(fpd) == periods(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_tz_methods_refuse_instead_of_returning_the_input() -> None:
+    naive = fpd.Series([1, 2], index=fpd.date_range("2024-01-01", periods=2, freq="D"))
+    with pytest.raises(NotImplementedError, match="tz_localize"):
+        naive.tz_localize("UTC")
+    # pandas raises the same TypeError for a tz-naive index.
+    with pytest.raises(TypeError, match="Cannot convert tz-naive timestamps"):
+        naive.tz_convert("UTC")
+    with pytest.raises(TypeError, match="Cannot convert tz-naive timestamps"):
+        pd.Series([1, 2], index=pd.date_range("2024-01-01", periods=2, freq="D")).tz_convert("UTC")
+    assert naive.tz_localize(None).tolist() == [1, 2]
+
+
+# Per-column DataFrame ops on non-numeric columns
+# (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18): object, datetime,
+# timedelta and nullable Float64 columns were returned UNCHANGED by ~54 ops.
+def _dtype_frame(m: Any, kind: str) -> Any:
+    if kind == "object":
+        return m.DataFrame({"c": ["b", "a", "c"]})
+    if kind == "datetime":
+        # (fpd.DataFrame({'c': <DatetimeIndex>}) is the fvsao.6 constructor gap)
+        return m.DataFrame({"c": ["2024-01-02", "2024-01-01", "2024-01-03"]}).astype(
+            {"c": "datetime64[ns]"}
+        )
+    if kind == "Float64":
+        return m.DataFrame({"c": [1.5, None, -2.5]}).astype({"c": "Float64"})
+    raise AssertionError(kind)
+
+
+_PER_COLUMN_OPS = {
+    "abs": lambda df: df.abs(),
+    "round": lambda df: df.round(),
+    "clip": lambda df: df.clip(0, 1),
+    "cumsum": lambda df: df.cumsum(),
+    "cumprod": lambda df: df.cumprod(),
+    "cummax": lambda df: df.cummax(),
+    "cummin": lambda df: df.cummin(),
+    "pct_change": lambda df: df.pct_change(fill_method=None),
+}
+
+
+def _outcome(m: Any, op: Any, kind: str) -> Any:
+    import warnings
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out = op(_dtype_frame(m, kind))
+    except TypeError:
+        return "TypeError"
+    return (str(out["c"].dtype), [_marker(v) for v in out["c"].tolist()])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["object", "datetime", "Float64"])
+@pytest.mark.parametrize("op", list(_PER_COLUMN_OPS), ids=list(_PER_COLUMN_OPS))
+def test_per_column_ops_on_non_numeric_columns_match_pandas(op: str, kind: str) -> None:
+    fn = _PER_COLUMN_OPS[op]
+    expected = _outcome(pd, fn, kind)
+    got = _outcome(fpd, fn, kind)
+    if kind == "Float64" and expected != "TypeError":
+        # The nullable dtype and its <NA> marker are fvsao.7 territory; the
+        # VALUES must match (they were the unchanged input before).
+        assert got != "TypeError"
+
+        def clean(vals: list) -> list:
+            # pd.NA cannot take part in ==/in, so test its type first.
+            return [
+                None
+                if v is None or type(v).__name__ == "NAType" or (isinstance(v, str) and v == "<NaN>")
+                else v
+                for v in vals
+            ]
+
+        assert clean(got[1]) == clean(expected[1])
+    else:
+        assert got == expected
 
 

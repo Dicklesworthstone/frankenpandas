@@ -17907,8 +17907,16 @@ impl Column {
         // hierarchy Null < Bool < Int64 < Float64), and promoting those to Float64
         // diverged from both the oracle and binary_numeric's own scalar fallback.
         // Runs only on the vectorized-declined path, so hot all-Int64 ops never pay it.
+        //
+        // One pandas 2.2.3 exception (probed live): `int64 % False` stays int64 with
+        // result 0 (numpy's integer `x % 0 == 0`, and pandas' zero-division fill only
+        // runs for non-bool divisors), while `int64 // False` still becomes float64
+        // inf/-inf/nan. So a Bool divisor never promotes Mod.
+        // br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.3.
+        let bool_divisor_mod = matches!(op, ArithmeticOp::Mod) && right.dtype == DType::Bool;
         if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv)
             && matches!(out_dtype, DType::Int64)
+            && !bool_divisor_mod
             && right
                 .values
                 .iter()
@@ -17954,8 +17962,20 @@ impl Column {
                             }
                             lhs_i64.wrapping_pow(u32::try_from(rhs_i64).unwrap_or(u32::MAX))
                         }
-                        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => {
-                            unreachable!()
+                        // Reached when the vectorized Int64 arm declines (a Bool or
+                        // Null-dtype operand) and no zero divisor forced Float64 — e.g.
+                        // `int64 // True` or `bool % 2`. This arm used to be
+                        // `unreachable!()`, and `df.eval("a // True")` panicked
+                        // (Fuzz Nightly, fuzz_dataframe_eval).
+                        ArithmeticOp::FloorDiv => python_floor_div_i64(lhs_i64, rhs_i64),
+                        // A zero divisor only survives to here for a Bool divisor
+                        // (see `bool_divisor_mod`); numpy/pandas give 0.
+                        ArithmeticOp::Mod if rhs_i64 == 0 => 0,
+                        ArithmeticOp::Mod => python_mod_i64(lhs_i64, rhs_i64),
+                        // `out_dtype` is always Float64 for Div (set above), so the
+                        // Int64 arm cannot see it; fall through to the float path.
+                        ArithmeticOp::Div => {
+                            return Ok(Scalar::Float64(left.to_f64()? / right.to_f64()?));
                         }
                     };
                     return Ok(Scalar::Int64(result));
@@ -33060,36 +33080,24 @@ impl CrackIndex {
     }
 }
 
-// The same claim as `fp_columnar_stays_sse41_flagged_in_both_release_profiles_85clb`
-// below, asserted against the COMPILED crate instead of the manifest text — the
-// manifest is only one of the ways the flag can go away. A `.cargo/config.toml` edit
-// or a `RUSTFLAGS` override in a bench script removes it without touching a line that
-// test reads, and this sits OUTSIDE `cfg(test)` so it also guards a plain
-// `cargo build --release`, which no test can reach at all.
-//
-// Both operands are `cfg!`, so this is a COMPILE-time guard rather than a runtime
-// one, which is stronger for a lock and is what clippy's `assertions_on_constants`
-// asks for. Disarmed in debug because the stanza is scoped to the two release
-// profiles and does not apply there. Verified before relying on it, rather than
-// assumed: package rustflags DO reach an optimized test target (throwaway two-crate
-// probe, 2026-08-19).
-const _: () = assert!(
-    cfg!(debug_assertions) || cfg!(target_feature = "sse4.1"),
-    "fp-columnar was compiled with optimizations but WITHOUT the `+sse4.1` target \
-     feature its fast paths require: without it `(lhs / rhs).floor()` in \
-     `python_floor_div_f64` lowers to a libm call again, and the certified \
-     `floordiv @10M` / `mod @10M` vs-pandas rows (br-frankenpandas-85clb) do not \
-     describe the binary being built. \
-     DOWNSTREAM CONSUMERS: profiles apply only from YOUR top-level manifest, so \
-     replicate the shipped stanza there (requires nightly cargo for \
-     `profile-rustflags`; see README 'Installation' -> 'Building release \
-     binaries that depend on frankenpandas'): \
-     `cargo-features = [\"profile-rustflags\"]` at the top of your Cargo.toml, \
-     plus `[profile.release.package.fp-columnar] rustflags = \
-     [\"-Ctarget-feature=+sse4.1\"]`. Internal contributors: build through the \
-     workspace, which already carries this stanza for the release and \
-     release-perf profiles."
-);
+/// Whether THIS build of fp-columnar was compiled with the x86 `+sse4.1` target
+/// feature, which the rounding fast paths (`python_floor_div_f64`, floor/ceil/
+/// trunc/round kernels) need to lower to a single `roundsd`/`roundpd` instead of
+/// a libm call.
+///
+/// This used to be a `const _: () = assert!(...)` that FAILED every optimized
+/// build lacking the flag. That protected the certified `floordiv @10M` /
+/// `mod @10M` vs-pandas rows (br-frankenpandas-85clb) from being attributed to a
+/// binary built without the fast path, but it also broke every downstream
+/// `cargo build --release` (Cargo applies the workspace's per-package rustflags
+/// only from the top-level manifest, and `profile-rustflags` is nightly-only) and
+/// EVERY optimized aarch64 build, where the flag cannot exist
+/// (br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.1). The protection is
+/// a property of the MEASUREMENT, so it now lives in the instrument: fp-bench
+/// reads this constant and refuses to produce rows from an optimized x86_64 build
+/// without it. For library users the flag is performance advice, not a
+/// requirement.
+pub const BUILT_WITH_SSE41: bool = cfg!(target_feature = "sse4.1");
 
 /// REGRESSION LOCK for the two standing `@10M` claims — `floordiv` ≥ 6.504x and
 /// `mod` ≥ 5.651x vs live pandas. br-frankenpandas-4kig1.
@@ -65044,6 +65052,75 @@ mod floordiv_mod_f64_pandas_special_value_lock {
             return true; // any NaN payload is acceptable; pandas does not pin one
         }
         actual.to_bits() == expected
+    }
+
+    /// br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.3. `int64 // True` reached
+    /// `unreachable!()` in the scalar fallback (the vectorized Int64 arm declines a
+    /// Bool operand). Expected values are pandas 2.2.3, probed live with
+    /// s = pd.Series([466, -7, 0]) and b = pd.Series([True, False, True]).
+    #[test]
+    fn int_bool_floordiv_and_mod_match_pandas_without_panicking() {
+        use crate::Column;
+        use fp_types::{DType, Scalar};
+
+        let ints = |v: &[i64]| {
+            Column::new(DType::Int64, v.iter().map(|x| Scalar::Int64(*x)).collect()).unwrap()
+        };
+        let bools = |v: &[bool]| {
+            Column::new(DType::Bool, v.iter().map(|x| Scalar::Bool(*x)).collect()).unwrap()
+        };
+        let s = ints(&[466, -7, 0]);
+        let dtype_and_values = |c: Column| (c.dtype().clone(), c.values().to_vec());
+
+        // s // True -> int64 [466, -7, 0]
+        assert_eq!(
+            dtype_and_values(s.floordiv(&bools(&[true, true, true])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(466), Scalar::Int64(-7), Scalar::Int64(0)])
+        );
+        // s % True -> int64 [0, 0, 0]
+        assert_eq!(
+            dtype_and_values(s.r#mod(&bools(&[true, true, true])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(0); 3])
+        );
+        // NEGATIVE for a naive "zero divisor promotes like division" fix:
+        // s % False stays int64 zeros in pandas, NOT float NaN.
+        assert_eq!(
+            dtype_and_values(s.r#mod(&bools(&[false, false, false])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(0); 3])
+        );
+        // s // False -> float64 [inf, -inf, nan]
+        let fd = s.floordiv(&bools(&[false, false, false])).unwrap();
+        assert_eq!(fd.dtype(), DType::Float64);
+        assert_eq!(fd.values()[0], Scalar::Float64(f64::INFINITY));
+        assert_eq!(fd.values()[1], Scalar::Float64(f64::NEG_INFINITY));
+        assert!(fd.values()[2].is_missing(), "0 // False is NaN");
+        // s // b (b has a False) -> float64 [466.0, -inf, 0.0]
+        let mixed = s.floordiv(&bools(&[true, false, true])).unwrap();
+        assert_eq!(mixed.dtype(), DType::Float64);
+        assert_eq!(
+            mixed.values(),
+            &[
+                Scalar::Float64(466.0),
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(0.0)
+            ]
+        );
+        // bool // int (no zero) -> int64 [0, 0, 0]; bool % int -> int64 [1, 0, 1]
+        let b = bools(&[true, false, true]);
+        assert_eq!(
+            dtype_and_values(b.floordiv(&ints(&[2, 3, 4])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(0); 3])
+        );
+        assert_eq!(
+            dtype_and_values(b.r#mod(&ints(&[2, 3, 4])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)])
+        );
+        // bool % int with a zero divisor -> float64 [1.0, nan, 1.0]
+        let bz = b.r#mod(&ints(&[2, 0, 4])).unwrap();
+        assert_eq!(bz.dtype(), DType::Float64);
+        assert_eq!(bz.values()[0], Scalar::Float64(1.0));
+        assert!(bz.values()[1].is_missing());
+        assert_eq!(bz.values()[2], Scalar::Float64(1.0));
     }
 
     #[test]

@@ -103,14 +103,15 @@ use fp_index::{
     validate_alignment_plan,
 };
 use fp_io::{
-    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient,
-    SqlReadOptions, read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
-    read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes, read_sql,
-    read_sql_query, read_sql_query_with_options, read_sql_query_with_options_and_index_col,
-    read_sql_table_with_index_col, read_sql_table_with_options_and_index_col,
-    read_sql_with_index_col, read_sql_with_options, series_from_arrow_array, series_to_arrow_array,
-    write_csv_string, write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes,
-    write_json_string, write_jsonl_string, write_parquet_bytes,
+    CsvOnBadLines, CsvReadOptions, CsvWriteOptions, ExcelReadOptions, IoError as FpIoError,
+    JsonOrient, SqlReadOptions, read_csv_str, read_csv_with_options, read_excel_bytes,
+    read_feather_bytes, read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
+    read_sql, read_sql_query, read_sql_query_with_options,
+    read_sql_query_with_options_and_index_col, read_sql_table_with_index_col,
+    read_sql_table_with_options_and_index_col, read_sql_with_index_col, read_sql_with_options,
+    series_from_arrow_array, series_to_arrow_array, write_csv_string_with_options,
+    write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes, write_json_string,
+    write_jsonl_string, write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -3747,6 +3748,15 @@ pub enum HarnessError {
     OracleUnavailable(String),
     #[error("live oracle is required but unavailable: {0}")]
     LiveOracleRequired(String),
+    /// The oracle ran and pandas raised. A case that does not expect an error
+    /// must fail on this, never skip: it is the pandas answer.
+    #[error("pandas raised: {0}")]
+    OracleRaised(String),
+    /// The oracle ran but its adapter refused the request before pandas saw it
+    /// (missing payload key, unsupported operation, malformed request): a
+    /// harness defect, not a missing oracle.
+    #[error("oracle adapter refused the request: {0}")]
+    OracleAdapterRefused(String),
     #[error("oracle command failed: status={status}, stderr={stderr}")]
     OracleCommandFailed { status: i32, stderr: String },
     #[error("raptorq error: {0}")]
@@ -4280,6 +4290,31 @@ struct OracleResponse {
     fixture_provenance: Option<FixtureProvenance>,
     #[serde(default)]
     error: Option<String>,
+    /// Where `error` came from (pandas_oracle.py ERROR_ORIGIN_*).
+    #[serde(default)]
+    error_origin: Option<String>,
+}
+
+/// Classify an oracle error response by the origin the oracle self-reports.
+///
+/// Only a pandas that never loaded (or a response too old to say) is
+/// unavailability. Every error response used to become `OracleUnavailable`,
+/// which the live-oracle tests skip on, so a case where pandas raised and
+/// FrankenPandas returned a value passed by skipping
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.2).
+fn classify_oracle_error(
+    error: String,
+    origin: Option<&str>,
+    require_live_oracle: bool,
+) -> HarnessError {
+    match origin {
+        Some("pandas") => HarnessError::OracleRaised(error),
+        Some("oracle_adapter" | "request" | "unexpected") => {
+            HarnessError::OracleAdapterRefused(error)
+        }
+        _ if require_live_oracle => HarnessError::LiveOracleRequired(error),
+        _ => HarnessError::OracleUnavailable(error),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -5174,7 +5209,11 @@ fn apply_oracle_response_to_generated_fixture(
     intentional_divergence_notes: &[String],
 ) -> Result<(), HarnessError> {
     if let Some(error) = response.error {
-        return Err(HarnessError::OracleUnavailable(error));
+        return Err(classify_oracle_error(
+            error,
+            response.error_origin.as_deref(),
+            false,
+        ));
     }
 
     fixture.expected_series = response.expected_series.take();
@@ -5273,7 +5312,11 @@ fn capture_live_oracle_response_for_generation(
         if let Ok(response) = serde_json::from_slice::<OracleResponse>(&output.stdout)
             && let Some(error) = response.error
         {
-            return Err(oracle_unavailable(config, error));
+            return Err(classify_oracle_error(
+                error,
+                response.error_origin.as_deref(),
+                config.require_live_oracle,
+            ));
         }
 
         let code = output.status.code().unwrap_or(-1);
@@ -6074,7 +6117,29 @@ impl CiGate {
     /// Shell command(s) for this gate (when run via external CI).
     pub fn commands(self) -> Vec<&'static str> {
         match self {
-            Self::G1Compile => vec!["cargo check --workspace --all-targets", "cargo fmt --check"],
+            // Format is checked per crate over the crates rustfmt can format -
+            // the same list as the CI `fmt` job and the Fast gate. A bare
+            // workspace `cargo fmt --check` also formats fp-columnar (62k
+            // lines) and fp-frame (208k), which need tens of GB (run
+            // 33488811029 died allocating 172 GB, br-frankenpandas-3bu58), so
+            // G1 could not pass on any runner. Those two stay unenforced until
+            // they are split (3bu58). br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.6
+            Self::G1Compile => vec![
+                "cargo check --workspace --all-targets",
+                "cargo fmt --check -p fp-types",
+                "cargo fmt --check -p fp-dot-kernel",
+                "cargo fmt --check -p fp-index",
+                "cargo fmt --check -p fp-expr",
+                "cargo fmt --check -p fp-groupby",
+                "cargo fmt --check -p fp-join",
+                "cargo fmt --check -p fp-io",
+                "cargo fmt --check -p fp-conformance",
+                "cargo fmt --check -p fp-bench",
+                "cargo fmt --check -p fp-runtime",
+                "cargo fmt --check -p fp-frankentui",
+                "cargo fmt --check -p fp-python",
+                "cargo fmt --check -p frankenpandas",
+            ],
             Self::G2Lint => vec!["cargo clippy --workspace --all-targets -- -D warnings"],
             Self::G3Unit => vec!["cargo test --workspace --lib"],
             Self::G4Property => vec!["cargo test -p fp-conformance --test proptest_properties"],
@@ -6834,7 +6899,9 @@ pub fn fuzz_fixture_parse_bytes(input: &[u8]) -> Result<(), HarnessError> {
 }
 
 fn assert_csv_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
-    let encoded = write_csv_string(frame)?;
+    // Frames here come from read_csv (RangeIndex): the round trip is
+    // to_csv(index=False) -> read_csv, as in pandas. (4qg5w.1)
+    let encoded = write_csv_string_with_options(frame, &csv_index_false())?;
     let reparsed = read_csv_str(&encoded)?;
     if !frame.equals(&reparsed) {
         return Err(FpIoError::Io(std::io::Error::other(
@@ -6844,9 +6911,25 @@ fn assert_csv_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     Ok(())
 }
 
+/// pandas' Excel round trip is `to_excel(p)` then `read_excel(p, index_col=0)`:
+/// the index is written as the first column under its name, or under a blank
+/// header that reads back as "Unnamed: 0". Reading with default options only
+/// "round-tripped" while fp-io guessed that column was an index and dropped it,
+/// which pandas never does (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19).
+fn excel_round_trip_read_options(frame: &DataFrame) -> ExcelReadOptions {
+    if frame.row_multiindex().is_some() {
+        // Levels are written as ordinary named columns; nothing to promote.
+        return ExcelReadOptions::default();
+    }
+    ExcelReadOptions {
+        index_col: Some(frame.index().name().unwrap_or("Unnamed: 0").to_owned()),
+        ..ExcelReadOptions::default()
+    }
+}
+
 fn assert_excel_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     let encoded = write_excel_bytes(frame)?;
-    let reparsed = read_excel_bytes(&encoded, &ExcelReadOptions::default())?;
+    let reparsed = read_excel_bytes(&encoded, &excel_round_trip_read_options(frame))?;
     if !frame.equals(&reparsed) {
         return Err(FpIoError::Io(std::io::Error::other(
             "excel round-trip drifted after parse/write/reparse",
@@ -14300,10 +14383,17 @@ fn capture_live_oracle_expected(
         if let Ok(response) = serde_json::from_slice::<OracleResponse>(&output.stdout)
             && let Some(error) = response.error
         {
-            if expects_error {
+            let origin = response.error_origin.as_deref();
+            // A pandas that never loaded is not the pandas answer to an
+            // expected-error case either.
+            if expects_error && origin != Some("oracle_unavailable") {
                 return resolve_expected_oracle_error(fixture, error);
             }
-            return Err(oracle_unavailable(config, error));
+            return Err(classify_oracle_error(
+                error,
+                origin,
+                config.require_live_oracle,
+            ));
         }
 
         let code = output.status.code().unwrap_or(-1);
@@ -14317,10 +14407,15 @@ fn capture_live_oracle_expected(
 
     let response: OracleResponse = serde_json::from_slice(&output.stdout)?;
     if let Some(error) = response.error {
-        if expects_error {
+        let origin = response.error_origin.as_deref();
+        if expects_error && origin != Some("oracle_unavailable") {
             return resolve_expected_oracle_error(fixture, error);
         }
-        return Err(oracle_unavailable(config, error));
+        return Err(classify_oracle_error(
+            error,
+            origin,
+            config.require_live_oracle,
+        ));
     }
     // br-frankenpandas-rc-oracle-provenance-guard-d8wt4: the oracle response
     // self-reports the pandas it ran. If that is not the PINNED version, the
@@ -15977,9 +16072,21 @@ fn execute_csv_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<b
         .as_ref()
         .ok_or_else(|| "csv_input is required for csv_round_trip".to_owned())?;
     let df = read_csv_str(csv_input).map_err(|err| format!("csv parse failed: {err}"))?;
-    let output = write_csv_string(&df).map_err(|err| format!("csv write failed: {err}"))?;
+    // The oracle's op_csv_round_trip is `to_csv(index=False)`; write_csv_string
+    // now defaults to pandas' index=True (4qg5w.1), so say index=False here.
+    let output = write_csv_string_with_options(&df, &csv_index_false())
+        .map_err(|err| format!("csv write failed: {err}"))?;
     let reparsed = read_csv_str(&output).map_err(|err| format!("csv reparse failed: {err}"))?;
     Ok(dataframes_semantically_equal(&df, &reparsed))
+}
+
+/// `to_csv(index=False)` options, for round trips of RangeIndex frames read
+/// from CSV (the question the oracle's csv_round_trip asks).
+fn csv_index_false() -> CsvWriteOptions {
+    CsvWriteOptions {
+        include_index: false,
+        ..CsvWriteOptions::default()
+    }
 }
 
 fn execute_csv_read_frame_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {
@@ -16221,7 +16328,7 @@ fn execute_feather_round_trip_fixture_operation(fixture: &PacketFixture) -> Resu
 fn execute_excel_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
     let frame = build_dataframe(require_frame(fixture)?)?;
     let bytes = write_excel_bytes(&frame).map_err(|err| format!("excel write failed: {err}"))?;
-    let reparsed = read_excel_bytes(&bytes, &ExcelReadOptions::default())
+    let reparsed = read_excel_bytes(&bytes, &excel_round_trip_read_options(&frame))
         .map_err(|err| format!("excel read failed: {err}"))?;
     Ok(dataframes_semantically_equal(&frame, &reparsed))
 }
@@ -17601,7 +17708,7 @@ fn execute_series_asof_fixture_operation(fixture: &PacketFixture) -> Result<Scal
     // datetime-like" heuristic that produced NaT — a marker pandas never
     // returns from `asof`, and a harness-side reimplementation of semantics FP
     // owns (br-frankenpandas-oxodo, br-frankenpandas-nywa8).
-    Ok(left.asof_value(label))
+    left.asof_value(label).map_err(|err| err.to_string())
 }
 
 fn execute_series_autocorr_fixture_operation(fixture: &PacketFixture) -> Result<Scalar, String> {
@@ -27251,7 +27358,16 @@ mod tests {
         let pack =
             build_compat_closure_final_evidence_pack(&cfg, &reports, &[differential], &[fault])
                 .expect("build final evidence");
-        let paths = write_compat_closure_final_evidence_pack(&cfg, &pack).expect("write final");
+        // Write under a temp root, not the checkout: the pack carries a fresh
+        // timestamp and signature on every run, so writing the tracked
+        // artifacts/phase2c/compat_closure_* files dirtied the shared checkout on
+        // every `cargo test -p fp-conformance` (and peers then committed the churn,
+        // e.g. 3ab22efec). br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.5.
+        let out = tempfile::tempdir().expect("tmp");
+        let mut out_cfg = cfg.clone();
+        out_cfg.repo_root = out.path().to_path_buf();
+        let paths = write_compat_closure_final_evidence_pack(&out_cfg, &pack).expect("write final");
+        assert!(paths.evidence_pack_path.starts_with(out.path()));
 
         assert!(paths.evidence_pack_path.exists());
         assert!(paths.migration_manifest_path.exists());

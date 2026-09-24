@@ -1,4 +1,4 @@
 0    11
 1    22
 2    33
-Name: x+y, Length: 3, dtype: Int64
+Name: , Length: 3, dtype: Int64
