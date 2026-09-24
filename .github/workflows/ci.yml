@@ -53,7 +53,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          components: rustfmt
+          components: rustfmt, clippy, rust-src
 
       # br-frankenpandas-3bu58: a bare `cargo fmt --check` was VACUOUS here.
       # On 2026-09-01 (run 33488811029) it printed 90 diffs, then rustfmt
@@ -120,7 +120,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          components: clippy, rust-src
+          components: rustfmt, clippy, rust-src
 
       - name: Install HDF5 (all-features leg)
         # ey5sl triage of run 32393665943: both `--all-features` lint legs
@@ -213,7 +213,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          components: clippy, rust-src, rustfmt
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -275,6 +275,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Core fp-frame and fp-columnar tests
         run: cargo test -p fp-frame -p fp-columnar --no-fail-fast
@@ -322,6 +323,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: PostgreSQL adapter tests against the live service
         run: cargo test -p fp-io --features sql-postgresql --lib -- postgres --nocapture
@@ -353,6 +355,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Eager fp-frame tests
         # br-frankenpandas-n35k2: deliberately NO --no-fail-fast here. `--lib`
@@ -404,12 +407,14 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Rust (pinned nightly, retry after transient failure)
         if: steps.rust_setup.outcome == 'failure'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -522,11 +527,13 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          # Install rust-toolchain.toml's components here. Left to rustup's
-          # on-demand install at the first cargo call, this job (which first ran
-          # on 2026-09-24, once conformance went green) failed with
-          # "failed to install component: 'clippy-preview...', detected
-          # conflict: 'bin/cargo-clippy'".
+          # EVERY setup step installs rust-toolchain.toml's components. Left to
+          # rustup's on-demand install at the first cargo call, jobs whose
+          # harness spawns nested cargo processes (gates on 35952586335,
+          # conformance on 35958461422) died with "failed to install component:
+          # 'clippy-preview...', detected conflict: 'bin/cargo-clippy'" - two
+          # concurrent on-demand installs racing. Nothing left to install means
+          # nothing to race. (kyvo0.6)
           components: rustfmt, clippy, rust-src
 
       - name: Setup Python
@@ -604,6 +611,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -652,6 +660,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -697,6 +706,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -751,6 +761,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
 
       - name: Setup Python
         uses: actions/setup-python@v7
