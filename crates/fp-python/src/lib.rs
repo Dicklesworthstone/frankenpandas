@@ -29,7 +29,7 @@ use fp_frame::{
 };
 use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
-    OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
+    OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex,
 };
 use fp_types::{
     CategoricalMetadata, DType, NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp,
@@ -1917,6 +1917,45 @@ fn row_keys_to_py(py: Python<'_>, index: &Index) -> PyResult<Vec<Py<PyAny>>> {
 
 /// `index` as the pandas object: a MultiIndex when its labels carry row
 /// MultiIndex levels, else a flat Index.
+/// A DatetimeIndex field (year, month, dayofweek, ...) as pandas returns it:
+/// an Index of ints, float64 with NaN when a NaT is present (it was a list
+/// holding None; br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18).
+fn datetime_field_index<T: Into<i64>>(values: Vec<Option<T>>) -> PyIndex {
+    let any_nat = values.iter().any(Option::is_none);
+    let labels = values
+        .into_iter()
+        .map(|value| match value {
+            Some(value) if any_nat => IndexLabel::Float64(OrderedF64(value.into() as f64)),
+            Some(value) => IndexLabel::Int64(value.into()),
+            None => IndexLabel::Null(NullKind::NaN),
+        })
+        .collect();
+    PyIndex {
+        inner: Index::new(labels),
+    }
+}
+
+/// A DatetimeIndex boolean field (is_month_start, is_leap_year, ...) as pandas
+/// returns it: NaT reads as False (it was None; fvsao.18).
+fn nat_as_false(flags: Vec<Option<bool>>) -> Vec<bool> {
+    flags
+        .into_iter()
+        .map(|flag| flag.unwrap_or(false))
+        .collect()
+}
+
+/// A DatetimeIndex text field (day_name, month_name, strftime) as pandas
+/// returns it: an object Index with NaN for NaT (fvsao.18).
+fn datetime_text_index(values: Vec<Option<String>>) -> PyIndex {
+    let labels = values
+        .into_iter()
+        .map(|value| value.map_or(IndexLabel::Null(NullKind::NaN), IndexLabel::Utf8))
+        .collect();
+    PyIndex {
+        inner: Index::new(labels),
+    }
+}
+
 fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     if let Some(levels) = index.row_multiindex() {
         return Ok(Py::new(
@@ -1926,6 +1965,27 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
             },
         )?
         .into_any());
+    }
+    // Instants and durations come back as pandas' DatetimeIndex /
+    // TimedeltaIndex, with their accessors (df.index.year, .month_name(),
+    // .normalize(); groupby(df.index.month)); every index was a plain Index
+    // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18).
+    let labels = index.labels();
+    if !labels.is_empty() {
+        if labels
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+            && let Ok(inner) = DatetimeIndex::from_index(index.clone())
+        {
+            return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
+        }
+        if labels
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Timedelta64(_)))
+            && let Ok(inner) = TimedeltaIndex::from_index(index.clone())
+        {
+            return Ok(Py::new(py, PyTimedeltaIndex { inner })?.into_any());
+        }
     }
     Ok(Py::new(
         py,
@@ -3456,74 +3516,89 @@ impl PyDatetimeIndex {
     }
 
     #[getter]
-    fn year(&self) -> Vec<Option<i32>> {
-        self.inner.year()
+    fn year(&self) -> PyIndex {
+        datetime_field_index(self.inner.year())
     }
 
     #[getter]
-    fn month(&self) -> Vec<Option<u32>> {
-        self.inner.month()
+    fn month(&self) -> PyIndex {
+        datetime_field_index(self.inner.month())
     }
 
     #[getter]
-    fn day(&self) -> Vec<Option<u32>> {
-        self.inner.day()
+    fn day(&self) -> PyIndex {
+        datetime_field_index(self.inner.day())
     }
 
     #[getter]
-    fn hour(&self) -> Vec<Option<u32>> {
-        self.inner.hour()
+    fn hour(&self) -> PyIndex {
+        datetime_field_index(self.inner.hour())
     }
 
     #[getter]
-    fn minute(&self) -> Vec<Option<u32>> {
-        self.inner.minute()
+    fn minute(&self) -> PyIndex {
+        datetime_field_index(self.inner.minute())
     }
 
     #[getter]
-    fn second(&self) -> Vec<Option<u32>> {
-        self.inner.second()
+    fn second(&self) -> PyIndex {
+        datetime_field_index(self.inner.second())
     }
 
     #[getter]
-    fn microsecond(&self) -> Vec<Option<u32>> {
-        self.inner.microsecond()
+    fn microsecond(&self) -> PyIndex {
+        datetime_field_index(self.inner.microsecond())
     }
 
     #[getter]
-    fn nanosecond(&self) -> Vec<Option<u32>> {
-        self.inner.nanosecond()
+    fn nanosecond(&self) -> PyIndex {
+        datetime_field_index(self.inner.nanosecond())
     }
 
     #[getter]
-    fn dayofweek(&self) -> Vec<Option<u32>> {
-        self.inner.dayofweek()
+    fn dayofweek(&self) -> PyIndex {
+        datetime_field_index(self.inner.dayofweek())
     }
 
-    fn day_name(&self) -> Vec<Option<String>> {
-        self.inner.day_name()
+    #[pyo3(signature = (locale=None))]
+    fn day_name(&self, locale: Option<&str>) -> PyResult<PyIndex> {
+        require_default_locale(locale)?;
+        Ok(datetime_text_index(self.inner.day_name()))
     }
 
-    fn month_name(&self) -> Vec<Option<String>> {
-        self.inner.month_name()
+    #[pyo3(signature = (locale=None))]
+    fn month_name(&self, locale: Option<&str>) -> PyResult<PyIndex> {
+        require_default_locale(locale)?;
+        Ok(datetime_text_index(self.inner.month_name()))
     }
 
     #[getter]
-    fn is_leap_year(&self) -> Vec<Option<bool>> {
-        self.inner.is_leap_year()
+    fn is_leap_year(&self) -> Vec<bool> {
+        nat_as_false(self.inner.is_leap_year())
     }
 
     #[getter]
-    fn days_in_month(&self) -> Vec<Option<u32>> {
-        self.inner.days_in_month()
+    fn days_in_month(&self) -> PyIndex {
+        datetime_field_index(self.inner.days_in_month())
     }
 
-    fn to_list(&self) -> Vec<String> {
-        self.inner.format()
+    /// The instants as Timestamps, NaT kept, as pandas (these were ISO
+    /// strings; fvsao.18).
+    fn to_list(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .nanos()
+            .into_iter()
+            .map(|ns| {
+                scalar_to_py(
+                    py,
+                    &ns.map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64),
+                )
+            })
+            .collect()
     }
 
-    fn tolist(&self) -> Vec<String> {
-        self.to_list()
+    fn tolist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.to_list(py)
     }
 
     #[getter]
@@ -3535,16 +3610,27 @@ impl PyDatetimeIndex {
         self.inner.values()
     }
 
-    fn min(&self) -> Option<String> {
-        self.inner.min().map(format_datetime_ns)
+    // Timestamps (NaT when there is no instant), as pandas; these were
+    // formatted strings (fvsao.18).
+    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scalar_to_py(
+            py,
+            &Scalar::Datetime64(self.inner.min().unwrap_or(Timestamp::NAT)),
+        )
     }
 
-    fn max(&self) -> Option<String> {
-        self.inner.max().map(format_datetime_ns)
+    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scalar_to_py(
+            py,
+            &Scalar::Datetime64(self.inner.max().unwrap_or(Timestamp::NAT)),
+        )
     }
 
-    fn mean(&self) -> Option<String> {
-        self.inner.mean().map(format_datetime_ns)
+    fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scalar_to_py(
+            py,
+            &Scalar::Datetime64(self.inner.mean().unwrap_or(Timestamp::NAT)),
+        )
     }
 
     fn std(&self) -> Option<f64> {
@@ -3661,8 +3747,8 @@ impl PyDatetimeIndex {
             .collect()
     }
 
-    fn strftime(&self, format: &str) -> Vec<Option<String>> {
-        self.inner.strftime(format)
+    fn strftime(&self, date_format: &str) -> PyIndex {
+        datetime_text_index(self.inner.strftime(date_format))
     }
 
     fn copy(&self) -> Self {
@@ -3707,8 +3793,10 @@ impl PyDatetimeIndex {
                     "index out of bounds",
                 ));
             }
+            // A Timestamp (NaT for the sentinel), as pandas; iteration goes
+            // through here too (it gave the formatted string; fvsao.18).
             let nanos = self.inner.asi8()[pos];
-            return format_datetime_ns(nanos).into_py_any(py);
+            return scalar_to_py(py, &Scalar::Datetime64(nanos));
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let s_idx = slice.indices(self.inner.len() as isize)?;
@@ -4110,23 +4198,23 @@ impl PyDatetimeIndex {
     }
 
     #[getter]
-    fn day_of_week(&self) -> Vec<Option<u32>> {
-        self.inner.day_of_week()
+    fn day_of_week(&self) -> PyIndex {
+        datetime_field_index(self.inner.day_of_week())
     }
 
     #[getter]
-    fn day_of_year(&self) -> Vec<Option<u32>> {
-        self.inner.day_of_year()
+    fn day_of_year(&self) -> PyIndex {
+        datetime_field_index(self.inner.day_of_year())
     }
 
     #[getter]
-    fn dayofyear(&self) -> Vec<Option<u32>> {
-        self.inner.dayofyear()
+    fn dayofyear(&self) -> PyIndex {
+        datetime_field_index(self.inner.dayofyear())
     }
 
     #[getter]
-    fn daysinmonth(&self) -> Vec<Option<u32>> {
-        self.inner.daysinmonth()
+    fn daysinmonth(&self) -> PyIndex {
+        datetime_field_index(self.inner.daysinmonth())
     }
 
     fn delete(&self, loc: usize) -> PyResult<Self> {
@@ -4239,14 +4327,15 @@ impl PyDatetimeIndex {
         }
     }
 
+    // pandas' boolean field arrays read NaT as False.
     #[getter]
-    fn is_month_end(&self) -> Vec<Option<bool>> {
-        self.inner.is_month_end()
+    fn is_month_end(&self) -> Vec<bool> {
+        nat_as_false(self.inner.is_month_end())
     }
 
     #[getter]
-    fn is_month_start(&self) -> Vec<Option<bool>> {
-        self.inner.is_month_start()
+    fn is_month_start(&self) -> Vec<bool> {
+        nat_as_false(self.inner.is_month_start())
     }
 
     #[getter]
@@ -4255,23 +4344,23 @@ impl PyDatetimeIndex {
     }
 
     #[getter]
-    fn is_quarter_end(&self) -> Vec<Option<bool>> {
-        self.inner.is_quarter_end()
+    fn is_quarter_end(&self) -> Vec<bool> {
+        nat_as_false(self.inner.is_quarter_end())
     }
 
     #[getter]
-    fn is_quarter_start(&self) -> Vec<Option<bool>> {
-        self.inner.is_quarter_start()
+    fn is_quarter_start(&self) -> Vec<bool> {
+        nat_as_false(self.inner.is_quarter_start())
     }
 
     #[getter]
-    fn is_year_end(&self) -> Vec<Option<bool>> {
-        self.inner.is_year_end()
+    fn is_year_end(&self) -> Vec<bool> {
+        nat_as_false(self.inner.is_year_end())
     }
 
     #[getter]
-    fn is_year_start(&self) -> Vec<Option<bool>> {
-        self.inner.is_year_start()
+    fn is_year_start(&self) -> Vec<bool> {
+        nat_as_false(self.inner.is_year_start())
     }
 
     fn isocalendar(&self) -> PyResult<PyDataFrame> {
@@ -4330,8 +4419,8 @@ impl PyDatetimeIndex {
     }
 
     #[getter]
-    fn quarter(&self) -> Vec<Option<u32>> {
-        self.inner.quarter()
+    fn quarter(&self) -> PyIndex {
+        datetime_field_index(self.inner.quarter())
     }
 
     fn ravel(&self) -> Self {
@@ -4564,8 +4653,8 @@ impl PyDatetimeIndex {
     }
 
     #[getter]
-    fn weekday(&self) -> Vec<Option<u32>> {
-        self.inner.weekday()
+    fn weekday(&self) -> PyIndex {
+        datetime_field_index(self.inner.weekday())
     }
 
     #[pyo3(signature = (cond, other=None))]
@@ -6263,12 +6352,23 @@ impl PyTimedeltaIndex {
         self.inner.isin(&values)
     }
 
-    pub fn tolist(&self) -> Vec<Option<i64>> {
-        self.inner.tolist()
+    /// The durations as Timedeltas, NaT kept, as pandas (these were raw
+    /// nanosecond ints and None; fvsao.18).
+    pub fn tolist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .tolist()
+            .into_iter()
+            .map(|ns| {
+                scalar_to_py(
+                    py,
+                    &ns.map_or(Scalar::Null(NullKind::NaT), Scalar::Timedelta64),
+                )
+            })
+            .collect()
     }
 
-    pub fn to_list(&self) -> Vec<Option<i64>> {
-        self.inner.tolist()
+    pub fn to_list(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.tolist(py)
     }
 
     #[getter]
@@ -17354,13 +17454,9 @@ impl PyDataFrame {
             )?
             .into_any());
         }
-        Ok(Py::new(
-            py,
-            PyIndex {
-                inner: self.inner.index().clone(),
-            },
-        )?
-        .into_any())
+        // A DatetimeIndex/TimedeltaIndex where the labels are instants or
+        // durations, as the Series getter (fvsao.18).
+        row_index_to_py(py, self.inner.index())
     }
 
     #[getter]
@@ -39038,16 +39134,19 @@ mod tests {
         assert_eq!(dti.len(), 2);
         assert!(dti.is_monotonic_increasing());
 
-        assert_eq!(dti.year(), vec![Some(2024), Some(2024)]);
-        assert_eq!(dti.month(), vec![Some(1), Some(1)]);
-        assert_eq!(dti.day(), vec![Some(1), Some(2)]);
-        assert_eq!(dti.hour(), vec![Some(0), Some(0)]);
-        assert_eq!(dti.minute(), vec![Some(0), Some(0)]);
-        assert_eq!(dti.second(), vec![Some(0), Some(0)]);
-        assert_eq!(dti.microsecond(), vec![Some(0), Some(0)]);
-        assert_eq!(dti.nanosecond(), vec![Some(0), Some(0)]);
-        assert_eq!(dti.days_in_month(), vec![Some(31), Some(31)]);
-        assert_eq!(dti.is_leap_year(), vec![Some(true), Some(true)]);
+        // The fields are Indexes of ints, as pandas (fvsao.18).
+        let labels = |index: PyIndex| index.inner.labels().to_vec();
+        let ints = |values: [i64; 2]| values.map(IndexLabel::Int64).to_vec();
+        assert_eq!(labels(dti.year()), ints([2024, 2024]));
+        assert_eq!(labels(dti.month()), ints([1, 1]));
+        assert_eq!(labels(dti.day()), ints([1, 2]));
+        assert_eq!(labels(dti.hour()), ints([0, 0]));
+        assert_eq!(labels(dti.minute()), ints([0, 0]));
+        assert_eq!(labels(dti.second()), ints([0, 0]));
+        assert_eq!(labels(dti.microsecond()), ints([0, 0]));
+        assert_eq!(labels(dti.nanosecond()), ints([0, 0]));
+        assert_eq!(labels(dti.days_in_month()), ints([31, 31]));
+        assert_eq!(dti.is_leap_year(), vec![true, true]);
 
         assert_eq!(dti.asi8(), vec![nanos1, nanos2]);
         assert_eq!(dti.nunique(), 2);

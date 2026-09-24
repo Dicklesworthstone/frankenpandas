@@ -4183,3 +4183,43 @@ def test_frame_resample_reduces_every_column_like_pandas(numeric_only: bool) -> 
         s = fpd.Series(["a"], index=fpd.to_datetime(["2024-01-01"]))
         with pytest.raises(TypeError, match="numeric_only=True"):
             s.resample("D").mean(numeric_only=True)
+
+
+def _nan_as_text(values: Any) -> Any:
+    return ["nan" if isinstance(v, float) and v != v else v for v in values]
+
+
+def _dated_frame(m: Any) -> Any:
+    return m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=m.to_datetime(["2024-01-05", "2024-02-06", None]))
+
+
+TYPED_INDEX_CASES = {
+    "frame index class": lambda m: type(_dated_frame(m).index).__name__,
+    "series index class": lambda m: type(m.Series([1.0], index=m.to_datetime(["2024-01-01"])).index).__name__,
+    "resample index class": lambda m: type(_dated_frame(m).dropna().resample("D").sum().index).__name__,
+    "timedelta index class": lambda m: type(m.Series([1], index=m.to_timedelta(["1D"])).index).__name__,
+    "index.year": lambda m: _nan_as_text(list(_dated_frame(m).index.year)),
+    "index.dayofweek": lambda m: _nan_as_text(list(_dated_frame(m).index.dayofweek)),
+    "index.quarter": lambda m: _nan_as_text(list(_dated_frame(m).index.quarter)),
+    "index.month_name()": lambda m: _nan_as_text(list(_dated_frame(m).index.month_name())),
+    "index.strftime": lambda m: _nan_as_text(list(_dated_frame(m).index.strftime("%Y/%m"))),
+    "index.is_month_start": lambda m: list(_dated_frame(m).index.is_month_start),
+    "index.normalize()": lambda m: [str(v) for v in _dated_frame(m).index.normalize()],
+    "index item types": lambda m: [type(v).__name__ for v in _dated_frame(m).index],
+    "index.tolist() types": lambda m: [type(v).__name__ for v in _dated_frame(m).index.tolist()],
+    "index.min()": lambda m: str(_dated_frame(m).index.min()),
+    "TimedeltaIndex.tolist()": lambda m: [str(v) for v in m.to_timedelta(["1D", None]).tolist()],
+    # NEGATIVES: an index that is not all instants stays a plain Index.
+    "string index class": lambda m: type(m.Series([1], index=["a"]).index).__name__,
+    "int index class": lambda m: type(m.Series([1, 2], index=[5, 9]).index).__name__,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", sorted(TYPED_INDEX_CASES))
+def test_index_is_a_typed_datetime_index_like_pandas(case: str) -> None:
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18: .index was
+    # always a plain Index, so df.index.year / .month_name() / .normalize()
+    # raised; DatetimeIndex.tolist() and iteration gave strings.
+    run = TYPED_INDEX_CASES[case]
+    assert run(fpd) == run(pd)
