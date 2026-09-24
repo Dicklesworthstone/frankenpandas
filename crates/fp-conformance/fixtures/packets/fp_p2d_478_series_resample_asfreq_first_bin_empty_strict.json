@@ -29,22 +29,22 @@
   },
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "70907bc9628c21a836a1728213ddaa7651126dfa1340e0682bf3185a2e97fc52",
-    "generated_at": "2026-09-07T01:38:30Z"
+    "oracle_script_sha256": "c358c49792c2b79936368a5e2b31c31036507e1cd83be4fe408c46676a93f0ff",
+    "generated_at": "2026-09-24T18:40:20Z"
   },
   "expected_series": {
     "index": [
       {
-        "kind": "utf8",
-        "value": "2020-01-01"
+        "kind": "datetime64",
+        "value": 1577836800000000000
       },
       {
-        "kind": "utf8",
-        "value": "2020-01-02"
+        "kind": "datetime64",
+        "value": 1577923200000000000
       },
       {
-        "kind": "utf8",
-        "value": "2020-01-03"
+        "kind": "datetime64",
+        "value": 1578009600000000000
       }
     ],
     "values": [

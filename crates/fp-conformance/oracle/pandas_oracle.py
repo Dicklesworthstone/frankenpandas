@@ -6169,16 +6169,6 @@ def required_groupby_columns(payload: dict[str, Any], op_name: str) -> list[str]
     return columns
 
 
-def format_groupby_resample_bucket_label(value: Any, freq: str) -> str:
-    strftime = getattr(value, "strftime", None)
-    if callable(strftime):
-        try:
-            return strftime("%Y-%m-%d")
-        except (AttributeError, OverflowError, TypeError, ValueError):
-            return str(value)
-    return str(value)
-
-
 def normalize_groupby_resample_frame(frame, groupby_columns: list[str], freq: str):
     out = frame.copy()
     if getattr(out.index, "nlevels", 1) > 1:
@@ -6227,10 +6217,9 @@ def normalize_groupby_resample_frame(frame, groupby_columns: list[str], freq: st
                 rename_map[actual] = column
         if rename_map:
             out = out.rename(columns=rename_map)
-    labels = []
-    for label in out.index.tolist():
-        labels.append(format_groupby_resample_bucket_label(label, freq))
-    out.index = labels
+    # The bins stay pandas' Timestamps (typed datetime64 labels); they were
+    # stringified with %Y-%m-%d to match frankenpandas' string bins
+    # (br-frankenpandas-0yilt).
     return out
 
 
@@ -8527,10 +8516,11 @@ def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Resample handlers (RubyGoose, br-frankenpandas-zozby). These ops had fixtures
 # but no live handler, so they errored under --oracle live. The fixtures carry a
-# date-string index ("YYYY-MM-DD") and expect the resampled bins back in the
-# same string form, so we parse to a DatetimeIndex for the resample and then
-# stringify the result index with %Y-%m-%d (label_to_json would otherwise emit
-# "...  00:00:00"). pandas resample agg defaults are skipna, matching FP.
+# date-string index ("YYYY-MM-DD"), parsed to a DatetimeIndex for the resample.
+# The result's bins are pandas' Timestamps, written as typed datetime64 labels.
+# (They used to be stringified with %Y-%m-%d to match frankenpandas' string
+# bins, which hid that pandas returns a DatetimeIndex; br-frankenpandas-0yilt.)
+# pandas resample agg defaults are skipna, matching FP.
 # ---------------------------------------------------------------------------
 
 
@@ -8546,21 +8536,6 @@ def _datetime_index_from_json(pd, index_json: list, op_name: str):
         return pd.to_datetime([label_from_json(item) for item in index_json])
     except Exception as exc:
         raise OracleError(f"{op_name} could not parse datetime index: {exc}") from exc
-
-
-def _stringify_date_index(out):
-    out = out.copy()
-    formatted = []
-    for ts in out.index:
-        if hasattr(ts, "time") and (ts.hour != 0 or ts.minute != 0 or ts.second != 0 or ts.microsecond != 0 or ts.nanosecond != 0):
-            if ts.nanosecond == 0 and ts.microsecond == 0:
-                formatted.append(ts.strftime("%Y-%m-%d %H:%M:%S"))
-            else:
-                formatted.append(ts.isoformat())
-        else:
-            formatted.append(ts.strftime("%Y-%m-%d"))
-    out.index = formatted
-    return out
 
 
 def _resample_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
@@ -8599,7 +8574,7 @@ def op_series_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -> d
             out = getattr(resampled, agg)()
     except Exception as exc:
         raise OracleError(f"{op_name} failed: {exc}") from exc
-    return {"expected_series": series_to_expected(_stringify_date_index(out))}
+    return {"expected_series": series_to_expected(out)}
 
 def op_dataframe_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[str, Any]:
     frame = payload.get("frame")
@@ -8629,7 +8604,7 @@ def op_dataframe_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -
             out = getattr(resampled, agg)()
     except Exception as exc:
         raise OracleError(f"{op_name} failed: {exc}") from exc
-    expected_frame = dataframe_to_json(_stringify_date_index(out))
+    expected_frame = dataframe_to_json(out)
     expected_frame["column_order"] = [str(name) for name in out.columns.tolist()]
     return {"expected_frame": expected_frame}
 

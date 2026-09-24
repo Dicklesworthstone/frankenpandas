@@ -5,39 +5,108 @@
   "operation": "dataframe_resample_sum",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
-    "generated_at": "2026-09-01T06:10:55Z"
+    "oracle_script_sha256": "c358c49792c2b79936368a5e2b31c31036507e1cd83be4fe408c46676a93f0ff",
+    "generated_at": "2026-09-24T18:40:18Z"
   },
   "resample_freq": "2D",
   "frame": {
     "index": [
-      { "kind": "utf8", "value": "2024-01-01" },
-      { "kind": "utf8", "value": "2024-01-02" },
-      { "kind": "utf8", "value": "2024-01-03" },
-      { "kind": "utf8", "value": "2024-01-04" }
+      {
+        "kind": "utf8",
+        "value": "2024-01-01"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-02"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-03"
+      },
+      {
+        "kind": "utf8",
+        "value": "2024-01-04"
+      }
     ],
     "columns": {
       "a": [
-        { "kind": "float64", "value": 10.0 },
-        { "kind": "null", "value": "null" },
-        { "kind": "float64", "value": 30.0 },
-        { "kind": "float64", "value": 40.0 }
+        {
+          "kind": "float64",
+          "value": 10.0
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "float64",
+          "value": 30.0
+        },
+        {
+          "kind": "float64",
+          "value": 40.0
+        }
       ],
       "b": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 2.0 },
-        { "kind": "null", "value": "null" },
-        { "kind": "float64", "value": 4.0 }
+        {
+          "kind": "float64",
+          "value": 1.0
+        },
+        {
+          "kind": "float64",
+          "value": 2.0
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "float64",
+          "value": 4.0
+        }
       ]
     },
-    "column_order": ["a", "b"]
+    "column_order": [
+      "a",
+      "b"
+    ]
   },
   "expected_frame": {
-    "index": [{ "kind": "utf8", "value": "2024-01-01" }, { "kind": "utf8", "value": "2024-01-03" }],
+    "index": [
+      {
+        "kind": "datetime64",
+        "value": 1704067200000000000
+      },
+      {
+        "kind": "datetime64",
+        "value": 1704240000000000000
+      }
+    ],
     "columns": {
-      "a": [{ "kind": "float64", "value": 10.0 }, { "kind": "float64", "value": 70.0 }],
-      "b": [{ "kind": "float64", "value": 3.0 }, { "kind": "float64", "value": 4.0 }]
+      "a": [
+        {
+          "kind": "float64",
+          "value": 10.0
+        },
+        {
+          "kind": "float64",
+          "value": 70.0
+        }
+      ],
+      "b": [
+        {
+          "kind": "float64",
+          "value": 3.0
+        },
+        {
+          "kind": "float64",
+          "value": 4.0
+        }
+      ]
     },
-    "column_order": ["a", "b"]
+    "column_order": [
+      "a",
+      "b"
+    ]
   }
 }

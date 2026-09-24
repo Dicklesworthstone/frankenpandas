@@ -359,6 +359,7 @@ pub use fp_io::{
     write_orc_bytes,
     write_parquet,
     write_parquet_bytes,
+    write_parquet_bytes_with_compression,
     write_pickle,
     write_pickle_bytes,
     write_pickle_bytes_with_options,

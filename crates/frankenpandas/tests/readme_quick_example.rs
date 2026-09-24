@@ -1142,10 +1142,11 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = monthly.agg(&["sum", "size", "nunique"])?;
     let _ = monthly.aggregate(&["mean", "sem"])?;
     assert_eq!(monthly.keys().len(), 2);
+    // Resample bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
     assert_eq!(
         monthly
             .indices()
-            .get(&IndexLabel::Utf8("2024-01-31".into())),
+            .get(&IndexLabel::Datetime64(1_706_659_200_000_000_000)),
         Some(&vec![0, 1])
     );
     assert_eq!(monthly.groups(), monthly.indices());
@@ -1262,8 +1263,10 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = drs.prod()?;
     let _ = drs.aggregate(&["sem", "size", "nunique"])?;
     assert_eq!(drs.keys().len(), 2);
+    // Resample bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
     assert_eq!(
-        drs.indices().get(&IndexLabel::Utf8("2024-01-31".into())),
+        drs.indices()
+            .get(&IndexLabel::Datetime64(1_706_659_200_000_000_000)),
         Some(&vec![0, 1])
     );
     assert_eq!(drs.groups(), drs.indices());
@@ -6822,6 +6825,7 @@ const FP_IO_EXPORTED_IO_FNS: &[&str] = &[
     "write_orc_bytes",
     "write_parquet",
     "write_parquet_bytes",
+    "write_parquet_bytes_with_compression",
     "write_pickle",
     "write_pickle_bytes",
     "write_pickle_bytes_with_options",
@@ -6934,6 +6938,7 @@ fn facade_io_surface_compile_guard() {
         fp::write_orc_bytes,
         fp::write_parquet,
         fp::write_parquet_bytes,
+        fp::write_parquet_bytes_with_compression,
         fp::write_pickle,
         fp::write_pickle_bytes,
         fp::write_pickle_bytes_with_options,

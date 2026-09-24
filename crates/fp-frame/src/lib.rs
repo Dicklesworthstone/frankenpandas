@@ -33971,6 +33971,15 @@ fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
     }
 }
 
+/// A resample bin's label: its edge as a Timestamp, as pandas labels a
+/// resample result (a DatetimeIndex). The bins are keyed by the edge's
+/// formatted text ("YYYY-MM-DD", "YYYY-MM-DDTHH:MM:SS[.f]"), which parses back
+/// exactly; they surfaced as those strings (br-frankenpandas-0yilt).
+fn resample_bin_label(key: &str) -> IndexLabel {
+    let text = IndexLabel::Utf8(key.to_owned());
+    resample_label_to_ns(&text).map_or(text, IndexLabel::Datetime64)
+}
+
 /// Convert a datelike index label to a month ordinal (year*12 + month-1) for
 /// multiplied-calendar resample bucketing. Per gauntlet bead 2.5.
 fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
@@ -34675,7 +34684,7 @@ impl Resample<'_> {
         let mut out_vals = Vec::with_capacity(order.len());
 
         for key in &order {
-            out_labels.push(IndexLabel::Utf8(key.clone()));
+            out_labels.push(resample_bin_label(key));
             let group_vals: Vec<Scalar> = groups[key].iter().map(|&i| vals[i].clone()).collect();
             out_vals.push(agg(&group_vals));
         }
@@ -34707,7 +34716,7 @@ impl Resample<'_> {
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out_f64.push(groups[key].iter().map(|&i| vals[i]).sum::<f64>());
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -34733,7 +34742,7 @@ impl Resample<'_> {
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out_f64.push(groups[key].iter().map(|&i| vals[i]).sum::<f64>());
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -34777,7 +34786,7 @@ impl Resample<'_> {
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 let g = &groups[key];
                 out_f64.push(if g.is_empty() {
                     f64::NAN
@@ -34807,7 +34816,7 @@ impl Resample<'_> {
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 let g = &groups[key];
                 out_f64.push(if g.is_empty() {
                     f64::NAN
@@ -34932,7 +34941,7 @@ impl Resample<'_> {
         let mut bidx = 0usize;
         while cursor <= last && bidx < n {
             if let Some(key) = resample_month_end_key(cursor) {
-                out_labels.push(IndexLabel::Utf8(key));
+                out_labels.push(resample_bin_label(&key));
                 let c = count[bidx];
                 out_f64.push(if c > 0 {
                     if is_sum {
@@ -35031,7 +35040,7 @@ impl Resample<'_> {
             let mut bidx = 0usize;
             while cursor <= last && bidx < n {
                 if let Some(key) = resample_month_end_key(cursor) {
-                    out_labels.push(IndexLabel::Utf8(key));
+                    out_labels.push(resample_bin_label(&key));
                     out.push(if count[bidx] > 0 {
                         Scalar::Float64(ext[bidx])
                     } else {
@@ -35087,7 +35096,7 @@ impl Resample<'_> {
         let mut out_f64 = Vec::with_capacity(n);
         for (bidx, (&s, &c)) in sum.iter().zip(count.iter()).enumerate() {
             if let Some(key) = key_of(min + bidx as i64) {
-                out_labels.push(IndexLabel::Utf8(key));
+                out_labels.push(resample_bin_label(&key));
                 out_f64.push(if c > 0 {
                     if is_sum { s } else { s / c as f64 }
                 } else if is_sum {
@@ -35148,106 +35157,47 @@ impl Resample<'_> {
         if min_ns > max_ns {
             return None; // no valid labels
         }
-        let origin = min_ns;
+        // pandas' default origin='start_day': the bins are anchored at midnight
+        // of the first day, so the first bin starts at the last grid edge at or
+        // before the first stamp - not at the first stamp itself, which put the
+        // edges of data off the grid (01:30 with '3h') in the wrong place
+        // (br-frankenpandas-0yilt). Same origin as the generic sub-day path.
+        let origin_day = min_ns.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY;
+        let origin = min_ns - (min_ns - origin_day).rem_euclid(bucket_ns);
         let bmax = (max_ns - origin).div_euclid(bucket_ns);
-        // Match the dense_done gate for dense-ish ranges. If the range is too
-        // sparse but the input is already ordered by bin, reduce observed runs
-        // directly instead of falling back to build_groups' String key path.
+        // Every bin from the first to the last is emitted, empty ones as 0.0
+        // (sum) / NaN (mean), as pandas does; this path dropped them. A range too
+        // sparse for a dense table goes to the generic path, which emits them too.
         if (bmax as i128 + 1) > (labels.len() as i128 * 4).max(1 << 16) {
-            let mut out_labels = Vec::with_capacity(labels.len());
-            let mut out_f64 = Vec::with_capacity(labels.len());
-            let mut current_bin: Option<i64> = None;
-            let mut current_sum = 0.0_f64;
-            let mut current_count = 0_i64;
-
-            let mut flush_bin = |bin: i64, sum: f64, count: i64| {
-                if count > 0 {
-                    let bin_start_ns = origin + bin * bucket_ns;
-                    out_labels.push(IndexLabel::Datetime64(bin_start_ns));
-                    out_f64.push(if is_sum { sum } else { sum / count as f64 });
-                }
-            };
-
-            for (i, l) in labels.iter().enumerate() {
-                let Some(ns) = resample_label_to_ns(l) else {
-                    continue;
-                };
-                let bin = (ns - origin).div_euclid(bucket_ns);
-                match current_bin {
-                    Some(prev) if bin < prev => return None,
-                    Some(prev) if bin != prev => {
-                        flush_bin(prev, current_sum, current_count);
-                        current_bin = Some(bin);
-                        current_sum = vals[i];
-                        current_count = 1;
-                    }
-                    Some(_) => {
-                        current_sum += vals[i];
-                        current_count += 1;
-                    }
-                    None => {
-                        current_bin = Some(bin);
-                        current_sum = vals[i];
-                        current_count = 1;
-                    }
-                }
-            }
-            if let Some(bin) = current_bin {
-                flush_bin(bin, current_sum, current_count);
-            }
-            let index = Index::new(out_labels).rename_index(self.series.index().name());
-            return Some(Series::new(
-                self.series.name(),
-                index,
-                Column::from_f64_values(out_f64),
-            ));
+            return None;
         }
         let nb = (bmax + 1) as usize;
         let mut sum = vec![0.0_f64; nb];
         let mut count = vec![0_i64; nb];
-        let mut occupied_bins = 0usize;
         for (i, l) in labels.iter().enumerate() {
             if let Some(ns) = resample_label_to_ns(l) {
                 let didx = (ns - origin).div_euclid(bucket_ns) as usize;
-                if count[didx] == 0 {
-                    occupied_bins += 1;
-                }
                 sum[didx] += vals[i];
                 count[didx] += 1;
             }
         }
-        let mut out_f64 = Vec::with_capacity(occupied_bins);
-        let index = if occupied_bins == nb {
-            for didx in 0..nb {
-                out_f64.push(if is_sum {
-                    sum[didx]
-                } else {
-                    sum[didx] / count[didx] as f64
-                });
-            }
-            Index::from_datetime64_affine_range(origin, bucket_ns, nb).unwrap_or_else(|| {
+        let out_f64: Vec<f64> = sum
+            .iter()
+            .zip(&count)
+            .map(|(&total, &n)| match (is_sum, n) {
+                (true, _) => total,
+                (false, 0) => f64::NAN,
+                (false, n) => total / n as f64,
+            })
+            .collect();
+        let index = Index::from_datetime64_affine_range(origin, bucket_ns, nb)
+            .unwrap_or_else(|| {
                 let labels = (0..nb)
                     .map(|didx| origin + didx as i64 * bucket_ns)
                     .collect();
                 Index::from_datetime64(labels)
             })
-        } else {
-            let mut out_labels = Vec::with_capacity(occupied_bins);
-            for didx in 0..nb {
-                if count[didx] == 0 {
-                    continue;
-                }
-                let bin_start_ns = origin + didx as i64 * bucket_ns;
-                out_labels.push(bin_start_ns);
-                out_f64.push(if is_sum {
-                    sum[didx]
-                } else {
-                    sum[didx] / count[didx] as f64
-                });
-            }
-            Index::from_datetime64(out_labels)
-        }
-        .rename_index(self.series.index().name());
+            .rename_index(self.series.index().name());
         Some(Series::new(
             self.series.name(),
             index,
@@ -35266,6 +35216,15 @@ impl Resample<'_> {
         let IndexLabel::Datetime64(first_ns) = labels[0] else {
             return None;
         };
+        // The stamps are their own bins only on the grid pandas anchors at
+        // midnight of the first day (origin='start_day').
+        if first_ns
+            .rem_euclid(Timedelta::NANOS_PER_DAY)
+            .rem_euclid(bucket_ns)
+            != 0
+        {
+            return None;
+        }
         for (i, label) in labels.iter().enumerate() {
             let IndexLabel::Datetime64(ns) = label else {
                 return None;
@@ -35298,7 +35257,7 @@ impl Resample<'_> {
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out.push(Scalar::Int64(groups[key].len() as i64));
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -35382,7 +35341,7 @@ impl Resample<'_> {
                     };
                     Scalar::Float64(v.expect("non-empty bin"))
                 };
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out.push(s);
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -35419,7 +35378,7 @@ impl Resample<'_> {
                     };
                     Scalar::Int64(v.expect("non-empty bin"))
                 };
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out.push(s);
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -35452,7 +35411,7 @@ impl Resample<'_> {
                     let idx = if want_last { g[g.len() - 1] } else { g[0] };
                     Scalar::Int64(data[idx])
                 };
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out.push(s);
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -35515,7 +35474,7 @@ impl Resample<'_> {
         let mut out_vals = Vec::with_capacity(order.len());
 
         for key in &order {
-            out_labels.push(IndexLabel::Utf8(key.clone()));
+            out_labels.push(resample_bin_label(key));
             let group_vals: Vec<Scalar> = groups[key].iter().map(|&i| vals[i].clone()).collect();
             out_vals.push(func(&group_vals)?);
         }
@@ -35587,7 +35546,7 @@ impl Resample<'_> {
                     let var = ssd / (n - 1) as f64;
                     Scalar::Float64(if want_std { var.sqrt() } else { var })
                 };
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out.push(s);
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -35633,7 +35592,7 @@ impl Resample<'_> {
                 let mut out_f64 = Vec::with_capacity(order.len());
                 let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
                 for key in &order {
-                    out_labels.push(IndexLabel::Utf8(key.clone()));
+                    out_labels.push(resample_bin_label(key));
                     let mut bucket: Vec<f64> = groups[key].iter().map(|&i| vals[i]).collect();
                     let n = bucket.len();
                     let mid = n / 2;
@@ -35672,7 +35631,7 @@ impl Resample<'_> {
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out_f64.push(groups[key].iter().map(|&i| vals[i]).product::<f64>());
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -35822,7 +35781,7 @@ impl Resample<'_> {
     #[must_use]
     pub fn keys(&self) -> Vec<IndexLabel> {
         let (order, _) = self.build_groups();
-        order.into_iter().map(IndexLabel::Utf8).collect()
+        order.iter().map(|key| resample_bin_label(key)).collect()
     }
 
     /// Mapping from bucket labels to source row positions.
@@ -35830,8 +35789,8 @@ impl Resample<'_> {
     pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
         let (order, groups) = self.build_groups();
         order
-            .into_iter()
-            .map(|key| (IndexLabel::Utf8(key.clone()), groups[&key].clone()))
+            .iter()
+            .map(|key| (resample_bin_label(key), groups[key].clone()))
             .collect()
     }
 
@@ -35930,8 +35889,7 @@ impl Resample<'_> {
         keys: &[String],
         out_vals: Vec<Scalar>,
     ) -> Result<Series, FrameError> {
-        let out_labels: Vec<IndexLabel> =
-            keys.iter().map(|k| IndexLabel::Utf8(k.clone())).collect();
+        let out_labels: Vec<IndexLabel> = keys.iter().map(|k| resample_bin_label(k)).collect();
         // Per br-frankenpandas-ur5fl: pandas Resampler.<agg>() returns a
         // Series whose index.name == source.index.name.
         let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -36108,7 +36066,7 @@ impl Resample<'_> {
                 let mut out_labels = Vec::with_capacity(order.len());
                 let mut out_f64 = Vec::with_capacity(order.len());
                 for key in &order {
-                    out_labels.push(IndexLabel::Utf8(key.clone()));
+                    out_labels.push(resample_bin_label(key));
                     let mut bucket: Vec<f64> = groups[key].iter().map(|&i| vals[i]).collect();
                     let n = bucket.len();
                     let val = if n == 1 {
@@ -36176,7 +36134,7 @@ impl Resample<'_> {
                     // (br-frankenpandas-7hxqv).
                     Scalar::Float64((ssd / (n - 1) as f64 / n as f64).sqrt())
                 };
-                out_labels.push(IndexLabel::Utf8(key.clone()));
+                out_labels.push(resample_bin_label(key));
                 out.push(s);
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -36240,7 +36198,7 @@ impl Resample<'_> {
         let mut closes = Vec::with_capacity(order.len());
 
         for key in &order {
-            labels.push(IndexLabel::Utf8(key.clone()));
+            labels.push(resample_bin_label(key));
             let nums: Vec<f64> = groups[key]
                 .iter()
                 .filter_map(|&idx| {
@@ -37515,7 +37473,7 @@ impl<'a> DataFrameResample<'a> {
     #[must_use]
     pub fn keys(&self) -> Vec<IndexLabel> {
         let (order, _) = self.build_groups();
-        order.into_iter().map(IndexLabel::Utf8).collect()
+        order.iter().map(|key| resample_bin_label(key)).collect()
     }
 
     /// Mapping from bucket labels to source row positions.
@@ -37523,8 +37481,8 @@ impl<'a> DataFrameResample<'a> {
     pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
         let (order, groups) = self.build_groups();
         order
-            .into_iter()
-            .map(|key| (IndexLabel::Utf8(key.clone()), groups[&key].clone()))
+            .iter()
+            .map(|key| (resample_bin_label(key), groups[key].clone()))
             .collect()
     }
 
@@ -45551,12 +45509,10 @@ impl SeriesGroupByResample<'_, '_> {
             )?;
             let resampled = agg(&group_series, &self.freq)?;
             let group_label = &order[group_pos];
-            for (bucket_label, value) in resampled
-                .index()
-                .labels()
-                .iter()
-                .zip(resampled.values().iter())
-            {
+            // The bins print as their repr does: dates alone when every bin
+            // falls on midnight.
+            let bucket_labels = repr_index_labels(resampled.index(), resampled.len());
+            for (bucket_label, value) in bucket_labels.iter().zip(resampled.values().iter()) {
                 out_labels.push(IndexLabel::Utf8(format!("{group_label}, {bucket_label}")));
                 out_values.push(value.clone());
             }
@@ -57020,14 +56976,42 @@ fn parse_tz_aware_datetime(s: &str) -> Result<ParsedAwareDateTime, FrameError> {
     )))
 }
 
+/// The first `show` index labels as a repr prints them: a datetime index whose
+/// every timestamp falls on midnight prints dates alone, as pandas prints a
+/// normalized DatetimeIndex ("2024-01-31", not "2024-01-31 00:00:00").
+fn repr_index_labels(index: &Index, show: usize) -> Vec<String> {
+    const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+    let labels = index.labels();
+    let dates_only = labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Datetime64(_)))
+        && labels.iter().all(|label| match label {
+            IndexLabel::Datetime64(ns) => {
+                *ns == Timestamp::NAT || ns.rem_euclid(NANOS_PER_DAY) == 0
+            }
+            IndexLabel::Null(NullKind::NaT) => true,
+            _ => false,
+        });
+    labels
+        .iter()
+        .take(show)
+        .map(|label| match label {
+            IndexLabel::Datetime64(ns) if dates_only && *ns != Timestamp::NAT => {
+                let (year, month, day) = DatetimeAccessor::datetime64_civil_from_nanos(*ns);
+                format!("{year:04}-{month:02}-{day:02}")
+            }
+            _ => label.to_string(),
+        })
+        .collect()
+}
+
 impl std::fmt::Display for Series {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let max_rows = 60;
         let len = self.len();
         let show = len.min(max_rows);
-        for i in 0..show {
-            let label = &self.index.labels()[i];
-            let val = &self.column.values()[i];
+        let labels = repr_index_labels(&self.index, show);
+        for (label, val) in labels.iter().zip(self.column.values()) {
             writeln!(f, "{label}    {}", format_repr_scalar(val))?;
         }
         if len > max_rows {
@@ -57063,6 +57047,30 @@ fn format_repr_scalar(value: &Scalar) -> String {
 
 #[cfg(test)]
 #[test]
+fn repr_prints_a_midnight_datetime_index_as_dates_0yilt() {
+    // pandas 2.2.3: Series([1.], index=to_datetime(['2024-01-31'])) prints
+    // "2024-01-31    1.0"; one non-midnight stamp prints every label in full.
+    const DAY: i64 = 86_400_000_000_000;
+    let midnight = Index::new(vec![
+        IndexLabel::Datetime64(19_753 * DAY),
+        IndexLabel::Null(NullKind::NaT),
+    ]);
+    assert_eq!(repr_index_labels(&midnight, 2), ["2024-01-31", "NaT"]);
+    let hourly = Index::new(vec![
+        IndexLabel::Datetime64(19_753 * DAY),
+        IndexLabel::Datetime64(19_753 * DAY + 3_600_000_000_000),
+    ]);
+    // NEGATIVE: a time of day keeps the full stamps, and text stays text.
+    assert_eq!(
+        repr_index_labels(&hourly, 2),
+        ["2024-01-31 00:00:00", "2024-01-31 01:00:00"]
+    );
+    let text = Index::new(vec![IndexLabel::Utf8("2024-01-31".to_owned())]);
+    assert_eq!(repr_index_labels(&text, 1), ["2024-01-31"]);
+}
+
+#[cfg(test)]
+#[test]
 fn repr_float64_keeps_the_decimal_point_93snp() {
     assert_eq!(format_repr_scalar(&Scalar::Float64(2.0)), "2.0");
     assert_eq!(format_repr_scalar(&Scalar::Float64(-0.0)), "-0.0");
@@ -57076,15 +57084,8 @@ impl std::fmt::Display for DataFrame {
         // Compute column widths
         let mut col_widths: Vec<usize> = self.column_order.iter().map(|name| name.len()).collect();
         // Also compute index label width
-        let idx_width = self
-            .index
-            .labels()
-            .iter()
-            .take(max_rows)
-            .map(|l| format!("{l}").len())
-            .max()
-            .unwrap_or(0)
-            .max(5);
+        let labels = repr_index_labels(&self.index, max_rows);
+        let idx_width = labels.iter().map(String::len).max().unwrap_or(0).max(5);
 
         // Measure value widths
         let show = len.min(max_rows);
@@ -57106,9 +57107,8 @@ impl std::fmt::Display for DataFrame {
         writeln!(f)?;
 
         // Data rows
-        for row in 0..show {
-            let label = &self.index.labels()[row];
-            write!(f, "{:<width$}", format!("{label}"), width = idx_width + 2)?;
+        for (row, label) in labels.iter().enumerate().take(show) {
+            write!(f, "{label:<width$}", width = idx_width + 2)?;
             for (col_idx, name) in self.column_order.iter().enumerate() {
                 let val = &self.columns[name].values()[row];
                 write!(
@@ -106972,11 +106972,35 @@ mod tests {
         }
     }
 
-    fn assert_utf8_index_labels(index: &Index, expected: &[&str]) {
-        assert_eq!(index.labels().len(), expected.len());
-        for (label, expected_label) in index.labels().iter().zip(expected) {
-            assert_eq!(expect_utf8_label(label), *expected_label);
-        }
+    /// A resample result's bins as their dates ("2024-01-31"), requiring
+    /// Timestamp labels as pandas gives: a text label shows as `Utf8("...")`
+    /// and fails the comparison (br-frankenpandas-0yilt).
+    fn resample_bin_dates(series: &Series) -> Vec<String> {
+        series
+            .index()
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(ns) => {
+                    let (year, month, day) =
+                        super::DatetimeAccessor::datetime64_civil_from_nanos(*ns);
+                    format!("{year:04}-{month:02}-{day:02}")
+                }
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// Resample bins are Timestamps, as pandas labels them (they were the
+    /// dates' text, br-frankenpandas-0yilt).
+    fn assert_datetime_index_labels(index: &Index, expected: &[&str]) {
+        let expected: Vec<IndexLabel> = expected
+            .iter()
+            .map(|date| {
+                IndexLabel::Datetime64(parse_datetime64_nanos(date).expect("expected a date"))
+            })
+            .collect();
+        assert_eq!(index.labels(), expected.as_slice());
     }
 
     fn assert_int64_index_labels(index: &Index, expected: &[i64]) {
@@ -155212,17 +155236,7 @@ mod tests {
         )
         .unwrap();
         let r = s.resample("D");
-        let labels = |series: &Series| -> Vec<String> {
-            series
-                .index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    fp_index::IndexLabel::Utf8(k) => k.clone(),
-                    other => panic!("unexpected label {other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
 
         // asfreq: exact bin-edge lookup — 03 has no 00:00 observation, and the
         // 12:00 value inside the bucket is NOT picked up.
@@ -155466,22 +155480,16 @@ mod tests {
         )
         .unwrap();
         let resample = s.resample("M");
+        // Bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
+        let bin = |date: &str| IndexLabel::Datetime64(parse_datetime64_nanos(date).unwrap());
 
-        assert_eq!(
-            resample.keys(),
-            vec![
-                IndexLabel::Utf8("2024-01-31".into()),
-                IndexLabel::Utf8("2024-02-29".into())
-            ]
-        );
+        assert_eq!(resample.keys(), vec![bin("2024-01-31"), bin("2024-02-29")]);
         assert_eq!(resample.ngroups(), 2);
         assert_eq!(resample.ndim(), 1);
         assert_eq!(resample.grouper(), "M");
         assert!(resample.exclusions().is_empty());
         assert_eq!(
-            resample
-                .indices()
-                .get(&IndexLabel::Utf8("2024-01-31".into())),
+            resample.indices().get(&bin("2024-01-31")),
             Some(&vec![0, 1])
         );
         assert_eq!(resample.get_group("2024-02-29").unwrap().len(), 3);
@@ -156840,12 +156848,9 @@ mod tests {
         assert_eq!(resample.ngroups(), 2);
         assert_eq!(resample.ndim(), 2);
         assert_eq!(resample.level(), "M");
-        assert_eq!(
-            resample
-                .groups()
-                .get(&IndexLabel::Utf8("2024-02-29".into())),
-            Some(&vec![2, 3])
-        );
+        // Bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
+        let february = IndexLabel::Datetime64(parse_datetime64_nanos("2024-02-29").unwrap());
+        assert_eq!(resample.groups().get(&february), Some(&vec![2, 3]));
         assert_eq!(resample.get_group("2024-01-31").unwrap().len(), 2);
 
         let aggregate = resample
@@ -161385,20 +161390,22 @@ mod tests {
         assert!((as_f(&nvals[3]) - 4.0).abs() < 1e-12);
 
         // The bucket labels are the real TIME buckets, not a positional 0..len.
-        // Resample emits its buckets as `IndexLabel::Utf8` period keys (verified
-        // against the emit sites in the Resample engine), so the variant check is
-        // load-bearing here: had the group index been replaced with the positional
-        // unit-range shortcut that grouped rolling/ewm legitimately use, the labels
-        // would come back as Int64 0,1,0,1 — which would still satisfy the
-        // equality/inequality assertions below, so those alone would NOT catch it.
+        // Resample emits its buckets as Timestamps (`IndexLabel::Datetime64`, as
+        // pandas does; they were Utf8 date keys before br-frankenpandas-0yilt), so
+        // the variant check is load-bearing here: had the group index been replaced
+        // with the positional unit-range shortcut that grouped rolling/ewm
+        // legitimately use, the labels would come back as Int64 0,1,0,1 — which
+        // would still satisfy the equality/inequality assertions below, so those
+        // alone would NOT catch it.
         let labels = summed.index().labels();
         assert_eq!(labels.len(), 4);
         for label in labels {
             assert!(
-                matches!(label, IndexLabel::Utf8(_)),
-                "grouped resample must keep Utf8 period bucket labels, got {label:?}"
+                matches!(label, IndexLabel::Datetime64(_)),
+                "grouped resample must keep Timestamp bucket labels, got {label:?}"
             );
         }
+        assert_eq!(labels[1], IndexLabel::Datetime64(86_400_000_000_000));
         assert_eq!(
             labels[0], labels[2],
             "both groups start at the same day-0 bucket"
@@ -172081,7 +172088,7 @@ mod tests {
         .unwrap();
 
         let size = s.resample("M").size().unwrap();
-        assert_utf8_index_labels(size.index(), &["2024-01-31", "2024-02-29", "2024-03-31"]);
+        assert_datetime_index_labels(size.index(), &["2024-01-31", "2024-02-29", "2024-03-31"]);
         assert_eq!(
             size.values(),
             &[Scalar::Int64(2), Scalar::Int64(0), Scalar::Int64(1)],
@@ -174776,7 +174783,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.column_names(), vec!["grp", "val"]);
         assert_eq!(result.len(), 4);
-        assert_utf8_index_labels(
+        assert_datetime_index_labels(
             result.index(),
             &["2024-01-31", "2024-02-29", "2024-01-31", "2024-02-29"],
         );
@@ -174847,7 +174854,7 @@ mod tests {
 
         assert_eq!(result.column_names(), vec!["grp", "val"]);
         assert_eq!(result.len(), 4);
-        assert_utf8_index_labels(
+        assert_datetime_index_labels(
             result.index(),
             &["2024-01-31", "2024-02-29", "2024-01-31", "2024-02-29"],
         );
@@ -175036,7 +175043,7 @@ mod tests {
 
         assert_eq!(result.column_names(), vec!["grp", "val"]);
         assert_eq!(result.len(), 4);
-        assert_utf8_index_labels(
+        assert_datetime_index_labels(
             result.index(),
             &["2024-01-31", "2024-02-29", "2024-01-31", "2024-02-29"],
         );
@@ -175119,7 +175126,7 @@ mod tests {
                 4,
                 "{label}: expected 4 (group, bucket) rows, got an empty frame"
             );
-            assert_utf8_index_labels(
+            assert_datetime_index_labels(
                 result.index(),
                 &["2024-01-31", "2024-02-29", "2024-01-31", "2024-02-29"],
             );
@@ -175210,7 +175217,7 @@ mod tests {
             vec!["grp", "tag"],
             "the utf8 column must survive count, not be dropped"
         );
-        assert_utf8_index_labels(
+        assert_datetime_index_labels(
             counted.index(),
             &[
                 "2024-01-31",
@@ -175791,7 +175798,7 @@ mod tests {
         ];
 
         assert_eq!(min_result.column_names(), vec!["grp", "val"]);
-        assert_utf8_index_labels(min_result.index(), expected_index);
+        assert_datetime_index_labels(min_result.index(), expected_index);
         assert_eq!(min_result.column("grp").unwrap().values(), expected_groups);
         assert_eq!(
             min_result.column("val").unwrap().values(),
@@ -175804,7 +175811,7 @@ mod tests {
         );
 
         assert_eq!(max_result.column_names(), vec!["grp", "val"]);
-        assert_utf8_index_labels(max_result.index(), expected_index);
+        assert_datetime_index_labels(max_result.index(), expected_index);
         assert_eq!(max_result.column("grp").unwrap().values(), expected_groups);
         assert_eq!(
             max_result.column("val").unwrap().values(),
@@ -175883,7 +175890,7 @@ mod tests {
         ];
 
         assert_eq!(first_result.column_names(), vec!["grp", "val"]);
-        assert_utf8_index_labels(first_result.index(), expected_index);
+        assert_datetime_index_labels(first_result.index(), expected_index);
         assert_eq!(
             first_result.column("grp").unwrap().values(),
             expected_groups
@@ -175899,7 +175906,7 @@ mod tests {
         );
 
         assert_eq!(last_result.column_names(), vec!["grp", "val"]);
-        assert_utf8_index_labels(last_result.index(), expected_index);
+        assert_datetime_index_labels(last_result.index(), expected_index);
         assert_eq!(last_result.column("grp").unwrap().values(), expected_groups);
         assert_eq!(
             last_result.column("val").unwrap().values(),
@@ -175963,8 +175970,8 @@ mod tests {
 
         assert_eq!(firsts.column_names(), vec!["grp", "val"]);
         assert_eq!(lasts.column_names(), vec!["grp", "val"]);
-        assert_utf8_index_labels(firsts.index(), &["2024-01-31", "2024-01-31"]);
-        assert_utf8_index_labels(lasts.index(), &["2024-01-31", "2024-01-31"]);
+        assert_datetime_index_labels(firsts.index(), &["2024-01-31", "2024-01-31"]);
+        assert_datetime_index_labels(lasts.index(), &["2024-01-31", "2024-01-31"]);
         assert_eq!(
             firsts.column("grp").unwrap().values(),
             &[Scalar::Utf8("a".to_string()), Scalar::Utf8("b".to_string()),]
@@ -176031,7 +176038,7 @@ mod tests {
 
         assert_eq!(firsts.column_names(), vec!["grp", "val"]);
         assert_eq!(lasts.column_names(), vec!["grp", "val"]);
-        assert_utf8_index_labels(
+        assert_datetime_index_labels(
             firsts.index(),
             &["2024-01-31", "2024-02-29", "2024-01-31", "2024-02-29"],
         );
@@ -176129,7 +176136,7 @@ mod tests {
         assert_eq!(firsts_vals, lasts_vals);
         assert_eq!(firsts.column_names(), vec!["grp", "val"]);
         assert_eq!(lasts.column_names(), vec!["grp", "val"]);
-        assert_utf8_index_labels(
+        assert_datetime_index_labels(
             firsts.index(),
             &["2024-01-31", "2024-02-29", "2024-01-31", "2024-02-29"],
         );
@@ -201993,6 +202000,59 @@ mod tests {
     }
 
     #[test]
+    fn subdaily_resample_fills_empty_bins_from_midnight_like_pandas_0yilt() {
+        // pandas 2.2.3, stamps 01:30, 02:00, 07:00 on 2024-01-01, values 1, 2, 7:
+        //   resample('3h').sum()  -> 00:00 3.0, 03:00 0.0, 06:00 7.0
+        //   resample('3h').mean() -> 00:00 1.5, 03:00 NaN, 06:00 7.0
+        // The typed fast path dropped the empty 03:00 bin and anchored the bins
+        // at 01:30 instead of midnight (origin='start_day').
+        const HOUR: i64 = 3_600_000_000_000;
+        let day = 1_704_067_200_000_000_000_i64; // 2024-01-01T00:00
+        let s = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::Datetime64(day + 3 * HOUR / 2),
+                IndexLabel::Datetime64(day + 2 * HOUR),
+                IndexLabel::Datetime64(day + 7 * HOUR),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(7.0),
+            ],
+        )
+        .unwrap();
+        let bins = [day, day + 3 * HOUR, day + 6 * HOUR].map(IndexLabel::Datetime64);
+        let sum = s.resample("3h").sum().unwrap();
+        assert_eq!(sum.index().labels(), &bins);
+        assert_eq!(sum.values(), [3.0, 0.0, 7.0].map(Scalar::Float64));
+        let mean = s.resample("3h").mean().unwrap();
+        assert_eq!(mean.index().labels(), &bins);
+        assert_eq!(mean.values()[0], Scalar::Float64(1.5));
+        assert!(mean.values()[1].is_missing());
+        assert_eq!(mean.values()[2], Scalar::Float64(7.0));
+        // NEGATIVE: stamps a whole bucket apart but off the midnight grid are
+        // not their own bins (01:30, 04:30, 07:30 -> 00:00, 03:00, 06:00).
+        let off = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::Datetime64(day + 3 * HOUR / 2),
+                IndexLabel::Datetime64(day + 9 * HOUR / 2),
+                IndexLabel::Datetime64(day + 15 * HOUR / 2),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let off_sum = off.resample("3h").sum().unwrap();
+        assert_eq!(off_sum.index().labels(), &bins);
+        assert_eq!(off_sum.values(), [1.0, 2.0, 3.0].map(Scalar::Float64));
+    }
+
+    #[test]
     fn series_resample_subdaily_typed_fast_path_emits_datetime64_labels() {
         let base = 1_577_836_800_000_000_000i64;
         let minute = 60_000_000_000i64;
@@ -202027,7 +202087,11 @@ mod tests {
     }
 
     #[test]
-    fn series_resample_sparse_subdaily_typed_path_skips_empty_bins() {
+    fn series_resample_sparse_subdaily_typed_path_fills_empty_bins_0yilt() {
+        // GOLDEN-CHANGE (br-frankenpandas-0yilt): this pinned the typed path
+        // SKIPPING the empty bins (3 rows). pandas 2.2.3 on this input,
+        // resample('s').mean(): 121 bins 00:00:00..00:02:00, 2.0 / 5.0 / 7.0 at
+        // seconds 0 / 60 / 120 and NaN in the other 118.
         let base = 1_577_836_800_000_000_000i64;
         let second = 1_000_000_000i64;
         let minute = 60_000_000_000i64;
@@ -202045,38 +202109,22 @@ mod tests {
 
         let result = s.resample("s").mean().unwrap();
 
-        assert_eq!(
-            result.index().labels(),
-            &[
-                IndexLabel::Datetime64(base),
-                IndexLabel::Datetime64(base + minute),
-                IndexLabel::Datetime64(base + 2 * minute),
-            ]
-        );
-        assert_eq!(
-            result.values(),
-            &[
-                Scalar::Float64(2.0),
-                Scalar::Float64(5.0),
-                Scalar::Float64(7.0),
-            ]
-        );
+        let expected_labels: Vec<IndexLabel> = (0..121)
+            .map(|k| IndexLabel::Datetime64(base + k * second))
+            .collect();
+        assert_eq!(result.index().labels(), expected_labels.as_slice());
+        let values = result.values();
+        assert_eq!(values[0], Scalar::Float64(2.0));
+        assert_eq!(values[60], Scalar::Float64(5.0));
+        assert_eq!(values[120], Scalar::Float64(7.0));
+        assert_eq!(values.iter().filter(|v| v.is_missing()).count(), 118);
     }
 
     #[test]
     fn series_resample_daily_and_weekly_fill_empty_bins_eov68() {
         // pandas resample emits a CONTIGUOUS bin range and fills dataless bins
         // (sum->0, mean/min/max->NaN, count->0). Verified vs live pandas 2.2.3.
-        let labels = |s: &Series| -> Vec<String> {
-            s.index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(d) => d.clone(),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
         let f64s = |s: &Series| -> Vec<Option<f64>> {
             s.values()
                 .iter()
@@ -202154,16 +202202,7 @@ mod tests {
         //   2M gap -> 2024-01-31:1, 2024-03-31:2, 2024-05-31:3, ..., 2025-03-31:4
         //   2Q gap -> 2024-03-31:3, 2024-09-30:3, 2025-03-31:4
         //   2Y gap -> 2024-12-31:6, 2026-12-31:4
-        let labels = |s: &Series| -> Vec<String> {
-            s.index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(d) => d.clone(),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
         let f64s = |s: &Series| -> Vec<Option<f64>> {
             s.values()
                 .iter()
@@ -202300,16 +202339,7 @@ mod tests {
 
     #[test]
     fn series_resample_modern_aliases_me_qe_ye() {
-        let labels = |s: &Series| -> Vec<String> {
-            s.index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(d) => d.clone(),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
         let f64s = |s: &Series| -> Vec<Option<f64>> {
             s.values()
                 .iter()
@@ -202419,16 +202449,7 @@ mod tests {
             vec![Scalar::Float64(10.0), Scalar::Float64(80.0)],
         )
         .unwrap();
-        let labels = |s: &Series| -> Vec<String> {
-            s.index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(d) => d.clone(),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
         let f64s = |s: &Series| -> Vec<Option<f64>> {
             s.values()
                 .iter()
@@ -202466,16 +202487,7 @@ mod tests {
         // pandas resample('B') = one bin per weekday; a weekend timestamp rolls
         // BACK to the preceding Friday; dataless business days fill (sum->0,
         // mean->NaN). Verified vs live pandas 2.2.3.
-        let labels = |s: &Series| -> Vec<String> {
-            s.index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(d) => d.clone(),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
         let f64s = |s: &Series| -> Vec<Option<f64>> {
             s.values()
                 .iter()
@@ -202576,16 +202588,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let labels = |s: &Series| -> Vec<String> {
-            s.index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(d) => d.clone(),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
         let vals =
             |s: &Series| -> Vec<f64> { s.values().iter().map(|v| v.to_f64().unwrap()).collect() };
 
@@ -202615,16 +202618,7 @@ mod tests {
             vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
         )
         .unwrap();
-        let labels = |s: &Series| -> Vec<String> {
-            s.index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(d) => d.clone(),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
 
         let sum = s.resample("2W").sum().unwrap();
         assert_eq!(
@@ -202687,16 +202681,7 @@ mod tests {
         )
         .unwrap();
 
-        let labels = |s: &Series| -> Vec<String> {
-            s.index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(d) => d.clone(),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let labels = resample_bin_dates;
         let sum = s.resample("W").sum().unwrap();
         assert_eq!(
             labels(&sum),

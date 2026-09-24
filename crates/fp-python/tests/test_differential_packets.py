@@ -3671,3 +3671,26 @@ def test_sample_without_random_state_draws_fresh_rows() -> None:
     assert list(frame.sample(5, random_state=7).index) == list(frame.sample(5, random_state=7).index)
 
 
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("freq", ["D", "2D", "W", "ME", "h"])
+@pytest.mark.parametrize("agg", ["sum", "mean", "count"])
+def test_resample_bins_are_timestamps_like_pandas(freq: str, agg: str) -> None:
+    # br-frankenpandas-0yilt: the bins came back as date STRINGS ('2024-01-01');
+    # pandas returns a DatetimeIndex of Timestamps.
+    def bins(m: Any) -> Any:
+        idx = m.to_datetime(
+            ["2024-01-01 00:00", "2024-01-01 06:00", "2024-01-02 00:00", "2024-01-05 00:00"]
+        )
+        out = getattr(m.Series([1.0, 2.0, 3.0, 4.0], index=idx, name="v").resample(freq), agg)()
+        return (
+            [type(t).__name__ for t in out.index],
+            [str(t) for t in out.index],
+            [_marker(v) for v in out.tolist()],
+        )
+
+    got, want = bins(fpd), bins(pd)
+    assert got == want
+    # NEGATIVE: not one bin is text.
+    assert set(got[0]) == {"Timestamp"}
