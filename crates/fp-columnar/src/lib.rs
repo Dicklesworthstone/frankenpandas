@@ -17907,8 +17907,16 @@ impl Column {
         // hierarchy Null < Bool < Int64 < Float64), and promoting those to Float64
         // diverged from both the oracle and binary_numeric's own scalar fallback.
         // Runs only on the vectorized-declined path, so hot all-Int64 ops never pay it.
+        //
+        // One pandas 2.2.3 exception (probed live): `int64 % False` stays int64 with
+        // result 0 (numpy's integer `x % 0 == 0`, and pandas' zero-division fill only
+        // runs for non-bool divisors), while `int64 // False` still becomes float64
+        // inf/-inf/nan. So a Bool divisor never promotes Mod.
+        // br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.3.
+        let bool_divisor_mod = matches!(op, ArithmeticOp::Mod) && right.dtype == DType::Bool;
         if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv)
             && matches!(out_dtype, DType::Int64)
+            && !bool_divisor_mod
             && right
                 .values
                 .iter()
@@ -17954,8 +17962,20 @@ impl Column {
                             }
                             lhs_i64.wrapping_pow(u32::try_from(rhs_i64).unwrap_or(u32::MAX))
                         }
-                        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => {
-                            unreachable!()
+                        // Reached when the vectorized Int64 arm declines (a Bool or
+                        // Null-dtype operand) and no zero divisor forced Float64 — e.g.
+                        // `int64 // True` or `bool % 2`. This arm used to be
+                        // `unreachable!()`, and `df.eval("a // True")` panicked
+                        // (Fuzz Nightly, fuzz_dataframe_eval).
+                        ArithmeticOp::FloorDiv => python_floor_div_i64(lhs_i64, rhs_i64),
+                        // A zero divisor only survives to here for a Bool divisor
+                        // (see `bool_divisor_mod`); numpy/pandas give 0.
+                        ArithmeticOp::Mod if rhs_i64 == 0 => 0,
+                        ArithmeticOp::Mod => python_mod_i64(lhs_i64, rhs_i64),
+                        // `out_dtype` is always Float64 for Div (set above), so the
+                        // Int64 arm cannot see it; fall through to the float path.
+                        ArithmeticOp::Div => {
+                            return Ok(Scalar::Float64(left.to_f64()? / right.to_f64()?));
                         }
                     };
                     return Ok(Scalar::Int64(result));
@@ -65032,6 +65052,75 @@ mod floordiv_mod_f64_pandas_special_value_lock {
             return true; // any NaN payload is acceptable; pandas does not pin one
         }
         actual.to_bits() == expected
+    }
+
+    /// br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.3. `int64 // True` reached
+    /// `unreachable!()` in the scalar fallback (the vectorized Int64 arm declines a
+    /// Bool operand). Expected values are pandas 2.2.3, probed live with
+    /// s = pd.Series([466, -7, 0]) and b = pd.Series([True, False, True]).
+    #[test]
+    fn int_bool_floordiv_and_mod_match_pandas_without_panicking() {
+        use crate::Column;
+        use fp_types::{DType, Scalar};
+
+        let ints = |v: &[i64]| {
+            Column::new(DType::Int64, v.iter().map(|x| Scalar::Int64(*x)).collect()).unwrap()
+        };
+        let bools = |v: &[bool]| {
+            Column::new(DType::Bool, v.iter().map(|x| Scalar::Bool(*x)).collect()).unwrap()
+        };
+        let s = ints(&[466, -7, 0]);
+        let dtype_and_values = |c: Column| (c.dtype().clone(), c.values().to_vec());
+
+        // s // True -> int64 [466, -7, 0]
+        assert_eq!(
+            dtype_and_values(s.floordiv(&bools(&[true, true, true])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(466), Scalar::Int64(-7), Scalar::Int64(0)])
+        );
+        // s % True -> int64 [0, 0, 0]
+        assert_eq!(
+            dtype_and_values(s.r#mod(&bools(&[true, true, true])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(0); 3])
+        );
+        // NEGATIVE for a naive "zero divisor promotes like division" fix:
+        // s % False stays int64 zeros in pandas, NOT float NaN.
+        assert_eq!(
+            dtype_and_values(s.r#mod(&bools(&[false, false, false])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(0); 3])
+        );
+        // s // False -> float64 [inf, -inf, nan]
+        let fd = s.floordiv(&bools(&[false, false, false])).unwrap();
+        assert_eq!(fd.dtype(), DType::Float64);
+        assert_eq!(fd.values()[0], Scalar::Float64(f64::INFINITY));
+        assert_eq!(fd.values()[1], Scalar::Float64(f64::NEG_INFINITY));
+        assert!(fd.values()[2].is_missing(), "0 // False is NaN");
+        // s // b (b has a False) -> float64 [466.0, -inf, 0.0]
+        let mixed = s.floordiv(&bools(&[true, false, true])).unwrap();
+        assert_eq!(mixed.dtype(), DType::Float64);
+        assert_eq!(
+            mixed.values(),
+            &[
+                Scalar::Float64(466.0),
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(0.0)
+            ]
+        );
+        // bool // int (no zero) -> int64 [0, 0, 0]; bool % int -> int64 [1, 0, 1]
+        let b = bools(&[true, false, true]);
+        assert_eq!(
+            dtype_and_values(b.floordiv(&ints(&[2, 3, 4])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(0); 3])
+        );
+        assert_eq!(
+            dtype_and_values(b.r#mod(&ints(&[2, 3, 4])).unwrap()),
+            (DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)])
+        );
+        // bool % int with a zero divisor -> float64 [1.0, nan, 1.0]
+        let bz = b.r#mod(&ints(&[2, 0, 4])).unwrap();
+        assert_eq!(bz.dtype(), DType::Float64);
+        assert_eq!(bz.values()[0], Scalar::Float64(1.0));
+        assert!(bz.values()[1].is_missing());
+        assert_eq!(bz.values()[2], Scalar::Float64(1.0));
     }
 
     #[test]
