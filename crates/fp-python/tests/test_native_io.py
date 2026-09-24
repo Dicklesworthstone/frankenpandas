@@ -241,22 +241,28 @@ def test_datetime_and_timedelta_survive_arrow_formats(writer, reader, suffix, tm
     assert {c: [str(v) for v in back[c].tolist()] for c in back.columns} == PANDAS_TEMPORAL_ROUND_TRIP
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20: Excel/Stata write "
-    "datetimes as text; pandas writes datetime cells / %tc and reads datetime64 back",
-)
-@pytest.mark.parametrize("writer, reader, suffix, kwargs", [
-    ("to_excel", "read_excel", "xlsx", {"index": False}),
-    ("to_stata", "read_stata", "dta", {"write_index": False}),
-])
-def test_datetime_survives_excel_and_stata(writer, reader, suffix, kwargs, tmp_path):
-    path = tmp_path / f"t.{suffix}"
-    frame = fpd.DataFrame({"t": _temporal_frame()["t"]})
-    getattr(frame, writer)(str(path), **kwargs)
-    back = getattr(fpd, reader)(str(path))
+def test_excel_writes_datetime_cells_and_timedelta_days(tmp_path):
+    # pandas 2.2.3 writes datetime64 as date cells and timedelta64 as float
+    # days, so read_excel returns datetimes and FLOATS:
+    #   t -> ['2024-01-02 03:04:05', 'NaT', '2024-12-31 23:59:59']
+    #   d -> [1.0, nan, 0.08333333333333333]
+    path = tmp_path / "t.xlsx"
+    _temporal_frame().to_excel(str(path), index=False)
+    back = fpd.read_excel(str(path))
     assert [str(v) for v in back["t"].tolist()] == PANDAS_TEMPORAL_ROUND_TRIP["t"]
+    assert [_cell(v) for v in back["d"].tolist()] == [1.0, None, 0.08333333333333333]
+
+
+def test_datetime_survives_stata_and_timedelta_is_refused(tmp_path):
+    # pandas 2.2.3 writes datetime64 as %tc (ms since 1960) and read_stata
+    # converts it back; timedelta64 raises NotImplementedError("Data type
+    # timedelta64[ns] not supported.").
+    path = tmp_path / "t.dta"
+    fpd.DataFrame({"t": _temporal_frame()["t"]}).to_stata(str(path), write_index=False)
+    back = fpd.read_stata(str(path))
+    assert [str(v) for v in back["t"].tolist()] == PANDAS_TEMPORAL_ROUND_TRIP["t"]
+    with pytest.raises(NotImplementedError, match="timedelta64"):
+        fpd.DataFrame({"d": _temporal_frame()["d"]}).to_stata(str(tmp_path / "d.dta"))
 
 
 def test_to_parquet_without_a_path_returns_parquet_bytes():

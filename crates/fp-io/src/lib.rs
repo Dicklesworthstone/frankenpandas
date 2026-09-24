@@ -3199,6 +3199,62 @@ struct StataField {
     variable_name: String,
     source: StataFieldSource,
     variable_type: VariableType,
+    /// Written as `%tc` (milliseconds since 1960-01-01), as pandas does.
+    datetime: bool,
+}
+
+/// Stata's date epoch, 1960-01-01T00:00:00, in Unix nanoseconds.
+const STATA_EPOCH_NS: i64 = -315_619_200_000_000_000;
+
+/// pandas `_datetime_to_stata_elapsed_vec(.., "tc")`: whole microseconds since
+/// the Stata epoch (floor), then divided by 1000 as a float.
+fn stata_tc_millis(ns: i64) -> f64 {
+    let micros = (i128::from(ns) - i128::from(STATA_EPOCH_NS)).div_euclid(1_000);
+    micros as f64 / 1_000.0
+}
+
+/// A `%tc`/`%td` variable read back as a Datetime64 column, as pandas'
+/// `convert_dates=True` does: `%tc` truncates the stored double to integer
+/// milliseconds; `%td` counts days. `None` for any other display format.
+fn stata_dates_column(values: &[Scalar], format: &str) -> Result<Option<Column>, IoError> {
+    let unit_ns: i64 = if format.starts_with("%tc") {
+        1_000_000
+    } else if format.starts_with("%td") || format.starts_with("%d") {
+        NANOS_PER_DAY
+    } else {
+        return Ok(None);
+    };
+    let mut data = Vec::with_capacity(values.len());
+    let mut validity = fp_columnar::ValidityMask::all_valid(values.len());
+    for (i, value) in values.iter().enumerate() {
+        let elapsed = match value {
+            Scalar::Int64(v) => Some(*v),
+            Scalar::Float64(v) if v.is_finite() => Some(v.trunc() as i64),
+            _ => None,
+        };
+        let nanos = elapsed
+            .map(|elapsed| {
+                elapsed
+                    .checked_mul(unit_ns)
+                    .and_then(|delta| delta.checked_add(STATA_EPOCH_NS))
+                    .ok_or_else(|| {
+                        IoError::Stata(format!(
+                            "Stata {format} value {elapsed} is out of bounds for nanosecond precision"
+                        ))
+                    })
+            })
+            .transpose()?;
+        match nanos {
+            Some(nanos) => data.push(nanos),
+            None => {
+                data.push(Timestamp::NAT);
+                validity.set(i, false);
+            }
+        }
+    }
+    Ok(Some(Column::from_datetime64_values_with_validity(
+        data, validity,
+    )))
 }
 
 #[derive(Debug, Clone)]
@@ -3219,7 +3275,11 @@ pub fn write_stata_bytes_with_options(
     let header = Header::builder(Release::V118, ByteOrder::LittleEndian).build();
     let mut schema = StataSchema::builder();
     for field in &fields {
-        let format = stata_format_for_type(field.variable_type);
+        let format = if field.datetime {
+            "%tc"
+        } else {
+            stata_format_for_type(field.variable_type)
+        };
         schema = schema.add_variable(
             Variable::builder(field.variable_type, &field.variable_name).format(format),
         );
@@ -3272,6 +3332,12 @@ pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
         .iter()
         .map(|variable| variable.name().to_owned())
         .collect::<Vec<_>>();
+    let formats = record_reader
+        .schema()
+        .variables()
+        .iter()
+        .map(|variable| variable.format().to_owned())
+        .collect::<Vec<_>>();
     reject_duplicate_headers(&column_order)?;
 
     let mut columns = column_order
@@ -3293,11 +3359,17 @@ pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
     }
 
     let mut out = BTreeMap::new();
-    for name in &column_order {
+    for (name, format) in column_order.iter().zip(&formats) {
         let values = columns
             .remove(name)
             .ok_or_else(|| IoError::Stata(format!("missing Stata column '{name}'")))?;
-        out.insert(name.clone(), Column::from_values(values)?);
+        // Date-formatted variables were returned as their raw elapsed number
+        // (float milliseconds since 1960). (4qg5w.20)
+        let column = match stata_dates_column(&values, format)? {
+            Some(dates) => dates,
+            None => Column::from_values(values)?,
+        };
+        out.insert(name.clone(), column);
     }
     Ok(DataFrame::new_with_column_order(
         Index::from_i64((0..row_count).collect()),
@@ -3325,11 +3397,22 @@ fn stata_fields_for_frame(
             .iter()
             .map(index_label_to_scalar_value)
             .collect::<Vec<_>>();
-        let variable_type = infer_stata_variable_type(&labels, &name)?;
+        let datetime = labels
+            .iter()
+            .any(|label| matches!(label, Scalar::Datetime64(v) if *v != Timestamp::NAT))
+            && labels
+                .iter()
+                .all(|label| label.is_missing() || matches!(label, Scalar::Datetime64(_)));
+        let variable_type = if datetime {
+            VariableType::Double
+        } else {
+            infer_stata_variable_type(&labels, &name)?
+        };
         fields.push(StataField {
             variable_name: name,
             source: StataFieldSource::Index,
             variable_type,
+            datetime,
         });
     }
 
@@ -3338,10 +3421,32 @@ fn stata_fields_for_frame(
         let column = frame
             .column(name)
             .ok_or_else(|| IoError::Stata(format!("missing DataFrame column '{name}'")))?;
+        // pandas raises NotImplementedError("Data type ... not supported.") for
+        // both; these were written as text before.
+        let dtype = column.dtype();
+        match &dtype {
+            DType::Datetime64 { tz: Some(tz) } => {
+                return Err(IoError::Deferred(format!(
+                    "Data type datetime64[ns, {tz}] not supported."
+                )));
+            }
+            DType::Timedelta64 => {
+                return Err(IoError::Deferred(
+                    "Data type timedelta64[ns] not supported.".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        let datetime = matches!(dtype, DType::Datetime64 { tz: None });
         fields.push(StataField {
             variable_name: name.clone(),
             source: StataFieldSource::Column(name.clone()),
-            variable_type: infer_stata_variable_type(column.values(), name)?,
+            variable_type: if datetime {
+                VariableType::Double
+            } else {
+                infer_stata_variable_type(column.values(), name)?
+            },
+            datetime,
         });
     }
 
@@ -3515,6 +3620,13 @@ fn scalar_to_stata_value(
                 0.0
             }))),
             Some(Scalar::Int64(v)) => Ok(StataValue::Double(StataDouble::Present(*v as f64))),
+            // A datetime field (`%tc`): milliseconds since 1960-01-01.
+            Some(Scalar::Datetime64(v)) if *v != Timestamp::NAT => Ok(StataValue::Double(
+                StataDouble::Present(stata_tc_millis(*v)),
+            )),
+            Some(Scalar::Datetime64(_)) => Ok(StataValue::Double(StataDouble::Missing(
+                MissingValue::System,
+            ))),
             Some(Scalar::Float64(v)) if v.is_nan() => Ok(StataValue::Double(StataDouble::Missing(
                 MissingValue::System,
             ))),
@@ -10183,9 +10295,18 @@ fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
         }
         calamine::Data::Bool(b) => Scalar::Bool(*b),
         calamine::Data::Empty => Scalar::Null(NullKind::Null),
+        // Date cells were returned as their serial number formatted as TEXT
+        // ("45293.1278..."). (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
+        calamine::Data::DateTime(dt) if dt.is_duration() => {
+            let millis = (dt.as_f64() * 86_400_000.0).round();
+            if millis.is_finite() && millis.abs() < 9.2e15 {
+                Scalar::Timedelta64(millis as i64 * 1_000_000)
+            } else {
+                Scalar::Null(NullKind::NaT)
+            }
+        }
         calamine::Data::DateTime(dt) => {
-            // Convert ExcelDateTime to string representation for now.
-            Scalar::Utf8(format!("{dt}"))
+            excel_datetime_to_epoch_ns(dt).map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64)
         }
         calamine::Data::DateTimeIso(s) => Scalar::Utf8(s.clone()),
         calamine::Data::DurationIso(s) => Scalar::Utf8(s.clone()),
@@ -10203,6 +10324,8 @@ fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
         }
         Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
         Scalar::Bool(b) => IndexLabel::Utf8(if b { "True" } else { "False" }.to_string()),
+        Scalar::Datetime64(v) => IndexLabel::Datetime64(v),
+        Scalar::Timedelta64(v) => IndexLabel::Timedelta64(v),
         _ => IndexLabel::Utf8(String::new()),
     }
 }
@@ -10674,11 +10797,78 @@ pub fn write_excel(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
+// Excel temporal cells, as pandas writes them through openpyxl
+// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20). They used to be
+// written as text, so no reader got a datetime back.
+
+/// pandas' default `datetime_format` for `to_excel`.
+const EXCEL_DATETIME_FORMAT: &str = "YYYY-MM-DD HH:MM:SS";
+/// The number format openpyxl gives the fractional-day value of a timedelta.
+const EXCEL_TIMEDELTA_FORMAT: &str = "0";
+const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+
+struct ExcelTemporalFormats {
+    datetime: rust_xlsxwriter::Format,
+    timedelta: rust_xlsxwriter::Format,
+}
+
+impl ExcelTemporalFormats {
+    fn new() -> Self {
+        Self {
+            datetime: rust_xlsxwriter::Format::new().set_num_format(EXCEL_DATETIME_FORMAT),
+            timedelta: rust_xlsxwriter::Format::new().set_num_format(EXCEL_TIMEDELTA_FORMAT),
+        }
+    }
+}
+
+/// Epoch nanoseconds -> Excel 1900-epoch serial, computed as openpyxl's
+/// `to_excel` does for the microsecond datetime pandas passes it: days since
+/// 1899-12-30 (one fewer up to day 60, Excel's phantom 1900-02-29), plus the
+/// time of day as `(seconds + microseconds / 1e6) / 86400`.
+fn epoch_ns_to_excel_serial(ns: i64) -> f64 {
+    let mut days = ns.div_euclid(NANOS_PER_DAY) + 25_569;
+    if 0 < days && days <= 60 {
+        days -= 1;
+    }
+    let time_ns = ns.rem_euclid(NANOS_PER_DAY);
+    let seconds = time_ns / 1_000_000_000;
+    let micros = (time_ns % 1_000_000_000) / 1_000;
+    days as f64 + (seconds as f64 + micros as f64 / 1e6) / 86_400.0
+}
+
+/// A timedelta as pandas writes it: `total_seconds() / 86400` of the
+/// microsecond timedelta.
+fn timedelta_ns_to_excel_days(ns: i64) -> f64 {
+    (ns / 1_000) as f64 / 1e6 / 86_400.0
+}
+
+/// An Excel date cell -> epoch nanoseconds via calamine's calendar components
+/// (millisecond precision, both workbook epochs), which is what openpyxl hands
+/// pandas. Excel's phantom 1900-02-29 reads as 1900-02-28, as in openpyxl.
+fn excel_datetime_to_epoch_ns(dt: &calamine::ExcelDateTime) -> Option<i64> {
+    let (year, month, day, hour, minute, second, milli) = dt.to_ymd_hms_milli();
+    let date = chrono::NaiveDate::from_ymd_opt(i32::from(year), u32::from(month), u32::from(day))
+        .or_else(|| {
+        ((year, month, day) == (1900, 2, 29))
+            .then(|| chrono::NaiveDate::from_ymd_opt(1900, 2, 28))
+            .flatten()
+    })?;
+    date.and_hms_milli_opt(
+        u32::from(hour),
+        u32::from(minute),
+        u32::from(second),
+        u32::from(milli),
+    )?
+    .and_utc()
+    .timestamp_nanos_opt()
+}
+
 fn write_excel_index_label(
     worksheet: &mut rust_xlsxwriter::Worksheet,
     excel_row: u32,
     excel_col: u16,
     label: &IndexLabel,
+    formats: &ExcelTemporalFormats,
 ) -> Result<(), IoError> {
     match label {
         IndexLabel::Int64(v) => {
@@ -10694,14 +10884,24 @@ fn write_excel_index_label(
         IndexLabel::Timedelta64(v) => {
             if *v != Timedelta::NAT {
                 worksheet
-                    .write_string(excel_row, excel_col, Timedelta::format(*v))
+                    .write_number_with_format(
+                        excel_row,
+                        excel_col,
+                        timedelta_ns_to_excel_days(*v),
+                        &formats.timedelta,
+                    )
                     .map_err(|e| IoError::Excel(format!("write index timedelta: {e}")))?;
             }
         }
         IndexLabel::Datetime64(v) => {
-            if *v != i64::MIN {
+            if *v != Timestamp::NAT {
                 worksheet
-                    .write_string(excel_row, excel_col, label.to_string())
+                    .write_number_with_format(
+                        excel_row,
+                        excel_col,
+                        epoch_ns_to_excel_serial(*v),
+                        &formats.datetime,
+                    )
                     .map_err(|e| IoError::Excel(format!("write index datetime: {e}")))?;
             }
         }
@@ -10727,6 +10927,7 @@ fn write_excel_scalar(
     excel_row: u32,
     excel_col: u16,
     scalar: &Scalar,
+    formats: &ExcelTemporalFormats,
 ) -> Result<(), IoError> {
     match scalar {
         Scalar::Int64(v) => {
@@ -10752,14 +10953,24 @@ fn write_excel_scalar(
         Scalar::Timedelta64(v) => {
             if *v != Timedelta::NAT {
                 worksheet
-                    .write_string(excel_row, excel_col, Timedelta::format(*v))
+                    .write_number_with_format(
+                        excel_row,
+                        excel_col,
+                        timedelta_ns_to_excel_days(*v),
+                        &formats.timedelta,
+                    )
                     .map_err(|e| IoError::Excel(format!("write timedelta: {e}")))?;
             }
         }
         Scalar::Datetime64(v) => {
             if *v != Timestamp::NAT {
                 worksheet
-                    .write_string(excel_row, excel_col, format_datetime_ns(*v))
+                    .write_number_with_format(
+                        excel_row,
+                        excel_col,
+                        epoch_ns_to_excel_serial(*v),
+                        &formats.datetime,
+                    )
                     .map_err(|e| IoError::Excel(format!("write datetime: {e}")))?;
             }
         }
@@ -10839,13 +11050,27 @@ pub fn write_excel_bytes_with_options(
 
     use rust_xlsxwriter::Workbook;
 
+    let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+    // pandas refuses before writing anything; Excel cells carry no zone.
+    if col_names.iter().any(|name| {
+        frame
+            .column(name)
+            .is_some_and(|column| column.timezone().is_some())
+    }) {
+        return Err(IoError::Excel(
+            "Excel does not support datetimes with timezones. Please ensure that datetimes \
+             are timezone unaware before writing to Excel."
+                .to_owned(),
+        ));
+    }
+    let formats = ExcelTemporalFormats::new();
+
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
     worksheet
         .set_name(options.sheet_name.as_str())
         .map_err(|e| IoError::Excel(format!("set sheet name: {e}")))?;
 
-    let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let data_col_offset: u16 = if options.index { 1 } else { 0 };
 
     // Header row (optional).
@@ -10875,7 +11100,7 @@ pub fn write_excel_bytes_with_options(
         if options.index
             && let Some(label) = frame.index().labels().get(row_idx)
         {
-            write_excel_index_label(worksheet, excel_row, 0, label)?;
+            write_excel_index_label(worksheet, excel_row, 0, label, &formats)?;
         }
         for (col_idx, name) in col_names.iter().enumerate() {
             if let Some(col) = frame.column(name)
@@ -10886,6 +11111,7 @@ pub fn write_excel_bytes_with_options(
                     excel_row,
                     data_col_offset + col_idx as u16,
                     scalar,
+                    &formats,
                 )?;
             }
         }
@@ -19250,6 +19476,78 @@ mod tests {
     }
 
     #[test]
+    fn stata_datetimes_write_as_tc_and_read_back_like_pandas() {
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20. pandas 2.2.3:
+        // DataFrame({t: [2024-01-02 03:04:05, NaT]}).to_stata(p) stores
+        // format %tc, raw value 2019783845000.0 (ms since 1960-01-01), and
+        // read_stata(p) returns datetime64[ns]; an ALL-NaT column still reads
+        // as datetime64; timedelta64 raises NotImplementedError.
+        use super::{VariableType, stata_fields_for_frame, stata_tc_millis};
+
+        assert_eq!(
+            stata_tc_millis(1_704_164_645_000_000_000),
+            2_019_783_845_000.0
+        );
+
+        let naive = |values: Vec<Scalar>| {
+            Column::new(DType::datetime64_naive(), values).expect("datetime column")
+        };
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "t".to_owned(),
+            naive(vec![
+                Scalar::Datetime64(1_704_164_645_000_000_000),
+                Scalar::Null(NullKind::NaT),
+            ]),
+        );
+        columns.insert(
+            "gone".to_owned(),
+            naive(vec![
+                Scalar::Null(NullKind::NaT),
+                Scalar::Null(NullKind::NaT),
+            ])
+            .with_dtype(DType::datetime64_naive()),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            columns,
+            vec!["t".to_owned(), "gone".to_owned()],
+        )
+        .expect("frame");
+
+        let fields = stata_fields_for_frame(&frame, &StataWriteOptions::default()).expect("fields");
+        let t_field = fields.iter().find(|f| f.variable_name == "t").expect("t");
+        assert!(t_field.datetime);
+        assert_eq!(t_field.variable_type, VariableType::Double);
+
+        let back = read_stata_bytes(&write_stata_bytes(&frame).expect("write")).expect("read");
+        let t = back.column("t").expect("t");
+        assert_eq!(t.dtype(), DType::datetime64_naive());
+        assert_eq!(t.values()[0], Scalar::Datetime64(1_704_164_645_000_000_000));
+        assert!(t.values()[1].is_missing());
+        let gone = back.column("gone").expect("gone");
+        assert_eq!(gone.dtype(), DType::datetime64_naive());
+        assert_eq!(gone.validity().count_invalid(), 2);
+
+        let mut deltas = BTreeMap::new();
+        deltas.insert(
+            "d".to_owned(),
+            Column::new(DType::Timedelta64, vec![Scalar::Timedelta64(1)]).expect("d"),
+        );
+        let deltas = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0]),
+            deltas,
+            vec!["d".to_owned()],
+        )
+        .expect("deltas");
+        let err = write_stata_bytes(&deltas).expect_err("timedelta must be refused");
+        assert!(
+            matches!(&err, IoError::Deferred(message) if message.contains("timedelta64[ns] not supported")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
     fn stata_path_reader_matches_bytes_reader() {
         let source = make_stata_dataframe();
         let path = std::env::temp_dir().join(format!(
@@ -24130,6 +24428,106 @@ mod tests {
         assert_eq!(
             names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             vec!["ints", "floats", "names"]
+        );
+    }
+
+    #[test]
+    fn excel_serials_match_openpyxl_to_excel() {
+        // openpyxl.utils.datetime.to_excel (pandas' writer path), recorded:
+        //   datetime(2024,1,2,3,4,5)              -> 45293.12783564815
+        //   datetime(2024,12,31,23,59,59,500000)  -> 45657.999994212965
+        //   datetime(1900,2,28) -> 59.0; datetime(1900,3,1) -> 61.0 (phantom 02-29)
+        //   datetime(1969,12,31,23,59,59,999999) -> 25568.99999999999
+        //   timedelta(days=1) -> 1.0; hours=2 -> 0.08333333333333333;
+        //   microseconds=1500 -> 1.736111111111111e-08
+        use super::{epoch_ns_to_excel_serial, timedelta_ns_to_excel_days};
+
+        assert_eq!(
+            epoch_ns_to_excel_serial(1_704_164_645_000_000_000),
+            45293.12783564815
+        );
+        assert_eq!(
+            epoch_ns_to_excel_serial(1_735_689_599_500_000_000),
+            45657.999994212965
+        );
+        assert_eq!(epoch_ns_to_excel_serial(-2_203_977_600_000_000_000), 59.0);
+        assert_eq!(epoch_ns_to_excel_serial(-2_203_891_200_000_000_000), 61.0);
+        assert_eq!(epoch_ns_to_excel_serial(-1_000), 25568.99999999999);
+        assert_eq!(timedelta_ns_to_excel_days(86_400_000_000_000), 1.0);
+        assert_eq!(
+            timedelta_ns_to_excel_days(7_200_000_000_000),
+            0.08333333333333333
+        );
+        assert_eq!(timedelta_ns_to_excel_days(1_500_000), 1.736111111111111e-08);
+    }
+
+    #[test]
+    fn excel_datetime_columns_round_trip_as_pandas_does() {
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20. pandas 2.2.3:
+        // DataFrame({t: [2024-01-02 03:04:05, NaT, 2024-12-31 23:59:59.5],
+        // d: ['1D', NaT, '2h']}).to_excel(p, index=False); read_excel(p) ->
+        // t datetime64[ns] with the same values and NaT, d float64 days
+        // [1.0, NaN, 0.08333333333333333]; a tz-aware column raises ValueError.
+        let t = Column::new(
+            DType::datetime64_naive(),
+            vec![
+                Scalar::Datetime64(1_704_164_645_000_000_000),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Datetime64(1_735_689_599_500_000_000),
+            ],
+        )
+        .expect("t");
+        let d = Column::new(
+            DType::Timedelta64,
+            vec![
+                Scalar::Timedelta64(86_400_000_000_000),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Timedelta64(7_200_000_000_000),
+            ],
+        )
+        .expect("d");
+        let mut cols = BTreeMap::new();
+        cols.insert("t".to_owned(), t.clone());
+        cols.insert("d".to_owned(), d);
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            cols,
+            vec!["t".to_owned(), "d".to_owned()],
+        )
+        .expect("frame");
+        let options = super::ExcelWriteOptions {
+            index: false,
+            ..super::ExcelWriteOptions::default()
+        };
+        let bytes = super::write_excel_bytes_with_options(&frame, &options).expect("write");
+        let back = read_excel_bytes(&bytes, &ExcelReadOptions::default()).expect("read");
+
+        let t_back = back.column("t").expect("t");
+        assert_eq!(t_back.dtype(), DType::datetime64_naive());
+        // The blank cell is missing (validity + is_missing); fp spells a
+        // missing datetime either Null(NaT) or the NaT sentinel, both missing.
+        assert_eq!(t_back.validity().count_invalid(), 1);
+        assert!(t_back.values()[1].is_missing());
+        assert_eq!(t_back.values()[0], t.values()[0]);
+        assert_eq!(t_back.values()[2], t.values()[2]);
+        let d_back = back.column("d").expect("d").values();
+        assert_eq!(d_back[0], Scalar::Float64(1.0));
+        assert!(d_back[1].is_missing());
+        assert_eq!(d_back[2], Scalar::Float64(0.08333333333333333));
+
+        let mut zoned = BTreeMap::new();
+        zoned.insert("z".to_owned(), t.with_dtype(DType::datetime64_tz("UTC")));
+        let zoned = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1, 2]),
+            zoned,
+            vec!["z".to_owned()],
+        )
+        .expect("zoned");
+        let err = super::write_excel_bytes_with_options(&zoned, &options)
+            .expect_err("tz-aware must be refused");
+        assert!(
+            format!("{err}").contains("does not support datetimes with timezones"),
+            "got: {err}"
         );
     }
 
