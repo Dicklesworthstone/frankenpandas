@@ -33060,36 +33060,24 @@ impl CrackIndex {
     }
 }
 
-// The same claim as `fp_columnar_stays_sse41_flagged_in_both_release_profiles_85clb`
-// below, asserted against the COMPILED crate instead of the manifest text — the
-// manifest is only one of the ways the flag can go away. A `.cargo/config.toml` edit
-// or a `RUSTFLAGS` override in a bench script removes it without touching a line that
-// test reads, and this sits OUTSIDE `cfg(test)` so it also guards a plain
-// `cargo build --release`, which no test can reach at all.
-//
-// Both operands are `cfg!`, so this is a COMPILE-time guard rather than a runtime
-// one, which is stronger for a lock and is what clippy's `assertions_on_constants`
-// asks for. Disarmed in debug because the stanza is scoped to the two release
-// profiles and does not apply there. Verified before relying on it, rather than
-// assumed: package rustflags DO reach an optimized test target (throwaway two-crate
-// probe, 2026-08-19).
-const _: () = assert!(
-    cfg!(debug_assertions) || cfg!(target_feature = "sse4.1"),
-    "fp-columnar was compiled with optimizations but WITHOUT the `+sse4.1` target \
-     feature its fast paths require: without it `(lhs / rhs).floor()` in \
-     `python_floor_div_f64` lowers to a libm call again, and the certified \
-     `floordiv @10M` / `mod @10M` vs-pandas rows (br-frankenpandas-85clb) do not \
-     describe the binary being built. \
-     DOWNSTREAM CONSUMERS: profiles apply only from YOUR top-level manifest, so \
-     replicate the shipped stanza there (requires nightly cargo for \
-     `profile-rustflags`; see README 'Installation' -> 'Building release \
-     binaries that depend on frankenpandas'): \
-     `cargo-features = [\"profile-rustflags\"]` at the top of your Cargo.toml, \
-     plus `[profile.release.package.fp-columnar] rustflags = \
-     [\"-Ctarget-feature=+sse4.1\"]`. Internal contributors: build through the \
-     workspace, which already carries this stanza for the release and \
-     release-perf profiles."
-);
+/// Whether THIS build of fp-columnar was compiled with the x86 `+sse4.1` target
+/// feature, which the rounding fast paths (`python_floor_div_f64`, floor/ceil/
+/// trunc/round kernels) need to lower to a single `roundsd`/`roundpd` instead of
+/// a libm call.
+///
+/// This used to be a `const _: () = assert!(...)` that FAILED every optimized
+/// build lacking the flag. That protected the certified `floordiv @10M` /
+/// `mod @10M` vs-pandas rows (br-frankenpandas-85clb) from being attributed to a
+/// binary built without the fast path, but it also broke every downstream
+/// `cargo build --release` (Cargo applies the workspace's per-package rustflags
+/// only from the top-level manifest, and `profile-rustflags` is nightly-only) and
+/// EVERY optimized aarch64 build, where the flag cannot exist
+/// (br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.1). The protection is
+/// a property of the MEASUREMENT, so it now lives in the instrument: fp-bench
+/// reads this constant and refuses to produce rows from an optimized x86_64 build
+/// without it. For library users the flag is performance advice, not a
+/// requirement.
+pub const BUILT_WITH_SSE41: bool = cfg!(target_feature = "sse4.1");
 
 /// REGRESSION LOCK for the two standing `@10M` claims — `floordiv` ≥ 6.504x and
 /// `mod` ≥ 5.651x vs live pandas. br-frankenpandas-4kig1.

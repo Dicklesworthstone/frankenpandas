@@ -4567,8 +4567,47 @@ fn run(
     Some(times)
 }
 
+/// The certified `floordiv @10M` / `mod @10M` vs-pandas rows (br-frankenpandas-85clb)
+/// describe an fp-columnar built WITH `+sse4.1`. That used to be enforced by a
+/// compile-time assert inside fp-columnar, which also broke every downstream and
+/// every aarch64 optimized build; it now lives here, in the instrument. fp-bench's
+/// own `cfg!` cannot see fp-columnar's per-package flag, so it reads
+/// `fp_columnar::BUILT_WITH_SSE41`. `FP_BENCH_ALLOW_NO_SSE41=1` is the explicit,
+/// logged escape hatch for exploratory runs whose rows must not be certified.
+fn sse41_build_refusal(
+    optimized: bool,
+    x86_64: bool,
+    columnar_sse41: bool,
+    override_set: bool,
+) -> Option<&'static str> {
+    if optimized && x86_64 && !columnar_sse41 && !override_set {
+        Some(
+            "fp-bench: refusing to measure: this optimized build's fp-columnar lacks +sse4.1 \
+             (fp_columnar::BUILT_WITH_SSE41 == false), so its rows would not describe the \
+             binary the certified floordiv/mod rows were measured on (br-frankenpandas-85clb). \
+             Build through the workspace's release/release-perf profiles, or set \
+             FP_BENCH_ALLOW_NO_SSE41=1 for an exploratory, non-certifiable run.",
+        )
+    } else {
+        None
+    }
+}
+
 fn main() {
     println!("bench_elf_sha256={}", self_identity());
+    let allow_no_sse41 = std::env::var_os("FP_BENCH_ALLOW_NO_SSE41").is_some();
+    if let Some(refusal) = sse41_build_refusal(
+        !cfg!(debug_assertions),
+        cfg!(target_arch = "x86_64"),
+        fp_columnar::BUILT_WITH_SSE41,
+        allow_no_sse41,
+    ) {
+        eprintln!("{refusal}");
+        std::process::exit(3);
+    }
+    if allow_no_sse41 && !fp_columnar::BUILT_WITH_SSE41 {
+        eprintln!("fp_columnar_built_with_sse41=false (FP_BENCH_ALLOW_NO_SSE41: NOT certifiable)");
+    }
 
     let args: Vec<String> = std::env::args().collect();
     if let Some(status) = run_remote_python_harness(&args) {
@@ -4732,6 +4771,19 @@ mod harness_contract_tests {
             samples.thread_probe.peak_process_threads
                 >= samples.thread_probe.process_threads_before_probe
         );
+    }
+
+    #[test]
+    fn sse41_refusal_fires_only_for_an_unflagged_optimized_x86_64_build() {
+        use super::sse41_build_refusal;
+        // The one case the old fp-columnar compile-time lock existed for.
+        assert!(sse41_build_refusal(true, true, false, false).is_some());
+        // Everything else measures: flagged build, debug build, non-x86 target,
+        // or the explicit exploratory override.
+        assert!(sse41_build_refusal(true, true, true, false).is_none());
+        assert!(sse41_build_refusal(false, true, false, false).is_none());
+        assert!(sse41_build_refusal(true, false, false, false).is_none());
+        assert!(sse41_build_refusal(true, true, false, true).is_none());
     }
 
     #[test]

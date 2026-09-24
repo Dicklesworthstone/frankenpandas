@@ -260,7 +260,9 @@ Requires **Rust nightly** (2024 edition). The exact dated nightly is pinned in `
 
 ### Building release binaries that depend on frankenpandas
 
-`fp-columnar`'s release fast paths require the `+sse4.1` target feature, and the crate carries a compile-time lock that **fails any optimized build without it** (a plain `cargo build --release` of a dependent crate errors with `E0080` naming this section). Cargo applies `[profile.*.package.*]` rustflags only from the *top-level* manifest of the build, and the `profile-rustflags` feature is nightly-only — so a downstream consumer must replicate the stanza in its **own** `Cargo.toml`:
+A plain `cargo build --release` of a crate that depends on FrankenPandas works on x86_64 and aarch64. (0.3.0 on crates.io carried a compile-time lock in `fp-columnar` that failed every optimized build without `+sse4.1`, including every aarch64 build; it was removed after 0.3.0.)
+
+On x86_64, `fp-columnar`'s floor/ceil/trunc/round and `//`/`%` fast paths are faster with the `+sse4.1` target feature (one `roundsd`/`roundpd` instead of a libm call). Cargo applies `[profile.*.package.*]` rustflags only from the *top-level* manifest, and `profile-rustflags` is nightly-only, so to get that speed in your own release builds add this to **your** `Cargo.toml`:
 
 ```toml
 cargo-features = ["profile-rustflags"]   # first line, above [package]
@@ -269,7 +271,7 @@ cargo-features = ["profile-rustflags"]   # first line, above [package]
 rustflags = ["-Ctarget-feature=+sse4.1"]
 ```
 
-In-tree this is already configured (the same stanza lives in this workspace's `Cargo.toml` for the `release` and `release-perf` profiles, with a measured bit-identity gate recorded in its comments). `cargo test` uses the dev profile, where the lock is disarmed. Tracked downstream story: `br-frankenpandas-rc-sse41-downstream-lock-hrnom`.
+In-tree the same stanza is configured for the `release` and `release-perf` profiles. The certified vs-pandas benchmark rows depend on it, so `fp-bench` reads `fp_columnar::BUILT_WITH_SSE41` and refuses to measure an optimized x86_64 build that lacks it.
 
 ## Quick Start
 
