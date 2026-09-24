@@ -1,4 +1,4 @@
-0    0
-1    1
-2    2
-Name: color, Length: 3, dtype: Int64
+0    blue
+1    green
+2    red
+Name: color, Length: 3, dtype: Categorical

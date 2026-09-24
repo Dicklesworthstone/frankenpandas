@@ -8733,9 +8733,23 @@ impl Series {
     /// non-fill data elsewhere, and whether that survives a slice is a question
     /// this helper has no business answering.
     fn with_row_subset(&self, index: Index, column: Column) -> Result<Self, FrameError> {
-        let mut out = Self::new(self.name.clone(), index, column)?;
-        out.categorical = self.categorical.clone();
-        Ok(out)
+        let out = Self::new(self.name.clone(), index, column)?;
+        Ok(match &self.categorical {
+            Some(meta) => out.with_categories(meta.clone()),
+            None => out,
+        })
+    }
+
+    /// This Series as a categorical over `meta`, its values kept: the column
+    /// becomes a `DType::Categorical` column carrying the categories, the form
+    /// a DataFrame stores (br-frankenpandas-hrxn9).
+    fn with_categories(mut self, meta: CategoricalMetadata) -> Self {
+        self.column = self
+            .column
+            .with_categorical(Some(meta.clone()))
+            .with_dtype(DType::Categorical);
+        self.categorical = Some(meta);
+        self
     }
 
     /// Construct a Series from key-value pairs (dict-style).
@@ -11739,8 +11753,12 @@ impl Series {
         let plan = align_union_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
-        let left = self.column.reindex_by_positions(&plan.left_positions)?;
-        let right = other.column.reindex_by_positions(&plan.right_positions)?;
+        let left = self
+            .category_codes_column()?
+            .reindex_by_positions(&plan.left_positions)?;
+        let right = other
+            .category_codes_column()?
+            .reindex_by_positions(&plan.right_positions)?;
         let values = left
             .values()
             .iter()
@@ -11863,7 +11881,7 @@ impl Series {
             FrameError::CompatibilityRejected("category position does not fit in i64".to_owned())
         })?;
         let values = self
-            .column
+            .category_codes_column()?
             .values()
             .iter()
             .map(|value| {
@@ -12707,10 +12725,13 @@ impl Series {
         }
         let mut order = (0..self.len()).collect::<Vec<_>>();
         if self.categorical.is_some() {
+            // A categorical sorts by category order, not by value.
+            let codes = self.category_codes_column()?;
+            let codes = codes.values();
             order.sort_by(|&left_pos, &right_pos| {
                 compare_categorical_codes_with_na_position(
-                    &self.values()[left_pos],
-                    &self.values()[right_pos],
+                    &codes[left_pos],
+                    &codes[right_pos],
                     ascending,
                     na_first,
                 )
@@ -13896,7 +13917,8 @@ impl Series {
             .collect();
         let mut null_count = 0_usize;
 
-        for (idx, value) in self.column.values().iter().enumerate() {
+        let codes = self.category_codes_column()?;
+        for (idx, value) in codes.values().iter().enumerate() {
             match value {
                 Scalar::Int64(code) if *code == -1 => {
                     null_count += 1;
@@ -16049,9 +16071,20 @@ impl Series {
     ///
     /// Matches `series.astype(dtype)` for scalar dtypes.
     pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
-        // ⚠️ A CATEGORICAL SERIES' COLUMN HOLDS CODES, NOT VALUES. Casting it
-        // directly casts the integer positions, so a category column came out as
-        // "0", "1", "0" instead of its labels. MEASURED, live pandas 2.2.3:
+        // astype('category'): an existing categorical stays as it is; anything
+        // else takes the categories pd.Categorical infers (sorted distinct
+        // values), keeping the index (br-frankenpandas-hrxn9).
+        if dtype == DType::Categorical {
+            if self.categorical.is_some() {
+                return Ok(self.clone());
+            }
+            let mut out = Self::from_categorical(self.name.clone(), self.values().to_vec(), false)?;
+            out.index = self.index.clone();
+            return Ok(out);
+        }
+        // Casting a categorical casts its values, never its codes (it held the
+        // codes when this was written, and a category column came out as "0",
+        // "1", "0" instead of its labels). MEASURED, live pandas 2.2.3:
         //
         //   c = pd.Categorical(['x', 'y', 'x'])
         //   list(c.codes)            -> [0, 1, 0]
@@ -18576,7 +18609,7 @@ impl Series {
         }
 
         let selected = self
-            .column
+            .category_codes_column()?
             .values()
             .iter()
             .filter_map(categorical_code)
@@ -26272,11 +26305,10 @@ impl Series {
     /// - `Last`: keep the last occurrence of each value
     /// - `None`: drop all duplicated values entirely
     pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
-        // ⚠️ A CATEGORICAL COLUMN HOLDS CODES — but here, unlike the rest of this
-        // family, the ROW SELECTION is already right: codes and categories are a
-        // bijection, so deduping codes keeps exactly the rows deduping values
-        // would. Only the OUTPUT was wrong, carrying codes as a plain Int64
-        // Series. MEASURED, live pandas 2.2.3, on Categorical([10, 20, 10, 30]):
+        // A categorical Series stores its values (br-frankenpandas-hrxn9; it held
+        // codes when this was written), so deduping them keeps exactly the rows
+        // pandas keeps; the result must stay categorical over the SAME category
+        // list. MEASURED, live pandas 2.2.3, on Categorical([10, 20, 10, 30]):
         //
         //   drop_duplicates()            -> [10, 20, 30]  dtype category, index [0,1,3]
         //   drop_duplicates(keep='last') -> [20, 10, 30]  index [1,2,3]
@@ -26298,9 +26330,8 @@ impl Series {
                 categorical: None,
                 sparse: self.sparse.clone(),
             };
-            let mut out = bare.drop_duplicates_keep(keep)?;
-            out.categorical = Some(meta.clone());
-            return Ok(out);
+            let out = bare.drop_duplicates_keep(keep)?;
+            return Ok(out.with_categories(meta.clone()));
         }
         // Hash-free dense seen-bitset fast path for all-valid bounded Int64:
         // the kept rows are exactly the positions whose duplicate-flag is false
@@ -28726,116 +28757,117 @@ impl Series {
         self.sparse.is_some()
     }
 
+    /// Every row's category code, -1 where missing: the position of its value
+    /// among this Series' categories. A categorical Series stores its VALUES
+    /// (a `DType::Categorical` column, as a DataFrame column and fp-io do), so
+    /// generic operations see the values; the codes are derived here for the
+    /// operations that order or count by category (br-frankenpandas-hrxn9).
+    fn category_codes(&self) -> Option<Vec<i64>> {
+        let meta = self.categorical.as_ref()?;
+        let positions: FxHashMap<ScalarKey<'_>, i64> = meta
+            .categories
+            .iter()
+            .enumerate()
+            .map(|(position, category)| (scalar_key_allow_missing(category), position as i64))
+            .collect();
+        Some(
+            self.column
+                .values()
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        -1
+                    } else {
+                        positions
+                            .get(&scalar_key_allow_missing(value))
+                            .copied()
+                            .unwrap_or(-1)
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// [`Self::category_codes`] as an Int64 column (-1 where missing).
+    fn category_codes_column(&self) -> Result<Column, FrameError> {
+        self.category_codes().map(Column::from_i64_values).ok_or_else(|| {
+            FrameError::CompatibilityRejected("the Series is not categorical".to_owned())
+        })
+    }
+
+    /// A categorical Series whose row `i` is category `codes[i]` of `meta`
+    /// (-1: missing), stored by value.
+    fn categorical_from_code_parts(
+        name: impl Into<String>,
+        index: Index,
+        codes: &[i64],
+        meta: CategoricalMetadata,
+    ) -> Result<Self, FrameError> {
+        let values: Vec<Scalar> = codes
+            .iter()
+            .map(|&code| {
+                usize::try_from(code)
+                    .ok()
+                    .and_then(|code| meta.categories.get(code))
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let column = Column::new(DType::Categorical, values)?.with_categorical(Some(meta.clone()));
+        Ok(Self {
+            name: name.into(),
+            index,
+            column,
+            categorical: Some(meta),
+            sparse: None,
+        })
+    }
+
     /// Create a categorical Series from values.
     ///
-    /// Matches `pd.Categorical(values)`. Infers categories from unique values.
-    /// Stores integer codes as the column data.
+    /// Matches `pd.Categorical(values)`: the categories are the distinct
+    /// non-missing values in sorted order (first-seen order when they do not
+    /// sort), and the Series stores the values (see [`Self::category_codes`]).
     pub fn from_categorical(
         name: impl Into<String>,
         values: Vec<Scalar>,
         ordered: bool,
     ) -> Result<Self, FrameError> {
-        // Typed Int64 dense fast path: all-Int64 values (Int64 is never missing)
-        // with a bounded range -> direct-address factorize (no per-value
-        // scalar_key + FxHashMap probe). First-seen category order preserved, so
-        // codes + categories are bit-identical to the hash path. Falls back when
-        // any value is non-Int64 or the range is too large (sparse keys).
-        'dense: {
-            if values.is_empty() {
-                break 'dense;
-            }
-            let (mut lo, mut hi) = (i64::MAX, i64::MIN);
-            for v in &values {
-                match v {
-                    Scalar::Int64(x) => {
-                        if *x < lo {
-                            lo = *x;
-                        }
-                        if *x > hi {
-                            hi = *x;
-                        }
-                    }
-                    _ => break 'dense,
+        let mut categories: Vec<Scalar> = Vec::new();
+        {
+            let mut seen: FxHashSet<ScalarKey<'_>> = FxHashSet::default();
+            for value in &values {
+                if !value.is_missing() && seen.insert(scalar_key_allow_missing(value)) {
+                    categories.push(value.clone());
                 }
             }
-            let range = (hi as i128) - (lo as i128) + 1;
-            let cap = ((values.len() as i128) * 4).max(1 << 16);
-            if range <= 0 || range > cap {
-                break 'dense;
-            }
-            let mut slot: Vec<i64> = vec![-1; range as usize];
-            let mut categories: Vec<Scalar> = Vec::new();
-            // Typed i64 codes + lazy unit-range index (the lazy-int64 vein): skip
-            // the Vec<Scalar> codes + from_values dtype scan, and the 1M
-            // Vec<IndexLabel::Int64(0..n)> materialization (the RangeIndex is O(1)
-            // lazy). Bit-identical: codes are Int64 either way; index is 0..n.
-            let mut codes: Vec<i64> = Vec::with_capacity(values.len());
-            for v in &values {
-                let x = match v {
-                    Scalar::Int64(x) => *x,
-                    _ => unreachable!(),
-                };
-                let idx = (x - lo) as usize;
-                let code = if slot[idx] >= 0 {
-                    slot[idx]
-                } else {
-                    let pos = categories.len() as i64;
-                    slot[idx] = pos;
-                    categories.push(Scalar::Int64(x));
-                    pos
-                };
-                codes.push(code);
-            }
-            let column = Column::from_i64_values_owned(codes);
-            return Ok(Self {
-                name: name.into(),
-                index: Index::new_known_unique_int64_unit_range(0, values.len()),
-                column,
-                categorical: Some(CategoricalMetadata {
-                    categories,
-                    ordered,
-                }),
-                sparse: None,
-            });
         }
-        // Build unique categories preserving first-seen order.
-        let mut categories: Vec<Scalar> = Vec::new();
-        let mut cat_positions: FxHashMap<ScalarKey<'_>, i64> = FxHashMap::default();
-
-        // Typed i64 codes + lazy unit-range index (lazy-int64 vein): the codes
-        // are always Int64 (or -1 for missing) and the index is always 0..n, so
-        // skip the Vec<Scalar> codes + from_values dtype scan + the 1M
-        // Vec<IndexLabel> materialization. Bit-identical.
-        let mut codes: Vec<i64> = Vec::with_capacity(values.len());
-
-        for val in &values {
-            if val.is_missing() {
-                codes.push(-1);
-                continue;
-            }
-            let key = scalar_key_allow_missing(val);
-            let code = if let Some(&pos) = cat_positions.get(&key) {
-                pos
-            } else {
-                let pos = categories.len() as i64;
-                cat_positions.insert(key, pos);
-                categories.push(val.clone());
-                pos
-            };
-            codes.push(code);
+        // pandas factorizes with sort=True and keeps the order of appearance
+        // only when the values do not order among themselves (mixed kinds).
+        let kind = |value: &Scalar| match value {
+            Scalar::Int64(_) | Scalar::Float64(_) => 0,
+            Scalar::Bool(_) => 1,
+            Scalar::Utf8(_) => 2,
+            Scalar::Datetime64(_) => 3,
+            Scalar::Timedelta64(_) => 4,
+            _ => 5,
+        };
+        if categories.first().is_some_and(|first| {
+            kind(first) < 5 && categories.iter().all(|c| kind(c) == kind(first))
+        }) {
+            categories.sort_by(|a, b| compare_scalars_with_na_position(a, b, true, false));
         }
-
-        let column = Column::from_i64_values_owned(codes);
-        let index = Index::new_known_unique_int64_unit_range(0, values.len());
-
+        let len = values.len();
+        let meta = CategoricalMetadata {
+            categories,
+            ordered,
+        };
+        let column = Column::new(DType::Categorical, values)?.with_categorical(Some(meta.clone()));
         Ok(Self {
             name: name.into(),
-            index,
+            index: Index::new_known_unique_int64_unit_range(0, len),
             column,
-            categorical: Some(CategoricalMetadata {
-                categories,
-                ordered,
-            }),
+            categorical: Some(meta),
             sparse: None,
         })
     }
@@ -28863,23 +28895,16 @@ impl Series {
             }
         }
 
-        let index_labels: Vec<IndexLabel> =
-            (0..codes.len() as i64).map(IndexLabel::Int64).collect();
-
-        let code_scalars: Vec<Scalar> = codes.into_iter().map(Scalar::Int64).collect();
-        let column = Column::from_values(code_scalars)?;
-        let index = Index::new(index_labels);
-
-        Ok(Self {
-            name: name.into(),
+        let index = Index::new_known_unique_int64_unit_range(0, codes.len());
+        Self::categorical_from_code_parts(
+            name,
             index,
-            column,
-            categorical: Some(CategoricalMetadata {
+            &codes,
+            CategoricalMetadata {
                 categories,
                 ordered,
-            }),
-            sparse: None,
-        })
+            },
+        )
     }
 
     /// Create a sparse Series from dense values.
@@ -46697,18 +46722,41 @@ impl CategoricalAccessor<'_> {
         self.meta.ordered
     }
 
+    /// Every row's category code (-1 where missing).
+    fn row_codes(&self) -> Vec<i64> {
+        self.series.category_codes().unwrap_or_default()
+    }
+
+    /// This Series' rows as the categories `codes` name among `categories`.
+    fn recoded(
+        &self,
+        codes: &[i64],
+        categories: Vec<Scalar>,
+        ordered: bool,
+    ) -> Result<Series, FrameError> {
+        Series::categorical_from_code_parts(
+            self.series.name.clone(),
+            self.series.index.clone(),
+            codes,
+            CategoricalMetadata {
+                categories,
+                ordered,
+            },
+        )
+    }
+
     /// Returns the integer codes for this categorical Series.
     ///
-    /// Matches `pd.Series.cat.codes`. Returns a Series of Int64 values
-    /// where -1 indicates missing/NaN.
+    /// Matches `pd.Series.cat.codes`: the codes (-1 where missing), unnamed as
+    /// pandas returns them (`.cat.codes.name is None`; this was
+    /// "{name}_codes"). pandas' codes are int8 for small category counts;
+    /// these are Int64.
     pub fn codes(&self) -> Result<Series, FrameError> {
-        Ok(Series {
-            name: format!("{}_codes", self.series.name),
-            index: self.series.index.clone(),
-            column: self.series.column.clone(),
-            categorical: None,
-            sparse: None,
-        })
+        Series::new(
+            String::new(),
+            self.series.index.clone(),
+            Column::from_i64_values(self.row_codes()),
+        )
     }
 
     /// Rename categories.
@@ -46723,16 +46771,7 @@ impl CategoricalAccessor<'_> {
                 self.meta.categories.len()
             )));
         }
-        Ok(Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: self.series.column.clone(),
-            categorical: Some(CategoricalMetadata {
-                categories: new_categories,
-                ordered: self.meta.ordered,
-            }),
-            sparse: None,
-        })
+        self.recoded(&self.row_codes(), new_categories, self.meta.ordered)
     }
 
     /// Add new categories.
@@ -46741,16 +46780,7 @@ impl CategoricalAccessor<'_> {
     pub fn add_categories(&self, new_categories: Vec<Scalar>) -> Result<Series, FrameError> {
         let mut cats = self.meta.categories.clone();
         cats.extend(new_categories);
-        Ok(Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: self.series.column.clone(),
-            categorical: Some(CategoricalMetadata {
-                categories: cats,
-                ordered: self.meta.ordered,
-            }),
-            sparse: None,
-        })
+        self.recoded(&self.row_codes(), cats, self.meta.ordered)
     }
 
     /// Remove unused categories (categories not referenced by any code).
@@ -46758,13 +46788,11 @@ impl CategoricalAccessor<'_> {
     /// Matches `pd.Series.cat.remove_unused_categories()`.
     pub fn remove_unused_categories(&self) -> Result<Series, FrameError> {
         // Collect which category codes are actually used.
+        let codes = self.row_codes();
         let mut used = vec![false; self.meta.categories.len()];
-        for val in self.series.column.values() {
-            if let Scalar::Int64(code) = val
-                && *code >= 0
-                && (*code as usize) < used.len()
-            {
-                used[*code as usize] = true;
+        for &code in &codes {
+            if let Some(slot) = usize::try_from(code).ok().and_then(|c| used.get_mut(c)) {
+                *slot = true;
             }
         }
 
@@ -46780,29 +46808,11 @@ impl CategoricalAccessor<'_> {
         }
 
         // Remap codes.
-        let new_codes: Vec<Scalar> = self
-            .series
-            .column
-            .values()
+        let new_codes: Vec<i64> = codes
             .iter()
-            .map(|val| match val {
-                Scalar::Int64(code) if *code >= 0 && (*code as usize) < remap.len() => {
-                    Scalar::Int64(remap[*code as usize])
-                }
-                _ => val.clone(),
-            })
+            .map(|&code| usize::try_from(code).map_or(-1, |c| remap[c]))
             .collect();
-
-        Ok(Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: Column::from_values(new_codes)?,
-            categorical: Some(CategoricalMetadata {
-                categories: new_categories,
-                ordered: self.meta.ordered,
-            }),
-            sparse: None,
-        })
+        self.recoded(&new_codes, new_categories, self.meta.ordered)
     }
 
     /// Remove specified categories from the categorical.
@@ -46824,29 +46834,12 @@ impl CategoricalAccessor<'_> {
         }
 
         // Remap codes.
-        let new_codes: Vec<Scalar> = self
-            .series
-            .column
-            .values()
+        let new_codes: Vec<i64> = self
+            .row_codes()
             .iter()
-            .map(|val| match val {
-                Scalar::Int64(code) if *code >= 0 && (*code as usize) < remap.len() => {
-                    Scalar::Int64(remap[*code as usize])
-                }
-                _ => val.clone(),
-            })
+            .map(|&code| usize::try_from(code).map_or(-1, |c| remap[c]))
             .collect();
-
-        Ok(Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: Column::from_values(new_codes)?,
-            categorical: Some(CategoricalMetadata {
-                categories: new_categories,
-                ordered: self.meta.ordered,
-            }),
-            sparse: None,
-        })
+        self.recoded(&new_codes, new_categories, self.meta.ordered)
     }
 
     /// Reorder categories according to the specified order.
@@ -46883,35 +46876,19 @@ impl CategoricalAccessor<'_> {
         }
 
         // Remap codes.
-        let new_codes: Vec<Scalar> = self
-            .series
-            .column
-            .values()
+        let new_codes: Vec<i64> = self
+            .row_codes()
             .iter()
-            .map(|val| {
-                if let Scalar::Int64(code) = val
-                    && *code >= 0
-                    && (*code as usize) < self.meta.categories.len()
-                {
-                    let cat = &self.meta.categories[*code as usize];
-                    let key = scalar_key_allow_missing(cat);
-                    Scalar::Int64(*new_code_map.get(&key).unwrap_or(&-1))
-                } else {
-                    val.clone()
-                }
+            .map(|&code| {
+                usize::try_from(code)
+                    .ok()
+                    .and_then(|c| self.meta.categories.get(c))
+                    .and_then(|cat| new_code_map.get(&scalar_key_allow_missing(cat)).copied())
+                    .unwrap_or(-1)
             })
             .collect();
-
-        Ok(Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: Column::from_values(new_codes)?,
-            categorical: Some(CategoricalMetadata {
-                categories: new_order,
-                ordered: self.meta.ordered,
-            }),
-            sparse: None,
-        })
+        drop(new_code_map);
+        self.recoded(&new_codes, new_order, self.meta.ordered)
     }
 
     /// Set the categories to a new list, remapping codes accordingly.
@@ -46926,67 +46903,39 @@ impl CategoricalAccessor<'_> {
         }
 
         // Remap each old code through: old_code -> old_category -> new_code.
-        let new_codes: Vec<Scalar> = self
-            .series
-            .column
-            .values()
+        let new_codes: Vec<i64> = self
+            .row_codes()
             .iter()
-            .map(|val| {
-                if let Scalar::Int64(code) = val
-                    && *code >= 0
-                    && (*code as usize) < self.meta.categories.len()
-                {
-                    let old_cat = &self.meta.categories[*code as usize];
-                    let key = scalar_key_allow_missing(old_cat);
-                    Scalar::Int64(*new_code_map.get(&key).unwrap_or(&-1))
-                } else {
-                    Scalar::Int64(-1)
-                }
+            .map(|&code| {
+                usize::try_from(code)
+                    .ok()
+                    .and_then(|c| self.meta.categories.get(c))
+                    .and_then(|cat| new_code_map.get(&scalar_key_allow_missing(cat)).copied())
+                    .unwrap_or(-1)
             })
             .collect();
-
-        Ok(Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: Column::from_values(new_codes)?,
-            categorical: Some(CategoricalMetadata {
-                categories: new_categories,
-                ordered: self.meta.ordered,
-            }),
-            sparse: None,
-        })
+        drop(new_code_map);
+        self.recoded(&new_codes, new_categories, self.meta.ordered)
     }
 
     /// Mark this categorical as ordered.
     ///
     /// Matches `pd.Series.cat.as_ordered()`.
     pub fn as_ordered(&self) -> Series {
-        Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: self.series.column.clone(),
-            categorical: Some(CategoricalMetadata {
-                categories: self.meta.categories.clone(),
-                ordered: true,
-            }),
-            sparse: None,
-        }
+        self.series.clone().with_categories(CategoricalMetadata {
+            categories: self.meta.categories.clone(),
+            ordered: true,
+        })
     }
 
     /// Mark this categorical as unordered.
     ///
     /// Matches `pd.Series.cat.as_unordered()`.
     pub fn as_unordered(&self) -> Series {
-        Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: self.series.column.clone(),
-            categorical: Some(CategoricalMetadata {
-                categories: self.meta.categories.clone(),
-                ordered: false,
-            }),
-            sparse: None,
-        }
+        self.series.clone().with_categories(CategoricalMetadata {
+            categories: self.meta.categories.clone(),
+            ordered: false,
+        })
     }
 
     /// Materialize the categorical back to the original values.
@@ -47015,25 +46964,20 @@ impl CategoricalAccessor<'_> {
         Series::new(self.series.name.clone(), index, column)
     }
 
-    /// The category value each code names, in row order.
+    /// The category value of each row, in row order (a missing row is
+    /// `Null(NaN)`, the missing-code rule above).
     ///
-    /// The one place codes become values. Infallible, so callers that cannot
-    /// return a `Result` (`Series::to_list`) reuse it instead of growing a
-    /// second copy of the missing-code rule.
+    /// Infallible, so callers that cannot return a `Result`
+    /// (`Series::to_list`) reuse it.
     fn resolved_values(&self) -> Vec<Scalar> {
-        self.series
-            .column
-            .values()
+        self.row_codes()
             .iter()
-            .map(|val| {
-                if let Scalar::Int64(code) = val
-                    && *code >= 0
-                    && (*code as usize) < self.meta.categories.len()
-                {
-                    self.meta.categories[*code as usize].clone()
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
+            .map(|&code| {
+                usize::try_from(code)
+                    .ok()
+                    .and_then(|c| self.meta.categories.get(c))
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
             })
             .collect()
     }
@@ -47049,16 +46993,7 @@ impl CategoricalAccessor<'_> {
         F: Fn(&Scalar) -> Scalar,
     {
         let new_categories: Vec<Scalar> = self.meta.categories.iter().map(&mapper).collect();
-        Ok(Series {
-            name: self.series.name.clone(),
-            index: self.series.index.clone(),
-            column: self.series.column.clone(),
-            categorical: Some(CategoricalMetadata {
-                categories: new_categories,
-                ordered: self.meta.ordered,
-            }),
-            sparse: None,
-        })
+        self.recoded(&self.row_codes(), new_categories, self.meta.ordered)
     }
 
     /// Return the minimum value from the series (requires ordered categorical).
@@ -47070,14 +47005,7 @@ impl CategoricalAccessor<'_> {
                 "min() requires an ordered categorical".into(),
             ));
         }
-        let mut min_code: Option<i64> = None;
-        for val in self.series.column.values() {
-            if let Scalar::Int64(code) = val
-                && *code >= 0
-            {
-                min_code = Some(min_code.map_or(*code, |m| m.min(*code)));
-            }
-        }
+        let min_code = self.row_codes().into_iter().filter(|&code| code >= 0).min();
         match min_code {
             Some(code) if (code as usize) < self.meta.categories.len() => {
                 Ok(self.meta.categories[code as usize].clone())
@@ -47095,14 +47023,7 @@ impl CategoricalAccessor<'_> {
                 "max() requires an ordered categorical".into(),
             ));
         }
-        let mut max_code: Option<i64> = None;
-        for val in self.series.column.values() {
-            if let Scalar::Int64(code) = val
-                && *code >= 0
-            {
-                max_code = Some(max_code.map_or(*code, |m| m.max(*code)));
-            }
-        }
+        let max_code = self.row_codes().into_iter().filter(|&code| code >= 0).max();
         match max_code {
             Some(code) if (code as usize) < self.meta.categories.len() => {
                 Ok(self.meta.categories[code as usize].clone())
@@ -141109,7 +141030,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(s.dtype(), DType::Categorical);
-        assert_eq!(s.column().dtype(), DType::Int64);
+        // The column stores the values as a categorical column, the form a
+        // DataFrame holds (it held Int64 codes before br-frankenpandas-hrxn9).
+        assert_eq!(s.column().dtype(), DType::Categorical);
+        let cat = s.cat().unwrap();
+        assert_eq!(
+            s.column().categorical().map(|meta| &meta.categories[..]),
+            Some(cat.categories())
+        );
     }
 
     #[test]
@@ -154526,6 +154454,52 @@ mod tests {
         let first_b = b.groupby(&key).unwrap().first_skipna(false).unwrap();
         assert_eq!(first_b.values()[0], Scalar::Float64(1.5));
         assert!(first_b.values()[1].is_missing());
+    }
+
+    #[test]
+    fn categorical_series_store_values_like_a_frame_column_hrxn9() {
+        // pandas 2.2.3: Series(['b','a','b']).astype('category') -> categories
+        // ['a','b'], codes [1,0,1]; `== 'b'` -> [True, False, True]; the
+        // category survives a trip through a DataFrame column.
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        let plain = Series::from_values(
+            "s",
+            vec![IndexLabel::Int64(10), IndexLabel::Int64(20), IndexLabel::Int64(30)],
+            vec![utf8("b"), utf8("a"), utf8("b")],
+        )
+        .unwrap();
+        let cat = plain.astype(DType::Categorical).unwrap();
+        assert_eq!(cat.dtype(), DType::Categorical);
+        assert_eq!(cat.index(), plain.index());
+        assert_eq!(cat.values(), [utf8("b"), utf8("a"), utf8("b")]);
+        let accessor = cat.cat().unwrap();
+        assert_eq!(accessor.categories(), [utf8("a"), utf8("b")]);
+        assert_eq!(
+            accessor.codes().unwrap().values(),
+            [1_i64, 0, 1].map(Scalar::Int64)
+        );
+        // Generic operations see the values, not the codes.
+        assert_eq!(
+            cat.eq_scalar(&utf8("b")).unwrap().values(),
+            [true, false, true].map(Scalar::Bool)
+        );
+        // Through a frame column and back, the categories stay.
+        let frame = cat.to_frame(Some("c")).unwrap();
+        assert_eq!(frame.column("c").unwrap().dtype(), DType::Categorical);
+        let back = frame.column_as_series("c").unwrap();
+        assert_eq!(back.cat().unwrap().categories(), [utf8("a"), utf8("b")]);
+        assert_eq!(back.values(), cat.values());
+        // astype('category') of a categorical keeps its own categories.
+        let explicit =
+            Series::from_categorical_codes("e", vec![1, 0], vec![utf8("z"), utf8("a")], false)
+                .unwrap();
+        assert_eq!(
+            explicit.astype(DType::Categorical).unwrap().cat().unwrap().categories(),
+            [utf8("z"), utf8("a")]
+        );
+        // NEGATIVE: a plain column is not categorical and has no accessor.
+        assert!(plain.cat().is_none());
+        assert_eq!(plain.eq_scalar(&utf8("b")).unwrap().values()[1], Scalar::Bool(false));
     }
 
     #[test]
@@ -172578,7 +172552,11 @@ mod tests {
             .remove_categories(&[Scalar::Utf8("b".to_string())])
             .unwrap();
         assert_eq!(result.cat().unwrap().categories().len(), 2);
-        assert_eq!(result.column().values()[1], Scalar::Int64(-1));
+        assert_eq!(
+            result.cat().unwrap().codes().unwrap().values()[1],
+            Scalar::Int64(-1)
+        );
+        assert!(result.values()[1].is_missing());
     }
 
     #[test]
@@ -172607,8 +172585,11 @@ mod tests {
         assert_eq!(cats[0], Scalar::Utf8("c".to_string()));
         assert_eq!(cats[1], Scalar::Utf8("b".to_string()));
         assert_eq!(cats[2], Scalar::Utf8("a".to_string()));
-        assert_eq!(result.column().values()[0], Scalar::Int64(2));
-        assert_eq!(result.column().values()[2], Scalar::Int64(0));
+        let codes = cat_accessor.codes().unwrap();
+        assert_eq!(codes.values()[0], Scalar::Int64(2));
+        assert_eq!(codes.values()[2], Scalar::Int64(0));
+        // Reordering the categories leaves every row's value alone.
+        assert_eq!(result.values(), s.values());
     }
 
     #[test]
@@ -177222,14 +177203,23 @@ mod tests {
 
         assert!(s.is_categorical());
         let cat = s.cat().unwrap();
-        assert_eq!(cat.categories().len(), 3);
         assert!(!cat.ordered());
 
-        // Codes should map: red=0, blue=1, green=2
-        assert_eq!(s.column().values()[0], Scalar::Int64(0));
-        assert_eq!(s.column().values()[1], Scalar::Int64(1));
-        assert_eq!(s.column().values()[2], Scalar::Int64(0));
-        assert_eq!(s.column().values()[3], Scalar::Int64(2));
+        // GOLDEN-CHANGE (br-frankenpandas-hrxn9): pandas 2.2.3 sorts the
+        // inferred categories - Categorical(['red','blue','red','green'])
+        // .categories == ['blue', 'green', 'red'], codes [2, 0, 2, 1]. This
+        // pinned first-seen order (red=0, blue=1, green=2). The Series stores
+        // the values; the codes come from the accessor.
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        assert_eq!(cat.categories(), [utf8("blue"), utf8("green"), utf8("red")]);
+        assert_eq!(
+            cat.codes().unwrap().values(),
+            [2_i64, 0, 2, 1].map(Scalar::Int64)
+        );
+        assert_eq!(
+            s.values(),
+            [utf8("red"), utf8("blue"), utf8("red"), utf8("green")]
+        );
     }
 
     #[test]
@@ -177383,9 +177373,10 @@ mod tests {
             false,
         )
         .unwrap();
-        // The codes are what the column actually holds.
-        assert_eq!(labels.column().values()[0], Scalar::Int64(0));
-        assert_eq!(labels.column().values()[1], Scalar::Int64(1));
+        // The codes are the accessor's (the column holds the values)...
+        let codes = labels.cat().unwrap().codes().unwrap();
+        assert_eq!(codes.values()[0], Scalar::Int64(0));
+        assert_eq!(codes.values()[1], Scalar::Int64(1));
         // ...and the list is the labels, through both spellings.
         let want = vec![
             Scalar::Utf8("x".to_owned()),
@@ -177429,7 +177420,11 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(numbers.column().values()[0], Scalar::Int64(0), "codes");
+        assert_eq!(
+            numbers.cat().unwrap().codes().unwrap().values()[0],
+            Scalar::Int64(0),
+            "codes"
+        );
 
         let by_value = numbers.isin(&[Scalar::Int64(10)]).unwrap();
         assert_eq!(
@@ -177478,8 +177473,11 @@ mod tests {
             false,
         )
         .unwrap();
-        // The codes are what the column holds, and they are NOT the answer.
-        assert_eq!(numbers.column().values()[3], Scalar::Int64(2));
+        // The codes are NOT the answer.
+        assert_eq!(
+            numbers.cat().unwrap().codes().unwrap().values()[3],
+            Scalar::Int64(2)
+        );
         assert_eq!(
             numbers.unique(),
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
@@ -177570,9 +177568,13 @@ mod tests {
             false,
         )
         .unwrap();
-        // 'b' is seen first, so it is code 0 — ordering by code would put it
-        // first, and pandas puts 'a' first.
-        assert_eq!(tied.column().values()[0], Scalar::Int64(0));
+        // pandas sorts the inferred categories, so 'b' (seen first) is code 1
+        // (br-frankenpandas-hrxn9; it was code 0 under first-seen order), and
+        // the mode lists 'a' first either way.
+        assert_eq!(
+            tied.cat().unwrap().codes().unwrap().values()[0],
+            Scalar::Int64(1)
+        );
         assert_eq!(
             tied.mode().unwrap().values(),
             &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]
@@ -177719,8 +177721,13 @@ mod tests {
         )
         .unwrap();
 
-        // Missing values get code -1
-        assert_eq!(s.column().values()[1], Scalar::Int64(-1));
+        // Missing values get code -1 (the Series stores the values; the
+        // accessor derives the codes).
+        assert_eq!(
+            s.cat().unwrap().codes().unwrap().values()[1],
+            Scalar::Int64(-1)
+        );
+        assert!(s.values()[1].is_missing());
 
         // Materializing back: -1 becomes Null
         let vals = s.cat().unwrap().to_values().unwrap();
@@ -177954,7 +177961,7 @@ mod tests {
         let sorted = s.sort_values(true).unwrap();
         assert!(sorted.is_categorical());
         assert_eq!(
-            sorted.column().values(),
+            sorted.cat().unwrap().codes().unwrap().values(),
             &[
                 Scalar::Int64(0),
                 Scalar::Int64(1),
@@ -208629,8 +208636,12 @@ mod test_select_columns_perf_76e1fd {
         let cat = s.cat().unwrap();
         let min_val = cat.min().unwrap();
         let max_val = cat.max().unwrap();
-        assert_eq!(min_val, Scalar::Utf8("b".into()));
-        assert_eq!(max_val, Scalar::Utf8("a".into()));
+        // GOLDEN-CHANGE (br-frankenpandas-hrxn9): pandas 2.2.3 sorts inferred
+        // categories even when ordered - Categorical(['b','c','a'],
+        // ordered=True) has categories ['a','b','c'], min 'a', max 'c'. This
+        // pinned first-seen order (min 'b', max 'a').
+        assert_eq!(min_val, Scalar::Utf8("a".into()));
+        assert_eq!(max_val, Scalar::Utf8("c".into()));
     }
 
     #[test]

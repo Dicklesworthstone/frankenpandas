@@ -3277,7 +3277,14 @@ fn build_merge_indicator_column(
             (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
         })
         .collect::<Vec<_>>();
-    Column::from_values(values).map_err(JoinError::from)
+    // pandas makes `_merge` a category with the fixed categories
+    // [left_only, right_only, both] - all three, in that order, whichever rows
+    // appear (br-frankenpandas-hrxn9; it was an object column).
+    let categories = ["left_only", "right_only", "both"]
+        .map(|category| fp_types::Scalar::Utf8(category.to_owned()))
+        .to_vec();
+    Ok(Column::new(fp_types::DType::Categorical, values)?
+        .with_categorical(Some(fp_types::CategoricalMetadata::new(categories, false))))
 }
 
 fn ensure_indicator_name_available(
@@ -18960,14 +18967,26 @@ mod tests {
         )
         .expect("merge");
 
+        let indicator = merged.columns.get("_merge").expect("indicator");
         assert_eq!(
-            merged.columns.get("_merge").expect("indicator").values(),
+            indicator.values(),
             &[
                 Scalar::Utf8("left_only".to_owned()),
                 Scalar::Utf8("both".to_owned()),
                 Scalar::Utf8("both".to_owned()),
                 Scalar::Utf8("right_only".to_owned())
             ]
+        );
+        // pandas 2.2.3: _merge is a category over the fixed [left_only,
+        // right_only, both] (br-frankenpandas-hrxn9), not an object column.
+        assert_eq!(indicator.dtype(), fp_types::DType::Categorical);
+        assert_eq!(
+            indicator.categorical().map(|meta| meta.categories.clone()),
+            Some(
+                ["left_only", "right_only", "both"]
+                    .map(|c| Scalar::Utf8(c.to_owned()))
+                    .to_vec()
+            )
         );
     }
 

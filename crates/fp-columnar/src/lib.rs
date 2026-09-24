@@ -26203,6 +26203,13 @@ impl Column {
                 return Ok(self.clone());
             }
         }
+        // astype('category'): the values stay, and the categories are the
+        // sorted distinct values `Column::new` infers for a categorical column
+        // (it tried to cast each value to "Categorical" and failed;
+        // br-frankenpandas-hrxn9).
+        if target == DType::Categorical {
+            return Self::new(DType::Categorical, self.values().to_vec());
+        }
         // Typed fast paths for the two ubiquitous all-valid numeric casts:
         //   Int64 -> Float64 is exactly `x as f64` (the cast_scalar branch), and
         //   Float64 -> Int64 truncates a finite in-range float toward zero via

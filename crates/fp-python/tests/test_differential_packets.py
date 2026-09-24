@@ -2343,10 +2343,18 @@ def test_merge_indicator_values_match_pandas() -> None:
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="br-frankenpandas-hrxn9: _merge is object, pandas category")
 def test_merge_indicator_dtype_is_category_like_pandas() -> None:
-    merged = fpd.DataFrame(_ML).merge(fpd.DataFrame(_MR), on="k", how="outer", indicator=True)
-    assert str(merged["_merge"].dtype) == "category"
+    # br-frankenpandas-hrxn9: _merge was an object column; pandas makes it a
+    # category with the fixed categories [left_only, right_only, both].
+    for how in ("outer", "inner", "left"):
+        got, want = (
+            m.DataFrame(_ML).merge(m.DataFrame(_MR), on="k", how=how, indicator=True)["_merge"]
+            for m in (fpd, pd)
+        )
+        assert str(got.dtype) == str(want.dtype) == "category"
+        assert list(got.cat.categories) == list(want.cat.categories)
+        assert got.tolist() == want.tolist()
+        assert got.cat.codes.tolist() == want.cat.codes.tolist()
 
 
 # astype specs and loc slices (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.4).
@@ -2394,8 +2402,6 @@ def test_astype_errors_match_pandas() -> None:
             mod.DataFrame(_AD).astype({"zz": float})
         with pytest.raises(TypeError, match="data type 'nonsense' not understood"):
             mod.DataFrame(_AD).astype("nonsense")
-    with pytest.raises(NotImplementedError, match="category"):
-        fpd.Series(["a", "b"]).astype("category")
 
 
 # Type leaks and no-ops (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.4):
@@ -3694,3 +3700,89 @@ def test_resample_bins_are_timestamps_like_pandas(freq: str, agg: str) -> None:
     assert got == want
     # NEGATIVE: not one bin is text.
     assert set(got[0]) == {"Timestamp"}
+
+
+# br-frankenpandas-hrxn9: the category dtype. astype('category'), Series(...,
+# dtype='category'), Categorical(...) in a Series or a frame all raised; the
+# Categorical class stringified every value; .cat on any Series returned empty
+# categories and made-up codes.
+def _category(obj: Any) -> Any:
+    if hasattr(obj, "columns"):
+        return (
+            "DataFrame",
+            [str(obj[c].dtype) for c in obj.columns],
+            {c: _category(obj[c]) for c in obj.columns},
+        )
+    out = ("Series", str(obj.dtype), obj.name, [_marker(v) for v in obj.tolist()])
+    if str(obj.dtype) == "category":
+        out += (
+            [_marker(c) for c in obj.cat.categories],
+            obj.cat.codes.tolist(),
+            obj.cat.ordered,
+        )
+    return out
+
+
+_CATEGORY_CASES = {
+    "astype": lambda m: m.Series(["b", "a", "b"], name="s").astype("category"),
+    "dtype_keyword": lambda m: m.Series(["b", "a", None, "b"], dtype="category"),
+    "positional_dtype": lambda m: m.Series([1, 2], None, "float64", "s"),
+    "numbers": lambda m: m.Series([3, 1, 3, 2]).astype("category"),
+    "categorical_inferred": lambda m: m.Series(m.Categorical([2, 1, None, 2])),
+    "categorical_given": lambda m: m.Series(
+        m.Categorical(["b", "a", "z"], categories=["b", "a", "c"], ordered=True)
+    ),
+    "frame_categorical": lambda m: m.DataFrame({"c": m.Categorical(["x", "y", "x"]), "v": [1, 2, 3]}),
+    "frame_astype_dict": lambda m: m.DataFrame({"c": ["x", "y", "x"], "v": [1, 2, 3]}).astype(
+        {"c": "category"}
+    ),
+    "column_of_frame": lambda m: m.DataFrame({"c": m.Categorical(["x", "y"])})["c"],
+    "value_counts_keeps_unused": lambda m: m.Series(m.Categorical(["a", "a"], categories=["a", "b"])).value_counts(),
+    "sort_by_category_order": lambda m: m.Series(
+        m.Categorical(["lo", "hi", "mid"], categories=["lo", "mid", "hi"], ordered=True)
+    ).sort_values(),
+    "equals_scalar": lambda m: m.Series(["b", "a", "b"]).astype("category") == "b",
+    "rename": lambda m: m.Series(["b", "a"]).astype("category").cat.rename_categories(["B", "A"]),
+    "add": lambda m: m.Series(["b", "a"]).astype("category").cat.add_categories(["c"]),
+    "remove": lambda m: m.Series(["b", "a"]).astype("category").cat.remove_categories(["a"]),
+    "remove_unused": lambda m: m.Series(m.Categorical(["a"], categories=["a", "b"])).cat.remove_unused_categories(),
+    "reorder": lambda m: m.Series(["b", "a"]).astype("category").cat.reorder_categories(["b", "a"]),
+    "set": lambda m: m.Series(["b", "a"]).astype("category").cat.set_categories(["a", "z"]),
+    "as_ordered": lambda m: m.Series(["b", "a"]).astype("category").cat.as_ordered(),
+    "astype_str": lambda m: m.Series(["b", None]).astype("category").astype(str),
+    "head": lambda m: m.Series(["b", "a", "c"]).astype("category").head(2),
+    "groupby_observed": lambda m: m.DataFrame({"c": m.Categorical(["y", "x", "y"]), "v": [1, 2, 3]})
+    .groupby("c", observed=True)["v"]
+    .sum(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CATEGORY_CASES.values()), ids=list(_CATEGORY_CASES))
+def test_category_dtype_matches_pandas(case: Any) -> None:
+    got, want = case(fpd), case(pd)
+    if hasattr(want, "columns"):
+        assert _category(got) == _category(want)
+        return
+    got_c, want_c = _category(got), _category(want)
+    # pandas' codes are int8; the codes themselves must agree.
+    assert got_c == want_c
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_category_refusals_and_errors_match_pandas() -> None:
+    for m in (pd, fpd):
+        # NEGATIVE: .cat on a Series that is not categorical raises.
+        with pytest.raises(AttributeError, match="category"):
+            m.Series([1, 2]).cat
+        # An unordered categorical has no min.
+        with pytest.raises(TypeError):
+            m.Series(["b", "a"]).astype("category").min()
+    # observed=False (pandas' default) adds the unused categories as groups;
+    # grouping by value would drop them, so it raises instead.
+    frame = fpd.DataFrame({"c": fpd.Categorical(["x"], categories=["x", "y"]), "v": [1]})
+    with pytest.raises(NotImplementedError, match="observed"):
+        frame.groupby("c")["v"].sum()
+    # The Categorical class keeps value types (it stringified them).
+    assert fpd.Categorical([1, None, 2]).tolist()[0] == 1
+    assert list(fpd.Categorical([2, 1]).categories) == [1, 2]

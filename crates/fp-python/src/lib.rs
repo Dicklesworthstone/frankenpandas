@@ -31,7 +31,9 @@ use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
     OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex, format_datetime_ns,
 };
-use fp_types::{DType, NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp};
+use fp_types::{
+    CategoricalMetadata, DType, NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp,
+};
 use mimalloc::MiMalloc;
 use pyo3::{
     IntoPyObjectExt,
@@ -9809,6 +9811,9 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || lower.contains("cannot perform __")
                 || lower.contains("not supported for the input types")
                 || lower.contains("cannot interpolate with all object-dtype")
+                // pandas' TypeErrors for unordered categoricals (hrxn9).
+                || lower.contains("categorical is not ordered for operation")
+                || lower.contains("unordered categoricals can only compare")
             {
                 (
                     PyErrorKind::Type,
@@ -10620,12 +10625,10 @@ fn execute_series_where(inner: &Series, cond: &Series, other: &SeriesOrScalar) -
     }
 }
 
-#[pymethods]
 impl PySeries {
-    /// Create a new Series from various data structures (list, tuple, dict, Series, Index, scalar).
-    #[new]
-    #[pyo3(signature = (data=None, index=None, name=None))]
-    fn new(
+    /// A Series from various data structures (list, tuple, dict, Series,
+    /// Index, scalar); [`Self::new`] adds `Categorical` data and `dtype=`.
+    fn from_data(
         py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
@@ -10779,6 +10782,53 @@ impl PySeries {
             Ok(PySeries { inner: series })
         }
     }
+}
+
+#[pymethods]
+impl PySeries {
+    /// pandas' `Series(data=None, index=None, dtype=None, name=None,
+    /// copy=None)`: a `Categorical` keeps its categories, and `dtype=` casts the
+    /// result, 'category' included (br-frankenpandas-hrxn9; the constructor
+    /// took no dtype, and its third positional argument was `name`).
+    #[new]
+    #[pyo3(signature = (data=None, index=None, dtype=None, name=None, copy=None))]
+    fn new(
+        py: Python<'_>,
+        data: Option<&Bound<'_, PyAny>>,
+        index: Option<&Bound<'_, PyAny>>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        name: Option<&str>,
+        copy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let _ = copy; // pandas' copy= does not change the result
+        let series = match data.map(|d| d.extract::<PyRef<'_, PyCategorical>>()) {
+            Some(Ok(categorical)) => {
+                let labels = extract_index_labels(index, categorical.inner.len())?;
+                if labels.len() != categorical.inner.len() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Length of values ({}) does not match length of index ({})",
+                        categorical.inner.len(),
+                        labels.len()
+                    )));
+                }
+                Series::new(
+                    name.unwrap_or(""),
+                    Index::new(labels),
+                    categorical.inner.column().clone(),
+                )
+                .map_err(frame_error_to_py)?
+            }
+            _ => Self::from_data(py, data, index, name)?.inner,
+        };
+        let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) else {
+            return Ok(PySeries { inner: series });
+        };
+        let target = py_dtype_arg(dtype)?;
+        let inner = series
+            .astype(target)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner })
+    }
 
     /// Return the name of the Series; None when unnamed, as in pandas (the Rust
     /// Series stores an unnamed Series as "").
@@ -10853,7 +10903,14 @@ impl PySeries {
             .collect::<PyResult<Vec<_>>>()?;
         let idx_list = PyList::new(py, &idx_labels)?;
         let name = self.name().into_bound_py_any(py)?;
-        let args = PyTuple::new(py, [vals_list.as_any(), idx_list.as_any(), &name])?;
+        // Series(data, index, dtype, name): a categorical comes back as
+        // 'category' (its categories re-inferred from the values).
+        let dtype = if self.inner.is_categorical() {
+            "category".into_bound_py_any(py)?
+        } else {
+            py.None().into_bound(py)
+        };
+        let args = PyTuple::new(py, [vals_list.as_any(), idx_list.as_any(), &dtype, &name])?;
         Ok((constructor, args))
     }
 
@@ -12616,11 +12673,6 @@ impl PySeries {
         } else {
             py_dtype_arg(dtype)?
         };
-        if target == DType::Categorical {
-            // Categorical columns are not rendered as pandas' category yet
-            // (br-frankenpandas-hrxn9).
-            return Err(not_implemented("astype('category')"));
-        }
         match self.inner.astype(target) {
             Ok(inner) => Ok(PySeries { inner }),
             Err(_) if errors == "ignore" => Ok(PySeries {
@@ -13117,7 +13169,8 @@ impl PySeries {
     /// pandas' `Series.groupby` signature (br-frankenpandas-n57tz: only `by`
     /// and `sort` were accepted). Grouping by index level, dropna=False and
     /// group_keys=False are not supported yet; as_index=False raises as it
-    /// does in pandas; `observed` changes nothing without a categorical dtype.
+    /// does in pandas; a category key is checked against `observed` and
+    /// `sort` (see `check_category_key`).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (by=None, axis=None, level=None, as_index=true, sort=true, group_keys=true, observed=None, dropna=true))]
     pub fn groupby(
@@ -13132,7 +13185,6 @@ impl PySeries {
         observed: Option<bool>,
         dropna: bool,
     ) -> PyResult<PySeriesGroupBy> {
-        let _ = observed;
         if !as_index {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "as_index=False only valid with DataFrame",
@@ -13159,6 +13211,7 @@ impl PySeries {
         };
         let sort = sort.unwrap_or(true);
         let by_series = extract_or_build_series(py, by, &self.inner)?;
+        check_category_key(by_series.column(), observed, sort)?;
         let (series, by) = if self.inner.index() != by_series.index()
             && !self.inner.index().has_duplicates()
             && !by_series.index().has_duplicates()
@@ -14426,8 +14479,16 @@ impl PySeries {
         Ok(PySeries { inner: s })
     }
 
+    /// pandas' `.cat` accessor; on a Series that is not categorical it raises
+    /// pandas' AttributeError (it returned empty categories and made-up codes;
+    /// br-frankenpandas-hrxn9).
     #[getter]
     fn cat(&self) -> PyResult<PySeriesCategoricalAccessor> {
+        if !self.inner.is_categorical() {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "Can only use .cat accessor with a 'category' dtype",
+            ));
+        }
         Ok(PySeriesCategoricalAccessor {
             series: self.inner.clone(),
         })
@@ -16660,6 +16721,20 @@ impl PyDataFrame {
                     } else {
                         s.inner.column().clone()
                     }
+                } else if let Ok(categorical) = value.extract::<PyRef<'_, PyCategorical>>() {
+                    // A Categorical column keeps its categories (it raised
+                    // "Cannot convert Categorical to Scalar"; br-frankenpandas-hrxn9).
+                    let column = categorical.inner.column().clone();
+                    if let Some(nr) = detected_nrows {
+                        if column.len() != nr {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "All columns must have the same length",
+                            ));
+                        }
+                    } else {
+                        detected_nrows = Some(column.len());
+                    }
+                    column
                 } else if let Ok(list) = value.cast::<PyList>() {
                     let scalars: Vec<Scalar> = list
                         .iter()
@@ -19342,10 +19417,6 @@ impl PyDataFrame {
                 }
                 targets.push((column, py_dtype_arg(&spec)?));
             }
-            if targets.iter().any(|(_, dt)| *dt == DType::Categorical) {
-                // Not rendered as pandas' category yet (br-frankenpandas-hrxn9).
-                return Err(not_implemented("astype('category')"));
-            }
             let pairs: Vec<(&str, DType)> = targets
                 .iter()
                 .map(|(column, dt)| (column.as_str(), dt.clone()))
@@ -19353,9 +19424,6 @@ impl PyDataFrame {
             self.inner.astype_columns(&pairs)
         } else {
             let target = py_dtype_arg(dtype)?;
-            if target == DType::Categorical {
-                return Err(not_implemented("astype('category')"));
-            }
             self.inner.astype(target)
         };
         match result {
@@ -19524,8 +19592,8 @@ impl PyDataFrame {
     /// and `df.groupby(["city", "year"])` both do in pandas, with pandas'
     /// `as_index`, `sort` and `dropna` (br-frankenpandas-n57tz: only `by` was
     /// accepted). Grouping by index level and group_keys=False are not
-    /// supported yet; `observed` changes nothing here, since a frankenpandas
-    /// frame stores category labels rather than a categorical dtype.
+    /// supported yet; a category key is checked against `observed` and
+    /// `sort` (see `check_category_key`).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (by=None, axis=None, level=None, as_index=true, sort=true, group_keys=true, observed=None, dropna=true))]
     fn groupby(
@@ -19539,7 +19607,6 @@ impl PyDataFrame {
         observed: Option<bool>,
         dropna: bool,
     ) -> PyResult<PyGroupBy> {
-        let _ = observed;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         unsupported_params(
             "DataFrame.groupby",
@@ -19563,6 +19630,11 @@ impl PyDataFrame {
                 )
             })?
         };
+        for key in &by {
+            if let Some(column) = self.inner.column(key) {
+                check_category_key(column, observed, sort)?;
+            }
+        }
         let gb = PyGroupBy {
             df: self.inner.clone(),
             by,
@@ -24481,42 +24553,179 @@ pub struct PySeriesCategoricalAccessor {
     series: Series,
 }
 
+impl PySeriesCategoricalAccessor {
+    fn accessor(&self) -> PyResult<fp_frame::CategoricalAccessor<'_>> {
+        self.series.cat().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "Can only use .cat accessor with a 'category' dtype",
+            )
+        })
+    }
+
+    /// A Series from `op` over the accessor, as a Python Series.
+    fn apply(
+        &self,
+        op: impl FnOnce(&fp_frame::CategoricalAccessor<'_>) -> Result<Series, FrameError>,
+    ) -> PyResult<PySeries> {
+        let inner = op(&self.accessor()?)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner })
+    }
+}
+
+/// pandas groups a category key by its CATEGORIES: observed=False (the 2.2
+/// default) adds a group for every unused category, and sort=True orders the
+/// groups by category order. The binding groups by value, which gives pandas'
+/// answer only with observed=True and the categories in value order (or
+/// sort=False); anything else raises rather than dropping the unused groups
+/// (br-frankenpandas-hrxn9).
+fn check_category_key(column: &Column, observed: Option<bool>, sort: bool) -> PyResult<()> {
+    let Some(meta) = column.categorical() else {
+        return Ok(());
+    };
+    if observed != Some(true) {
+        return Err(not_implemented(
+            "groupby over a category key with observed=False (pandas adds the unused categories)",
+        ));
+    }
+    let in_value_order = meta
+        .categories
+        .windows(2)
+        .all(|pair| match (&pair[0], &pair[1]) {
+            (Scalar::Utf8(a), Scalar::Utf8(b)) => a < b,
+            (a, b) => matches!((a.to_f64(), b.to_f64()), (Ok(a), Ok(b)) if a < b),
+        });
+    if sort && !in_value_order {
+        return Err(not_implemented(
+            "groupby(sort=True) over a category key whose categories are not in value order",
+        ));
+    }
+    Ok(())
+}
+
+/// Python objects as category values.
+fn py_categories(py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Vec<Scalar>> {
+    if values.is_instance_of::<pyo3::types::PyString>() {
+        return Ok(vec![py_to_scalar(py, values)?]);
+    }
+    values
+        .try_iter()?
+        .map(|item| py_to_scalar(py, &item?))
+        .collect()
+}
+
 #[pymethods]
 impl PySeriesCategoricalAccessor {
     #[getter]
-    fn ordered(&self) -> bool {
-        self.series.cat().map(|c| c.ordered()).unwrap_or(false)
+    fn ordered(&self) -> PyResult<bool> {
+        Ok(self.accessor()?.ordered())
     }
 
+    /// The categories as an Index, as pandas returns them.
     #[getter]
-    fn categories(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(cat) = self.series.cat() {
-            let py_cats: Vec<Py<PyAny>> = cat
-                .categories()
-                .iter()
-                .map(|sc| scalar_to_py(py, sc))
-                .collect::<PyResult<Vec<_>>>()?;
-            let list = PyList::new(py, py_cats)?;
-            Ok(list.into_any().unbind())
-        } else {
-            let list = PyList::empty(py);
-            Ok(list.into_any().unbind())
-        }
+    fn categories(&self) -> PyResult<PyIndex> {
+        let labels = self
+            .accessor()?
+            .categories()
+            .iter()
+            .map(scalar_to_index_label_converter)
+            .collect();
+        Ok(PyIndex {
+            inner: Index::new(labels),
+        })
     }
 
+    /// Each row's category code, -1 where missing (pandas' are int8 for
+    /// small category counts; these are int64).
     #[getter]
     fn codes(&self) -> PyResult<PySeries> {
-        if let Some(cat) = self.series.cat() {
-            let s = cat.codes().map_err(frame_error_to_py)?;
-            Ok(PySeries { inner: s })
-        } else {
-            let labels = self.series.index().labels().to_vec();
-            let values: Vec<Scalar> = (0..self.series.len())
-                .map(|i| Scalar::Int64(i as i64))
-                .collect();
-            let s = Series::from_values("", labels, values).map_err(frame_error_to_py)?;
-            Ok(PySeries { inner: s })
+        self.apply(|cat| cat.codes())
+    }
+
+    fn rename_categories(
+        &self,
+        py: Python<'_>,
+        new_categories: &Bound<'_, PyAny>,
+    ) -> PyResult<PySeries> {
+        let categories = py_categories(py, new_categories)?;
+        self.apply(|cat| cat.rename_categories(categories))
+    }
+
+    fn add_categories(
+        &self,
+        py: Python<'_>,
+        new_categories: &Bound<'_, PyAny>,
+    ) -> PyResult<PySeries> {
+        let categories = py_categories(py, new_categories)?;
+        self.apply(|cat| cat.add_categories(categories))
+    }
+
+    fn remove_categories(&self, py: Python<'_>, removals: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let removals = py_categories(py, removals)?;
+        self.apply(|cat| cat.remove_categories(&removals))
+    }
+
+    fn remove_unused_categories(&self) -> PyResult<PySeries> {
+        self.apply(|cat| cat.remove_unused_categories())
+    }
+
+    #[pyo3(signature = (new_categories, ordered=None))]
+    fn reorder_categories(
+        &self,
+        py: Python<'_>,
+        new_categories: &Bound<'_, PyAny>,
+        ordered: Option<bool>,
+    ) -> PyResult<PySeries> {
+        let categories = py_categories(py, new_categories)?;
+        let out = self.apply(|cat| cat.reorder_categories(categories))?;
+        self.with_ordered(out, ordered)
+    }
+
+    #[pyo3(signature = (new_categories, ordered=None, rename=false))]
+    fn set_categories(
+        &self,
+        py: Python<'_>,
+        new_categories: &Bound<'_, PyAny>,
+        ordered: Option<bool>,
+        rename: bool,
+    ) -> PyResult<PySeries> {
+        if rename {
+            return Err(not_implemented("cat.set_categories(rename=True)"));
         }
+        let categories = py_categories(py, new_categories)?;
+        let out = self.apply(|cat| cat.set_categories(categories))?;
+        self.with_ordered(out, ordered)
+    }
+
+    fn as_ordered(&self) -> PyResult<PySeries> {
+        Ok(PySeries {
+            inner: self.accessor()?.as_ordered(),
+        })
+    }
+
+    fn as_unordered(&self) -> PyResult<PySeries> {
+        Ok(PySeries {
+            inner: self.accessor()?.as_unordered(),
+        })
+    }
+}
+
+impl PySeriesCategoricalAccessor {
+    /// `ordered=` of reorder/set_categories: None keeps the current flag.
+    fn with_ordered(&self, out: PySeries, ordered: Option<bool>) -> PyResult<PySeries> {
+        let Some(ordered) = ordered else {
+            return Ok(out);
+        };
+        let accessor = out
+            .inner
+            .cat()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyTypeError, _>("not categorical"))?;
+        let inner = if ordered {
+            accessor.as_ordered()
+        } else {
+            accessor.as_unordered()
+        };
+        Ok(PySeries { inner })
     }
 }
 
@@ -31976,7 +32185,7 @@ fn unique(py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             .collect::<PyResult<Vec<_>>>()?;
         return Ok(PyList::new(py, list)?.into_any().unbind());
     }
-    let s = PySeries::new(py, Some(values), None, None)?;
+    let s = PySeries::from_data(py, Some(values), None, None)?;
     s.unique(py)
 }
 
@@ -31993,7 +32202,7 @@ fn value_counts(
     let series = if let Ok(s) = values.extract::<PyRef<'_, PySeries>>() {
         s.inner.clone()
     } else {
-        PySeries::new(py, Some(values), None, None)?.inner
+        PySeries::from_data(py, Some(values), None, None)?.inner
     };
     let r = series
         .value_counts_with_options(normalize, sort, ascending, dropna)
@@ -32009,7 +32218,7 @@ fn factorize(
     sort: bool,
     use_na_sentinel: bool,
 ) -> PyResult<(Py<PyAny>, PyIndex)> {
-    let s = PySeries::new(py, Some(values), None, None)?;
+    let s = PySeries::from_data(py, Some(values), None, None)?;
     let col_vals = s.inner.column().values();
 
     let mut cat_to_code: HashMap<String, i64> = HashMap::new();
@@ -32174,7 +32383,7 @@ fn get_dummies(
         return Ok(PyDataFrame { inner: new_df });
     }
 
-    let s = PySeries::new(py, Some(data), None, None)?;
+    let s = PySeries::from_data(py, Some(data), None, None)?;
     let vals = s.inner.column().values();
     let mut distinct_cats = Vec::new();
     let mut cat_set = HashSet::new();
@@ -32263,8 +32472,8 @@ fn crosstab(
             ("margins", !margins),
         ],
     )?;
-    let s_idx = PySeries::new(py, Some(index), None, None)?;
-    let s_col = PySeries::new(py, Some(columns), None, None)?;
+    let s_idx = PySeries::from_data(py, Some(index), None, None)?;
+    let s_col = PySeries::from_data(py, Some(columns), None, None)?;
 
     if s_idx.inner.len() != s_col.inner.len() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -33665,69 +33874,72 @@ impl PyIntervalIndex {
     }
 }
 
+/// pandas' `Categorical`: the values with their categories, held as a
+/// categorical fp-frame Series. The values keep their types (they were all
+/// stringified, so `Categorical([1, None])` had the categories '1' and
+/// 'None'), missing values are missing, and inferred categories are the
+/// sorted distinct values (br-frankenpandas-hrxn9).
 #[pyclass(name = "Categorical", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCategorical {
-    pub categories_list: Vec<String>,
-    #[pyo3(get)]
-    pub codes: Vec<i64>,
-    #[pyo3(get)]
-    pub ordered: bool,
+    inner: Series,
+}
+
+impl PyCategorical {
+    fn meta(&self) -> CategoricalMetadata {
+        self.inner.cat().map_or_else(
+            || CategoricalMetadata::new(Vec::new(), false),
+            |cat| CategoricalMetadata::new(cat.categories().to_vec(), cat.ordered()),
+        )
+    }
 }
 
 #[pymethods]
 impl PyCategorical {
     #[new]
-    #[pyo3(signature = (values, categories=None, ordered=false))]
+    #[pyo3(signature = (values, categories=None, ordered=None))]
     fn new(
+        py: Python<'_>,
         values: &Bound<'_, PyAny>,
-        categories: Option<Vec<String>>,
+        categories: Option<&Bound<'_, PyAny>>,
         ordered: Option<bool>,
     ) -> PyResult<Self> {
         let ordered = ordered.unwrap_or(false);
-        let seq = values.cast::<pyo3::types::PySequence>()?;
-        let len = seq.len()?;
-        let mut raw_vals = Vec::with_capacity(len);
-        for i in 0..len {
-            let item = seq.get_item(i)?;
-            raw_vals.push(item.str()?.to_str()?.to_string());
-        }
-        let cats = if let Some(c) = categories {
-            c
-        } else {
-            let mut set = HashSet::new();
-            let mut unique_cats = Vec::new();
-            for v in &raw_vals {
-                if set.insert(v.clone()) {
-                    unique_cats.push(v.clone());
-                }
+        let values = values
+            .try_iter()?
+            .map(|item| py_to_scalar(py, &item?))
+            .collect::<PyResult<Vec<Scalar>>>()?;
+        let inner = match categories.filter(|c| !c.is_none()) {
+            None => Series::from_categorical("", values, ordered),
+            Some(categories) => {
+                let categories = categories
+                    .try_iter()?
+                    .map(|item| py_to_scalar(py, &item?))
+                    .collect::<PyResult<Vec<Scalar>>>()?;
+                // A value outside the given categories is missing, as pandas.
+                let codes: Vec<i64> = values
+                    .iter()
+                    .map(|value| {
+                        categories
+                            .iter()
+                            .position(|category| !value.is_missing() && category.semantic_eq(value))
+                            .map_or(-1, |position| position as i64)
+                    })
+                    .collect();
+                Series::from_categorical_codes("", codes, categories, ordered)
             }
-            unique_cats.sort();
-            unique_cats
-        };
-        let cat_map: HashMap<&str, i64> = cats
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), i as i64))
-            .collect();
-        let codes: Vec<i64> = raw_vals
-            .iter()
-            .map(|v| cat_map.get(v.as_str()).copied().unwrap_or(-1))
-            .collect();
-
-        Ok(Self {
-            categories_list: cats,
-            codes,
-            ordered,
-        })
+        }
+        .map_err(frame_error_to_py)?;
+        Ok(Self { inner })
     }
 
     #[getter]
     fn categories(&self) -> PyIndex {
         let labels = self
-            .categories_list
+            .meta()
+            .categories
             .iter()
-            .map(|s| IndexLabel::Utf8(s.clone()))
+            .map(scalar_to_index_label_converter)
             .collect();
         PyIndex {
             inner: Index::new(labels),
@@ -33735,24 +33947,59 @@ impl PyCategorical {
     }
 
     #[getter]
+    fn codes(&self) -> PyResult<Vec<i64>> {
+        let cat = self
+            .inner
+            .cat()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyTypeError, _>("not categorical"))?;
+        let codes = cat.codes().map_err(frame_error_to_py)?;
+        Ok(codes
+            .values()
+            .iter()
+            .map(|code| match code {
+                Scalar::Int64(code) => *code,
+                _ => -1,
+            })
+            .collect())
+    }
+
+    #[getter]
+    fn ordered(&self) -> bool {
+        self.meta().ordered
+    }
+
+    #[getter]
     fn dtype(&self) -> PyCategoricalDtype {
+        let meta = self.meta();
         PyCategoricalDtype {
-            categories: Some(self.categories_list.clone()),
-            ordered: self.ordered,
+            categories: Some(meta.categories.iter().map(ToString::to_string).collect()),
+            ordered: meta.ordered,
         }
     }
 
+    fn tolist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .values()
+            .iter()
+            .map(|value| scalar_to_py(py, value))
+            .collect()
+    }
+
     fn __repr__(&self) -> String {
+        let meta = self.meta();
         format!(
             "Categorical(categories={:?}, ordered={}, length={})",
-            self.categories_list,
-            self.ordered,
-            self.codes.len()
+            meta.categories
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            meta.ordered,
+            self.inner.len()
         )
     }
 
     fn __len__(&self) -> usize {
-        self.codes.len()
+        self.inner.len()
     }
 }
 
@@ -34434,7 +34681,7 @@ pub fn array(
     data: &Bound<'_, PyAny>,
     dtype: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PySeries> {
-    let s = PySeries::new(py, Some(data), None, None)?;
+    let s = PySeries::from_data(py, Some(data), None, None)?;
     match dtype {
         Some(dt) => s.astype(dt, None, "raise"),
         None => Ok(s),

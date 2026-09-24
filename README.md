@@ -568,13 +568,13 @@ The asymmetric loss matrix penalizes "allow if incompatible" (100.0) far more th
 
 ### Categorical Data
 
-`DType::Categorical` is a reportable dtype identity, but the physical storage is an `Int64` code column with a parallel `CategoricalMetadata` record. This dual-layer design preserves dtype reporting parity with pandas while avoiding per-element `Scalar::Categorical(...)` allocations on every match arm across the workspace:
+A categorical Series or DataFrame column stores its values in a `DType::Categorical` column that carries a `CategoricalMetadata` record, so generic operations (comparisons, `isin`, `map`, `astype`, IO) see the values, while the operations that order or count by category (sorting, `value_counts`, `min`/`max` of an ordered categorical, the `.cat()` accessor) derive the integer codes from the categories:
 
 ```
 Series {
     name: String,
     index: Index,
-    column: Column,                  // dtype=Int64; values are integer codes (0, 1, 2, ...)
+    column: Column,                  // dtype=Categorical; values are the category values
     categorical: Some(CategoricalMetadata {
         categories: Vec<Scalar>,     // ["low", "medium", "high"]
         ordered: bool,               // Whether categories have total ordering
@@ -583,7 +583,7 @@ Series {
 }
 ```
 
-The `.cat()` accessor provides pandas-compatible operations: `categories()`, `codes()`, `rename_categories()`, `add_categories()`, `remove_unused_categories()`, `set_categories()`, `as_ordered()`, `as_unordered()`, `to_values()`. Missing values use code `-1`.
+Inferred categories are the sorted distinct values, as `pd.Categorical` infers them. The `.cat()` accessor provides pandas-compatible operations: `categories()`, `codes()`, `rename_categories()`, `add_categories()`, `remove_unused_categories()`, `set_categories()`, `as_ordered()`, `as_unordered()`, `to_values()`. Missing values have code `-1`.
 
 ### String Accessor
 
