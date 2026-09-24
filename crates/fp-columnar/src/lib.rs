@@ -19226,11 +19226,54 @@ impl Column {
         }
     }
 
-    /// Element-wise comparison producing a `Bool`-typed column.
+    /// Element-wise comparison producing an all-valid `Bool` column, with
+    /// pandas' numpy semantics: a missing operand (NaN, None, NaT) compares
+    /// `false`, or `true` under `!=`. Only when an operand has a nullable
+    /// extension dtype (Int64/Float64/boolean) is the result missing there, as
+    /// pandas' `pd.NA` propagates (br-frankenpandas-zwfz3: every missing
+    /// operand gave a missing result).
     ///
-    /// Both columns must have the same length. Missing values (Null or NaN)
-    /// propagate: if either operand is missing, the result is missing.
+    /// Both columns must have the same length.
     pub fn binary_comparison(&self, right: &Self, op: ComparisonOp) -> Result<Self, ColumnError> {
+        let result = self.binary_comparison_propagating(right, op)?;
+        if self.dtype.is_nullable() || right.dtype.is_nullable() {
+            return Ok(result);
+        }
+        Ok(result.missing_compares_as(op == ComparisonOp::Ne))
+    }
+
+    /// A comparison result with every missing slot set to `value` (pandas'
+    /// numpy rule: missing compares `false`, `true` under `!=`), all-valid.
+    fn missing_compares_as(self, value: bool) -> Self {
+        if self.validity.all() {
+            return self;
+        }
+        let bools: Vec<bool> =
+            if let ScalarValues::LazyNullableBool { data, validity, .. } = &self.values {
+                data.iter()
+                    .enumerate()
+                    .map(|(i, &b)| if validity.get(i) { b } else { value })
+                    .collect()
+            } else {
+                self.values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Bool(b) => *b,
+                        _ => value,
+                    })
+                    .collect()
+            };
+        Self::from_bool_values(bools)
+    }
+
+    /// Element-wise comparison with `pd.NA` propagation: if either operand is
+    /// missing, the result is missing. [`binary_comparison`](Self::binary_comparison)
+    /// keeps this only for the nullable extension dtypes.
+    fn binary_comparison_propagating(
+        &self,
+        right: &Self,
+        op: ComparisonOp,
+    ) -> Result<Self, ColumnError> {
         if self.len() != right.len() {
             return Err(ColumnError::LengthMismatch {
                 left: self.len(),
@@ -19562,10 +19605,26 @@ impl Column {
         self.binary_comparison(right, ComparisonOp::Ge)
     }
 
-    /// Compare every element against a scalar value, producing a `Bool`-typed column.
-    ///
-    /// Missing values in the column propagate as missing in the result.
+    /// Compare every element against a scalar value, producing an all-valid
+    /// `Bool` column under pandas' numpy semantics: a missing element, or a
+    /// missing scalar, compares `false` (`true` under `!=`). A nullable
+    /// extension dtype keeps `pd.NA` propagation (see
+    /// [`binary_comparison`](Self::binary_comparison); br-frankenpandas-zwfz3).
     pub fn compare_scalar(&self, scalar: &Scalar, op: ComparisonOp) -> Result<Self, ColumnError> {
+        let result = self.compare_scalar_propagating(scalar, op)?;
+        if self.dtype.is_nullable() {
+            return Ok(result);
+        }
+        Ok(result.missing_compares_as(op == ComparisonOp::Ne))
+    }
+
+    /// [`compare_scalar`](Self::compare_scalar) with `pd.NA` propagation:
+    /// missing values in the column, or a missing scalar, give missing results.
+    fn compare_scalar_propagating(
+        &self,
+        scalar: &Scalar,
+        op: ComparisonOp,
+    ) -> Result<Self, ColumnError> {
         if scalar.is_missing() {
             // Comparing against missing always produces all-missing.
             let values = vec![Scalar::Null(NullKind::Null); self.len()];
@@ -38583,9 +38642,33 @@ mod tests {
             let result = left
                 .binary_comparison(&right, ComparisonOp::Gt)
                 .expect("gt");
-            assert_eq!(result.values()[0], Scalar::Bool(false));
-            assert!(result.values()[1].is_missing(), "null op valid = null");
-            assert!(result.values()[2].is_missing(), "valid op null = null");
+            // GOLDEN-CHANGE (br-frankenpandas-zwfz3): these were missing. pandas
+            // 2.2.3: Series([1, None, 3]) > Series([2, 2, None]) is
+            // [False, False, False] (numpy dtypes), and != is [True, True, True].
+            assert_eq!(
+                result.values(),
+                &[
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false)
+                ]
+            );
+            let ne = left
+                .binary_comparison(&right, ComparisonOp::Ne)
+                .expect("ne");
+            assert_eq!(
+                ne.values(),
+                &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)]
+            );
+            // NEGATIVE: the nullable extension dtype (pandas "Int64") keeps
+            // pd.NA propagation.
+            let nullable = left.astype(DType::Int64Nullable).expect("Int64");
+            let na = nullable
+                .binary_comparison(&right, ComparisonOp::Gt)
+                .expect("gt");
+            assert_eq!(na.values()[0], Scalar::Bool(false));
+            assert!(na.values()[1].is_missing(), "NA op valid = NA");
+            assert!(na.values()[2].is_missing(), "valid op NA = NA");
         }
 
         #[test]
@@ -38623,7 +38706,9 @@ mod tests {
                 .expect("gt");
             assert_eq!(result.values()[0], Scalar::Bool(false));
             assert_eq!(result.values()[1], Scalar::Bool(true));
-            assert!(result.values()[2].is_missing());
+            // GOLDEN-CHANGE (br-frankenpandas-zwfz3): was missing; pandas'
+            // Series([1, 5, None, 3]) > 3 is False there.
+            assert_eq!(result.values()[2], Scalar::Bool(false));
             assert_eq!(result.values()[3], Scalar::Bool(false));
         }
 
@@ -38634,8 +38719,19 @@ mod tests {
             let result = col
                 .compare_scalar(&Scalar::Null(NullKind::Null), ComparisonOp::Eq)
                 .expect("eq");
-            assert!(result.values()[0].is_missing());
-            assert!(result.values()[1].is_missing());
+            // GOLDEN-CHANGE (br-frankenpandas-zwfz3): was all missing; pandas'
+            // Series([1, 2]) == None is [False, False] and != None [True, True].
+            assert_eq!(result.values(), &[Scalar::Bool(false), Scalar::Bool(false)]);
+            let ne = col
+                .compare_scalar(&Scalar::Null(NullKind::Null), ComparisonOp::Ne)
+                .expect("ne");
+            assert_eq!(ne.values(), &[Scalar::Bool(true), Scalar::Bool(true)]);
+            // NEGATIVE: pandas "Int64" == pd.NA stays <NA>.
+            let nullable = col.astype(DType::Int64Nullable).expect("Int64");
+            let na = nullable
+                .compare_scalar(&Scalar::Null(NullKind::Null), ComparisonOp::Eq)
+                .expect("eq");
+            assert!(na.values().iter().all(Scalar::is_missing));
         }
 
         #[test]
@@ -38961,8 +39057,11 @@ mod tests {
                 ComparisonOp::Ge,
                 ComparisonOp::Le,
             ] {
+                // The typed kernel against its Scalar reference, both with pd.NA
+                // propagation; the numpy missing-is-false rule on top is
+                // compare_scalar's (br-frankenpandas-zwfz3).
                 let got = column
-                    .compare_scalar(&probe, op)
+                    .compare_scalar_propagating(&probe, op)
                     .expect("nullable Int64 scalar comparison");
                 let expected: Vec<Scalar> = values
                     .iter()
@@ -39201,7 +39300,11 @@ mod tests {
                         ComparisonOp::Ge,
                         ComparisonOp::Le,
                     ] {
-                        let got = column.compare_scalar(&needle, op).expect("utf8 compare");
+                        // Typed kernel vs Scalar reference, both propagating
+                        // (br-frankenpandas-zwfz3 moved the numpy rule on top).
+                        let got = column
+                            .compare_scalar_propagating(&needle, op)
+                            .expect("utf8 compare");
                         let expected: Vec<Scalar> = opt_strings
                             .iter()
                             .map(|os| match os {
@@ -39370,8 +39473,10 @@ mod tests {
                             ComparisonOp::Ge,
                             ComparisonOp::Le,
                         ] {
+                            // Typed kernel vs reference, both propagating
+                            // (br-frankenpandas-zwfz3 moved the numpy rule on top).
                             let got = lcol
-                                .binary_comparison(&rcol, op)
+                                .binary_comparison_propagating(&rcol, op)
                                 .expect("temporal col compare must not error");
                             let expected: Vec<Scalar> = (0..n)
                                 .map(|i| {
@@ -39449,7 +39554,11 @@ mod tests {
                         ComparisonOp::Ge,
                         ComparisonOp::Le,
                     ] {
-                        let got = lcol.binary_comparison(&rcol, op).expect("bool col compare");
+                        // Typed kernel vs reference, both propagating
+                        // (br-frankenpandas-zwfz3 moved the numpy rule on top).
+                        let got = lcol
+                            .binary_comparison_propagating(&rcol, op)
+                            .expect("bool col compare");
                         let expected: Vec<Scalar> = lopt
                             .iter()
                             .zip(&ropt)
@@ -39538,8 +39647,10 @@ mod tests {
                                 ComparisonOp::Ge,
                                 ComparisonOp::Le,
                             ] {
+                                // Typed kernel vs reference, both propagating
+                                // (br-frankenpandas-zwfz3: numpy rule on top).
                                 let got = col
-                                    .compare_scalar(&scalar, op)
+                                    .compare_scalar_propagating(&scalar, op)
                                     .expect("temporal scalar compare must not error");
                                 let expected: Vec<Scalar> = (0..n)
                                     .map(|i| {

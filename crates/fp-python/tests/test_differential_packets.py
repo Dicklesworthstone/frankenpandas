@@ -2998,13 +2998,8 @@ _SERIES_FLEX_CASES = {
     "truediv_fill": lambda m: _flex_s(m).truediv(_flex_s(m, (4,), ("x",)), fill_value=2),
     "rtruediv_fill": lambda m: _flex_s(m).rtruediv(_flex_s(m, (4,), ("x",)), fill_value=2),
     "eq_fill": lambda m: _flex_s(m, (1.0, _NAN, 3.0)).eq(_flex_s(m, (1.0, 2.0, _NAN)), fill_value=2.0),
-    "lt_fill": pytest.param(
-        lambda m: _flex_s(m, (1.0, _NAN), ("x", "y")).lt(_flex_s(m, (2.0, 0.5), ("x", "w")), fill_value=0),
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="br-frankenpandas-zwfz3: a comparison with NaN (y, missing on both "
-            "sides) is None where pandas gives False",
-        ),
+    "lt_fill": lambda m: _flex_s(m, (1.0, _NAN), ("x", "y")).lt(
+        _flex_s(m, (2.0, 0.5), ("x", "w")), fill_value=0
     ),
     "divmod_fill": lambda m: _flex_s(m).divmod(_flex_s(m, (3,), ("x",)), fill_value=7)[1],
     "axis_index": lambda m: _flex_s(m).add(_flex_s(m), axis="index"),
@@ -3016,6 +3011,42 @@ _SERIES_FLEX_CASES = {
 @pytest.mark.parametrize("case", list(_SERIES_FLEX_CASES.values()), ids=list(_SERIES_FLEX_CASES))
 def test_series_flex_keywords_match_pandas(case: Any) -> None:
     assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
+
+
+def _nan_pair(m: Any) -> Any:
+    return m.Series([1.0, _NAN, 3.0]), m.Series([2.0, _NAN, 1.0])
+
+
+# br-frankenpandas-zwfz3: a comparison with a missing value was missing
+# (None); pandas' numpy dtypes compare it False, and True under !=.
+_NAN_COMPARISON_CASES = {
+    "lt": lambda m: _nan_pair(m)[0] < _nan_pair(m)[1],
+    "eq": lambda m: _nan_pair(m)[0] == _nan_pair(m)[1],
+    "ne": lambda m: _nan_pair(m)[0] != _nan_pair(m)[1],
+    "ge_scalar": lambda m: _nan_pair(m)[0] >= 2,
+    "ne_scalar": lambda m: _nan_pair(m)[0] != 3.0,
+    "eq_none": lambda m: m.Series([1.0, 2.0]) == None,  # noqa: E711
+    "string_eq": lambda m: m.Series(["a", None, "c"]) == "a",
+    "flex_lt_misaligned": lambda m: m.Series([1.0], index=["x"]).lt(m.Series([2.0], index=["y"])),
+    "frame_gt_scalar": lambda m: m.DataFrame({"a": [1.0, _NAN], "b": [3, 4]}) > 1,
+    "frame_eq_frame": lambda m: m.DataFrame({"a": [1.0, _NAN]}).eq(m.DataFrame({"a": [1.0, 2.0]})),
+    "frame_ne_frame": lambda m: m.DataFrame({"a": [1.0, _NAN]}).ne(m.DataFrame({"a": [1.0, 2.0]})),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NAN_COMPARISON_CASES.values()), ids=list(_NAN_COMPARISON_CASES))
+def test_comparisons_with_missing_values_match_pandas(case: Any) -> None:
+    assert _nan_marked(_strict_ordered(case(fpd))) == _nan_marked(_strict_ordered(case(pd)))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_comparison_operators_refuse_different_labels_like_pandas() -> None:
+    for m in (pd, fpd):
+        with pytest.raises(ValueError, match="Can only compare identically-labeled Series objects"):
+            m.Series([1.0], index=["x"]) < m.Series([2.0], index=["y"])
+        # NEGATIVE: identically labeled Series compare, and so does a scalar.
+        assert (m.Series([1.0], index=["x"]) < m.Series([2.0], index=["x"])).tolist() == [True]
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")

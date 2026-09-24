@@ -89815,42 +89815,26 @@ impl DataFrame {
                         }
                         let n = ld.len();
                         let mut bools = vec![false; n];
-                        let mut missing = vec![false; n];
-                        let mut any_missing = false;
                         for i in 0..n {
                             let lp = lv.get(i) && !ld[i].is_nan();
                             let rp = rv.get(i) && !rd[i].is_nan();
-                            if lp && rp {
-                                bools[i] = match op {
+                            bools[i] = if lp && rp {
+                                match op {
                                     ComparisonOp::Eq => ld[i] == rd[i],
                                     ComparisonOp::Ne => ld[i] != rd[i],
                                     ComparisonOp::Gt => ld[i] > rd[i],
                                     ComparisonOp::Ge => ld[i] >= rd[i],
                                     ComparisonOp::Lt => ld[i] < rd[i],
                                     ComparisonOp::Le => ld[i] <= rd[i],
-                                };
-                            } else {
-                                missing[i] = true;
-                                any_missing = true;
-                            }
-                        }
-                        // Typed nullable-Bool backing (br-frankenpandas-rcvpj):
-                        // build the result straight from the bool buffer +
-                        // validity mask. A missing slot carries `bools[i] == false`
-                        // but a cleared validity bit, so it materializes
-                        // Null(NullKind::Null) — bit-identical to the Vec<Scalar>.
-                        let column = if any_missing {
-                            let mut validity = fp_columnar::ValidityMask::all_valid(n);
-                            for (i, &is_missing) in missing.iter().enumerate() {
-                                if is_missing {
-                                    validity.set(i, false);
                                 }
-                            }
-                            Column::from_bool_values_with_validity(bools, validity)
-                        } else {
-                            Column::from_bool_values(bools)
-                        };
-                        Ok(Some(column))
+                            } else {
+                                // numpy Float64/Int64: a missing operand compares
+                                // False, True under != (br-frankenpandas-zwfz3; it
+                                // was carried as missing).
+                                op == ComparisonOp::Ne
+                            };
+                        }
+                        Ok(Some(Column::from_bool_values(bools)))
                     } else if let (Some(ld), Some(rd)) = (lc.as_i64_slice(), rc.as_i64_slice()) {
                         // All-valid Int64 on both sides: the general path compares
                         // via to_f64, so compare each i64 cast to f64 —
@@ -89900,6 +89884,10 @@ impl DataFrame {
         for col_name in &left.column_order {
             let lc = &left.columns[col_name];
             let rc = &right.columns[col_name];
+            // pd.NA propagates only through the nullable extension dtypes; a
+            // numpy-backed missing value compares False, True under !=
+            // (br-frankenpandas-zwfz3).
+            let propagates_na = lc.dtype().is_nullable() || rc.dtype().is_nullable();
 
             let vals: Vec<Scalar> = lc
                 .values()
@@ -89907,7 +89895,11 @@ impl DataFrame {
                 .zip(rc.values())
                 .map(|(lv, rv)| {
                     if lv.is_missing() || rv.is_missing() {
-                        return Scalar::Null(NullKind::Null);
+                        return if propagates_na {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            Scalar::Bool(op == ComparisonOp::Ne)
+                        };
                     }
                     match (lv.to_f64(), rv.to_f64()) {
                         (Ok(l), Ok(r)) => Scalar::Bool(match op {
@@ -90031,7 +90023,7 @@ impl DataFrame {
                 && let Some((d, validity)) = col.as_i64_slice_with_validity()
                 && let Ok(s) = scalar.to_f64()
             {
-                let bools: Vec<bool> = match op {
+                let mut bools: Vec<bool> = match op {
                     ComparisonOp::Eq => d.iter().map(|&v| (v as f64) == s).collect(),
                     ComparisonOp::Ne => d.iter().map(|&v| (v as f64) != s).collect(),
                     ComparisonOp::Gt => d.iter().map(|&v| (v as f64) > s).collect(),
@@ -90039,18 +90031,30 @@ impl DataFrame {
                     ComparisonOp::Lt => d.iter().map(|&v| (v as f64) < s).collect(),
                     ComparisonOp::Le => d.iter().map(|&v| (v as f64) <= s).collect(),
                 };
-                result_cols.insert(
-                    col_name.clone(),
-                    Column::from_bool_values_with_validity(bools, validity.clone()),
-                );
+                // A missing numpy value compares False (True under !=), as in
+                // pandas; it was carried as missing (br-frankenpandas-zwfz3).
+                for (i, b) in bools.iter_mut().enumerate() {
+                    if !validity.get(i) {
+                        *b = op == ComparisonOp::Ne;
+                    }
+                }
+                result_cols.insert(col_name.clone(), Column::from_bool_values(bools));
                 continue;
             }
+            // pd.NA propagates only through the nullable extension dtypes; a
+            // numpy-backed missing value compares False, True under !=
+            // (br-frankenpandas-zwfz3).
+            let propagates_na = col.dtype().is_nullable();
             let vals: Vec<Scalar> = col
                 .values()
                 .iter()
                 .map(|v| {
                     if v.is_missing() || scalar.is_missing() {
-                        return Scalar::Null(NullKind::Null);
+                        return if propagates_na {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            Scalar::Bool(op == ComparisonOp::Ne)
+                        };
                     }
                     match (v.to_f64(), scalar.to_f64()) {
                         (Ok(l), Ok(r)) => Scalar::Bool(match op {
@@ -112430,13 +112434,15 @@ mod tests {
             ],
         )
         .unwrap();
+        // GOLDEN-CHANGE (br-frankenpandas-zwfz3): the NaT row was Null; pandas
+        // 2.2.3 compares NaT False (datetime64[ns] is a numpy dtype).
         assert_eq!(
             left.lt(&right).unwrap().values(),
             &[
                 Scalar::Bool(true),
                 Scalar::Bool(false),
                 Scalar::Bool(false),
-                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false),
             ]
         );
         assert_eq!(
@@ -112445,7 +112451,7 @@ mod tests {
                 Scalar::Bool(false),
                 Scalar::Bool(true),
                 Scalar::Bool(false),
-                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false),
             ]
         );
 
@@ -112505,6 +112511,8 @@ mod tests {
             ],
         )
         .unwrap();
+        // GOLDEN-CHANGE (br-frankenpandas-zwfz3): the NaT row was Null; pandas
+        // 2.2.3 compares NaT False under both > and <=.
         assert_eq!(
             s.compare_scalar(&Scalar::Datetime64(base + 1), fp_columnar::ComparisonOp::Gt)
                 .unwrap()
@@ -112513,7 +112521,7 @@ mod tests {
                 Scalar::Bool(false),
                 Scalar::Bool(false),
                 Scalar::Bool(true),
-                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false),
             ]
         );
         assert_eq!(
@@ -112524,7 +112532,7 @@ mod tests {
                 Scalar::Bool(true),
                 Scalar::Bool(true),
                 Scalar::Bool(false),
-                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false),
             ]
         );
 
@@ -112564,12 +112572,13 @@ mod tests {
 
         let result = left.gt(&right).unwrap();
         // Union index: [1, 2, 3]
-        // Position 0 (label 1): left=10, right=null -> null
-        // Position 1 (label 2): left=20, right=15 -> true
-        // Position 2 (label 3): left=null, right=25 -> null
-        assert!(result.values()[0].is_missing());
-        assert_eq!(result.values()[1], Scalar::Bool(true));
-        assert!(result.values()[2].is_missing());
+        // GOLDEN-CHANGE (br-frankenpandas-zwfz3): the unmatched labels were
+        // null; pandas 2.2.3's flex left.gt(right) is [False, True, False]
+        // (a missing operand compares False).
+        assert_eq!(
+            result.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
     }
 
     #[test]
@@ -163010,7 +163019,10 @@ mod tests {
         assert_eq!(out.dtype(), DType::Bool);
         let vals = out.values();
         assert_eq!(vals[0], Scalar::Bool(true));
-        assert!(matches!(vals[1], Scalar::Null(_)), "missing stays missing");
+        // GOLDEN-CHANGE (br-frankenpandas-zwfz3): was Null ("missing stays
+        // missing"); pandas 2.2.3: DataFrame({'x': [2.5, nan]}) > 0 is False
+        // at the NaN.
+        assert_eq!(vals[1], Scalar::Bool(false));
         assert_eq!(vals[2], Scalar::Bool(false));
         assert_eq!(vals[3], Scalar::Bool(true));
     }
@@ -163031,7 +163043,13 @@ mod tests {
         assert_eq!(gt.columns["x"].dtype(), DType::Bool);
         let gv = gt.columns["x"].values();
         assert_eq!(gv[0], Scalar::Bool(true));
-        assert!(matches!(gv[1], Scalar::Null(_)), "missing stays missing");
+        // GOLDEN-CHANGE (br-frankenpandas-zwfz3): was Null; a missing value in
+        // a numpy column compares False (True under !=) in pandas 2.2.3.
+        assert_eq!(gv[1], Scalar::Bool(false));
+        assert_eq!(
+            df.ne_scalar_df(&Scalar::Int64(2)).unwrap().columns["x"].values()[1],
+            Scalar::Bool(true)
+        );
         assert_eq!(gv[2], Scalar::Bool(false));
         assert_eq!(gv[3], Scalar::Bool(true));
 
@@ -163119,10 +163137,13 @@ mod tests {
         .unwrap();
         let eq = df1.eq_df(&df2).unwrap();
         assert_eq!(eq.columns["x"].values()[0], Scalar::Bool(true));
-        assert!(eq.columns["x"].values()[1].is_missing());
+        // GOLDEN-CHANGE (br-frankenpandas-zwfz3): both were missing; pandas
+        // 2.2.3: DataFrame({'x': [1.0, nan]}).eq(DataFrame({'x': [1.0, 2.0]}))
+        // is [True, False] and .ne is [False, True].
+        assert_eq!(eq.columns["x"].values()[1], Scalar::Bool(false));
 
         let ne = df1.ne_df(&df2).unwrap();
-        assert!(ne.columns["x"].values()[1].is_missing());
+        assert_eq!(ne.columns["x"].values()[1], Scalar::Bool(true));
     }
 
     // ── DataFrame floordiv_df / mod_df ──

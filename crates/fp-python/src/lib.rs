@@ -10188,6 +10188,39 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
 }
 
+/// `side` with `fill` wherever it is missing and `against` is not: pandas'
+/// flex-method `fill_value` (br-frankenpandas-n57tz).
+fn fill_one_side(side: &Series, against: &Series, fill: &Scalar) -> PyResult<Series> {
+    let values = side
+        .values()
+        .iter()
+        .zip(against.values())
+        .map(|(v, w)| {
+            if v.is_missing() && !w.is_missing() {
+                fill.clone()
+            } else {
+                v.clone()
+            }
+        })
+        .collect();
+    let column = Column::from_values(values).map_err(column_error_to_py)?;
+    Series::new(side.name(), side.index().clone(), column).map_err(frame_error_to_py)
+}
+
+/// pandas refuses `s1 < s2` (and the other comparison operators) between two
+/// Series with different labels; only the flex methods align them
+/// (br-frankenpandas-zwfz3: the operators aligned too).
+fn check_comparable(this: &Series, other: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(series) = other.extract::<PyRef<'_, PySeries>>()
+        && series.inner.index().labels() != this.index().labels()
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Can only compare identically-labeled Series objects",
+        ));
+    }
+    Ok(())
+}
+
 fn extract_or_build_series(
     py: Python<'_>,
     by: &Bound<'_, PyAny>,
@@ -10236,10 +10269,12 @@ fn check_series_axis(axis: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
 
 impl PySeries {
     /// pandas' Series flex methods (`s.add(other, level=, fill_value=, axis=)`
-    /// and the rest): after the indexes are aligned, `fill_value` stands in for
-    /// a value missing on exactly one side before `op` runs (missing on both
-    /// stays missing); `axis` can only name a Series' one axis, and `level` is
-    /// refused (br-frankenpandas-n57tz; the binding took `other` alone).
+    /// and the rest): the indexes are aligned to their sorted union first (so
+    /// the comparison forms work across labels, where `s < t` refuses them),
+    /// then `fill_value` stands in for a value missing on exactly one side
+    /// before `op` runs (missing on both stays missing); `axis` can only name a
+    /// Series' one axis, and `level` is refused (br-frankenpandas-n57tz,
+    /// br-frankenpandas-zwfz3; the binding took `other` alone).
     #[allow(clippy::too_many_arguments)]
     fn flex(
         &self,
@@ -10256,46 +10291,31 @@ impl PySeries {
             &format!("Series.{method}"),
             &[("level", level.is_none_or(|l| l.is_none()))],
         )?;
-        let Some(fill) = fill_value.filter(|f| !f.is_none()) else {
-            return op(self, py, other);
-        };
-        let fill = py_to_scalar(py, fill)?;
+        let fill = fill_value
+            .filter(|f| !f.is_none())
+            .map(|f| py_to_scalar(py, f))
+            .transpose()?;
         let rhs = series_operand(py, other, &self.inner)?;
-        let (left, right) = if self.inner.index().labels() == rhs.index().labels() {
+        let aligned = self.inner.index().labels() == rhs.index().labels();
+        if aligned && fill.is_none() {
+            return op(self, py, other);
+        }
+        let (left, right) = if aligned {
             (self.inner.clone(), rhs)
         } else {
             self.inner
                 .align(&rhs, fp_index::AlignMode::Outer)
                 .map_err(frame_error_to_py)?
         };
-        let fill_one_side = |side: &Series, against: &Series| -> PyResult<Series> {
-            let values = side
-                .values()
-                .iter()
-                .zip(against.values())
-                .map(|(v, w)| {
-                    if v.is_missing() && !w.is_missing() {
-                        fill.clone()
-                    } else {
-                        v.clone()
-                    }
-                })
-                .collect();
-            let column = Column::from_values(values).map_err(column_error_to_py)?;
-            Series::new(side.name(), side.index().clone(), column).map_err(frame_error_to_py)
+        let (left, right) = match &fill {
+            Some(fill) => (
+                fill_one_side(&left, &right, fill)?,
+                fill_one_side(&right, &left, fill)?,
+            ),
+            None => (left, right),
         };
-        let filled_left = fill_one_side(&left, &right)?;
-        let filled_right = Py::new(
-            py,
-            Self {
-                inner: fill_one_side(&right, &left)?,
-            },
-        )?;
-        op(
-            &Self { inner: filled_left },
-            py,
-            filled_right.bind(py).as_any(),
-        )
+        let right = Py::new(py, Self { inner: right })?;
+        op(&Self { inner: left }, py, right.bind(py).as_any())
     }
 
     /// pandas' `key=` for sort_values/sort_index: the callable receives the
@@ -10915,26 +10935,32 @@ impl PySeries {
         wrap_series(self.inner.neg())
     }
     fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        check_comparable(&self.inner, other)?;
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.gt(&rhs))
     }
     fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        check_comparable(&self.inner, other)?;
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.ge(&rhs))
     }
     fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        check_comparable(&self.inner, other)?;
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.lt(&rhs))
     }
     fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        check_comparable(&self.inner, other)?;
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.le(&rhs))
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        check_comparable(&self.inner, other)?;
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.eq(&rhs))
     }
     fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        check_comparable(&self.inner, other)?;
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.ne(&rhs))
     }
