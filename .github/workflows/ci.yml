@@ -328,6 +328,52 @@ jobs:
       - name: PostgreSQL adapter tests against the live service
         run: cargo test -p fp-io --features sql-postgresql --lib -- postgres --nocapture
 
+  downstream-consumer:
+    # br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.2: 0.3.0 shipped an
+    # sse4.1 compile-time lock that fired only in RELEASE builds, because nothing
+    # in CI built the library the way a user does. This job builds a crate
+    # outside the workspace against it in release and runs it, checks the same
+    # crate for aarch64, and packages every crate and verifies the packages build
+    # against each other (what crates.io users get).
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.target-downstream
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: rustfmt, clippy, rust-src
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install the aarch64 C compiler (rusqlite builds bundled SQLite)
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build and run a downstream crate in release
+        run: cargo run --release --manifest-path ci/downstream-consumer/Cargo.toml
+
+      - name: Check the downstream crate for aarch64 (release)
+        run: cargo check --release --target aarch64-unknown-linux-gnu --manifest-path ci/downstream-consumer/Cargo.toml
+
+      - name: Package every crate and build the packages against each other
+        run: cargo package --workspace
+
   eager-frame:
     # br-frankenpandas-it6kj: the default build uses lazy transpose storage,
     # so exercise the non-default eager store separately before it silently

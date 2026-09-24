@@ -64,6 +64,9 @@ artifacts/perf/round*_*.txt
 artifacts/perf/round*_*.svg
 artifacts/bench/**/fp-bench
 artifacts/bench/*candidate*/
+# The downstream-consumer CI crate resolves its dependencies fresh, as a user's
+# crate does (0zz8y.2).
+ci/downstream-consumer/Cargo.lock
 
 # Ephemeral files (agent-generated, build artifacts, test detritus)
 ci-artifacts/
