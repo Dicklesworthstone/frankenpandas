@@ -3108,6 +3108,103 @@ def test_frame_flex_keyword_errors_and_refusals() -> None:
         _fs_frame(fpd).add(fpd.Series([1, 2], index=["a", "b"]), level=0)
 
 
+def _dr(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}, index=["x", "y", "z"])
+
+
+# br-frankenpandas-n57tz: drop took string row labels and an int axis only,
+# and rename's bare mapping renamed the COLUMNS (pandas: the index).
+_DROP_RENAME_CASES = {
+    "drop_row_label": lambda m: _dr(m).drop("x"),
+    "drop_index_kw": lambda m: _dr(m).drop(index=["x", "y"]),
+    "drop_columns_kw": lambda m: _dr(m).drop(columns="a"),
+    "drop_axis_columns_str": lambda m: _dr(m).drop("a", axis="columns"),
+    "drop_axis1": lambda m: _dr(m).drop("a", axis=1),
+    "drop_index_and_columns": lambda m: _dr(m).drop(index="x", columns="a"),
+    "drop_errors_ignore": lambda m: _dr(m).drop(["q", "x"], errors="ignore"),
+    "drop_int_label": lambda m: m.DataFrame({"a": [1, 2]}).drop(1),
+    "drop_duplicate_labels": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=["x", "x", "y"]).drop("x"),
+    "rename_mapper_targets_index": lambda m: _dr(m).rename({"a": "A", "x": "X"}),
+    "rename_columns_dict": lambda m: _dr(m).rename(columns={"a": "A"}),
+    "rename_index_dict": lambda m: _dr(m).rename(index={"x": "X"}),
+    "rename_callable_axis1": lambda m: _dr(m).rename(str.upper, axis=1),
+    "rename_callable_axis_columns": lambda m: _dr(m).rename(str.upper, axis="columns"),
+    "rename_columns_callable": lambda m: _dr(m).rename(columns=str.upper),
+    "rename_index_callable": lambda m: _dr(m).rename(index=str.upper),
+    "rename_errors_ignore_skips": lambda m: _dr(m).rename(columns={"q": "Q", "a": "A"}),
+    "set_index_verified": lambda m: _dr(m).set_index("a", verify_integrity=True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DROP_RENAME_CASES.values()), ids=list(_DROP_RENAME_CASES))
+def test_drop_rename_keywords_match_pandas(case: Any) -> None:
+    assert _strict_ordered(case(fpd)) == _strict_ordered(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda d: d.drop("x", inplace=True),
+        lambda d: d.drop(columns="b", inplace=True),
+        lambda d: d.rename(columns={"a": "A"}, inplace=True),
+        lambda d: d.rename(index=str.upper, inplace=True),
+        lambda d: d.set_index("a", inplace=True),
+        lambda d: d.query("a > 1", inplace=True),
+        lambda d: d.eval("c = a + b", inplace=True),
+        lambda d: d.dropna(inplace=True),
+    ],
+    ids=["drop", "drop_columns", "rename", "rename_callable", "set_index", "query", "eval", "dropna"],
+)
+def test_inplace_keywords_mutate_and_return_none_like_pandas(call: Any) -> None:
+    after = []
+    for m in (pd, fpd):
+        frame = _dr(m)
+        assert call(frame) is None
+        after.append(_strict_ordered(frame))
+    assert after[1] == after[0]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_drop_rename_errors_match_pandas() -> None:
+    for m in (pd, fpd):
+        with pytest.raises(KeyError, match=r"\['q'\] not found in axis"):
+            _dr(m).drop(["q"])
+        with pytest.raises(KeyError, match=r"\['q', 'r'\] not found in axis"):
+            _dr(m).drop(columns=["q", "r"])
+        with pytest.raises(ValueError, match="Cannot specify both 'labels' and 'index'/'columns'"):
+            _dr(m).drop("x", index="y")
+        with pytest.raises(ValueError, match="Need to specify at least one of 'labels', 'index' or 'columns'"):
+            _dr(m).drop()
+        with pytest.raises(KeyError, match=r"\['q'\] not found in axis"):
+            _dr(m).rename(columns={"q": "Q", "a": "A"}, errors="raise")
+        with pytest.raises(TypeError, match="Cannot specify both 'mapper' and any of 'index' or 'columns'"):
+            _dr(m).rename({"a": "A"}, columns={"b": "B"})
+        with pytest.raises(TypeError, match="must pass an index to rename"):
+            _dr(m).rename()
+        with pytest.raises(ValueError, match=r"Index has duplicate keys: Index\(\[1\]"):
+            m.DataFrame({"a": [1, 1]}).set_index("a", verify_integrity=True)
+        with pytest.raises(ValueError, match="Cannot operate inplace if there is no assignment"):
+            _dr(m).eval("a + 1", inplace=True)
+    # What the binding cannot do raises instead of being dropped.
+    with pytest.raises(NotImplementedError, match="append"):
+        _dr(fpd).set_index("a", append=True)
+    with pytest.raises(NotImplementedError, match="level"):
+        _dr(fpd).drop("x", level=0)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="br-frankenpandas-1tkrg: the Index repr omits dtype=")
+def test_set_index_duplicate_keys_message_is_pandas_exactly() -> None:
+    messages = []
+    for m in (pd, fpd):
+        with pytest.raises(ValueError) as err:
+            m.DataFrame({"a": [1, 1]}).set_index("a", verify_integrity=True)
+        messages.append(str(err.value))
+    assert messages[1] == messages[0]
+
+
 def _nan_pair(m: Any) -> Any:
     return m.Series([1.0, _NAN, 3.0]), m.Series([2.0, _NAN, 1.0])
 
