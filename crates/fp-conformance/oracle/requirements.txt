@@ -1,3 +1,5 @@
 pandas==2.2.3
+# pandas' xlsx engine: read_excel/to_excel raise ModuleNotFoundError without it.
+openpyxl==3.1.5
 pyarrow==25.0.1
 scipy>=1.10.0
