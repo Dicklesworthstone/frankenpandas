@@ -103,14 +103,15 @@ use fp_index::{
     validate_alignment_plan,
 };
 use fp_io::{
-    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient,
-    SqlReadOptions, read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
-    read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes, read_sql,
-    read_sql_query, read_sql_query_with_options, read_sql_query_with_options_and_index_col,
-    read_sql_table_with_index_col, read_sql_table_with_options_and_index_col,
-    read_sql_with_index_col, read_sql_with_options, series_from_arrow_array, series_to_arrow_array,
-    write_csv_string, write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes,
-    write_json_string, write_jsonl_string, write_parquet_bytes,
+    CsvOnBadLines, CsvReadOptions, CsvWriteOptions, ExcelReadOptions, IoError as FpIoError,
+    JsonOrient, SqlReadOptions, read_csv_str, read_csv_with_options, read_excel_bytes,
+    read_feather_bytes, read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
+    read_sql, read_sql_query, read_sql_query_with_options,
+    read_sql_query_with_options_and_index_col, read_sql_table_with_index_col,
+    read_sql_table_with_options_and_index_col, read_sql_with_index_col, read_sql_with_options,
+    series_from_arrow_array, series_to_arrow_array, write_csv_string_with_options,
+    write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes, write_json_string,
+    write_jsonl_string, write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -6856,7 +6857,9 @@ pub fn fuzz_fixture_parse_bytes(input: &[u8]) -> Result<(), HarnessError> {
 }
 
 fn assert_csv_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
-    let encoded = write_csv_string(frame)?;
+    // Frames here come from read_csv (RangeIndex): the round trip is
+    // to_csv(index=False) -> read_csv, as in pandas. (4qg5w.1)
+    let encoded = write_csv_string_with_options(frame, &csv_index_false())?;
     let reparsed = read_csv_str(&encoded)?;
     if !frame.equals(&reparsed) {
         return Err(FpIoError::Io(std::io::Error::other(
@@ -16015,9 +16018,21 @@ fn execute_csv_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<b
         .as_ref()
         .ok_or_else(|| "csv_input is required for csv_round_trip".to_owned())?;
     let df = read_csv_str(csv_input).map_err(|err| format!("csv parse failed: {err}"))?;
-    let output = write_csv_string(&df).map_err(|err| format!("csv write failed: {err}"))?;
+    // The oracle's op_csv_round_trip is `to_csv(index=False)`; write_csv_string
+    // now defaults to pandas' index=True (4qg5w.1), so say index=False here.
+    let output = write_csv_string_with_options(&df, &csv_index_false())
+        .map_err(|err| format!("csv write failed: {err}"))?;
     let reparsed = read_csv_str(&output).map_err(|err| format!("csv reparse failed: {err}"))?;
     Ok(dataframes_semantically_equal(&df, &reparsed))
+}
+
+/// `to_csv(index=False)` options, for round trips of RangeIndex frames read
+/// from CSV (the question the oracle's csv_round_trip asks).
+fn csv_index_false() -> CsvWriteOptions {
+    CsvWriteOptions {
+        include_index: false,
+        ..CsvWriteOptions::default()
+    }
 }
 
 fn execute_csv_read_frame_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {

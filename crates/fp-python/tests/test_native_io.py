@@ -218,6 +218,18 @@ def test_csv_blank_index_header_reads_as_unnamed(tmp_path):
     assert list(fpd.read_csv(str(path)).columns) == ["Unnamed: 0", "i", "f"]
 
 
+def test_to_csv_writes_the_index_by_default_like_pandas():
+    # br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1. pandas 2.2.3:
+    #   DataFrame({'a': [1, 2], 'b': ['x', None]}).to_csv() -> ',a,b\n0,1,x\n1,2,\n'
+    #   ... .rename_axis('k').to_csv()                  -> 'k,a,b\n0,1,x\n1,2,\n'
+    #   ... .to_csv(index=False)                        -> 'a,b\n1,x\n2,\n'
+    # (The binding defaulted to index=False, which e.g. dropped groupby keys.)
+    frame = fpd.DataFrame({"a": [1, 2], "b": ["x", None]})
+    assert frame.to_csv() == ",a,b\n0,1,x\n1,2,\n"
+    assert frame.rename_axis("k").to_csv() == "k,a,b\n0,1,x\n1,2,\n"
+    assert frame.to_csv(index=False) == "a,b\n1,x\n2,\n"
+
+
 def test_json_defaults_match_pandas_both_ways(tmp_path):
     # pandas 2.2.3 defaults: DataFrame.to_json() orient 'columns', Series
     # 'index'; read_json accepts both its default shape and records.

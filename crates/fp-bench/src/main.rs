@@ -1001,6 +1001,21 @@ where
     }
 }
 
+/// fp's side of pandas' `df.to_csv(index=False)`, which every CSV lane's pandas
+/// arm uses. `write_csv_string` now defaults to pandas' index=True
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1); these are the exact
+/// options its old default was, so the timed path is unchanged.
+fn csv_index_false(frame: &DataFrame) -> String {
+    fp_io::write_csv_string_with_options(
+        frame,
+        &fp_io::CsvWriteOptions {
+            include_index: false,
+            ..fp_io::CsvWriteOptions::default()
+        },
+    )
+    .expect("csv serialize")
+}
+
 /// Time a closure after warmup and emit a same-invocation A/A control.
 fn time_us<F, T>(op: F) -> PairedSamples
 where
@@ -1046,7 +1061,7 @@ fn build_distinct_f64_csvs(rows: usize, cols: usize, k: usize) -> Vec<String> {
             }
             let frame = DataFrame::new_with_column_order(index, columns, column_order)
                 .expect("fp-bench distinct-csv frame construction");
-            fp_io::write_csv_string(&frame).expect("csv serialize")
+            csv_index_false(&frame)
         })
         .collect()
 }
@@ -3629,7 +3644,7 @@ fn run(
         ("io", "csv_read") => {
             // pandas: df.to_csv(file, index=False) [setup]; time pd.read_csv(file).
             // FP: serialize once (setup), time read_csv_str of the same text.
-            let csv = fp_io::write_csv_string(&df).expect("csv serialize");
+            let csv = csv_index_false(&df);
             time_us(|| {
                 let _ = fp_io::read_csv_str(&csv).expect("read_csv");
             })
@@ -3697,7 +3712,7 @@ fn run(
             // parser is deliberately inside the timed closure; each A/A arm
             // therefore proves a fresh frame becomes block-backed before its
             // first array observation. CSV serialization remains setup.
-            let csv = fp_io::write_csv_string(&df).expect("csv serialize");
+            let csv = csv_index_false(&df);
             time_us(|| {
                 let frame = fp_io::read_csv_str(&csv).expect("read_csv");
                 let view = frame
@@ -3711,9 +3726,9 @@ fn run(
             panic!("csv_read_block_view requires fp-bench --features block-storage")
         }
         ("io", "csv_write") => {
-            // pandas: time df.to_csv(file, index=False). FP: time write_csv_string.
+            // pandas: time df.to_csv(file, index=False). FP: the same, index=False.
             time_us(|| {
-                let _ = fp_io::write_csv_string(&df).expect("write_csv");
+                let _ = csv_index_false(&df);
             })
         }
         ("io", "parquet_read") => {

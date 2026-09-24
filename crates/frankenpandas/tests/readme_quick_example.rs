@@ -64,8 +64,13 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let dates = Series::from_values("d", vec![0i64.into()], vec!["2024-01-15".into()])?;
     let _parsed = to_datetime(&dates)?;
 
-    // Format exports.
-    let _csv = write_csv_string(&by_ticker)?;
+    // Format exports. The groupby key lives in the index, and the writers keep
+    // it by default as pandas does - pandas 2.2.3 on this exact pipeline:
+    //   .to_csv() -> 'ticker,price,volume\nAAPL,371.5,2200\n'
+    //   .to_sql('results', con); read_sql -> {'ticker': ['AAPL'], ...}
+    // (Both dropped the ticker before br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1.)
+    let csv = write_csv_string(&by_ticker)?;
+    assert_eq!(csv, "ticker,price,volume\nAAPL,371.5,2200\n");
     let _json = write_json_string(&by_ticker, JsonOrient::Records)?;
     let _feather = write_feather_bytes(&by_ticker)?;
 
@@ -73,6 +78,17 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let conn = frankenpandas::rusqlite::Connection::open_in_memory()?;
     write_sql(&by_ticker, &conn, "results", SqlIfExists::Fail)?;
     let back = read_sql_table(&conn, "results")?;
+    assert_eq!(
+        back.column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["ticker", "price", "volume"]
+    );
+    assert_eq!(
+        back.column("ticker").expect("ticker column").values(),
+        &[Scalar::Utf8("AAPL".to_owned())]
+    );
 
     // Both AAPL trades survive price > 150 filter; GOOG (140.25) is dropped.
     // After groupby(ticker).sum(), only the AAPL group row remains.

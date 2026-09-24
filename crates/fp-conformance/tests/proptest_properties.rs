@@ -3746,13 +3746,48 @@ fn arb_csv_dataframe(
     })
 }
 
+/// The CSV/SQL round-trip properties are DATA round trips of RangeIndex frames:
+/// pandas' `to_csv(index=False)` / `to_sql(index=False)`. The writers' defaults
+/// now write the index like pandas (4qg5w.1), which would come back as an extra
+/// 'Unnamed: 0' / 'index' column, so these name index=False explicitly.
+fn csv_index_false(df: &DataFrame) -> Result<String, fp_io::IoError> {
+    fp_io::write_csv_string_with_options(
+        df,
+        &fp_io::CsvWriteOptions {
+            include_index: false,
+            ..fp_io::CsvWriteOptions::default()
+        },
+    )
+}
+
+fn sql_index_false(
+    df: &DataFrame,
+    conn: &rusqlite::Connection,
+    table: &str,
+) -> Result<(), fp_io::IoError> {
+    fp_io::write_sql_with_options(
+        df,
+        conn,
+        table,
+        &fp_io::SqlWriteOptions {
+            if_exists: fp_io::SqlIfExists::Replace,
+            index: false,
+            index_label: None,
+            schema: None,
+            dtype: None,
+            method: fp_io::SqlInsertMethod::Single,
+            chunksize: None,
+        },
+    )
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
     /// CSV round-trip preserves DataFrame shape (rows x columns).
     #[test]
     fn prop_csv_round_trip_preserves_shape(df in arb_csv_dataframe(8, 4)) {
-        let csv_text = fp_io::write_csv_string(&df);
+        let csv_text = csv_index_false(&df);
         prop_assert!(csv_text.is_ok(), "CSV write must succeed");
         let csv_text = csv_text.unwrap();
 
@@ -3773,7 +3808,7 @@ proptest! {
     /// CSV round-trip preserves column names (order may be preserved by BTreeMap).
     #[test]
     fn prop_csv_round_trip_preserves_column_names(df in arb_csv_dataframe(5, 3)) {
-        let csv_text = fp_io::write_csv_string(&df).unwrap();
+        let csv_text = csv_index_false(&df).unwrap();
         let parsed = fp_io::read_csv_str(&csv_text).unwrap();
 
         let orig_names: Vec<&String> = df.column_names();
@@ -10039,7 +10074,7 @@ proptest! {
     #[test]
     fn prop_sql_round_trip_preserves_shape(df in arb_int64_dataframe(8, 4)) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        let write_result = fp_io::write_sql(&df, &conn, "test_prop", fp_io::SqlIfExists::Replace);
+        let write_result = sql_index_false(&df, &conn, "test_prop");
         prop_assert!(write_result.is_ok(), "SQL write must succeed: {:?}", write_result.err());
 
         let parsed = fp_io::read_sql_table(&conn, "test_prop");
@@ -10073,7 +10108,7 @@ proptest! {
     #[test]
     fn prop_sql_round_trip_preserves_column_names(df in arb_int64_dataframe(5, 3)) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        fp_io::write_sql(&df, &conn, "test_names", fp_io::SqlIfExists::Replace).unwrap();
+        sql_index_false(&df, &conn, "test_names").unwrap();
         let parsed = fp_io::read_sql_table(&conn, "test_names").unwrap();
 
         let mut orig: Vec<String> = df.column_names().into_iter().cloned().collect();

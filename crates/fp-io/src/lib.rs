@@ -1849,7 +1849,7 @@ impl Default for CsvWriteOptions {
             delimiter: b',',
             na_rep: String::new(),
             header: true,
-            include_index: false,
+            include_index: true,
             index_label: None,
         }
     }
@@ -16253,7 +16253,10 @@ fn projection_with_index_col<'a>(
 
 /// Write a DataFrame to a SQL table.
 ///
-/// Matches `pd.DataFrame.to_sql(name, con)`.
+/// Matches `pd.DataFrame.to_sql(name, con)`, whose default is `index=True`: the
+/// index becomes a leading column named after the index, or "index" when it is
+/// unnamed. (This wrote no index, silently dropping e.g. groupby keys.)
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1)
 pub fn write_sql<C: SqlConnection>(
     frame: &DataFrame,
     conn: &C,
@@ -16266,7 +16269,7 @@ pub fn write_sql<C: SqlConnection>(
         table_name,
         &SqlWriteOptions {
             if_exists,
-            index: false,
+            index: true,
             index_label: None,
             schema: None,
             dtype: None,
@@ -17513,7 +17516,62 @@ mod tests {
         .unwrap();
         let csv = write_csv_string(&df).expect("write");
         let header = csv.lines().next().expect("header line");
-        assert_eq!(header, "alpha,beta,gamma", "header order; csv={csv:?}");
+        // GOLDEN-CHANGE (4qg5w.1): write_csv_string now writes the index like
+        // pandas' to_csv() (and like to_csv_string, sseeh), so the header starts
+        // with the blank index cell: pandas -> ",alpha,beta,gamma".
+        assert_eq!(header, ",alpha,beta,gamma", "header order; csv={csv:?}");
+    }
+
+    /// `to_csv(index=False)`: the form the CSV tests below were written against
+    /// before write_csv_string took pandas' index=True default (4qg5w.1).
+    /// Tests about quoting/formatting keep testing exactly that.
+    fn csv_no_index(frame: &DataFrame) -> String {
+        super::write_csv_string_with_options(
+            frame,
+            &CsvWriteOptions {
+                include_index: false,
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write csv without index")
+    }
+
+    #[test]
+    fn write_csv_string_defaults_to_pandas_index_true() {
+        // NEGATIVE for 4qg5w.1: pandas 2.2.3
+        //   DataFrame({'a': [1, 2], 'b': ['x', None]}).to_csv()
+        //     -> ',a,b\n0,1,x\n1,2,\n'
+        // A writer that omits the index (the old default) fails this.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("a"),
+        );
+        cols.insert(
+            "b".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("b"),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 1]),
+            cols,
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .expect("frame");
+        assert_eq!(
+            write_csv_string(&frame).expect("write"),
+            ",a,b\n0,1,x\n1,2,\n"
+        );
+        // A named index heads its column: rename_axis('k').to_csv() -> 'k,a,b\n...'.
+        let named = frame.rename_axis("k").expect("rename_axis");
+        assert_eq!(
+            write_csv_string(&named).expect("write"),
+            "k,a,b\n0,1,x\n1,2,\n"
+        );
+        assert_eq!(csv_no_index(&frame), "a,b\n1,x\n2,\n");
     }
 
     /// Bare DataFrame and Series CSV writers follow pandas' index default, while
@@ -20130,7 +20188,8 @@ mod tests {
         ];
         for (input, expected_csv) in cases {
             let frame = read_csv_str(input).expect("read");
-            let out = write_csv_string(&frame).expect("write");
+            // to_csv(index=False): the pandas call these expectations mirror.
+            let out = csv_no_index(&frame);
             assert_eq!(
                 &out, expected_csv,
                 "round-trip mismatch for input {input:?}"
@@ -20163,10 +20222,7 @@ mod tests {
         );
         let object_frame = read_csv_str(object_input).expect("fallback read");
         assert_eq!(object_frame.index().int64_unit_range_labels(), Some((0, 2)));
-        assert_eq!(
-            write_csv_string(&object_frame).expect("fallback write"),
-            object_input
-        );
+        assert_eq!(csv_no_index(&object_frame), object_input);
     }
 
     #[test]
@@ -20466,22 +20522,22 @@ mod tests {
 
         // All midnight -> date only.
         assert_eq!(
-            write_csv_string(&dt_frame(&[MIDNIGHT_JAN1, MIDNIGHT_JAN2])).expect("w"),
+            csv_no_index(&dt_frame(&[MIDNIGHT_JAN1, MIDNIGHT_JAN2])),
             "d\n2020-01-01\n2020-01-02\n"
         );
         // Sub-second present -> whole column gets .fff (millis), incl. .000.
         assert_eq!(
-            write_csv_string(&dt_frame(&[JAN1_HALF, MIDNIGHT_JAN1])).expect("w"),
+            csv_no_index(&dt_frame(&[JAN1_HALF, MIDNIGHT_JAN1])),
             "d\n2020-01-01 00:00:00.500\n2020-01-01 00:00:00.000\n"
         );
         // Time present, no sub-second -> HH:MM:SS for all (midnight -> 00:00:00).
         assert_eq!(
-            write_csv_string(&dt_frame(&[JAN2_0300, MIDNIGHT_JAN1])).expect("w"),
+            csv_no_index(&dt_frame(&[JAN2_0300, MIDNIGHT_JAN1])),
             "d\n2020-01-02 03:00:00\n2020-01-01 00:00:00\n"
         );
         // NaT in an otherwise date-only column -> date only, NaT -> quoted "".
         assert_eq!(
-            write_csv_string(&dt_frame(&[MIDNIGHT_JAN1, i64::MIN])).expect("w"),
+            csv_no_index(&dt_frame(&[MIDNIGHT_JAN1, i64::MIN])),
             "d\n2020-01-01\n\"\"\n"
         );
     }
@@ -20760,24 +20816,19 @@ mod tests {
 
     #[test]
     fn read_csv_skipinitialspace_strips_field_leading_spaces_i4h5g() {
-        use super::{CsvReadOptions, read_csv_with_options, write_csv_string};
+        use super::{CsvReadOptions, read_csv_with_options};
         let opts = CsvReadOptions {
             skipinitialspace: true,
             ..Default::default()
         };
         // Object columns: leading spaces at each field start are dropped.
+        // (Checked through to_csv(index=False).)
         let frame = read_csv_with_options("k,v\n  aa,bb\n cc,  dd\n", &opts).expect("read");
-        assert_eq!(
-            write_csv_string(&frame).expect("write"),
-            "k,v\naa,bb\ncc,dd\n"
-        );
+        assert_eq!(csv_no_index(&frame), "k,v\naa,bb\ncc,dd\n");
         // Default (skipinitialspace=false) keeps the leading spaces.
         let frame_def =
             read_csv_with_options("k,v\n  aa,bb\n", &CsvReadOptions::default()).expect("read");
-        assert_eq!(
-            write_csv_string(&frame_def).expect("write"),
-            "k,v\n  aa,bb\n"
-        );
+        assert_eq!(csv_no_index(&frame_def), "k,v\n  aa,bb\n");
     }
 
     #[test]
@@ -20790,18 +20841,19 @@ mod tests {
             delimiter: b'\t',
             ..Default::default()
         };
+        // (Checked through to_csv(index=False).)
         let frame = read_csv_with_options("c\ntrue\nfalse\nmaybe\n", &tsv).expect("read");
         assert_eq!(frame.index().int64_unit_range_labels(), Some((0, 3)));
-        let out = write_csv_string(&frame).expect("write");
+        let out = csv_no_index(&frame);
         assert_eq!(out, "c\ntrue\nfalse\nmaybe\n");
 
         let frame2 = read_csv_with_options("c\n01\n02\nabc\n", &tsv).expect("read");
-        let out2 = write_csv_string(&frame2).expect("write");
+        let out2 = csv_no_index(&frame2);
         assert_eq!(out2, "c\n01\n02\nabc\n");
 
         // Pure-bool column still infers bool dtype (writes True/False).
         let frame3 = read_csv_with_options("c\ntrue\nfalse\n", &tsv).expect("read");
-        let out3 = write_csv_string(&frame3).expect("write");
+        let out3 = csv_no_index(&frame3);
         assert_eq!(out3, "c\nTrue\nFalse\n");
 
         // Custom na_values: an NA cell in an object column stays missing while
@@ -20812,7 +20864,7 @@ mod tests {
             ..Default::default()
         };
         let frame4 = read_csv_with_options("c\ntrue\nMISSING\nmaybe\n", &na_opts).expect("read");
-        let out4 = write_csv_string(&frame4).expect("write");
+        let out4 = csv_no_index(&frame4);
         // The lone empty NaN field in a single-column object frame is quoted "".
         assert_eq!(out4, "c\ntrue\n\"\"\nmaybe\n");
     }
@@ -20938,7 +20990,7 @@ mod tests {
         // float repr: 1.0/3.0 must stay "1.0"/"3.0", not collapse to "1"/"3".
         let frame = read_csv_str("x\n1.0\nNaN\n3.0\n").expect("read");
         assert!(frame.column("x").unwrap().values()[1].is_missing());
-        let out = write_csv_string(&frame).expect("write");
+        let out = csv_no_index(&frame);
         assert_eq!(out, "x\n1.0\n\"\"\n3.0\n");
     }
 
@@ -20965,14 +21017,11 @@ mod tests {
             vec!["a".to_string()],
         )
         .unwrap();
-        assert_eq!(write_csv_string(&frame).expect("write"), "a\n\"\"\nx\ny\n");
+        assert_eq!(csv_no_index(&frame), "a\n\"\"\nx\ny\n");
 
         // Empty header for a sole column is quoted too (DataFrame({'':['a','b']})).
         let named = frame.rename_columns(&[("a", "")]).expect("rename");
-        assert_eq!(
-            write_csv_string(&named).expect("write2"),
-            "\"\"\n\"\"\nx\ny\n"
-        );
+        assert_eq!(csv_no_index(&named), "\"\"\n\"\"\nx\ny\n");
     }
 
     #[test]
@@ -20995,7 +21044,7 @@ mod tests {
             vec!["a".to_string(), "b".to_string()],
         )
         .unwrap();
-        assert_eq!(write_csv_string(&frame).expect("write"), "a,b\n,y\nx,\n");
+        assert_eq!(csv_no_index(&frame), "a,b\n,y\nx,\n");
     }
 
     #[test]
@@ -21099,13 +21148,18 @@ mod tests {
             ],
         )
         .unwrap();
+        // to_csv(index=False) (4qg5w.1 made the index the default).
+        let no_index = CsvWriteOptions {
+            include_index: false,
+            ..CsvWriteOptions::default()
+        };
         let expected = "\"comma,name\",\"quote\"\"name\",\"line\nname\"\n1,1.0,x\n2,2.5,y\n";
 
         assert_eq!(
-            super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
+            super::try_write_csv_typed(&frame, &no_index).as_deref(),
             Some(expected)
         );
-        assert_eq!(write_csv_string(&frame).expect("write"), expected);
+        assert_eq!(csv_no_index(&frame), expected);
     }
 
     #[test]
@@ -21138,12 +21192,16 @@ mod tests {
         .unwrap();
         let expected = "a,b,t\n10,1.5,2000-01-01 00:00:00\n20,2.0,2000-01-01 01:01:01\n30,3.5,\n";
         // Typed fast path fires (no datetime fallback) and is byte-identical to
-        // the public writer (which routes through it).
+        // the public writer (which routes through it). to_csv(index=False).
+        let no_index = CsvWriteOptions {
+            include_index: false,
+            ..CsvWriteOptions::default()
+        };
         assert_eq!(
-            super::try_write_csv_typed(&frame, &CsvWriteOptions::default()).as_deref(),
+            super::try_write_csv_typed(&frame, &no_index).as_deref(),
             Some(expected),
         );
-        assert_eq!(write_csv_string(&frame).expect("write"), expected);
+        assert_eq!(csv_no_index(&frame), expected);
     }
 
     #[test]
@@ -21911,9 +21969,9 @@ mod tests {
             },
         )
         .expect("write");
-        assert!(output.starts_with("a;b\n"));
-        assert!(output.contains("1;x\n"));
-        assert!(output.contains("2;y\n"));
+        // GOLDEN-CHANGE (4qg5w.1): the default now writes the index, as pandas:
+        // read_csv('a,b\n1,x\n2,y\n').to_csv(sep=';') -> ';a;b\n0;1;x\n1;2;y\n'.
+        assert_eq!(output, ";a;b\n0;1;x\n1;2;y\n");
     }
 
     #[test]
@@ -22342,7 +22400,9 @@ mod tests {
             },
         )
         .expect("write");
-        assert_eq!(output, "1,2\n");
+        // GOLDEN-CHANGE (4qg5w.1): pandas read_csv('a,b\n1,2\n')
+        // .to_csv(header=False) -> '0,1,2\n' (the index is written by default).
+        assert_eq!(output, "0,1,2\n");
     }
 
     #[test]
@@ -22512,7 +22572,7 @@ mod tests {
         // Fixed CSV input -> write_csv_string output matches golden reference exactly.
         let input = "a,b,c\n1,hello,3.14\n2,,true\n3,world,\n";
         let frame = read_csv_str(input).expect("parse");
-        let output = write_csv_string(&frame).expect("write");
+        let output = csv_no_index(&frame);
 
         // GOLDEN-CHANGE (live pandas 2.2.3): read_csv keeps c as object because it
         // contains the string token "true"; to_csv(index=False) therefore emits
@@ -26445,8 +26505,16 @@ mod tests {
             let back = read_sql_table(&conn, table_name).expect("read_sql_table");
             let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
 
+            // pandas' to_sql default index=True: the unnamed index comes back
+            // as a leading "index" column (4qg5w.1).
             let got: Vec<String> = back.column_names().iter().map(|s| s.to_string()).collect();
-            assert_eq!(got, order);
+            let mut want = vec!["index".to_owned()];
+            want.extend(order.iter().cloned());
+            assert_eq!(got, want);
+            assert_eq!(
+                back.column("index").unwrap().values(),
+                &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)]
+            );
             for name in &order {
                 eprintln!(
                     "live_pg dtypes_nulls: {name} dtype={:?} values={:?}",
@@ -26506,16 +26574,19 @@ mod tests {
         write_sql(&frame, &conn, "portable_tbl", SqlIfExists::Fail)
             .expect("write through marker-aware mock backend");
 
+        // GOLDEN-CHANGE (4qg5w.1): write_sql follows pandas' to_sql default
+        // index=True, so the unnamed index leads as an "index" column.
         let insert_sql = conn.insert_sql.borrow();
         assert_eq!(
             insert_sql.as_slice(),
-            &["INSERT INTO \"portable_tbl\" (\"ints\", \"floats\", \"names\") VALUES ($1, $2, $3)"
+            &["INSERT INTO \"portable_tbl\" (\"index\", \"ints\", \"floats\", \"names\") VALUES ($1, $2, $3, $4)"
                 .to_owned()]
         );
         let inserted_rows = conn.inserted_rows.borrow();
         assert_eq!(inserted_rows[0].len(), frame.index().len());
-        assert_eq!(inserted_rows[0][0][0], Scalar::Int64(10));
-        assert_eq!(inserted_rows[0][2][2], Scalar::Utf8("carol".into()));
+        assert_eq!(inserted_rows[0][0][0], Scalar::Int64(0));
+        assert_eq!(inserted_rows[0][0][1], Scalar::Int64(10));
+        assert_eq!(inserted_rows[0][2][3], Scalar::Utf8("carol".into()));
     }
 
     #[cfg(feature = "sql-sqlite")]

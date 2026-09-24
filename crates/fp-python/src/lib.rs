@@ -17354,8 +17354,10 @@ impl PyDataFrame {
     }
 
     /// Export to CSV. With no `path`, returns the CSV string; with a `path`,
-    /// writes the file and returns `None` (pandas `DataFrame.to_csv`).
-    #[pyo3(signature = (path=None, index=false))]
+    /// writes the file and returns `None` (pandas `DataFrame.to_csv`). pandas'
+    /// default is `index=True` (this defaulted to False, dropping e.g. groupby
+    /// keys). (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.1)
+    #[pyo3(signature = (path=None, index=true))]
     fn to_csv(&self, path: Option<&str>, index: bool) -> PyResult<Option<String>> {
         let csv = self.inner.to_csv(',', index);
         match path {
