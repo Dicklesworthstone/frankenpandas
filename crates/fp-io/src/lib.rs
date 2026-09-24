@@ -9216,11 +9216,16 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Categorical => ArrowDataType::Utf8,
         DType::Bool | DType::BoolNullable => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
-        DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
-        DType::Datetime64 { .. } => ArrowDataType::Int64, // store as nanoseconds
+        // Real Arrow temporal types, as pyarrow writes them for pandas; these
+        // were plain Int64, which every reader (fp included) took for integers.
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
+        DType::Timedelta64 => ArrowDataType::Duration(TimeUnit::Nanosecond),
+        DType::Datetime64 { tz } => {
+            ArrowDataType::Timestamp(TimeUnit::Nanosecond, tz.map(|tz| fp_tz_to_arrow(tz).into()))
+        }
         DType::Period => ArrowDataType::Int64, // store as ordinal
         DType::Interval => ArrowDataType::Utf8, // store as string until arrow interval lands
-        DType::Sparse => ArrowDataType::Utf8, // marker fallback until sparse arrays land
+        DType::Sparse => ArrowDataType::Utf8,  // marker fallback until sparse arrays land
     }
 }
 
@@ -9295,38 +9300,28 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             Arc::new(builder.finish())
         }
         DType::Timedelta64 => {
-            let mut builder = Int64Builder::with_capacity(column.len());
-            for value in column.values() {
-                match value {
-                    Scalar::Timedelta64(nanos) => {
-                        if *nanos == Timedelta::NAT {
-                            builder.append_null();
-                        } else {
-                            builder.append_value(*nanos);
-                        }
-                    }
-                    _ if value.is_missing() => builder.append_null(),
-                    _ => builder.append_null(),
-                }
-            }
-            Arc::new(builder.finish())
+            let nanos: Vec<Option<i64>> = column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => Some(*nanos),
+                    _ => None,
+                })
+                .collect();
+            Arc::new(arrow::array::DurationNanosecondArray::from(nanos))
         }
-        DType::Datetime64 { .. } => {
-            let mut builder = Int64Builder::with_capacity(column.len());
-            for value in column.values() {
-                match value {
-                    Scalar::Datetime64(nanos) => {
-                        if *nanos == Timestamp::NAT {
-                            builder.append_null();
-                        } else {
-                            builder.append_value(*nanos);
-                        }
-                    }
-                    _ if value.is_missing() => builder.append_null(),
-                    _ => builder.append_null(),
-                }
-            }
-            Arc::new(builder.finish())
+        DType::Datetime64 { tz } => {
+            let nanos: Vec<Option<i64>> = column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => Some(*nanos),
+                    _ => None,
+                })
+                .collect();
+            Arc::new(
+                TimestampNanosecondArray::from(nanos).with_timezone_opt(tz.map(fp_tz_to_arrow)),
+            )
         }
         DType::Period => {
             let mut builder = Int64Builder::with_capacity(column.len());
@@ -9379,6 +9374,12 @@ pub fn series_from_arrow_array(
     dt: &ArrowDataType,
 ) -> Result<Series, IoError> {
     let values = arrow_array_to_scalars(arr, dt)?;
+    if let ArrowDataType::Timestamp(_, Some(_)) = dt {
+        // The zone lives on the dtype; value inference alone would drop it, and
+        // Column::new refuses a naive->tz cast, so relabel the inferred column.
+        let column = Column::from_values(values)?.with_dtype(fp_dtype_for_arrow_data_type(dt));
+        return Series::new(name, Index::new(index_labels), column).map_err(IoError::from);
+    }
     Series::from_values(name, index_labels, values).map_err(IoError::from)
 }
 
@@ -9620,11 +9621,14 @@ fn fp_dtype_for_arrow_data_type(dt: &ArrowDataType) -> DType {
         | ArrowDataType::UInt64 => DType::Int64,
         ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => DType::Float64,
         ArrowDataType::Boolean => DType::Bool,
+        ArrowDataType::Timestamp(_, tz) => DType::Datetime64 {
+            tz: tz.as_deref().map(arrow_tz_to_fp),
+        },
+        ArrowDataType::Duration(_) => DType::Timedelta64,
         ArrowDataType::Utf8
         | ArrowDataType::LargeUtf8
         | ArrowDataType::Date32
-        | ArrowDataType::Date64
-        | ArrowDataType::Timestamp(_, _) => DType::Utf8,
+        | ArrowDataType::Date64 => DType::Utf8,
         _ => DType::Utf8,
     }
 }
@@ -9727,7 +9731,105 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
                 None => Column::from_utf8_contiguous(bytes, offsets),
             })
         }
+        // Temporal columns stay temporal (br-frankenpandas-rc0923-epic-rust-
+        // parity-bugs-4qg5w.20): they used to come back as formatted strings.
+        // An out-of-range value falls through to the Scalar path, which reports it.
+        ArrowDataType::Timestamp(_, tz) => {
+            let nanos = arrow_temporal_nanos(arr, dt).ok()?;
+            let data: Vec<i64> = nanos.iter().map(|v| v.unwrap_or(Timestamp::NAT)).collect();
+            let naive = match arrow_validity_mask(arr) {
+                Some(m) => Column::from_datetime64_values_with_validity(data, m),
+                None => Column::from_datetime64_values(data),
+            };
+            // The zone is column metadata over UTC nanoseconds; relabel the
+            // naive column the way fp-frame's tz_convert does.
+            Some(match tz {
+                Some(tz) => naive.with_dtype(DType::datetime64_tz(arrow_tz_to_fp(tz))),
+                None => naive,
+            })
+        }
+        ArrowDataType::Duration(_) => {
+            let nanos = arrow_temporal_nanos(arr, dt).ok()?;
+            let validity = arrow_validity_mask(arr)
+                .unwrap_or_else(|| fp_columnar::ValidityMask::all_valid(nanos.len()));
+            let data: Vec<i64> = nanos.iter().map(|v| v.unwrap_or(Timedelta::NAT)).collect();
+            Some(Column::from_timedelta64_values_with_validity(
+                data, validity,
+            ))
+        }
         _ => None,
+    }
+}
+
+/// fp spells a fixed-offset zone `UTC+05:30` (pandas' repr); Arrow and
+/// pyarrow spell it `+05:30`. Named zones are the same on both sides.
+fn arrow_tz_to_fp(tz: &str) -> String {
+    if tz.starts_with('+') || tz.starts_with('-') {
+        format!("UTC{tz}")
+    } else {
+        tz.to_owned()
+    }
+}
+
+fn fp_tz_to_arrow(tz: String) -> String {
+    match tz.strip_prefix("UTC") {
+        Some(offset) if offset.starts_with('+') || offset.starts_with('-') => offset.to_owned(),
+        _ => tz,
+    }
+}
+
+/// An Arrow Timestamp/Duration array's values widened to nanoseconds, fp's
+/// only temporal unit; `None` marks a null. A value outside the i64 nanosecond
+/// range is an error, as pandas' OutOfBoundsDatetime, never a wrapped number.
+fn arrow_temporal_nanos(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Option<i64>>, IoError> {
+    use arrow::array::{
+        DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
+        DurationSecondArray,
+    };
+
+    let unit = match dt {
+        ArrowDataType::Timestamp(unit, _) | ArrowDataType::Duration(unit) => unit,
+        other => {
+            return Err(IoError::Parquet(format!(
+                "not a temporal Arrow type: {other:?}"
+            )));
+        }
+    };
+    let scale: i64 = match unit {
+        TimeUnit::Second => 1_000_000_000,
+        TimeUnit::Millisecond => 1_000_000,
+        TimeUnit::Microsecond => 1_000,
+        TimeUnit::Nanosecond => 1,
+    };
+    macro_rules! widen {
+        ($ty:ty) => {{
+            let typed = arr.as_any().downcast_ref::<$ty>().ok_or_else(|| {
+                IoError::Parquet(format!("expected {} for {dt:?}", stringify!($ty)))
+            })?;
+            (0..typed.len())
+                .map(|i| {
+                    if typed.is_null(i) {
+                        return Ok(None);
+                    }
+                    let raw = typed.value(i);
+                    raw.checked_mul(scale).map(Some).ok_or_else(|| {
+                        IoError::Parquet(format!(
+                            "{dt:?} value {raw} is out of bounds for nanosecond precision"
+                        ))
+                    })
+                })
+                .collect()
+        }};
+    }
+    match dt {
+        ArrowDataType::Timestamp(TimeUnit::Second, _) => widen!(TimestampSecondArray),
+        ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => widen!(TimestampMillisecondArray),
+        ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => widen!(TimestampMicrosecondArray),
+        ArrowDataType::Timestamp(TimeUnit::Nanosecond, _) => widen!(TimestampNanosecondArray),
+        ArrowDataType::Duration(TimeUnit::Second) => widen!(DurationSecondArray),
+        ArrowDataType::Duration(TimeUnit::Millisecond) => widen!(DurationMillisecondArray),
+        ArrowDataType::Duration(TimeUnit::Microsecond) => widen!(DurationMicrosecondArray),
+        _ => widen!(DurationNanosecondArray),
     }
 }
 
@@ -9868,90 +9970,17 @@ fn arrow_array_to_scalars(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Sca
                 }
             }
         }
-        ArrowDataType::Timestamp(unit, _tz) => match unit {
-            TimeUnit::Second => {
-                let typed = arr
-                    .as_any()
-                    .downcast_ref::<TimestampSecondArray>()
-                    .ok_or_else(|| IoError::Parquet("expected TimestampSecondArray".into()))?;
-                for i in 0..len {
-                    if typed.is_null(i) {
-                        scalars.push(Scalar::Null(NullKind::NaT));
-                    } else {
-                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
-                            arrow::datatypes::TimestampSecondType,
-                        >(typed.value(i))
-                        {
-                            scalars.push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
-                        } else {
-                            scalars.push(Scalar::Null(NullKind::NaT));
-                        }
-                    }
-                }
+        // Was: chrono-formatted STRINGS, so a datetime column came back as Utf8.
+        ArrowDataType::Timestamp(_, _) => {
+            for value in arrow_temporal_nanos(arr, dt)? {
+                scalars.push(value.map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64));
             }
-            TimeUnit::Millisecond => {
-                let typed = arr
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .ok_or_else(|| IoError::Parquet("expected TimestampMillisecondArray".into()))?;
-                for i in 0..len {
-                    if typed.is_null(i) {
-                        scalars.push(Scalar::Null(NullKind::NaT));
-                    } else {
-                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
-                            arrow::datatypes::TimestampMillisecondType,
-                        >(typed.value(i))
-                        {
-                            scalars.push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
-                        } else {
-                            scalars.push(Scalar::Null(NullKind::NaT));
-                        }
-                    }
-                }
+        }
+        ArrowDataType::Duration(_) => {
+            for value in arrow_temporal_nanos(arr, dt)? {
+                scalars.push(value.map_or(Scalar::Null(NullKind::NaT), Scalar::Timedelta64));
             }
-            TimeUnit::Microsecond => {
-                let typed = arr
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .ok_or_else(|| IoError::Parquet("expected TimestampMicrosecondArray".into()))?;
-                for i in 0..len {
-                    if typed.is_null(i) {
-                        scalars.push(Scalar::Null(NullKind::NaT));
-                    } else {
-                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
-                            arrow::datatypes::TimestampMicrosecondType,
-                        >(typed.value(i))
-                        {
-                            scalars
-                                .push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string()));
-                        } else {
-                            scalars.push(Scalar::Null(NullKind::NaT));
-                        }
-                    }
-                }
-            }
-            TimeUnit::Nanosecond => {
-                let typed = arr
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .ok_or_else(|| IoError::Parquet("expected TimestampNanosecondArray".into()))?;
-                for i in 0..len {
-                    if typed.is_null(i) {
-                        scalars.push(Scalar::Null(NullKind::NaT));
-                    } else {
-                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
-                            arrow::datatypes::TimestampNanosecondType,
-                        >(typed.value(i))
-                        {
-                            scalars
-                                .push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string()));
-                        } else {
-                            scalars.push(Scalar::Null(NullKind::NaT));
-                        }
-                    }
-                }
-            }
-        },
+        }
         other => {
             return Err(IoError::Parquet(format!(
                 "unsupported Arrow data type: {other:?}"
@@ -28277,6 +28306,133 @@ mod tests {
         let names = frame2.column("names").unwrap();
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn arrow_temporal_columns_round_trip_as_temporal_types() {
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20: Datetime64 and
+        // Timedelta64 were written as plain Int64 and Timestamps were read back
+        // as strings, so neither pandas nor fp got a datetime column back.
+        // pyarrow writes pandas' datetime64[ns] / datetime64[ns, tz] /
+        // timedelta64[ns] as exactly these three Arrow types.
+        use arrow::datatypes::TimeUnit;
+
+        // 1_704_164_645_000_000_000 ns = 2024-01-02T03:04:05Z; 86_400e9 ns = 1 day.
+        let column = |dtype: DType, value: Scalar| {
+            Column::new(dtype, vec![value, Scalar::Null(NullKind::NaT)]).expect("column")
+        };
+        let naive = column(
+            DType::datetime64_naive(),
+            Scalar::Datetime64(1_704_164_645_000_000_000),
+        );
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "z".to_owned(),
+            naive.with_dtype(DType::datetime64_tz("US/Eastern")),
+        );
+        cols.insert(
+            "o".to_owned(),
+            naive.with_dtype(DType::datetime64_tz("UTC+05:30")),
+        );
+        cols.insert("t".to_owned(), naive);
+        cols.insert(
+            "d".to_owned(),
+            column(DType::Timedelta64, Scalar::Timedelta64(86_400_000_000_000)),
+        );
+        let order = ["t", "z", "o", "d"].map(str::to_owned).to_vec();
+        let frame = DataFrame::new_with_column_order(Index::from_i64(vec![0, 1]), cols, order)
+            .expect("frame");
+
+        let batch = super::dataframe_to_record_batch(&frame).expect("batch");
+        let schema = batch.schema();
+        assert_eq!(
+            schema.field(0).data_type(),
+            &ArrowDataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(
+            schema.field(1).data_type(),
+            &ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("US/Eastern".into()))
+        );
+        // pyarrow's spelling of pandas' UTC+05:30.
+        assert_eq!(
+            schema.field(2).data_type(),
+            &ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("+05:30".into()))
+        );
+        assert_eq!(
+            schema.field(3).data_type(),
+            &ArrowDataType::Duration(TimeUnit::Nanosecond)
+        );
+
+        let parquet = read_parquet_bytes(&super::write_parquet_bytes(&frame).expect("write pq"))
+            .expect("read pq");
+        let feather = read_feather_bytes(&super::write_feather_bytes(&frame).expect("write ft"))
+            .expect("read ft");
+        for (label, back) in [("parquet", parquet), ("feather", feather)] {
+            for name in ["t", "z", "o", "d"] {
+                let got = back.column(name).expect("round-tripped column");
+                let want = frame.column(name).expect("source column");
+                assert_eq!(got.dtype(), want.dtype(), "{label} {name} dtype");
+                assert_eq!(got.values(), want.values(), "{label} {name} values");
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_temporal_units_widen_to_nanoseconds_and_overflow_is_an_error() {
+        // pyarrow files can carry s/ms/us units; fp stores ns. A value that does
+        // not fit in i64 nanoseconds must be an error (pandas raises
+        // OutOfBoundsDatetime), never a wrapped timestamp.
+        use arrow::{
+            array::{DurationMillisecondArray, TimestampMicrosecondArray, TimestampSecondArray},
+            datatypes::{Field, Schema, TimeUnit},
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t", ArrowDataType::Timestamp(TimeUnit::Second, None), true),
+            Field::new("d", ArrowDataType::Duration(TimeUnit::Millisecond), true),
+        ]));
+        let batch = arrow::array::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampSecondArray::from(vec![Some(1_704_164_645), None])),
+                Arc::new(DurationMillisecondArray::from(vec![Some(1_500), None])),
+            ],
+        )
+        .expect("batch");
+        let frame = super::record_batch_to_dataframe(&batch).expect("frame");
+        assert_eq!(
+            frame.column("t").expect("t").dtype(),
+            DType::datetime64_naive()
+        );
+        assert_eq!(
+            frame.column("t").expect("t").values(),
+            &[
+                Scalar::Datetime64(1_704_164_645_000_000_000),
+                Scalar::Null(NullKind::NaT)
+            ]
+        );
+        assert_eq!(
+            frame.column("d").expect("d").values(),
+            &[
+                Scalar::Timedelta64(1_500_000_000),
+                Scalar::Null(NullKind::NaT)
+            ]
+        );
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        )]));
+        let batch = arrow::array::RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMicrosecondArray::from(vec![Some(
+                i64::MAX,
+            )]))],
+        )
+        .expect("batch");
+        let err = super::record_batch_to_dataframe(&batch).expect_err("overflow must error");
+        assert!(format!("{err}").contains("out of bounds"), "got: {err}");
     }
 
     #[test]

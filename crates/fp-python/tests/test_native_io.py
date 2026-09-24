@@ -200,6 +200,7 @@ def test_series_to_excel_writes_a_named_column(tmp_path):
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19: fp-io guesses the "
     "unnamed first column is an index and drops it; pandas keeps it as 'Unnamed: 0'",
 )
@@ -209,6 +210,53 @@ def test_excel_written_index_reads_back_as_unnamed_column(tmp_path):
     path = tmp_path / "with_index.xlsx"
     _frame().to_excel(str(path))
     assert list(fpd.read_excel(str(path)).columns) == ["Unnamed: 0", "i", "f", "s", "b"]
+
+
+def _temporal_frame():
+    return fpd.DataFrame(
+        {
+            "t": fpd.to_datetime(fpd.Series(["2024-01-02 03:04:05", None, "2024-12-31 23:59:59"])),
+            "d": fpd.to_timedelta(fpd.Series(["1D", None, "2h"])),
+        }
+    )
+
+
+# pandas 2.2.3: the same frame through to_X / read_X; str() of each value.
+PANDAS_TEMPORAL_ROUND_TRIP = {
+    "t": ["2024-01-02 03:04:05", "NaT", "2024-12-31 23:59:59"],
+    "d": ["1 days 00:00:00", "NaT", "0 days 02:00:00"],
+}
+
+
+@pytest.mark.parametrize("writer, reader, suffix", [
+    ("to_parquet", "read_parquet", "parquet"),
+    ("to_feather", "read_feather", "feather"),
+])
+def test_datetime_and_timedelta_survive_arrow_formats(writer, reader, suffix, tmp_path):
+    # br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20: fp-io wrote these
+    # as plain int64 nanoseconds and read Arrow timestamps back as strings.
+    path = tmp_path / f"t.{suffix}"
+    getattr(_temporal_frame(), writer)(str(path))
+    back = getattr(fpd, reader)(str(path))
+    assert {c: [str(v) for v in back[c].tolist()] for c in back.columns} == PANDAS_TEMPORAL_ROUND_TRIP
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20: Excel/Stata write "
+    "datetimes as text; pandas writes datetime cells / %tc and reads datetime64 back",
+)
+@pytest.mark.parametrize("writer, reader, suffix, kwargs", [
+    ("to_excel", "read_excel", "xlsx", {"index": False}),
+    ("to_stata", "read_stata", "dta", {"write_index": False}),
+])
+def test_datetime_survives_excel_and_stata(writer, reader, suffix, kwargs, tmp_path):
+    path = tmp_path / f"t.{suffix}"
+    frame = fpd.DataFrame({"t": _temporal_frame()["t"]})
+    getattr(frame, writer)(str(path), **kwargs)
+    back = getattr(fpd, reader)(str(path))
+    assert [str(v) for v in back["t"].tolist()] == PANDAS_TEMPORAL_ROUND_TRIP["t"]
 
 
 def test_to_parquet_without_a_path_returns_parquet_bytes():
