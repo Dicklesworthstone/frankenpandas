@@ -1,5 +1,0 @@
-strict:2,2,4,
-one_bin:8,
-many:1,1,1,1,2,1,1,0,0,1,
-nonstrict:2,0,2,4,
-null:1,0,1,

@@ -1,1 +1,0 @@
-golden_cmp_status=0

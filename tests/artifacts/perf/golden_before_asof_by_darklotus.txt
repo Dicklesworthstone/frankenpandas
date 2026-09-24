@@ -1,4 +1,0 @@
-backward:t=1,2,3,4,5,6,|g_x=Utf8("a"),Utf8("b"),Utf8("a"),Utf8("b"),Utf8("a"),Utf8("b"),|rv=10,N,11,12,11,13,|
-forward:t=1,2,3,4,5,6,|g_x=Utf8("a"),Utf8("b"),Utf8("a"),Utf8("b"),Utf8("a"),Utf8("b"),|rv=10,12,N,13,N,N,|
-nearest:t=1,2,3,4,5,6,|g_x=Utf8("a"),Utf8("b"),Utf8("a"),Utf8("b"),Utf8("a"),Utf8("b"),|rv=10,12,11,12,11,13,|
-noexact_tol1:t=1,2,3,4,5,6,|g_x=Utf8("a"),Utf8("b"),Utf8("a"),Utf8("b"),Utf8("a"),Utf8("b"),|rv=N,N,11,12,N,13,|

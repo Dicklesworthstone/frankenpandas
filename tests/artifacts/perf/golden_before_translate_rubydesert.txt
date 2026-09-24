@@ -1,4 +1,0 @@
-basic=[Utf8("heLLO wOrLd"), Utf8("abcXYZ"), Utf8(""), Utf8("dupLicate-d")]
-delete=[Utf8("he0 w0rd"), Utf8("abcXYZ"), Utf8(""), Utf8("dupicate-d")]
-dupsrc=[Utf8("hello worl1"), Utf8("abcXYZ"), Utf8(""), Utf8("1uplicate-1")]
-empty=[Utf8("hello world"), Utf8("abcXYZ"), Utf8(""), Utf8("duplicate-d")]

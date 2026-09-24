@@ -1,2 +1,0 @@
-left_diff_exit=0
-outer_diff_exit=0

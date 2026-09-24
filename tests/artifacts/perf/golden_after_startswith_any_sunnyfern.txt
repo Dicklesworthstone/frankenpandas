@@ -1,6 +1,0 @@
-sw_hit=[Bool(true), Bool(true), Bool(false), Bool(false), Bool(false)]
-sw_meta=[Bool(false), Bool(false), Bool(false), Bool(false), Bool(true)]
-ew_hit=[Bool(true), Bool(false), Bool(true), Bool(false), Bool(false)]
-empty=[Bool(false), Bool(false), Bool(false), Bool(false), Bool(false)]
-empty_pat=[Bool(true), Bool(true), Bool(true), Bool(true), Bool(true)]
-na_fill=[Bool(true), Bool(true)]

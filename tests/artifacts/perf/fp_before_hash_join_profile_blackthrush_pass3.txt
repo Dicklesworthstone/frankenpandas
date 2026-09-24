@@ -1,5 +1,0 @@
-Thu Jun  4 04:49:29 UTC 2026
-join_bench join_type=inner rows=50000 right_rows=50000 key_cardinality=10000 ordered_unique=false force_generic=false warmup=3 iters=20 output_rows=50000 mean_ms=0.541 p50_ms=0.139 p95_ms=1.763 p99_ms=1.774 checksum=9999431140.000
-join_bench join_type=left rows=50000 right_rows=50000 key_cardinality=10000 ordered_unique=false force_generic=false warmup=3 iters=20 output_rows=250000 mean_ms=35.837 p50_ms=34.870 p95_ms=43.780 p99_ms=43.804 checksum=49997155700.000
-join_bench join_type=right rows=50000 right_rows=50000 key_cardinality=10000 ordered_unique=false force_generic=false warmup=3 iters=20 output_rows=250000 mean_ms=37.856 p50_ms=36.909 p95_ms=44.655 p99_ms=45.428 checksum=49997155700.000
-join_bench join_type=outer rows=50000 right_rows=50000 key_cardinality=10000 ordered_unique=false force_generic=false warmup=3 iters=20 output_rows=250000 mean_ms=59.107 p50_ms=58.534 p95_ms=65.904 p99_ms=66.984 checksum=49997155700.000

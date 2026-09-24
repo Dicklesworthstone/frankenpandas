@@ -1,6 +1,0 @@
-  [2m2026-06-07T03:57:52.610731Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: bash -lc 'hostname; command -v hyperfine; ls -l /data/projects/frankenpandas/.rch-target-ts1-job-29872254800115083-1780804414011307000-0/release-perf/examples/perf_profile'[0m
-    [2;3mat[0m rch/src/hook.rs:402 [2;3mon[0m ThreadId(1)
-
-thinkstation1
-/usr/bin/hyperfine
--rwxrwxr-x 2 ubuntu ubuntu 11844920 Jun  6 23:56 /data/projects/frankenpandas/.rch-target-ts1-job-29872254800115083-1780804414011307000-0/release-perf/examples/perf_profile

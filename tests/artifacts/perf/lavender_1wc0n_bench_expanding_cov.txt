@@ -1,3 +1,0 @@
-n=10000
-expanding cov  OLD   108.782 ms -> NEW     0.569 ms = 191.14x
-expanding corr OLD   184.010 ms -> NEW     0.602 ms = 305.85x

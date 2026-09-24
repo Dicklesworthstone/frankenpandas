@@ -1,6 +1,0 @@
-warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
-of file /data/tmp/cargo-target-blackthrush-xzvpi-after/release-perf/examples/perf_profile.
-Use `info auto-load python-scripts [REGEXP]' to list them.
-Python Exception <class 'NameError'>: name 'end' is not defined
-Error occurred in Python: name 'end' is not defined
-Selected thread is running.

@@ -1,7 +1,0 @@
-dense:4
-single:1
-empty:0
-wide:3
-null_drop:2
-null_keep:3
-utf8:3

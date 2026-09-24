@@ -206,3 +206,6 @@ rust_out
 # prior run to <name>.data.old. The .old siblings are transient and must not be
 # committed (the live .data goldens under tests/artifacts/perf/ stay tracked).
 *.data.old
+
+# Bulk perf goldens: 4.6 GB of generated before/after dumps (retired 2026-09-22)
+tests/artifacts/perf/

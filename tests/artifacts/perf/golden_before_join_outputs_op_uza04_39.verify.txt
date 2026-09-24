@@ -1,2 +1,0 @@
-tests/artifacts/perf/golden_before_inner_join_op_uza04_39.txt: OK
-tests/artifacts/perf/golden_before_join_1to1_op_uza04_39.txt: OK

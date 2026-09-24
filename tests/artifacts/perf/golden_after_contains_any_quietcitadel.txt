@@ -1,5 +1,0 @@
-hit=[Bool(true), Bool(false), Bool(true), Bool(false), Bool(false)]
-literal_meta=[Bool(false), Bool(false), Bool(false), Bool(false), Bool(true)]
-case=[Bool(false), Bool(false), Bool(false), Bool(false), Bool(false)]
-empty=[Bool(false), Bool(false), Bool(false), Bool(false), Bool(false)]
-empty_pat=[Bool(true), Bool(true), Bool(true), Bool(true), Bool(true)]

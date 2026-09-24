@@ -1,5 +1,0 @@
-iloc=lbls=[Int64(14), Int64(10), Int64(14), Int64(12), Int64(12)] a=[Int64(500), Int64(100), Int64(500), Int64(300), Int64(300)] b=[Float64(9.0), Float64(1.5), Float64(9.0), Float64(-3.0), Float64(-3.0)]
-iloc_oob_err=true
-take=lbls=[Int64(13), Int64(11), Int64(10)] a=[Int64(400), Int64(200), Int64(100)] b=[Float64(2.0), Float64(NaN), Float64(1.5)]
-take_oob_err=true
-sample=lbls=[Int64(10), Int64(12), Int64(14)] a=[Int64(100), Int64(300), Int64(500)] b=[Float64(1.5), Float64(-3.0), Float64(9.0)]

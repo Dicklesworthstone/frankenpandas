@@ -1,1 +1,0 @@
-groupby_golden agg=mean rows=500000 key_cardinality=512 out_rows=512 digest=2b79521eadd77439

@@ -1,7 +1,0 @@
-join_bench
-join_type=left
-rows=5000
-right_rows=2500
-key_cardinality=5000
-output_rows=5000
-checksum=35018587.000

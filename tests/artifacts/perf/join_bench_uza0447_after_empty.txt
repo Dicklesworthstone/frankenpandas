@@ -1,8 +1,0 @@
-nrows=0
-
-col id dtype=Utf8
-
-col left_value dtype=Float64
-
-col right_value dtype=Float64
-
