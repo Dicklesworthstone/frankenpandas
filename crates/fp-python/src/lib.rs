@@ -9478,6 +9478,10 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || lower.contains("could not convert")
                 || lower.contains("not allowed for dtype")
                 || lower.contains("unsupported operand type")
+                // pandas' TypeError texts for dtype refusals (4qg5w.18).
+                || lower.contains("cannot perform __")
+                || lower.contains("not supported for the input types")
+                || lower.contains("cannot interpolate with all object-dtype")
             {
                 (
                     PyErrorKind::Type,
@@ -16710,10 +16714,9 @@ impl PyDataFrame {
 
     /// Return the elementwise absolute value as a new DataFrame.
     fn abs(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .inner
-            .abs()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // frame_error_to_py, not a blanket ValueError: abs of an object column
+        // is pandas' TypeError (4qg5w.18).
+        let result = self.inner.abs().map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 

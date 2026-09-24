@@ -2442,3 +2442,69 @@ def test_tz_methods_refuse_instead_of_returning_the_input() -> None:
     assert naive.tz_localize(None).tolist() == [1, 2]
 
 
+# Per-column DataFrame ops on non-numeric columns
+# (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18): object, datetime,
+# timedelta and nullable Float64 columns were returned UNCHANGED by ~54 ops.
+def _dtype_frame(m: Any, kind: str) -> Any:
+    if kind == "object":
+        return m.DataFrame({"c": ["b", "a", "c"]})
+    if kind == "datetime":
+        # (fpd.DataFrame({'c': <DatetimeIndex>}) is the fvsao.6 constructor gap)
+        return m.DataFrame({"c": ["2024-01-02", "2024-01-01", "2024-01-03"]}).astype(
+            {"c": "datetime64[ns]"}
+        )
+    if kind == "Float64":
+        return m.DataFrame({"c": [1.5, None, -2.5]}).astype({"c": "Float64"})
+    raise AssertionError(kind)
+
+
+_PER_COLUMN_OPS = {
+    "abs": lambda df: df.abs(),
+    "round": lambda df: df.round(),
+    "clip": lambda df: df.clip(0, 1),
+    "cumsum": lambda df: df.cumsum(),
+    "cumprod": lambda df: df.cumprod(),
+    "cummax": lambda df: df.cummax(),
+    "cummin": lambda df: df.cummin(),
+    "pct_change": lambda df: df.pct_change(fill_method=None),
+}
+
+
+def _outcome(m: Any, op: Any, kind: str) -> Any:
+    import warnings
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out = op(_dtype_frame(m, kind))
+    except TypeError:
+        return "TypeError"
+    return (str(out["c"].dtype), [_marker(v) for v in out["c"].tolist()])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["object", "datetime", "Float64"])
+@pytest.mark.parametrize("op", list(_PER_COLUMN_OPS), ids=list(_PER_COLUMN_OPS))
+def test_per_column_ops_on_non_numeric_columns_match_pandas(op: str, kind: str) -> None:
+    fn = _PER_COLUMN_OPS[op]
+    expected = _outcome(pd, fn, kind)
+    got = _outcome(fpd, fn, kind)
+    if kind == "Float64" and expected != "TypeError":
+        # The nullable dtype and its <NA> marker are fvsao.7 territory; the
+        # VALUES must match (they were the unchanged input before).
+        assert got != "TypeError"
+
+        def clean(vals: list) -> list:
+            # pd.NA cannot take part in ==/in, so test its type first.
+            return [
+                None
+                if v is None or type(v).__name__ == "NAType" or (isinstance(v, str) and v == "<NaN>")
+                else v
+                for v in vals
+            ]
+
+        assert clean(got[1]) == clean(expected[1])
+    else:
+        assert got == expected
+
+

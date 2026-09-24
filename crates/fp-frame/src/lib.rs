@@ -16969,10 +16969,25 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.fix()?)
     }
 
+    /// numpy's floating-point predicates refuse an object column with TypeError
+    /// ("ufunc 'isnan' not supported for the input types, ..."); they answered
+    /// False for every string (4qg5w.18).
+    fn reject_object_ufunc(&self, ufunc: &str) -> Result<(), FrameError> {
+        if self.column.dtype() == DType::Utf8 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "ufunc '{ufunc}' not supported for the input types, and the inputs could \
+                 not be safely coerced to any supported types according to the casting \
+                 rule ''safe''"
+            )));
+        }
+        Ok(())
+    }
+
     /// Element-wise check for finite values.
     ///
     /// Matches `np.isfinite(series)`. Returns boolean Series.
     pub fn isfinite(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isfinite")?;
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -16984,6 +16999,7 @@ impl Series {
     ///
     /// Matches `np.isinf(series)`. Returns boolean Series.
     pub fn isinf(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isinf")?;
         Self::new(self.name.clone(), self.index.clone(), self.column.isinf()?)
     }
 
@@ -16991,6 +17007,7 @@ impl Series {
     ///
     /// Matches `np.isnan(series)`. Returns boolean Series.
     pub fn isnan(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isnan")?;
         Self::new(self.name.clone(), self.index.clone(), self.column.isnan()?)
     }
 
@@ -16998,6 +17015,7 @@ impl Series {
     ///
     /// Matches `np.isneginf(series)`. Returns boolean Series.
     pub fn isneginf(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isneginf")?;
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -17009,6 +17027,7 @@ impl Series {
     ///
     /// Matches `np.isposinf(series)`. Returns boolean Series.
     pub fn isposinf(&self) -> Result<Self, FrameError> {
+        self.reject_object_ufunc("isposinf")?;
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -24588,6 +24607,21 @@ impl Series {
         fill_method: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Self, FrameError> {
+        // pandas cannot divide strings or datetimes and raises TypeError; this
+        // returned an all-NaN Series for them (4qg5w.18).
+        match self.column.dtype() {
+            DType::Utf8 => {
+                return Err(FrameError::CompatibilityRejected(
+                    "unsupported operand type(s) for /: 'str' and 'str'".to_owned(),
+                ));
+            }
+            DType::Datetime64 { .. } => {
+                return Err(FrameError::CompatibilityRejected(
+                    "cannot perform __truediv__ with this index type: DatetimeArray".to_owned(),
+                ));
+            }
+            _ => {}
+        }
         // Validate fill_method up front (preserve the error for unknown methods
         // regardless of data), then short-circuit the fill when there is nothing
         // missing to fill: ffill/bfill on an all-valid column is the identity, so
@@ -88477,7 +88511,7 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.round(decimals)`.
     pub fn round(&self, decimals: i32) -> Result<Self, FrameError> {
-        self.apply_per_column(|s| s.round(decimals))
+        self.apply_per_numeric_column(|s| s.round(decimals))
     }
 
     /// Round each named column to its own number of decimal places.
@@ -90906,6 +90940,7 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.interpolate()`. Non-numeric columns are preserved.
     pub fn interpolate(&self) -> Result<Self, FrameError> {
+        self.reject_all_object_interpolate()?;
         self.apply_per_column(|s| s.interpolate())
     }
 
@@ -90913,7 +90948,27 @@ impl DataFrame {
     ///
     /// Matches `df.interpolate(method='linear'|'nearest'|'zero')`.
     pub fn interpolate_method(&self, method: &str) -> Result<Self, FrameError> {
+        self.reject_all_object_interpolate()?;
         self.apply_per_column(|s| s.interpolate_method(method))
+    }
+
+    /// pandas' DataFrame.interpolate raises TypeError when every column is
+    /// object dtype (a Series or a mixed frame interpolates); it returned the
+    /// frame unchanged (4qg5w.18).
+    fn reject_all_object_interpolate(&self) -> Result<(), FrameError> {
+        if !self.column_order.is_empty()
+            && self
+                .column_order
+                .iter()
+                .all(|name| self.columns[name].dtype() == DType::Utf8)
+        {
+            return Err(FrameError::CompatibilityRejected(
+                "Cannot interpolate with all object-dtype columns in the DataFrame. Try \
+                 setting at least one column to a numeric dtype."
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Convert dtypes to best-possible types.
@@ -91139,6 +91194,25 @@ impl DataFrame {
         self.apply_per_column_min(16_384, func)
     }
 
+    /// `apply_per_column` over the numeric columns only, every other column
+    /// (bool included) returned as is: pandas' `DataFrame.round` skips them,
+    /// where the other per-column ops apply or raise (4qg5w.18).
+    fn apply_per_numeric_column<F>(&self, func: F) -> Result<Self, FrameError>
+    where
+        F: Fn(&Series) -> Result<Series, FrameError> + Sync,
+    {
+        self.apply_per_column(|s| {
+            if matches!(
+                s.column().dtype(),
+                DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable
+            ) {
+                func(s)
+            } else {
+                Ok(s.clone())
+            }
+        })
+    }
+
     /// Per-column cumulative fold (cumsum/cumprod/cummin/cummax) with a
     /// direct-typed-column fast path for Float64 columns. `apply_per_column`
     /// routes through `column_as_series` -> `col.clone()`, and `Column::clone`
@@ -91244,24 +91318,16 @@ impl DataFrame {
                     out,
                     fp_columnar::ValidityMask::from_words(words, n),
                 ))
-            } else if matches!(
-                col.dtype(),
-                DType::Int64 | DType::Float64 | DType::Bool | DType::Datetime64 { .. }
-            ) {
-                // Numeric columns and Datetime64 use the Series operation. The
-                // latter accumulates extrema but correctly refuses sum/product.
-                Ok(series_op(&self.column_as_series(name)?)?.column().clone())
             } else if col.dtype() == DType::Utf8 {
                 Self::cum_utf8_column(func, name, col)
             } else {
-                // Other non-numeric dtypes (Datetime64/...) still pass through
-                // unchanged, as apply_per_column's gate does. NOT verified
-                // against pandas — `cummax` on a datetime64 column does run a
-                // real accumulation there, so this arm is likely wrong too, but
-                // it is a different dtype family than the object-column
-                // question br-frankenpandas-reductions-numeric-only-default-zx21n
-                // covers and is left for its own measurement.
-                Ok(col.clone())
+                // Every other dtype uses the Series operation, which accumulates
+                // or refuses per pandas' rule (Datetime64 accumulates extrema and
+                // refuses sum/product). Timedelta64 and the nullable dtypes were
+                // returned UNCHANGED here: df.cummax() on a timedelta column and
+                // df.cumsum() on a Float64Nullable column were silent no-ops
+                // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18).
+                Ok(series_op(&self.column_as_series(name)?)?.column().clone())
             }
         })?;
         let mut result_cols = BTreeMap::new();
@@ -91291,34 +91357,21 @@ impl DataFrame {
         // Each column is transformed INDEPENDENTLY by the same `func`, so
         // spreading columns across par_map_columns scope workers is bit-identical
         // — results are reassembled in column_order. The serial loop left all but
-        // one core idle. Per br-frankenpandas-fcf80: pandas treats Bool as numeric
-        // in cumsum/cumprod/diff/shift/abs (Series ops handle the cast); the gate
-        // delegates Bool columns and passes other non-numeric dtypes through.
+        // one core idle.
+        //
+        // Every column goes to the per-Series op, which applies pandas'
+        // per-dtype rule (apply, or raise). This gate used to delegate only
+        // Int64/Float64/Bool (then Int64Nullable/BoolNullable,
+        // br-frankenpandas-77x9g) and return every other column UNTOUCHED: a
+        // silent no-op, not an error. df.abs() on a string column "succeeded"
+        // where pandas raises TypeError, and df.abs() on a Float64Nullable
+        // column left -2.5 in place
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18). The one op
+        // pandas does skip non-numeric columns for, DataFrame.round, uses
+        // `apply_per_numeric_column`.
         let transformed = self.par_map_columns_min(&self.column_order, par_min_values, |name| {
-            let col = &self.columns[name];
-            // The NULLABLE extension dtypes belong on the delegating side of this
-            // gate (br-frankenpandas-77x9g). They were landing in the `else`, which
-            // returns the column UNTOUCHED — so every op routed through this helper
-            // was a silent NO-OP on an `Int64Nullable`/`BoolNullable` column, not an
-            // error and not a fallback. That is how `df.clip(-1, 4)` returned its
-            // input `-5` unchanged: the pass-through, not clip, produced the answer.
-            //
-            // This is the shared helper behind ~54 elementwise/scan/math ops, so the
-            // no-op was never clip-specific. `Series` handles these dtypes (clip does
-            // so as of this bead); the gate simply never let them through.
-            if matches!(
-                col.dtype(),
-                DType::Int64
-                    | DType::Float64
-                    | DType::Bool
-                    | DType::Int64Nullable
-                    | DType::BoolNullable
-            ) {
-                let s = self.column_as_series(name)?;
-                Ok(func(&s)?.column().clone())
-            } else {
-                Ok(col.clone())
-            }
+            let s = self.column_as_series(name)?;
+            Ok(func(&s)?.column().clone())
         })?;
         let mut result_cols = BTreeMap::new();
         for (name, column) in self.column_order.iter().zip(transformed) {
@@ -154534,6 +154587,90 @@ mod tests {
         );
     }
 
+    /// br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18: the per-column
+    /// DataFrame ops returned every column outside Int64/Float64/Bool (and the
+    /// Int64/Bool nullables) UNCHANGED. Expectations read off pandas 2.2.3 on a
+    /// one-column frame of each dtype: `R` = raises TypeError, `A` = applies,
+    /// `S` = returns the column unchanged. NEGATIVE: every `R` and every
+    /// Float64Nullable `A` was an `S` before the fix.
+    #[test]
+    fn per_column_ops_follow_pandas_per_dtype_4qg5w18() {
+        type Op = fn(&DataFrame) -> Result<DataFrame, FrameError>;
+        let one = |dtype: DType, values: Vec<Scalar>| {
+            let index = Index::new((0..values.len() as i64).map(IndexLabel::Int64).collect());
+            let column = Column::new(dtype, values).expect("column");
+            DataFrame::new_with_column_order(
+                index,
+                BTreeMap::from([("c".to_owned(), column)]),
+                vec!["c".to_owned()],
+            )
+            .expect("frame")
+        };
+        let hour = 3_600_000_000_000_i64;
+        let object = one(
+            DType::Utf8,
+            vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())],
+        );
+        let datetime = one(
+            DType::datetime64_naive(),
+            vec![Scalar::Datetime64(2 * hour), Scalar::Datetime64(hour)],
+        );
+        let timedelta = one(
+            DType::Timedelta64,
+            vec![Scalar::Timedelta64(2 * hour), Scalar::Timedelta64(hour)],
+        );
+        let nullable = one(
+            DType::Float64Nullable,
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(-2.5),
+            ],
+        );
+        let cases: Vec<(&str, Op, &DataFrame, char)> = vec![
+            ("abs", |d| d.abs(), &object, 'R'),
+            ("abs", |d| d.abs(), &datetime, 'R'),
+            ("abs", |d| d.abs(), &nullable, 'A'),
+            ("sqrt", |d| d.sqrt(), &object, 'R'),
+            ("sin", |d| d.sin(), &datetime, 'R'),
+            ("log", |d| d.log(), &timedelta, 'R'),
+            ("exp", |d| d.exp(), &nullable, 'A'),
+            ("clip", |d| d.clip(Some(0.0), Some(1.0)), &object, 'R'),
+            ("cumprod", |d| d.cumprod(), &object, 'R'),
+            ("cumprod", |d| d.cumprod(), &nullable, 'A'),
+            ("cummax", |d| d.cummax(), &timedelta, 'A'),
+            ("pct_change", |d| d.pct_change(1), &object, 'R'),
+            ("pct_change", |d| d.pct_change(1), &datetime, 'R'),
+            ("isnan", |d| d.isnan(), &object, 'R'),
+            ("isfinite", |d| d.isfinite(), &datetime, 'A'),
+            ("interpolate", |d| d.interpolate(), &object, 'R'),
+            ("round", |d| d.round(0), &object, 'S'),
+            ("round", |d| d.round(0), &datetime, 'S'),
+            ("round", |d| d.round(0), &nullable, 'A'),
+        ];
+        for (name, op, frame, want) in cases {
+            let got = match op(frame) {
+                Err(_) => 'R',
+                Ok(out) => {
+                    let (a, b) = (out.column("c").expect("c"), frame.column("c").expect("c"));
+                    if a.values() == b.values() && a.dtype() == b.dtype() {
+                        'S'
+                    } else {
+                        'A'
+                    }
+                }
+            };
+            let dtype = frame.column("c").expect("c").dtype();
+            assert_eq!(got, want, "{name} on {dtype:?}");
+        }
+        // The Float64Nullable no-op, concretely: abs left -2.5 in place.
+        let abs = nullable.abs().expect("abs");
+        assert_eq!(
+            abs.column("c").expect("c").values()[2],
+            Scalar::Float64(2.5)
+        );
+    }
+
     /// pandas 2.2.3: `pd.Series(v).groupby(k)` over an int64 column keeps int64
     /// for sum/prod/min/max, the cumulative forms and transform; the f64 paths
     /// returned float64. (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.1)
@@ -214791,11 +214928,13 @@ mod clip_nullable_int64_77x9g {
         assert_eq!(b_vals[3], Scalar::Float64(4.0));
     }
 
-    /// Guard the gate change itself: widening `apply_per_column_min` must not
-    /// start transforming columns it is supposed to pass through. A Utf8 column
-    /// is still returned as-is by `df.clip`.
+    /// GOLDEN-CHANGE (4qg5w.18): this pinned `df.clip` returning a Utf8 column
+    /// untouched. pandas 2.2.3 raises for it -
+    /// `pd.DataFrame({'a': pd.array([-5, 8], dtype='Int64'), 's': ['keep', 'me']})
+    /// .clip(-1, 4)` -> TypeError ('>=' not supported between 'str' and 'int') -
+    /// and the pass-through was the silent no-op that bead removed.
     #[test]
-    fn a_non_numeric_column_is_still_passed_through_untouched() {
+    fn a_non_numeric_column_makes_clip_raise_like_pandas() {
         let a = Column::new(
             DType::Int64Nullable,
             vec![Scalar::Int64(-5), Scalar::Int64(8)],
@@ -214817,11 +214956,13 @@ mod clip_nullable_int64_77x9g {
         )
         .expect("frame");
 
-        let clipped = frame.clip(Some(-1.0), Some(4.0)).expect("clip");
-        let s_out = clipped.column("s").expect("column s");
-        assert_eq!(s_out.dtype(), DType::Utf8);
-        assert_eq!(s_out.values()[0], Scalar::Utf8("keep".to_owned()));
-        assert_eq!(s_out.values()[1], Scalar::Utf8("me".to_owned()));
+        assert!(frame.clip(Some(-1.0), Some(4.0)).is_err());
+        // Without the string column the nullable Int64 column is clipped.
+        let numeric = frame.select_columns(&["a"]).expect("select a");
+        let clipped = numeric.clip(Some(-1.0), Some(4.0)).expect("clip");
+        let a_out = clipped.column("a").expect("column a");
+        assert_eq!(a_out.values()[0], Scalar::Int64(-1));
+        assert_eq!(a_out.values()[1], Scalar::Int64(4));
     }
 
     // ---- br-frankenpandas-8x4r2: the 3ugrk guard over-rejected -------------
