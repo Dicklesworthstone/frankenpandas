@@ -27259,8 +27259,7 @@ mod tests {
         let out = tempfile::tempdir().expect("tmp");
         let mut out_cfg = cfg.clone();
         out_cfg.repo_root = out.path().to_path_buf();
-        let paths =
-            write_compat_closure_final_evidence_pack(&out_cfg, &pack).expect("write final");
+        let paths = write_compat_closure_final_evidence_pack(&out_cfg, &pack).expect("write final");
         assert!(paths.evidence_pack_path.starts_with(out.path()));
 
         assert!(paths.evidence_pack_path.exists());
