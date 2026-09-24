@@ -40791,6 +40791,10 @@ impl SeriesGroupBy<'_> {
                 sum
             });
         }
+        // int64 / bool sums are int64 in pandas (wrapping, as numpy does).
+        if let Some(r) = self.integral_reduce(i64::wrapping_add, false) {
+            return r;
+        }
         // Dense single-fold fast path (no per-group Vec<f64> buckets) — see
         // dense_group_fold. Bit-identical to agg_numeric's `nums.iter().sum()`.
         if let Some(r) = self.dense_group_fold(0.0, |a, x| a + x, |a, _| Scalar::Float64(a)) {
@@ -41253,6 +41257,9 @@ impl SeriesGroupBy<'_> {
         if self.column_is_timedelta() {
             return self.agg_timedelta_extrema(|a, b| a.min(b));
         }
+        if let Some(r) = self.integral_reduce(std::cmp::min, true) {
+            return r;
+        }
         if let Some(r) = self.dense_group_fold(f64::INFINITY, f64::min, |a, _| Scalar::Float64(a)) {
             return r;
         }
@@ -41276,6 +41283,9 @@ impl SeriesGroupBy<'_> {
         if self.column_is_timedelta() {
             return self.agg_timedelta_extrema(|a, b| a.max(b));
         }
+        if let Some(r) = self.integral_reduce(std::cmp::max, true) {
+            return r;
+        }
         if let Some(r) =
             self.dense_group_fold(f64::NEG_INFINITY, f64::max, |a, _| Scalar::Float64(a))
         {
@@ -41284,6 +41294,161 @@ impl SeriesGroupBy<'_> {
         self.agg_numeric(
             |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             self.series.name(),
+        )
+    }
+
+    /// The values of an all-valid Int64 or Bool column as i64, and whether the
+    /// column is Bool. pandas keeps these integral where the f64 paths below
+    /// widened them to float64 (`df.groupby("k")["v"].sum()` gave 4.0 for 4):
+    /// sum/prod and their cumulative and transform forms are int64 for an int64
+    /// or bool column, and min/max/cummin/cummax keep int64 or bool. A column
+    /// with missing values is float64 in pandas (DISC-011) and keeps the f64
+    /// paths. (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.1)
+    fn integral_values(&self) -> Option<(std::borrow::Cow<'_, [i64]>, bool)> {
+        let column = &self.series.column;
+        let is_bool = match column.dtype() {
+            DType::Int64 => false,
+            DType::Bool => true,
+            _ => return None,
+        };
+        if !column.validity().all() {
+            return None;
+        }
+        if let Some(values) = column.as_i64_slice() {
+            return Some((std::borrow::Cow::Borrowed(values), false));
+        }
+        if let Some(values) = column.as_bool_slice() {
+            let widened = values.iter().map(|&v| i64::from(v)).collect();
+            return Some((std::borrow::Cow::Owned(widened), true));
+        }
+        // A Scalar-backed column: read the cells.
+        let widened = column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(v) => Some(*v),
+                Scalar::Bool(v) => Some(i64::from(*v)),
+                _ => None,
+            })
+            .collect::<Option<Vec<i64>>>()?;
+        Some((std::borrow::Cow::Owned(widened), is_bool))
+    }
+
+    /// Per-row group ids (`usize::MAX` for a row whose key the grouping drops),
+    /// the group count, and the group labels in first-seen order when
+    /// `want_labels`: the dense layout when it applies, else `build_groups`.
+    fn row_group_layout(
+        &self,
+        want_labels: bool,
+    ) -> (std::rc::Rc<[usize]>, usize, Vec<IndexLabel>) {
+        if let Some((gids, ngroups)) = self.dense_group_ids() {
+            if !want_labels {
+                return (gids, ngroups, Vec::new());
+            }
+            if let Some(labels) = self.dense_group_labels(&gids, ngroups) {
+                return (gids, ngroups, labels);
+            }
+        }
+        let (order, keys, groups) = self.build_groups();
+        let mut gids = vec![usize::MAX; self.series.len()];
+        for (g, key) in keys.iter().enumerate() {
+            for &row in &groups[key] {
+                gids[row] = g;
+            }
+        }
+        (std::rc::Rc::from(gids), keys.len(), order)
+    }
+
+    /// `values` as an Int64 column, or as Bool when the input was Bool and
+    /// `keep_bool` (min/max/cummin/cummax).
+    fn integral_column(
+        values: Vec<i64>,
+        is_bool: bool,
+        keep_bool: bool,
+    ) -> Result<Column, FrameError> {
+        if is_bool && keep_bool {
+            let flags = values.into_iter().map(|v| Scalar::Bool(v != 0)).collect();
+            Ok(Column::from_values(flags)?)
+        } else {
+            Ok(Column::from_i64_values_owned(values))
+        }
+    }
+
+    /// Group-wise fold of `integral_values` in row order: one result per group,
+    /// indexed by the group labels (see `integral_values` for which ops).
+    /// `None` when the column is not all-valid Int64/Bool.
+    fn integral_reduce(
+        &self,
+        fold: impl Fn(i64, i64) -> i64,
+        keep_bool: bool,
+    ) -> Option<Result<Series, FrameError>> {
+        let (values, is_bool) = self.integral_values()?;
+        let (gids, ngroups, labels) = self.row_group_layout(true);
+        let mut acc = vec![0_i64; ngroups];
+        let mut seen = vec![false; ngroups];
+        for (row, &g) in gids.iter().enumerate() {
+            if g == usize::MAX {
+                continue;
+            }
+            acc[g] = if seen[g] {
+                fold(acc[g], values[row])
+            } else {
+                seen[g] = true;
+                values[row]
+            };
+        }
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
+        let index = Index::new(labels).rename_index(idx_name);
+        Some(
+            Self::integral_column(acc, is_bool, keep_bool)
+                .and_then(|column| Series::new(self.series.name(), index, column)),
+        )
+    }
+
+    /// Row-aligned integral result: each row's group reduction (`broadcast`,
+    /// transform) or its group's running fold up to that row (cumulative ops).
+    /// `None` when the column is not all-valid Int64/Bool, or when a row's key
+    /// is dropped: pandas gives that row NaN, so the result is float64.
+    fn integral_by_row(
+        &self,
+        fold: impl Fn(i64, i64) -> i64,
+        keep_bool: bool,
+        broadcast: bool,
+    ) -> Option<Result<Series, FrameError>> {
+        let (values, is_bool) = self.integral_values()?;
+        let (gids, ngroups, _) = self.row_group_layout(false);
+        if gids.contains(&usize::MAX) {
+            return None;
+        }
+        let mut acc = vec![0_i64; ngroups];
+        let mut seen = vec![false; ngroups];
+        let mut out: Vec<i64> = gids
+            .iter()
+            .zip(values.iter())
+            .map(|(&g, &v)| {
+                acc[g] = if seen[g] {
+                    fold(acc[g], v)
+                } else {
+                    seen[g] = true;
+                    v
+                };
+                acc[g]
+            })
+            .collect();
+        if broadcast {
+            for (slot, &g) in out.iter_mut().zip(gids.iter()) {
+                *slot = acc[g];
+            }
+        }
+        Some(
+            Self::integral_column(out, is_bool, keep_bool).and_then(|column| {
+                Series::new(self.series.name(), self.series.index.clone(), column)
+            }),
         )
     }
 
@@ -42943,6 +43108,9 @@ impl SeriesGroupBy<'_> {
         if self.column_is_timedelta() {
             return self.agg_timedelta_values(|_| fp_types::Timedelta::NAT);
         }
+        if let Some(r) = self.integral_reduce(i64::wrapping_mul, false) {
+            return r;
+        }
         // Dense single-fold fast path (no per-group Vec<f64> buckets). Bit-
         // identical to `nums.iter().product()`: 1.0 * x0 * x1 * ... folds
         // left-to-right in value order, same as `product()`'s left fold.
@@ -43087,6 +43255,9 @@ impl SeriesGroupBy<'_> {
                     .collect()
             });
         }
+        if let Some(r) = self.integral_by_row(i64::wrapping_add, false, false) {
+            return r;
+        }
         if let Some(s) = self.try_cum_dense(0.0, false, |a, v| a + v) {
             return Ok(s);
         }
@@ -43121,6 +43292,9 @@ impl SeriesGroupBy<'_> {
                     .map(|_| Scalar::Timedelta64(fp_types::Timedelta::NAT))
                     .collect()
             });
+        }
+        if let Some(r) = self.integral_by_row(i64::wrapping_mul, false, false) {
+            return r;
         }
         if let Some(s) = self.try_cum_dense(1.0, true, |a, v| a * v) {
             return Ok(s);
@@ -43162,6 +43336,9 @@ impl SeriesGroupBy<'_> {
                     })
                     .collect()
             });
+        }
+        if let Some(r) = self.integral_by_row(std::cmp::min, true, false) {
+            return r;
         }
         if let Some(s) = self.try_cum_dense(f64::INFINITY, false, |a, v| if v < a { v } else { a })
         {
@@ -43207,6 +43384,9 @@ impl SeriesGroupBy<'_> {
                     })
                     .collect()
             });
+        }
+        if let Some(r) = self.integral_by_row(std::cmp::max, true, false) {
+            return r;
         }
         if let Some(s) =
             self.try_cum_dense(f64::NEG_INFINITY, false, |a, v| if v > a { v } else { a })
@@ -44044,6 +44224,18 @@ impl SeriesGroupBy<'_> {
     /// Matches `series.groupby(by).transform("mean")` for supported reduction
     /// names. The output keeps the original index and length.
     pub fn transform(&self, func: &str) -> Result<Series, FrameError> {
+        // int64 / bool: transform("sum"/"prod") is int64 and ("min"/"max")
+        // keeps the dtype in pandas; the f64 paths below widened them.
+        let integral = match func {
+            "sum" => self.integral_by_row(i64::wrapping_add, false, true),
+            "prod" => self.integral_by_row(i64::wrapping_mul, false, true),
+            "min" => self.integral_by_row(std::cmp::min, true, true),
+            "max" => self.integral_by_row(std::cmp::max, true, true),
+            _ => None,
+        };
+        if let Some(r) = integral {
+            return r;
+        }
         // Dense direct-address fast path for the two hottest transforms
         // (group-normalization is `transform("mean")`): a dense gid per row
         // (bounded-Int64 OR contiguous-Utf8 key — covers categorical group keys,
@@ -44807,7 +44999,14 @@ impl SeriesGroupBy<'_> {
         // same first-seen gids/labels, same by-name index. Gated on int64/Utf8
         // key + all-valid numeric values; count excluded (Int64 output).
         const BUCKET_FUNCS: &[&str] = &["sum", "mean", "min", "max", "std", "var", "prod"];
+        // The buckets are f64: an int64/bool column's sum/min/max/prod must come
+        // from the integral per-func methods instead.
+        let integral_func = matches!(self.series.column.dtype(), DType::Int64 | DType::Bool)
+            && funcs
+                .iter()
+                .any(|f| matches!(*f, "sum" | "min" | "max" | "prod"));
         if !funcs.is_empty()
+            && !integral_func
             && funcs.iter().all(|f| BUCKET_FUNCS.contains(f))
             && let Some((gids, ngroups)) = self.dense_group_ids()
         {
@@ -154333,6 +154532,186 @@ mod tests {
         );
     }
 
+    /// pandas 2.2.3: `pd.Series(v).groupby(k)` over an int64 column keeps int64
+    /// for sum/prod/min/max, the cumulative forms and transform; the f64 paths
+    /// returned float64. (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.1)
+    #[test]
+    fn series_groupby_int64_reductions_stay_int64_fvsao61() {
+        let index: Vec<IndexLabel> = (0..5_i64).map(IndexLabel::Int64).collect();
+        let values = Series::new(
+            "v",
+            Index::new(index.clone()),
+            Column::from_i64_values_owned(vec![-1, 2, -3, 4, 5]),
+        )
+        .unwrap();
+        let utf8_keys = Series::from_values(
+            "k",
+            index.clone(),
+            ["a", "b", "a", "c", "b"]
+                .iter()
+                .map(|k| Scalar::Utf8((*k).to_owned()))
+                .collect(),
+        )
+        .unwrap();
+        let int_keys = Series::new(
+            "k",
+            Index::new(index),
+            Column::from_i64_values_owned(vec![10, 20, 10, 30, 20]),
+        )
+        .unwrap();
+        // Both group layouts: dense int64 ids and the build_groups fallback.
+        for keys in [&utf8_keys, &int_keys] {
+            let gb = values.groupby(keys).unwrap();
+            let ints = |s: Series| -> Vec<Scalar> {
+                assert_eq!(s.column().dtype(), DType::Int64, "{s:?}");
+                s.values().to_vec()
+            };
+            let i = |v: &[i64]| v.iter().map(|&x| Scalar::Int64(x)).collect::<Vec<_>>();
+            // Groups in first-seen order: a=[-1,-3], b=[2,5], c=[4].
+            assert_eq!(ints(gb.sum().unwrap()), i(&[-4, 7, 4]));
+            assert_eq!(ints(gb.prod().unwrap()), i(&[3, 10, 4]));
+            assert_eq!(ints(gb.min().unwrap()), i(&[-3, 2, 4]));
+            assert_eq!(ints(gb.max().unwrap()), i(&[-1, 5, 4]));
+            assert_eq!(ints(gb.cumsum().unwrap()), i(&[-1, 2, -4, 4, 7]));
+            assert_eq!(ints(gb.cumprod().unwrap()), i(&[-1, 2, 3, 4, 10]));
+            assert_eq!(ints(gb.cummin().unwrap()), i(&[-1, 2, -3, 4, 2]));
+            assert_eq!(ints(gb.cummax().unwrap()), i(&[-1, 2, -1, 4, 5]));
+            assert_eq!(ints(gb.transform("sum").unwrap()), i(&[-4, 7, -4, 4, 7]));
+            assert_eq!(ints(gb.transform("max").unwrap()), i(&[-1, 5, -1, 4, 5]));
+            let agg = gb.agg(&["sum", "mean", "max"]).unwrap();
+            assert_eq!(agg.column("sum").unwrap().dtype(), DType::Int64);
+            assert_eq!(agg.column("max").unwrap().dtype(), DType::Int64);
+            assert_eq!(agg.column("mean").unwrap().dtype(), DType::Float64);
+        }
+    }
+
+    /// Negative for a compute-in-f64-then-cast shortcut: above 2^53 the f64
+    /// fold rounds (2^53 + 1 + 1 == 2^53 in f64), and numpy's int64 sum wraps.
+    #[test]
+    fn series_groupby_int64_sum_is_exact_above_2_pow_53_and_wraps_fvsao61() {
+        let index: Vec<IndexLabel> = (0..3_i64).map(IndexLabel::Int64).collect();
+        let big = (1_i64 << 53) + 1;
+        let values = Series::new(
+            "v",
+            Index::new(index.clone()),
+            Column::from_i64_values_owned(vec![big, 1, i64::MAX]),
+        )
+        .unwrap();
+        let keys = Series::new(
+            "k",
+            Index::new(index),
+            Column::from_i64_values_owned(vec![0, 0, 1]),
+        )
+        .unwrap();
+        let gb = values.groupby(&keys).unwrap();
+        assert_eq!(
+            gb.sum().unwrap().values().to_vec(),
+            vec![Scalar::Int64(big + 1), Scalar::Int64(i64::MAX)]
+        );
+        // pandas: pd.Series([i64max, 1]).groupby([0, 0]).sum() == i64min (wraps).
+        let wrap = Series::new(
+            "v",
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            Column::from_i64_values_owned(vec![i64::MAX, 1]),
+        )
+        .unwrap();
+        let zero_keys = Series::new(
+            "k",
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+            Column::from_i64_values_owned(vec![0, 0]),
+        )
+        .unwrap();
+        assert_eq!(
+            wrap.groupby(&zero_keys)
+                .unwrap()
+                .sum()
+                .unwrap()
+                .values()
+                .to_vec(),
+            vec![Scalar::Int64(i64::MIN)]
+        );
+    }
+
+    /// Bool: sum/prod/cumsum are int64, min/max/cummax stay bool (pandas 2.2.3).
+    /// A column with missing values keeps the float64 paths (DISC-011), and so
+    /// does a cumulative op whose key drops rows (pandas gives those rows NaN).
+    #[test]
+    fn series_groupby_bool_and_missing_value_dtypes_fvsao61() {
+        let index: Vec<IndexLabel> = (0..5_i64).map(IndexLabel::Int64).collect();
+        let keys = Series::from_values(
+            "k",
+            index.clone(),
+            ["a", "b", "a", "c", "b"]
+                .iter()
+                .map(|k| Scalar::Utf8((*k).to_owned()))
+                .collect(),
+        )
+        .unwrap();
+        let flags = Series::from_values(
+            "f",
+            index.clone(),
+            [true, false, true, true, false]
+                .iter()
+                .map(|&b| Scalar::Bool(b))
+                .collect(),
+        )
+        .unwrap();
+        let gb = flags.groupby(&keys).unwrap();
+        let sum = gb.sum().unwrap();
+        assert_eq!(sum.column().dtype(), DType::Int64);
+        assert_eq!(
+            sum.values().to_vec(),
+            vec![Scalar::Int64(2), Scalar::Int64(0), Scalar::Int64(1)]
+        );
+        let max = gb.max().unwrap();
+        assert_eq!(max.column().dtype(), DType::Bool);
+        assert_eq!(
+            max.values().to_vec(),
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(gb.cumsum().unwrap().column().dtype(), DType::Int64);
+        assert_eq!(gb.cummax().unwrap().column().dtype(), DType::Bool);
+
+        let with_missing = Series::from_values(
+            "v",
+            index.clone(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        let sum = with_missing.groupby(&keys).unwrap().sum().unwrap();
+        assert_eq!(sum.column().dtype(), DType::Float64, "{sum:?}");
+
+        let dropped_key = Series::from_values(
+            "k",
+            index.clone(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+                Scalar::Utf8("c".to_owned()),
+            ],
+        )
+        .unwrap();
+        let values = Series::new(
+            "v",
+            Index::new(index),
+            Column::from_i64_values_owned(vec![1, 2, 3, 4, 5]),
+        )
+        .unwrap();
+        let gb = values.groupby(&dropped_key).unwrap();
+        assert_eq!(gb.sum().unwrap().column().dtype(), DType::Int64);
+        let cumsum = gb.cumsum().unwrap();
+        assert_eq!(cumsum.column().dtype(), DType::Float64, "{cumsum:?}");
+        assert!(cumsum.values()[1].is_missing(), "{cumsum:?}");
+    }
+
     #[test]
     fn series_groupby_sum_mean_timedelta64_c1bxu() {
         // Per br-frankenpandas-c1bxu: SeriesGroupBy::sum and mean on a
@@ -209210,21 +209589,22 @@ mod test_select_columns_perf_76e1fd {
             )
             .unwrap();
 
-            // Reference: first-seen group order, accumulate f64 values.
+            // Reference: first-seen group order; int64 sums (pandas keeps an int64
+            // column's groupby sum int64, fvsao.6.1) and f64 means.
             let mut order: Vec<i64> = Vec::new();
-            let mut sums: Vec<f64> = Vec::new();
+            let mut sums: Vec<i64> = Vec::new();
             let mut counts: Vec<usize> = Vec::new();
             for (&k, &v) in keys.iter().zip(&vals) {
                 let g = match order.iter().position(|&o| o == k) {
                     Some(p) => p,
                     None => {
                         order.push(k);
-                        sums.push(0.0);
+                        sums.push(0);
                         counts.push(0);
                         order.len() - 1
                     }
                 };
-                sums[g] += v as f64;
+                sums[g] += v;
                 counts[g] += 1;
             }
 
@@ -209232,32 +209612,37 @@ mod test_select_columns_perf_76e1fd {
             let mean_ref: Vec<f64> = sums
                 .iter()
                 .zip(&counts)
-                .map(|(s, &c)| s / c as f64)
+                .map(|(&s, &c)| s as f64 / c as f64)
                 .collect();
-            for (opname, want) in [("sum", sums.clone()), ("mean", mean_ref)] {
-                let got = if opname == "sum" { gb.sum() } else { gb.mean() }.unwrap();
-                let glabels: Vec<i64> = got
-                    .index()
+            let group_labels = |got: &Series| -> Vec<i64> {
+                got.index()
                     .labels()
                     .iter()
                     .map(|l| match l {
                         IndexLabel::Int64(v) => *v,
                         other => panic!("{other:?}"),
                     })
-                    .collect();
-                let gvals: Vec<f64> = got
-                    .values()
-                    .iter()
-                    .map(|v| match v {
-                        Scalar::Float64(f) => *f,
-                        other => panic!("{other:?}"),
-                    })
-                    .collect();
-                assert_eq!(glabels, order, "trial {trial} {opname} labels");
-                assert_eq!(gvals.len(), want.len());
-                for (g, w) in gvals.iter().zip(&want) {
-                    assert!((g - w).abs() < 1e-9, "trial {trial} {opname}: {g} vs {w}");
-                }
+                    .collect()
+            };
+
+            let got = gb.sum().unwrap();
+            assert_eq!(group_labels(&got), order, "trial {trial} sum labels");
+            let want: Vec<Scalar> = sums.iter().map(|&s| Scalar::Int64(s)).collect();
+            assert_eq!(got.values().to_vec(), want, "trial {trial} sum");
+
+            let got = gb.mean().unwrap();
+            assert_eq!(group_labels(&got), order, "trial {trial} mean labels");
+            let gvals: Vec<f64> = got
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(f) => *f,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(gvals.len(), mean_ref.len());
+            for (g, w) in gvals.iter().zip(&mean_ref) {
+                assert!((g - w).abs() < 1e-9, "trial {trial} mean: {g} vs {w}");
             }
         }
     }

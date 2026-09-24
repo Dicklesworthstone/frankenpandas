@@ -23287,10 +23287,84 @@ pub struct PyGroupBy {
     by: Vec<String>,
 }
 
+impl PyGroupBy {
+    /// One column grouped by this groupby's key: pandas' `gb["col"]` / `gb.col`.
+    fn column_groupby(&self, name: &str) -> PyResult<PySeriesGroupBy> {
+        let [key] = self.by.as_slice() else {
+            // A multi-key groupby's result index is not yet a MultiIndex
+            // (DISC-006), so a SeriesGroupBy over several keys cannot match pandas.
+            return Err(not_implemented(
+                "selecting a column from a groupby over several keys",
+            ));
+        };
+        let column = |col: &str| -> PyResult<Series> {
+            let values = self.df.column(col).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Column not found: {col}"))
+            })?;
+            Series::new(col, self.df.index().clone(), values.clone()).map_err(frame_error_to_py)
+        };
+        Ok(PySeriesGroupBy {
+            series: column(name)?,
+            by: column(key)?,
+            sort: true,
+        })
+    }
+}
+
 #[pymethods]
 impl PyGroupBy {
     fn __repr__(&self) -> String {
         format!("DataFrameGroupBy(by={:?})", self.by)
+    }
+
+    /// pandas' column selection: `gb["v"]` is that column's SeriesGroupBy and
+    /// `gb[["v", "w"]]` this groupby over those columns; an absent column is a
+    /// KeyError with pandas' message.
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(name) = key.extract::<String>() {
+            return Ok(Py::new(py, self.column_groupby(&name)?)?.into_any());
+        }
+        let names: Vec<String> = key.extract().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "groupby column selection must be a column name or a list of column names",
+            )
+        })?;
+        let missing: Vec<String> = names
+            .iter()
+            .filter(|name| self.df.column(name).is_none())
+            .map(|name| format!("'{name}'"))
+            .collect();
+        if !missing.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Columns not found: {}",
+                missing.join(", ")
+            )));
+        }
+        let mut keep: Vec<&str> = self.by.iter().map(String::as_str).collect();
+        for name in &names {
+            if !keep.contains(&name.as_str()) {
+                keep.push(name);
+            }
+        }
+        let df = self.df.select_columns(&keep).map_err(frame_error_to_py)?;
+        Ok(Py::new(
+            py,
+            Self {
+                df,
+                by: self.by.clone(),
+            },
+        )?
+        .into_any())
+    }
+
+    /// `gb.v` for a column `v`; anything else is pandas' AttributeError.
+    fn __getattr__(&self, name: &str) -> PyResult<PySeriesGroupBy> {
+        if self.df.column(name).is_some() {
+            return self.column_groupby(name);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            format!("'DataFrameGroupBy' object has no attribute '{name}'"),
+        ))
     }
 
     fn sum(&self) -> PyResult<PyDataFrame> {

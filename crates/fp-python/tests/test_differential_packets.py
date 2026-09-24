@@ -657,9 +657,13 @@ def test_api_types_differential() -> None:
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_top_level_missing_functions_differential() -> None:
-    # __version__
-    assert hasattr(fpd, "__version__")
-    assert fpd.__version__ == "0.2.0"
+    # __version__ is the Cargo workspace version (0zz8y.3: the 0.3.0 wheel said
+    # 0.2.0, and this line pinned the stale literal).
+    import tomllib
+
+    with open(Path(__file__).resolve().parents[3] / "Cargo.toml", "rb") as fh:
+        cargo_version = tomllib.load(fh)["workspace"]["package"]["version"]
+    assert fpd.__version__ == cargo_version
 
     # unique
     u_pd = list(pd.unique([3, 1, 2, 1, 3]))
@@ -2025,5 +2029,92 @@ def test_values_match_pandas(case: Any) -> None:
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_int_list_with_none_infers_float64_dtype() -> None:
     assert str(fpd.Series([1, 2, None]).dtype) == str(pd.Series([1, 2, None]).dtype) == "float64"
+
+
+# Groupby column selection (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.1).
+# Every case raised TypeError ("not subscriptable") or AttributeError before, and
+# a SeriesGroupBy over an int64 column returned float64 sums. _strict compares
+# dtypes, names and value types, not just values: 4.0 == 4 in Python.
+_GB_DATA = {
+    "k": ["a", "b", "a", "c", "b"],
+    "v": [1, -2, 3, 4, 5],
+    "w": [10.0, 20.0, 30.0, 40.0, 50.0],
+    "b": [True, False, True, True, False],
+    "s": ["x", "y", "z", "u", "t"],
+}
+
+
+def _gb(m: Any) -> Any:
+    return m.DataFrame(_GB_DATA).groupby("k")
+
+
+_GROUPBY_SELECTION_CASES = {
+    "col_sum": lambda m: _gb(m)["v"].sum(),
+    "col_mean": lambda m: _gb(m)["v"].mean(),
+    "col_min": lambda m: _gb(m)["v"].min(),
+    "col_prod": lambda m: _gb(m)["v"].prod(),
+    "col_count": lambda m: _gb(m)["v"].count(),
+    "col_first_str": lambda m: _gb(m)["s"].first(),
+    "col_cumsum": lambda m: _gb(m)["v"].cumsum(),
+    "col_cummax": lambda m: _gb(m)["v"].cummax(),
+    "col_agg_max": lambda m: _gb(m)["w"].agg("max"),
+    "col_agg_list": lambda m: _gb(m)["v"].agg(["sum", "max"]),
+    "col_transform_sum": lambda m: _gb(m)["v"].transform("sum"),
+    "col_transform_mean": lambda m: _gb(m)["v"].transform("mean"),
+    "bool_col_sum": lambda m: _gb(m)["b"].sum(),
+    "bool_col_max": lambda m: _gb(m)["b"].max(),
+    "key_col_count": lambda m: _gb(m)["k"].count(),
+    "attr_sum": lambda m: _gb(m).v.sum(),
+    "cols_sum": lambda m: _gb(m)[["v", "w"]].sum(),
+    "cols_mean": lambda m: _gb(m)[["v", "w"]].mean(),
+    "one_col_list_sum": lambda m: _gb(m)[["v"]].sum(),
+    "cols_transform_sum": lambda m: _gb(m)[["v", "w"]].transform("sum"),
+}
+
+
+def _strict(obj: Any) -> Any:
+    if hasattr(obj, "columns"):
+        columns = list(obj.columns)
+        return (
+            "DataFrame",
+            columns,
+            [str(obj[c].dtype) for c in columns],
+            [_strict(obj[c]) for c in columns],
+        )
+    as_dict = obj.to_dict()
+    return (
+        "Series",
+        str(obj.dtype),
+        obj.name,
+        obj.index.name,
+        [type(v).__name__ for v in as_dict.values()],
+        as_dict,
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case", list(_GROUPBY_SELECTION_CASES.values()), ids=list(_GROUPBY_SELECTION_CASES)
+)
+def test_groupby_column_selection_matches_pandas(case: Any) -> None:
+    assert _strict(case(fpd)) == _strict(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("select", "error"),
+    [
+        (lambda g: g["zz"], KeyError),
+        (lambda g: g[["v", "zz"]], KeyError),
+        (lambda g: g.zz, AttributeError),
+    ],
+    ids=["missing_column", "missing_in_list", "missing_attribute"],
+)
+def test_groupby_missing_selection_raises_like_pandas(select: Any, error: type) -> None:
+    with pytest.raises(error) as expected:
+        select(_gb(pd))
+    with pytest.raises(error) as got:
+        select(_gb(fpd))
+    assert str(got.value) == str(expected.value)
 
 
