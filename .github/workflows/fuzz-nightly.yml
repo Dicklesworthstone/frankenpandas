@@ -24,18 +24,39 @@ jobs:
 
       - name: Nightly corpus expansion
         working-directory: fuzz
+        # Every target runs even after another crashes. Under `set -e` the first
+        # crash used to abort the loop, so on 2026-09-23 26 of 30 targets never
+        # ran and the job carried no signal. Crashes are collected, summarised,
+        # and fail the job at the END.
         run: |
-          set -euo pipefail
+          set -uo pipefail
           targets="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "fp-fuzz") | .targets[] | select(.kind[] == "bin") | .name')"
+          crashed=()
+          summary="fuzz-nightly-summary.txt"
+          : > "$summary"
           for target in $targets; do
             mkdir -p "artifacts/$target"
-            cargo fuzz run "$target" "corpus/$target" -- -max_total_time=60 -artifact_prefix="artifacts/$target/"
+            if cargo fuzz run "$target" "corpus/$target" -- -max_total_time=60 -artifact_prefix="artifacts/$target/"; then
+              echo "ok      $target" | tee -a "$summary"
+            else
+              echo "CRASHED $target (exit $?; artifacts/$target/)" | tee -a "$summary"
+              crashed+=("$target")
+            fi
           done
+          echo "---- fuzz nightly summary ----"
+          cat "$summary"
+          echo "targets: $(wc -l < "$summary"), crashed: ${#crashed[@]}"
+          if [ "${#crashed[@]}" -gt 0 ]; then
+            echo "::error::fuzz targets crashed: ${crashed[*]}"
+            exit 1
+          fi
 
       - name: Upload nightly fuzz artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-nightly-artifacts
-          path: fuzz/artifacts
+          path: |
+            fuzz/artifacts
+            fuzz/fuzz-nightly-summary.txt
           if-no-files-found: warn
