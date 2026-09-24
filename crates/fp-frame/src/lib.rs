@@ -34005,6 +34005,22 @@ fn resample_bin_label(key: &str) -> IndexLabel {
     resample_label_to_ns(&text).map_or(text, IndexLabel::Datetime64)
 }
 
+/// Per-bin integer results that took an empty bin: numpy int64 cannot hold
+/// the NaN, so pandas returns float64 (with no empty bin it stays int64;
+/// br-frankenpandas-0yilt - these came back int64 holding a NaN).
+fn int_bins_with_gaps_as_float(values: Vec<Scalar>) -> Vec<Scalar> {
+    if !values.iter().any(Scalar::is_missing) {
+        return values;
+    }
+    values
+        .into_iter()
+        .map(|value| match value {
+            Scalar::Int64(v) => Scalar::Float64(v as f64),
+            other => other,
+        })
+        .collect()
+}
+
 /// Convert a datelike index label to a month ordinal (year*12 + month-1) for
 /// multiplied-calendar resample bucketing. Per gauntlet bead 2.5.
 fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
@@ -34747,31 +34763,47 @@ impl Resample<'_> {
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
         }
-        // Typed all-valid Int64 fast path (sister to the f64 block above): `nansum`
-        // coerces each value via `to_f64` and returns `Scalar::Float64(sum)`, so an
-        // Int64 column also yields a Float64 sum — build the `v as f64` view once and
-        // run the SAME typed accumulate (single-pass for D/sub-daily, else
-        // build_groups + row-order `sum`). Bit-identical to aggregate_scalar(nansum)
-        // on an all-valid Int64 column — the f64 block just above with the input view
-        // materialized from `&[i64]`: every value observed, `to_f64(Int64(v)) ==
-        // v as f64`, the same bin-order f64 sum, empty bin -> 0.0, same
-        // `from_f64_values`. Output stays Float64 (no dtype change, no i64 overflow —
-        // f64 accumulation exactly as the generic path).
+        // Typed all-valid Int64 path (sister to the f64 block above): pandas keeps
+        // an int64 sum int64, an empty bin summing to 0 (this was Float64;
+        // br-frankenpandas-0yilt). While every partial sum stays under 2^53 the f64
+        // single pass (D/sub-daily) is exact, so its sums convert back losslessly;
+        // otherwise each bin is summed in i64, wrapping on overflow as numpy does.
         if let Some(data) = self.series.column().as_i64_slice() {
             self.validate()?;
-            let vals: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-            if let Some(r) = self.resample_reduce_single_pass(&vals, true) {
-                return r;
+            let max_abs = data.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0);
+            if u128::from(max_abs) * (data.len() as u128) < (1_u128 << 53) {
+                let vals: Vec<f64> = data.iter().map(|&v| v as f64).collect();
+                if let Some(r) = self.resample_reduce_single_pass(&vals, true) {
+                    return r.and_then(|sums| {
+                        let ints = sums
+                            .values()
+                            .iter()
+                            .map(|sum| match sum {
+                                Scalar::Float64(sum) => *sum as i64,
+                                _ => 0,
+                            })
+                            .collect();
+                        Series::new(
+                            sums.name(),
+                            sums.index().clone(),
+                            Column::from_i64_values(ints),
+                        )
+                    });
+                }
             }
             let (order, groups) = self.build_groups();
             let mut out_labels = Vec::with_capacity(order.len());
-            let mut out_f64 = Vec::with_capacity(order.len());
+            let mut out_i64 = Vec::with_capacity(order.len());
             for key in &order {
                 out_labels.push(resample_bin_label(key));
-                out_f64.push(groups[key].iter().map(|&i| vals[i]).sum::<f64>());
+                out_i64.push(
+                    groups[key]
+                        .iter()
+                        .fold(0_i64, |total, &i| total.wrapping_add(data[i])),
+                );
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
-            return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
+            return Series::new(self.series.name(), index, Column::from_i64_values(out_i64));
         }
         // STRING SUM IS CONCATENATION (br-frankenpandas-a7faz). `nansum` coerces via
         // `to_f64`, which fails for every Utf8, so a string column silently summed to
@@ -35407,6 +35439,7 @@ impl Resample<'_> {
                 out.push(s);
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
+            let out = int_bins_with_gaps_as_float(out);
             Series::new(self.series.name(), index, Column::from_values(out)?)
         })())
     }
@@ -35440,6 +35473,7 @@ impl Resample<'_> {
                 out.push(s);
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
+            let out = int_bins_with_gaps_as_float(out);
             Series::new(self.series.name(), index, Column::from_values(out)?)
         })())
     }
@@ -35650,17 +35684,23 @@ impl Resample<'_> {
         // stays Float64 (no dtype change, no i64 overflow — f64 accumulation exactly
         // as the generic). Int64-gated, so `nanprod`'s Timedelta NaT arm is moot.
         if let Some(data) = self.series.column().as_i64_slice() {
+            // pandas keeps an int64 product int64, an empty bin's product 1,
+            // wrapping on overflow as numpy does (this was Float64;
+            // br-frankenpandas-0yilt).
             self.validate()?;
-            let vals: Vec<f64> = data.iter().map(|&v| v as f64).collect();
             let (order, groups) = self.build_groups();
             let mut out_labels = Vec::with_capacity(order.len());
-            let mut out_f64 = Vec::with_capacity(order.len());
+            let mut out_i64 = Vec::with_capacity(order.len());
             for key in &order {
                 out_labels.push(resample_bin_label(key));
-                out_f64.push(groups[key].iter().map(|&i| vals[i]).product::<f64>());
+                out_i64.push(
+                    groups[key]
+                        .iter()
+                        .fold(1_i64, |product, &i| product.wrapping_mul(data[i])),
+                );
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
-            return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
+            return Series::new(self.series.name(), index, Column::from_i64_values(out_i64));
         }
         self.aggregate_scalar(fp_types::nanprod)
     }
@@ -156853,9 +156893,11 @@ mod tests {
         assert_eq!(sales.values()[0], Scalar::Float64(6.0)); // Jan: 2 * 3
         assert_eq!(sales.values()[1], Scalar::Float64(5.0)); // Feb: 5
 
+        // GOLDEN-CHANGE (br-frankenpandas-0yilt): pandas 2.2.3 keeps the int
+        // column's product int64 - cost [24, 7] dtype int64; this pinned Float64.
         let cost = result.column_as_series("cost").unwrap();
-        assert_eq!(cost.values()[0], Scalar::Float64(24.0)); // Jan: 4 * 6
-        assert_eq!(cost.values()[1], Scalar::Float64(7.0)); // Feb: 7
+        assert_eq!(cost.values()[0], Scalar::Int64(24)); // Jan: 4 * 6
+        assert_eq!(cost.values()[1], Scalar::Int64(7)); // Feb: 7
     }
 
     #[test]
@@ -202085,6 +202127,51 @@ mod tests {
         assert!(s.resample("M").mean().is_ok());
         assert!(s.resample("D").mean().is_ok());
         assert!(s.resample("W").mean().is_ok());
+    }
+
+    #[test]
+    fn int_resample_keeps_pandas_int_dtypes_0yilt() {
+        // pandas 2.2.3, Series([1, 2, 3]) at 2024-01-01 x2 and 2024-01-03,
+        // resample('D'): sum [3, 0, 3] int64; prod [2, 1, 3] int64; min
+        // [1.0, nan, 3.0] float64 (the empty bin forces float); first likewise.
+        let day = 86_400_000_000_000_i64;
+        let base = 1_704_067_200_000_000_000_i64;
+        let s = Series::new(
+            "v",
+            Index::from_datetime64(vec![base, base, base + 2 * day]),
+            Column::from_i64_values(vec![1, 2, 3]),
+        )
+        .unwrap();
+        let r = s.resample("D");
+        assert_eq!(r.sum().unwrap().values(), [3_i64, 0, 3].map(Scalar::Int64));
+        assert_eq!(r.prod().unwrap().values(), [2_i64, 1, 3].map(Scalar::Int64));
+        let min = r.min().unwrap();
+        assert_eq!(min.column().dtype(), DType::Float64);
+        assert_eq!(min.values()[0], Scalar::Float64(1.0));
+        assert!(min.values()[1].is_missing());
+        assert_eq!(r.first().unwrap().column().dtype(), DType::Float64);
+        // No empty bin: min stays int64, as in pandas.
+        let dense = Series::new(
+            "v",
+            Index::from_datetime64(vec![base, base + day]),
+            Column::from_i64_values(vec![5, 7]),
+        )
+        .unwrap();
+        assert_eq!(
+            dense.resample("D").min().unwrap().values(),
+            [5_i64, 7].map(Scalar::Int64)
+        );
+        // NEGATIVE: a sum past 2^53 stays exact (it would round through f64).
+        let big = Series::new(
+            "v",
+            Index::from_datetime64(vec![base, base]),
+            Column::from_i64_values(vec![(1_i64 << 53) + 1, 2]),
+        )
+        .unwrap();
+        assert_eq!(
+            big.resample("D").sum().unwrap().values(),
+            [Scalar::Int64((1_i64 << 53) + 3)]
+        );
     }
 
     #[test]
