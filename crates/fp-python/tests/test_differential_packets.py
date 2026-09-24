@@ -2076,32 +2076,23 @@ def _is_nan(value: Any) -> bool:
     return isinstance(value, float) and math.isnan(value)
 
 
-def _marker(value: Any, object_missing: bool) -> Any:
-    """NaN != NaN, so compare it as a marker. With `object_missing`, None and
-    NaN are one marker (see _READ_CSV_CASES)."""
-    if object_missing and (value is None or _is_nan(value)):
-        return "<missing>"
+def _marker(value: Any) -> Any:
+    """NaN != NaN, so compare it as a marker."""
     # frankenpandas has its own Timestamp/Timedelta classes (pandas-free), so
     # compare those by type name and repr rather than cross-class ==.
-    if type(value).__name__ in ("Timestamp", "Timedelta"):
+    if type(value).__name__ in ("Timestamp", "Timedelta", "NaTType"):
         return (type(value).__name__, repr(value))
     return "<NaN>" if _is_nan(value) else value
 
 
-def _type_tag(value: Any, object_missing: bool) -> str:
-    if object_missing and (value is None or _is_nan(value)):
-        return "<missing>"
-    return type(value).__name__
-
-
-def _strict(obj: Any, object_missing: bool = False) -> Any:
+def _strict(obj: Any) -> Any:
     if hasattr(obj, "columns"):
         columns = list(obj.columns)
         return (
             "DataFrame",
             columns,
             [str(obj[c].dtype) for c in columns],
-            [_strict(obj[c], object_missing) for c in columns],
+            [_strict(obj[c]) for c in columns],
         )
     as_dict = obj.to_dict()
     return (
@@ -2109,8 +2100,8 @@ def _strict(obj: Any, object_missing: bool = False) -> Any:
         str(obj.dtype),
         obj.name,
         obj.index.name,
-        [_type_tag(v, object_missing) for v in as_dict.values()],
-        {k: _marker(v, object_missing) for k, v in as_dict.items()},
+        [type(v).__name__ for v in as_dict.values()],
+        {k: _marker(v) for k, v in as_dict.items()},
     )
 
 
@@ -2184,10 +2175,7 @@ _READ_CSV_CASES = {
 
 
 def _strict_frame(frame: Any) -> Any:
-    # object_missing: a missing cell in a string column is None here and NaN in
-    # pandas (br-frankenpandas-audiv, pinned by the xfail below); every other
-    # dtype, name, index and value is compared exactly.
-    return (_strict(frame, object_missing=True), frame.index.name, list(frame.index))
+    return (_strict(frame), frame.index.name, list(frame.index))
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -2197,10 +2185,30 @@ def test_read_csv_sources_and_keywords_match_pandas(case: Any, tmp_path: Path) -
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="br-frankenpandas-audiv: missing string cells read as None, pandas gives NaN")
 def test_read_csv_missing_string_cell_is_nan_like_pandas() -> None:
+    # br-frankenpandas-audiv: fp-io marked NA cells NullKind::Null, which the
+    # binding renders None; pandas' text parser gives NaN in string columns too.
+    # The explicit-None constructor must keep None (pandas does).
     assert _is_nan(pd.read_csv(io.StringIO("a\nx\nNA\n"))["a"].to_dict()[1])
     assert _is_nan(fpd.read_csv(io.StringIO("a\nx\nNA\n"))["a"].to_dict()[1])
+    assert fpd.Series(["a", None]).to_dict()[1] is None
+    assert pd.Series(["a", None]).to_dict()[1] is None
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_read_excel_blank_cells_match_pandas(tmp_path: Path) -> None:
+    # audiv: blank cells read as None, and a whole-number column with a blank
+    # stayed int64; pandas gives NaN / float64 (and NaT beside datetimes).
+    path = tmp_path / "blanks.xlsx"
+    pd.DataFrame(
+        {
+            "s": ["x", None, "z"],
+            "n": [1.0, None, 3.0],
+            "t": pd.to_datetime(["2024-01-02", None, "2024-03-04"]),
+        }
+    ).to_excel(path, index=False)
+    got, expected = fpd.read_excel(str(path)), pd.read_excel(str(path))
+    assert _strict_frame(got) == _strict_frame(expected)
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -2265,9 +2273,9 @@ def _strict_ordered(obj: Any) -> Any:
     # concat repeats labels, and to_dict keeps only the last one per label, so
     # also compare the values in row order.
     if hasattr(obj, "columns"):
-        ordered = [[_marker(v, False) for v in obj[c].tolist()] for c in obj.columns]
+        ordered = [[_marker(v) for v in obj[c].tolist()] for c in obj.columns]
     else:
-        ordered = [_marker(v, False) for v in obj.tolist()]
+        ordered = [_marker(v) for v in obj.tolist()]
     return (_strict(obj), obj.index.name, list(obj.index), ordered)
 
 

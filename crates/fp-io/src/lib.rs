@@ -686,7 +686,8 @@ fn build_csv_object_aware_column(
             .enumerate()
             .map(|(i, parsed)| {
                 if parsed.is_missing() {
-                    Scalar::Null(NullKind::Null)
+                    // pandas: a missing cell in an object column is NaN (audiv).
+                    Scalar::Null(NullKind::NaN)
                 } else {
                     let field = &raw_bytes[raw_offsets[i]..raw_offsets[i + 1]];
                     // Fields originate from a `&str` CSV input, so every slice is
@@ -4481,8 +4482,10 @@ fn parse_scalar(field: &str) -> Scalar {
     // padded " NA " or "true " is NOT null/bool), and plain strings keep their
     // original whitespace. Verified vs live pandas 2.2.3: " abc " stays
     // " abc "; "true " / " NA " stay strings; but " 1 " parses to Int64(1).
+    // NaN, not Null: pandas' text parser marks a missing cell NaN in every
+    // column, strings included (br-frankenpandas-audiv).
     if is_pandas_default_na(field) {
-        return Scalar::Null(NullKind::Null);
+        return Scalar::Null(NullKind::NaN);
     }
 
     let trimmed = field.trim();
@@ -4655,7 +4658,8 @@ fn parse_scalar_with_options(
         let is_default_na = keep_default_na && is_pandas_default_na(field);
         let is_custom_na = na_set.contains(field);
         if is_default_na || is_custom_na {
-            return Scalar::Null(NullKind::Null);
+            // NaN in every column, as pandas marks it (br-frankenpandas-audiv).
+            return Scalar::Null(NullKind::NaN);
         }
     }
 
@@ -10442,15 +10446,17 @@ fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
                 Scalar::Float64(*v)
             }
         }
+        // pandas marks an empty cell NaN in every column, strings included
+        // (br-frankenpandas-audiv).
         calamine::Data::String(s) => {
             if s.is_empty() {
-                Scalar::Null(NullKind::Null)
+                Scalar::Null(NullKind::NaN)
             } else {
                 Scalar::Utf8(s.clone())
             }
         }
         calamine::Data::Bool(b) => Scalar::Bool(*b),
-        calamine::Data::Empty => Scalar::Null(NullKind::Null),
+        calamine::Data::Empty => Scalar::Null(NullKind::NaN),
         // Date cells were returned as their serial number formatted as TEXT
         // ("45293.1278..."). (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
         calamine::Data::DateTime(dt) if dt.is_duration() => {
@@ -10620,7 +10626,27 @@ fn parse_excel_rows(
         if Some(idx) == index_col_idx {
             continue; // skip index column from data columns
         }
-        out_columns.insert(name.clone(), Column::from_values(values)?);
+        // A blank cell is NaN, except beside datetimes/timedeltas where pandas
+        // gives NaT.
+        let mut values = values;
+        if values
+            .iter()
+            .any(|v| matches!(v, Scalar::Datetime64(_) | Scalar::Timedelta64(_)))
+        {
+            for value in &mut values {
+                if matches!(value, Scalar::Null(NullKind::NaN)) {
+                    *value = Scalar::Null(NullKind::NaT);
+                }
+            }
+        }
+        let mut column = Column::from_values(values)?;
+        // pandas reads a whole-number column with a blank cell as float64 (NaN);
+        // the default Int64-with-validity inference (DISC-011) kept int64 here
+        // (br-frankenpandas-audiv).
+        if column.dtype() == DType::Int64 && column.has_nulls() {
+            column = column.astype(DType::Float64)?;
+        }
+        out_columns.insert(name.clone(), column);
         column_order.push(name);
     }
 
@@ -25251,11 +25277,14 @@ mod tests {
         )
         .expect("read");
 
-        // Non-null values round-trip.
-        assert_eq!(frame2.column("vals").unwrap().values()[0], Scalar::Int64(1));
-        // NaN written as empty cell, read back as Null.
-        assert!(frame2.column("vals").unwrap().values()[1].is_missing());
-        assert_eq!(frame2.column("vals").unwrap().values()[2], Scalar::Int64(3));
+        // GOLDEN-CHANGE (br-frankenpandas-audiv): pandas 2.2.3 reads this
+        // column as float64 [1.0, nan, 3.0]; it came back int64 with a gap.
+        let vals = frame2.column("vals").unwrap();
+        assert_eq!(vals.dtype(), DType::Float64);
+        assert_eq!(vals.values()[0], Scalar::Float64(1.0));
+        // NaN written as an empty cell, read back as NaN.
+        assert!(vals.values()[1].is_missing());
+        assert_eq!(vals.values()[2], Scalar::Float64(3.0));
     }
 
     #[test]
@@ -30090,9 +30119,11 @@ mod tests {
         assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Float64(1.0));
         assert!(frame.column("b").unwrap().values()[0].is_missing());
         assert!(frame.column("b").unwrap().values()[1].is_missing());
+        // pandas 2.2.3: read_csv(...)['c'].tolist() == [nan, 'x'] - the missing
+        // cell of an object column is NaN, not None (br-frankenpandas-audiv).
         assert_eq!(
             frame.column("c").unwrap().values(),
-            &[Scalar::Null(NullKind::Null), Scalar::Utf8("x".to_owned())]
+            &[Scalar::Null(NullKind::NaN), Scalar::Utf8("x".to_owned())]
         );
     }
 
