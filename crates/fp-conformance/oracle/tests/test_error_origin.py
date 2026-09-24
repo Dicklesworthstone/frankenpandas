@@ -14,6 +14,8 @@ that drifts.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -57,8 +59,64 @@ def test_the_origins_are_distinct_labels(oracle):
         oracle.ERROR_ORIGIN_ADAPTER,
         oracle.ERROR_ORIGIN_REQUEST,
         oracle.ERROR_ORIGIN_UNEXPECTED,
+        oracle.ERROR_ORIGIN_UNAVAILABLE,
     }
-    assert len(origins) == 4
+    assert len(origins) == 5
+
+
+def _run_cli(oracle, payload, *flags):
+    """The oracle as the Rust harness runs it: a subprocess, JSON on stdin."""
+    completed = subprocess.run(
+        [sys.executable, oracle.__file__, *flags],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode, json.loads(completed.stdout)
+
+
+_ASOF_ON_STRING_INDEX = {
+    "operation": "series_asof",
+    "left": {
+        "index": [{"kind": "utf8", "value": v} for v in ("a", "b", "c")],
+        "values": [{"kind": "int64", "value": v} for v in (1, 2, 3)],
+    },
+    "asof_label": {"kind": "utf8", "value": "b"},
+}
+_SYSTEM_PANDAS = ("--legacy-root", "/__fp_missing_legacy__", "--allow-system-pandas-fallback")
+
+
+def test_cli_labels_a_pandas_raise_as_pandas(oracle):
+    """pandas 2.2.3 raises DateParseError for Series.asof('b') on a string index.
+
+    br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.2: the harness used to
+    read every error response as "oracle unavailable" and the test skipped, so
+    FrankenPandas returning a value here passed. The oracle RAN; this is a
+    comparison whose pandas answer is an error.
+    """
+    code, response = _run_cli(oracle, _ASOF_ON_STRING_INDEX, *_SYSTEM_PANDAS)
+    assert code == 1, response
+    assert response["error_origin"] == oracle.ERROR_ORIGIN_PANDAS, response
+    assert "Unknown datetime string format" in response["error"], response
+
+
+def test_cli_labels_a_missing_payload_key_as_the_adapter(oracle):
+    payload = {k: v for k, v in _ASOF_ON_STRING_INDEX.items() if k != "asof_label"}
+    code, response = _run_cli(oracle, payload, *_SYSTEM_PANDAS)
+    assert code == 1, response
+    assert response["error_origin"] == oracle.ERROR_ORIGIN_ADAPTER, response
+
+
+def test_cli_labels_a_pandas_that_never_loaded_as_unavailable(oracle):
+    """Strict legacy import from a root that does not exist, no fallback: the
+    only case the harness may treat as a missing oracle."""
+    code, response = _run_cli(
+        oracle, _ASOF_ON_STRING_INDEX, "--legacy-root", "/__fp_missing_legacy__", "--strict-legacy"
+    )
+    assert code == 1, response
+    assert response["error_origin"] == oracle.ERROR_ORIGIN_UNAVAILABLE, response
+    assert response["fixture_provenance"] is None, response
 
 
 def test_error_response_carries_the_origin_and_still_stamps_provenance(oracle, pd):

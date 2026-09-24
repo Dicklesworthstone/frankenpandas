@@ -94,6 +94,10 @@ ERROR_ORIGIN_PANDAS = "pandas"
 ERROR_ORIGIN_ADAPTER = "oracle_adapter"
 ERROR_ORIGIN_REQUEST = "request"
 ERROR_ORIGIN_UNEXPECTED = "unexpected"
+# pandas never loaded (setup_pandas failed): the one origin the Rust harness
+# treats as "oracle unavailable". Every other origin means the oracle RAN, so a
+# test must compare or fail rather than skip (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.2).
+ERROR_ORIGIN_UNAVAILABLE = "oracle_unavailable"
 
 
 def oracle_error_origin(exc: BaseException) -> str:
@@ -9475,16 +9479,16 @@ def main() -> int:
         json.dump(response, sys.stdout)
         return 0
     except OracleError as exc:
-        json.dump(error_response(str(exc), pd, oracle_error_origin(exc)), sys.stdout)
+        origin = ERROR_ORIGIN_UNAVAILABLE if pd is None else oracle_error_origin(exc)
+        json.dump(error_response(str(exc), pd, origin), sys.stdout)
         return 1
     except Exception as exc:  # pragma: no cover - defensive
         # Escaped every adapter try-block. It may be the engine or it may be a
         # bug in this adapter; UNEXPECTED says so rather than guessing "pandas"
         # and lending it an authority it has not earned.
+        origin = ERROR_ORIGIN_UNAVAILABLE if pd is None else ERROR_ORIGIN_UNEXPECTED
         json.dump(
-            error_response(
-                f"unexpected oracle failure: {exc}", pd, ERROR_ORIGIN_UNEXPECTED
-            ),
+            error_response(f"unexpected oracle failure: {exc}", pd, origin),
             sys.stdout,
         )
         return 2

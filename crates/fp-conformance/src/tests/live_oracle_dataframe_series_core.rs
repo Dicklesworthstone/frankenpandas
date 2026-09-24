@@ -7340,11 +7340,9 @@ fn live_oracle_series_pct_change_with_zero_baseline() {
     .expect("fixture");
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
-    if let Err(
-        super::HarnessError::OracleUnavailable(message)
-        | super::HarnessError::LiveOracleRequired(message),
-    ) = &expected_result
-    {
+    // Skip only on a missing oracle: LiveOracleRequired (FP_REQUIRE_LIVE_ORACLE=1)
+    // must fail this test, as must a pandas-raised error (4qg5w.2).
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
         eprintln!("live pandas unavailable; skipping pct_change zero baseline test: {message}");
         return;
     }
@@ -20902,11 +20900,9 @@ fn live_oracle_series_div_with_zero_divisor() {
     .expect("fixture");
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
-    if let Err(
-        super::HarnessError::OracleUnavailable(message)
-        | super::HarnessError::LiveOracleRequired(message),
-    ) = &expected_result
-    {
+    // Skip only on a missing oracle: LiveOracleRequired (FP_REQUIRE_LIVE_ORACLE=1)
+    // must fail this test, as must a pandas-raised error (4qg5w.2).
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
         eprintln!("live pandas unavailable; skipping series_div zero test: {message}");
         return;
     }

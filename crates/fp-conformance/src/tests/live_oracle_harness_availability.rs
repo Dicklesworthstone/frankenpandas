@@ -100,14 +100,10 @@ fn system_pandas_permission_never_enables_fixture_fallback_mlnu3() {
 
 #[test]
 fn live_oracle_non_oracle_unavailable_errors_still_propagate() {
+    // Needs only the in-repo oracle script and a python that does not exist;
+    // it used to skip whenever the legacy pandas checkout was absent, which is
+    // every host (4qg5w.2).
     let mut cfg = super::HarnessConfig::default_paths();
-    if !cfg.oracle_root.exists() {
-        eprintln!(
-            "oracle repo missing at {}; skipping python-missing check",
-            cfg.oracle_root.display()
-        );
-        return;
-    }
     cfg.allow_system_pandas_fallback = true;
     cfg.python_bin = "/__fp_missing_python__/python3".to_owned();
 
@@ -125,4 +121,80 @@ fn live_oracle_non_oracle_unavailable_errors_still_propagate() {
         }),
         "expected command-spawn io error mismatches in all failed cases: {report:?}"
     );
+}
+
+/// br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.2: only a pandas that
+/// never loaded is "unavailable". Every live-oracle test skips on
+/// `OracleUnavailable`, so mapping a pandas raise (or an adapter refusal) there
+/// turns a divergence into a pass.
+#[test]
+fn oracle_error_classification_keeps_raises_out_of_the_skip_path() {
+    use super::HarnessError as E;
+    let classify =
+        |origin, required| super::classify_oracle_error("m".to_owned(), origin, required);
+
+    assert!(matches!(
+        classify(Some("pandas"), false),
+        E::OracleRaised(_)
+    ));
+    assert!(matches!(classify(Some("pandas"), true), E::OracleRaised(_)));
+    for origin in ["oracle_adapter", "request", "unexpected"] {
+        assert!(
+            matches!(classify(Some(origin), false), E::OracleAdapterRefused(_)),
+            "{origin}"
+        );
+    }
+    // A pandas that never loaded, or a response too old to carry an origin.
+    for origin in [Some("oracle_unavailable"), None] {
+        assert!(
+            matches!(classify(origin, false), E::OracleUnavailable(_)),
+            "{origin:?}"
+        );
+        assert!(
+            matches!(classify(origin, true), E::LiveOracleRequired(_)),
+            "{origin:?}"
+        );
+    }
+}
+
+/// The negative the bead names: pandas raises, the case does not expect an
+/// error, and the result must be something the standard skip arm
+/// (`if let Err(OracleUnavailable(_))`) does NOT catch.
+#[test]
+fn live_oracle_pandas_raise_on_a_value_case_is_not_a_skip() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-RAISE-NOT-SKIP",
+        "case_id": "series_asof_string_label_value_case",
+        "mode": "strict",
+        "operation": "series_asof",
+        "oracle_source": "live_legacy_pandas",
+        "asof_label": { "kind": "utf8", "value": "b" },
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &result {
+        eprintln!("live pandas unavailable; skipping raise-classification check: {message}");
+        return;
+    }
+    match result {
+        Err(super::HarnessError::OracleRaised(message)) => assert!(
+            message.contains("Unknown datetime string format"),
+            "{message}"
+        ),
+        other => panic!("pandas raised on this case; expected OracleRaised, got {other:?}"),
+    }
 }

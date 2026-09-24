@@ -3748,6 +3748,15 @@ pub enum HarnessError {
     OracleUnavailable(String),
     #[error("live oracle is required but unavailable: {0}")]
     LiveOracleRequired(String),
+    /// The oracle ran and pandas raised. A case that does not expect an error
+    /// must fail on this, never skip: it is the pandas answer.
+    #[error("pandas raised: {0}")]
+    OracleRaised(String),
+    /// The oracle ran but its adapter refused the request before pandas saw it
+    /// (missing payload key, unsupported operation, malformed request): a
+    /// harness defect, not a missing oracle.
+    #[error("oracle adapter refused the request: {0}")]
+    OracleAdapterRefused(String),
     #[error("oracle command failed: status={status}, stderr={stderr}")]
     OracleCommandFailed { status: i32, stderr: String },
     #[error("raptorq error: {0}")]
@@ -4281,6 +4290,31 @@ struct OracleResponse {
     fixture_provenance: Option<FixtureProvenance>,
     #[serde(default)]
     error: Option<String>,
+    /// Where `error` came from (pandas_oracle.py ERROR_ORIGIN_*).
+    #[serde(default)]
+    error_origin: Option<String>,
+}
+
+/// Classify an oracle error response by the origin the oracle self-reports.
+///
+/// Only a pandas that never loaded (or a response too old to say) is
+/// unavailability. Every error response used to become `OracleUnavailable`,
+/// which the live-oracle tests skip on, so a case where pandas raised and
+/// FrankenPandas returned a value passed by skipping
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.2).
+fn classify_oracle_error(
+    error: String,
+    origin: Option<&str>,
+    require_live_oracle: bool,
+) -> HarnessError {
+    match origin {
+        Some("pandas") => HarnessError::OracleRaised(error),
+        Some("oracle_adapter" | "request" | "unexpected") => {
+            HarnessError::OracleAdapterRefused(error)
+        }
+        _ if require_live_oracle => HarnessError::LiveOracleRequired(error),
+        _ => HarnessError::OracleUnavailable(error),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -5175,7 +5209,11 @@ fn apply_oracle_response_to_generated_fixture(
     intentional_divergence_notes: &[String],
 ) -> Result<(), HarnessError> {
     if let Some(error) = response.error {
-        return Err(HarnessError::OracleUnavailable(error));
+        return Err(classify_oracle_error(
+            error,
+            response.error_origin.as_deref(),
+            false,
+        ));
     }
 
     fixture.expected_series = response.expected_series.take();
@@ -5274,7 +5312,11 @@ fn capture_live_oracle_response_for_generation(
         if let Ok(response) = serde_json::from_slice::<OracleResponse>(&output.stdout)
             && let Some(error) = response.error
         {
-            return Err(oracle_unavailable(config, error));
+            return Err(classify_oracle_error(
+                error,
+                response.error_origin.as_deref(),
+                config.require_live_oracle,
+            ));
         }
 
         let code = output.status.code().unwrap_or(-1);
@@ -14341,10 +14383,17 @@ fn capture_live_oracle_expected(
         if let Ok(response) = serde_json::from_slice::<OracleResponse>(&output.stdout)
             && let Some(error) = response.error
         {
-            if expects_error {
+            let origin = response.error_origin.as_deref();
+            // A pandas that never loaded is not the pandas answer to an
+            // expected-error case either.
+            if expects_error && origin != Some("oracle_unavailable") {
                 return resolve_expected_oracle_error(fixture, error);
             }
-            return Err(oracle_unavailable(config, error));
+            return Err(classify_oracle_error(
+                error,
+                origin,
+                config.require_live_oracle,
+            ));
         }
 
         let code = output.status.code().unwrap_or(-1);
@@ -14358,10 +14407,15 @@ fn capture_live_oracle_expected(
 
     let response: OracleResponse = serde_json::from_slice(&output.stdout)?;
     if let Some(error) = response.error {
-        if expects_error {
+        let origin = response.error_origin.as_deref();
+        if expects_error && origin != Some("oracle_unavailable") {
             return resolve_expected_oracle_error(fixture, error);
         }
-        return Err(oracle_unavailable(config, error));
+        return Err(classify_oracle_error(
+            error,
+            origin,
+            config.require_live_oracle,
+        ));
     }
     // br-frankenpandas-rc-oracle-provenance-guard-d8wt4: the oracle response
     // self-reports the pandas it ran. If that is not the PINNED version, the
