@@ -10166,6 +10166,9 @@ impl Series {
         policy: &RuntimePolicy,
         ledger: &mut EvidenceLedger,
     ) -> Result<Self, FrameError> {
+        if let Some(strings) = self.utf8_binary(other, op)? {
+            return Ok(strings);
+        }
         // pandas: the result keeps the name only when both operands share it;
         // otherwise it is unnamed (None). This used to concatenate the names
         // ("a+b"), which pandas never produces.
@@ -10447,6 +10450,50 @@ impl Series {
         } else {
             Column::from_timedelta64_values_with_validity(output, validity)
         }))
+    }
+
+    /// pandas' object-string arithmetic: `s + t` concatenates and `s * n` /
+    /// `n * s` repeats, row by row after aligning the indexes; a missing
+    /// operand (None included) gives NaN, as pandas. `None` for any other
+    /// dtype pair. These raised on the numeric kernel
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
+    fn utf8_binary(&self, other: &Self, op: ArithmeticOp) -> Result<Option<Self>, FrameError> {
+        let concat = match (self.column.dtype(), other.column.dtype(), op) {
+            (DType::Utf8, DType::Utf8, ArithmeticOp::Add) => true,
+            (DType::Utf8, DType::Int64 | DType::Bool, ArithmeticOp::Mul)
+            | (DType::Int64 | DType::Bool, DType::Utf8, ArithmeticOp::Mul) => false,
+            _ => return Ok(None),
+        };
+        let (left, right) = if self.index == other.index {
+            (self.clone(), other.clone())
+        } else {
+            self.align(other, AlignMode::Outer)?
+        };
+        let times = |count: &Scalar| match count {
+            Scalar::Int64(k) => Some(usize::try_from(*k).unwrap_or(0)),
+            Scalar::Bool(b) => Some(usize::from(*b)),
+            _ => None,
+        };
+        let values = left
+            .values()
+            .iter()
+            .zip(right.values())
+            .map(|(a, b)| match (a, b) {
+                (Scalar::Utf8(a), Scalar::Utf8(b)) if concat => Scalar::Utf8(format!("{a}{b}")),
+                (Scalar::Utf8(text), count) | (count, Scalar::Utf8(text)) if !concat => {
+                    times(count).map_or(Scalar::Null(NullKind::NaN), |k| {
+                        Scalar::Utf8(text.repeat(k))
+                    })
+                }
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        let name = if self.name == other.name {
+            self.name.clone()
+        } else {
+            String::new()
+        };
+        Self::new(name, left.index.clone(), Column::from_values(values)?).map(Some)
     }
 
     /// Timedelta arithmetic beyond add/sub, row by row over the same index,
@@ -50374,7 +50421,10 @@ impl StringAccessor<'_> {
     /// caps the result at `k + 1` parts by doing at most `k` splits.
     pub fn split_df_n(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
         let split_limit = Self::checked_split_part_limit(n, "str.split")?;
-        let mut row_parts = Vec::new();
+        // Ok(parts) for a string; Err(gap) for a row that is no string: pandas
+        // gives such a row its own missing value in EVERY column (a NaN row
+        // stays NaN across; it came back None, the short-row pad; fvsao.13).
+        let mut row_parts: Vec<Result<Vec<Scalar>, Scalar>> = Vec::new();
         let mut max_parts = 0;
         for val in self.series.column().values() {
             match val {
@@ -50387,11 +50437,10 @@ impl StringAccessor<'_> {
                         s.split(pat).map(|p| Scalar::Utf8(p.to_string())).collect()
                     };
                     max_parts = max_parts.max(parts.len());
-                    row_parts.push(parts);
+                    row_parts.push(Ok(parts));
                 }
-                _ => {
-                    row_parts.push(Vec::new());
-                }
+                other if other.is_missing() => row_parts.push(Err(other.clone())),
+                _ => row_parts.push(Err(Scalar::Null(NullKind::NaN))),
             }
         }
 
@@ -50399,14 +50448,14 @@ impl StringAccessor<'_> {
             .map(|_| Vec::with_capacity(self.series.len()))
             .collect();
         for parts in row_parts {
-            for i in 0..max_parts {
-                if i < parts.len() {
-                    out_cols_data[i].push(parts[i].clone());
-                } else {
+            for (i, column) in out_cols_data.iter_mut().enumerate() {
+                match &parts {
+                    Ok(parts) if i < parts.len() => column.push(parts[i].clone()),
                     // pandas pads a short row with Python `None`, NOT `nan` —
                     // it builds a list per row and widens with None before
                     // constructing the object frame. See `split_pad_kind`.
-                    out_cols_data[i].push(Scalar::Null(NullKind::Null));
+                    Ok(_) => column.push(Scalar::Null(NullKind::Null)),
+                    Err(gap) => column.push(gap.clone()),
                 }
             }
         }
@@ -50438,7 +50487,9 @@ impl StringAccessor<'_> {
             ));
         }
         let split_limit = Self::checked_split_part_limit(n, "str.rsplit")?;
-        let mut row_parts = Vec::new();
+        // As `split_df_n`: a row that is no string keeps its own missing
+        // value in every column.
+        let mut row_parts: Vec<Result<Vec<Scalar>, Scalar>> = Vec::new();
         let mut max_parts = 0;
         for val in self.series.column().values() {
             match val {
@@ -50453,11 +50504,10 @@ impl StringAccessor<'_> {
                     let mut parts = parts;
                     parts.reverse(); // rsplit returns in reverse order
                     max_parts = max_parts.max(parts.len());
-                    row_parts.push(parts);
+                    row_parts.push(Ok(parts));
                 }
-                _ => {
-                    row_parts.push(Vec::new());
-                }
+                other if other.is_missing() => row_parts.push(Err(other.clone())),
+                _ => row_parts.push(Err(Scalar::Null(NullKind::NaN))),
             }
         }
 
@@ -50465,13 +50515,13 @@ impl StringAccessor<'_> {
             .map(|_| Vec::with_capacity(self.series.len()))
             .collect();
         for parts in row_parts {
-            for i in 0..max_parts {
-                if i < parts.len() {
-                    out_cols_data[i].push(parts[i].clone());
-                } else {
+            for (i, column) in out_cols_data.iter_mut().enumerate() {
+                match &parts {
+                    Ok(parts) if i < parts.len() => column.push(parts[i].clone()),
                     // Same `None` pad as `split_df_n`, and pandas pads rsplit
                     // on the RIGHT too. See `split_pad_kind`.
-                    out_cols_data[i].push(Scalar::Null(NullKind::Null));
+                    Ok(_) => column.push(Scalar::Null(NullKind::Null)),
+                    Err(gap) => column.push(gap.clone()),
                 }
             }
         }
@@ -129065,35 +129115,37 @@ mod tests {
             ]
         );
 
-        // A null INPUT row takes the same marker in every output column.
-        let with_null = Series::from_values(
-            "x",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Utf8("a_b".into()),
-                Scalar::Null(NullKind::NaN),
-                Scalar::Utf8("c".into()),
-            ],
-        )
-        .unwrap();
-        let expanded = with_null.str().split_df_n("_", None).unwrap();
-        assert_eq!(expanded.column_names(), vec!["0", "1"]);
-        assert_eq!(
-            expanded.column("0").unwrap().values(),
-            &[
-                Scalar::Utf8("a".into()),
-                Scalar::Null(NullKind::Null),
-                Scalar::Utf8("c".into()),
-            ]
-        );
-        assert_eq!(
-            expanded.column("1").unwrap().values(),
-            &[
-                Scalar::Utf8("b".into()),
-                Scalar::Null(NullKind::Null),
-                Scalar::Null(NullKind::Null),
-            ]
-        );
+        // A null INPUT row takes ITS OWN marker in every output column.
+        // GOLDEN-CHANGE (fvsao.13): this built a NaN input and expected None,
+        // though the measurement above is for a None input. Measured on the
+        // pinned oracle (pandas 2.2.3): ['a_b', None, 'c'] -> row 1 [None,
+        // None]; ['a_b', np.nan, 'c'] -> row 1 [nan, nan] (the short row 2
+        // pads with None either way). Both inputs are pinned now.
+        for (marker, gap) in [
+            (Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)),
+            (Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)),
+        ] {
+            let with_null = Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Utf8("a_b".into()), marker, Scalar::Utf8("c".into())],
+            )
+            .unwrap();
+            let expanded = with_null.str().split_df_n("_", None).unwrap();
+            assert_eq!(expanded.column_names(), vec!["0", "1"]);
+            assert_eq!(
+                expanded.column("0").unwrap().values(),
+                &[
+                    Scalar::Utf8("a".into()),
+                    gap.clone(),
+                    Scalar::Utf8("c".into())
+                ]
+            );
+            assert_eq!(
+                expanded.column("1").unwrap().values(),
+                &[Scalar::Utf8("b".into()), gap, Scalar::Null(NullKind::Null)]
+            );
+        }
     }
 
     #[test]
@@ -203064,6 +203116,42 @@ mod tests {
         );
         let (before, _, _) = text_series.str().partition(" ").unwrap();
         assert_eq!(before.values()[1], Scalar::Null(NullKind::Null));
+
+        // split(expand=True): a missing row keeps its own missing value in
+        // every column; a short row pads with None.
+        let tags = Series::from_values(
+            "t",
+            (0..3).map(IndexLabel::Int64).collect(),
+            vec![
+                text_scalar("a,b"),
+                Scalar::Null(NullKind::NaN),
+                text_scalar("c"),
+            ],
+        )
+        .unwrap();
+        let wide = tags.str().split_df_n(",", None).unwrap();
+        assert!(matches!(
+            wide.columns()["1"].values()[1],
+            Scalar::Null(NullKind::NaN)
+        ));
+        assert_eq!(
+            wide.columns()["1"].values()[2],
+            Scalar::Null(NullKind::Null)
+        );
+
+        // String arithmetic: concatenation and repetition, a missing operand
+        // NaN; NEGATIVE: a numeric pair still goes to the numeric kernel.
+        let joined = tags.add(&tags).unwrap();
+        assert_eq!(joined.values()[0], text_scalar("a,ba,b"));
+        assert!(joined.values()[1].is_missing());
+        let twice = Series::from_values(
+            "t",
+            (0..3).map(IndexLabel::Int64).collect(),
+            [2_i64, 2, 0].map(Scalar::Int64).to_vec(),
+        )
+        .unwrap();
+        assert_eq!(tags.mul(&twice).unwrap().values()[2], text_scalar(""));
+        assert_eq!(twice.add(&twice).unwrap().values()[0], Scalar::Int64(4));
     }
 
     fn text_scalar(text: &str) -> Scalar {

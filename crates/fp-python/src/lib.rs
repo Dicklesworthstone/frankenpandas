@@ -25219,50 +25219,77 @@ impl PySeriesStringAccessor {
         }
         Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
     }
-    /// pandas' `split(pat=None, n=-1, expand=False, regex=None)` with
-    /// `expand=True`: a DataFrame of the pieces. A Series of lists
-    /// (`expand=False`) needs list values the columns do not hold yet.
+    /// pandas' `split(pat=None, n=-1, expand=False, regex=None)`: a Series of
+    /// Python lists, or with `expand=True` a DataFrame of the pieces. As
+    /// pandas: `pat=None` splits on whitespace runs, and with `regex=None` a
+    /// pattern longer than one character is a regular expression.
     #[pyo3(signature = (pat=None, n=-1, expand=false, regex=None))]
     fn split(
         &self,
+        py: Python<'_>,
         pat: Option<&str>,
         n: i64,
         expand: bool,
         regex: Option<bool>,
-    ) -> PyResult<PyDataFrame> {
-        if !expand {
-            return Err(not_implemented(
-                "str.split without expand=True (a Series of lists)",
-            ));
+    ) -> PyResult<Py<PyAny>> {
+        let is_regex = pat.is_some_and(|pat| regex.unwrap_or(pat.chars().count() > 1));
+        if expand && let Some(literal) = pat.filter(|_| !is_regex) {
+            let parts = usize::try_from(n).ok().filter(|&n| n > 0);
+            let df = self
+                .series
+                .str()
+                .split_expand_n(literal, parts)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
         }
-        if regex == Some(true) || pat.is_none() {
-            return Err(not_implemented(
-                "str.split(expand=True) with pat=None or regex=True",
-            ));
-        }
-        let n = usize::try_from(n).ok().filter(|&n| n > 0);
-        let df = self
-            .series
-            .str()
-            .split_expand_n(pat.unwrap_or_default(), n)
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+        let re = py.import("re")?;
+        let lists = self.python_lists(py, |text| {
+            let pieces = match pat {
+                // maxsplit by keyword: positional is deprecated in Python 3.13.
+                Some(pat) if is_regex => {
+                    let options = PyDict::new(py);
+                    options.set_item("maxsplit", n.max(0))?;
+                    re.call_method("split", (pat, text), Some(&options))?
+                }
+                Some(pat) => text.call_method1("split", (pat, n))?,
+                None => text.call_method1("split", (py.None(), n))?,
+            };
+            Ok(pieces.unbind())
+        })?;
+        lists_result(py, lists, expand)
     }
-    /// pandas' `rsplit(pat=None, n=-1, expand=False)` with `expand=True`.
+    /// pandas' `rsplit(pat=None, n=-1, expand=False)`: as `split` from the
+    /// right (always a literal pattern).
     #[pyo3(signature = (pat=None, n=-1, expand=false))]
-    fn rsplit(&self, pat: Option<&str>, n: i64, expand: bool) -> PyResult<PyDataFrame> {
-        if !expand || pat.is_none() {
-            return Err(not_implemented(
-                "str.rsplit without expand=True (a Series of lists) or with pat=None",
-            ));
+    fn rsplit(
+        &self,
+        py: Python<'_>,
+        pat: Option<&str>,
+        n: i64,
+        expand: bool,
+    ) -> PyResult<Py<PyAny>> {
+        if expand && let Some(literal) = pat {
+            let parts = usize::try_from(n).ok().filter(|&n| n > 0);
+            let df = self
+                .series
+                .str()
+                .rsplit_df(literal, parts)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
         }
-        let n = usize::try_from(n).ok().filter(|&n| n > 0);
-        let df = self
-            .series
-            .str()
-            .rsplit_df(pat.unwrap_or_default(), n)
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+        let lists = self.python_lists(py, |text| {
+            Ok(text.call_method1("rsplit", (pat, n))?.unbind())
+        })?;
+        lists_result(py, lists, expand)
+    }
+    /// pandas' `findall(pat, flags=0)`: each string's matches as a list
+    /// (Python's `re.findall`, so one group gives the group's text).
+    #[pyo3(signature = (pat, flags=0))]
+    fn findall(&self, py: Python<'_>, pat: &str, flags: i64) -> PyResult<PyStringListSeries> {
+        let re = py.import("re")?;
+        self.python_lists(py, |text| {
+            Ok(re.call_method1("findall", (pat, text, flags))?.unbind())
+        })
     }
     /// pandas' `partition(sep=' ', expand=True)` / `rpartition`.
     #[pyo3(signature = (sep=" ", expand=true))]
@@ -25334,6 +25361,286 @@ impl PySeriesStringAccessor {
             .map(|inner| PySeries { inner })
             .map_err(frame_error_to_py)
     }
+
+    /// Each string's `method(*args)` computed by Python itself (a list per
+    /// row), a missing value kept as it is: pandas' `str.split(expand=False)`
+    /// and `str.findall` build exactly these Python lists (fvsao.13).
+    fn python_lists(
+        &self,
+        py: Python<'_>,
+        each: impl Fn(&Bound<'_, PyAny>) -> PyResult<Py<PyAny>>,
+    ) -> PyResult<PyStringListSeries> {
+        let values = self
+            .series
+            .values()
+            .iter()
+            .map(|value| {
+                let object = scalar_to_py(py, value)?;
+                let bound = object.bind(py);
+                if bound.is_instance_of::<pyo3::types::PyString>() {
+                    each(bound)
+                } else {
+                    Ok(object)
+                }
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyStringListSeries {
+            values,
+            index: self.series.index().clone(),
+            name: self.series.name().to_owned(),
+        })
+    }
+}
+
+/// pandas' Series of Python lists, as `str.split(expand=False)` and
+/// `str.findall` return it: frankenpandas columns hold no list values, so
+/// the lists live here as Python objects, with the operations pandas users
+/// chain on them - `.str[i]` / `.str.get(i)` / `.str.len()` / `.str.join`,
+/// `explode`, `tolist`, `apply`/`map`
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
+#[pyclass(name = "StringListSeries", module = "frankenpandas")]
+pub struct PyStringListSeries {
+    values: Vec<Py<PyAny>>,
+    index: Index,
+    name: String,
+}
+
+impl PyStringListSeries {
+    /// A Series of `each(row)` per row, a row that is no list (a missing
+    /// string) kept as it is; an all-missing result is float64 NaN, as
+    /// pandas' object inference turns it.
+    fn map_rows(
+        &self,
+        py: Python<'_>,
+        each: impl Fn(&Bound<'_, PyList>) -> PyResult<Py<PyAny>>,
+    ) -> PyResult<PySeries> {
+        let scalars = self
+            .values
+            .iter()
+            .map(|value| {
+                let bound = value.bind(py);
+                match bound.cast::<PyList>() {
+                    Ok(list) => py_to_scalar(py, each(list)?.bind(py)),
+                    Err(_) => py_to_scalar(py, bound),
+                }
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let column = if scalars.iter().all(Scalar::is_missing) {
+            Column::new(
+                DType::Float64,
+                vec![Scalar::Null(NullKind::NaN); scalars.len()],
+            )
+        } else {
+            Column::from_values(pandas_promote_int_with_missing(scalars))
+        }
+        .map_err(column_error_to_py)?;
+        Series::new(&self.name, self.index.clone(), column)
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
+    }
+}
+
+#[pymethods]
+impl PyStringListSeries {
+    #[getter]
+    fn str(slf: Py<Self>) -> PyStringListAccessor {
+        PyStringListAccessor { series: slf }
+    }
+
+    #[getter]
+    fn index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        row_index_to_py(py, &self.index)
+    }
+
+    #[getter]
+    fn name(&self) -> Option<&str> {
+        (!self.name.is_empty()).then_some(self.name.as_str())
+    }
+
+    #[getter]
+    fn dtype(&self) -> &'static str {
+        "object"
+    }
+
+    fn __len__(&self) -> usize {
+        self.values.len()
+    }
+
+    fn tolist(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
+        self.values
+            .iter()
+            .map(|value| value.clone_ref(py))
+            .collect()
+    }
+
+    fn to_list(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
+        self.tolist(py)
+    }
+
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let list = PyList::new(py, self.tolist(py))?;
+        Ok(list.try_iter()?.into_any().unbind())
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let mut lines = Vec::with_capacity(self.values.len() + 1);
+        for (label, value) in self.index.labels().iter().zip(&self.values) {
+            lines.push(format!("{label}    {}", value.bind(py).repr()?));
+        }
+        lines.push(format!(
+            "Name: {}, dtype: object",
+            if self.name.is_empty() {
+                "None"
+            } else {
+                &self.name
+            }
+        ));
+        Ok(lines.join("\n"))
+    }
+
+    /// pandas' `explode(ignore_index=False)`: one row per list element under
+    /// the list's label; an empty list is one NaN row, a missing row stays.
+    #[pyo3(signature = (ignore_index=false))]
+    fn explode(&self, py: Python<'_>, ignore_index: bool) -> PyResult<PySeries> {
+        let mut labels = Vec::new();
+        let mut scalars = Vec::new();
+        for (label, value) in self.index.labels().iter().zip(&self.values) {
+            let bound = value.bind(py);
+            match bound.cast::<PyList>() {
+                Ok(list) if !list.is_empty() => {
+                    for item in list.iter() {
+                        labels.push(label.clone());
+                        scalars.push(py_to_scalar(py, &item)?);
+                    }
+                }
+                Ok(_) => {
+                    labels.push(label.clone());
+                    scalars.push(Scalar::Null(NullKind::NaN));
+                }
+                Err(_) => {
+                    labels.push(label.clone());
+                    scalars.push(py_to_scalar(py, bound)?);
+                }
+            }
+        }
+        if ignore_index {
+            labels = (0..scalars.len() as i64).map(IndexLabel::Int64).collect();
+        }
+        Series::from_values(&self.name, labels, scalars)
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
+    }
+
+    /// `apply(func)` / `map(func)`: `func` on every row (a list, or the
+    /// missing value), as pandas calls it.
+    fn apply(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let scalars = self
+            .values
+            .iter()
+            .map(|value| py_to_scalar(py, &func.call1((value.bind(py),))?))
+            .collect::<PyResult<Vec<_>>>()?;
+        let column = Column::from_values(pandas_promote_int_with_missing(scalars))
+            .map_err(column_error_to_py)?;
+        Series::new(&self.name, self.index.clone(), column)
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
+    }
+
+    fn map(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.apply(py, func)
+    }
+}
+
+/// `.str` of a Series of lists: pandas' element access and length.
+#[pyclass(name = "StringListMethods", module = "frankenpandas")]
+pub struct PyStringListAccessor {
+    series: Py<PyStringListSeries>,
+}
+
+#[pymethods]
+impl PyStringListAccessor {
+    /// `s.str[i]`: each list's i-th element (NaN past the end).
+    fn __getitem__(&self, py: Python<'_>, key: i64) -> PyResult<PySeries> {
+        self.get(py, key)
+    }
+
+    fn get(&self, py: Python<'_>, i: i64) -> PyResult<PySeries> {
+        self.series.borrow(py).map_rows(py, |list| {
+            let len = list.len() as i64;
+            let position = if i < 0 { i + len } else { i };
+            if (0..len).contains(&position) {
+                Ok(list.get_item(position as usize)?.unbind())
+            } else {
+                Ok(f64::NAN.into_py_any(py)?)
+            }
+        })
+    }
+
+    /// Each list's length (float64 when a row is missing, as pandas).
+    fn len(&self, py: Python<'_>) -> PyResult<PySeries> {
+        self.series
+            .borrow(py)
+            .map_rows(py, |list| list.len().into_py_any(py))
+    }
+
+    /// `sep.join(list)`; a list holding a non-string is NaN, as pandas.
+    fn join(&self, py: Python<'_>, sep: &str) -> PyResult<PySeries> {
+        let separator = pyo3::types::PyString::new(py, sep);
+        self.series
+            .borrow(py)
+            .map_rows(py, |list| match separator.call_method1("join", (list,)) {
+                Ok(joined) => Ok(joined.unbind()),
+                Err(_) => f64::NAN.into_py_any(py),
+            })
+    }
+}
+
+/// A split's lists as the Series of lists, or with `expand` widened into
+/// pandas' frame: a column per position, a short row padded with None and a
+/// missing row that missing value in every column.
+fn lists_result(py: Python<'_>, lists: PyStringListSeries, expand: bool) -> PyResult<Py<PyAny>> {
+    if !expand {
+        return Ok(Py::new(py, lists)?.into_any());
+    }
+    let width = lists
+        .values
+        .iter()
+        .filter_map(|value| value.bind(py).cast::<PyList>().ok().map(|list| list.len()))
+        .max()
+        .unwrap_or(0);
+    let mut columns: Vec<Vec<Scalar>> = vec![Vec::with_capacity(lists.values.len()); width];
+    for value in &lists.values {
+        let bound = value.bind(py);
+        match bound.cast::<PyList>() {
+            Ok(list) => {
+                for (position, column) in columns.iter_mut().enumerate() {
+                    column.push(match list.get_item(position) {
+                        Ok(item) => py_to_scalar(py, &item)?,
+                        Err(_) => Scalar::Null(NullKind::Null),
+                    });
+                }
+            }
+            Err(_) => {
+                let gap = py_to_scalar(py, bound)?;
+                for column in &mut columns {
+                    column.push(gap.clone());
+                }
+            }
+        }
+    }
+    let mut store = BTreeMap::new();
+    let mut order = Vec::with_capacity(width);
+    for (position, values) in columns.into_iter().enumerate() {
+        let name = position.to_string();
+        store.insert(
+            name.clone(),
+            Column::from_values(values).map_err(column_error_to_py)?,
+        );
+        order.push(name);
+    }
+    let df =
+        DataFrame::new_with_column_order(lists.index, store, order).map_err(frame_error_to_py)?;
+    Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
 }
 
 /// A string method's pattern: a string, or pandas' tuple of strings.
@@ -38878,6 +39185,8 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataFrameIAt>()?;
     m.add_class::<PyDataFrameAt>()?;
     m.add_class::<PySeriesStringAccessor>()?;
+    m.add_class::<PyStringListSeries>()?;
+    m.add_class::<PyStringListAccessor>()?;
     m.add_class::<PySeriesDatetimeAccessor>()?;
     m.add_class::<PySeriesCategoricalAccessor>()?;
     m.add_class::<PySeriesListAccessor>()?;

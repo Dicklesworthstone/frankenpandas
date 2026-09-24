@@ -4481,12 +4481,121 @@ def test_str_methods_match_pandas(case: str) -> None:
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_str_refusals() -> None:
-    s = fpd.Series(["a,b"])
-    # A Series of lists needs list values the columns do not hold yet.
     with pytest.raises(NotImplementedError):
-        s.str.split(",")
-    with pytest.raises(NotImplementedError):
-        s.str.contains("a", flags=2)
+        fpd.Series(["a,b"]).str.contains("a", flags=2)
     # NEGATIVE: an all-present bool result stays bool, as pandas.
     for m in (pd, fpd):
         assert str(m.Series(["ab", "c"]).str.contains("a").dtype) == "bool"
+
+
+# np.nan (not float("nan")): pandas' split(expand=True) spreads a missing row
+# across the columns only for the np.nan object.
+STR_LIST_VALUES = ["a,b,,c", "  two  words here ", None, "x", "", np.nan, "k1=v1; k2=v2"]
+
+STR_LIST_CASES = {
+    "split": lambda s: s.str.split(","),
+    "split whitespace": lambda s: s.str.split(),
+    "split n=1": lambda s: s.str.split(",", n=1),
+    "split multi-char pattern is a regex": lambda s: s.str.split("; "),
+    "split regex=True": lambda s: s.str.split(r"[,=;]", regex=True),
+    "rsplit n=1": lambda s: s.str.rsplit(",", n=1),
+    "split then str[0]": lambda s: s.str.split(",").str[0],
+    "split then str[-1]": lambda s: s.str.split(",").str[-1],
+    "split then str.get out of range": lambda s: s.str.split(",").str.get(5),
+    "split then str.len": lambda s: s.str.split().str.len(),
+    "split then str.join": lambda s: s.str.split(",").str.join("|"),
+    "split then explode": lambda s: s.str.split(",").explode(),
+    "split then explode ignore_index": lambda s: s.str.split(",").explode(ignore_index=True),
+    "split then apply": lambda s: s.str.split(",").apply(lambda v: len(v) if isinstance(v, list) else -1),
+    "split whitespace expand": lambda s: s.str.split(expand=True),
+    "split regex expand": lambda s: s.str.split(r"[,=]", regex=True, expand=True),
+    "rsplit whitespace expand": lambda s: s.str.rsplit(n=1, expand=True),
+    "findall": lambda s: s.str.findall(r"[a-z]\d?"),
+    "findall one group": lambda s: s.str.findall(r"k(\d)"),
+    "findall then len": lambda s: s.str.findall(r"\w").str.len(),
+}
+
+
+def _list_outcome(obj: Any) -> Any:
+    def one(v: Any) -> str:
+        return "nan" if isinstance(v, float) and v != v else repr(v)
+
+    if hasattr(obj, "columns"):
+        return ("frame", [str(c) for c in obj.columns], [[one(v) for v in obj[c].tolist()] for c in obj.columns])
+    return (str(obj.dtype), [one(v) for v in obj.tolist()], [str(t) for t in obj.index], obj.name)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", sorted(STR_LIST_CASES))
+def test_str_list_results_match_pandas(case: str) -> None:
+    # fvsao.13: str.split(expand=False) and str.findall return a Series of
+    # Python lists in pandas; they raised (split) or were missing (findall),
+    # so .str.split(",").str[0], .str.split().str.len() and explode() failed.
+    run = STR_LIST_CASES[case]
+    index = list(range(10, 17))
+    got = run(fpd.Series(STR_LIST_VALUES, name="t", index=index))
+    want = run(pd.Series(STR_LIST_VALUES, name="t", index=index))
+    assert _list_outcome(got) == _list_outcome(want)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_string_arithmetic_matches_pandas() -> None:
+    # fvsao.13: s + t concatenated nothing - "value 'a' has non-numeric dtype".
+    for build in (
+        lambda m: m.Series(["a", "b", None, np.nan, "e"], name="x") + m.Series(["1", None, "3", "4", np.nan], name="x"),
+        lambda m: m.Series(["a", None], name="x") + "z",
+        lambda m: "z" + m.Series(["a", None], name="x"),
+        lambda m: m.Series(["ab", None], name="x") * 2,
+        lambda m: m.Series(["a", "b"], index=[0, 1]) + m.Series(["c"], index=[1]),
+    ):
+        got, want = build(fpd), build(pd)
+        assert _list_outcome(got) == _list_outcome(want)
+    # NEGATIVE: a string plus an int is pandas' TypeError.
+    for m in (pd, fpd):
+        with pytest.raises(TypeError):
+            m.Series(["a"]) + 1
+
+
+JOURNEY_TEXT_CSV = """id,name,email,city,tags,comment
+1,  Alice Smith ,ALICE@Example.com,new york,"red,blue",Great product!! 5/5
+2,bob jones,bob@test.org,Boston,blue,"Not bad, 3/5"
+3,Carol  White,carol@example.com,new york,,Terrible. 1/5
+4,dave brown,DAVE@TEST.ORG,boston,"green,red,blue",ok 3/5
+5,Eve Black,eve@example.com,Chicago,red,
+6,frank green,frank@other.net,chicago,"blue,green",Loved it 5/5
+"""
+
+
+def _text_journey(m: Any) -> dict:
+    out = {}
+    raw = m.read_csv(io.StringIO(JOURNEY_TEXT_CSV))
+    name = raw["name"].str.strip().str.replace(r"\s+", " ", regex=True).str.title()
+    out["name"] = name
+    email = raw["email"].str.lower()
+    out["domain"] = email.str.split("@").str[1]
+    out["domain parts"] = email.str.extract(r"@(\w+)\.(\w+)$")
+    city = raw["city"].str.title()
+    out["city counts"] = city.value_counts()
+    out["five stars"] = raw["comment"].str.contains("5/5", na=False)
+    out["rating"] = raw["comment"].str.extract(r"(\d)/5", expand=False).astype(float)
+    out["tags wide"] = raw["tags"].str.split(",", expand=True)
+    out["tag dummies"] = raw["tags"].str.get_dummies(sep=",")
+    out["city dummies"] = m.get_dummies(city, prefix="city")
+    out["crosstab"] = m.crosstab(city, out["five stars"])
+    out["initials"] = name.str[0] + name.str.split(" ").str[1].str[0]
+    out["padded id"] = raw["id"].astype(str).str.zfill(4)
+    out["tag counts"] = raw["tags"].str.split(",").explode().value_counts()
+    out["words"] = raw["comment"].fillna("(none)").str.split().str.len()
+    out["digits"] = raw["comment"].fillna("(none)").str.findall(r"\d").str.len()
+    out["deduped"] = m.DataFrame({"c": city, "d": out["domain"]}).drop_duplicates()
+    return out
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_text_journey_matches_pandas() -> None:
+    # fvsao.13 journey (3): string cleaning, extraction, splitting, dummies,
+    # crosstab, list-valued splits and string concatenation under both
+    # libraries, every intermediate compared.
+    want, got = _text_journey(pd), _text_journey(fpd)
+    for step in want:
+        assert _plain(got[step]) == _plain(want[step]), step
