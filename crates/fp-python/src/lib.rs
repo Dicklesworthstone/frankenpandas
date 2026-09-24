@@ -1932,6 +1932,16 @@ pub struct PyIndex {
     pub(crate) inner: Index,
 }
 
+impl PyIndex {
+    /// `Index.astype` by pandas dtype name (shared with the typed index classes).
+    fn astype_name(&self, dtype: &str) -> PyResult<Self> {
+        self.inner
+            .astype(dtype)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
+    }
+}
+
 #[pymethods]
 impl PyIndex {
     #[new]
@@ -2456,8 +2466,31 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    fn astype(&self, _dtype: &str) -> PyResult<Self> {
-        Ok(self.clone())
+    /// pandas `Index.astype`: a dtype name, a Python type or a numpy/pandas
+    /// dtype. It returned the index unchanged whatever the dtype (fvsao.4).
+    #[pyo3(signature = (dtype, copy=true))]
+    fn astype(&self, dtype: &Bound<'_, PyAny>, copy: bool) -> PyResult<Self> {
+        let _ = copy; // pandas' copy= does not change the result
+        // astype('object') keeps the values (ints stay ints in an object
+        // index); a typed index here cannot hold that, so only a string index
+        // passes through, while astype(str) converts.
+        if dtype
+            .extract::<String>()
+            .is_ok_and(|name| name == "object" || name == "O")
+        {
+            if self
+                .inner
+                .labels()
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Utf8(_)))
+            {
+                return Ok(self.clone());
+            }
+            return Err(not_implemented(
+                "Index.astype('object') of non-string labels",
+            ));
+        }
+        self.astype_name(&pandas_dtype_name(&py_dtype_arg(dtype)?))
     }
 
     #[getter]
@@ -3724,7 +3757,7 @@ impl PyDatetimeIndex {
     }
 
     fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
-        self.as_py_index().astype(dtype)
+        self.as_py_index().astype_name(dtype)
     }
 
     fn date(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -6296,7 +6329,7 @@ impl PyTimedeltaIndex {
     }
 
     fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
-        self.as_py_index().astype(dtype)
+        self.as_py_index().astype_name(dtype)
     }
 
     fn components(&self) -> PyResult<PyDataFrame> {
@@ -7677,20 +7710,22 @@ impl PyPeriodIndex {
         self.inner.has_duplicates()
     }
 
-    pub fn tolist(&self) -> Vec<String> {
+    /// The Periods themselves, as pandas returns them (it yielded the raw
+    /// ordinals, '648' for 2024-01; fvsao.4).
+    pub fn tolist(&self) -> Vec<PyPeriod> {
         self.inner
             .values()
             .iter()
-            .map(|p| format!("{}", p.ordinal))
+            .map(|p| PyPeriod { inner: *p })
             .collect()
     }
 
-    pub fn to_list(&self) -> Vec<String> {
+    pub fn to_list(&self) -> Vec<PyPeriod> {
         self.tolist()
     }
 
     #[getter]
-    pub fn values(&self) -> Vec<String> {
+    pub fn values(&self) -> Vec<PyPeriod> {
         self.tolist()
     }
 
@@ -7758,8 +7793,8 @@ impl PyPeriodIndex {
                     "index out of bounds",
                 ));
             }
-            let p = &self.inner.values()[pos as usize];
-            return format!("{}", p.ordinal).into_py_any(py);
+            let p = self.inner.values()[pos as usize];
+            return PyPeriod { inner: p }.into_py_any(py);
         }
         if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
             let indices = slice.indices(self.inner.len() as isize)?;
@@ -8127,7 +8162,7 @@ impl PyPeriodIndex {
     }
 
     fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
-        self.as_py_index().astype(dtype)
+        self.as_py_index().astype_name(dtype)
     }
 
     #[getter]
@@ -9090,7 +9125,7 @@ impl PyCategoricalIndex {
     }
 
     fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
-        self.as_py_index().astype(dtype)
+        self.as_py_index().astype_name(dtype)
     }
 
     fn delete(&self, loc: usize) -> PyResult<PyIndex> {
@@ -13622,6 +13657,9 @@ impl PySeries {
         Ok(self.clone())
     }
 
+    /// pandas converts the (tz-aware) DatetimeIndex. A FrankenPandas index is
+    /// never tz-aware, which is pandas' tz-naive case, so this raises pandas'
+    /// TypeError instead of returning the Series unchanged (fvsao.4).
     #[pyo3(signature = (tz, axis=0, level=None, copy=None))]
     fn tz_convert(
         &self,
@@ -13631,9 +13669,14 @@ impl PySeries {
         copy: Option<bool>,
     ) -> PyResult<PySeries> {
         let _ = (tz, axis, level, copy);
-        Ok(self.clone())
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Cannot convert tz-naive timestamps, use tz_localize to localize",
+        ))
     }
 
+    /// pandas localizes the DatetimeIndex; FrankenPandas' index cannot carry a
+    /// timezone yet, so any tz raises NotImplementedError instead of returning
+    /// the Series unchanged (fvsao.4). tz=None on a naive index is pandas' no-op.
     #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous="raise", nonexistent="raise"))]
     fn tz_localize(
         &self,
@@ -13644,8 +13687,13 @@ impl PySeries {
         ambiguous: Option<&str>,
         nonexistent: Option<&str>,
     ) -> PyResult<PySeries> {
-        let _ = (tz, axis, level, copy, ambiguous, nonexistent);
-        Ok(self.clone())
+        let _ = (axis, level, copy, ambiguous, nonexistent);
+        match tz {
+            None => Ok(self.clone()),
+            Some(_) => Err(not_implemented(
+                "Series.tz_localize (a tz-aware DatetimeIndex)",
+            )),
+        }
     }
 
     #[pyo3(signature = (dtype=None))]
@@ -21182,6 +21230,8 @@ impl PyDataFrame {
         self.apply(py, func, ax_obj.as_ref(), false, None, args, kwargs)
     }
 
+    /// Same as `Series.tz_convert`: the index is never tz-aware here, which is
+    /// pandas' TypeError case, not a no-op (fvsao.4).
     #[pyo3(signature = (tz, axis=0, level=None, copy=None))]
     fn tz_convert(
         &self,
@@ -21191,9 +21241,13 @@ impl PyDataFrame {
         copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
         let _ = (tz, axis, level, copy);
-        Ok(self.clone())
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Cannot convert tz-naive timestamps, use tz_localize to localize",
+        ))
     }
 
+    /// Same as `Series.tz_localize`: a tz needs a tz-aware DatetimeIndex, which
+    /// the binding cannot represent yet (fvsao.4); tz=None is pandas' no-op.
     #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous="raise", nonexistent="raise"))]
     fn tz_localize(
         &self,
@@ -21204,7 +21258,12 @@ impl PyDataFrame {
         ambiguous: Option<&str>,
         nonexistent: Option<&str>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (tz, axis, level, copy, ambiguous, nonexistent);
+        let _ = (axis, level, copy, ambiguous, nonexistent);
+        if tz.is_some() {
+            return Err(not_implemented(
+                "DataFrame.tz_localize (a tz-aware DatetimeIndex)",
+            ));
+        }
         Ok(self.clone())
     }
 }

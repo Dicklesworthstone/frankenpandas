@@ -42571,9 +42571,11 @@ impl SeriesGroupBy<'_> {
     /// pandas). A single sequential pass tracks the best value + its row per
     /// group with SEQUENTIAL `data[row]` reads. BIT-IDENTICAL to the numeric
     /// `agg_scalar` path: same first-seen group order, the same first-row-wins
-    /// strictly-better tie rule, and the same `Scalar::Utf8(label.to_string())`
-    /// output. Int64 values are cast to f64 before comparison, matching the
-    /// generic path's `Scalar::Int64(v).to_f64()` semantics above 2^53. Returns
+    /// strictly-better tie rule, and the same label output: the winning row's
+    /// index label with its own type, as pandas returns it (an int label stays
+    /// int64; it was stringified, fvsao.4). Int64 values are cast to f64
+    /// before comparison, matching the generic path's
+    /// `Scalar::Int64(v).to_f64()` semantics above 2^53. Returns
     /// `None` (→ `agg_scalar`) for non-numeric values / non-dense Int64 keys.
     fn idx_extreme_dense(&self, want_max: bool) -> Option<Result<Series, FrameError>> {
         let f64_data = self.series.column.as_f64_slice();
@@ -42618,7 +42620,7 @@ impl SeriesGroupBy<'_> {
         let labels: Vec<IndexLabel> = key_of_gid.iter().map(|&k| IndexLabel::Int64(k)).collect();
         let values: Vec<Scalar> = best_row
             .iter()
-            .map(|&r| Scalar::Utf8(idx_labels[r].to_string()))
+            .map(|&r| index_label_to_scalar(&idx_labels[r]))
             .collect();
         let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
@@ -42701,7 +42703,7 @@ impl SeriesGroupBy<'_> {
                 }
             }
             best_idx.map_or(Scalar::Null(NullKind::NaN), |idx| {
-                Scalar::Utf8(self.series.index.labels()[idx].to_string())
+                index_label_to_scalar(&self.series.index.labels()[idx])
             })
         })
     }
@@ -42770,7 +42772,7 @@ impl SeriesGroupBy<'_> {
                 }
             }
             best_idx.map_or(Scalar::Null(NullKind::NaN), |idx| {
-                Scalar::Utf8(self.series.index.labels()[idx].to_string())
+                index_label_to_scalar(&self.series.index.labels()[idx])
             })
         })
     }
@@ -167200,13 +167202,15 @@ mod tests {
             gb.nunique().unwrap().column().values(),
             &[Scalar::Int64(2), Scalar::Int64(3)]
         );
+        // GOLDEN-CHANGE (fvsao.4): idxmin/idxmax return the index labels with
+        // their type (int64 here), as pandas 2.2.3 does, not "11"/"12".
         assert_eq!(
             gb.idxmin().unwrap().column().values(),
-            &[Scalar::Utf8("11".into()), Scalar::Utf8("12".into())]
+            &[Scalar::Int64(11), Scalar::Int64(12)]
         );
         assert_eq!(
             gb.idxmax().unwrap().column().values(),
-            &[Scalar::Utf8("10".into()), Scalar::Utf8("14".into())]
+            &[Scalar::Int64(10), Scalar::Int64(14)]
         );
         assert_eq!(
             gb.is_monotonic_increasing().unwrap().column().values(),
@@ -206455,17 +206459,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let result = gb.idxmin().expect("idxmin ok");
         // group 0: ["banana"@0, "apple"@1] -> min "apple" at original index 1
         // group 1: ["cherry"@2, "ant"@3]  -> min "ant" at original index 3
-        let labels: Vec<&Scalar> = result.values().iter().collect();
-        // Result is per-group; the group axis is 0 then 1.
-        // Each value is the original index label as Utf8.
-        match labels[0] {
-            Scalar::Utf8(s) => assert_eq!(s, "1", "group 0 min idx, got {labels:?}"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
-        match labels[1] {
-            Scalar::Utf8(s) => assert_eq!(s, "3", "group 1 min idx, got {labels:?}"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
+        // Result is per-group; the group axis is 0 then 1. Each value is the
+        // original index label with its own type. GOLDEN-CHANGE (fvsao.4): it was
+        // the label stringified ("1"); pandas 2.2.3 returns the int64 label.
+        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
     }
 
     #[test]
@@ -206474,17 +206471,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let groups = make_int_series("g", &[0, 0, 1, 1]);
         let gb = series.groupby(&groups).expect("groupby ok");
         let result = gb.idxmax().expect("idxmax ok");
-        let labels: Vec<&Scalar> = result.values().iter().collect();
         // group 0: ["banana", "apple"] -> max "banana" at idx 0
         // group 1: ["cherry", "ant"]   -> max "cherry" at idx 2
-        match labels[0] {
-            Scalar::Utf8(s) => assert_eq!(s, "0"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
-        match labels[1] {
-            Scalar::Utf8(s) => assert_eq!(s, "2"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
+        // GOLDEN-CHANGE (fvsao.4): int64 labels, not "0"/"2".
+        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(0), Scalar::Int64(2)]);
     }
 
     #[test]
@@ -206496,15 +206486,8 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let result = gb.idxmin().expect("idxmin ok");
         // group 0: [10, 5] -> min 5 at idx 1
         // group 1: [30, 20] -> min 20 at idx 3
-        let labels: Vec<&Scalar> = result.values().iter().collect();
-        match labels[0] {
-            Scalar::Utf8(s) => assert_eq!(s, "1"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
-        match labels[1] {
-            Scalar::Utf8(s) => assert_eq!(s, "3"),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
+        // GOLDEN-CHANGE (fvsao.4): int64 labels, not "1"/"3".
+        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
     }
 
     #[test]
@@ -206585,10 +206568,8 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let groups = make_int_series("g", &[0, 0, 0]);
         let gb = series.groupby(&groups).expect("groupby ok");
         let result = gb.idxmin().expect("idxmin ok");
-        match &result.values()[0] {
-            Scalar::Utf8(s) => assert_eq!(s, "2", "expected idx of \"ant\""),
-            other => panic!("expected Utf8, got {other:?}"),
-        }
+        // GOLDEN-CHANGE (fvsao.4): the int64 label of "ant", not "2".
+        assert_eq!(result.values()[0], Scalar::Int64(2), "expected idx of \"ant\"");
     }
 }
 

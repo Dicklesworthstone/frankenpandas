@@ -2377,3 +2377,68 @@ def test_astype_errors_match_pandas() -> None:
         fpd.Series(["a", "b"]).astype("category")
 
 
+# Type leaks and no-ops (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.4):
+# groupby idxmax/idxmin stringified the labels, Index.astype returned the index
+# unchanged, and Series/DataFrame.tz_localize/tz_convert were silent no-ops.
+_TYPE_LEAK_CASES = {
+    "gb_idxmax_int_labels": lambda m: m.Series([3.0, 1.0, 9.0, 2.0])
+    .groupby(m.Series(["p", "q", "p", "q"]))
+    .idxmax(),
+    "gb_idxmin_int_labels": lambda m: m.Series([3.0, 1.0, 9.0, 2.0], name="v")
+    .groupby(m.Series(["p", "q", "p", "q"], name="k"))
+    .idxmin(),
+    "gb_idxmax_str_labels": lambda m: m.Series([3, 1, 9], index=["a", "b", "c"])
+    .groupby(m.Series([0, 1, 0], index=["a", "b", "c"]))
+    .idxmax(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TYPE_LEAK_CASES.values()), ids=list(_TYPE_LEAK_CASES))
+def test_type_leaks_match_pandas(case: Any) -> None:
+    assert _strict_ordered(case(fpd)) == _strict_ordered(case(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_index_astype_casts_like_pandas() -> None:
+    for spec in ("float64", float, np.float64, "int64", str):
+        got, expected = fpd.Index([1, 2]).astype(spec), pd.Index([1, 2]).astype(spec)
+        assert (str(got.dtype), list(got)) == (str(expected.dtype), list(expected)), spec
+    got, expected = fpd.Index([3, 0]).astype(bool), pd.Index([3, 0]).astype(bool)
+    assert (str(got.dtype), list(got)) == (str(expected.dtype), list(expected))
+    got, expected = fpd.Index(["a", "b"]).astype("object"), pd.Index(["a", "b"]).astype("object")
+    assert (str(got.dtype), list(got)) == (str(expected.dtype), list(expected))
+    # pandas keeps the ints in an object index; a typed index cannot, so it
+    # refuses rather than stringifying them.
+    with pytest.raises(NotImplementedError, match="object"):
+        fpd.Index([1, 2]).astype("object")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_period_index_yields_periods_like_pandas() -> None:
+    # It yielded the ordinals ('648' for 2024-01) from tolist/values/[i]/copy.
+    def periods(m: Any) -> Any:
+        index = m.period_range("2024-01", periods=3, freq="M")
+        return (
+            [repr(p) for p in index.tolist()],
+            [repr(p) for p in index.copy().tolist()],
+            repr(index[1]),
+            [str(p) for p in index],
+        )
+
+    assert periods(fpd) == periods(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_tz_methods_refuse_instead_of_returning_the_input() -> None:
+    naive = fpd.Series([1, 2], index=fpd.date_range("2024-01-01", periods=2, freq="D"))
+    with pytest.raises(NotImplementedError, match="tz_localize"):
+        naive.tz_localize("UTC")
+    # pandas raises the same TypeError for a tz-naive index.
+    with pytest.raises(TypeError, match="Cannot convert tz-naive timestamps"):
+        naive.tz_convert("UTC")
+    with pytest.raises(TypeError, match="Cannot convert tz-naive timestamps"):
+        pd.Series([1, 2], index=pd.date_range("2024-01-01", periods=2, freq="D")).tz_convert("UTC")
+    assert naive.tz_localize(None).tolist() == [1, 2]
+
+
