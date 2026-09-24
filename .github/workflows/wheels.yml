@@ -50,6 +50,15 @@ jobs:
           args: --release --out dist --manifest-path crates/fp-python/Cargo.toml
           sccache: 'true'
           manylinux: auto
+      # Only the leg whose wheel this runner can import (aarch64 is cross-built).
+      # Fails on a wrong __version__ or an empty read_csv. (0zz8y.3)
+      - name: Smoke-test the wheel
+        if: matrix.target == 'x86_64'
+        shell: bash
+        run: |
+          export EXPECTED_VERSION="$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          python -m pip install --no-index --find-links dist frankenpandas
+          python scripts/wheel_smoke.py
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
@@ -89,6 +98,14 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist --manifest-path crates/fp-python/Cargo.toml
           sccache: 'true'
+      # macos-latest runs on arm64: only the aarch64 wheel is importable here.
+      - name: Smoke-test the wheel
+        if: matrix.target == 'aarch64'
+        shell: bash
+        run: |
+          export EXPECTED_VERSION="$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          python -m pip install --no-index --find-links dist frankenpandas
+          python scripts/wheel_smoke.py
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
@@ -127,6 +144,12 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist --manifest-path crates/fp-python/Cargo.toml
           sccache: 'true'
+      - name: Smoke-test the wheel
+        shell: bash
+        run: |
+          export EXPECTED_VERSION="$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")"
+          python -m pip install --no-index --find-links dist frankenpandas
+          python scripts/wheel_smoke.py
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:

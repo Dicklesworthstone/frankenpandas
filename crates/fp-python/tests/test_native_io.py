@@ -53,6 +53,16 @@ def _frame():
     return fpd.DataFrame(DATA)
 
 
+def test_version_is_the_cargo_package_version():
+    # The 0.3.0 wheel reported __version__ 0.2.0 (a hard-coded literal).
+    # (br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.3)
+    tomllib = pytest.importorskip("tomllib")
+    cargo_toml = BINDING_SOURCE.parents[3] / "Cargo.toml"
+    with open(cargo_toml, "rb") as fh:
+        version = tomllib.load(fh)["workspace"]["package"]["version"]
+    assert fpd.__version__ == version
+
+
 # ── the binding never reaches for the incumbent ──────────────────────────────
 
 FORBIDDEN_IMPORT = re.compile(r'import\("(pandas|pyarrow|openpyxl|matplotlib|pandas_gbq)\b')

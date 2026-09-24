@@ -30204,7 +30204,7 @@ pub fn show_versions(py: Python<'_>, as_json: Option<&Bound<'_, PyAny>>) -> PyRe
         sys_info.set_item("machine", &machine)?;
         dict.set_item("system", sys_info)?;
         let fpd_info = PyDict::new(py);
-        fpd_info.set_item("frankenpandas", "0.2.0")?;
+        fpd_info.set_item("frankenpandas", env!("CARGO_PKG_VERSION"))?;
         dict.set_item("dependencies", fpd_info)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("indent", 2)?;
@@ -30221,7 +30221,8 @@ pub fn show_versions(py: Python<'_>, as_json: Option<&Bound<'_, PyAny>>) -> PyRe
     } else {
         let header = "\nINSTALLED VERSIONS\n------------------";
         let msg = format!(
-            "{header}\npython                : {py_ver}\nOS                    : {os_name}\nOS-release            : {os_release}\nmachine               : {machine}\nfrankenpandas         : 0.2.0"
+            "{header}\npython                : {py_ver}\nOS                    : {os_name}\nOS-release            : {os_release}\nmachine               : {machine}\nfrankenpandas         : {}",
+            env!("CARGO_PKG_VERSION")
         );
         builtins.call_method1("print", (msg,))?;
     }
@@ -32418,7 +32419,9 @@ fn plotting_deregister_matplotlib_converters() -> PyResult<()> {
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__version__", "0.2.0")?;
+    // The Cargo package version, not a literal: the 0.3.0 wheel reported 0.2.0.
+    // (br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.3)
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<PySeries>()?;
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyPlotResult>()?;
@@ -32977,7 +32980,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // frankenpandas.util
     let util_mod = PyModule::new(m.py(), "util")?;
-    util_mod.add("version", "0.2.0")?;
+    util_mod.add("version", env!("CARGO_PKG_VERSION"))?;
     m.add_submodule(&util_mod)?;
     m.py()
         .import("sys")?
