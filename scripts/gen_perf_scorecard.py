@@ -12,10 +12,12 @@ This version is the scorecard's only source:
 
   * scans artifacts/bench/*.json (schema v3/v4 rows under "results");
   * keeps, per lane (category, workload, size, dtype), the NEWEST row whose
-    median-CI gate is decidable with every clause true — exactly the rule
-    scripts/current_loss_census.py applies — and records every other lane's
-    latest verdict separately so undecidable/dropped rows are COUNTED, never
-    averaged;
+    median-CI gate is decidable with every clause true — the rule
+    scripts/current_loss_census.py applies, with its code — and records every
+    other lane's latest verdict separately so undecidable/dropped rows are
+    COUNTED, never averaged. "Newest" is each document's embedded measurement
+    timestamp, not the file mtime, so a fresh clone gives the same scorecard as
+    the working tree it was committed from (bss5q.1);
   * reports every category present in the corpus, with an explicit
     "no certified lane" line instead of an invented 1.0x;
   * flags a certified loss whose ELF is not the newest ELF that lane has since
@@ -40,23 +42,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from current_loss_census import certified, elf_of, measured_at, measured_date  # noqa: E402
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BENCH_DIR = PROJECT_ROOT / "artifacts" / "bench"
 SCORECARD = PROJECT_ROOT / "artifacts" / "perf" / "SCORECARD.md"
 HISTORY_MARKER = "## Historical narrative (pre-2026-09, hand-maintained)"
-
-
-def certified(row: dict) -> bool:
-    gate = row.get("median_ci_gate") or {}
-    clauses = gate.get("clauses") or {}
-    return bool(clauses) and bool(gate.get("decidable")) and all(clauses.values())
-
-
-def elf_of(row: dict) -> str:
-    try:
-        return row["frankenpandas"]["executable"]["sha256"][:12]
-    except (KeyError, TypeError):
-        return "?"
 
 
 def fp_threads(row: dict):
@@ -94,6 +87,7 @@ def scan(bench_dir: Path) -> dict:
     newest_certified: dict[tuple, dict] = {}
     newest_any: dict[tuple, dict] = {}
     newest_elf_seen: dict[tuple, tuple] = {}
+    unstamped: list[str] = []
     files = 0
     rows = 0
     for path in sorted(glob.glob(os.path.join(bench_dir, "*.json"))):
@@ -102,11 +96,17 @@ def scan(bench_dir: Path) -> dict:
                 document = json.load(handle)
         except (OSError, json.JSONDecodeError):
             continue
+        if not isinstance(document, dict):
+            continue
         results = document.get("results")
         if not isinstance(results, list):
             continue
         files += 1
-        mtime = os.path.getmtime(path)
+        when, stamped = measured_at(document, path)
+        if not stamped:
+            unstamped.append(os.path.basename(path))
+        # Same tie-break as the census: measurement time, then file name.
+        order = (when, os.path.basename(path))
         for row in results:
             if not isinstance(row, dict):
                 continue
@@ -115,7 +115,8 @@ def scan(bench_dir: Path) -> dict:
             if key[0] is None or key[1] is None:
                 continue
             record = {
-                "mtime": mtime,
+                "order": order,
+                "measured": when,
                 "file": os.path.basename(path),
                 "verdict": row.get("verdict"),
                 "elf": elf_of(row),
@@ -126,18 +127,19 @@ def scan(bench_dir: Path) -> dict:
                 record["ratio"] = float(row["ratio"])
             except (KeyError, TypeError, ValueError):
                 record["ratio"] = None
-            if key not in newest_elf_seen or mtime > newest_elf_seen[key][0]:
-                newest_elf_seen[key] = (mtime, record["elf"])
-            if key not in newest_any or mtime > newest_any[key]["mtime"]:
+            if key not in newest_elf_seen or order > newest_elf_seen[key][0]:
+                newest_elf_seen[key] = (order, record["elf"])
+            if key not in newest_any or order > newest_any[key]["order"]:
                 newest_any[key] = record
             if certified(row) and record["ratio"] is not None:
-                if key not in newest_certified or mtime > newest_certified[key]["mtime"]:
+                if key not in newest_certified or order > newest_certified[key]["order"]:
                     newest_certified[key] = record
     for key, record in newest_certified.items():
         record["stale_elf"] = newest_elf_seen[key][1] != record["elf"]
     return {
         "files": files,
         "rows": rows,
+        "unstamped": unstamped,
         "certified": newest_certified,
         "latest": newest_any,
     }
@@ -170,8 +172,8 @@ def summarize(scan_result: dict) -> dict:
         ((key, rec) for key, rec in certified_rows.items() if rec["ratio"] < 1.0),
         key=lambda kv: kv[1]["ratio"],
     )
-    newest = max((r["mtime"] for r in latest.values()), default=None)
-    oldest_cert = min((r["mtime"] for r in certified_rows.values()), default=None)
+    newest = max((r["measured"] for r in latest.values()), default=None)
+    oldest_cert = min((r["measured"] for r in certified_rows.values()), default=None)
     return {
         "categories": dict(sorted(categories.items())),
         "overall_geomean": geomean(all_ratios),
@@ -182,6 +184,7 @@ def summarize(scan_result: dict) -> dict:
         "oldest_certified": oldest_cert,
         "files": scan_result["files"],
         "rows": scan_result["rows"],
+        "unstamped": scan_result["unstamped"],
     }
 
 
@@ -190,7 +193,7 @@ def fmt_ratio(value) -> str:
 
 
 def fmt_date(ts) -> str:
-    return "—" if ts is None else dt.date.fromtimestamp(ts).isoformat()
+    return "—" if ts is None else measured_date(ts)
 
 
 def render_markdown(summary: dict, head: str) -> str:
@@ -213,6 +216,16 @@ def render_markdown(summary: dict, head: str) -> str:
         f"(oldest certified row still standing: {fmt_date(summary['oldest_certified'])}).",
         f"- Overall certified geomean: **{fmt_ratio(summary['overall_geomean'])}**.",
         f"- Certified lanes still losing: **{len(summary['losses'])}**.",
+        "- Rows are ordered by each document's embedded measurement timestamp; dates "
+        "below are that timestamp (UTC), not a file mtime.",
+    ]
+    if summary["unstamped"]:
+        lines.append(
+            f"- {len(summary['unstamped'])} document(s) carry no timestamp and were "
+            f"ordered by file mtime, which a checkout resets: "
+            + ", ".join(f"`{name}`" for name in summary["unstamped"]) + "."
+        )
+    lines += [
         "",
         "## Per category",
         "",
@@ -246,7 +259,7 @@ def render_markdown(summary: dict, head: str) -> str:
                 f"| {rec['ratio']:.3f}x | {key[0]} | `{key[1]}` | {key[2]} | {key[3]} | "
                 f"{rec['fp_threads'] if rec['fp_threads'] is not None else '?'} | "
                 f"{rec['pd_threads'] if rec['pd_threads'] is not None else '?'} | "
-                f"`{rec['elf']}` | {fmt_date(rec['mtime'])} | {note} |"
+                f"`{rec['elf']}` | {fmt_date(rec['measured'])} | {note} |"
             )
     lines += [
         "",
@@ -290,7 +303,7 @@ def main() -> int:
                 for name, cat in summary["categories"].items()
             },
             "losses": [
-                {"category": k[0], "workload": k[1], "size": k[2], "dtype": k[3], **{kk: vv for kk, vv in rec.items() if kk != "mtime"}, "measured": fmt_date(rec["mtime"])}
+                {"category": k[0], "workload": k[1], "size": k[2], "dtype": k[3], **{kk: vv for kk, vv in rec.items() if kk not in ("order", "measured")}, "measured": fmt_date(rec["measured"])}
                 for k, rec in summary["losses"]
             ],
         }

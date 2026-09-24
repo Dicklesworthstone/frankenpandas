@@ -918,18 +918,19 @@ Functions matching pandas top-level API:
 
 ### vs-pandas Scorecard
 
-FrankenPandas performance is measured head-to-head against pandas 2.2.3 using identical workloads, with the incumbent live in the same invocation, an A/A null control per arm, a balanced ABBAABBA square, and a bootstrap median-CI gate. The current instrument is the certified census, `scripts/current_loss_census.py`, over `artifacts/bench/`: on 2026-09-02 it reported 143 certified lanes, a geometric-mean ratio of about 4x, every category above 1.0x, and 10 lanes still losing (the worst is `df_transpose_full_materialize` at 0.004x, a 2-D block-storage floor). [`artifacts/perf/SCORECARD.md`](artifacts/perf/SCORECARD.md) is generated from that census by `python3 scripts/gen_perf_scorecard.py --write` (per-category geomeans over certified lanes only, undecidable rows counted rather than averaged, every certified loss listed with the threads each arm used); the older hand-maintained narrative is kept below the generated section for its lever-by-lever history.
+FrankenPandas performance is measured head-to-head against pandas 2.2.3 using identical workloads, with the incumbent live in the same invocation, an A/A null control per arm, a balanced ABBAABBA square, and a bootstrap median-CI gate. The current instrument is the certified census, `scripts/current_loss_census.py`, over `artifacts/bench/`, which keeps each lane's newest certified row by the measurement timestamp the row carries: the scorecard regenerated on 2026-09-24 reports 146 certified lanes, an overall certified geomean of 3.970x, every category above 1.0x, and 10 certified lanes still losing (the worst is `df_transpose_full_materialize` at 0.004x, a 2-D block-storage floor). [`artifacts/perf/SCORECARD.md`](artifacts/perf/SCORECARD.md) is generated from that census by `python3 scripts/gen_perf_scorecard.py --write` (per-category geomeans over certified lanes only, undecidable rows counted rather than averaged, every certified loss listed with the threads each arm used); the older hand-maintained narrative is kept below the generated section for its lever-by-lever history.
 
 Benchmarks run on `release-perf` profile (LTO, opt-level=3). Each category geomean must exceed 1.0x to validate the "exceeds pandas" claim for that category. Categories and lanes below parity are documented honestly; a certified loss is reported as a loss.
 
 ```bash
-# Run benchmarks
-python benches/vs_pandas_harness.py --all --sizes 10k,100k
+# Run benchmarks (rows land in artifacts/bench/; commit them so a clone reproduces the census)
+python3 benches/vs_pandas_harness.py --all --sizes 10k,100k
 
-# Generate scorecard
-python scripts/gen_perf_scorecard.py --input artifacts/bench/latest.json --format md
+# Current certified losses, then regenerate artifacts/perf/SCORECARD.md from the same rows
+python3 scripts/current_loss_census.py
+python3 scripts/gen_perf_scorecard.py --write
 
-# Apply ratchet gate (CI)
+# Perf ratchet against .bench-history baselines (local; CI runs only the ratchet's unit tests)
 ./scripts/apply_ratchet.sh
 ```
 

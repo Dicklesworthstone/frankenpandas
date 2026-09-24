@@ -294,6 +294,11 @@ struct TreeCounts {
     rust_lines_all: usize,
     /// `crates/<name>/src` lines per crate directory name.
     crate_src_lines: BTreeMap<String, usize>,
+    /// Header of the generated `artifacts/perf/SCORECARD.md` (certified lanes,
+    /// certified lanes still losing, overall certified geomean as printed).
+    scorecard_lanes: usize,
+    scorecard_losses: usize,
+    scorecard_geomean: String,
 }
 
 impl TreeCounts {
@@ -320,6 +325,17 @@ impl TreeCounts {
         }
         let disc = fs::read_to_string(root.join("crates/fp-conformance/DISCREPANCIES.md"))
             .expect("read DISCREPANCIES");
+        let scorecard =
+            fs::read_to_string(root.join("artifacts/perf/SCORECARD.md")).expect("read SCORECARD");
+        // "- Certified lanes: **146** (...)": the bold value after `label`.
+        let bold_after = |label: &str| -> String {
+            scorecard
+                .split_once(label)
+                .and_then(|(_, rest)| rest.strip_prefix("**"))
+                .and_then(|rest| rest.split_once("**"))
+                .map(|(value, _)| value.to_owned())
+                .unwrap_or_else(|| panic!("SCORECARD.md has no \"{label}**…**\" line"))
+        };
         let mut counts = Self {
             packets: count_json(&root.join("crates/fp-conformance/fixtures/packets")),
             fixture_json: count_json(&root.join("crates/fp-conformance/fixtures")),
@@ -334,6 +350,15 @@ impl TreeCounts {
             rust_lines_src: 0,
             rust_lines_all: 0,
             crate_src_lines: BTreeMap::new(),
+            scorecard_lanes: bold_after("Certified lanes: ")
+                .parse()
+                .expect("SCORECARD certified lanes"),
+            scorecard_losses: bold_after("Certified lanes still losing: ")
+                .parse()
+                .expect("SCORECARD losses"),
+            scorecard_geomean: bold_after("Overall certified geomean: ")
+                .trim_end_matches('x')
+                .to_owned(),
         };
         // Textual counts over every `.rs` file under crates/; lines are newline
         // counts, as `wc -l` reports them.
@@ -528,6 +553,51 @@ fn readme_number_violations(readme: &str, tree: &TreeCounts) -> Vec<String> {
     floor(&mut out, readme, " lines of Rust under `crates/`", |_| {
         tree.rust_lines_all
     });
+    // Census numbers must be the generated scorecard's (the README said 143
+    // lanes from a scorecard built on uncommitted, mtime-ordered rows).
+    let (losing, lanes): (Vec<_>, Vec<_>) = number_claims(readme, " certified lanes")
+        .into_iter()
+        .partition(|claim| claim.tail.starts_with(" still losing"));
+    for (label, claims, want) in [
+        ("certified lanes", lanes, tree.scorecard_lanes),
+        (
+            "certified lanes still losing",
+            losing,
+            tree.scorecard_losses,
+        ),
+    ] {
+        if claims.is_empty() {
+            out.push(format!("no {label} claim found"));
+        }
+        for claim in claims {
+            if claim.value != want {
+                out.push(format!(
+                    "line {}: {} {label}, SCORECARD.md has {want}",
+                    claim.line, claim.value
+                ));
+            }
+        }
+    }
+    let geomean_prefix = "overall certified geomean of ";
+    let geomeans: Vec<(usize, &str)> = readme
+        .match_indices(geomean_prefix)
+        .map(|(at, _)| {
+            let rest = &readme[at + geomean_prefix.len()..];
+            let value = &rest[..rest.find('x').unwrap_or(0)];
+            (readme[..at].matches('\n').count() + 1, value)
+        })
+        .collect();
+    if geomeans.is_empty() {
+        out.push("no overall certified geomean claim found".to_owned());
+    }
+    for (line, value) in geomeans {
+        if value != tree.scorecard_geomean {
+            out.push(format!(
+                "line {line}: geomean {value}x, SCORECARD.md has {}x",
+                tree.scorecard_geomean
+            ));
+        }
+    }
     // Per-crate floors in the Workspace Structure tree
     // ("│   ├── fp-io/  # ... (more than 35,000 lines)"); every crate needs one.
     let mut listed = BTreeSet::new();
@@ -608,6 +678,9 @@ fn readme_number_gate_reports_stale_copies_and_bad_floors() {
             ("fp-frame".to_owned(), 221_529),
             ("fp-io".to_owned(), 38_651),
         ]),
+        scorecard_lanes: 146,
+        scorecard_losses: 10,
+        scorecard_geomean: "3.970".to_owned(),
     };
     let good = "1,387 packet JSON files spanning 1,400 fixture files (147 occurrences across 8 files);\n\
         28 numbered divergence entries (16 active, the rest resolved);\n\
@@ -615,13 +688,31 @@ fn readme_number_gate_reports_stale_copies_and_bad_floors() {
         more than 550,000 lines of Rust under `src/`; more than 600,000 lines of Rust under `crates/` (more than 550,000 of those lines live under `src/`).\n\
         │   ├── fp-frame/         # DataFrame, Series (more than 200,000 lines)\n\
         │   ├── fp-io/            # 14+ IO formats (more than 35,000 lines)\n\
-        ├── artifacts/perf/       # Optimization round baselines (12 lines)\n";
+        ├── artifacts/perf/       # Optimization round baselines (12 lines)\n\
+        the scorecard reports 146 certified lanes, an overall certified geomean of 3.970x, and 10 certified lanes still losing.\n";
     assert_eq!(readme_number_violations(good, &tree), Vec::<String>::new());
 
     let stale_copy = format!("{good}Adding a new packet (1,341 packet files and counting).\n");
     assert_eq!(
         readme_number_violations(&stale_copy, &tree),
-        vec!["line 8: 1341 packets, the tree has 1387".to_owned()]
+        vec!["line 9: 1341 packets, the tree has 1387".to_owned()]
+    );
+
+    // The 2026-09-02 census paragraph, left behind by a regenerated scorecard.
+    let stale_census = good
+        .replace("146 certified lanes", "143 certified lanes")
+        .replace("geomean of 3.970x", "geomean of 4.000x");
+    assert_eq!(
+        readme_number_violations(&stale_census, &tree),
+        vec![
+            "line 8: 143 certified lanes, SCORECARD.md has 146".to_owned(),
+            "line 8: geomean 4.000x, SCORECARD.md has 3.970x".to_owned(),
+        ]
+    );
+    let stale_losses = good.replace("10 certified lanes still", "14 certified lanes still");
+    assert_eq!(
+        readme_number_violations(&stale_losses, &tree),
+        vec!["line 8: 14 certified lanes still losing, SCORECARD.md has 10".to_owned()]
     );
 
     // The 2026-05 README called fp-frame "the 87,000-line crate".
