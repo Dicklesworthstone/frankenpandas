@@ -6074,7 +6074,29 @@ impl CiGate {
     /// Shell command(s) for this gate (when run via external CI).
     pub fn commands(self) -> Vec<&'static str> {
         match self {
-            Self::G1Compile => vec!["cargo check --workspace --all-targets", "cargo fmt --check"],
+            // Format is checked per crate over the crates rustfmt can format -
+            // the same list as the CI `fmt` job and the Fast gate. A bare
+            // workspace `cargo fmt --check` also formats fp-columnar (62k
+            // lines) and fp-frame (208k), which need tens of GB (run
+            // 33488811029 died allocating 172 GB, br-frankenpandas-3bu58), so
+            // G1 could not pass on any runner. Those two stay unenforced until
+            // they are split (3bu58). br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.6
+            Self::G1Compile => vec![
+                "cargo check --workspace --all-targets",
+                "cargo fmt --check -p fp-types",
+                "cargo fmt --check -p fp-dot-kernel",
+                "cargo fmt --check -p fp-index",
+                "cargo fmt --check -p fp-expr",
+                "cargo fmt --check -p fp-groupby",
+                "cargo fmt --check -p fp-join",
+                "cargo fmt --check -p fp-io",
+                "cargo fmt --check -p fp-conformance",
+                "cargo fmt --check -p fp-bench",
+                "cargo fmt --check -p fp-runtime",
+                "cargo fmt --check -p fp-frankentui",
+                "cargo fmt --check -p fp-python",
+                "cargo fmt --check -p frankenpandas",
+            ],
             Self::G2Lint => vec!["cargo clippy --workspace --all-targets -- -D warnings"],
             Self::G3Unit => vec!["cargo test --workspace --lib"],
             Self::G4Property => vec!["cargo test -p fp-conformance --test proptest_properties"],
@@ -17601,7 +17623,7 @@ fn execute_series_asof_fixture_operation(fixture: &PacketFixture) -> Result<Scal
     // datetime-like" heuristic that produced NaT — a marker pandas never
     // returns from `asof`, and a harness-side reimplementation of semantics FP
     // owns (br-frankenpandas-oxodo, br-frankenpandas-nywa8).
-    Ok(left.asof_value(label))
+    left.asof_value(label).map_err(|err| err.to_string())
 }
 
 fn execute_series_autocorr_fixture_operation(fixture: &PacketFixture) -> Result<Scalar, String> {

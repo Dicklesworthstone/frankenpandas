@@ -13689,11 +13689,31 @@ impl Series {
     /// That is the shadow-reimplementation pattern of
     /// `br-frankenpandas-oxodo` — FrankenPandas must own its own observable
     /// semantics. (br-frankenpandas-nywa8)
-    #[must_use]
-    pub fn asof_value(&self, label: &IndexLabel) -> Scalar {
-        self.asof(label)
+    ///
+    /// A string `where` is converted with `Timestamp(where)` before anything
+    /// else, so a string that is not a date raises whatever the index holds.
+    /// MEASURED, live pandas 2.2.3:
+    ///
+    /// ```text
+    /// pd.Series([1., 2., 3.], index=['a', 'b', 'c']).asof('c')
+    ///     -> DateParseError: Unknown datetime string format, unable to parse: c
+    /// ```
+    ///
+    /// (A date string against a non-datetime index raises TypeError in pandas;
+    /// fp keeps answering it, because fp also spells datetime indexes as ISO
+    /// strings.) br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.6
+    pub fn asof_value(&self, label: &IndexLabel) -> Result<Scalar, FrameError> {
+        if let IndexLabel::Utf8(text) = label
+            && matches!(parse_datetime_string(text, None), Scalar::Null(_))
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Unknown datetime string format, unable to parse: {text}"
+            )));
+        }
+        Ok(self
+            .asof(label)
             .cloned()
-            .unwrap_or(Scalar::Null(NullKind::NaN))
+            .unwrap_or(Scalar::Null(NullKind::NaN)))
     }
 
     /// Return a boolean mask where missing values are `true`.
@@ -162128,6 +162148,60 @@ mod tests {
         .unwrap();
         let v = s.asof(&2_i64.into());
         assert_eq!(v, Some(&Scalar::Float64(20.0)));
+    }
+
+    #[test]
+    fn series_asof_value_rejects_a_non_date_string_label_like_pandas() {
+        // pandas 2.2.3: Series([10., 20., 30.], index=['a','b','c']).asof('c')
+        //   -> DateParseError: Unknown datetime string format, unable to parse: c
+        // (asof converts a string `where` with Timestamp(where) first).
+        let strings = Series::from_values(
+            "s",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+        let err = strings
+            .asof_value(&IndexLabel::Utf8("c".to_owned()))
+            .expect_err("non-date string label");
+        assert!(
+            err.to_string()
+                .contains("Unknown datetime string format, unable to parse: c"),
+            "got {err}"
+        );
+
+        // A date-string label still answers against fp's ISO-string datetime
+        // index, and non-string labels are untouched.
+        let dates = Series::from_values(
+            "d",
+            vec!["2024-01-01".into(), "2024-01-02".into(), "2024-01-03".into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            dates
+                .asof_value(&IndexLabel::Utf8("2024-01-02".to_owned()))
+                .expect("date label"),
+            Scalar::Float64(2.0)
+        );
+        let ints = Series::from_values(
+            "i",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            ints.asof_value(&2_i64.into()).expect("int label"),
+            Scalar::Float64(2.0)
+        );
     }
 
     #[test]

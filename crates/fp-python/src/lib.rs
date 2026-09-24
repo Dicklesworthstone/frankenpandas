@@ -12594,7 +12594,7 @@ impl PySeries {
 
     fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let lbl = py_to_index_label(label)?;
-        let val = self.inner.asof_value(&lbl);
+        let val = self.inner.asof_value(&lbl).map_err(frame_error_to_py)?;
         scalar_to_py(py, &val)
     }
 

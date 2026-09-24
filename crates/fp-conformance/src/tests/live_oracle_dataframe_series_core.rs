@@ -15464,7 +15464,7 @@ fn live_oracle_series_asof_int_index_match() {
     // Delegates the missing-marker decision to FrankenPandas
     // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
     // is at or before the label, in EVERY dtype.
-    let actual = series.asof_value(label);
+    let actual = series.asof_value(label).expect("asof");
     super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
 }
 
@@ -25303,7 +25303,7 @@ fn live_oracle_series_asof_intermediate_label() {
     // Delegates the missing-marker decision to FrankenPandas
     // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
     // is at or before the label, in EVERY dtype.
-    let actual = series.asof_value(label);
+    let actual = series.asof_value(label).expect("asof");
     super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
 }
 
@@ -40039,6 +40039,10 @@ fn live_oracle_series_asof_string_index() {
         "operation": "series_asof",
         "oracle_source": "live_legacy_pandas",
         "asof_label": { "kind": "utf8", "value": "c" },
+        // pandas converts a string `where` with Timestamp(where) first, and
+        // 'c' is not a date. This case used to treat pandas' error as "oracle
+        // unavailable" and skip. (kyvo0.6)
+        "expected_error_contains": "Unknown datetime string format",
         "left": {
             "name": "vals",
             "index": [
@@ -40057,28 +40061,29 @@ fn live_oracle_series_asof_string_index() {
     }))
     .expect("fixture");
 
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label = fixture.asof_label.as_ref().expect("asof_label");
+    let err = series
+        .asof_value(label)
+        .expect_err("a non-date string label must raise, as in pandas");
+    assert!(
+        err.to_string()
+            .contains("Unknown datetime string format, unable to parse: c"),
+        "got {err}"
+    );
+
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
-    if let Err(
-        super::HarnessError::OracleUnavailable(message)
-        | super::HarnessError::LiveOracleRequired(message),
-    ) = &expected_result
-    {
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
         eprintln!("live pandas unavailable; skipping asof string: {message}");
         return;
     }
-    let expected = expected_result.expect("live oracle expected");
-    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else {
-        return;
-    };
-
-    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let label = fixture.asof_label.as_ref().expect("asof_label");
-    // Delegates the missing-marker decision to FrankenPandas
-    // (br-frankenpandas-nywa8): pandas' asof returns a float nan when nothing
-    // is at or before the label, in EVERY dtype.
-    let actual = series.asof_value(label);
-    super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
+    assert!(
+        matches!(
+            expected_result.expect("live oracle expected"),
+            super::ResolvedExpected::ErrorContains(_) | super::ResolvedExpected::ErrorAny
+        ),
+        "pandas must raise for asof('c') on a string index"
+    );
 }
 
 #[test]
