@@ -63,6 +63,13 @@ STRUCTURAL_KEYS = {
     "expected_dtype",
     "expected_error_contains",
     "expected_error",
+    # FixtureRetirement metadata (crates/fp-conformance/src/lib.rs `retired`).
+    # Both run paths return a Retired result BEFORE any OracleRequest is built
+    # (the `if let Some(retirement) = &fixture.retired` early returns in the
+    # packet runner and in the differential runner), and OracleRequest has no
+    # such field, so this key can never reach the oracle. A retired case is
+    # reported as "retired", never as a pass.
+    "retired",
 }
 
 # Keys that are legitimately not oracle options, or are known gaps with a bead.
@@ -85,13 +92,23 @@ KNOWN_UNREAD = {
 }
 
 
-def _fixture_keys() -> dict[str, list[str]]:
+def _fixture_keys(root: pathlib.Path = FIXTURE_ROOT) -> dict[str, list[str]]:
     keys: dict[str, list[str]] = {}
-    for path in sorted(FIXTURE_ROOT.glob("*.json")):
+    for path in sorted(root.glob("*.json")):
         fixture = json.loads(path.read_text())
         for key in fixture:
             keys.setdefault(key, []).append(path.name)
     return keys
+
+
+def _unread_keys(root: pathlib.Path, source: str) -> dict[str, list[str]]:
+    return {
+        key: paths
+        for key, paths in _fixture_keys(root).items()
+        if key not in STRUCTURAL_KEYS
+        and key not in KNOWN_UNREAD
+        and f'"{key}"' not in source
+    }
 
 
 def test_fixture_corpus_is_present():
@@ -100,15 +117,23 @@ def test_fixture_corpus_is_present():
     assert len(list(FIXTURE_ROOT.glob("*.json"))) > 1000
 
 
+def test_the_guard_still_catches_an_unread_option_key(tmp_path):
+    """Guard the guard: a key the oracle never reads must still be flagged.
+
+    Copies one real fixture, plants an option key that appears nowhere in the
+    oracle source, and requires the guard to report exactly that key — so a
+    change to the structural/known lists cannot silently turn it into a no-op.
+    """
+    real = sorted(FIXTURE_ROOT.glob("*.json"))[0]
+    planted = json.loads(real.read_text())
+    planted["zzz_unread_option_for_guard_selftest"] = 3
+    (tmp_path / real.name).write_text(json.dumps(planted))
+    unread = _unread_keys(tmp_path, ORACLE_SOURCE.read_text())
+    assert list(unread) == ["zzz_unread_option_for_guard_selftest"], unread
+
+
 def test_every_fixture_option_key_is_read_by_the_oracle():
-    source = ORACLE_SOURCE.read_text()
-    unread = {
-        key: paths
-        for key, paths in _fixture_keys().items()
-        if key not in STRUCTURAL_KEYS
-        and key not in KNOWN_UNREAD
-        and f'"{key}"' not in source
-    }
+    unread = _unread_keys(FIXTURE_ROOT, ORACLE_SOURCE.read_text())
     assert not unread, (
         "fixture option keys the oracle never reads — it will silently use a "
         "default and evaluate a different operation than the fixture asked for:\n"
