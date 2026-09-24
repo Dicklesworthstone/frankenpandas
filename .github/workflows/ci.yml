@@ -794,6 +794,26 @@ jobs:
         run: |
           "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_differential_packets.py -v
 
+      # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.11: every venv
+      # above has pandas, so a reader that delegated to pandas (or fell back to
+      # an empty frame) passed. This venv has no pandas, pyarrow or openpyxl; the
+      # battery's expected values are literals recorded from pandas 2.2.3.
+      - name: Pandas-absent native IO battery
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/nopd"
+          NOPD="$RUNNER_TEMP/nopd/bin/python"
+          "$NOPD" -m pip install --quiet pytest
+          "$NOPD" -m pip install --no-deps dist/*.whl
+          for module in pandas pyarrow openpyxl; do
+            if "$NOPD" -c "import $module" 2>/dev/null; then
+              echo "$module is importable in the pandas-absent venv" >&2
+              exit 1
+            fi
+          done
+          "$NOPD" -c "import pandas" || true
+          "$NOPD" -m pytest crates/fp-python/tests/test_native_io.py -v
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7
         with:
