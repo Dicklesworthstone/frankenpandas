@@ -16910,19 +16910,23 @@ impl PyDataFrame {
                     }
                 }
 
-                let mut col_map = BTreeMap::new();
-                for (i, name) in col_order.iter().enumerate() {
-                    let col = Column::from_values(col_scalars[i].clone()).map_err(|e| {
+                // A ColumnStore keeps every column of a duplicated name; the
+                // map kept only the last (br-frankenpandas-5ihhi).
+                let mut pairs = Vec::with_capacity(num_cols);
+                for (name, scalars) in col_order.iter().zip(col_scalars) {
+                    let col = Column::from_values(scalars).map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                     })?;
-                    col_map.insert(name.clone(), col);
+                    pairs.push((name.clone(), col));
                 }
 
                 let labels = extract_index_labels(index, len)?;
-                let df = DataFrame::new_with_column_order(Index::new(labels), col_map, col_order)
-                    .map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                })?;
+                let df = DataFrame::new_with_column_order(
+                    Index::new(labels),
+                    fp_frame::ColumnStore::from_pairs(pairs),
+                    col_order,
+                )
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                 return Ok(PyDataFrame { inner: df });
             }
 
@@ -19806,15 +19810,15 @@ impl PyDataFrame {
                 let cols_list =
                     PyList::new(py, col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
                 out.set_item("columns", cols_list)?;
+                // Columns by position, so a duplicated name keeps its own data
+                // (br-frankenpandas-5ihhi).
+                let columns: Vec<&Column> = (0..col_names.len())
+                    .filter_map(|position| self.inner.column_at(position))
+                    .collect();
                 let mut data_rows = Vec::with_capacity(n_rows);
                 for row_idx in 0..n_rows {
-                    let mut row_vals = Vec::with_capacity(col_names.len());
-                    for name in &col_names {
-                        let col = self.inner.column(name).ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                                "column {name:?} missing"
-                            ))
-                        })?;
+                    let mut row_vals = Vec::with_capacity(columns.len());
+                    for col in &columns {
                         row_vals.push(scalar_to_py(py, &col.values()[row_idx])?);
                     }
                     data_rows.push(PyList::new(py, row_vals)?);
@@ -23973,10 +23977,12 @@ impl PyDataFrameILoc {
                 let col_name = self.inner.column_name_at(c_norm as usize).ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyIndexError, _>("column index out of bounds")
                 })?;
-                let col = self.inner.column(&col_name).ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(col_name.clone())
+                // Positional: a duplicated name resolved to its first column
+                // (br-frankenpandas-5ihhi).
+                let col = self.inner.column_at(c_norm as usize).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>("column index out of bounds")
                 })?;
-                let col_series = Series::new(&col_name, self.inner.index().clone(), col.clone())
+                let col_series = Series::new(&col_name, self.inner.series_index(), col.clone())
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
                 if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
@@ -24007,17 +24013,17 @@ impl PyDataFrameILoc {
                 }
             }
 
-            // Both row and col are slices or lists: df.iloc[:, :] -> DataFrame
-            let col_names: Vec<String> =
+            // Both row and col are slices or lists: df.iloc[:, :] -> DataFrame.
+            // The columns are taken by POSITION, so a duplicated name keeps
+            // its own column (br-frankenpandas-5ihhi).
+            let col_positions: Vec<usize> =
                 if let Ok(col_slice) = col_key.cast::<pyo3::types::PySlice>() {
                     let c_idx = col_slice.indices(self.inner.num_columns() as isize)?;
                     let mut cols = Vec::new();
                     let mut i = c_idx.start;
                     if c_idx.step > 0 {
                         while i < c_idx.stop {
-                            if let Some(name) = self.inner.column_name_at(i as usize) {
-                                cols.push(name);
-                            }
+                            cols.push(i as usize);
                             i += c_idx.step;
                         }
                     }
@@ -24032,9 +24038,7 @@ impl PyDataFrameILoc {
                                 "column index out of bounds",
                             ));
                         }
-                        if let Some(name) = self.inner.column_name_at(norm as usize) {
-                            cols.push(name);
-                        }
+                        cols.push(norm as usize);
                     }
                     cols
                 } else {
@@ -24065,7 +24069,8 @@ impl PyDataFrameILoc {
 
             let res = self
                 .inner
-                .iloc_with_columns(&row_positions, Some(&col_names))
+                .take_columns(&col_positions)
+                .and_then(|columns| columns.iloc(&row_positions))
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
@@ -29817,14 +29822,12 @@ fn concat(
         if axis == 0 {
             out = out.reset_index(true).map_err(frame_error_to_py)?;
         } else {
-            let names: Vec<String> = out.column_names().iter().map(|n| n.to_string()).collect();
-            let positions: Vec<String> = (0..names.len()).map(|i| i.to_string()).collect();
-            let mapping: Vec<(&str, &str)> = names
-                .iter()
-                .map(String::as_str)
-                .zip(positions.iter().map(String::as_str))
+            // Relabel by POSITION: a name->position mapping sent every column
+            // of a duplicated name to one position (br-frankenpandas-5ihhi).
+            let positions: Vec<IndexLabel> = (0..out.num_columns())
+                .map(|position| IndexLabel::Int64(position as i64))
                 .collect();
-            out = out.rename_columns(&mapping).map_err(frame_error_to_py)?;
+            out = out.set_axis(positions, 1).map_err(frame_error_to_py)?;
         }
     }
     PyDataFrame { inner: out }.into_py_any(py)

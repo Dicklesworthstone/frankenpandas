@@ -79354,8 +79354,15 @@ impl DataFrame {
                 "DataFrame.iat: column position {col_pos} out of bounds for width {n_cols}"
             )));
         }
-        let col_name = &self.column_order[col_idx];
-        Ok(self.columns[col_name].values()[row_idx].clone())
+        // Positional: a duplicated column name resolved to its FIRST column,
+        // so the second 's' of ['s', 's'] read the first's data
+        // (br-frankenpandas-5ihhi).
+        let column = self.column_at(col_idx).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "DataFrame.iat: column position {col_pos} out of bounds for width {n_cols}"
+            ))
+        })?;
+        Ok(column.values()[row_idx].clone())
     }
 
     /// Replace the row index or column names without touching data.
@@ -79401,18 +79408,28 @@ impl DataFrame {
                     });
                 }
                 let new_names: Vec<String> = labels.iter().map(IndexLabel::to_string).collect();
-                let mut new_columns = BTreeMap::new();
-                for (old, new) in self.column_order.iter().zip(new_names.iter()) {
-                    new_columns.insert(new.clone(), self.columns[old].clone());
+                // Positional: the column AT each position takes its new label,
+                // so duplicated names keep their own data (by name, every 's'
+                // of ['s', 's'] was the first; br-frankenpandas-5ihhi). The
+                // rows are untouched, row MultiIndex included.
+                let mut pairs = Vec::with_capacity(new_names.len());
+                for (position, new) in new_names.iter().enumerate() {
+                    let column = self.column_at(position).ok_or_else(|| {
+                        FrameError::CompatibilityRejected(format!(
+                            "set_axis: column position {position} out of bounds"
+                        ))
+                    })?;
+                    pairs.push((new.clone(), column.clone()));
                 }
-                Ok(Self {
-                    columns: new_columns.into(),
-                    column_order: new_names.into(),
-                    index: self.index.clone(),
-                    column_multiindex: None,
-                    row_multiindex: None,
-                    allows_duplicate_labels: self.allows_duplicate_labels,
-                })
+                let mut out = Self::new_with_axes(
+                    self.index.clone(),
+                    self.row_multiindex.clone(),
+                    ColumnStore::from_pairs(pairs),
+                    new_names,
+                    None,
+                )?;
+                out.allows_duplicate_labels = self.allows_duplicate_labels;
+                Ok(out)
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "set_axis: axis must be 0 or 1, got {other}"
@@ -92949,17 +92966,33 @@ impl DataFrame {
     /// Used by `df.take(indices, axis=1)` after negative indices have been resolved.
     pub fn take_columns(&self, indices: &[usize]) -> Result<Self, FrameError> {
         let n = self.column_order.len();
-        let mut selected_cols = Vec::with_capacity(indices.len());
+        // Positional: each index takes the column AT that position, so a
+        // duplicated name keeps its own data (selecting by name resolved every
+        // 's' of ['s', 's'] to the first; br-frankenpandas-5ihhi).
+        let mut pairs = Vec::with_capacity(indices.len());
         for &idx in indices {
-            if idx >= n {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "take: index {} out of bounds for axis 1 with size {}",
-                    idx, n
-                )));
-            }
-            selected_cols.push(self.column_order[idx].as_str());
+            let column = self.column_at(idx).filter(|_| idx < n).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "take: index {idx} out of bounds for axis 1 with size {n}"
+                ))
+            })?;
+            pairs.push((self.column_order[idx].clone(), column.clone()));
         }
-        self.select_columns(&selected_cols)
+        let order: Vec<String> = pairs.iter().map(|(name, _)| name.clone()).collect();
+        let column_multiindex = self
+            .column_multiindex
+            .as_ref()
+            .map(|levels| levels.take(indices))
+            .transpose()?;
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            ColumnStore::from_pairs(pairs),
+            order,
+            column_multiindex,
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     // ── DataFrame utility: isin / equals / first_valid_index / last_valid_index ──
@@ -154454,6 +154487,54 @@ mod tests {
         let first_b = b.groupby(&key).unwrap().first_skipna(false).unwrap();
         assert_eq!(first_b.values()[0], Scalar::Float64(1.5));
         assert!(first_b.values()[1].is_missing());
+    }
+
+    #[test]
+    fn concat_axis1_keeps_each_same_named_column_s_own_data() {
+        // pandas 2.2.3: concat([Series([1,2], name='s'), Series([3,4], name='s')],
+        // axis=1) -> columns ['s', 's'] holding [1, 2] and [3, 4].
+        let left = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap()
+        .to_frame(Some("s"))
+        .unwrap();
+        let right = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        )
+        .unwrap()
+        .to_frame(Some("s"))
+        .unwrap();
+        let out = concat_dataframes_with_axis_join(&[&left, &right], 1, ConcatJoin::Outer).unwrap();
+        assert_eq!(out.column_names(), vec!["s", "s"]);
+        assert_eq!(
+            out.column_at(0).unwrap().values(),
+            [1_i64, 2].map(Scalar::Int64)
+        );
+        assert_eq!(
+            out.column_at(1).unwrap().values(),
+            [3_i64, 4].map(Scalar::Int64)
+        );
+        // br-frankenpandas-5ihhi: positional readers keep each column's data;
+        // by name, every 's' resolved to the first.
+        assert_eq!(out.iat(1, 1).unwrap(), Scalar::Int64(4));
+        let swapped = out.take_columns(&[1, 0]).unwrap();
+        assert_eq!(
+            swapped.column_at(0).unwrap().values(),
+            [3_i64, 4].map(Scalar::Int64)
+        );
+        let relabelled = out
+            .set_axis(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)], 1)
+            .unwrap();
+        assert_eq!(relabelled.column_names(), vec!["0", "1"]);
+        assert_eq!(
+            relabelled.column_at(1).unwrap().values(),
+            [3_i64, 4].map(Scalar::Int64)
+        );
     }
 
     #[test]

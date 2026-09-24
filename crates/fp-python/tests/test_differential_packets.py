@@ -5,6 +5,7 @@ Differential conformance test harness for frankenpandas vs pandas oracle on pack
 from __future__ import annotations
 
 import glob
+import itertools
 import json
 import math
 import os
@@ -3786,3 +3787,128 @@ def test_category_refusals_and_errors_match_pandas() -> None:
     # The Categorical class keeps value types (it stringified them).
     assert fpd.Categorical([1, None, 2]).tolist()[0] == 1
     assert list(fpd.Categorical([2, 1]).categories) == [1, 2]
+
+
+# fvsao.6.3's acceptance: merge/concat keywords in combination, not one at a
+# time. The full grids (merge 4x2x3x2x3x2 = 288, concat 2x2x2x2x2 = 32) must
+# each match pandas 2.2.3 or refuse with NotImplementedError.
+def _grid_describe(obj: Any) -> Any:
+    if hasattr(obj, "columns"):
+        columns = [obj.iloc[:, i] for i in range(len(obj.columns))]
+        return (
+            "DataFrame",
+            [str(c) for c in obj.columns],
+            [str(c.dtype) for c in columns],
+            [_marker(x) for x in obj.index],
+            [[_marker(v) for v in c.tolist()] for c in columns],
+        )
+    return ("Series", str(obj.dtype), [_marker(x) for x in obj.index], [_marker(v) for v in obj.tolist()])
+
+
+def _grid_run(fn: Any) -> Any:
+    try:
+        return ("ok", _grid_describe(fn()))
+    except NotImplementedError:
+        return ("refused",)
+    except Exception as exc:  # noqa: BLE001
+        return ("raise", type(exc).__name__)
+
+
+def _merge_grid_case(m: Any, how: str, suffixes: Any, indicator: Any, sort: bool, keys: str, validate: Any) -> Any:
+    left = m.DataFrame({"k": ["a", "b", "c"], "v": [1, 2, 3], "x": [10, 20, 30]})
+    right = m.DataFrame({"k": ["b", "c", "d"], "w": [4, 5, 6], "x": [40, 50, 60]})
+    kw: dict[str, Any] = {"how": how, "sort": sort}
+    if suffixes is not None:
+        kw["suffixes"] = suffixes
+    if indicator is not False:
+        kw["indicator"] = indicator
+    if validate is not None:
+        kw["validate"] = validate
+    if keys == "on":
+        kw["on"] = "k"
+    elif keys == "left_right_on":
+        right = right.rename(columns={"k": "k2"})
+        kw.update(left_on="k", right_on="k2")
+    else:
+        left, right = left.set_index("k"), right.set_index("k")
+        kw.update(left_index=True, right_index=True)
+    return left.merge(right, **kw)
+
+
+_MERGE_GRID = list(
+    itertools.product(
+        ["inner", "left", "right", "outer"],
+        [None, ("_l", "_r")],
+        [False, True, "src"],
+        [False, True],
+        ["on", "left_right_on", "index"],
+        [None, "1:1"],
+    )
+)
+# br-frankenpandas-7u2td: the outer left_on/right_on key columns take a None
+# where pandas mints nan (typed-Utf8 fast gather).
+_MERGE_GRID_MARKER_GAP = {
+    ("outer", None, False, False, "left_right_on", None),
+    ("outer", ("_l", "_r"), False, False, "left_right_on", None),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_merge_keyword_grid_matches_pandas() -> None:
+    bad = []
+    for combo in _MERGE_GRID:
+        if combo in _MERGE_GRID_MARKER_GAP:
+            continue
+        got = _grid_run(lambda: _merge_grid_case(fpd, *combo))
+        want = _grid_run(lambda: _merge_grid_case(pd, *combo))
+        if got != ("refused",) and got != want:
+            bad.append(combo)
+    assert bad == []
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="br-frankenpandas-7u2td: invented gap in an object key column is None, pandas nan")
+def test_merge_outer_left_right_on_gap_marker_matches_pandas() -> None:
+    for combo in sorted(_MERGE_GRID_MARKER_GAP, key=str):
+        assert _grid_run(lambda: _merge_grid_case(fpd, *combo)) == _grid_run(
+            lambda: _merge_grid_case(pd, *combo)
+        )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_concat_keyword_grid_matches_pandas() -> None:
+    # br-frankenpandas-5ihhi: every axis=1 case here shares a column name, and
+    # the binding read the first same-named column for both.
+    def objs(m: Any, kind: str) -> Any:
+        if kind == "frames":
+            return [m.DataFrame({"a": [1, 2], "b": [3, 4]}), m.DataFrame({"a": [5], "c": [6]})]
+        return [m.Series([1, 2], name="s"), m.Series([3], name="s")]
+
+    bad = []
+    for axis, ignore_index, join, keys, kind in itertools.product(
+        [0, 1], [False, True], ["outer", "inner"], [None, ["p", "q"]], ["frames", "series"]
+    ):
+        kw: dict[str, Any] = {"axis": axis, "ignore_index": ignore_index, "join": join}
+        if keys is not None:
+            kw["keys"] = keys
+        got = _grid_run(lambda: fpd.concat(objs(fpd, kind), **kw))
+        want = _grid_run(lambda: pd.concat(objs(pd, kind), **kw))
+        if got != ("refused",) and got != want:
+            bad.append((axis, ignore_index, join, keys, kind))
+    assert bad == []
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_duplicate_column_labels_keep_their_own_data() -> None:
+    # br-frankenpandas-5ihhi: pandas keeps every same-named column's data.
+    for m in (pd, fpd):
+        side = m.concat([m.Series([1, 2], name="s"), m.Series([3, 4], name="s")], axis=1)
+        assert [list(map(int, row)) for row in side.values] == [[1, 3], [2, 4]]
+        assert side.iloc[:, 1].tolist() == [3, 4]
+        assert side.iloc[:, [1, 0]].iloc[:, 0].tolist() == [3, 4]
+        assert side.to_dict("split")["data"] == [[1, 3], [2, 4]]
+        built = m.DataFrame([[1, 3], [2, 4]], columns=["s", "s"])
+        assert [list(map(int, row)) for row in built.values] == [[1, 3], [2, 4]]
+        assert built.iloc[:, 0].tolist() == [1, 2]
+    # NEGATIVE: distinct names are untouched.
+    assert fpd.concat([fpd.Series([1], name="a"), fpd.Series([2], name="b")], axis=1).iloc[:, 1].tolist() == [2]
