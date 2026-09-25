@@ -13996,6 +13996,103 @@ fn is_pandas_object(value: &Bound<'_, PyAny>) -> bool {
     value.is_instance_of::<PySeries>() || value.is_instance_of::<PyDataFrame>()
 }
 
+/// pandas' `is_sequence`: iterable and sized, and not a string or bytes.
+fn is_sequence(value: &Bound<'_, PyAny>) -> bool {
+    !value.is_instance_of::<pyo3::types::PyString>()
+        && !value.is_instance_of::<pyo3::types::PyBytes>()
+        && value.len().is_ok()
+        && value.try_iter().is_ok()
+}
+
+/// `frame` relabelled with `index` as its row axis, MultiIndex levels too.
+fn with_row_axis(frame: DataFrame, index: &Index) -> PyResult<DataFrame> {
+    let frame = frame.with_index(index.clone()).map_err(frame_error_to_py)?;
+    match index.row_multiindex() {
+        Some(levels) => frame
+            .with_row_multiindex(levels.clone())
+            .map_err(frame_error_to_py),
+        None => Ok(frame),
+    }
+}
+
+/// pandas' sort of a union of index labels (`Index.sort_values`): numbers
+/// by value (bools as 0 / 1), text, instants or durations, missing labels
+/// last; labels of kinds Python cannot order are its TypeError.
+fn sort_union_labels(labels: &mut [IndexLabel]) -> PyResult<()> {
+    let python_type = |label: &IndexLabel| match label {
+        IndexLabel::Int64(_) => "int",
+        IndexLabel::Float64(_) => "float",
+        IndexLabel::Bool(_) => "bool",
+        IndexLabel::Utf8(_) => "str",
+        IndexLabel::Datetime64(_) => "Timestamp",
+        IndexLabel::Timedelta64(_) => "Timedelta",
+        IndexLabel::Null(_) => "NoneType",
+    };
+    let number = |label: &IndexLabel| match label {
+        IndexLabel::Int64(v) => Some(*v as f64),
+        IndexLabel::Float64(v) => Some(v.0),
+        IndexLabel::Bool(v) => Some(f64::from(u8::from(*v))),
+        _ => None,
+    };
+    let kind = |label: &IndexLabel| {
+        if number(label).is_some() {
+            "number"
+        } else {
+            python_type(label)
+        }
+    };
+    let mut present = labels
+        .iter()
+        .filter(|label| !matches!(label, IndexLabel::Null(_)));
+    if let Some(first) = present.next()
+        && let Some(other) = present.find(|label| kind(label) != kind(first))
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "'<' not supported between instances of '{}' and '{}'",
+            python_type(other),
+            python_type(first)
+        )));
+    }
+    labels.sort_by(|a, b| match (a, b) {
+        (IndexLabel::Null(_), IndexLabel::Null(_)) => std::cmp::Ordering::Equal,
+        (IndexLabel::Null(_), _) => std::cmp::Ordering::Greater,
+        (_, IndexLabel::Null(_)) => std::cmp::Ordering::Less,
+        _ => match (number(a), number(b)) {
+            (Some(x), Some(y)) => x.total_cmp(&y),
+            _ => a.cmp(b),
+        },
+    });
+    Ok(())
+}
+
+/// pandas' `DataFrame(values, index=index, columns=names)` over a 2-D
+/// ndarray (read as its rows).
+fn frame_from_values<'py>(
+    py: Python<'py>,
+    values: &Bound<'py, PyAny>,
+    names: &[String],
+    index: &Index,
+) -> PyResult<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("columns", PyList::new(py, names)?)?;
+    // An object array (a mixed frame's values) stays object, as pandas.
+    if values
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        == "O"
+    {
+        kwargs.set_item("dtype", "object")?;
+    }
+    let rows = values.call_method0("tolist")?;
+    let built = py.get_type::<PyDataFrame>().call((rows,), Some(&kwargs))?;
+    let inner = built.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
+    PyDataFrame {
+        inner: with_row_axis(inner, index)?,
+    }
+    .into_bound_py_any(py)
+}
+
 /// `Series.agg(func, axis, *args, **kwargs)`, as pandas' `SeriesApply.agg`:
 /// a name is that reduction (any other method name is that method); a
 /// `_cython_table` callable is its name; any other callable is tried
@@ -22207,6 +22304,15 @@ impl PyDataFrame {
                 pandas_promote_int_with_missing(scalars)
             }
         };
+        // An empty list / tuple / iterable is numpy's empty float64 array
+        // in pandas (it was object).
+        let sequence_column = |scalars: Vec<Scalar>| {
+            if scalars.is_empty() && !keep_objects {
+                Column::new(DType::Float64, Vec::new())
+            } else {
+                Column::from_values(promote(scalars))
+            }
+        };
         let built = (|| -> PyResult<Self> {
             let explicit_cols = extract_columns_names(columns)?;
 
@@ -22297,15 +22403,23 @@ impl PyDataFrame {
                 let common_labels = if let Some(idx_arg) = index {
                     Some(extract_index_labels(Some(idx_arg), 0)?)
                 } else if !series_indices.is_empty() {
-                    let mut union_labels = series_indices[0].labels().to_vec();
-                    for idx in &series_indices[1..] {
-                        for lbl in idx.labels() {
-                            if !union_labels.contains(lbl) {
-                                union_labels.push(lbl.clone());
-                            }
-                        }
+                    // pandas' union_indexes: identical indexes keep their
+                    // order, others are united and SORTED (it kept the
+                    // first-seen order).
+                    let first = series_indices[0].labels();
+                    if series_indices.iter().all(|idx| idx.labels() == first) {
+                        Some(first.to_vec())
+                    } else {
+                        let mut seen = HashSet::new();
+                        let mut union_labels: Vec<IndexLabel> = series_indices
+                            .iter()
+                            .flat_map(|idx| idx.labels().iter())
+                            .filter(|label| seen.insert(*label))
+                            .cloned()
+                            .collect();
+                        sort_union_labels(&mut union_labels)?;
+                        Some(union_labels)
                     }
-                    Some(union_labels)
                 } else {
                     None
                 };
@@ -22370,7 +22484,7 @@ impl PyDataFrame {
                         // ints with a missing value are float64 with NaN, as
                         // the Series constructor already made them (the frame
                         // kept int64 with a null; DISC-011).
-                        Column::from_values(promote(scalars)).map_err(|e| {
+                        sequence_column(scalars).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?
                     } else if let Ok(tuple) = value.cast::<PyTuple>() {
@@ -22387,7 +22501,7 @@ impl PyDataFrame {
                         } else {
                             detected_nrows = Some(scalars.len());
                         }
-                        Column::from_values(promote(scalars)).map_err(|e| {
+                        sequence_column(scalars).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?
                     } else if !value.is_instance_of::<pyo3::types::PyString>()
@@ -22409,7 +22523,7 @@ impl PyDataFrame {
                         } else {
                             detected_nrows = Some(scalars.len());
                         }
-                        Column::from_values(promote(scalars)).map_err(column_error_to_py)?
+                        sequence_column(scalars).map_err(column_error_to_py)?
                     } else {
                         let scalar = py_to_scalar(py, &value)?;
                         let nr = common_labels
@@ -28311,258 +28425,394 @@ impl PyDataFrame {
         ))
     }
 
+    /// pandas' `df.apply(func, axis=0, raw=False, result_type=None, args=(),
+    /// by_row='compat', engine='python', engine_kwargs=None, **kwargs)`, as
+    /// pandas' `FrameApply`:
+    /// - a string is that method of the frame (axis passed on); a list or
+    ///   dict of functions is [`frame_agg`];
+    /// - a callable gets each column (axis=0) or row (axis=1) as a Series,
+    ///   or with raw=True as a 1-D ndarray of `df.values`, then `args` and
+    ///   `**kwargs`;
+    /// - result_type='broadcast' fills the frame's own shape and dtype;
+    /// - otherwise scalars become a Series over the other axis, and
+    ///   sequences (lists, tuples, arrays, dicts, Series) a frame as pandas'
+    ///   `wrap_results_for_axis` builds it: axis=0 one column per result
+    ///   (the frame's index when the lengths match), axis=1 with Series
+    ///   results or result_type='expand' one row per result.
+    ///
+    /// pandas' remaining shapes are a Series of Python objects (lists,
+    /// dicts), which needs object cells the columnar store does not hold
+    /// (fvsao.33): they raise NotImplementedError where a bare Python list
+    /// came back. raw and result_type were refused, `args=` reached func as
+    /// a keyword, and string / list / dict funcs raised TypeError.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (func, axis=None, raw=false, result_type=None, *args, **kwargs))]
-    fn apply(
-        &self,
-        py: Python<'_>,
-        func: &Bound<'_, PyAny>,
-        axis: Option<&Bound<'_, PyAny>>,
+    #[pyo3(signature = (func, axis=None, raw=false, result_type=None, args=None, by_row=None, engine=None, engine_kwargs=None, **kwargs))]
+    fn apply<'py>(
+        slf: &Bound<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Option<&Bound<'py, PyAny>>,
         raw: bool,
         result_type: Option<&str>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyAny>> {
-        // raw=True hands `func` numpy arrays where this passes Series, and
-        // result_type reshapes the output; neither is implemented yet.
+        args: Option<&Bound<'py, PyTuple>>,
+        by_row: Option<&Bound<'py, PyAny>>,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        if !matches!(result_type, None | Some("reduce" | "broadcast" | "expand")) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "invalid value for result_type, must be one of {None, 'reduce', 'broadcast', 'expand'}",
+            ));
+        }
+        if let Some(by_row) = by_row.filter(|value| {
+            !(value.extract::<String>().is_ok_and(|v| v == "compat")
+                || value.extract::<bool>().is_ok_and(|v| !v))
+        }) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "by_row={} not allowed",
+                by_row.str()?
+            )));
+        }
         unsupported_params(
             "DataFrame.apply",
-            &[("raw", !raw), ("result_type", result_type.is_none())],
+            &[
+                ("engine", matches!(engine, None | Some("python"))),
+                (
+                    "engine_kwargs",
+                    engine_kwargs.is_none_or(|value| value.is_none()),
+                ),
+            ],
         )?;
-        let ax: usize = match axis {
-            Some(a) => {
-                if let Ok(i) = a.extract::<usize>() {
-                    i
-                } else if let Ok(s) = a.extract::<String>() {
-                    match s.to_ascii_lowercase().as_str() {
-                        "0" | "index" | "rows" => 0,
-                        "1" | "columns" => 1,
-                        other => {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "No axis named {other} for object type DataFrame"
-                            )));
-                        }
-                    }
-                } else {
-                    0
-                }
-            }
-            None => 0,
-        };
-
-        if ax == 0 {
-            let mut res_items = Vec::new();
-            for col_name in self.inner.column_names() {
-                let s = self.column_series(col_name)?;
-                let py_s = Py::new(py, s)?;
-                let res = if args.is_empty() {
-                    let t = PyTuple::new(py, &[py_s.into_any()])?;
-                    func.call(t, kwargs)?
-                } else {
-                    let mut full_args = Vec::with_capacity(1 + args.len());
-                    full_args.push(py_s.into_any());
-                    for a in args.iter() {
-                        full_args.push(a.into_any().unbind());
-                    }
-                    let t = PyTuple::new(py, &full_args)?;
-                    func.call(t, kwargs)?
-                };
-                res_items.push((col_name.to_string(), res));
-            }
-
-            let mut scalars = Vec::new();
-            let mut all_scalars = true;
-            for (_, r) in &res_items {
-                if let Ok(sc) = py_to_scalar(py, r) {
-                    scalars.push(sc);
-                } else {
-                    all_scalars = false;
-                    break;
-                }
-            }
-            if all_scalars {
-                let labels: Vec<IndexLabel> = res_items
-                    .iter()
-                    .map(|(n, _)| IndexLabel::Utf8(n.clone()))
-                    .collect();
-                let s = Series::from_values("", labels, scalars).map_err(frame_error_to_py)?;
-                return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-            }
-
-            let mut series_cols = Vec::new();
-            let mut all_series = true;
-            for (_, r) in &res_items {
-                if let Ok(py_ser) = r.extract::<PyRef<PySeries>>() {
-                    series_cols.push(py_ser.inner.clone());
-                } else {
-                    all_series = false;
-                    break;
-                }
-            }
-            if all_series && !series_cols.is_empty() {
-                let idx = series_cols[0].index().clone();
-                let mut col_map = BTreeMap::new();
-                let mut col_order = Vec::with_capacity(res_items.len());
-                for (i, (name, _)) in res_items.iter().enumerate() {
-                    col_map.insert(name.clone(), series_cols[i].column().clone());
-                    col_order.push(name.clone());
-                }
-                let df = DataFrame::new_with_column_order(idx, col_map, col_order)
-                    .map_err(frame_error_to_py)?;
-                return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
-            }
-
-            let list = PyList::new(py, res_items.into_iter().map(|(_, r)| r))?;
-            return Ok(list.into_any().unbind());
-        }
-
-        // ax == 1: Apply row-by-row
-        let (nrows, ncols) = self.inner.shape();
-        let col_names = self.inner.column_names();
-        let col_labels: Vec<IndexLabel> = col_names
-            .iter()
-            .map(|n| IndexLabel::Utf8(n.to_string()))
-            .collect();
-        let mut cols_vals = Vec::with_capacity(ncols);
-        for pos in 0..ncols {
-            let col = self.inner.column_at(pos).expect("col in bounds");
-            cols_vals.push(col.values());
-        }
-
-        let mut row_results = Vec::with_capacity(nrows);
-        for r in 0..nrows {
-            let row_scalars: Vec<Scalar> = (0..ncols).map(|c| cols_vals[c][r].clone()).collect();
-            let row_label = self
-                .inner
-                .index()
-                .labels()
-                .get(r)
-                .cloned()
-                .unwrap_or(IndexLabel::Int64(r as i64));
-            let s = Series::from_values(row_label.to_string(), col_labels.clone(), row_scalars)
-                .map_err(frame_error_to_py)?;
-            let py_s = Py::new(py, PySeries { inner: s })?;
-            let res = if args.is_empty() {
-                let t = PyTuple::new(py, &[py_s.into_any()])?;
-                func.call(t, kwargs)?
-            } else {
-                let mut full_args = Vec::with_capacity(1 + args.len());
-                full_args.push(py_s.into_any());
-                for a in args.iter() {
-                    full_args.push(a.into_any().unbind());
-                }
-                let t = PyTuple::new(py, &full_args)?;
-                func.call(t, kwargs)?
+        let args = args.cloned().unwrap_or_else(|| PyTuple::empty(py));
+        // A method name: that method, axis passed on (pandas' apply_str).
+        if let Ok(name) = func.extract::<String>() {
+            let call_kwargs = match kwargs {
+                Some(given) => given.copy()?,
+                None => PyDict::new(py),
             };
-            row_results.push(res);
-        }
-
-        let mut scalars = Vec::with_capacity(nrows);
-        let mut all_scalars = true;
-        for r in &row_results {
-            // A Series result expands into columns below, even a one-element
-            // Series that converts to a float (fvsao.30).
-            if is_pandas_object(r) {
-                all_scalars = false;
-                break;
+            if ax != 0 {
+                call_kwargs.set_item("axis", ax)?;
             }
-            if let Ok(sc) = py_to_scalar(py, r) {
-                scalars.push(sc);
+            return slf.getattr(name.as_str())?.call(args, Some(&call_kwargs));
+        }
+        // Several functions: DataFrame.agg (pandas' apply_list_or_dict_like).
+        if !func.is_callable() {
+            return frame_agg(slf, func, ax, &args, kwargs);
+        }
+        let frame = slf.borrow().inner.clone();
+        let (nrows, ncols) = frame.shape();
+        let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+        let column_labels: Vec<IndexLabel> = names
+            .iter()
+            .map(|name| IndexLabel::Utf8(name.clone()))
+            .collect();
+        let row_index = frame_row_index(&frame)?;
+        let column_index = Index::new(column_labels.clone());
+        // The results label the other axis; each piece runs `along` one.
+        let (count, along, result_index) = if ax == 0 {
+            (ncols, nrows, &column_index)
+        } else {
+            (nrows, ncols, &row_index)
+        };
+        let np = py.import("numpy")?;
+        let empty_series = |index: Index| -> PyResult<Bound<'py, PyAny>> {
+            let column = Column::new(DType::Float64, vec![Scalar::Float64(f64::NAN); index.len()])
+                .map_err(column_error_to_py)?;
+            PySeries {
+                inner: Series::new("", index, column).map_err(frame_error_to_py)?,
+            }
+            .into_bound_py_any(py)
+        };
+        // An empty axis: pandas' apply_empty_result calls func on an empty
+        // float Series to see whether it reduces.
+        if result_type != Some("broadcast") && (nrows == 0 || ncols == 0) {
+            if !matches!(result_type, None | Some("reduce")) {
+                return PyDataFrame { inner: frame }.into_bound_py_any(py);
+            }
+            let probe = || {
+                let piece = if ax == 0 {
+                    empty_series(Index::new(Vec::new()))?
+                } else {
+                    empty_series(column_index.clone())?
+                };
+                func.call(prepend_arg(piece, Some(&args))?, kwargs)
+            };
+            let reduces = result_type == Some("reduce")
+                || probe().is_ok_and(|result| !result.is_instance_of::<PySeries>());
+            if !reduces {
+                return PyDataFrame { inner: frame }.into_bound_py_any(py);
+            }
+            let value = if result_index.is_empty() {
+                Scalar::Float64(f64::NAN)
             } else {
-                all_scalars = false;
-                break;
-            }
-        }
-        if all_scalars {
-            let s = Series::from_values("", self.inner.index().labels().to_vec(), scalars)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
-        }
-
-        let mut series_rows = Vec::new();
-        let mut all_series = true;
-        for r in &row_results {
-            if let Ok(py_ser) = r.extract::<PyRef<PySeries>>() {
-                series_rows.push(py_ser.inner.clone());
+                py_to_scalar(
+                    py,
+                    &func.call(
+                        prepend_arg(empty_series(Index::new(Vec::new()))?, Some(&args))?,
+                        kwargs,
+                    )?,
+                )?
+            };
+            let column = if result_index.is_empty() {
+                Column::new(DType::Float64, Vec::new())
             } else {
-                all_series = false;
-                break;
+                Column::from_values(vec![value; result_index.len()])
             }
+            .map_err(column_error_to_py)?;
+            return PySeries {
+                inner: Series::new("", result_index.clone(), column).map_err(frame_error_to_py)?,
+            }
+            .into_bound_py_any(py);
         }
-        if all_series && !series_rows.is_empty() {
-            let new_col_names: Vec<String> = series_rows[0]
-                .index()
-                .labels()
+        // raw=True pieces are the 1-D slices of `df.values` (its common
+        // dtype), as np.apply_along_axis hands them over.
+        let values = if raw && result_type != Some("broadcast") {
+            Some(slf.getattr("values")?)
+        } else {
+            None
+        };
+        let cells: Vec<&[Scalar]> = (0..ncols)
+            .map(|position| {
+                frame
+                    .column_at(position)
+                    .map(Column::values)
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>(position))
+            })
+            .collect::<PyResult<_>>()?;
+        let mut results = Vec::with_capacity(count);
+        for position in 0..count {
+            let piece = match (&values, ax) {
+                (Some(values), 0) => values.get_item((pyo3::types::PySlice::full(py), position))?,
+                (Some(values), _) => values.get_item(position)?,
+                (None, 0) => PySeries {
+                    inner: Series::new(
+                        &names[position],
+                        frame.series_index(),
+                        frame.column_at(position).cloned().ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyIndexError, _>(position)
+                        })?,
+                    )
+                    .map_err(frame_error_to_py)?,
+                }
+                .into_bound_py_any(py)?,
+                (None, _) => {
+                    let label = frame.index().labels()[position].clone();
+                    let row = cells
+                        .iter()
+                        .map(|column| column[position].clone())
+                        .collect();
+                    PySeries {
+                        inner: Series::from_values(label.to_string(), column_labels.clone(), row)
+                            .map_err(frame_error_to_py)?,
+                    }
+                    .into_bound_py_any(py)?
+                }
+            };
+            results.push(func.call(prepend_arg(piece, Some(&args))?, kwargs)?);
+        }
+        // result_type='broadcast': pandas fills np.empty_like(df.values) -
+        // the frame's own shape and dtype - with each result, a scalar or a
+        // 1-D sequence as long as the axis.
+        if result_type == Some("broadcast") {
+            let out = np.call_method1("empty_like", (slf.getattr("values")?,))?;
+            for (position, result) in results.iter().enumerate() {
+                let array = np.call_method1("asarray", (result,))?;
+                let ndim: usize = array.getattr("ndim")?.extract()?;
+                if ndim > 1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "too many dims to broadcast",
+                    ));
+                }
+                if ndim == 1 && array.len()? != along {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "cannot broadcast result",
+                    ));
+                }
+                if ax == 0 {
+                    out.set_item((pyo3::types::PySlice::full(py), position), array)?;
+                } else {
+                    out.set_item(position, array)?;
+                }
+            }
+            return frame_from_values(py, &out, &names, &row_index);
+        }
+        // raw=True: np.apply_along_axis - 1-D results lie along the axis and
+        // keep the frame's shape; scalars fall through to a Series.
+        if raw {
+            let arrays = results
                 .iter()
-                .map(|l| l.to_string())
-                .collect();
-            let mut col_data: Vec<Vec<Scalar>> = (0..new_col_names.len())
-                .map(|_| Vec::with_capacity(nrows))
-                .collect();
-            for s in &series_rows {
-                let vals = s.column().values();
-                for (ci, v) in vals.iter().enumerate() {
-                    if ci < col_data.len() {
-                        col_data[ci].push(v.clone());
-                    }
+                .map(|result| np.call_method1("asarray", (result,)))
+                .collect::<PyResult<Vec<_>>>()?;
+            let vectors = arrays
+                .iter()
+                .map(|array| array.getattr("ndim")?.extract::<usize>())
+                .collect::<PyResult<Vec<_>>>()?;
+            if vectors.iter().any(|&ndim| ndim > 1)
+                || (vectors.contains(&1) && vectors.contains(&0))
+            {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "setting an array element with a sequence.",
+                ));
+            }
+            if vectors.contains(&1) {
+                let stack = if ax == 0 { "column_stack" } else { "vstack" };
+                let stacked = np.call_method1(stack, (PyList::new(py, &arrays)?,))?;
+                let (rows, columns): (usize, usize) = stacked.getattr("shape")?.extract()?;
+                if (rows, columns) != (nrows, ncols) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Shape of passed values is ({rows}, {columns}), indices imply ({nrows}, {ncols})"
+                    )));
                 }
+                return frame_from_values(py, &stacked, &names, &row_index);
             }
-            let mut col_map = BTreeMap::new();
-            for (ci, name) in new_col_names.iter().enumerate() {
-                let col = Column::from_values(col_data[ci].clone()).map_err(column_error_to_py)?;
-                col_map.insert(name.clone(), col);
-            }
-            let df = DataFrame::new_with_column_order(
-                self.inner.index().clone(),
-                col_map,
-                new_col_names,
+        }
+        let object_cells = || {
+            not_implemented(
+                "DataFrame.apply whose result is a Series of lists / dicts / tuples (object cells; fvsao.33)",
             )
-            .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
-        }
-
-        let mut dict_rows = Vec::new();
-        let mut all_dicts = true;
-        for r in &row_results {
-            if let Ok(d) = r.cast::<PyDict>() {
-                dict_rows.push(d);
-            } else {
-                all_dicts = false;
-                break;
-            }
-        }
-        if all_dicts && !dict_rows.is_empty() {
-            let mut seen_keys = Vec::new();
-            for d in &dict_rows {
-                for k in d.keys() {
-                    if let Ok(k_str) = k.extract::<String>() {
-                        if !seen_keys.contains(&k_str) {
-                            seen_keys.push(k_str);
-                        }
-                    }
-                }
-            }
-            let mut col_map = BTreeMap::new();
-            for k in &seen_keys {
-                let mut col_vals = Vec::with_capacity(nrows);
-                for d in &dict_rows {
-                    if let Some(item) = d.get_item(k)? {
-                        col_vals.push(py_to_scalar(py, &item)?);
+        };
+        // Scalars (pandas decides on the first result): a Series over the
+        // other axis.
+        if !results.first().is_some_and(|first| is_sequence(first)) {
+            let cells = results
+                .iter()
+                .map(|result| {
+                    if is_sequence(result) {
+                        Err(object_cells())
                     } else {
-                        col_vals.push(Scalar::Float64(f64::NAN));
+                        py_to_scalar(py, result)
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let column = Column::from_values(cells).map_err(column_error_to_py)?;
+            return PySeries {
+                inner: Series::new("", result_index.clone(), column).map_err(frame_error_to_py)?,
+            }
+            .into_bound_py_any(py);
+        }
+        let all_series = results
+            .iter()
+            .all(|result| result.is_instance_of::<PySeries>());
+        let any_series = results
+            .iter()
+            .any(|result| result.is_instance_of::<PySeries>());
+        let all_dicts = results
+            .iter()
+            .all(|result| result.is_instance_of::<PyDict>());
+        let any_dict = results
+            .iter()
+            .any(|result| result.is_instance_of::<PyDict>());
+        let data = PyDict::new(py);
+        if ax == 0 {
+            // pandas' FrameRowApply.wrap_results_for_axis: 'reduce' and
+            // all-dict results are a Series of them; otherwise one column
+            // per result, and sequences of unequal length are a Series of
+            // them.
+            if result_type == Some("reduce") || (result_type.is_none() && all_dicts) {
+                return Err(object_cells());
+            }
+            if any_series != all_series || any_dict {
+                return Err(object_cells());
+            }
+            if !all_series {
+                let lengths = results
+                    .iter()
+                    .map(|result| result.len())
+                    .collect::<PyResult<Vec<_>>>()?;
+                if lengths.windows(2).any(|pair| pair[0] != pair[1]) {
+                    return Err(object_cells());
+                }
+            }
+            if names.iter().collect::<HashSet<_>>().len() != names.len() {
+                return Err(not_implemented(
+                    "DataFrame.apply returning sequences over duplicate column names",
+                ));
+            }
+            for (name, result) in names.iter().zip(&results) {
+                data.set_item(name, result)?;
+            }
+            let built = py.get_type::<PyDataFrame>().call1((data,))?;
+            let mut inner = built.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
+            if !all_series && inner.len() == nrows {
+                inner = with_row_axis(inner, &row_index)?;
+            }
+            return PyDataFrame { inner }.into_bound_py_any(py);
+        }
+        // pandas' FrameColumnApply.wrap_results_for_axis: Series results, or
+        // any sequences under 'expand', become one row each (a frame over
+        // the results, transposed); other sequences are a Series of them.
+        if result_type != Some("expand") && !results[0].is_instance_of::<PySeries>() {
+            return Err(object_cells());
+        }
+        // Dicts: a column per key in first-seen order, missing where a row
+        // lacks it. pandas builds them through a transpose, so numbers share
+        // one dtype: all floats once any row has a float or a missing key.
+        if all_dicts {
+            let mut keys: Vec<Bound<'py, PyAny>> = Vec::new();
+            for result in &results {
+                for key in result.cast::<PyDict>()?.keys() {
+                    if !keys.iter().any(|seen| seen.eq(&key).unwrap_or(false)) {
+                        keys.push(key);
                     }
                 }
-                let col = Column::from_values(col_vals).map_err(column_error_to_py)?;
-                col_map.insert(k.clone(), col);
             }
-            let df =
-                DataFrame::new_with_column_order(self.inner.index().clone(), col_map, seen_keys)
-                    .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
+            let mut cells = Vec::with_capacity(keys.len());
+            for key in &keys {
+                let mut column = Vec::with_capacity(results.len());
+                for result in &results {
+                    column.push(match result.cast::<PyDict>()?.get_item(key)? {
+                        Some(value) => py_to_scalar(py, &value)?,
+                        None => Scalar::Null(NullKind::NaN),
+                    });
+                }
+                cells.push(column);
+            }
+            let numeric = cells.iter().flatten().all(|value| {
+                matches!(
+                    value,
+                    Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Null(_)
+                )
+            });
+            if numeric
+                && cells
+                    .iter()
+                    .flatten()
+                    .any(|value| matches!(value, Scalar::Float64(_) | Scalar::Null(_)))
+            {
+                for value in cells.iter_mut().flatten() {
+                    if let Scalar::Int64(v) = value {
+                        *value = Scalar::Float64(*v as f64);
+                    }
+                }
+            }
+            let mut columns = BTreeMap::new();
+            let mut order = Vec::with_capacity(keys.len());
+            for (key, column) in keys.iter().zip(cells) {
+                let name = key.str()?.to_string();
+                columns.insert(
+                    name.clone(),
+                    Column::from_values(column).map_err(column_error_to_py)?,
+                );
+                order.push(name);
+            }
+            let inner = DataFrame::new_with_column_order(row_index.clone(), columns, order)
+                .map_err(frame_error_to_py)?;
+            return PyDataFrame {
+                inner: with_row_axis(inner, &row_index)?,
+            }
+            .into_bound_py_any(py);
         }
-
-        let list = PyList::new(py, row_results)?;
-        Ok(list.into_any().unbind())
+        for (position, result) in results.iter().enumerate() {
+            data.set_item(position, result)?;
+        }
+        let built = py.get_type::<PyDataFrame>().call1((data,))?;
+        let transposed = built.extract::<PyRef<'_, PyDataFrame>>()?.transposed()?;
+        PyDataFrame {
+            inner: with_row_axis(transposed.inner, &row_index)?,
+        }
+        .into_bound_py_any(py)
     }
 
     fn applymap(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
@@ -30461,20 +30711,41 @@ impl PyDataFrame {
         write_text_target(path_or_buffer, xml, false)
     }
 
-    #[pyo3(signature = (func, axis=0, *args, **kwargs))]
-    fn transform(
-        &self,
-        py: Python<'_>,
-        func: &Bound<'_, PyAny>,
-        axis: Option<usize>,
-        args: &Bound<'_, pyo3::types::PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyAny>> {
-        let ax_obj = match axis {
-            Some(a) => Some(a.into_bound_py_any(py)?),
-            None => None,
+    /// pandas' `df.transform(func, axis=0, *args, **kwargs)`: `apply`, whose
+    /// result must be indexed like the frame (pandas' ValueError otherwise;
+    /// a reduction used to come back as if it had transformed).
+    #[pyo3(signature = (func, axis=None, *args, **kwargs))]
+    fn transform<'py>(
+        slf: &Bound<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Option<&Bound<'py, PyAny>>,
+        args: &Bound<'py, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let call_kwargs = match kwargs {
+            Some(given) => given.copy()?,
+            None => PyDict::new(py),
         };
-        self.apply(py, func, ax_obj.as_ref(), false, None, args, kwargs)
+        call_kwargs.set_item(
+            "axis",
+            parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0),
+        )?;
+        call_kwargs.set_item("args", args)?;
+        let result = slf.call_method("apply", (func,), Some(&call_kwargs))?;
+        let rows = slf.borrow().inner.index().labels().to_vec();
+        let transformed = match result.extract::<PyRef<'_, PyDataFrame>>() {
+            Ok(frame) => frame.inner.index().labels() == rows,
+            Err(_) => result
+                .extract::<PyRef<'_, PySeries>>()
+                .is_ok_and(|series| series.inner.index().labels() == rows),
+        };
+        if !transformed {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Function did not transform",
+            ));
+        }
+        Ok(result)
     }
 
     /// Same as `Series.tz_convert`: the index is never tz-aware here, which is

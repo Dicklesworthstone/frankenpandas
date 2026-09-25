@@ -1163,14 +1163,18 @@ def test_dataframe_apply_axis1_and_row_returns():
     row_sums = df.apply(lambda row: row["a"] + row["b"], axis=1)
     assert list(row_sums.values) == [11, 22, 33]
 
-    # Row-wise function returning dict -> DataFrame
+    # Row-wise function returning dict -> DataFrame under result_type="expand";
+    # pandas' default is a Series of the dicts, which needs object cells
+    # (fvsao.33) and raises (it used to expand the dicts regardless).
     def row_transform(row):
         return {"sum": row["a"] + row["b"], "diff": row["b"] - row["a"]}
 
-    df_out = df.apply(row_transform, axis=1)
+    df_out = df.apply(row_transform, axis=1, result_type="expand")
     assert isinstance(df_out, fpd.DataFrame)
     assert list(df_out["sum"].values) == [11, 22, 33]
     assert list(df_out["diff"].values) == [9, 18, 27]
+    with pytest.raises(NotImplementedError):
+        df.apply(row_transform, axis=1)
 
 
 def test_series_map_na_action_and_mapping():
@@ -2763,6 +2767,8 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
     [
         lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), values=fpd.Series([1]), aggfunc="sum"),
         lambda: _hd(fpd).groupby("a").value_counts(normalize=True),
+        # pandas' Series of lists: object cells (fvsao.33); it returned a bare list.
+        lambda: _hd(fpd).apply(lambda r: [r["a"], r["b"]], axis=1),
         lambda: _hs(fpd).interpolate(method="nearest", limit_direction="both"),
         lambda: _hs(fpd).to_string(float_format="{:.1f}".format),
         lambda: _hs(fpd).view("int64"),
@@ -7033,3 +7039,90 @@ def _wire_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_WIRE_CASES))
 def test_centered_windows_reindex_fill_dayfirst_and_groupby_apply_match_pandas(case: str) -> None:
     assert _wire_outcome(fpd, case) == _wire_outcome(pd, case), case
+
+
+def _typed(r: Any) -> Any:
+    """`_shaped` plus the dtypes."""
+    dtypes = [str(d) for d in r.dtypes] if hasattr(r, "columns") else str(r.dtype)
+    return (_shaped(r), dtypes)
+
+
+def _xy(m: Any) -> Any:
+    return m.DataFrame({"x": [1, 2], "y": [3, 4]}, index=["r", "s"])
+
+
+# DataFrame.apply modelled only scalar and Series results: a list / tuple /
+# dict result came back as a bare Python list, axis=1 dicts were expanded,
+# raw= and result_type= were refused, args= reached func as a keyword and a
+# string / list / dict func raised TypeError; transform accepted reductions.
+# The DataFrame constructor kept a dict of differently indexed Series in
+# first-seen order (pandas sorts the union) and made an empty list object.
+_FRAME_APPLY_CASES = {
+    "axis0 scalar": lambda m: _typed(_xy(m).apply(lambda c: c.sum())),
+    "axis0 list same length": lambda m: _typed(_xy(m).apply(lambda c: [1, 2])),
+    "axis0 list other length": lambda m: _typed(_xy(m).apply(lambda c: [1, 2, 3])),
+    "axis0 tuple": lambda m: _typed(_xy(m).apply(lambda c: (c.sum(), c.max()))),
+    "axis0 series": lambda m: _typed(_xy(m).apply(lambda c: c * 2)),
+    "axis0 series other index": lambda m: _typed(_xy(m).apply(lambda c: m.Series({"a": c.sum(), "b": c.max()}))),
+    "axis0 series union sorted": lambda m: _typed(_xy(m).apply(lambda c: m.Series({"b": c.sum()}) if c.name == "x" else m.Series({"a": c.max()}))),
+    "axis1 scalar": lambda m: _typed(_xy(m).apply(lambda r: r.sum(), axis=1)),
+    "axis1 row name": lambda m: _xy(m).apply(lambda r: r.name, axis=1).tolist(),
+    "axis1 series": lambda m: _typed(_xy(m).apply(lambda r: m.Series({"a": r["x"], "b": r["y"]}), axis=1)),
+    "axis1 series union": lambda m: _typed(_xy(m).apply(lambda r: m.Series({"b": r["x"]}) if r.name == "r" else m.Series({"a": r["y"]}), axis=1)),
+    "axis1 expand list": lambda m: _typed(_xy(m).apply(lambda r: [r["x"], r["y"] * 2], axis=1, result_type="expand")),
+    "axis1 expand dict": lambda m: _typed(_xy(m).apply(lambda r: {"a": r["x"]}, axis=1, result_type="expand")),
+    "axis1 expand dict union": lambda m: _typed(_xy(m).apply(lambda r: {"b": r["x"]} if r.name == "r" else {"a": r["y"], "b": 0}, axis=1, result_type="expand")),
+    "axis1 expand scalar": lambda m: _typed(_xy(m).apply(lambda r: r.sum(), axis=1, result_type="expand")),
+    "axis1 reduce series": lambda m: _typed(_xy(m).apply(lambda r: r * 2, axis=1, result_type="reduce")),
+    "axis0 expand list": lambda m: _typed(_xy(m).apply(lambda c: [1, 2, 3], result_type="expand")),
+    "broadcast axis1 list": lambda m: _typed(_xy(m).apply(lambda r: [r["x"], r["y"] * 2], axis=1, result_type="broadcast")),
+    "broadcast axis1 scalar": lambda m: _typed(_xy(m).apply(lambda r: r.sum(), axis=1, result_type="broadcast")),
+    "broadcast axis0 scalar": lambda m: _typed(_xy(m).apply(lambda c: c.sum(), result_type="broadcast")),
+    "broadcast float into int": lambda m: _typed(_xy(m).apply(lambda c: c.mean(), result_type="broadcast")),
+    "broadcast mixed dtypes": lambda m: _typed(m.DataFrame({"x": [1, 2], "s": ["a", "b"]}).apply(lambda c: c.iloc[0], result_type="broadcast")),
+    "raw false gets series": lambda m: _typed(_xy(m).apply(lambda a: type(a).__name__ + str(a.sum()))),
+    "raw axis0 ndarray": lambda m: _typed(_xy(m).apply(lambda a: type(a).__name__ + str(a.sum()), raw=True)),
+    "raw axis1": lambda m: _typed(_xy(m).apply(lambda a: a[0] * 10 + a[1], axis=1, raw=True)),
+    "raw array result": lambda m: _typed(_xy(m).apply(lambda a: a * 2, raw=True)),
+    "raw axis1 array result": lambda m: _typed(_xy(m).apply(lambda a: a * 2, axis=1, raw=True)),
+    "raw mixed int float": lambda m: _typed(m.DataFrame({"x": [1, 2], "y": [0.5, 1.5]}).apply(lambda a: a.dtype.kind, axis=1, raw=True)),
+    "empty frame reduces": lambda m: _typed(m.DataFrame({"x": []}).apply(lambda c: c.sum())),
+    "empty axis1": lambda m: _typed(m.DataFrame({"x": [], "y": []}).apply(lambda r: r.sum(), axis=1)),
+    "empty keeps frame": lambda m: _typed(m.DataFrame({"x": []}).apply(lambda c: c * 2)),
+    "args and kwargs": lambda m: _typed(_xy(m).apply(lambda c, k, z=0: c.sum() * k + z, args=(2,), z=1)),
+    "string func": lambda m: _typed(_xy(m).apply("sum")),
+    "string func axis1": lambda m: _typed(_xy(m).apply("sum", axis=1)),
+    "list funcs": lambda m: _typed(_xy(m).apply(["sum", "max"])),
+    "dict funcs": lambda m: _typed(_xy(m).apply({"x": "sum"})),
+    "numpy ufunc": lambda m: _typed(_xy(m).apply(np.sqrt)),
+    "numpy reduction": lambda m: _typed(_xy(m).apply(np.sum)),
+    "transform lambda": lambda m: _typed(_xy(m).transform(lambda c: c * 2)),
+    "transform string": lambda m: _typed(_xy(m).transform("cumsum")),
+    "transform axis1": lambda m: _typed(_xy(m).transform(lambda r: r - r.min(), axis=1)),
+    "frame from differently indexed series": lambda m: _typed(m.DataFrame({"x": m.Series({"b": 3, "c": 1}), "y": m.Series({"c": 4, "b": 2})})),
+    "frame from same indexed series": lambda m: _typed(m.DataFrame({"x": m.Series({"b": 3, "a": 1}), "y": m.Series({"b": 4, "a": 2})})),
+    "frame from empty list": lambda m: _typed(m.DataFrame({"x": []})),
+    # NEGATIVES
+    "empty list object dtype": lambda m: _typed(m.DataFrame({"x": []}, dtype=object)),
+    "bad result_type": lambda m: _xy(m).apply(lambda c: c, result_type="bogus"),
+    "broadcast wrong length": lambda m: _xy(m).apply(lambda r: [1, 2, 3], axis=1, result_type="broadcast"),
+    "raw wrong length": lambda m: _xy(m).apply(lambda a: [1, 2, 3], raw=True),
+    "expand ragged": lambda m: _xy(m).apply(lambda r: [1] if r.name == "r" else [1, 2], axis=1, result_type="expand"),
+    "by_row bad": lambda m: _xy(m).apply(lambda c: c.sum(), by_row="x"),
+    "transform reduction": lambda m: _xy(m).transform(lambda c: c.sum()),
+    "transform string reduction": lambda m: _xy(m).transform("sum"),
+    "series union mixed labels": lambda m: m.DataFrame({"x": m.Series({"b": 3}), "y": m.Series({"a": 4, 1: 5})}),
+}
+
+
+def _frame_apply_outcome(m: Any, case: str) -> Any:
+    try:
+        return _FRAME_APPLY_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FRAME_APPLY_CASES))
+def test_frame_apply_result_shapes_raw_broadcast_and_transform_match_pandas(case: str) -> None:
+    assert _frame_apply_outcome(fpd, case) == _frame_apply_outcome(pd, case), case
