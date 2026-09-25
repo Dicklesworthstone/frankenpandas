@@ -5577,6 +5577,38 @@ def test_agg_with_callables_lists_and_dicts_matches_pandas(case: str) -> None:
     assert _agg_outcome(fpd, case) == _agg_outcome(pd, case), case
 
 
+_QUERY_GLOBAL_LIMIT = 40
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_query_and_eval_resolve_at_references_like_pandas() -> None:
+    # fvsao.28: every @name raised "unknown local reference" - the binding
+    # never resolved the caller's variables.
+    cities = ["LA", "SF"]
+    name_q = "Bob"
+    series_ref = None
+    outcomes = {}
+    for m in (pd, fpd):
+        df = m.DataFrame({"name": ["Ann", "Bob", "Cid"], "city": ["NYC", "LA", "SF"], "age": [34, 45, 29]})
+        series_ref = m.Series(["NYC"])
+        got = {
+            "@local scalar": df.query("name == @name_q")["name"].tolist(),
+            "@global scalar": df.query("age > @_QUERY_GLOBAL_LIMIT")["name"].tolist(),
+            "@list in": df.query("city in @cities")["name"].tolist(),
+            "@Series in": df.query("city in @series_ref")["name"].tolist(),
+            "@ in quotes is text": df.query("name != 'a@b'")["name"].tolist(),
+            "local_dict": df.query("age < @x", local_dict={"x": 40})["name"].tolist(),
+            "eval @": df.eval("age + @_QUERY_GLOBAL_LIMIT").tolist(),
+            "eval assign @": df.eval("older = age + @_QUERY_GLOBAL_LIMIT")["older"].tolist(),
+        }
+        # NEGATIVE: an undefined name is pandas' UndefinedVariableError.
+        with pytest.raises(Exception) as excinfo:
+            df.query("age < @nope")
+        got["undefined"] = (type(excinfo.value).__name__, str(excinfo.value))
+        outcomes[m.__name__] = got
+    assert outcomes["frankenpandas"] == outcomes["pandas"]
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_agg_numpy_callable_warns_like_pandas() -> None:
     import warnings

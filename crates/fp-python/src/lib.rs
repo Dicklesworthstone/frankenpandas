@@ -12347,6 +12347,116 @@ fn named_agg_spec<'py>(
     Ok(Some(spec.clone()))
 }
 
+/// pandas' `@name` references in a `query` / `eval` expression, resolved as
+/// pandas resolves them: `local_dict`, then the calling frame's locals, then
+/// `global_dict` or the frame's globals (`level` frames further up). A scalar
+/// becomes an fp-expr local binding; a list-like is written into the text as
+/// a list literal (fp-expr parses `in [...]`); an undefined name is pandas'
+/// UndefinedVariableError. Every `@name` raised "unknown local reference"
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.28).
+fn resolve_expr_locals(
+    py: Python<'_>,
+    expr: &str,
+    local_dict: Option<&Bound<'_, PyDict>>,
+    global_dict: Option<&Bound<'_, PyDict>>,
+    level: usize,
+) -> PyResult<(String, BTreeMap<String, Scalar>)> {
+    let mut text = String::with_capacity(expr.len());
+    let mut locals = BTreeMap::new();
+    let mut frame: Option<Bound<'_, PyAny>> = None;
+    let mut quote: Option<char> = None;
+    let mut chars = expr.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        if let Some(open) = quote {
+            text.push(c);
+            if c == open {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(c, '\'' | '"' | '`') {
+            quote = Some(c);
+            text.push(c);
+            continue;
+        }
+        if c != '@' {
+            text.push(c);
+            continue;
+        }
+        let mut name = String::new();
+        while let Some(&(_, next)) = chars.peek() {
+            if next.is_alphanumeric() || next == '_' {
+                name.push(next);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let mut value = local_dict.map(|d| d.get_item(&name)).transpose()?.flatten();
+        if value.is_none() {
+            let caller = match &frame {
+                Some(caller) => caller.clone(),
+                None => {
+                    let caller = py.import("sys")?.call_method1("_getframe", (level,))?;
+                    frame = Some(caller.clone());
+                    caller
+                }
+            };
+            let frame_locals = caller.getattr("f_locals")?;
+            if frame_locals.contains(&name)? {
+                value = Some(frame_locals.get_item(&name)?);
+            } else {
+                let globals = match global_dict {
+                    Some(globals) => globals.clone().into_any(),
+                    None => caller.getattr("f_globals")?,
+                };
+                if globals.contains(&name)? {
+                    value = Some(globals.get_item(&name)?);
+                }
+            }
+        }
+        let Some(value) = value else {
+            return Err(PyErr::new::<UndefinedVariableError, _>(format!(
+                "local variable '{name}' is not defined"
+            )));
+        };
+        let listed = value.is_instance_of::<PyList>()
+            || value.is_instance_of::<PyTuple>()
+            || value.is_instance_of::<pyo3::types::PySet>()
+            || is_pandas_object(&value)
+            || value.get_type().name()?.to_str()?.ends_with("Index")
+            || value.get_type().name()? == "ndarray";
+        if listed {
+            let items = value
+                .try_iter()?
+                .map(|item| {
+                    Ok(match py_to_scalar(py, &item?)? {
+                        Scalar::Utf8(text) => {
+                            pyo3::types::PyString::new(py, &text).repr()?.to_string()
+                        }
+                        Scalar::Int64(value) => value.to_string(),
+                        Scalar::Float64(value) => format!("{value:?}"),
+                        Scalar::Bool(value) => if value { "True" } else { "False" }.to_owned(),
+                        other => {
+                            return Err(not_implemented(&format!(
+                                "query/eval with @{name} holding {other:?}"
+                            )));
+                        }
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            text.push('[');
+            text.push_str(&items.join(", "));
+            text.push(']');
+        } else {
+            locals.insert(name.clone(), py_to_scalar(py, &value)?);
+            text.push('@');
+            text.push_str(&name);
+        }
+    }
+    Ok((text, locals))
+}
+
 /// One window of `Rolling.apply` / `Expanding.apply` as pandas hands it to
 /// the function: a Series under the window's labels (`raw=False`), or a
 /// numpy array (`raw=True`). It was a Python list, so `x.max()` raised and
@@ -24387,11 +24497,26 @@ impl PyDataFrame {
     /// Query the columns of a DataFrame with a boolean expression; pandas'
     /// `inplace=True` replaces the frame and returns None
     /// (br-frankenpandas-n57tz).
-    #[pyo3(signature = (expr, inplace=false))]
-    fn query(&mut self, expr: &str, inplace: bool) -> PyResult<Option<PyDataFrame>> {
+    /// `@name` references resolve as pandas' (see [`resolve_expr_locals`]);
+    /// every engine / parser pandas takes gives the same rows here.
+    #[pyo3(signature = (expr, inplace=false, local_dict=None, global_dict=None, level=0, engine=None, parser=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn query(
+        &mut self,
+        py: Python<'_>,
+        expr: &str,
+        inplace: bool,
+        local_dict: Option<&Bound<'_, PyDict>>,
+        global_dict: Option<&Bound<'_, PyDict>>,
+        level: usize,
+        engine: Option<&str>,
+        parser: Option<&str>,
+    ) -> PyResult<Option<PyDataFrame>> {
+        let _ = (engine, parser);
+        let (expr, locals) = resolve_expr_locals(py, expr, local_dict, global_dict, level)?;
         let res = self
             .inner
-            .query(expr)
+            .query_with_locals(&expr, &locals)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         if inplace {
             self.inner = res;
@@ -24404,8 +24529,22 @@ impl PyDataFrame {
     /// pandas' `inplace=True` an assignment (`c = a + b`) adds the column to
     /// this frame and returns None; without one it is pandas' ValueError
     /// (br-frankenpandas-n57tz).
-    #[pyo3(signature = (expr, inplace=false))]
-    fn eval(&mut self, py: Python<'_>, expr: &str, inplace: bool) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (expr, inplace=false, local_dict=None, global_dict=None, level=0, engine=None, parser=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn eval(
+        &mut self,
+        py: Python<'_>,
+        expr: &str,
+        inplace: bool,
+        local_dict: Option<&Bound<'_, PyDict>>,
+        global_dict: Option<&Bound<'_, PyDict>>,
+        level: usize,
+        engine: Option<&str>,
+        parser: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (engine, parser);
+        let (expr, locals) = resolve_expr_locals(py, expr, local_dict, global_dict, level)?;
+        let expr = expr.as_str();
         if let Some((target, rhs)) = expr.split_once('=') {
             let target = target.trim();
             if !target.is_empty()
@@ -24419,7 +24558,7 @@ impl PyDataFrame {
             {
                 let evaluated = self
                     .inner
-                    .eval(rhs.trim())
+                    .eval_with_locals(rhs.trim(), &locals)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                 let new_df = self
                     .inner
@@ -24439,7 +24578,7 @@ impl PyDataFrame {
         }
         let evaluated = self
             .inner
-            .eval(expr)
+            .eval_with_locals(expr, &locals)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(Py::new(py, PySeries { inner: evaluated })?.into_any())
     }
@@ -45117,10 +45256,10 @@ mod tests {
         let sh = py_df.shift(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
         assert_eq!(sh.shape(), (3, 2));
 
-        let queried = py_df
-            .query("a > 1", false)
-            .expect("query") // ubs:ignore — test fixture
-            .expect("not inplace, so a frame"); // ubs:ignore — test fixture
+        let queried =
+            Python::attach(|py| py_df.query(py, "a > 1", false, None, None, 0, None, None))
+                .expect("query") // ubs:ignore — test fixture
+                .expect("not inplace, so a frame"); // ubs:ignore — test fixture
         assert_eq!(queried.shape(), (2, 2));
 
         let dups = py_df.duplicated(None, None).expect("duplicated"); // ubs:ignore — test fixture
