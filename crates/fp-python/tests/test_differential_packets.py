@@ -5577,6 +5577,68 @@ def test_agg_with_callables_lists_and_dicts_matches_pandas(case: str) -> None:
     assert _agg_outcome(fpd, case) == _agg_outcome(pd, case), case
 
 
+def _pivot_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "city": ["NYC", "LA", "NYC", "SF", "LA"],
+            "kind": ["a", "b", "b", "a", "a"],
+            "age": [34, 45, 29, 51, 38],
+            "score": [88.5, None, 92.0, 75.25, 81.0],
+        }
+    )
+
+
+# fvsao.29: pivot_table required columns= (index/values/aggfunc alone raised),
+# took no lists or callables, and refused margins.
+_PIVOT_CASES = {
+    "no columns mean": lambda m: _pivot_frame(m).pivot_table(index="city", values="age", aggfunc="mean"),
+    "no columns int sum stays int": lambda m: _pivot_frame(m).pivot_table(index="city", values="age", aggfunc="sum"),
+    "no columns two values": lambda m: _pivot_frame(m).pivot_table(index="city", values=["age", "score"]),
+    "values None": lambda m: _pivot_frame(m)[["city", "age", "score"]].pivot_table(index="city", aggfunc="sum"),
+    "aggfunc np.sum": lambda m: _pivot_frame(m).pivot_table(index="city", values="age", aggfunc=np.sum),
+    "aggfunc count skips NaN": lambda m: _pivot_frame(m).pivot_table(index="city", values="score", aggfunc="count"),
+    "aggfunc list, function level first": lambda m: _pivot_frame(m).pivot_table(
+        index="city", values="age", aggfunc=["sum", "max"]
+    ),
+    "margins no columns": lambda m: _pivot_frame(m).pivot_table(index="city", values="age", aggfunc="sum", margins=True),
+    # NEGATIVE: a mean margin is the mean of the original rows, not of the cells.
+    "margins mean from rows": lambda m: _pivot_frame(m).pivot_table(
+        index="city", columns="kind", values="age", aggfunc="mean", margins=True
+    ),
+    "margins with columns sum": lambda m: _pivot_frame(m).pivot_table(
+        index="city", columns="kind", values="age", aggfunc="sum", margins=True
+    ),
+    "top-level pd.pivot_table": lambda m: m.pivot_table(
+        _pivot_frame(m), values="age", index="city", columns="kind", aggfunc="max"
+    ),
+    "fill_value": lambda m: _pivot_frame(m).pivot_table(
+        index="city", columns="kind", values="age", aggfunc="sum", fill_value=0
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PIVOT_CASES))
+def test_pivot_table_forms_match_pandas(case: str) -> None:
+    import warnings
+
+    def shape(r: Any) -> Any:
+        def cell(v: Any) -> Any:
+            return None if isinstance(v, float) and math.isnan(v) else (round(v, 9) if isinstance(v, float) else v)
+
+        return (
+            [str(d) for d in r.dtypes.tolist()],
+            [str(i) for i in r.index.tolist()],
+            r.index.name,
+            [str(c) for c in r.columns.tolist()],
+            [[cell(v) for v in r.iloc[:, j].tolist()] for j in range(r.shape[1])],
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert shape(_PIVOT_CASES[case](fpd)) == shape(_PIVOT_CASES[case](pd)), case
+
+
 _QUERY_GLOBAL_LIMIT = 40
 
 

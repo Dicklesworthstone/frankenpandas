@@ -24908,53 +24908,196 @@ impl PyDataFrame {
 
     /// pandas' `pivot_table`, with `fill_value` filling the cells no row
     /// reached (it was refused as an unknown keyword;
-    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13). margins,
-    /// dropna=False and sort=False are not supported yet; `observed` only
-    /// matters for categorical keys.
+    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13). Without
+    /// `columns` (pandas' most common form, which required `columns`) it is
+    /// the groupby aggregate of `values` (every other column when None) over
+    /// `index`; `margins` adds pandas' `All` row (and `All` column), each
+    /// aggregated from the original rows, not from the cells; a list of
+    /// functions puts the function level first (fvsao.29). dropna=False and
+    /// sort=False are not supported yet; `observed` only matters for
+    /// categorical keys.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (values, index, columns, aggfunc="mean", fill_value=None, margins=false, dropna=true, margins_name="All", observed=None, sort=true))]
-    fn pivot_table(
-        &self,
-        py: Python<'_>,
-        values: &str,
-        index: &str,
-        columns: &str,
-        aggfunc: &str,
-        fill_value: Option<&Bound<'_, PyAny>>,
+    #[pyo3(signature = (values=None, index=None, columns=None, aggfunc=None, fill_value=None, margins=false, dropna=true, margins_name="All", observed=None, sort=true))]
+    fn pivot_table<'py>(
+        slf: &Bound<'py, Self>,
+        values: Option<&Bound<'py, PyAny>>,
+        index: Option<&Bound<'py, PyAny>>,
+        columns: Option<&Bound<'py, PyAny>>,
+        aggfunc: Option<&Bound<'py, PyAny>>,
+        fill_value: Option<&Bound<'py, PyAny>>,
         margins: bool,
         dropna: bool,
         margins_name: &str,
         observed: Option<bool>,
         sort: bool,
-    ) -> PyResult<PyDataFrame> {
-        let _ = (margins_name, observed);
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let _ = observed;
         unsupported_params(
             "DataFrame.pivot_table",
-            &[("margins", !margins), ("dropna", dropna), ("sort", sort)],
+            &[("dropna", dropna), ("sort", sort)],
         )?;
-        let mut res = self
-            .inner
-            .pivot_table(values, index, columns, aggfunc)
-            .map_err(frame_error_to_py)?;
+        let names = |spec: Option<&Bound<'py, PyAny>>| -> PyResult<Vec<String>> {
+            match spec.filter(|spec| !spec.is_none()) {
+                None => Ok(Vec::new()),
+                Some(spec) => match spec.extract::<String>() {
+                    Ok(name) => Ok(vec![name]),
+                    Err(_) => spec.extract::<Vec<String>>(),
+                },
+            }
+        };
+        let index_keys = names(index)?;
+        let column_keys = names(columns)?;
+        if index_keys.is_empty() {
+            return Err(not_implemented("DataFrame.pivot_table without index"));
+        }
+        let mut value_names = names(values)?;
+        if value_names.is_empty() {
+            value_names = slf
+                .borrow()
+                .inner
+                .column_names()
+                .into_iter()
+                .filter(|name| !index_keys.contains(name) && !column_keys.contains(name))
+                .cloned()
+                .collect();
+        }
+        let default_func = pyo3::types::PyString::new(py, "mean").into_any();
+        let aggfunc = aggfunc.filter(|f| !f.is_none()).unwrap_or(&default_func);
+        let keyword = |key: &str, value: Bound<'py, PyAny>| -> PyResult<Bound<'py, PyDict>> {
+            let kw = PyDict::new(py);
+            kw.set_item(key, value)?;
+            Ok(kw)
+        };
+        // A list of functions: one pivot per function, the function level first.
+        if aggfunc.is_instance_of::<PyList>() || aggfunc.is_instance_of::<PyTuple>() {
+            let funcs: Vec<Bound<'py, PyAny>> = aggfunc.try_iter()?.collect::<PyResult<_>>()?;
+            let labels = funcs.iter().map(agg_label).collect::<PyResult<Vec<_>>>()?;
+            let mut results = Vec::with_capacity(funcs.len());
+            for func in &funcs {
+                results.push(Self::pivot_table(
+                    slf,
+                    values,
+                    index,
+                    columns,
+                    Some(func),
+                    fill_value,
+                    margins,
+                    dropna,
+                    margins_name,
+                    observed,
+                    sort,
+                )?);
+            }
+            return concat_side_by_side(py, results, labels);
+        }
+        let key_list = |keys: &[String]| -> PyResult<Bound<'py, PyAny>> {
+            Ok(if keys.len() == 1 {
+                pyo3::types::PyString::new(py, &keys[0]).into_any()
+            } else {
+                PyList::new(py, keys)?.into_any()
+            })
+        };
+        let values_list = PyList::new(py, &value_names)?;
+        let aggregate = |keys: &[String]| -> PyResult<Bound<'py, PyAny>> {
+            slf.call_method1("groupby", (key_list(keys)?,))?
+                .get_item(&values_list)?
+                .call_method1("agg", (aggfunc,))
+        };
+        let simple = column_keys.len() == 1
+            && index_keys.len() == 1
+            && value_names.len() == 1
+            && aggfunc.extract::<String>().is_ok();
+        let mut table = if column_keys.is_empty() {
+            aggregate(&index_keys)?
+        } else if simple {
+            let name = aggfunc.extract::<String>()?;
+            let res = slf
+                .borrow()
+                .inner
+                .pivot_table(&value_names[0], &index_keys[0], &column_keys[0], &name)
+                .map_err(frame_error_to_py)?;
+            Bound::new(py, PyDataFrame { inner: res })?.into_any()
+        } else {
+            return Err(not_implemented(
+                "DataFrame.pivot_table with several index / columns / values keys and columns=",
+            ));
+        };
         if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
             let fill = py_to_scalar(py, fill)?;
-            res = res.fillna(&fill).map_err(frame_error_to_py)?;
+            let res = table
+                .extract::<PyRef<'_, PyDataFrame>>()?
+                .inner
+                .fillna(&fill)
+                .map_err(frame_error_to_py)?;
             // pandas fills while unstacking the aggregate, so an int
             // aggregate (sum/min/max/first/last/count of an int column)
             // filled with an int stays int64.
-            let int_aggregate = self
-                .inner
-                .column(values)
-                .is_some_and(|c| c.dtype() == DType::Int64)
-                && matches!(
-                    aggfunc,
-                    "sum" | "min" | "max" | "first" | "last" | "count" | "size"
-                );
-            if int_aggregate && matches!(fill, Scalar::Int64(_)) {
-                res = res.astype(DType::Int64).map_err(frame_error_to_py)?;
-            }
+            let int_aggregate = value_names.len() == 1
+                && slf
+                    .borrow()
+                    .inner
+                    .column(&value_names[0])
+                    .is_some_and(|c| c.dtype() == DType::Int64)
+                && aggfunc.extract::<String>().is_ok_and(|name| {
+                    matches!(
+                        name.as_str(),
+                        "sum" | "min" | "max" | "first" | "last" | "count" | "size"
+                    )
+                });
+            let res = if int_aggregate && matches!(fill, Scalar::Int64(_)) {
+                res.astype(DType::Int64).map_err(frame_error_to_py)?
+            } else {
+                res
+            };
+            table = Bound::new(py, PyDataFrame { inner: res })?.into_any();
         }
-        Ok(PyDataFrame { inner: res })
+        if !margins {
+            return Ok(table);
+        }
+        if index_keys.len() != 1 {
+            return Err(not_implemented(
+                "DataFrame.pivot_table(margins=True) over several index keys",
+            ));
+        }
+        let index_name = pyo3::types::PyString::new(py, &index_keys[0]).into_any();
+        let concat = py.import("frankenpandas")?.getattr("concat")?;
+        let one_row = |cells: Bound<'py, PyDict>| -> PyResult<Bound<'py, PyAny>> {
+            let labels = PyList::new(py, [margins_name])?;
+            py.get_type::<PyDataFrame>()
+                .call((cells,), Some(&keyword("index", labels.into_any())?))
+        };
+        let totals = slf
+            .get_item(&values_list)?
+            .call_method1("agg", (aggfunc,))?;
+        let with_row = if column_keys.is_empty() {
+            let cells = PyDict::new(py);
+            for name in &value_names {
+                cells.set_item(name, PyList::new(py, [totals.get_item(name)?])?)?;
+            }
+            concat.call1((PyList::new(py, [table, one_row(cells)?])?,))?
+        } else {
+            // The All column: each index group over every column label; the
+            // All row: each column label over every index group; the corner:
+            // everything.
+            let value = &value_names[0];
+            let by_index = aggregate(&index_keys)?.get_item(value)?;
+            let by_column = aggregate(&column_keys)?.get_item(value)?;
+            table.set_item(margins_name, by_index)?;
+            let cells = PyDict::new(py);
+            for label in table.getattr("columns")?.try_iter()? {
+                let label = label?;
+                let cell = if label.eq(margins_name)? {
+                    totals.get_item(value)?
+                } else {
+                    by_column.get_item(&label)?
+                };
+                cells.set_item(label, PyList::new(py, [cell])?)?;
+            }
+            concat.call1((PyList::new(py, [table, one_row(cells)?])?,))?
+        };
+        with_row.getattr("index")?.setattr("name", index_name)?;
+        Ok(with_row)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -37290,23 +37433,22 @@ fn pivot(
 /// Create a spreadsheet-style pivot table as a DataFrame (pandas `pivot_table`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (data, values, index, columns, aggfunc="mean", fill_value=None, margins=false, dropna=true, margins_name="All", observed=None, sort=true))]
-fn pivot_table(
-    py: Python<'_>,
-    data: &PyDataFrame,
-    values: &str,
-    index: &str,
-    columns: &str,
-    aggfunc: &str,
-    fill_value: Option<&Bound<'_, PyAny>>,
+#[pyo3(signature = (data, values=None, index=None, columns=None, aggfunc=None, fill_value=None, margins=false, dropna=true, margins_name="All", observed=None, sort=true))]
+fn pivot_table<'py>(
+    data: &Bound<'py, PyDataFrame>,
+    values: Option<&Bound<'py, PyAny>>,
+    index: Option<&Bound<'py, PyAny>>,
+    columns: Option<&Bound<'py, PyAny>>,
+    aggfunc: Option<&Bound<'py, PyAny>>,
+    fill_value: Option<&Bound<'py, PyAny>>,
     margins: bool,
     dropna: bool,
     margins_name: &str,
     observed: Option<bool>,
     sort: bool,
-) -> PyResult<PyDataFrame> {
-    data.pivot_table(
-        py,
+) -> PyResult<Bound<'py, PyAny>> {
+    PyDataFrame::pivot_table(
+        data,
         values,
         index,
         columns,
