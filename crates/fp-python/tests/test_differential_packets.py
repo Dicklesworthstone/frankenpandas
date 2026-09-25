@@ -5303,3 +5303,58 @@ def _logical_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_LOGICAL_CASES))
 def test_logical_operators_and_attribute_access_match_pandas(case: str) -> None:
     assert _logical_outcome(fpd, case) == _logical_outcome(pd, case), case
+
+
+# fvsao.22: astype(object) / dtype=object stringified every value (None became
+# the string 'None', 1 became '1.0'), and DataFrame took no dtype= at all.
+_OBJECT_DTYPE_CASES = {
+    "Series(bools with None, dtype=object)": lambda m: m.Series([True, None, False], dtype=object),
+    "Series(ints with None, dtype='object')": lambda m: m.Series([1, None, 2], dtype="object"),
+    "Series(ints, dtype=np.object_)": lambda m: m.Series([1, 2], dtype=np.object_),
+    "Series(mixed, dtype='O')": lambda m: m.Series([1.5, "a", None], dtype="O"),
+    "int astype(object)": lambda m: m.Series([1, 2]).astype(object),
+    "float with NaN astype('object')": lambda m: m.Series([1.0, None]).astype("object"),
+    "astype(np.dtype('O'))": lambda m: m.Series([True, False]).astype(np.dtype("O")),
+    "astype({name: object})": lambda m: m.Series([1, 2], name="v").astype({"v": object}),
+    "category astype(object)": lambda m: m.Series(["a", "b"], dtype="category").astype(object),
+    "datetime astype(object)": lambda m: m.Series(m.to_datetime(["2024-01-01", None])).astype(object),
+    "frame astype(object)": lambda m: m.DataFrame({"a": [1, 2], "b": [1.5, None]}).astype(object),
+    "frame astype({col: object})": lambda m: m.DataFrame({"a": [1, 2], "b": [1.5, None]}).astype({"b": object}),
+    "DataFrame(dtype=object)": lambda m: m.DataFrame({"a": [1, None], "b": ["x", None]}, dtype=object),
+    "DataFrame(dtype=float)": lambda m: m.DataFrame({"a": [1, 2], "b": [3, 4]}, dtype=float),
+    "DataFrame(dtype='float64')": lambda m: m.DataFrame([[1, 2], [3, 4]], columns=["a", "b"], dtype="float64"),
+    # NEGATIVE: astype(str) still stringifies - None is the string 'None'.
+    "astype(str) stringifies None": lambda m: m.Series(["a", None]).astype(str),
+    "object isna": lambda m: m.Series([1.0, None]).astype(object).isna(),
+    "object fillna": lambda m: m.Series(["a", None], dtype=object).fillna("z"),
+    "object == 1": lambda m: m.Series([1, 2], dtype=object) == 1,
+    "object value_counts": lambda m: m.Series([1, 1, 2], dtype=object).value_counts(),
+    "object tolist types": lambda m: [type(v).__name__ for v in m.Series([1, 2.5, True], dtype=object).tolist()],
+}
+
+
+def _object_outcome(m: Any, case: str) -> Any:
+    def cell(v: Any) -> Any:
+        if v is None or v is pd.NA or (isinstance(v, float) and math.isnan(v)):
+            return ("missing", type(v).__name__)
+        return (type(v).__name__, str(v))
+
+    try:
+        r = _OBJECT_DTYPE_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+    if hasattr(r, "columns"):
+        # tolist() gives Python scalars in both (iloc gives numpy's in pandas).
+        return (
+            [str(d) for d in r.dtypes.tolist()],
+            [[cell(v) for v in r[c].tolist()] for c in r.columns],
+        )
+    if hasattr(r, "index") and hasattr(r, "tolist"):
+        return (str(r.dtype), r.name, [str(i) for i in r.index.tolist()], [cell(v) for v in r.tolist()])
+    return r
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OBJECT_DTYPE_CASES))
+def test_object_dtype_keeps_values_like_pandas(case: str) -> None:
+    assert _object_outcome(fpd, case) == _object_outcome(pd, case), case

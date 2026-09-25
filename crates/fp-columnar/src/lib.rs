@@ -11883,7 +11883,13 @@ impl Column {
         }
     }
 
-    fn from_object_values(values: Vec<Scalar>) -> Self {
+    /// A pandas object column holding `values` exactly as given: no coercion,
+    /// so ints stay ints and a missing value stays missing. `astype(object)` /
+    /// `dtype=object` need this; [`Self::new`] with `DType::Utf8` stringifies
+    /// a homogeneous column (None became the string 'None';
+    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.22).
+    #[must_use]
+    pub fn from_object_values(values: Vec<Scalar>) -> Self {
         let validity = ValidityMask::from_values(&values);
         Self {
             dtype: DType::Utf8,

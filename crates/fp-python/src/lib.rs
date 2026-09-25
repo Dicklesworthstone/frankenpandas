@@ -12576,24 +12576,56 @@ impl PySeries {
         copy: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let _ = copy; // pandas' copy= does not change the result
-        let series = match data.map(|d| d.extract::<PyRef<'_, PyCategorical>>()) {
-            Some(Ok(categorical)) => {
-                let labels = extract_index_labels(index, categorical.inner.len())?;
-                if labels.len() != categorical.inner.len() {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Length of values ({}) does not match length of index ({})",
-                        categorical.inner.len(),
-                        labels.len()
-                    )));
-                }
-                Series::new(
-                    name.unwrap_or(""),
-                    Index::new(labels),
-                    categorical.inner.column().clone(),
+        // dtype=object keeps a list's values as given; `from_data` would first
+        // make [1, None, 2] float64 (fvsao.22).
+        let object_values = match (data, dtype) {
+            (Some(data), Some(dtype))
+                if is_object_dtype_arg(dtype)
+                    && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()) =>
+            {
+                Some(
+                    data.try_iter()?
+                        .map(|value| value.and_then(|value| py_to_scalar(py, &value)))
+                        .collect::<PyResult<Vec<_>>>()?,
                 )
-                .map_err(frame_error_to_py)?
             }
-            _ => Self::from_data(py, data, index, name)?.inner,
+            _ => None,
+        };
+        let series = if let Some(values) = object_values {
+            let labels = extract_index_labels(index, values.len())?;
+            if labels.len() != values.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length of values ({}) does not match length of index ({})",
+                    values.len(),
+                    labels.len()
+                )));
+            }
+            Series::new(
+                name.unwrap_or(""),
+                Index::new(labels),
+                Column::from_object_values(values),
+            )
+            .map_err(frame_error_to_py)?
+        } else {
+            match data.map(|d| d.extract::<PyRef<'_, PyCategorical>>()) {
+                Some(Ok(categorical)) => {
+                    let labels = extract_index_labels(index, categorical.inner.len())?;
+                    if labels.len() != categorical.inner.len() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Length of values ({}) does not match length of index ({})",
+                            categorical.inner.len(),
+                            labels.len()
+                        )));
+                    }
+                    Series::new(
+                        name.unwrap_or(""),
+                        Index::new(labels),
+                        categorical.inner.column().clone(),
+                    )
+                    .map_err(frame_error_to_py)?
+                }
+                _ => Self::from_data(py, data, index, name)?.inner,
+            }
         };
         // An Index given as index= keeps its name, as pandas (it was dropped).
         let series = match index.and_then(py_index_arg_name) {
@@ -12608,6 +12640,11 @@ impl PySeries {
         let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) else {
             return Ok(PySeries { inner: series });
         };
+        if is_object_dtype_arg(dtype) {
+            return Ok(PySeries {
+                inner: object_series(&series)?,
+            });
+        }
         let target = py_dtype_arg(dtype)?;
         let inner = series
             .astype(target)
@@ -14561,10 +14598,10 @@ impl PySeries {
         errors: &str,
     ) -> PyResult<PySeries> {
         let _ = copy; // pandas' copy= does not change the result
-        let target = if let Ok(mapping) = dtype.cast::<PyDict>() {
+        let spec = if let Ok(mapping) = dtype.cast::<PyDict>() {
             let name = self.inner.name().to_owned();
             match mapping.get_item(&name)? {
-                Some(spec) if mapping.len() == 1 => py_dtype_arg(&spec)?,
+                Some(spec) if mapping.len() == 1 => spec,
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
                         "Only the Series name can be used for the key in Series dtype mappings.",
@@ -14572,9 +14609,14 @@ impl PySeries {
                 }
             }
         } else {
-            py_dtype_arg(dtype)?
+            dtype.clone()
         };
-        match self.inner.astype(target) {
+        if is_object_dtype_arg(&spec) {
+            return Ok(PySeries {
+                inner: object_series(&self.inner)?,
+            });
+        }
+        match self.inner.astype(py_dtype_arg(&spec)?) {
             Ok(inner) => Ok(PySeries { inner }),
             Err(_) if errors == "ignore" => Ok(PySeries {
                 inner: self.inner.clone(),
@@ -19237,12 +19279,13 @@ fn execute_df_mask(
 impl PyDataFrame {
     /// Create a new DataFrame from various data structures (dict, list of dicts, 2D matrix, 1D list, Series, DataFrame, scalar).
     #[new]
-    #[pyo3(signature = (data=None, index=None, columns=None))]
+    #[pyo3(signature = (data=None, index=None, columns=None, dtype=None))]
     fn new(
         py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
         columns: Option<&Bound<'_, PyAny>>,
+        dtype: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let built = (|| -> PyResult<Self> {
             let explicit_cols = extract_columns_names(columns)?;
@@ -19666,15 +19709,26 @@ impl PyDataFrame {
             ))
         })()?;
         // An Index given as index= keeps its name, as pandas (it was dropped).
-        match index.and_then(py_index_arg_name) {
+        let built = match index.and_then(py_index_arg_name) {
             Some(index_name) => {
                 let renamed = built.inner.index().rename_index(Some(&index_name));
-                Ok(PyDataFrame {
-                    inner: built.inner.with_index(renamed).map_err(frame_error_to_py)?,
-                })
+                built.inner.with_index(renamed).map_err(frame_error_to_py)?
             }
-            None => Ok(built),
-        }
+            None => built.inner,
+        };
+        // dtype= casts every column once built, as the Series constructor
+        // does; object keeps the values. The constructor took no dtype=
+        // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.22).
+        let inner = match dtype.filter(|dtype| !dtype.is_none()) {
+            None => built,
+            Some(dtype) if is_object_dtype_arg(dtype) => {
+                object_frame(&built, None).map_err(frame_error_to_py)?
+            }
+            Some(dtype) => built
+                .astype(py_dtype_arg(dtype)?)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+        };
+        Ok(PyDataFrame { inner })
     }
 
     /// Return the shape of the DataFrame as (rows, cols).
@@ -22308,6 +22362,7 @@ impl PyDataFrame {
         let _ = copy; // pandas' copy= does not change the result
         let result = if let Ok(mapping) = dtype.cast::<PyDict>() {
             let mut targets: Vec<(String, DType)> = Vec::with_capacity(mapping.len());
+            let mut objects: Vec<String> = Vec::new();
             for (column, spec) in mapping.iter() {
                 let column = column.extract::<String>()?;
                 if self.inner.column(&column).is_none() {
@@ -22319,13 +22374,21 @@ impl PyDataFrame {
                             + "' not found in columns.",
                     ));
                 }
-                targets.push((column, py_dtype_arg(&spec)?));
+                if is_object_dtype_arg(&spec) {
+                    objects.push(column);
+                } else {
+                    targets.push((column, py_dtype_arg(&spec)?));
+                }
             }
             let pairs: Vec<(&str, DType)> = targets
                 .iter()
                 .map(|(column, dt)| (column.as_str(), dt.clone()))
                 .collect();
-            self.inner.astype_columns(&pairs)
+            self.inner
+                .astype_columns(&pairs)
+                .and_then(|frame| object_frame(&frame, Some(&objects)))
+        } else if is_object_dtype_arg(dtype) {
+            object_frame(&self.inner, None)
         } else {
             let target = py_dtype_arg(dtype)?;
             self.inner.astype(target)
@@ -26037,17 +26100,15 @@ impl PyDataFrame {
         py: Python<'_>,
         data: &Bound<'_, pyo3::types::PyDict>,
         orient: Option<&str>,
-        dtype: Option<&str>,
+        dtype: Option<&Bound<'_, PyAny>>,
         columns: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         unsupported_params(
             "DataFrame.from_dict",
-            &[
-                ("orient", matches!(orient, None | Some("columns"))),
-                ("dtype", dtype.is_none()),
-            ],
+            &[("orient", matches!(orient, None | Some("columns")))],
         )?;
-        Self::new(py, Some(data.as_any()), None, columns)
+        // dtype= is the constructor's (it was refused while that took none).
+        Self::new(py, Some(data.as_any()), None, columns, dtype)
     }
 
     #[classmethod]
@@ -26071,7 +26132,7 @@ impl PyDataFrame {
                 ("nrows", nrows.is_none()),
             ],
         )?;
-        Self::new(py, Some(data), index, columns)
+        Self::new(py, Some(data), index, columns, None)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
@@ -34461,6 +34522,54 @@ fn concat(
 
 /// A pandas dtype argument: a name (`"float64"`), a Python type (`float`), or
 /// anything with a dtype `name` (numpy and pandas dtype objects).
+/// pandas' object dtype named by a dtype argument: 'object' / 'O', the
+/// `object` type, `np.object_`, `np.dtype('O')`. [`py_dtype_arg`] reads
+/// object and str alike as `DType::Utf8`, whose astype stringifies (None
+/// became the string 'None'), so these keep the values instead
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.22).
+fn is_object_dtype_arg(obj: &Bound<'_, PyAny>) -> bool {
+    let name = if let Ok(name) = obj.extract::<String>() {
+        Some(name)
+    } else if let Ok(ty) = obj.cast::<pyo3::types::PyType>() {
+        ty.name().ok().map(|name| name.to_string())
+    } else {
+        obj.getattr("name")
+            .ok()
+            .and_then(|name| name.extract::<String>().ok())
+    };
+    name.is_some_and(|name| matches!(name.as_str(), "object" | "O" | "|O" | "object_"))
+}
+
+/// `series` as a pandas object column: the same values, as they are.
+fn object_series(series: &Series) -> PyResult<Series> {
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        Column::from_object_values(series.column().values().to_vec()),
+    )
+    .map_err(frame_error_to_py)
+}
+
+/// `frame` with the columns named in `only` (every column when None) as
+/// pandas object columns holding the same values.
+fn object_frame(frame: &DataFrame, only: Option<&[String]>) -> Result<DataFrame, FrameError> {
+    let mut out = frame.clone();
+    for position in 0..frame.shape().1 {
+        let wanted = only.is_none_or(|only| {
+            frame
+                .column_name_at(position)
+                .is_some_and(|name| only.contains(&name))
+        });
+        if let (true, Some(column)) = (wanted, frame.column_at(position)) {
+            out = out.isetitem(
+                position,
+                Column::from_object_values(column.values().to_vec()),
+            )?;
+        }
+    }
+    Ok(out)
+}
+
 fn py_dtype_arg(obj: &Bound<'_, PyAny>) -> PyResult<DType> {
     if let Ok(name) = obj.extract::<String>() {
         return parse_dtype(&name);
@@ -39069,7 +39178,7 @@ pub fn from_dummies(
     let df_obj = if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
         df.clone()
     } else {
-        PyDataFrame::new(data.py(), Some(data), None, None)?
+        PyDataFrame::new(data.py(), Some(data), None, None, None)?
     };
     let col_names = df_obj.column_labels();
     let num_rows = df_obj.inner.len();
