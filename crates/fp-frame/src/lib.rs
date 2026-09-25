@@ -5641,36 +5641,9 @@ pub fn calendar_date_range(
         return Ok(None);
     }
     let step = usize::try_from(step).unwrap_or(1).max(1);
-    let out_of_range =
-        || FrameError::CompatibilityRejected("date_range: timestamp out of range".to_owned());
-    let to_datetime = |nanos: i64| -> Result<NaiveDateTime, FrameError> {
-        let subsec = u32::try_from(nanos.rem_euclid(1_000_000_000)).map_err(|_| out_of_range())?;
-        DateTime::from_timestamp(nanos.div_euclid(1_000_000_000), subsec)
-            .map(|dt| dt.naive_utc())
-            .ok_or_else(out_of_range)
-    };
-    // The widest gap between two consecutive anchors of `unit`, in days: it
-    // bounds the window `periods` anchors can span.
-    let gap_days: i64 = match unit {
-        AsFreqUnit::Week(_) | AsFreqUnit::BusinessDay => 7,
-        AsFreqUnit::QuarterEnd(_)
-        | AsFreqUnit::QuarterStart(_)
-        | AsFreqUnit::BusinessQuarterEnd(_)
-        | AsFreqUnit::BusinessQuarterStart(_) => 96,
-        AsFreqUnit::YearEnd(_)
-        | AsFreqUnit::YearStart(_)
-        | AsFreqUnit::BusinessYearEnd(_)
-        | AsFreqUnit::BusinessYearStart(_) => 370,
-        _ => 35,
-    };
-    let window = |count: usize| -> Result<Duration, FrameError> {
-        i64::try_from(count)
-            .ok()
-            .and_then(|count| count.checked_add(2))
-            .and_then(|count| count.checked_mul(gap_days))
-            .and_then(Duration::try_days)
-            .ok_or_else(out_of_range)
-    };
+    let out_of_range = calendar_out_of_range;
+    let to_datetime = naive_from_nanos;
+    let window = |count: usize| anchor_window(unit, count);
     // Anchors on the dates of [lo, hi], moved to `time` and kept in [lo, hi].
     let anchors_between = |lo: NaiveDateTime,
                            hi: NaiveDateTime,
@@ -5742,6 +5715,121 @@ pub fn calendar_date_range(
         .map(|dt| dt.and_utc().timestamp_nanos_opt().ok_or_else(out_of_range))
         .collect::<Result<Vec<i64>, FrameError>>()
         .map(Some)
+}
+
+fn calendar_out_of_range() -> FrameError {
+    FrameError::CompatibilityRejected("date_range: timestamp out of range".to_owned())
+}
+
+/// Tz-naive nanoseconds as a `NaiveDateTime`.
+fn naive_from_nanos(nanos: i64) -> Result<NaiveDateTime, FrameError> {
+    let subsec =
+        u32::try_from(nanos.rem_euclid(1_000_000_000)).map_err(|_| calendar_out_of_range())?;
+    DateTime::from_timestamp(nanos.div_euclid(1_000_000_000), subsec)
+        .map(|dt| dt.naive_utc())
+        .ok_or_else(calendar_out_of_range)
+}
+
+fn nanos_from_naive(at: NaiveDateTime) -> Result<i64, FrameError> {
+    at.and_utc()
+        .timestamp_nanos_opt()
+        .ok_or_else(calendar_out_of_range)
+}
+
+/// A span of days certain to hold `count` anchors of `unit` (count + 2
+/// times the widest gap between two consecutive anchors).
+fn anchor_window(unit: AsFreqUnit, count: usize) -> Result<Duration, FrameError> {
+    let gap_days: i64 = match unit {
+        AsFreqUnit::Week(_) | AsFreqUnit::BusinessDay => 7,
+        AsFreqUnit::QuarterEnd(_)
+        | AsFreqUnit::QuarterStart(_)
+        | AsFreqUnit::BusinessQuarterEnd(_)
+        | AsFreqUnit::BusinessQuarterStart(_) => 96,
+        AsFreqUnit::YearEnd(_)
+        | AsFreqUnit::YearStart(_)
+        | AsFreqUnit::BusinessYearEnd(_)
+        | AsFreqUnit::BusinessYearStart(_) => 370,
+        _ => 35,
+    };
+    i64::try_from(count)
+        .ok()
+        .and_then(|count| count.checked_add(2))
+        .and_then(|count| count.checked_mul(gap_days))
+        .and_then(Duration::try_days)
+        .ok_or_else(calendar_out_of_range)
+}
+
+/// `nanos` moved `n` anchors of the calendar offset `freq` (an anchored
+/// alias: ME, MS, QE-DEC, QS-MAR, YE-JUN, W-MON, B, BME, SME-15, ...),
+/// keeping its time of day, as pandas adds an anchored offset: forward to
+/// the n-th anchor date strictly after its date, back to the |n|-th
+/// strictly before it, and for n = 0 its own date when that is an anchor,
+/// else the next one (rollforward).
+pub fn shift_by_anchored_offset(nanos: i64, freq: &str, n: i64) -> Result<i64, FrameError> {
+    let (_, unit) = parse_asfreq_step(freq)?;
+    if unit.is_fixed() {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "{freq} is a fixed frequency, not an anchored offset"
+        )));
+    }
+    let at = naive_from_nanos(nanos)?;
+    let (date, time) = (at.date(), at.time());
+    let count = usize::try_from(n.unsigned_abs()).map_err(|_| calendar_out_of_range())?;
+    let anchor_dates = |lo: NaiveDate, hi: NaiveDate| -> Result<Vec<NaiveDate>, FrameError> {
+        Ok(anchored_asfreq_anchors(
+            lo.and_time(chrono::NaiveTime::MIN),
+            hi.and_time(chrono::NaiveTime::MIN),
+            unit,
+        )?
+        .into_iter()
+        .map(|anchor| anchor.date())
+        .collect())
+    };
+    let target = if n >= 0 {
+        let from = if n == 0 {
+            date
+        } else {
+            date.succ_opt().ok_or_else(calendar_out_of_range)?
+        };
+        let hi = from
+            .checked_add_signed(anchor_window(unit, count.max(1))?)
+            .ok_or_else(calendar_out_of_range)?;
+        anchor_dates(from, hi)?
+            .get(count.saturating_sub(1))
+            .copied()
+    } else {
+        let to = date.pred_opt().ok_or_else(calendar_out_of_range)?;
+        let lo = to
+            .checked_sub_signed(anchor_window(unit, count)?)
+            .ok_or_else(calendar_out_of_range)?;
+        anchor_dates(lo, to)?.iter().rev().nth(count - 1).copied()
+    };
+    nanos_from_naive(target.ok_or_else(calendar_out_of_range)?.and_time(time))
+}
+
+/// Whether `nanos`' date is an anchor of the calendar offset `freq` (the
+/// time of day does not matter, as pandas' `is_on_offset`).
+pub fn is_on_anchored_offset(nanos: i64, freq: &str) -> Result<bool, FrameError> {
+    Ok(shift_by_anchored_offset(nanos, freq, 0)? == nanos)
+}
+
+/// `nanos` plus `months` calendar months, the day clipped to the target
+/// month's length and the time of day kept - dateutil's relativedelta,
+/// which pandas' `DateOffset(years=, months=)` applies (Jan 31 + 1 month is
+/// Feb 29 in 2024).
+pub fn add_calendar_months(nanos: i64, months: i64) -> Result<i64, FrameError> {
+    let at = naive_from_nanos(nanos)?;
+    let total = i64::from(at.year())
+        .checked_mul(12)
+        .and_then(|base| base.checked_add(i64::from(at.month0())))
+        .and_then(|base| base.checked_add(months))
+        .ok_or_else(calendar_out_of_range)?;
+    let year = i32::try_from(total.div_euclid(12)).map_err(|_| calendar_out_of_range())?;
+    let month = u32::try_from(total.rem_euclid(12)).map_err(|_| calendar_out_of_range())? + 1;
+    let last = period_last_day_of_month(year, month).ok_or_else(calendar_out_of_range)?;
+    let date = NaiveDate::from_ymd_opt(year, month, at.day().min(last))
+        .ok_or_else(calendar_out_of_range)?;
+    nanos_from_naive(date.and_time(at.time()))
 }
 
 /// Convert (year, month, day) to Julian Day Number.
@@ -34806,6 +34894,18 @@ fn resample_month_end_key(month_ordinal: i64) -> Option<String> {
     Some(format!("{year:04}-{month:02}-{day:02}"))
 }
 
+fn resample_month_start_key(month_ordinal: i64) -> String {
+    let year = month_ordinal.div_euclid(12);
+    let month = month_ordinal.rem_euclid(12) + 1;
+    format!("{year:04}-{month:02}-01")
+}
+
+/// Whether `unit` is a period-START resample rule (MS, QS, YS/AS), whose
+/// bins pandas closes and labels on the left.
+fn resample_is_period_start(unit: &str) -> bool {
+    matches!(unit, "MS" | "QS" | "YS" | "AS")
+}
+
 /// Shared resample grouping used by Series and DataFrame resample paths.
 ///
 /// For calendar frequencies (`"M"`, `"Q"`, `"Y"`/`"A"` with optional
@@ -34854,6 +34954,72 @@ fn resample_build_groups_with_options(
 ) -> ResampleGrouping {
     let (mult, unit) = parse_resample_freq(freq).unwrap_or((1, freq.to_string()));
     let unit_lower = unit.to_lowercase();
+
+    // MS/QS/YS, with multiples: bins [period start, next start), closed
+    // and labelled on the LEFT (pandas' default for start-anchored rules),
+    // a contiguous run from the first to the last present period, dataless
+    // ones empty. 'MS' passed validation as milliseconds and then fell
+    // through to the empty grouping, so resample('MS') returned nothing.
+    if resample_is_period_start(&unit) {
+        let months_per_period = match unit.as_str() {
+            "MS" => 1,
+            "QS" => 3,
+            _ => 12,
+        };
+        let Some(bucket_months) = mult.checked_mul(months_per_period) else {
+            return ResampleGrouping::empty();
+        };
+        let period_start = |mo: i64| -> i64 {
+            match months_per_period {
+                1 => mo,
+                3 => mo.div_euclid(3) * 3,
+                _ => mo.div_euclid(12) * 12,
+            }
+        };
+        let month_ords: Vec<Option<i64>> = labels
+            .iter()
+            .map(|label| resample_label_to_month_ordinal(label).map(period_start))
+            .collect();
+        let Some(first) = month_ords.iter().flatten().copied().min() else {
+            return ResampleGrouping::empty();
+        };
+        let bucket_of = |mo: i64| (mo - first).div_euclid(bucket_months);
+        let Some(buckets) = month_ords
+            .iter()
+            .flatten()
+            .map(|&mo| bucket_of(mo))
+            .max()
+            .and_then(|last| usize::try_from(last + 1).ok())
+        else {
+            return ResampleGrouping::empty();
+        };
+        if buckets > 1_000_000 {
+            return ResampleGrouping::empty();
+        }
+        let mut dense: Vec<Vec<usize>> = vec![Vec::new(); buckets];
+        for (i, mo) in month_ords.iter().enumerate() {
+            if let Some(slot) = mo.and_then(|mo| usize::try_from(bucket_of(mo)).ok()) {
+                dense[slot].push(i);
+            }
+        }
+        let mut order = Vec::with_capacity(buckets);
+        let mut groups = std::collections::HashMap::with_capacity(buckets);
+        let mut lattice = Vec::with_capacity(buckets);
+        for (slot, members) in dense.into_iter().enumerate() {
+            let start = first + slot as i64 * bucket_months;
+            let key = resample_month_start_key(start);
+            if let Some(ns) = resample_label_to_ns(&IndexLabel::Utf8(key.clone())) {
+                lattice.push((key.clone(), ns));
+            }
+            order.push(key.clone());
+            groups.insert(key, members);
+        }
+        return ResampleGrouping {
+            order,
+            groups,
+            lattice,
+        };
+    }
 
     // Y/A/Q/M, including multiplied forms like 2M/2Q/2Y: pandas labels
     // calendar resample buckets by period right edges and synthesizes a
@@ -35343,6 +35509,16 @@ fn validate_resample_options(
     // Day units: D (and multiples like 2D, 3D)
     // Sub-day units: H, min/T, s, ms/L, us/U, ns/N (and multiples like 3H, 15min)
     match parse_resample_freq(freq) {
+        // MS/QS/YS bin [start, next start) with left labels; closed= /
+        // label='right' on them is not implemented.
+        Some((_, unit)) if resample_is_period_start(&unit) => {
+            if closed == Some("right") || label == Some("right") {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "resample('{freq}') with closed/label='right' is not implemented"
+                )));
+            }
+            Ok(())
+        }
         Some((mult, unit)) => {
             let unit_lower = unit.to_lowercase();
             // `W` (weekly, W-SUN) supports multipliers (2W, 3W, ...): pandas
@@ -203245,17 +203421,103 @@ mod tests {
             vec![Scalar::Float64(1.0)],
         )
         .unwrap();
-        // `QS` (quarter-start) is a pandas freq fp-frame does not model yet, so it
-        // must still be rejected through every aggregator. (`W` and `B` are now
-        // supported — see series_resample_weekly_w_sun_rj4fn / _business_day_b_eov68.)
-        assert!(matches!(s.resample("QS").sum().unwrap_err(),
+        // `QS-FEB` (an anchored quarter start) is a pandas freq fp-frame does not
+        // model yet, so it must still be rejected through every aggregator. (`W`,
+        // `B` and - fvsao.35 - plain `QS`/`MS`/`YS` are now supported; this case
+        // used plain `QS` until then.)
+        assert!(matches!(s.resample("QS-FEB").sum().unwrap_err(),
             FrameError::CompatibilityRejected(msg) if msg.contains("invalid frequency")));
-        assert!(matches!(s.resample("QS").count().unwrap_err(),
+        assert!(matches!(s.resample("QS-FEB").count().unwrap_err(),
             FrameError::CompatibilityRejected(msg) if msg.contains("invalid frequency")));
-        assert!(matches!(s.resample("QS").min().unwrap_err(),
+        assert!(matches!(s.resample("QS-FEB").min().unwrap_err(),
             FrameError::CompatibilityRejected(msg) if msg.contains("invalid frequency")));
-        assert!(matches!(s.resample("QS").ohlc().unwrap_err(),
+        assert!(matches!(s.resample("QS-FEB").ohlc().unwrap_err(),
             FrameError::CompatibilityRejected(msg) if msg.contains("invalid frequency")));
+    }
+
+    #[test]
+    fn resample_period_start_bins_fvsao35() {
+        // Live pandas 2.2.3: Series([10.5, NaN, 7.25], index=to_datetime(
+        // ['2024-01-05', '2024-01-06', '2024-03-01'])).resample('MS').sum() is
+        // 10.5 / 0.0 / 7.25 over 2024-01-01, 02-01, 03-01 - the dataless February
+        // kept - and .resample('QS').sum() is 17.75 over 2024-01-01. 'MS' used to
+        // pass validation as milliseconds and bin NOTHING (an empty result).
+        let s = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::Datetime64(1_704_412_800_000_000_000),
+                IndexLabel::Datetime64(1_704_499_200_000_000_000),
+                IndexLabel::Datetime64(1_709_251_200_000_000_000),
+            ],
+            vec![
+                Scalar::Float64(10.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(7.25),
+            ],
+        )
+        .unwrap();
+        let months = s.resample("MS").sum().unwrap();
+        assert_eq!(
+            months.values(),
+            &[
+                Scalar::Float64(10.5),
+                Scalar::Float64(0.0),
+                Scalar::Float64(7.25)
+            ]
+        );
+        let quarters = s.resample("QS").sum().unwrap();
+        assert_eq!(quarters.values(), &[Scalar::Float64(17.75)]);
+        // NEGATIVE: closed='right' on a period-start rule is refused, not binned
+        // as if left.
+        assert!(
+            s.resample_ext("MS", Some("right"), None, None)
+                .sum()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn anchored_offsets_and_calendar_months_match_pandas_fvsao35() {
+        // Live pandas 2.2.3, Timestamp + pd.offsets.* / pd.DateOffset(months=).
+        use crate::{add_calendar_months, is_on_anchored_offset, shift_by_anchored_offset};
+        let at = |y: i32, m: u32, d: u32, h: u32| {
+            chrono::NaiveDate::from_ymd_opt(y, m, d)
+                .and_then(|date| date.and_hms_opt(h, 0, 0))
+                .and_then(|dt| dt.and_utc().timestamp_nanos_opt())
+                .expect("valid test instant") // ubs:ignore — test fixture
+        };
+        let shift = |nanos, freq, n| shift_by_anchored_offset(nanos, freq, n).unwrap();
+        // MonthEnd: forward strictly after the date, n=0 rolls forward.
+        assert_eq!(shift(at(2024, 1, 15, 10), "ME", 1), at(2024, 1, 31, 10));
+        assert_eq!(shift(at(2024, 1, 31, 10), "ME", 1), at(2024, 2, 29, 10));
+        assert_eq!(shift(at(2024, 1, 31, 10), "ME", 0), at(2024, 1, 31, 10));
+        assert_eq!(shift(at(2024, 1, 15, 10), "ME", -1), at(2023, 12, 31, 10));
+        // BDay from a Saturday, Week(weekday=0), QuarterBegin, YearBegin(-1).
+        assert_eq!(shift(at(2024, 1, 13, 0), "B", 3), at(2024, 1, 17, 0));
+        assert_eq!(shift(at(2024, 1, 13, 0), "B", -1), at(2024, 1, 12, 0));
+        assert_eq!(shift(at(2024, 1, 15, 10), "W-MON", 1), at(2024, 1, 22, 10));
+        assert_eq!(shift(at(2024, 1, 15, 10), "QS-MAR", 1), at(2024, 3, 1, 10));
+        assert_eq!(
+            shift(at(2024, 12, 31, 23), "YS-JAN", -1),
+            at(2024, 1, 1, 23)
+        );
+        assert!(is_on_anchored_offset(at(2024, 1, 31, 10), "ME").unwrap());
+        assert!(!is_on_anchored_offset(at(2024, 1, 15, 10), "ME").unwrap());
+        // relativedelta months clip the day to the month.
+        assert_eq!(
+            add_calendar_months(at(2024, 1, 31, 0), 1).unwrap(),
+            at(2024, 2, 29, 0)
+        );
+        assert_eq!(
+            add_calendar_months(at(2024, 3, 29, 0), 1).unwrap(),
+            at(2024, 4, 29, 0)
+        );
+        assert_eq!(
+            add_calendar_months(at(2024, 1, 31, 10), -1).unwrap(),
+            at(2023, 12, 31, 10)
+        );
+        // NEGATIVE: a fixed frequency is not an anchored offset.
+        assert!(shift_by_anchored_offset(at(2024, 1, 15, 0), "D", 1).is_err());
     }
 
     #[test]

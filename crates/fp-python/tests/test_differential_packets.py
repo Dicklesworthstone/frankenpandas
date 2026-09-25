@@ -6115,3 +6115,120 @@ def test_datetimeindex_tz_methods_do_not_ignore_tz() -> None:
         fpd.DatetimeIndex(["2024-01-05"]).tz_localize("UTC")
     with pytest.raises(NotImplementedError):
         fpd.Timestamp("2024-01-05", tz="UTC")
+
+
+_OFFSET_TIMESTAMPS = ["2024-01-15 10:00", "2024-01-31 10:00", "2024-02-01", "2024-03-29", "2024-01-13", "2024-12-31 23:00"]
+
+
+def _offset(m: Any, name: str) -> Any:
+    o = m.offsets
+    return {
+        "MonthEnd": lambda: o.MonthEnd(),
+        "MonthEnd(2)": lambda: o.MonthEnd(2),
+        "MonthEnd(-1)": lambda: o.MonthEnd(-1),
+        "MonthEnd(0)": lambda: o.MonthEnd(0),
+        "MonthBegin(-1)": lambda: o.MonthBegin(-1),
+        "BMonthEnd": lambda: o.BMonthEnd(),
+        "BMonthBegin": lambda: o.BMonthBegin(),
+        "QuarterEnd": lambda: o.QuarterEnd(),
+        "QuarterEnd(startingMonth=1)": lambda: o.QuarterEnd(startingMonth=1),
+        "QuarterBegin": lambda: o.QuarterBegin(),
+        "YearEnd(month=6)": lambda: o.YearEnd(month=6),
+        "YearBegin(-1)": lambda: o.YearBegin(-1),
+        "BDay(3)": lambda: o.BDay(3),
+        "BDay(-1)": lambda: o.BDay(-1),
+        "Week": lambda: o.Week(),
+        "Week(weekday=0)": lambda: o.Week(weekday=0),
+        "Week(-1, weekday=4)": lambda: o.Week(-1, weekday=4),
+        "SemiMonthEnd": lambda: o.SemiMonthEnd(),
+        "SemiMonthBegin": lambda: o.SemiMonthBegin(),
+        "Day(2)": lambda: o.Day(2),
+        "Hour(-3)": lambda: o.Hour(-3),
+        "Milli(5)": lambda: o.Milli(5),
+        "DateOffset(months=1)": lambda: m.DateOffset(months=1),
+        "DateOffset(months=-1)": lambda: m.DateOffset(months=-1),
+        "DateOffset(n=2, months=1)": lambda: m.DateOffset(2, months=1),
+        "DateOffset(years=1, days=2)": lambda: m.DateOffset(years=1, days=2),
+        "DateOffset(day=1)": lambda: m.DateOffset(day=1),
+        "DateOffset()": lambda: m.DateOffset(),
+        "MonthEnd(normalize=True)": lambda: o.MonthEnd(normalize=True),
+    }[name]()
+
+
+# fvsao.35: MonthEnd/YearEnd were DateOffset(months=1)/(years=1), which
+# added a flat 30/365 days (2024-01-15 + MonthEnd() read 2024-02-14), and
+# every DateOffset(months=/years=) did the same; MonthBegin, QuarterEnd,
+# BDay, ... did not exist.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "name",
+    ["MonthEnd", "MonthEnd(2)", "MonthEnd(-1)", "MonthEnd(0)", "MonthBegin(-1)", "BMonthEnd", "BMonthBegin",
+     "QuarterEnd", "QuarterEnd(startingMonth=1)", "QuarterBegin", "YearEnd(month=6)", "YearBegin(-1)", "BDay(3)",
+     "BDay(-1)", "Week", "Week(weekday=0)", "Week(-1, weekday=4)", "SemiMonthEnd", "SemiMonthBegin", "Day(2)",
+     "Hour(-3)", "Milli(5)", "DateOffset(months=1)", "DateOffset(months=-1)", "DateOffset(n=2, months=1)",
+     "DateOffset(years=1, days=2)", "DateOffset(day=1)", "DateOffset()", "MonthEnd(normalize=True)"],
+)
+def test_date_offsets_move_timestamps_like_pandas(name: str) -> None:
+    def outcome(m: Any) -> Any:
+        off = _offset(m, name)
+        return (
+            repr(off),
+            [str(m.Timestamp(t) + off) for t in _OFFSET_TIMESTAMPS],
+            [str(m.Timestamp(t) - off) for t in _OFFSET_TIMESTAMPS],
+        )
+
+    assert outcome(fpd) == outcome(pd)
+
+
+_OFFSET_SURFACE_CASES = {
+    "Series + MonthEnd": lambda m: (m.Series(m.to_datetime(["2024-01-15", "2024-01-31", None])) + m.offsets.MonthEnd()).tolist(),
+    "Series - MonthBegin": lambda m: (m.Series(m.to_datetime(["2024-01-15", None])) - m.offsets.MonthBegin()).tolist(),
+    "offset + Series": lambda m: (m.offsets.MonthEnd() + m.Series(m.to_datetime(["2024-01-15"]))).tolist(),
+    "Series + DateOffset(months=1)": lambda m: (m.Series(m.to_datetime(["2024-01-31", "2024-03-31"])) + m.DateOffset(months=1)).tolist(),
+    "DatetimeIndex + MonthEnd": lambda m: [str(t) for t in m.DatetimeIndex(["2024-01-15", "2024-02-29"]) + m.offsets.MonthEnd()],
+    "DatetimeIndex + Timedelta": lambda m: [str(t) for t in m.DatetimeIndex(["2024-01-15"]) + m.Timedelta(hours=1)],
+    "offset times 2": lambda m: repr(m.offsets.MonthEnd() * 2),
+    "negated": lambda m: repr(-m.offsets.QuarterEnd()),
+    "equal": lambda m: m.offsets.MonthEnd(2) == m.offsets.MonthEnd(2),
+    # NEGATIVE: a different count is a different offset.
+    "not equal": lambda m: m.offsets.MonthEnd(2) == m.offsets.MonthEnd(1),
+    "freqstr": lambda m: [m.offsets.MonthEnd(2).freqstr, m.offsets.Week(weekday=0).freqstr, m.offsets.QuarterBegin().freqstr, m.offsets.BDay().freqstr, m.offsets.Day(3).freqstr],
+    "tick nanos": lambda m: m.offsets.Hour(2).nanos,
+    "anchored nanos raises": lambda m: m.offsets.MonthEnd().nanos,
+    "rollforward": lambda m: str(m.offsets.MonthEnd().rollforward(m.Timestamp("2024-01-15 10:00"))),
+    "rollback": lambda m: str(m.offsets.MonthEnd().rollback(m.Timestamp("2024-01-15 10:00"))),
+    "is_on_offset": lambda m: m.offsets.MonthEnd().is_on_offset(m.Timestamp("2024-01-31 10:00")),
+    "date_range freq offset": lambda m: [str(t) for t in m.date_range("2024-01-01", periods=3, freq=m.offsets.MonthEnd())],
+    "resample by offset": lambda m: m.Series([1, 2, 3], index=m.date_range("2024-01-01", periods=3, freq="D")).resample(m.offsets.MonthEnd()).sum().tolist(),
+    # resample('MS') binned NOTHING (MS read as milliseconds, then an empty
+    # grouping); QS was refused; on= raised; the Resampler was not
+    # subscriptable.
+    "resample MS": lambda m: m.Series([10.5, None, 7.25], index=m.to_datetime(["2024-01-05", "2024-01-06", "2024-03-01"])).resample("MS").sum().to_dict(),
+    "resample 2MS": lambda m: m.Series([1.0, 2.0, 3.0], index=m.to_datetime(["2024-01-05", "2024-02-06", "2024-05-01"])).resample("2MS").sum().to_dict(),
+    "resample QS": lambda m: m.Series([1.0, 2.0, 3.0], index=m.to_datetime(["2024-01-05", "2024-02-06", "2024-08-01"])).resample("QS").mean().to_dict(),
+    "resample YS": lambda m: m.Series([1.0, 2.0], index=m.to_datetime(["2024-01-05", "2025-06-06"])).resample("YS").sum().to_dict(),
+    "resample on column": lambda m: m.DataFrame({"when": m.to_datetime(["2024-01-05", "2024-01-06", "2024-02-01"]), "amount": [10.5, 1.0, 7.25]}).resample("MS", on="when")["amount"].sum().to_dict(),
+    "resample on column subset": lambda m: m.DataFrame({"when": m.to_datetime(["2024-01-05", "2024-02-01"]), "a": [1, 2], "b": [3.0, 4.0]}).resample("MS", on="when")[["b"]].sum().to_dict(),
+    # NEGATIVE: an integer index is pandas' TypeError, not an empty result.
+    "resample int index raises": lambda m: m.Series([1, 2, 3], index=m.Index([1, 2, 3])).resample("MS").sum(),
+    "Series index from a Series": lambda m: (lambda s: (s.index.tolist(), s.index.name))(m.Series([1, 2], index=m.Series(["a", "b"], index=[5, 6], name="k"))),
+    "frame index from a Series": lambda m: (lambda d: (d.index.tolist(), d.index.name))(m.DataFrame({"v": [1, 2]}, index=m.Series(["a", "b"], index=[5, 6], name="k"))),
+}
+
+
+def _offset_surface_outcome(m: Any, case: str) -> Any:
+    try:
+        r = _OFFSET_SURFACE_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+    if isinstance(r, dict):
+        return {str(k): (None if isinstance(v, float) and math.isnan(v) else v) for k, v in r.items()}
+    if isinstance(r, list):
+        return [str(v) for v in r]
+    return r
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OFFSET_SURFACE_CASES))
+def test_offsets_on_series_indexes_and_resample_match_pandas(case: str) -> None:
+    assert _offset_surface_outcome(fpd, case) == _offset_surface_outcome(pd, case), case

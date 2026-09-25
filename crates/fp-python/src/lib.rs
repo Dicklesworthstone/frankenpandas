@@ -2103,7 +2103,7 @@ impl PyTimestamp {
             let res = self.inner.add_timedelta(td.nanos);
             PyTimestamp { inner: res }.into_py_any(py)
         } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
-            let res = self.inner.add_timedelta(offset.nanos());
+            let res = Timestamp::from_nanos(offset.apply(py, self.inner.nanos, 1)?);
             PyTimestamp { inner: res }.into_py_any(py)
         } else if let Ok(delta) = other.cast::<PyDelta>() {
             let res = self.inner.add_timedelta(py_delta_nanos(delta));
@@ -2132,7 +2132,7 @@ impl PyTimestamp {
             let res = self.inner.sub_timedelta(td.nanos);
             PyTimestamp { inner: res }.into_py_any(py)
         } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
-            let res = self.inner.sub_timedelta(offset.nanos());
+            let res = Timestamp::from_nanos(offset.apply(py, self.inner.nanos, -1)?);
             PyTimestamp { inner: res }.into_py_any(py)
         } else if let Ok(other_ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
             let diff_nanos = self.inner.sub_timestamp(&other_ts.inner);
@@ -2838,6 +2838,9 @@ fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<String> {
         tdi.inner.name().map(str::to_owned)
     } else if let Ok(ri) = obj.extract::<PyRef<'_, PyRangeIndex>>() {
         ri.inner.name().map(str::to_owned)
+    } else if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
+        let name = series.inner.name();
+        (!name.is_empty()).then(|| name.to_owned())
     } else {
         None
     }
@@ -3121,7 +3124,15 @@ fn extract_index_labels(
         } else if let Ok(mi) = index.extract::<PyRef<'_, PyMultiIndex>>() {
             Ok(mi.inner.to_flat_index(", ").labels().to_vec())
         } else if let Ok(s) = index.extract::<PyRef<'_, PySeries>>() {
-            Ok(s.inner.index().labels().to_vec())
+            // A Series given as an index is its VALUES, as pandas (its own
+            // index was taken, so `index=pd.to_datetime(series)` lost the
+            // dates).
+            Ok(s.inner
+                .column()
+                .values()
+                .iter()
+                .map(scalar_to_index_label_converter)
+                .collect())
         } else if let Ok(list) = index.cast::<PyList>() {
             list.iter().map(|item| py_to_index_label(&item)).collect()
         } else if let Ok(tuple) = index.cast::<PyTuple>() {
@@ -4635,6 +4646,42 @@ impl PyDatetimeIndex {
         }
     }
 
+    /// This index moved `times` times by an offset, a Timedelta or a
+    /// `datetime.timedelta` (NaT stays NaT); NotImplemented otherwise.
+    fn shifted(&self, py: Python<'_>, other: &Bound<'_, PyAny>, times: i64) -> PyResult<Py<PyAny>> {
+        let nanos = self.inner.asi8();
+        let moved: Vec<i64> = if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
+            nanos
+                .iter()
+                .map(|&value| offset.apply(py, value, times))
+                .collect::<PyResult<_>>()?
+        } else {
+            let step = if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+                td.nanos
+            } else if let Ok(delta) = other.cast::<PyDelta>() {
+                py_delta_nanos(delta)
+            } else {
+                return Ok(py.NotImplemented());
+            };
+            let step = step.checked_mul(times).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timedelta overflow")
+            })?;
+            nanos
+                .iter()
+                .map(|&value| {
+                    if value == Timestamp::NAT {
+                        Ok(value)
+                    } else {
+                        value.checked_add(step).ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timestamp overflow")
+                        })
+                    }
+                })
+                .collect::<PyResult<_>>()?
+        };
+        self.with_nanos(moved).into_py_any(py)
+    }
+
     /// The nanoseconds a `fillna` value stands for.
     fn fill_nanos(label: &IndexLabel) -> PyResult<i64> {
         match label {
@@ -5958,6 +6005,19 @@ impl PyDatetimeIndex {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "Cannot convert tz-naive timestamps, use tz_localize to localize",
         ))
+    }
+
+    /// `index + offset / Timedelta / datetime.timedelta` (it had no `+`).
+    fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        self.shifted(py, other, 1)
+    }
+
+    fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        self.shifted(py, other, 1)
+    }
+
+    fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        self.shifted(py, other, -1)
     }
 
     /// `tz_localize(None)` keeps a tz-naive index as it is, as pandas; a
@@ -15031,14 +15091,26 @@ impl PySeries {
     // Series' index). Comparisons return a bool Series, as in pandas, so
     // `__eq__`/`__ne__` deliberately do not return a Python bool.
     fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
+            let inner = series_apply_offset(py, &self.inner, &offset, 1)?;
+            return Ok(PySeries { inner });
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.add(&rhs))
     }
     fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
+            let inner = series_apply_offset(py, &self.inner, &offset, 1)?;
+            return Ok(PySeries { inner });
+        }
         let lhs = series_operand(py, other, &self.inner)?;
         wrap_series(lhs.add(&self.inner))
     }
     fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
+            let inner = series_apply_offset(py, &self.inner, &offset, -1)?;
+            return Ok(PySeries { inner });
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         wrap_series(self.inner.sub(&rhs))
     }
@@ -17415,21 +17487,24 @@ impl PySeries {
         })
     }
 
+    /// pandas' `Series.resample(rule, closed=, label=, origin=)`; `rule` a
+    /// string alias or an offset object.
     #[pyo3(signature = (freq, closed=None, label=None, origin=None))]
     pub fn resample(
         &self,
-        freq: &str,
+        freq: &Bound<'_, PyAny>,
         closed: Option<&str>,
         label: Option<&str>,
         origin: Option<&str>,
-    ) -> PyResampler {
-        PyResampler {
+    ) -> PyResult<PyResampler> {
+        require_resample_axis(self.inner.index())?;
+        Ok(PyResampler {
             target: ResampleTarget::Series(self.inner.clone()),
-            freq: freq.to_string(),
+            freq: freq_alias(freq, "resample")?,
             closed: closed.map(str::to_string),
             label: label.map(str::to_string),
             origin: origin.map(str::to_string),
-        }
+        })
     }
 
     #[pyo3(signature = (freq, method=None))]
@@ -26341,21 +26416,36 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    #[pyo3(signature = (freq, closed=None, label=None, origin=None))]
+    /// pandas' `DataFrame.resample(rule, closed=, label=, origin=, on=)`:
+    /// `rule` a string alias or an offset object; `on` bins by that
+    /// datetime column instead of the index (it becomes the result's index
+    /// and leaves the aggregated columns), as pandas. `on=` raised TypeError.
+    #[pyo3(signature = (freq, closed=None, label=None, origin=None, on=None, level=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn resample(
         &self,
-        freq: &str,
+        freq: &Bound<'_, PyAny>,
         closed: Option<&str>,
         label: Option<&str>,
         origin: Option<&str>,
-    ) -> PyResampler {
-        PyResampler {
-            target: ResampleTarget::DataFrame(self.inner.clone()),
-            freq: freq.to_string(),
+        on: Option<&str>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyResampler> {
+        if level.is_some_and(|level| !level.is_none()) {
+            return Err(not_implemented("DataFrame.resample(level=...)"));
+        }
+        let frame = match on {
+            Some(on) => self.inner.set_index(on, true).map_err(frame_error_to_py)?,
+            None => self.inner.clone(),
+        };
+        require_resample_axis(frame.index())?;
+        Ok(PyResampler {
+            target: ResampleTarget::DataFrame(frame),
+            freq: freq_alias(freq, "resample")?,
             closed: closed.map(str::to_string),
             label: label.map(str::to_string),
             origin: origin.map(str::to_string),
-        }
+        })
     }
 
     #[pyo3(signature = (freq, method=None))]
@@ -36509,6 +36599,37 @@ impl PyResampler {
         format!("Resampler(freq='{}')", self.freq)
     }
 
+    /// `df.resample(...)['col']` / `[['a', 'b']]`: the same bins over one
+    /// column (a Series resampler) or a column subset. It was not
+    /// subscriptable.
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let ResampleTarget::DataFrame(frame) = &self.target else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "a Series resampler has no columns to select",
+            ));
+        };
+        let target = if let Ok(name) = key.extract::<String>() {
+            let column = frame
+                .column(&name)
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone()))?;
+            ResampleTarget::Series(
+                Series::new(name.as_str(), frame.series_index(), column.clone())
+                    .map_err(frame_error_to_py)?,
+            )
+        } else {
+            let names: Vec<String> = key.extract()?;
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            ResampleTarget::DataFrame(frame.select_columns(&names).map_err(frame_error_to_py)?)
+        };
+        Ok(Self {
+            target,
+            freq: self.freq.clone(),
+            closed: self.closed.clone(),
+            label: self.label.clone(),
+            origin: self.origin.clone(),
+        })
+    }
+
     // pandas' reductions take `numeric_only` (keyword-only here: pandas'
     // positional order differs per method, e.g. std's first is ddof).
     #[pyo3(signature = (*, numeric_only=false))]
@@ -38350,7 +38471,7 @@ fn date_range(
     start: Option<&Bound<'_, PyAny>>,
     end: Option<&Bound<'_, PyAny>>,
     periods: Option<usize>,
-    freq: Option<&str>,
+    freq: Option<&Bound<'_, PyAny>>,
     tz: Option<&Bound<'_, PyAny>>,
     normalize: bool,
     name: Option<&str>,
@@ -38361,6 +38482,11 @@ fn date_range(
     if tz.is_some_and(|tz| !tz.is_none()) {
         return Err(not_implemented("date_range(tz=...)"));
     }
+    let freq: Option<String> = freq
+        .filter(|freq| !freq.is_none())
+        .map(|freq| freq_alias(freq, "date_range"))
+        .transpose()?;
+    let freq = freq.as_deref();
     if unit.is_some_and(|unit| unit != "ns") {
         return Err(not_implemented("date_range(unit=...) other than 'ns'"));
     }
@@ -38903,12 +39029,13 @@ fn bdate_range(
             "bdate_range(weekmask=/holidays=), a custom business calendar",
         ));
     }
+    let freq = pyo3::types::PyString::new(py, freq);
     date_range(
         py,
         start,
         end,
         periods,
-        Some(freq),
+        Some(freq.as_any()),
         tz,
         normalize,
         name,
@@ -41985,11 +42112,20 @@ impl PyCategorical {
     }
 }
 
+/// pandas' date offsets, `pd.DateOffset` and `pd.offsets.*`, in one class:
+/// a relativedelta (`DateOffset(years=, months=, days=, ..., day=, ...)`
+/// and the fixed ticks Day..Nano), or - with an `anchor` - a calendar
+/// offset (MonthEnd, QuarterBegin, YearEnd, Week(weekday=), BusinessDay,
+/// ...) that moves between anchor dates. `kind` names the pandas class it
+/// stands for. MonthEnd / YearEnd and `months=` / `years=` used to add a
+/// flat 30 / 365 days (fvsao.35).
 #[pyclass(name = "DateOffset", from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyDateOffset {
     #[pyo3(get)]
     pub n: i64,
+    #[pyo3(get)]
+    pub normalize: bool,
     #[pyo3(get)]
     pub years: i64,
     #[pyo3(get)]
@@ -42008,12 +42144,36 @@ pub struct PyDateOffset {
     pub microseconds: i64,
     #[pyo3(get)]
     pub nanoseconds: i64,
+    /// relativedelta's absolute fields, in [`DATE_OFFSET_ABSOLUTE`] order.
+    absolute: [Option<i64>; 8],
+    /// The anchored alias (ME, QS-MAR, W-MON, B, ...) of a calendar offset.
+    anchor: Option<String>,
+    /// The pandas class this offset stands for (None: DateOffset).
+    kind: Option<&'static str>,
+    /// Its repr attribute ("startingMonth=3").
+    attr: Option<String>,
+    /// pandas' rule code: the freqstr without the count (None for a
+    /// DateOffset, whose freqstr is its repr).
+    rule_code: Option<String>,
 }
+
+/// relativedelta's absolute (replacing) fields, as DateOffset takes them.
+const DATE_OFFSET_ABSOLUTE: [&str; 8] = [
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "microsecond",
+    "nanosecond",
+];
 
 impl Default for PyDateOffset {
     fn default() -> Self {
         Self {
             n: 1,
+            normalize: false,
             years: 0,
             months: 0,
             weeks: 0,
@@ -42023,281 +42183,760 @@ impl Default for PyDateOffset {
             seconds: 0,
             microseconds: 0,
             nanoseconds: 0,
+            absolute: [None; 8],
+            anchor: None,
+            kind: None,
+            attr: None,
+            rule_code: None,
         }
     }
 }
 
-#[pymethods]
 impl PyDateOffset {
-    #[new]
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (n=1, years=0, months=0, weeks=0, days=0, hours=0, minutes=0, seconds=0, microseconds=0, nanoseconds=0))]
-    fn new(
-        n: Option<i64>,
-        years: Option<i64>,
-        months: Option<i64>,
-        weeks: Option<i64>,
-        days: Option<i64>,
-        hours: Option<i64>,
-        minutes: Option<i64>,
-        seconds: Option<i64>,
-        microseconds: Option<i64>,
-        nanoseconds: Option<i64>,
+    /// A calendar offset over the anchored alias `anchor`.
+    fn anchored(
+        kind: &'static str,
+        anchor: String,
+        n: i64,
+        normalize: bool,
+        attr: Option<String>,
     ) -> Self {
         Self {
-            n: n.unwrap_or(1),
-            years: years.unwrap_or(0),
-            months: months.unwrap_or(0),
-            weeks: weeks.unwrap_or(0),
-            days: days.unwrap_or(0),
-            hours: hours.unwrap_or(0),
-            minutes: minutes.unwrap_or(0),
-            seconds: seconds.unwrap_or(0),
-            microseconds: microseconds.unwrap_or(0),
-            nanoseconds: nanoseconds.unwrap_or(0),
+            n,
+            normalize,
+            rule_code: Some(anchor.clone()),
+            anchor: Some(anchor),
+            kind: Some(kind),
+            attr,
+            ..Default::default()
         }
     }
 
-    fn nanos(&self) -> i64 {
-        let mut total_nanos = self.nanoseconds;
-        total_nanos += self.microseconds * 1_000;
-        total_nanos += self.seconds * 1_000_000_000;
-        total_nanos += self.minutes * 60 * 1_000_000_000;
-        total_nanos += self.hours * 3600 * 1_000_000_000;
-        total_nanos += self.days * 86400 * 1_000_000_000;
-        total_nanos += self.weeks * 7 * 86400 * 1_000_000_000;
-        total_nanos += self.months * 30 * 86400 * 1_000_000_000;
-        total_nanos += self.years * 365 * 86400 * 1_000_000_000;
-        total_nanos * self.n
+    /// A fixed tick of `nanos` per unit (Day, Hour, ...).
+    fn tick(kind: &'static str, rule_code: &str, n: i64, nanos: i64) -> Self {
+        Self {
+            n,
+            nanoseconds: nanos,
+            kind: Some(kind),
+            rule_code: Some(rule_code.to_owned()),
+            ..Default::default()
+        }
     }
 
-    fn __repr__(&self) -> String {
-        if self.years == 0
-            && self.months == 0
-            && self.weeks == 0
-            && self.hours == 0
-            && self.minutes == 0
-            && self.seconds == 0
-            && self.microseconds == 0
-            && self.nanoseconds == 0
-            && self.days == 1
-        {
-            if self.n == 1 {
-                return "<Day>".to_string();
-            }
-            return format!("<{} * Days>", self.n);
-        }
-        if self.years == 0
-            && self.months == 0
-            && self.weeks == 0
-            && self.days == 0
-            && self.minutes == 0
-            && self.seconds == 0
-            && self.microseconds == 0
-            && self.nanoseconds == 0
-            && self.hours == 1
-        {
-            if self.n == 1 {
-                return "<Hour>".to_string();
-            }
-            return format!("<{} * Hours>", self.n);
-        }
-        if self.years == 0
-            && self.months == 0
-            && self.weeks == 0
-            && self.days == 0
-            && self.hours == 0
-            && self.seconds == 0
-            && self.microseconds == 0
-            && self.nanoseconds == 0
-            && self.minutes == 1
-        {
-            if self.n == 1 {
-                return "<Minute>".to_string();
-            }
-            return format!("<{} * Minutes>", self.n);
-        }
-        if self.years == 0
-            && self.months == 0
-            && self.weeks == 0
-            && self.days == 0
-            && self.hours == 0
-            && self.minutes == 0
-            && self.microseconds == 0
-            && self.nanoseconds == 0
-            && self.seconds == 1
-        {
-            if self.n == 1 {
-                return "<Second>".to_string();
-            }
-            return format!("<{} * Seconds>", self.n);
-        }
-        if self.years == 0
-            && self.months == 0
-            && self.days == 0
-            && self.hours == 0
-            && self.minutes == 0
-            && self.seconds == 0
-            && self.microseconds == 0
-            && self.nanoseconds == 0
-            && self.weeks == 1
-        {
-            if self.n == 1 {
-                return "<Week>".to_string();
-            }
-            return format!("<{} * Weeks>", self.n);
-        }
-        if self.years == 0
-            && self.weeks == 0
-            && self.days == 0
-            && self.hours == 0
-            && self.minutes == 0
-            && self.seconds == 0
-            && self.microseconds == 0
-            && self.nanoseconds == 0
-            && self.months == 1
-        {
-            if self.n == 1 {
-                return "<MonthEnd>".to_string();
-            }
-            return format!("<{} * MonthEnds>", self.n);
-        }
-        if self.months == 0
-            && self.weeks == 0
-            && self.days == 0
-            && self.hours == 0
-            && self.minutes == 0
-            && self.seconds == 0
-            && self.microseconds == 0
-            && self.nanoseconds == 0
-            && self.years == 1
-        {
-            if self.n == 1 {
-                return "<YearEnd: month=12>".to_string();
-            }
-            return format!("<{} * YearEnds: month=12>", self.n);
-        }
+    /// The fixed part of one unit, in nanoseconds.
+    fn fixed_nanos(&self) -> Option<i64> {
+        const SECOND: i64 = 1_000_000_000;
+        [
+            (self.weeks, 7 * 86_400 * SECOND),
+            (self.days, 86_400 * SECOND),
+            (self.hours, 3_600 * SECOND),
+            (self.minutes, 60 * SECOND),
+            (self.seconds, SECOND),
+            (self.microseconds, 1_000),
+            (self.nanoseconds, 1),
+        ]
+        .iter()
+        .try_fold(0_i64, |total, &(count, unit)| {
+            total.checked_add(count.checked_mul(unit)?)
+        })
+    }
 
-        let mut parts = Vec::new();
-        if self.years != 0 {
-            parts.push(format!("years={}", self.years));
+    /// A DateOffset with nothing set, which pandas reads as one day.
+    fn is_bare(&self) -> bool {
+        self.anchor.is_none()
+            && self.kind.is_none()
+            && self.years == 0
+            && self.months == 0
+            && self.fixed_nanos() == Some(0)
+            && self.absolute.iter().all(Option::is_none)
+    }
+
+    /// `nanos` with this offset applied `times` times (1 adds, -1
+    /// subtracts); NaT stays NaT.
+    fn apply(&self, py: Python<'_>, nanos: i64, times: i64) -> PyResult<i64> {
+        const DAY: i64 = 86_400_000_000_000;
+        let overflow = || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow");
+        if nanos == Timestamp::NAT {
+            return Ok(nanos);
         }
-        if self.months != 0 {
-            parts.push(format!("months={}", self.months));
-        }
-        if self.weeks != 0 {
-            parts.push(format!("weeks={}", self.weeks));
-        }
-        if self.days != 0 {
-            parts.push(format!("days={}", self.days));
-        }
-        if self.hours != 0 {
-            parts.push(format!("hours={}", self.hours));
-        }
-        if self.minutes != 0 {
-            parts.push(format!("minutes={}", self.minutes));
-        }
-        if self.seconds != 0 {
-            parts.push(format!("seconds={}", self.seconds));
-        }
-        if self.microseconds != 0 {
-            parts.push(format!("microseconds={}", self.microseconds));
-        }
-        if self.nanoseconds != 0 {
-            parts.push(format!("nanoseconds={}", self.nanoseconds));
-        }
-        if parts.is_empty() {
-            "<DateOffset>".to_string()
+        let n = self.n.checked_mul(times).ok_or_else(overflow)?;
+        let mut out = if let Some(anchor) = &self.anchor {
+            fp_frame::shift_by_anchored_offset(nanos, anchor, n).map_err(frame_error_to_py)?
         } else {
-            format!("<DateOffset: {}>", parts.join(", "))
+            let mut value = nanos;
+            if self.absolute.iter().any(Option::is_some) {
+                let narrow = |value: Option<i64>| -> PyResult<Option<u8>> {
+                    value
+                        .map(|value| u8::try_from(value).map_err(|_| overflow()))
+                        .transpose()
+                };
+                let [year, month, day, hour, minute, second, micro, nano] = self.absolute;
+                value = PyTimestamp {
+                    inner: Timestamp::from_nanos(value),
+                }
+                .replace(
+                    py,
+                    year.map(|year| i32::try_from(year).map_err(|_| overflow()))
+                        .transpose()?,
+                    narrow(month)?,
+                    narrow(day)?,
+                    narrow(hour)?,
+                    narrow(minute)?,
+                    narrow(second)?,
+                    micro
+                        .map(|micro| u32::try_from(micro).map_err(|_| overflow()))
+                        .transpose()?,
+                    nano,
+                    None,
+                    None,
+                )?
+                .inner
+                .nanos;
+            }
+            let months = self
+                .years
+                .checked_mul(12)
+                .and_then(|months| months.checked_add(self.months))
+                .and_then(|months| months.checked_mul(n))
+                .ok_or_else(overflow)?;
+            if months != 0 {
+                value = fp_frame::add_calendar_months(value, months).map_err(frame_error_to_py)?;
+            }
+            let unit = if self.is_bare() {
+                DAY
+            } else {
+                self.fixed_nanos().ok_or_else(overflow)?
+            };
+            unit.checked_mul(n)
+                .and_then(|fixed| value.checked_add(fixed))
+                .ok_or_else(overflow)?
+        };
+        if self.normalize {
+            out -= out.rem_euclid(DAY);
         }
+        Ok(out)
     }
 
-    fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+    /// The instant a Timestamp or `datetime` operand stands for.
+    fn instant(other: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
         if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
-            let res = ts.inner.add_timedelta(self.nanos());
-            PyTimestamp { inner: res }.into_py_any(py)
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Can only add DateOffset to Timestamp",
-            ))
+            return Ok(Some(ts.inner.nanos));
         }
+        if let Ok(dt) = other.cast::<PyDateTime>() {
+            return py_datetime_nanos(dt).map(Some);
+        }
+        Ok(None)
+    }
+
+    /// `other` (a Timestamp or datetime, a datetime Series or a
+    /// DatetimeIndex) with this offset applied `times` times; None for
+    /// any other operand.
+    fn apply_to_operand(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        times: i64,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if let Some(nanos) = Self::instant(other)? {
+            let inner = Timestamp::from_nanos(self.apply(py, nanos, times)?);
+            return Ok(Some(PyTimestamp { inner }.into_py_any(py)?));
+        }
+        if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+            let inner = series_apply_offset(py, &series.inner, self, times)?;
+            return Ok(Some(PySeries { inner }.into_py_any(py)?));
+        }
+        if let Ok(index) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            let nanos = index
+                .inner
+                .asi8()
+                .iter()
+                .map(|&nanos| self.apply(py, nanos, times))
+                .collect::<PyResult<Vec<i64>>>()?;
+            return Ok(Some(index.with_nanos(nanos).into_py_any(py)?));
+        }
+        Ok(None)
+    }
+}
+
+/// A frequency argument as its alias: a string as is, an offset object
+/// through its freqstr ('2ME', 'W-MON'); `what` names the caller for the
+/// DateOffset(months=...) that has none.
+fn freq_alias(freq: &Bound<'_, PyAny>, what: &str) -> PyResult<String> {
+    match freq.extract::<PyRef<'_, PyDateOffset>>() {
+        Ok(offset) if offset.rule_code.is_some() => Ok(offset.freqstr()),
+        Ok(_) => Err(not_implemented(&format!("{what}(DateOffset(...))"))),
+        Err(_) => freq.extract::<String>(),
+    }
+}
+
+/// pandas resamples only a datetime axis: any other raises its TypeError
+/// (an integer index binned nothing and returned an empty result, a string
+/// index was read as dates). A TimedeltaIndex is not supported yet.
+fn require_resample_axis(index: &Index) -> PyResult<()> {
+    let labels = index.labels();
+    if labels
+        .iter()
+        .all(|label| matches!(label, IndexLabel::Datetime64(_) | IndexLabel::Null(_)))
+    {
+        return Ok(());
+    }
+    if labels
+        .iter()
+        .all(|label| matches!(label, IndexLabel::Timedelta64(_) | IndexLabel::Null(_)))
+    {
+        return Err(not_implemented("resample over a TimedeltaIndex"));
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        "Only valid with DatetimeIndex, TimedeltaIndex or PeriodIndex, but got an instance of 'Index'",
+    ))
+}
+
+/// `series` (datetime64) with `offset` applied `times` times to each value;
+/// NaT stays NaT.
+fn series_apply_offset(
+    py: Python<'_>,
+    series: &Series,
+    offset: &PyDateOffset,
+    times: i64,
+) -> PyResult<Series> {
+    if !matches!(series.column().dtype(), DType::Datetime64 { tz: None }) {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "cannot add {} to a Series of dtype {}",
+            offset.__repr__(),
+            column_pandas_dtype_name(series.column())
+        )));
+    }
+    let values = series
+        .values()
+        .iter()
+        .map(|value| match value {
+            Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                offset.apply(py, *nanos, times).map(Scalar::Datetime64)
+            }
+            _ => Ok(Scalar::Null(NullKind::NaT)),
+        })
+        .collect::<PyResult<Vec<Scalar>>>()?;
+    let column = Column::new(DType::datetime64_naive(), values).map_err(column_error_to_py)?;
+    Series::new(series.name(), series.index().clone(), column).map_err(frame_error_to_py)
+}
+
+#[pymethods]
+impl PyDateOffset {
+    /// pandas' `DateOffset(n=1, normalize=False, **kwds)`: relative
+    /// `years`..`nanoseconds` and absolute `year`..`nanosecond`.
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (n=1, normalize=false, *, years=0, months=0, weeks=0, days=0, hours=0, minutes=0, seconds=0, microseconds=0, nanoseconds=0, year=None, month=None, day=None, hour=None, minute=None, second=None, microsecond=None, nanosecond=None))]
+    fn new(
+        n: i64,
+        normalize: bool,
+        years: i64,
+        months: i64,
+        weeks: i64,
+        days: i64,
+        hours: i64,
+        minutes: i64,
+        seconds: i64,
+        microseconds: i64,
+        nanoseconds: i64,
+        year: Option<i64>,
+        month: Option<i64>,
+        day: Option<i64>,
+        hour: Option<i64>,
+        minute: Option<i64>,
+        second: Option<i64>,
+        microsecond: Option<i64>,
+        nanosecond: Option<i64>,
+    ) -> Self {
+        Self {
+            n,
+            normalize,
+            years,
+            months,
+            weeks,
+            days,
+            hours,
+            minutes,
+            seconds,
+            microseconds,
+            nanoseconds,
+            absolute: [
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                microsecond,
+                nanosecond,
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// A tick's fixed length; pandas' ValueError for any other offset.
+    #[getter]
+    fn nanos(&self) -> PyResult<i64> {
+        if self.anchor.is_none() && self.kind.is_some() {
+            if let Some(nanos) = self.fixed_nanos().and_then(|unit| unit.checked_mul(self.n)) {
+                return Ok(nanos);
+            }
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "{} is a non-fixed frequency",
+            self.__repr__()
+        )))
+    }
+
+    /// pandas' freqstr: the rule code with the count ("2ME", "W-MON",
+    /// "QS-MAR"); a DateOffset's is its repr.
+    #[getter]
+    fn freqstr(&self) -> String {
+        match &self.rule_code {
+            Some(code) if self.n == 1 => code.clone(),
+            Some(code) => format!("{}{code}", self.n),
+            None => self.__repr__(),
+        }
+    }
+
+    #[getter]
+    fn rule_code(&self) -> PyResult<String> {
+        self.rule_code
+            .clone()
+            .ok_or_else(|| not_implemented("DateOffset.rule_code"))
+    }
+
+    /// The Timestamp itself when it is on this offset, else the next one.
+    fn rollforward(&self, dt: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
+        let nanos = Self::instant(dt)?.ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("rollforward takes a Timestamp")
+        })?;
+        let inner = match &self.anchor {
+            Some(anchor) => Timestamp::from_nanos(
+                fp_frame::shift_by_anchored_offset(nanos, anchor, 0).map_err(frame_error_to_py)?,
+            ),
+            None => Timestamp::from_nanos(nanos),
+        };
+        Ok(PyTimestamp { inner })
+    }
+
+    /// The Timestamp itself when it is on this offset, else the previous one.
+    fn rollback(&self, dt: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
+        let nanos = Self::instant(dt)?.ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("rollback takes a Timestamp")
+        })?;
+        let inner = match &self.anchor {
+            Some(anchor)
+                if !fp_frame::is_on_anchored_offset(nanos, anchor)
+                    .map_err(frame_error_to_py)? =>
+            {
+                Timestamp::from_nanos(
+                    fp_frame::shift_by_anchored_offset(nanos, anchor, -1)
+                        .map_err(frame_error_to_py)?,
+                )
+            }
+            _ => Timestamp::from_nanos(nanos),
+        };
+        Ok(PyTimestamp { inner })
+    }
+
+    /// Whether the Timestamp's date is on this offset (a relative offset is
+    /// on every date).
+    fn is_on_offset(&self, dt: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let nanos = Self::instant(dt)?.ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("is_on_offset takes a Timestamp")
+        })?;
+        match &self.anchor {
+            Some(anchor) => {
+                fp_frame::is_on_anchored_offset(nanos, anchor).map_err(frame_error_to_py)
+            }
+            None => Ok(true),
+        }
+    }
+
+    /// pandas' `<2 * MonthEnds>`, `<-1 * QuarterEnd: startingMonth=3>`,
+    /// `<DateOffset: days=2, years=1>` (the plural unless |n| is 1, a
+    /// DateOffset's keywords sorted).
+    fn __repr__(&self) -> String {
+        let class = self.kind.unwrap_or("DateOffset");
+        let plural = if self.n.abs() == 1 { "" } else { "s" };
+        let count = if self.n == 1 {
+            String::new()
+        } else {
+            format!("{} * ", self.n)
+        };
+        let attrs = match (&self.attr, self.kind) {
+            (Some(attr), _) => attr.clone(),
+            (None, Some(_)) => String::new(),
+            (None, None) => {
+                let relative = [
+                    ("years", self.years),
+                    ("months", self.months),
+                    ("weeks", self.weeks),
+                    ("days", self.days),
+                    ("hours", self.hours),
+                    ("minutes", self.minutes),
+                    ("seconds", self.seconds),
+                    ("microseconds", self.microseconds),
+                    ("nanoseconds", self.nanoseconds),
+                ];
+                let mut parts: Vec<(&str, i64)> = relative
+                    .into_iter()
+                    .filter(|(_, value)| *value != 0)
+                    .chain(
+                        DATE_OFFSET_ABSOLUTE
+                            .iter()
+                            .zip(self.absolute)
+                            .filter_map(|(name, value)| value.map(|value| (*name, value))),
+                    )
+                    .collect();
+                parts.sort_unstable_by_key(|(name, _)| *name);
+                parts
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        let attrs = if attrs.is_empty() {
+            attrs
+        } else {
+            format!(": {attrs}")
+        };
+        format!("<{count}{class}{plural}{attrs}>")
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.__repr__().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::class::basic::CompareOp,
+    ) -> PyResult<Py<PyAny>> {
+        use pyo3::class::basic::CompareOp;
+        let Ok(other) = other.extract::<PyRef<'_, PyDateOffset>>() else {
+            return Ok(py.NotImplemented());
+        };
+        let same = *self == *other;
+        match op {
+            CompareOp::Eq => Ok(pyo3::types::PyBool::new(py, same)
+                .to_owned()
+                .into_any()
+                .unbind()),
+            CompareOp::Ne => Ok(pyo3::types::PyBool::new(py, !same)
+                .to_owned()
+                .into_any()
+                .unbind()),
+            _ => Ok(py.NotImplemented()),
+        }
+    }
+
+    /// `offset + Timestamp / datetime / datetime Series / DatetimeIndex`.
+    fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .apply_to_operand(py, other, 1)?
+            .unwrap_or_else(|| py.NotImplemented()))
     }
 
     fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         self.__add__(py, other)
     }
+
+    /// `Timestamp / Series / DatetimeIndex - offset`.
+    fn __rsub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .apply_to_operand(py, other, -1)?
+            .unwrap_or_else(|| py.NotImplemented()))
+    }
+
+    fn __mul__(&self, factor: i64) -> PyResult<Self> {
+        let n = self
+            .n
+            .checked_mul(factor)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow"))?;
+        Ok(Self { n, ..self.clone() })
+    }
+
+    fn __rmul__(&self, factor: i64) -> PyResult<Self> {
+        self.__mul__(factor)
+    }
+
+    fn __neg__(&self) -> PyResult<Self> {
+        self.__mul__(-1)
+    }
 }
 
-// Helper factory functions for offsets
+// pandas.tseries.offsets: the fixed ticks and the anchored calendar offsets.
 #[pyfunction(name = "Day")]
 #[pyo3(signature = (n=1))]
-fn offset_day(n: Option<i64>) -> PyDateOffset {
-    PyDateOffset {
-        n: n.unwrap_or(1),
-        days: 1,
-        ..Default::default()
-    }
+fn offset_day(n: i64) -> PyDateOffset {
+    PyDateOffset::tick("Day", "D", n, 86_400_000_000_000)
 }
 
 #[pyfunction(name = "Hour")]
 #[pyo3(signature = (n=1))]
-fn offset_hour(n: Option<i64>) -> PyDateOffset {
-    PyDateOffset {
-        n: n.unwrap_or(1),
-        hours: 1,
-        ..Default::default()
-    }
+fn offset_hour(n: i64) -> PyDateOffset {
+    PyDateOffset::tick("Hour", "h", n, 3_600_000_000_000)
 }
 
 #[pyfunction(name = "Minute")]
 #[pyo3(signature = (n=1))]
-fn offset_minute(n: Option<i64>) -> PyDateOffset {
-    PyDateOffset {
-        n: n.unwrap_or(1),
-        minutes: 1,
-        ..Default::default()
-    }
+fn offset_minute(n: i64) -> PyDateOffset {
+    PyDateOffset::tick("Minute", "min", n, 60_000_000_000)
 }
 
 #[pyfunction(name = "Second")]
 #[pyo3(signature = (n=1))]
-fn offset_second(n: Option<i64>) -> PyDateOffset {
-    PyDateOffset {
-        n: n.unwrap_or(1),
-        seconds: 1,
-        ..Default::default()
-    }
+fn offset_second(n: i64) -> PyDateOffset {
+    PyDateOffset::tick("Second", "s", n, 1_000_000_000)
 }
 
-#[pyfunction(name = "Week")]
+#[pyfunction(name = "Milli")]
 #[pyo3(signature = (n=1))]
-fn offset_week(n: Option<i64>) -> PyDateOffset {
-    PyDateOffset {
-        n: n.unwrap_or(1),
-        weeks: 1,
-        ..Default::default()
-    }
+fn offset_milli(n: i64) -> PyDateOffset {
+    PyDateOffset::tick("Milli", "ms", n, 1_000_000)
+}
+
+#[pyfunction(name = "Micro")]
+#[pyo3(signature = (n=1))]
+fn offset_micro(n: i64) -> PyDateOffset {
+    PyDateOffset::tick("Micro", "us", n, 1_000)
+}
+
+#[pyfunction(name = "Nano")]
+#[pyo3(signature = (n=1))]
+fn offset_nano(n: i64) -> PyDateOffset {
+    PyDateOffset::tick("Nano", "ns", n, 1)
+}
+
+/// pandas' `Week(n, weekday=)`: seven days, or with a weekday (Monday 0)
+/// the next such weekday strictly after the date.
+#[pyfunction(name = "Week")]
+#[pyo3(signature = (n=1, normalize=false, weekday=None))]
+fn offset_week(n: i64, normalize: bool, weekday: Option<i64>) -> PyResult<PyDateOffset> {
+    const DAYS: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+    let Some(weekday) = weekday else {
+        return Ok(PyDateOffset {
+            n,
+            normalize,
+            weeks: 1,
+            kind: Some("Week"),
+            attr: Some("weekday=None".to_owned()),
+            rule_code: Some("W".to_owned()),
+            ..Default::default()
+        });
+    };
+    let day = usize::try_from(weekday)
+        .ok()
+        .and_then(|weekday| DAYS.get(weekday))
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Day must be 0<=day<=6, got {weekday}"
+            ))
+        })?;
+    Ok(PyDateOffset::anchored(
+        "Week",
+        format!("W-{day}"),
+        n,
+        normalize,
+        Some(format!("weekday={weekday}")),
+    ))
+}
+
+/// The anchor suffix of a month number (1 -> "JAN").
+fn offset_month_abbr(month: i64) -> PyResult<&'static str> {
+    const MONTHS: [&str; 12] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ];
+    usize::try_from(month - 1)
+        .ok()
+        .and_then(|month| MONTHS.get(month).copied())
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Month must go from 1 to 12")
+        })
 }
 
 #[pyfunction(name = "MonthEnd")]
-#[pyo3(signature = (n=1))]
-fn offset_month_end(n: Option<i64>) -> PyDateOffset {
-    PyDateOffset {
-        n: n.unwrap_or(1),
-        months: 1,
-        ..Default::default()
+#[pyo3(signature = (n=1, normalize=false))]
+fn offset_month_end(n: i64, normalize: bool) -> PyDateOffset {
+    PyDateOffset::anchored("MonthEnd", "ME".to_owned(), n, normalize, None)
+}
+
+#[pyfunction(name = "MonthBegin")]
+#[pyo3(signature = (n=1, normalize=false))]
+fn offset_month_begin(n: i64, normalize: bool) -> PyDateOffset {
+    PyDateOffset::anchored("MonthBegin", "MS".to_owned(), n, normalize, None)
+}
+
+#[pyfunction(name = "BMonthEnd")]
+#[pyo3(signature = (n=1, normalize=false))]
+fn offset_business_month_end(n: i64, normalize: bool) -> PyDateOffset {
+    PyDateOffset::anchored("BusinessMonthEnd", "BME".to_owned(), n, normalize, None)
+}
+
+#[pyfunction(name = "BMonthBegin")]
+#[pyo3(signature = (n=1, normalize=false))]
+fn offset_business_month_begin(n: i64, normalize: bool) -> PyDateOffset {
+    PyDateOffset::anchored("BusinessMonthBegin", "BMS".to_owned(), n, normalize, None)
+}
+
+/// A semi-monthly offset: SME's anchors are `day_of_month` and the month
+/// end, SMS's the 1st and `day_of_month` (2..=27, pandas' bounds).
+fn offset_semi_month(
+    kind: &'static str,
+    code: &str,
+    n: i64,
+    normalize: bool,
+    day_of_month: i64,
+) -> PyResult<PyDateOffset> {
+    if !(2..=27).contains(&day_of_month) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "day_of_month must be 2<=day_of_month<=27, got {day_of_month}"
+        )));
     }
+    let mut offset = PyDateOffset::anchored(
+        kind,
+        format!("{code}-{day_of_month}"),
+        n,
+        normalize,
+        Some(format!("day_of_month={day_of_month}")),
+    );
+    if day_of_month == 15 {
+        offset.rule_code = Some(code.to_owned());
+    }
+    Ok(offset)
+}
+
+#[pyfunction(name = "SemiMonthEnd")]
+#[pyo3(signature = (n=1, normalize=false, day_of_month=15))]
+fn offset_semi_month_end(n: i64, normalize: bool, day_of_month: i64) -> PyResult<PyDateOffset> {
+    offset_semi_month("SemiMonthEnd", "SME", n, normalize, day_of_month)
+}
+
+#[pyfunction(name = "SemiMonthBegin")]
+#[pyo3(signature = (n=1, normalize=false, day_of_month=15))]
+fn offset_semi_month_begin(n: i64, normalize: bool, day_of_month: i64) -> PyResult<PyDateOffset> {
+    offset_semi_month("SemiMonthBegin", "SMS", n, normalize, day_of_month)
+}
+
+/// A quarter or year offset anchored on `month` (a quarter's anchor months
+/// are every third from it).
+fn offset_period_anchor(
+    kind: &'static str,
+    code: &str,
+    n: i64,
+    normalize: bool,
+    attr: &str,
+    month: i64,
+) -> PyResult<PyDateOffset> {
+    Ok(PyDateOffset::anchored(
+        kind,
+        format!("{code}-{}", offset_month_abbr(month)?),
+        n,
+        normalize,
+        Some(format!("{attr}={month}")),
+    ))
+}
+
+#[pyfunction(name = "QuarterEnd")]
+#[pyo3(signature = (n=1, normalize=false, startingMonth=3))]
+#[allow(non_snake_case)] // pandas' keyword
+fn offset_quarter_end(n: i64, normalize: bool, startingMonth: i64) -> PyResult<PyDateOffset> {
+    offset_period_anchor(
+        "QuarterEnd",
+        "QE",
+        n,
+        normalize,
+        "startingMonth",
+        startingMonth,
+    )
+}
+
+#[pyfunction(name = "QuarterBegin")]
+#[pyo3(signature = (n=1, normalize=false, startingMonth=3))]
+#[allow(non_snake_case)] // pandas' keyword
+fn offset_quarter_begin(n: i64, normalize: bool, startingMonth: i64) -> PyResult<PyDateOffset> {
+    offset_period_anchor(
+        "QuarterBegin",
+        "QS",
+        n,
+        normalize,
+        "startingMonth",
+        startingMonth,
+    )
+}
+
+#[pyfunction(name = "BQuarterEnd")]
+#[pyo3(signature = (n=1, normalize=false, startingMonth=3))]
+#[allow(non_snake_case)] // pandas' keyword
+fn offset_business_quarter_end(
+    n: i64,
+    normalize: bool,
+    startingMonth: i64,
+) -> PyResult<PyDateOffset> {
+    offset_period_anchor(
+        "BusinessQuarterEnd",
+        "BQE",
+        n,
+        normalize,
+        "startingMonth",
+        startingMonth,
+    )
+}
+
+#[pyfunction(name = "BQuarterBegin")]
+#[pyo3(signature = (n=1, normalize=false, startingMonth=3))]
+#[allow(non_snake_case)] // pandas' keyword
+fn offset_business_quarter_begin(
+    n: i64,
+    normalize: bool,
+    startingMonth: i64,
+) -> PyResult<PyDateOffset> {
+    offset_period_anchor(
+        "BusinessQuarterBegin",
+        "BQS",
+        n,
+        normalize,
+        "startingMonth",
+        startingMonth,
+    )
 }
 
 #[pyfunction(name = "YearEnd")]
-#[pyo3(signature = (n=1))]
-fn offset_year_end(n: Option<i64>) -> PyDateOffset {
-    PyDateOffset {
-        n: n.unwrap_or(1),
-        years: 1,
-        ..Default::default()
-    }
+#[pyo3(signature = (n=1, normalize=false, month=12))]
+fn offset_year_end(n: i64, normalize: bool, month: i64) -> PyResult<PyDateOffset> {
+    offset_period_anchor("YearEnd", "YE", n, normalize, "month", month)
+}
+
+#[pyfunction(name = "YearBegin")]
+#[pyo3(signature = (n=1, normalize=false, month=1))]
+fn offset_year_begin(n: i64, normalize: bool, month: i64) -> PyResult<PyDateOffset> {
+    offset_period_anchor("YearBegin", "YS", n, normalize, "month", month)
+}
+
+#[pyfunction(name = "BYearEnd")]
+#[pyo3(signature = (n=1, normalize=false, month=12))]
+fn offset_business_year_end(n: i64, normalize: bool, month: i64) -> PyResult<PyDateOffset> {
+    offset_period_anchor("BusinessYearEnd", "BYE", n, normalize, "month", month)
+}
+
+#[pyfunction(name = "BYearBegin")]
+#[pyo3(signature = (n=1, normalize=false, month=1))]
+fn offset_business_year_begin(n: i64, normalize: bool, month: i64) -> PyResult<PyDateOffset> {
+    offset_period_anchor("BusinessYearBegin", "BYS", n, normalize, "month", month)
+}
+
+/// pandas' `BusinessDay` / `BDay`: weekdays, Saturday and Sunday skipped.
+#[pyfunction(name = "BDay")]
+#[pyo3(signature = (n=1, normalize=false))]
+fn offset_business_day(n: i64, normalize: bool) -> PyDateOffset {
+    PyDateOffset::anchored("BusinessDay", "B".to_owned(), n, normalize, None)
 }
 
 // 4. Top-level functions
@@ -46120,9 +46759,36 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     offsets_mod.add_function(wrap_pyfunction!(offset_hour, &offsets_mod)?)?;
     offsets_mod.add_function(wrap_pyfunction!(offset_minute, &offsets_mod)?)?;
     offsets_mod.add_function(wrap_pyfunction!(offset_second, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_milli, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_micro, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_nano, &offsets_mod)?)?;
     offsets_mod.add_function(wrap_pyfunction!(offset_week, &offsets_mod)?)?;
     offsets_mod.add_function(wrap_pyfunction!(offset_month_end, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_month_begin, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_business_month_end, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_business_month_begin, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_semi_month_end, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_semi_month_begin, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_quarter_end, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_quarter_begin, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_business_quarter_end, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(
+        offset_business_quarter_begin,
+        &offsets_mod
+    )?)?;
     offsets_mod.add_function(wrap_pyfunction!(offset_year_end, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_year_begin, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_business_year_end, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_business_year_begin, &offsets_mod)?)?;
+    offsets_mod.add_function(wrap_pyfunction!(offset_business_day, &offsets_mod)?)?;
+    // pandas' long names for the same offsets.
+    for (alias, name) in [
+        ("BusinessDay", "BDay"),
+        ("BusinessMonthEnd", "BMonthEnd"),
+        ("BusinessMonthBegin", "BMonthBegin"),
+    ] {
+        offsets_mod.add(alias, offsets_mod.getattr(name)?)?;
+    }
     m.add_submodule(&offsets_mod)?;
     m.py()
         .import("sys")?
@@ -47362,11 +48028,28 @@ mod tests {
         assert_eq!(gb_nq.shape(), (2, 1));
         assert_eq!(gb.ngroups().expect("ngroups"), 2); // ubs:ignore — test fixture
 
-        let resampler_df = py_df.resample("1D", None, None, None);
-        assert_eq!(resampler_df.freq, "1D");
+        Python::attach(|py| {
+            let rule = pyo3::types::PyString::new(py, "1D");
+            // These fixtures are integer-indexed, which pandas refuses to
+            // resample (TypeError); this used to build a resampler that binned
+            // nothing.
+            let refused = py_df.resample(rule.as_any(), None, None, None, None, None);
+            assert!(refused.is_err_and(|e| e.is_instance_of::<pyo3::exceptions::PyTypeError>(py)));
+            assert!(py_s.resample(rule.as_any(), None, None, None).is_err());
 
-        let resampler_s = py_s.resample("1D", None, None, None);
-        assert_eq!(resampler_s.freq, "1D");
+            let dated = PySeries {
+                inner: Series::from_values(
+                    "v",
+                    vec![IndexLabel::Datetime64(0)],
+                    vec![Scalar::Float64(1.0)],
+                )
+                .expect("series"), // ubs:ignore — test fixture
+            };
+            let resampler_s = dated
+                .resample(rule.as_any(), None, None, None)
+                .expect("resample"); // ubs:ignore — test fixture
+            assert_eq!(resampler_s.freq, "1D");
+        });
     }
 
     #[test]
