@@ -7375,3 +7375,57 @@ def _text_time_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_TEXT_TIME_CASES))
 def test_index_drop_time_selection_regex_replace_and_text_methods_match_pandas(case: str) -> None:
     assert _text_time_outcome(fpd, case) == _text_time_outcome(pd, case), case
+
+
+def _levels(m: Any) -> Any:
+    return m.Series(["lo", "hi", "mid", "lo"], dtype=m.CategoricalDtype(["lo", "mid", "hi"], ordered=True))
+
+
+def _grouped(m: Any) -> Any:
+    return m.DataFrame({"g": ["a", "b", "a", "b", "c"], "h": [1, 1, 2, 2, 1], "x": [1.0, 2.0, None, 4.0, 5.0], "y": [5, 4, 3, 2, 1]})
+
+
+# Silently wrong: a CategoricalDtype(categories, ordered=True) given to
+# Series(...) / astype lost its category order and ordering (re-sorted as
+# text), so sorts, max, codes, value_counts and groupby followed 'hi' < 'lo'
+# < 'mid'; an all-NaN rolling corr / cov was object dtype. Raised: `for key,
+# group in gb` (TypeError), named ("col", "size") aggregation, an ordered
+# categorical against a scalar (`cat > 'lo'`), rename_categories with a dict
+# or a callable.
+_CATEGORY_GROUP_CASES = {
+    "ordered sort": lambda m: _shaped(_levels(m).sort_values()),
+    "ordered categories": lambda m: _levels(m).cat.categories.tolist(),
+    "ordered codes": lambda m: _levels(m).cat.codes.tolist(),
+    "ordered max min": lambda m: (_levels(m).max(), _levels(m).min()),
+    "ordered value_counts": lambda m: _shaped(_levels(m).value_counts()),
+    "ordered groupby": lambda m: _shaped(m.DataFrame({"c": _levels(m), "v": [1, 2, 3, 4]}).groupby("c", observed=False)["v"].sum()),
+    "ordered compare scalar": lambda m: _shaped(_levels(m) > "lo"),
+    "ordered compare reflected": lambda m: _shaped("mid" >= _levels(m)),
+    "astype categorical dtype": lambda m: m.Series(["b", "a", "c"]).astype(m.CategoricalDtype(["c", "b", "a"], ordered=True)).sort_values().tolist(),
+    "value outside categories": lambda m: _shaped(m.Series(["lo", "zz"], dtype=m.CategoricalDtype(["lo", "hi"]))),
+    "rename categories dict": lambda m: _shaped(_levels(m).cat.rename_categories({"lo": "L"})),
+    "rename categories callable": lambda m: _shaped(_levels(m).cat.rename_categories(lambda c: c.upper())),
+    # NEGATIVES: a scalar outside the categories and an unordered
+    # categorical's ordering comparison raise TypeError.
+    "compare scalar not a category": lambda m: _levels(m) > "zz",
+    "unordered compare": lambda m: m.Series(["a", "b"], dtype="category") > "a",
+    "groupby iterate": lambda m: [(k, _shaped(g)) for k, g in _grouped(m).groupby("g")],
+    "groupby iterate two keys": lambda m: [(k, len(g)) for k, g in _grouped(m).groupby(["g", "h"])],
+    "groupby iterate unsorted": lambda m: [k for k, _ in _grouped(m).groupby("g", sort=False)],
+    "series groupby iterate": lambda m: [(k, g.tolist()) for k, g in _grouped(m).groupby("g")["y"]],
+    "named agg size": lambda m: _shaped(_grouped(m).groupby("g").agg(x_sum=("x", "sum"), n=("y", "size"), x_n=("x", "size"))),
+    "rolling corr all undefined": lambda m: (str(_grouped(m)["y"].rolling(3).corr(_grouped(m)["x"]).dtype), _shaped(_grouped(m)["y"].rolling(3).corr(_grouped(m)["x"]))),
+}
+
+
+def _category_group_outcome(m: Any, case: str) -> Any:
+    try:
+        return _CATEGORY_GROUP_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CATEGORY_GROUP_CASES))
+def test_categorical_dtype_order_groupby_iteration_and_named_size_match_pandas(case: str) -> None:
+    assert _category_group_outcome(fpd, case) == _category_group_outcome(pd, case), case

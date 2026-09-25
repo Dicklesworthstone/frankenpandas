@@ -12100,6 +12100,7 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 // pandas' TypeErrors for unordered categoricals (hrxn9).
                 || lower.contains("categorical is not ordered for operation")
                 || lower.contains("unordered categoricals can only compare")
+                || lower.contains("cannot compare a categorical")
                 // pandas' TypeError for a datetime/timedelta reduction it does
                 // not define (4qg5w.23).
                 || lower.contains("type does not support")
@@ -15660,6 +15661,9 @@ impl PySeries {
                 inner: object_series(&series)?,
             });
         }
+        if let Some(inner) = categorical_with_dtype(&series, dtype)? {
+            return Ok(PySeries { inner });
+        }
         let target = py_dtype_arg(dtype)?;
         let inner = series
             .astype(target)
@@ -17697,6 +17701,9 @@ impl PySeries {
             return Ok(PySeries {
                 inner: object_series(&self.inner)?,
             });
+        }
+        if let Some(inner) = categorical_with_dtype(&self.inner, &spec)? {
+            return Ok(PySeries { inner });
         }
         match self.inner.astype(py_dtype_arg(&spec)?) {
             Ok(inner) => Ok(PySeries { inner }),
@@ -34330,12 +34337,36 @@ impl PySeriesCategoricalAccessor {
         self.apply(|cat| cat.codes())
     }
 
+    /// pandas' `cat.rename_categories(new_categories)`: a list in category
+    /// order, a dict-like mapping some of them (the rest kept) or a callable
+    /// on each (the dict and callable forms raised).
     fn rename_categories(
         &self,
         py: Python<'_>,
         new_categories: &Bound<'_, PyAny>,
     ) -> PyResult<PySeries> {
-        let categories = py_categories(py, new_categories)?;
+        let current = self.accessor()?.categories().to_vec();
+        let categories = if let Ok(mapping) = new_categories.cast::<PyDict>() {
+            current
+                .iter()
+                .map(|category| {
+                    let key = scalar_to_py(py, category)?;
+                    match mapping.get_item(key)? {
+                        Some(renamed) => py_to_scalar(py, &renamed),
+                        None => Ok(category.clone()),
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        } else if new_categories.is_callable() {
+            current
+                .iter()
+                .map(|category| {
+                    py_to_scalar(py, &new_categories.call1((scalar_to_py(py, category)?,))?)
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        } else {
+            py_categories(py, new_categories)?
+        };
         self.apply(|cat| cat.rename_categories(categories))
     }
 
@@ -37595,6 +37626,53 @@ impl PyGroupBy {
         Ok(PyDataFrame { inner: res })
     }
 
+    /// `for key, group in gb`: each group's key (a tuple over several keys)
+    /// and its rows, in group order, as pandas; it raised TypeError.
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let groups = self.ordered_groups(false)?;
+        let keys = index_rows(&self.group_key_index(&groups)?);
+        // A key passed as an array rides as a column of its own; it is not
+        // one of the group's columns.
+        let own_keys: Vec<&str> = self
+            .by
+            .iter()
+            .zip(&self.key_names)
+            .filter(|(column, name)| name.as_deref() != Some(column.as_str()))
+            .map(|(column, _)| column.as_str())
+            .collect();
+        let kept: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .filter(|column| !own_keys.contains(column))
+            .collect();
+        let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
+        let mut pairs = Vec::with_capacity(groups.len());
+        for ((_, positions), key) in groups.iter().zip(&keys) {
+            let key = match key.as_slice() {
+                [single] => index_label_to_py(py, single)?,
+                parts => pyo3::types::PyTuple::new(
+                    py,
+                    parts
+                        .iter()
+                        .map(|part| index_label_to_py(py, part))
+                        .collect::<PyResult<Vec<_>>>()?,
+                )?
+                .into_any()
+                .unbind(),
+            };
+            let group = PyDataFrame {
+                inner: frame.take_rows(positions).map_err(frame_error_to_py)?,
+            };
+            pairs.push(pyo3::types::PyTuple::new(
+                py,
+                [key, Py::new(py, group)?.into_any()],
+            )?);
+        }
+        Ok(PyList::new(py, pairs)?.try_iter()?.into_any().unbind())
+    }
+
     fn get_group(&self, name: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let s = name
             .extract::<String>()
@@ -39329,6 +39407,43 @@ impl PySeriesGroupBy {
             .get_group(&s)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
+    }
+
+    /// `for key, group in sgb`: each group's key (a tuple over several keys)
+    /// and its values, in group order, as pandas; it raised TypeError.
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let key_rows = self.groups.as_ref().map(index_rows);
+        let mut pairs = Vec::new();
+        for (key, positions) in self.ordered_groups(false)? {
+            let parts = match (&key_rows, &key) {
+                (Some(rows), IndexLabel::Int64(code)) => usize::try_from(*code)
+                    .ok()
+                    .and_then(|code| rows.get(code))
+                    .cloned()
+                    .unwrap_or_else(|| vec![key.clone()]),
+                _ => vec![key.clone()],
+            };
+            let key = match parts.as_slice() {
+                [single] => index_label_to_py(py, single)?,
+                parts => pyo3::types::PyTuple::new(
+                    py,
+                    parts
+                        .iter()
+                        .map(|part| index_label_to_py(py, part))
+                        .collect::<PyResult<Vec<_>>>()?,
+                )?
+                .into_any()
+                .unbind(),
+            };
+            let group = PySeries {
+                inner: self.group_rows(&positions)?,
+            };
+            pairs.push(pyo3::types::PyTuple::new(
+                py,
+                [key, Py::new(py, group)?.into_any()],
+            )?);
+        }
+        Ok(PyList::new(py, pairs)?.try_iter()?.into_any().unbind())
     }
 
     /// pandas' `gb.groups`: each group's row labels, in group order.
@@ -41132,6 +41247,46 @@ fn object_frame(frame: &DataFrame, only: Option<&[String]>) -> Result<DataFrame,
         }
     }
     Ok(out)
+}
+
+/// `series` as the categorical `dtype` describes when it is a
+/// `CategoricalDtype` with categories or ordered=True: those categories in
+/// their order (a value outside them missing) and that ordering - they were
+/// re-inferred from the values, sorted as text and unordered, so sorts,
+/// comparisons, max and codes followed the wrong order. `None` for any
+/// other dtype.
+fn categorical_with_dtype(series: &Series, dtype: &Bound<'_, PyAny>) -> PyResult<Option<Series>> {
+    let Ok(categorical) = dtype.extract::<PyRef<'_, PyCategoricalDtype>>() else {
+        return Ok(None);
+    };
+    if categorical.categories.is_none() && !categorical.ordered {
+        return Ok(None);
+    }
+    let values = series.column().values();
+    let built = match &categorical.categories {
+        None => Series::from_categorical(series.name(), values.to_vec(), true),
+        Some(categories) => {
+            let categories: Vec<Scalar> = categories.iter().cloned().map(Scalar::Utf8).collect();
+            let codes = values
+                .iter()
+                .map(|value| {
+                    categories
+                        .iter()
+                        .position(|category| !value.is_missing() && category.semantic_eq(value))
+                        .map_or(-1, |position| i64::try_from(position).unwrap_or(-1))
+                })
+                .collect();
+            Series::from_categorical_codes(series.name(), codes, categories, categorical.ordered)
+        }
+    }
+    .map_err(frame_error_to_py)?;
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        built.column().clone(),
+    )
+    .map(Some)
+    .map_err(frame_error_to_py)
 }
 
 /// A typed index's `astype(dtype)` argument as `astype_name` reads it: a

@@ -12345,28 +12345,63 @@ impl Series {
         other: &Self,
         op: ComparisonOp,
     ) -> Result<Self, FrameError> {
-        let left_meta = self.categorical.as_ref().ok_or_else(|| {
-            FrameError::CompatibilityRejected(
-                "ordered categorical comparison requires both operands to be categorical"
-                    .to_owned(),
-            )
-        })?;
-        let right_meta = other.categorical.as_ref().ok_or_else(|| {
-            FrameError::CompatibilityRejected(
-                "ordered categorical comparison requires both operands to be categorical"
-                    .to_owned(),
-            )
-        })?;
-        if !left_meta.ordered || !right_meta.ordered {
+        // Plain values against an ordered categorical (a scalar broadcast):
+        // the values are read as its categories, as pandas; it required both
+        // operands to be categorical, so `cat > 'lo'` raised.
+        let Some(left_meta) = self.categorical.as_ref() else {
+            let flipped = match op {
+                ComparisonOp::Gt => ComparisonOp::Lt,
+                ComparisonOp::Lt => ComparisonOp::Gt,
+                ComparisonOp::Ge => ComparisonOp::Le,
+                ComparisonOp::Le => ComparisonOp::Ge,
+                same => same,
+            };
+            return other.categorical_ordering_comparison_op(self, flipped);
+        };
+        if !left_meta.ordered
+            || other
+                .categorical
+                .as_ref()
+                .is_some_and(|right_meta| !right_meta.ordered)
+        {
             return Err(FrameError::CompatibilityRejected(
                 "Unordered Categoricals can only compare equality or not".to_owned(),
             ));
         }
-        if !categorical_categories_match(left_meta, right_meta) {
-            return Err(FrameError::CompatibilityRejected(
-                "Categoricals can only compare if categories are the same".to_owned(),
-            ));
-        }
+        let right_codes = match other.categorical.as_ref() {
+            Some(right_meta) => {
+                if !categorical_categories_match(left_meta, right_meta) {
+                    return Err(FrameError::CompatibilityRejected(
+                        "Categoricals can only compare if categories are the same".to_owned(),
+                    ));
+                }
+                other.category_codes_column()?
+            }
+            None => {
+                let codes = other
+                    .column
+                    .values()
+                    .iter()
+                    .map(|value| {
+                        if value.is_missing() {
+                            return Ok(Scalar::Null(NullKind::NaN));
+                        }
+                        left_meta
+                            .categories
+                            .iter()
+                            .position(|category| category.semantic_eq(value))
+                            .map(|code| Scalar::Int64(i64::try_from(code).unwrap_or(i64::MAX)))
+                            .ok_or_else(|| {
+                                FrameError::CompatibilityRejected(
+                                    "Cannot compare a Categorical with a scalar, which is not a category."
+                                        .to_owned(),
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Column::from_values(codes)?
+            }
+        };
 
         let plan = align_union_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
@@ -12374,9 +12409,7 @@ impl Series {
         let left = self
             .category_codes_column()?
             .reindex_by_positions(&plan.left_positions)?;
-        let right = other
-            .category_codes_column()?
-            .reindex_by_positions(&plan.right_positions)?;
+        let right = right_codes.reindex_by_positions(&plan.right_positions)?;
         let values = left
             .values()
             .iter()
@@ -31784,7 +31817,9 @@ impl Rolling<'_> {
                 out.push(state.output(self.min_periods, want_corr, cx, cy));
             }
             let index = self.series.index().clone();
-            let column = Column::from_values(out)?;
+            // Float64 even when every window is undefined (all-NaN inferred
+            // object).
+            let column = Column::new(DType::Float64, out)?;
             return Series::new(self.series.name(), index, column);
         }
 
@@ -31811,9 +31846,10 @@ impl Rolling<'_> {
         }
 
         // Per br-frankenpandas-yk50z: pandas rolling cov/corr preserves source
-        // axis name. Inline impl, not via apply_rolling.
+        // axis name. Inline impl, not via apply_rolling. Float64 even when
+        // every window is undefined (all-NaN inferred object).
         let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
+        let column = Column::new(DType::Float64, out)?;
         Series::new(self.series.name(), index, column)
     }
 
@@ -98228,6 +98264,8 @@ impl DataFrameGroupBy<'_> {
                     "sum" => Self::sum_group_vals(col.dtype(), &group_vals),
                     "mean" => fp_types::nanmean(&group_vals),
                     "count" => fp_types::nancount(&group_vals),
+                    // Every row, missing values included (it was rejected).
+                    "size" => Scalar::Int64(i64::try_from(group_vals.len()).unwrap_or(i64::MAX)),
                     "min" => fp_types::nanmin(&group_vals),
                     "max" => fp_types::nanmax(&group_vals),
                     "std" => fp_types::nanstd(&group_vals, 1),
@@ -103424,6 +103462,11 @@ impl DataFrameGroupBy<'_> {
             "sum" => Ok(Self::sum_group_vals(dtype, group_vals)),
             "mean" => Ok(fp_types::nanmean(group_vals)),
             "count" => Ok(fp_types::nancount(group_vals)),
+            // pandas' size counts every row, missing values included (a
+            // named ("col", "size") aggregation was rejected).
+            "size" => Ok(Scalar::Int64(
+                i64::try_from(group_vals.len()).unwrap_or(i64::MAX),
+            )),
             "min" => Ok(fp_types::nanmin(group_vals)),
             "max" => Ok(fp_types::nanmax(group_vals)),
             "std" => Ok(fp_types::nanstd(group_vals, 1)),
@@ -117058,6 +117101,101 @@ mod tests {
         // NEGATIVES: no match is empty; an unreadable time is an error.
         assert!(kept(s.at_time("12:00").unwrap()).is_empty());
         assert!(s.at_time("25:99").is_err());
+    }
+
+    #[test]
+    fn ordered_categorical_compares_plain_values_as_categories() {
+        let categories = || ["lo", "mid", "hi"].map(|c| Scalar::Utf8(c.into())).to_vec();
+        let levels =
+            Series::from_categorical_codes("c", vec![0, 2, 1, -1], categories(), true).unwrap();
+        let plain = |value: &str| {
+            Series::from_values(
+                "c",
+                (0..4_i64).map(IndexLabel::from).collect(),
+                vec![Scalar::Utf8(value.into()); 4],
+            )
+            .unwrap()
+        };
+        let bools = |out: Series| -> Vec<Scalar> { out.values().to_vec() };
+        let expect = |flags: [bool; 4]| flags.map(Scalar::Bool).to_vec();
+        // pandas 2.2.3: cat > 'lo' orders by the categories (lo < mid < hi),
+        // not as text; a missing value compares False.
+        assert_eq!(
+            bools(levels.gt(&plain("lo")).unwrap()),
+            expect([false, true, true, false])
+        );
+        // 'mid' >= cat is cat <= 'mid'.
+        assert_eq!(
+            bools(plain("mid").ge(&levels).unwrap()),
+            expect([true, false, true, false])
+        );
+        // NEGATIVES: a value outside the categories and an unordered
+        // categorical raise.
+        assert!(levels.gt(&plain("zz")).is_err());
+        let unordered =
+            Series::from_categorical_codes("c", vec![0, 2, 1, -1], categories(), false).unwrap();
+        assert!(unordered.gt(&plain("lo")).is_err());
+    }
+
+    #[test]
+    fn named_size_counts_missing_rows_and_undefined_rolling_corr_is_float() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    ["a", "b", "a"].map(|g| Scalar::Utf8(g.into())).to_vec(),
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        // pandas: agg(n=('v', 'size'), c=('v', 'count')) -> a: 2, 2; b: 1, 0.
+        let named = df
+            .groupby(&["g"])
+            .unwrap()
+            .agg_named(&[("n", "v", "size"), ("c", "v", "count")])
+            .unwrap();
+        assert_eq!(
+            named.column("n").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(1)]
+        );
+        // NEGATIVE: count still skips the missing value.
+        assert_eq!(
+            named.column("c").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(0)]
+        );
+
+        // pandas: a rolling corr / cov with no defined window is float64
+        // (it inferred object from the all-NaN output).
+        let labels = || (0..4_i64).map(IndexLabel::from).collect::<Vec<_>>();
+        let x = Series::from_values(
+            "x",
+            labels(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let y =
+            Series::from_values("y", labels(), (1..=4_i64).map(Scalar::Int64).collect()).unwrap();
+        let corr = y.rolling(3, None).corr(&x).unwrap();
+        assert_eq!(corr.column().dtype(), DType::Float64);
+        assert!(corr.values().iter().all(Scalar::is_missing));
+        assert_eq!(
+            y.rolling(3, None).cov(&x).unwrap().column().dtype(),
+            DType::Float64
+        );
     }
 
     #[test]
