@@ -3112,8 +3112,14 @@ impl Timedelta {
             return Ok(if negative { -nanos } else { nanos });
         }
 
-        let nanos = Self::parse_compound(s)?;
-        Ok(if negative { -nanos } else { nanos })
+        // pandas' leading '-' negates the unit values but not an HH:MM:SS
+        // part that follows one: "-1 days +02:03:04" (how pandas prints a
+        // negative Timedelta) is -1 day + 2:03:04. Negating the whole
+        // compound read it as -(1 day 2:03:04), so a printed Timedelta did
+        // not parse back to itself.
+        let (units, clock) = Self::parse_compound(s)?;
+        let units = if negative { -units } else { units };
+        units.checked_add(clock).ok_or(TimedeltaError::Overflow)
     }
 
     /// Parse an ISO-8601 duration the way pandas `Timedelta` accepts it:
@@ -3210,8 +3216,14 @@ impl Timedelta {
             .checked_add(frac_nanos)
     }
 
-    fn parse_compound(s: &str) -> Result<i64, TimedeltaError> {
+    /// The number-and-unit values of a compound Timedelta string, and the
+    /// HH:MM:SS part that may end it (which the leading sign does not
+    /// negate; see [`Self::parse`]). A sign inside the string is pandas'
+    /// "only leading negative signs are allowed" error ("1 days -02:00:00"
+    /// read as 22 hours).
+    fn parse_compound(s: &str) -> Result<(i64, i64), TimedeltaError> {
         let mut total: i64 = 0;
+        let mut clock: i64 = 0;
         let mut remaining = s;
 
         while !remaining.is_empty() {
@@ -3219,15 +3231,18 @@ impl Timedelta {
             if remaining.is_empty() {
                 break;
             }
+            if remaining.starts_with('-') {
+                return Err(TimedeltaError::InvalidFormat(format!(
+                    "only leading negative signs are allowed: {s}"
+                )));
+            }
 
             // Per br-frankenpandas-i9bah: check if remaining is a time format
             // (HH:MM:SS) which can appear after "N days " in pandas timedelta strings.
             if remaining.contains(':')
                 && let Some(time_nanos) = Self::try_parse_time_format(remaining)
             {
-                total = total
-                    .checked_add(time_nanos)
-                    .ok_or(TimedeltaError::Overflow)?;
+                clock = time_nanos;
                 break;
             }
 
@@ -3277,7 +3292,7 @@ impl Timedelta {
         // unnecessary: the loop above returns `InvalidFormat` on an unparseable
         // number AND on an unknown unit, so the only way to reach here with
         // `total == 0` is an input whose components genuinely sum to zero.
-        Ok(total)
+        Ok((total, clock))
     }
 
     /// Map a pandas-style frequency-alias string to a nanosecond-count.
@@ -12515,6 +12530,27 @@ mod tests {
             + 30 * Timedelta::NANOS_PER_MIN;
         assert_eq!(Timedelta::parse("1d 2h 30m").unwrap(), expected);
         assert_eq!(Timedelta::parse("1d2h30m").unwrap(), expected);
+    }
+
+    #[test]
+    fn timedelta_parse_leading_sign_spares_the_clock_part() {
+        use super::Timedelta;
+        const S: i64 = Timedelta::NANOS_PER_SEC;
+        // Verified vs pandas 2.2.3 Timedelta(...).total_seconds(); the second
+        // is how pandas prints a negative Timedelta.
+        assert_eq!(Timedelta::parse("-1 days 02:03:04").unwrap(), -79_016 * S);
+        assert_eq!(Timedelta::parse("-1 days +02:03:04").unwrap(), -79_016 * S);
+        assert_eq!(
+            Timedelta::parse("-3 days +23:59:59.5").unwrap(),
+            -172_800 * S - S / 2
+        );
+        assert_eq!(Timedelta::parse("-0 days 01:00:00").unwrap(), 3_600 * S);
+        // Without a clock part after a unit, the whole value is negated.
+        assert_eq!(Timedelta::parse("-1d2h").unwrap(), -93_600 * S);
+        assert_eq!(Timedelta::parse("-02:03:04").unwrap(), -7_384 * S);
+        // A sign inside the string is pandas' "only leading negative signs".
+        assert!(Timedelta::parse("-1 days -02:03:04").is_err());
+        assert!(Timedelta::parse("1 days -02:00:00").is_err());
     }
 
     #[test]

@@ -6026,3 +6026,92 @@ _MULTIINDEX_TEXT_CASES = {
 @pytest.mark.parametrize("case", list(_MULTIINDEX_TEXT_CASES))
 def test_multiindex_repr_and_to_string_match_pandas(case: str) -> None:
     assert _MULTIINDEX_TEXT_CASES[case](fpd) == _MULTIINDEX_TEXT_CASES[case](pd), case
+
+
+def _ts(m: Any) -> Any:
+    return m.Timestamp("2024-01-05 10:30:15")
+
+
+# fvsao.35 (scalars): Timestamp(datetime / date / np.datetime64 / nothing /
+# a list) silently returned Timestamp.now(); DatetimeIndex.to_period used the
+# day count as every frequency's ordinal ('2024-01-05' -> '3613-12' monthly);
+# Timedelta('-1 days +02:03:04') - pandas' own printed form - parsed to
+# -(1 day 2:03:04); and the datetime interop pandas users lean on was missing.
+_TIMESTAMP_CASES = {
+    "from datetime": lambda m: m.Timestamp(datetime.datetime(2024, 1, 5, 1)),
+    "from date": lambda m: m.Timestamp(datetime.date(2024, 1, 5)),
+    "from numpy datetime64": lambda m: m.Timestamp(np.datetime64("2024-01-05T01:02")),
+    "no argument raises": lambda m: m.Timestamp(),
+    "a list raises": lambda m: m.Timestamp([1]),
+    # NEGATIVE: the string form is unchanged.
+    "from string": lambda m: m.Timestamp("2024-01-05 10:30"),
+    "date()": lambda m: _ts(m).date(),
+    "time()": lambda m: _ts(m).time(),
+    "to_pydatetime()": lambda m: _ts(m).to_pydatetime(),
+    "weekday()": lambda m: m.Timestamp("2024-01-07").weekday(),
+    "isoweekday()": lambda m: m.Timestamp("2024-01-07").isoweekday(),
+    "isocalendar()": lambda m: tuple(m.Timestamp("2024-12-30").isocalendar()),
+    "replace": lambda m: _ts(m).replace(day=9, hour=0, nanosecond=5),
+    "replace out of range": lambda m: _ts(m).replace(month=13),
+    "to_period M": lambda m: _ts(m).to_period("M"),
+    "to_period without freq": lambda m: _ts(m).to_period(),
+    "is_month_end": lambda m: m.Timestamp("2024-02-29").is_month_end,
+    "is_quarter_start": lambda m: m.Timestamp("2024-04-01").is_quarter_start,
+    "is_year_end": lambda m: m.Timestamp("2024-12-31 10:00").is_year_end,
+    "plus datetime.timedelta": lambda m: _ts(m) + datetime.timedelta(days=2),
+    "timedelta plus Timestamp": lambda m: datetime.timedelta(days=1) + _ts(m),
+    "minus datetime.timedelta": lambda m: _ts(m) - datetime.timedelta(hours=1),
+    "minus datetime": lambda m: _ts(m) - datetime.datetime(2024, 1, 5),
+    "datetime minus Timestamp": lambda m: datetime.datetime(2024, 1, 6) - _ts(m),
+    "equals datetime": lambda m: _ts(m) == datetime.datetime(2024, 1, 5, 10, 30, 15),
+    "equals date is False": lambda m: m.Timestamp("2024-01-05") == datetime.date(2024, 1, 5),
+    "orders against date raises": lambda m: m.Timestamp("2024-01-05") < datetime.date(2024, 1, 6),
+    "equals int is False": lambda m: _ts(m) == 5,
+    "orders against int raises": lambda m: _ts(m) < 5,
+    "hash matches datetime": lambda m: hash(m.Timestamp("2024-01-05 01:00")) == hash(datetime.datetime(2024, 1, 5, 1)),
+    "dict key found by datetime": lambda m: {m.Timestamp("2024-01-05"): 1}[datetime.datetime(2024, 1, 5)],
+    "components as a tuple": lambda m: tuple(m.Timedelta("1 days 02:03:04.005006007").components),
+    "components index and len": lambda m: (m.Timedelta("36h").components[1], len(m.Timedelta("36h").components)),
+    "negative Timedelta printed form": lambda m: m.Timedelta("-1 days +02:03:04"),
+    "negative Timedelta clock after days": lambda m: m.Timedelta("-3 days +23:59:59.5"),
+    # NEGATIVE: without a clock part the leading sign negates everything.
+    "negative Timedelta units only": lambda m: m.Timedelta("-1d2h"),
+    "negative clock only": lambda m: m.Timedelta("-02:03:04"),
+    "inner sign raises": lambda m: m.Timedelta("1 days -02:00:00"),
+    "to_timedelta printed form": lambda m: m.to_timedelta(m.Series(["-1 days +02:03:04"])).dt.total_seconds().tolist(),
+    "DatetimeIndex to_period M": lambda m: [str(p) for p in m.DatetimeIndex(["2024-01-05", "2024-03-20"]).to_period("M")],
+    "DatetimeIndex to_period Q": lambda m: [str(p) for p in m.DatetimeIndex(["2024-01-05", "2024-08-20"]).to_period("Q")],
+    "DatetimeIndex to_period without freq": lambda m: m.DatetimeIndex(["2024-01-05"]).to_period(),
+    "DatetimeIndex tz_convert naive raises": lambda m: m.DatetimeIndex(["2024-01-05"]).tz_convert("UTC"),
+    "DatetimeIndex tz_localize None": lambda m: [str(t) for t in m.DatetimeIndex(["2024-01-05"]).tz_localize(None)],
+    "NaT date": lambda m: m.NaT.date(),
+}
+
+
+def _timestamp_outcome(m: Any, case: str) -> Any:
+    try:
+        r = _TIMESTAMP_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+    if type(r).__name__ == "Period":
+        return ("period", str(r))
+    if type(r).__name__ == "NaTType":
+        return ("NaT",)
+    return ("value", type(r).__name__, repr(r))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TIMESTAMP_CASES))
+def test_timestamp_timedelta_and_datetimeindex_scalars_match_pandas(case: str) -> None:
+    assert _timestamp_outcome(fpd, case) == _timestamp_outcome(pd, case), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_datetimeindex_tz_methods_do_not_ignore_tz() -> None:
+    # tz_localize / tz_convert returned the index unchanged whatever tz was.
+    with pytest.raises(TypeError, match="Cannot convert tz-naive timestamps"):
+        fpd.DatetimeIndex(["2024-01-05"]).tz_convert("US/Eastern")
+    with pytest.raises(NotImplementedError):
+        fpd.DatetimeIndex(["2024-01-05"]).tz_localize("UTC")
+    with pytest.raises(NotImplementedError):
+        fpd.Timestamp("2024-01-05", tz="UTC")

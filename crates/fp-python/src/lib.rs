@@ -1056,6 +1056,21 @@ impl PyNaTType {
     fn total_seconds(&self) -> f64 {
         f64::NAN
     }
+
+    /// pandas' NaT.date() / time() / to_pydatetime() are NaT.
+    fn date(&self) -> Self {
+        PyNaTType
+    }
+
+    fn time(&self) -> Self {
+        PyNaTType
+    }
+
+    #[pyo3(signature = (warn=true))]
+    fn to_pydatetime(&self, warn: bool) -> Self {
+        let _ = warn; // there are no nanoseconds to discard
+        PyNaTType
+    }
 }
 
 /// Components breakdown for `Timedelta` (pandas `Timedelta.components`).
@@ -1078,8 +1093,47 @@ pub struct PyTimedeltaComponents {
     pub nanoseconds: i64,
 }
 
+impl PyTimedeltaComponents {
+    fn fields(&self) -> [i64; 7] {
+        [
+            self.days,
+            self.hours,
+            self.minutes,
+            self.seconds,
+            self.milliseconds,
+            self.microseconds,
+            self.nanoseconds,
+        ]
+    }
+}
+
+/// pandas' Components is a namedtuple: it iterates, indexes and has a
+/// length (tuple(c) raised "not iterable").
 #[pymethods]
 impl PyTimedeltaComponents {
+    fn __len__(&self) -> usize {
+        7
+    }
+
+    fn __getitem__(&self, index: isize) -> PyResult<i64> {
+        let fields = self.fields();
+        let position = if index < 0 { index + 7 } else { index };
+        usize::try_from(position)
+            .ok()
+            .and_then(|position| fields.get(position).copied())
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>("tuple index out of range")
+            })
+    }
+
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyTuple::new(py, self.fields())?
+            .into_any()
+            .try_iter()?
+            .into_any()
+            .unbind())
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Components(days={}, hours={}, minutes={}, seconds={}, milliseconds={}, microseconds={}, nanoseconds={})",
@@ -1412,11 +1466,44 @@ pub struct PyTimestamp {
     pub(crate) inner: Timestamp,
 }
 
+impl PyTimestamp {
+    /// The fields Python's datetime takes (microseconds, the nanoseconds
+    /// dropped); None for NaT.
+    fn civil_fields(&self) -> Option<(i32, u8, u8, u8, u8, u8, u32)> {
+        Some((
+            i32::try_from(self.inner.year()?).ok()?,
+            u8::try_from(self.inner.month()?).ok()?,
+            u8::try_from(self.inner.day()?).ok()?,
+            u8::try_from(self.inner.hour()?).ok()?,
+            u8::try_from(self.inner.minute()?).ok()?,
+            u8::try_from(self.inner.second()?).ok()?,
+            u32::try_from(self.inner.microsecond()?).ok()?,
+        ))
+    }
+
+    /// This instant as a naive `datetime.datetime`; None for NaT.
+    fn datetime_object<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDateTime>>> {
+        let Some((year, month, day, hour, minute, second, micro)) = self.civil_fields() else {
+            return Ok(None);
+        };
+        PyDateTime::new(py, year, month, day, hour, minute, second, micro, None).map(Some)
+    }
+}
+
 #[pymethods]
 impl PyTimestamp {
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        // A zone needs the timezone carrier Timestamp does not interpret yet;
+        // tz= was dropped without a word.
+        if let Some(kw) = kwargs {
+            for key in ["tz", "tzinfo"] {
+                if kw.get_item(key)?.is_some_and(|value| !value.is_none()) {
+                    return Err(not_implemented("Timestamp(tz=...)"));
+                }
+            }
+        }
         if args.len() >= 3 {
             let year = args.get_item(0)?.extract::<i64>()?;
             let month = args.get_item(1)?.extract::<i64>()?;
@@ -1456,6 +1543,29 @@ impl PyTimestamp {
             if let Ok(ts) = arg.extract::<PyRef<'_, PyTimestamp>>() {
                 return Ok(PyTimestamp {
                     inner: ts.inner.clone(),
+                });
+            }
+            // datetime, date and numpy datetime64 inputs (each fell through
+            // to Timestamp.now(), a silently wrong value; fvsao.35).
+            if let Ok(dt) = arg.cast::<PyDateTime>() {
+                return Ok(PyTimestamp {
+                    inner: Timestamp::from_nanos(py_datetime_nanos(dt)?),
+                });
+            }
+            if let Ok(date) = arg.cast::<pyo3::types::PyDate>() {
+                let days = days_from_ymd(
+                    i64::from(date.get_year()),
+                    i64::from(date.get_month()),
+                    i64::from(date.get_day()),
+                );
+                return Ok(PyTimestamp {
+                    inner: Timestamp::from_nanos(days * 86_400_000_000_000),
+                });
+            }
+            if arg.get_type().name()?.to_str()? == "datetime64" {
+                let nanos = numpy_temporal_nanos(&arg, "datetime64[ns]")?.unwrap_or(Timestamp::NAT);
+                return Ok(PyTimestamp {
+                    inner: Timestamp::from_nanos(nanos),
                 });
             }
             if let Ok(s) = arg.extract::<String>() {
@@ -1529,9 +1639,18 @@ impl PyTimestamp {
                 });
             }
         }
-        Ok(PyTimestamp {
-            inner: Timestamp::now(),
-        })
+        // Anything else was Timestamp.now() - no argument, a list, an
+        // unknown type - where pandas raises (fvsao.35).
+        match args.iter().next() {
+            Some(arg) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Cannot convert input [{}] of type {} to Timestamp",
+                arg.repr()?,
+                arg.get_type().repr()?
+            ))),
+            None => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "function missing required argument 'year' (pos 1)",
+            )),
+        }
     }
 
     #[getter]
@@ -1589,9 +1708,161 @@ impl PyTimestamp {
         self.inner.day_of_week()
     }
 
-    #[getter]
+    /// pandas' `Timestamp.weekday()` is a method (Monday 0); it was a
+    /// property, so the call raised "'int' object is not callable".
     fn weekday(&self) -> Option<i64> {
         self.inner.weekday()
+    }
+
+    /// Monday 1 .. Sunday 7.
+    fn isoweekday(&self) -> Option<i64> {
+        self.inner.day_of_week().map(|day| day + 1)
+    }
+
+    /// `datetime.date(...).isocalendar()`: (ISO year, week, weekday).
+    fn isocalendar(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .date(py)?
+            .bind(py)
+            .call_method0("isocalendar")?
+            .unbind())
+    }
+
+    /// The calendar date as a `datetime.date`; NaT for NaT.
+    fn date(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some((year, month, day, ..)) = self.civil_fields() else {
+            return Ok(Py::new(py, PyNaTType)?.into_any());
+        };
+        Ok(pyo3::types::PyDate::new(py, year, month, day)?
+            .into_any()
+            .unbind())
+    }
+
+    /// The wall-clock time as a `datetime.time` (microseconds; the
+    /// nanoseconds are dropped, as pandas); NaT for NaT.
+    fn time(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some((_, _, _, hour, minute, second, micro)) = self.civil_fields() else {
+            return Ok(Py::new(py, PyNaTType)?.into_any());
+        };
+        Ok(
+            pyo3::types::PyTime::new(py, hour, minute, second, micro, None)?
+                .into_any()
+                .unbind(),
+        )
+    }
+
+    /// A `datetime.datetime`, warning as pandas when nonzero nanoseconds
+    /// are dropped; NaT for NaT.
+    #[pyo3(signature = (warn=true))]
+    fn to_pydatetime(&self, py: Python<'_>, warn: bool) -> PyResult<Py<PyAny>> {
+        if warn && self.civil_fields().is_some() && self.inner.nanos.rem_euclid(1_000) != 0 {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                c"Discarding nonzero nanoseconds in conversion.",
+                1,
+            )?;
+        }
+        match self.datetime_object(py)? {
+            Some(dt) => Ok(dt.into_any().unbind()),
+            None => Ok(Py::new(py, PyNaTType)?.into_any()),
+        }
+    }
+
+    /// pandas' `Timestamp.replace`: the given fields replaced, each checked
+    /// by Python's datetime (pandas' own messages, "month must be in
+    /// 1..12"); `nanosecond` replaces the sub-microsecond part. A zone
+    /// (`tzinfo=`) is not supported yet.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (year=None, month=None, day=None, hour=None, minute=None, second=None, microsecond=None, nanosecond=None, tzinfo=None, fold=None))]
+    fn replace(
+        &self,
+        py: Python<'_>,
+        year: Option<i32>,
+        month: Option<u8>,
+        day: Option<u8>,
+        hour: Option<u8>,
+        minute: Option<u8>,
+        second: Option<u8>,
+        microsecond: Option<u32>,
+        nanosecond: Option<i64>,
+        tzinfo: Option<&Bound<'_, PyAny>>,
+        fold: Option<i64>,
+    ) -> PyResult<Self> {
+        if tzinfo.is_some_and(|tz| !tz.is_none()) {
+            return Err(not_implemented("Timestamp.replace(tzinfo=...)"));
+        }
+        let _ = fold; // only disambiguates a zone's repeated wall time
+        let Some((y, mo, d, h, mi, s, us)) = self.civil_fields() else {
+            return Ok(self.clone());
+        };
+        let dt = PyDateTime::new(
+            py,
+            year.unwrap_or(y),
+            month.unwrap_or(mo),
+            day.unwrap_or(d),
+            hour.unwrap_or(h),
+            minute.unwrap_or(mi),
+            second.unwrap_or(s),
+            microsecond.unwrap_or(us),
+            None,
+        )?;
+        let nanosecond = nanosecond.unwrap_or_else(|| self.inner.nanos.rem_euclid(1_000));
+        if !(0..1_000).contains(&nanosecond) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "nanosecond must be in 0..999",
+            ));
+        }
+        Ok(PyTimestamp {
+            inner: Timestamp::from_nanos(py_datetime_nanos(&dt)? + nanosecond),
+        })
+    }
+
+    /// The Period of `freq` holding this instant.
+    #[pyo3(signature = (freq=None))]
+    fn to_period(&self, freq: Option<&str>) -> PyResult<PyPeriod> {
+        let Some(freq) = freq else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Must supply freq for datetime value",
+            ));
+        };
+        let periods = DatetimeIndex::new(vec![self.inner.nanos])
+            .to_period(freq)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let inner = periods.values().first().cloned().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("to_period: no period")
+        })?;
+        Ok(PyPeriod { inner })
+    }
+
+    #[getter]
+    fn is_month_start(&self) -> Option<bool> {
+        Some(self.inner.day()? == 1)
+    }
+
+    #[getter]
+    fn is_month_end(&self) -> Option<bool> {
+        Some(self.inner.day()? == self.inner.days_in_month()?)
+    }
+
+    #[getter]
+    fn is_quarter_start(&self) -> Option<bool> {
+        Some(self.inner.day()? == 1 && self.inner.month()? % 3 == 1)
+    }
+
+    #[getter]
+    fn is_quarter_end(&self) -> Option<bool> {
+        Some(self.inner.month()? % 3 == 0 && self.is_month_end()?)
+    }
+
+    #[getter]
+    fn is_year_start(&self) -> Option<bool> {
+        Some(self.inner.month()? == 1 && self.inner.day()? == 1)
+    }
+
+    #[getter]
+    fn is_year_end(&self) -> Option<bool> {
+        Some(self.inner.month()? == 12 && self.inner.day()? == 31)
     }
 
     #[getter]
@@ -1754,59 +2025,79 @@ impl PyTimestamp {
         }
     }
 
-    fn __hash__(&self) -> isize {
-        self.inner.nanos as isize
+    /// pandas hashes a Timestamp without nanoseconds as the equal
+    /// `datetime`, so either finds the other in a dict or set.
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        if self.inner.nanos.rem_euclid(1_000) == 0
+            && let Some(dt) = self.datetime_object(py)?
+        {
+            return dt.hash();
+        }
+        Ok(self.inner.nanos as isize)
     }
 
+    /// Against a Timestamp, NaT, a date string, a `datetime` or a numpy
+    /// datetime64. A `datetime.date` is unequal and unordered (pandas'
+    /// TypeError); anything else is Python's NotImplemented, so == is False
+    /// and ordering raises (it raised for == too).
     fn __richcmp__(
         &self,
+        py: Python<'_>,
         other: &Bound<'_, PyAny>,
         op: pyo3::class::basic::CompareOp,
-    ) -> PyResult<bool> {
+    ) -> PyResult<Py<PyAny>> {
+        use pyo3::class::basic::CompareOp;
+        let unequal = |op: CompareOp| -> PyResult<Py<PyAny>> {
+            Ok(pyo3::types::PyBool::new(py, matches!(op, CompareOp::Ne))
+                .to_owned()
+                .into_any()
+                .unbind())
+        };
         let other_nanos = if let Ok(other_ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
             other_ts.inner.nanos
         } else if other.is_instance_of::<PyNaTType>() {
-            match op {
-                pyo3::class::basic::CompareOp::Eq => return Ok(false),
-                pyo3::class::basic::CompareOp::Ne => return Ok(true),
-                _ => return Ok(false),
+            return unequal(op);
+        } else if let Ok(dt) = other.cast::<PyDateTime>() {
+            py_datetime_nanos(dt)?
+        } else if other.cast::<pyo3::types::PyDate>().is_ok() {
+            if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                return unequal(op);
             }
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot compare Timestamp with datetime.date. Use ts == pd.Timestamp(date) or ts.date() == date instead.",
+            ));
+        } else if other.get_type().name()?.to_str()? == "datetime64" {
+            numpy_temporal_nanos(other, "datetime64[ns]")?.unwrap_or(Timestamp::NAT)
         } else if let Ok(s) = other.extract::<String>() {
             if s.eq_ignore_ascii_case("nat") {
-                match op {
-                    pyo3::class::basic::CompareOp::Eq => return Ok(false),
-                    pyo3::class::basic::CompareOp::Ne => return Ok(true),
-                    _ => return Ok(false),
-                }
-            } else {
-                Timestamp::parse(&s)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-                    .nanos
+                return unequal(op);
             }
+            Timestamp::parse(&s)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+                .nanos
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Cannot compare Timestamp with non-temporal value",
-            ));
+            return Ok(py.NotImplemented());
         };
-
         if self.inner.is_nat() || other_nanos == Timestamp::NAT {
-            match op {
-                pyo3::class::basic::CompareOp::Eq => Ok(false),
-                pyo3::class::basic::CompareOp::Ne => Ok(true),
-                _ => Ok(false),
-            }
-        } else {
-            Ok(match op {
-                pyo3::class::basic::CompareOp::Eq => self.inner.nanos == other_nanos,
-                pyo3::class::basic::CompareOp::Ne => self.inner.nanos != other_nanos,
-                pyo3::class::basic::CompareOp::Lt => self.inner.nanos < other_nanos,
-                pyo3::class::basic::CompareOp::Le => self.inner.nanos <= other_nanos,
-                pyo3::class::basic::CompareOp::Gt => self.inner.nanos > other_nanos,
-                pyo3::class::basic::CompareOp::Ge => self.inner.nanos >= other_nanos,
-            })
+            return unequal(op);
         }
+        let result = match op {
+            CompareOp::Eq => self.inner.nanos == other_nanos,
+            CompareOp::Ne => self.inner.nanos != other_nanos,
+            CompareOp::Lt => self.inner.nanos < other_nanos,
+            CompareOp::Le => self.inner.nanos <= other_nanos,
+            CompareOp::Gt => self.inner.nanos > other_nanos,
+            CompareOp::Ge => self.inner.nanos >= other_nanos,
+        };
+        Ok(pyo3::types::PyBool::new(py, result)
+            .to_owned()
+            .into_any()
+            .unbind())
     }
 
+    /// `+` a Timedelta, a DateOffset or a `datetime.timedelta`; anything else
+    /// is NotImplemented, so the other operand's reflected op runs (it
+    /// raised before `Series.__radd__` could).
     fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
             let res = self.inner.add_timedelta(td.nanos);
@@ -1814,13 +2105,28 @@ impl PyTimestamp {
         } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
             let res = self.inner.add_timedelta(offset.nanos());
             PyTimestamp { inner: res }.into_py_any(py)
+        } else if let Ok(delta) = other.cast::<PyDelta>() {
+            let res = self.inner.add_timedelta(py_delta_nanos(delta));
+            PyTimestamp { inner: res }.into_py_any(py)
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Can only add Timedelta or DateOffset to Timestamp",
-            ))
+            Ok(py.NotImplemented())
         }
     }
 
+    /// `datetime.timedelta + Timestamp`.
+    fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        match other.cast::<PyDelta>() {
+            Ok(delta) => PyTimestamp {
+                inner: self.inner.add_timedelta(py_delta_nanos(delta)),
+            }
+            .into_py_any(py),
+            Err(_) => Ok(py.NotImplemented()),
+        }
+    }
+
+    /// `-` a Timedelta, a DateOffset, a `datetime.timedelta` (a Timestamp),
+    /// or a Timestamp / `datetime` (a Timedelta); anything else is
+    /// NotImplemented.
     fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
             let res = self.inner.sub_timedelta(td.nanos);
@@ -1831,10 +2137,31 @@ impl PyTimestamp {
         } else if let Ok(other_ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
             let diff_nanos = self.inner.sub_timestamp(&other_ts.inner);
             PyTimedelta { nanos: diff_nanos }.into_py_any(py)
+        } else if let Ok(dt) = other.cast::<PyDateTime>() {
+            let other = Timestamp::from_nanos(py_datetime_nanos(dt)?);
+            PyTimedelta {
+                nanos: self.inner.sub_timestamp(&other),
+            }
+            .into_py_any(py)
+        } else if let Ok(delta) = other.cast::<PyDelta>() {
+            let res = self.inner.sub_timedelta(py_delta_nanos(delta));
+            PyTimestamp { inner: res }.into_py_any(py)
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Can only subtract Timestamp, Timedelta, or DateOffset from Timestamp",
-            ))
+            Ok(py.NotImplemented())
+        }
+    }
+
+    /// `datetime - Timestamp`, a Timedelta.
+    fn __rsub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        match other.cast::<PyDateTime>() {
+            Ok(dt) => {
+                let other = Timestamp::from_nanos(py_datetime_nanos(dt)?);
+                PyTimedelta {
+                    nanos: other.sub_timestamp(&self.inner),
+                }
+                .into_py_any(py)
+            }
+            Err(_) => Ok(py.NotImplemented()),
         }
     }
 }
@@ -5543,22 +5870,39 @@ impl PyDatetimeIndex {
             .collect()
     }
 
-    #[pyo3(signature = (freq="D"))]
-    fn to_period(&self, freq: &str) -> PyResult<PyPeriodIndex> {
-        let p_freq = PeriodFreq::parse(freq).unwrap_or(PeriodFreq::Daily);
-        let periods = self
-            .inner
-            .asi8()
+    /// pandas' `DatetimeIndex.to_period(freq)` through fp-index's calendar
+    /// ordinals, NaT staying NaT. It used the day count as the ordinal of
+    /// every frequency ('2024-01-05' read '3613-12' monthly) and took an
+    /// unknown freq as daily.
+    #[pyo3(signature = (freq=None))]
+    fn to_period(&self, freq: Option<&str>) -> PyResult<PyPeriodIndex> {
+        let Some(freq) = freq else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "You must pass a freq argument as current index has none.",
+            ));
+        };
+        let p_freq = PeriodFreq::parse(freq).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid frequency: {freq}"))
+        })?;
+        let nanos = self.inner.asi8();
+        let present: Vec<i64> = nanos.iter().copied().filter(|&ns| ns != i64::MIN).collect();
+        let converted = DatetimeIndex::new(present)
+            .to_period(freq)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let mut converted = converted.values().iter();
+        let periods = nanos
             .iter()
             .map(|&ns| {
-                let days = if ns == i64::MIN {
-                    0
+                if ns == i64::MIN {
+                    Some(Period::new(i64::MIN, p_freq))
                 } else {
-                    ns / (86_400 * 1_000_000_000)
-                };
-                Period::new(days, p_freq)
+                    converted.next().cloned()
+                }
             })
-            .collect();
+            .collect::<Option<Vec<Period>>>()
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("to_period: lost a period")
+            })?;
         let mut out = PeriodIndex::new(periods);
         if let Some(n) = self.inner.name() {
             out = out.set_name(n);
@@ -5605,14 +5949,32 @@ impl PyDatetimeIndex {
         None
     }
 
-    fn tz_convert(&self, tz: Option<&str>) -> Self {
+    /// A frankenpandas DatetimeIndex is always tz-naive, where pandas'
+    /// tz_convert raises this; it returned the index unchanged, silently
+    /// ignoring `tz`.
+    #[pyo3(signature = (tz))]
+    fn tz_convert(&self, tz: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let _ = tz;
-        self.clone()
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Cannot convert tz-naive timestamps, use tz_localize to localize",
+        ))
     }
 
-    fn tz_localize(&self, tz: Option<&str>) -> Self {
-        let _ = tz;
-        self.clone()
+    /// `tz_localize(None)` keeps a tz-naive index as it is, as pandas; a
+    /// zone needs the timezone carrier the index does not have yet, so it
+    /// raises (it returned the index unchanged, silently ignoring `tz`).
+    #[pyo3(signature = (tz, ambiguous=None, nonexistent=None))]
+    fn tz_localize(
+        &self,
+        tz: Option<&Bound<'_, PyAny>>,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let _ = (ambiguous, nonexistent);
+        if tz.is_some_and(|tz| !tz.is_none()) {
+            return Err(not_implemented("DatetimeIndex.tz_localize to a timezone"));
+        }
+        Ok(self.clone())
     }
 
     #[getter]
