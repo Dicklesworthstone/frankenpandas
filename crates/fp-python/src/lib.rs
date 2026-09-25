@@ -170,6 +170,45 @@ fn column_pandas_dtype_name(column: &Column) -> String {
     pandas_dtype_name(&dtype)
 }
 
+/// pandas' dtype OBJECT for a column (`Series.dtype`): numpy's dtype for
+/// the numpy-backed types, so `s.dtype == np.float64`, `.kind` and `.name`
+/// behave (it was the name as a str: `== np.float64` was False and `.kind`
+/// raised); the extension dtype classes for the nullable, categorical and
+/// tz-aware ones; the name for anything else.
+fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, PyAny>> {
+    let name = column_pandas_dtype_name(column);
+    if matches!(
+        name.as_str(),
+        "int64" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
+    ) {
+        return py.import("numpy")?.call_method1("dtype", (name,));
+    }
+    match column.dtype() {
+        DType::Int64Nullable => PyInt64Dtype.into_bound_py_any(py),
+        DType::Float64Nullable => PyFloat64Dtype.into_bound_py_any(py),
+        DType::BoolNullable => PyBooleanDtype.into_bound_py_any(py),
+        DType::Categorical => {
+            let (categories, ordered) = column.categorical().map_or((None, false), |meta| {
+                (
+                    Some(meta.categories.iter().map(ToString::to_string).collect()),
+                    meta.ordered,
+                )
+            });
+            PyCategoricalDtype {
+                categories,
+                ordered,
+            }
+            .into_bound_py_any(py)
+        }
+        DType::Datetime64 { tz: Some(tz) } => PyDatetimeTZDtype {
+            unit: "ns".to_owned(),
+            tz: tz.to_string(),
+        }
+        .into_bound_py_any(py),
+        _ => Ok(pyo3::types::PyString::new(py, &name).into_any()),
+    }
+}
+
 /// pandas' name for a dtype, as `Series.dtype` / `DataFrame.dtypes` print it.
 fn pandas_dtype_name(dtype: &fp_types::DType) -> String {
     use fp_types::DType;
@@ -5909,8 +5948,35 @@ impl PyDatetimeIndex {
         self.as_py_index().asof_locs(where_, mask)
     }
 
-    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
-        self.as_py_index().astype_name(dtype)
+    /// pandas' `DatetimeIndex.astype`; astype(str) prints each instant as
+    /// `Series.astype(str)` does - the date alone when every instant is at
+    /// midnight (it always printed the time).
+    fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        let name = index_astype_name(dtype)?;
+        let index = self.as_py_index();
+        if name != "str" {
+            return index.astype_name(&name);
+        }
+        let values: Vec<Scalar> = index
+            .inner
+            .labels()
+            .iter()
+            .map(index_label_to_scalar)
+            .collect();
+        let positions = (0..values.len())
+            .map(|position| IndexLabel::Int64(i64::try_from(position).unwrap_or(i64::MAX)))
+            .collect();
+        let text = Series::from_values("", positions, values)
+            .and_then(|series| series.astype(DType::Utf8))
+            .map_err(frame_error_to_py)?;
+        let labels = text
+            .values()
+            .iter()
+            .map(scalar_to_index_label_converter)
+            .collect();
+        Ok(PyIndex {
+            inner: Index::new(labels).set_names(index.inner.name()),
+        })
     }
 
     fn date(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -7239,8 +7305,9 @@ impl PyMultiIndex {
 
     /// A MultiIndex is always object dtype; pandas refuses any other (this
     /// returned the MultiIndex whatever dtype was asked for).
-    fn astype(&self, dtype: &str) -> PyResult<Self> {
-        if !matches!(dtype, "object" | "O") {
+    fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let dtype = index_astype_name(dtype).unwrap_or_default();
+        if !matches!(dtype.as_str(), "object" | "O") {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Setting a MultiIndex dtype to anything other than object is not supported",
             ));
@@ -8725,8 +8792,8 @@ impl PyTimedeltaIndex {
         self.as_py_index().asof_locs(where_, mask)
     }
 
-    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
-        self.as_py_index().astype_name(dtype)
+    fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().astype_name(&index_astype_name(dtype)?)
     }
 
     fn components(&self) -> PyResult<PyDataFrame> {
@@ -9659,11 +9726,11 @@ impl PyRangeIndex {
 
     /// pandas casts the labels (a float RangeIndex becomes a float Index);
     /// this returned the RangeIndex whatever dtype was asked for.
-    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
+    fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
         PyIndex {
             inner: self.inner.to_index(),
         }
-        .astype_name(dtype)
+        .astype_name(&index_astype_name(dtype)?)
     }
 
     fn delete(&self, loc: usize) -> PyResult<PyIndex> {
@@ -10613,8 +10680,8 @@ impl PyPeriodIndex {
         self.as_py_index().asof_locs(where_, mask)
     }
 
-    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
-        self.as_py_index().astype_name(dtype)
+    fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().astype_name(&index_astype_name(dtype)?)
     }
 
     #[getter]
@@ -11601,8 +11668,8 @@ impl PyCategoricalIndex {
         self.as_py_index().asof_locs(where_, mask)
     }
 
-    fn astype(&self, dtype: &str) -> PyResult<PyIndex> {
-        self.as_py_index().astype_name(dtype)
+    fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        self.as_py_index().astype_name(&index_astype_name(dtype)?)
     }
 
     fn delete(&self, loc: usize) -> PyResult<PyIndex> {
@@ -14909,6 +14976,11 @@ fn check_series_axis(axis: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
 }
 
 impl PySeries {
+    /// pandas' dtype name (`str(s.dtype)`).
+    fn dtype_name(&self) -> String {
+        column_pandas_dtype_name(self.inner.column())
+    }
+
     /// pandas' Series flex methods (`s.add(other, level=, fill_value=, axis=)`
     /// and the rest): the indexes are aligned to their sorted union first (so
     /// the comparison forms work across labels, where `s < t` refuses them),
@@ -15587,9 +15659,10 @@ impl PySeries {
         Ok(())
     }
 
+    /// pandas' dtype object (see [`column_pandas_dtype`]).
     #[getter]
-    fn dtype(&self) -> String {
-        column_pandas_dtype_name(self.inner.column())
+    fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        column_pandas_dtype(py, self.inner.column())
     }
 
     #[getter]
@@ -40802,6 +40875,19 @@ fn object_frame(frame: &DataFrame, only: Option<&[String]>) -> Result<DataFrame,
     Ok(out)
 }
 
+/// A typed index's `astype(dtype)` argument as `astype_name` reads it: a
+/// name as given, the `str` type as 'str', any other type or dtype by its
+/// pandas name (a type raised TypeError: 'type' object is not a 'str').
+fn index_astype_name(dtype: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(name) = dtype.extract::<String>() {
+        return Ok(name);
+    }
+    if dtype.is(dtype.py().get_type::<pyo3::types::PyString>()) {
+        return Ok("str".to_owned());
+    }
+    Ok(pandas_dtype_name(&py_dtype_arg(dtype)?))
+}
+
 fn py_dtype_arg(obj: &Bound<'_, PyAny>) -> PyResult<DType> {
     if let Ok(name) = obj.extract::<String>() {
         return parse_dtype(&name);
@@ -43142,7 +43228,7 @@ fn is_bool_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
         return b;
     }
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype() == "bool" || s.dtype() == "boolean";
+        return s.dtype_name() == "bool" || s.dtype_name() == "boolean";
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
         return idx.dtype() == "bool" || idx.dtype() == "boolean";
@@ -43158,7 +43244,7 @@ fn is_bool_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
 
 fn is_integer_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype().contains("int");
+        return s.dtype_name().contains("int");
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
         return idx.dtype().contains("int");
@@ -43174,7 +43260,7 @@ fn is_integer_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
 
 fn is_unsigned_integer_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype().contains("uint");
+        return s.dtype_name().contains("uint");
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
         return idx.dtype().contains("uint");
@@ -43190,7 +43276,7 @@ fn is_unsigned_integer_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
 
 fn is_float_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype().contains("float");
+        return s.dtype_name().contains("float");
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
         return idx.dtype().contains("float");
@@ -43209,7 +43295,7 @@ fn is_numeric_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
         return true;
     }
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        let dt = s.dtype();
+        let dt = s.dtype_name();
         return dt.contains("int") || dt.contains("float") || dt == "bool";
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
@@ -43227,7 +43313,7 @@ fn is_numeric_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
 
 fn is_string_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        let dt = s.dtype();
+        let dt = s.dtype_name();
         return dt == "string" || dt == "object" || dt == "utf8";
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
@@ -43245,7 +43331,7 @@ fn is_string_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
 
 fn is_datetime_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype().contains("datetime");
+        return s.dtype_name().contains("datetime");
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
         let _ = idx;
@@ -43259,7 +43345,7 @@ fn is_datetime_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
 
 fn is_timedelta_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype().contains("timedelta");
+        return s.dtype_name().contains("timedelta");
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
         let _ = idx;
@@ -43273,7 +43359,7 @@ fn is_timedelta_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
 
 fn is_period_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype().contains("period") || s.dtype().contains("Period");
+        return s.dtype_name().contains("period") || s.dtype_name().contains("Period");
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
         let _ = idx;
@@ -43287,7 +43373,7 @@ fn is_period_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
 
 fn is_categorical_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype().contains("category") || s.dtype().contains("categorical");
+        return s.dtype_name().contains("category") || s.dtype_name().contains("categorical");
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
         let _ = idx;
@@ -43736,6 +43822,16 @@ fn factorize(
     Ok((py_codes, py_uniques))
 }
 
+/// A get_dummies cell in pandas' `dtype` (bool by default; float64 was
+/// ignored and came back bool).
+fn dummy_cell(matches: bool, dtype: Option<&str>) -> Scalar {
+    match dtype {
+        Some("int64") => Scalar::Int64(i64::from(matches)),
+        Some("float64") => Scalar::Float64(f64::from(u8::from(matches))),
+        _ => Scalar::Bool(matches),
+    }
+}
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (data, prefix=None, prefix_sep="_", dummy_na=false, columns=None, drop_first=false, dtype=None))]
@@ -43747,8 +43843,15 @@ fn get_dummies(
     dummy_na: bool,
     columns: Option<Vec<String>>,
     drop_first: bool,
-    dtype: Option<&str>,
+    dtype: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyDataFrame> {
+    // A type (dtype=int, float, bool) as well as its name; a type raised
+    // TypeError.
+    let dtype_name = dtype
+        .filter(|dtype| !dtype.is_none())
+        .map(|dtype| py_dtype_arg(dtype).map(|dtype| pandas_dtype_name(&dtype)))
+        .transpose()?;
+    let dtype = dtype_name.as_deref();
     let prefix = prefix.filter(|prefix| !prefix.is_none());
     let series_prefix: Option<String> = prefix.and_then(|prefix| prefix.extract().ok());
     let prefix_of = |position: usize, column: &str| -> PyResult<String> {
@@ -43834,11 +43937,7 @@ fn get_dummies(
                         .iter()
                         .map(|v| {
                             let matches = if cat.is_null() { v.is_null() } else { v == cat };
-                            if let Some("int") | Some("int64") = dtype {
-                                Scalar::Int64(if matches { 1 } else { 0 })
-                            } else {
-                                Scalar::Bool(matches)
-                            }
+                            dummy_cell(matches, dtype)
                         })
                         .collect();
                     let col_obj = Column::from_values(bool_vals).map_err(|e| {
@@ -43902,11 +44001,7 @@ fn get_dummies(
             .iter()
             .map(|v| {
                 let matches = if cat.is_null() { v.is_null() } else { v == cat };
-                if let Some("int") | Some("int64") = dtype {
-                    Scalar::Int64(if matches { 1 } else { 0 })
-                } else {
-                    Scalar::Bool(matches)
-                }
+                dummy_cell(matches, dtype)
             })
             .collect();
         let col_obj = Column::from_values(bool_vals)
@@ -51253,7 +51348,7 @@ mod tests {
         let s = Series::from_values("s", labels, values).expect("series"); // ubs:ignore — test fixture
         let mut py_s = PySeries { inner: s };
 
-        assert_eq!(py_s.dtype(), "float64");
+        assert_eq!(py_s.dtype_name(), "float64");
         assert_eq!(py_s.shape(), (4,));
         assert_eq!(py_s.size(), 4);
         assert_eq!(py_s.ndim(), 1);

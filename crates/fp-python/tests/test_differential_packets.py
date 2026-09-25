@@ -7237,3 +7237,62 @@ def _everyday_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_EVERYDAY_CASES))
 def test_value_counts_crosstab_quantile_json_normalize_and_sample_match_pandas(case: str) -> None:
     assert _everyday_outcome(fpd, case) == _everyday_outcome(pd, case), case
+
+
+def _dtype_facts(dtype: Any) -> Any:
+    """What user code reads off a dtype."""
+    return (str(dtype), dtype.name, dtype.kind)
+
+
+# Series.dtype was the name as a str: `s.dtype == np.float64` was False and
+# `.kind` / `.name` raised; Series.unstack made an all-NaN column object
+# (pandas float64); df.T of ints and floats inferred each row on its own (a
+# [1, NaN] row became a nullable int64 column; pandas: the common float64);
+# get_dummies(dtype=int) raised TypeError (and dtype=float gave bools);
+# a typed index's astype(str) raised TypeError.
+_DTYPE_CASES = {
+    "float dtype facts": lambda m: _dtype_facts(m.Series([1.5]).dtype),
+    "float dtype is np float64": lambda m: m.Series([1.5]).dtype == np.float64,
+    "int dtype is np int64": lambda m: m.Series([1]).dtype == np.int64,
+    "bool dtype facts": lambda m: _dtype_facts(m.Series([True]).dtype),
+    "object dtype facts": lambda m: _dtype_facts(m.Series(["x"]).dtype),
+    "datetime dtype facts": lambda m: _dtype_facts(m.to_datetime(m.Series(["2024-01-01"])).dtype),
+    "timedelta dtype facts": lambda m: _dtype_facts(m.to_timedelta(m.Series(["1h"])).dtype),
+    "issubdtype number": lambda m: np.issubdtype(m.Series([1]).dtype, np.number),
+    "nullable int dtype": lambda m: (str(m.Series([1, None], dtype="Int64").dtype), m.Series([1, None], dtype="Int64").dtype == "Int64"),
+    "category dtype": lambda m: (str(m.Series(["a", "b"], dtype="category").dtype), m.Series(["a"], dtype="category").dtype == "category", m.Series(["a"], dtype="category").dtype.name),
+    "dtype equals name": lambda m: (m.Series([1.5]).dtype == "float64", m.Series([1]).dtype == "int64"),
+    # NEGATIVE: a float column is not int64, nor object.
+    "float dtype is not int64": lambda m: (m.Series([1.5]).dtype == np.int64, m.Series([1.5]).dtype == object),
+    "unstack all-missing column": lambda m: _typed(m.DataFrame({"k": ["a", "b", "a"], "x": [1, 2, 3], "y": [1.5, None, 2.5]}).set_index(["k", "x"])["y"].unstack()),
+    "unstack int with gaps": lambda m: _typed(m.DataFrame({"k": ["a", "b"], "x": [1, 2], "v": [5, 6]}).set_index(["k", "x"])["v"].unstack()),
+    # NEGATIVE: an int unstack with every cell present stays int64.
+    "unstack int complete": lambda m: _typed(m.DataFrame({"k": ["a", "a", "b", "b"], "x": [1, 2, 1, 2], "v": [5, 6, 7, 8]}).set_index(["k", "x"])["v"].unstack()),
+    "transpose int float": lambda m: _typed(m.DataFrame({"x": [3, 1], "y": [1.5, None]}, index=["r", "s"]).T),
+    "transpose int float complete": lambda m: _typed(m.DataFrame({"x": [3, 1], "y": [1.5, 2.5]}, index=["r", "s"]).T),
+    # NEGATIVES: all-int stays int64; text with numbers stays object.
+    "transpose ints": lambda m: _typed(m.DataFrame({"x": [3, 1], "y": [2, 4]}, index=["r", "s"]).T),
+    "transpose mixed text": lambda m: _typed(m.DataFrame({"x": [3, 1], "s": ["a", "b"]}, index=["r", "s"]).T),
+    "get_dummies dtype int": lambda m: _typed(m.get_dummies(m.Series(["a", "b", "a"]), dtype=int)),
+    "get_dummies dtype float": lambda m: _typed(m.get_dummies(m.Series(["a", "b", "a"]), dtype=float)),
+    "get_dummies dtype name": lambda m: _typed(m.get_dummies(m.Series(["a", "b", "a"]), dtype="int64", drop_first=True)),
+    "get_dummies frame dtype": lambda m: _typed(m.get_dummies(m.DataFrame({"k": ["a", "b"], "x": [1, 2]}), columns=["k"], dtype=float)),
+    # NEGATIVE: the default stays bool.
+    "get_dummies default bool": lambda m: _typed(m.get_dummies(m.Series(["a", "b"]))),
+    "period_range astype str": lambda m: m.period_range("2024-01", periods=3, freq="M").astype(str).tolist(),
+    "date_range astype str": lambda m: m.date_range("2024-01-01", periods=2).astype(str).tolist(),
+    "timedelta index astype str": lambda m: m.to_timedelta(["1h", "2h"]).astype(str).tolist(),
+}
+
+
+def _dtype_outcome(m: Any, case: str) -> Any:
+    try:
+        return _DTYPE_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DTYPE_CASES))
+def test_dtype_objects_unstack_transpose_and_get_dummies_dtypes_match_pandas(case: str) -> None:
+    assert _dtype_outcome(fpd, case) == _dtype_outcome(pd, case), case

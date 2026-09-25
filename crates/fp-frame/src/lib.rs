@@ -25984,7 +25984,15 @@ impl Series {
                 })
                 .collect();
             let name = label.to_string();
-            columns.insert(name.clone(), Column::from_values(values)?);
+            // pandas upcasts a numeric source with missing cells to float64
+            // for EVERY column; an all-missing one inferred object.
+            let column =
+                if any_missing && matches!(self.column.dtype(), DType::Int64 | DType::Float64) {
+                    Column::new(DType::Float64, values)?
+                } else {
+                    Column::from_values(values)?
+                };
+            columns.insert(name.clone(), column);
             order.push(name);
         }
         let index = Index::new(rows).rename_index(levels.names()[0].as_deref());
@@ -76367,6 +76375,17 @@ impl DataFrame {
         // Generic (mixed / nullable) path.
         let labels = self.index.labels();
         let src_values: Vec<&[Scalar]> = src_cols.iter().map(|c| c.values()).collect();
+        // pandas transposes through the columns' COMMON dtype: ints mixed
+        // with floats are float64 in every output column (as the lazy view's
+        // PromotedFloat64); each row inferred its own, so a [1, NaN] row
+        // became a nullable int64 column. All-int sources keep Int64, nulls
+        // included, as the lazy view does (DISC-011).
+        let to_float = src_cols
+            .iter()
+            .all(|column| matches!(column.dtype(), DType::Int64 | DType::Float64))
+            && src_cols
+                .iter()
+                .any(|column| column.dtype() == DType::Float64);
         let mut pairs = Vec::with_capacity(n_rows);
         for (row_idx, label) in labels.iter().enumerate() {
             let col_name = label_to_name(label);
@@ -76374,7 +76393,12 @@ impl DataFrame {
             for vals in &src_values {
                 row_values.push(vals[row_idx].clone());
             }
-            pairs.push((col_name, Column::from_values(row_values)?));
+            let column = if to_float {
+                Column::new(DType::Float64, row_values)?
+            } else {
+                Column::from_values(row_values)?
+            };
+            pairs.push((col_name, column));
         }
 
         finish_transpose(new_index, pairs)
@@ -116955,6 +116979,64 @@ mod tests {
         assert!(
             (trailing.column("x").unwrap().values()[2].to_f64().unwrap() - 8.0 / 3.0).abs() < 1e-12
         );
+    }
+
+    #[test]
+    fn transpose_and_unstack_use_pandas_common_dtypes() {
+        let labels = || vec![IndexLabel::from(0_i64), IndexLabel::from(1_i64)];
+        let ints =
+            Series::from_values("x", labels(), vec![Scalar::Int64(3), Scalar::Int64(1)]).unwrap();
+        let floats = Series::from_values(
+            "y",
+            labels(),
+            vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        // pandas: DataFrame({'x': [3, 1], 'y': [1.5, NaN]}).T is float64 in
+        // every column; the [1, NaN] row was a nullable int64 column.
+        let mixed = DataFrame::from_series(vec![ints.clone(), floats])
+            .unwrap()
+            .transpose()
+            .unwrap();
+        for position in 0..mixed.num_columns() {
+            assert_eq!(mixed.column_at(position).unwrap().dtype(), DType::Float64);
+        }
+        // NEGATIVE: all-int sources stay int64.
+        let twice = ints.rename("z").unwrap();
+        let int_only = DataFrame::from_series(vec![ints, twice])
+            .unwrap()
+            .transpose()
+            .unwrap();
+        assert_eq!(int_only.column_at(0).unwrap().dtype(), DType::Int64);
+
+        // pandas: a numeric unstack with missing cells is float64 in every
+        // column, an all-missing one included (it was object).
+        let levels = fp_index::MultiIndex::from_arrays(vec![
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+            vec![IndexLabel::from(1_i64), IndexLabel::from(2_i64)],
+        ])
+        .unwrap();
+        let index = Index::new(vec![
+            IndexLabel::Utf8("a|1".into()),
+            IndexLabel::Utf8("b|2".into()),
+        ])
+        .with_row_multiindex(levels)
+        .unwrap();
+        let gappy = Series::new(
+            "v",
+            index,
+            Column::new(
+                DType::Float64,
+                vec![Scalar::Null(NullKind::NaN), Scalar::Float64(0.5)],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .unstack()
+        .unwrap();
+        for position in 0..gappy.num_columns() {
+            assert_eq!(gappy.column_at(position).unwrap().dtype(), DType::Float64);
+        }
     }
 
     #[test]
