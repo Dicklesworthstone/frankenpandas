@@ -2765,8 +2765,9 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), values=fpd.Series([1]), aggfunc="sum"),
-        lambda: _hd(fpd).groupby("a").value_counts(normalize=True),
+        lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), normalize=True, margins=True),
+        lambda: _hd(fpd).groupby("a").value_counts(dropna=False),
+        lambda: _hd(fpd).pivot_table(index="a", values="b", dropna=False),
         # pandas' Series of lists: object cells (fvsao.33); it returned a bare list.
         lambda: _hd(fpd).apply(lambda r: [r["a"], r["b"]], axis=1),
         lambda: _hs(fpd).interpolate(method="nearest", limit_direction="both"),
@@ -7126,3 +7127,113 @@ def _frame_apply_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_FRAME_APPLY_CASES))
 def test_frame_apply_result_shapes_raw_broadcast_and_transform_match_pandas(case: str) -> None:
     assert _frame_apply_outcome(fpd, case) == _frame_apply_outcome(pd, case), case
+
+
+def _ab(m: Any) -> Any:
+    return m.DataFrame({"a": ["x", "y", "x", "y", "x"], "b": ["p", "p", "q", "q", "q"], "v": [1, 2, 3, 4, 5], "w": [1.5, None, 2.5, 3.5, 0.5]})
+
+
+def _q_named(r: Any) -> Any:
+    return (str(r.name), [str(i) for i in r.index], _dtype_values(r))
+
+
+def _number(v: Any) -> Any:
+    """A scalar and whether it is an integer (pandas' np.int64 vs a float)."""
+    return (v, isinstance(v, (int, np.integer)))
+
+
+def _records() -> Any:
+    return [{"id": 1, "info": {"n": "p"}, "items": [{"k": "a", "z": {"q": 1}}, {"k": "b", "z": {"q": 2}}]}, {"id": 2, "info": {"n": "r"}, "items": [{"k": "c", "z": {"q": 3}}]}]
+
+
+# Silently wrong: DataFrame.quantile ignored interpolation for a single q
+# (nearest gave 2.2), gb.value_counts() counted the keys with one column as
+# a frame, frame value_counts labelled rows 'x, q' (pandas' MultiIndex),
+# crosstab sorted int keys as text, pivot_table sum of ints came back
+# float64, sample drew other rows than pandas for the same seed. Refused:
+# value_counts sort / dropna / normalize / subset, crosstab values /
+# aggfunc / margins / names / normalize='index', json_normalize
+# record_path / meta, merge_asof suffixes, groupby quantile interpolation,
+# pivot_table sort=False, sample weights.
+_EVERYDAY_CASES = {
+    # (Series names are text here - fvsao.32 - so the q name compares as str.)
+    "frame quantile nearest": lambda m: _q_named(_ab(m)[["v", "w"]].quantile(0.3, interpolation="nearest")),
+    "frame quantile lower int": lambda m: _q_named(_ab(m)[["v"]].quantile(0.3, interpolation="lower")),
+    "frame quantile midpoint": lambda m: _q_named(_ab(m)[["v", "w"]].quantile(0.3, interpolation="midpoint")),
+    "frame quantile higher axis1": lambda m: _q_named(_ab(m)[["v", "w"]].quantile(0.5, interpolation="higher", axis=1)),
+    "frame quantile linear axis1": lambda m: _q_named(_ab(m)[["v", "w"]].quantile(0.5, axis=1)),
+    "series quantile lower int": lambda m: _number(_ab(m)["v"].quantile(0.3, interpolation="lower")),
+    "series quantile linear float": lambda m: _number(_ab(m)["v"].quantile(0.3)),
+    "gb quantile higher": lambda m: _typed(_ab(m).groupby("a")["v"].quantile(0.5, interpolation="higher")),
+    "gb frame quantile lower": lambda m: _typed(_ab(m).groupby("a")[["v", "w"]].quantile(0.5, interpolation="lower")),
+    "value_counts": lambda m: _typed(_ab(m)[["a", "b"]].value_counts()),
+    "value_counts sort false": lambda m: _typed(_ab(m)[["a", "b"]].value_counts(sort=False)),
+    "value_counts normalize": lambda m: _typed(_ab(m)[["a", "b"]].value_counts(normalize=True)),
+    "value_counts ascending": lambda m: _typed(_ab(m)[["a"]].value_counts(ascending=True)),
+    "value_counts dropna false": lambda m: _typed(m.DataFrame({"a": ["x", None, "x"]}).value_counts(dropna=False)),
+    "value_counts subset str": lambda m: _typed(_ab(m).value_counts(subset="a")),
+    "value_counts subset list": lambda m: _typed(_ab(m).value_counts(subset=["b"])),
+    "gb value_counts": lambda m: _typed(_ab(m).groupby("a").value_counts()),
+    "gb value_counts normalize": lambda m: _typed(_ab(m).groupby("a").value_counts(normalize=True)),
+    "gb value_counts subset": lambda m: _typed(_ab(m).groupby("a").value_counts(subset=["b"])),
+    "gb value_counts sort false": lambda m: _typed(_ab(m).groupby("a").value_counts(subset=["b"], sort=False)),
+    "gb value_counts ascending": lambda m: _typed(_ab(m).groupby("a").value_counts(subset=["b"], ascending=True)),
+    "gb value_counts as_index false": lambda m: _typed(_ab(m).groupby("a", as_index=False).value_counts(subset=["b"])),
+    "crosstab": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"])),
+    "crosstab int keys": lambda m: _typed(m.crosstab(m.Series([10, 2, 10], name="k"), m.Series([1, 1, 2], name="j"))),
+    "crosstab margins": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"], margins=True)),
+    "crosstab margins_name": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"], margins=True, margins_name="Total")),
+    "crosstab values sum": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"], values=_ab(m)["v"], aggfunc="sum")),
+    "crosstab values mean margins": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"], values=_ab(m)["v"], aggfunc="mean", margins=True)),
+    "crosstab normalize": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"], normalize=True)),
+    "crosstab normalize index": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"], normalize="index")),
+    "crosstab normalize columns": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"], normalize="columns")),
+    "crosstab names": lambda m: _typed(m.crosstab(_ab(m)["a"], _ab(m)["b"], rownames=["R"], colnames=["C"])),
+    "pivot int sum complete": lambda m: _typed(_ab(m).pivot_table(index="a", columns="b", values="v", aggfunc="sum")),
+    "pivot int sum missing": lambda m: _typed(m.DataFrame({"a": ["x", "y"], "b": ["p", "q"], "v": [1, 2]}).pivot_table(index="a", columns="b", values="v", aggfunc="sum")),
+    "pivot count": lambda m: _typed(_ab(m).pivot_table(index="a", columns="b", values="w", aggfunc="count")),
+    "pivot sort false columns": lambda m: _typed(m.DataFrame({"a": ["y", "x", "y"], "b": ["q", "p", "p"], "v": [1, 2, 3]}).pivot_table(index="a", columns="b", values="v", aggfunc="sum", sort=False)),
+    "pivot sort false": lambda m: _typed(m.DataFrame({"a": ["y", "x", "y"], "v": [1, 2, 3]}).pivot_table(index="a", values="v", aggfunc="sum", sort=False)),
+    "json record_path meta": lambda m: _typed(m.json_normalize(_records(), record_path="items", meta=["id"])),
+    "json record prefix": lambda m: _typed(m.json_normalize(_records(), record_path="items", meta=["id"], record_prefix="it.")),
+    "json nested meta": lambda m: _typed(m.json_normalize(_records(), record_path="items", meta=["id", ["info", "n"]])),
+    "json meta_prefix": lambda m: _typed(m.json_normalize(_records(), record_path="items", meta=["id"], meta_prefix="m_")),
+    "json meta ignore": lambda m: _typed(m.json_normalize([{"items": [{"k": "a"}]}], record_path="items", meta=["id"], errors="ignore")),
+    "json record_path list": lambda m: _typed(m.json_normalize({"a": {"items": [{"k": 1}]}}, record_path=["a", "items"])),
+    "merge_asof suffixes": lambda m: _typed(m.merge_asof(m.DataFrame({"t": [1, 5], "v": [1, 2]}), m.DataFrame({"t": [2, 3], "v": [7, 8]}), on="t", suffixes=("_l", "_r"))),
+    "sample n": lambda m: _ab(m).sample(n=3, random_state=0).index.tolist(),
+    "sample frac": lambda m: _ab(m).sample(frac=0.5, random_state=2).index.tolist(),
+    "sample replace": lambda m: _ab(m).sample(n=7, replace=True, random_state=4).index.tolist(),
+    "sample weights list": lambda m: _ab(m).sample(n=2, weights=[0, 0, 0, 1, 1], random_state=0).index.tolist(),
+    "sample weights series": lambda m: _ab(m).sample(n=2, weights=m.Series([5, 0, 0, 1, 0]), random_state=3).index.tolist(),
+    "sample weights column": lambda m: _ab(m).sample(n=2, weights="v", random_state=1).index.tolist(),
+    "series sample": lambda m: _ab(m)["v"].sample(n=3, random_state=5).tolist(),
+    "sample axis1": lambda m: _ab(m).sample(n=2, axis=1, random_state=0).columns.tolist(),
+    # NEGATIVES
+    "gb value_counts subset clash": lambda m: _ab(m).groupby("a").value_counts(subset=["a"]),
+    "gb value_counts subset missing": lambda m: _ab(m).groupby("a").value_counts(subset=["zz"]),
+    "crosstab values without aggfunc": lambda m: m.crosstab(_ab(m)["a"], _ab(m)["b"], values=_ab(m)["v"]),
+    "crosstab aggfunc without values": lambda m: m.crosstab(_ab(m)["a"], _ab(m)["b"], aggfunc="sum"),
+    "crosstab bad normalize": lambda m: m.crosstab(_ab(m)["a"], _ab(m)["b"], normalize="rows"),
+    "json missing meta": lambda m: m.json_normalize([{"items": [{"k": "a"}]}], record_path="items", meta=["id"]),
+    "json missing record path": lambda m: m.json_normalize([{"id": 1}], record_path="items"),
+    "json meta conflict": lambda m: m.json_normalize([{"k": 1, "items": [{"k": "a"}]}], record_path="items", meta=["k"]),
+    "sample n and frac": lambda m: _ab(m).sample(n=1, frac=0.5),
+    "sample negative weights": lambda m: _ab(m).sample(n=1, weights=[1, -1, 0, 0, 0]),
+    "sample zero weights": lambda m: _ab(m).sample(n=1, weights=[0, 0, 0, 0, 0]),
+    "sample weights length": lambda m: _ab(m).sample(n=1, weights=[1, 2]),
+    "sample upsample without replace": lambda m: _ab(m).sample(frac=1.5),
+}
+
+
+def _everyday_outcome(m: Any, case: str) -> Any:
+    try:
+        return _EVERYDAY_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY_CASES))
+def test_value_counts_crosstab_quantile_json_normalize_and_sample_match_pandas(case: str) -> None:
+    assert _everyday_outcome(fpd, case) == _everyday_outcome(pd, case), case

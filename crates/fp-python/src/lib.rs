@@ -14015,6 +14015,126 @@ fn with_row_axis(frame: DataFrame, index: &Index) -> PyResult<DataFrame> {
     }
 }
 
+/// The positions pandas' `sample` draws from an axis of `len` items: its
+/// `process_sampling_size` (n, else round(frac * len), else 1), its
+/// `preprocess_weights` (given here as one weight per position, missing as
+/// None) and `random_state.choice(len, size, replace, p)` through numpy (an
+/// int seed is `np.random.RandomState(seed)`, None numpy's global state), so
+/// the same seed draws the same rows as pandas; fp-frame's own generator
+/// drew others.
+fn pandas_sample_positions(
+    py: Python<'_>,
+    len: usize,
+    n: Option<i64>,
+    frac: Option<f64>,
+    replace: bool,
+    weights: Option<Vec<Option<f64>>>,
+    random_state: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<usize>> {
+    let value_error =
+        |message: &str| PyErr::new::<pyo3::exceptions::PyValueError, _>(message.to_owned());
+    let size = match (n, frac) {
+        (None, None) => 1,
+        (Some(_), Some(_)) => {
+            return Err(value_error(
+                "Please enter a value for `frac` OR `n`, not both",
+            ));
+        }
+        (Some(n), None) => usize::try_from(n).map_err(|_| {
+            value_error("A negative number of rows requested. Please provide `n` >= 0.")
+        })?,
+        (None, Some(frac)) => {
+            if frac > 1.0 && !replace {
+                return Err(value_error(
+                    "Replace has to be set to `True` when upsampling the population `frac` > 1.",
+                ));
+            }
+            if frac < 0.0 {
+                return Err(value_error(
+                    "A negative number of rows requested. Please provide `frac` >= 0.",
+                ));
+            }
+            (frac * len as f64).round_ties_even() as usize
+        }
+    };
+    let np = py.import("numpy")?;
+    let probabilities = match weights {
+        None => py.None().into_bound(py),
+        Some(weights) => {
+            if weights.len() != len {
+                return Err(value_error(
+                    "Weights and axis to be sampled must be of same length",
+                ));
+            }
+            if weights.iter().flatten().any(|w| w.is_infinite()) {
+                return Err(value_error("weight vector may not include `inf` values"));
+            }
+            if weights.iter().flatten().any(|&w| w < 0.0) {
+                return Err(value_error(
+                    "weight vector many not include negative values",
+                ));
+            }
+            let weights: Vec<f64> = weights
+                .into_iter()
+                .map(|w| w.filter(|w| !w.is_nan()).unwrap_or(0.0))
+                .collect();
+            let total: f64 = weights.iter().sum();
+            if total == 0.0 {
+                return Err(value_error("Invalid weights: weights sum to zero"));
+            }
+            np.call_method1(
+                "array",
+                (weights.iter().map(|w| w / total).collect::<Vec<_>>(),),
+            )?
+        }
+    };
+    let random = np.getattr("random")?;
+    let state = match random_state.filter(|state| !state.is_none()) {
+        None => random,
+        Some(state) if state.hasattr("choice")? => state.clone(),
+        Some(state) => random.call_method1("RandomState", (state,))?,
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("size", size)?;
+    kwargs.set_item("replace", replace)?;
+    kwargs.set_item("p", probabilities)?;
+    state
+        .call_method("choice", (len,), Some(&kwargs))?
+        .call_method0("tolist")?
+        .extract()
+}
+
+/// pandas' weights for `sample`: an array-like is one weight per item, a
+/// Series is aligned to `labels` by label, a string names a column of
+/// `frame` (rows only); missing values are None.
+fn sample_weights(
+    py: Python<'_>,
+    weights: &Bound<'_, PyAny>,
+    labels: &[IndexLabel],
+    frame: Option<&DataFrame>,
+) -> PyResult<Vec<Option<f64>>> {
+    let cell = |value: &Scalar| (!value.is_missing()).then(|| value.to_f64().ok()).flatten();
+    if let Ok(name) = weights.extract::<String>() {
+        let column = frame.and_then(|frame| frame.column(&name)).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                "String passed to weights not a valid column",
+            )
+        })?;
+        return Ok(column.values().iter().map(cell).collect());
+    }
+    if let Ok(series) = weights.extract::<PyRef<'_, PySeries>>() {
+        let aligned = series
+            .inner
+            .reindex(labels.to_vec())
+            .map_err(frame_error_to_py)?;
+        return Ok(aligned.column().values().iter().map(cell).collect());
+    }
+    weights
+        .try_iter()?
+        .map(|item| Ok(cell(&py_to_scalar(py, &item?)?)))
+        .collect()
+}
+
 /// pandas' sort of a union of index labels (`Index.sort_values`): numbers
 /// by value (bools as 0 / 1), text, instants or durations, missing labels
 /// last; labels of kinds Python cannot order are its TypeError.
@@ -17976,27 +18096,42 @@ impl PySeries {
 
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (n=None, frac=None, replace=false, weights=None, random_state=None, axis=None, ignore_index=false))]
+    /// pandas' `Series.sample`: the rows pandas draws for the same seed,
+    /// `weights` included (see [`pandas_sample_positions`]).
     fn sample(
         &self,
-        n: Option<usize>,
+        py: Python<'_>,
+        n: Option<i64>,
         frac: Option<f64>,
         replace: bool,
         weights: Option<&Bound<'_, PyAny>>,
-        random_state: Option<u64>,
+        random_state: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
         ignore_index: bool,
     ) -> PyResult<PySeries> {
-        unsupported_params("Series.sample", &[("weights", weights.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {ax} for object type Series"
             )));
         }
-        let mut res = self
-            .inner
-            .sample(n, frac, replace, random_state)
-            .map_err(frame_error_to_py)?;
+        let weights = weights
+            .filter(|weights| !weights.is_none())
+            .map(|weights| sample_weights(py, weights, self.inner.index().labels(), None))
+            .transpose()?;
+        let positions: Vec<i64> = pandas_sample_positions(
+            py,
+            self.inner.len(),
+            n,
+            frac,
+            replace,
+            weights,
+            random_state,
+        )?
+        .into_iter()
+        .map(|position| i64::try_from(position).unwrap_or(i64::MAX))
+        .collect();
+        let mut res = self.inner.take(&positions).map_err(frame_error_to_py)?;
         if ignore_index {
             res = match res
                 .reset_index_with_name(true, None)
@@ -27081,10 +27216,7 @@ impl PyDataFrame {
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let _ = observed;
-        unsupported_params(
-            "DataFrame.pivot_table",
-            &[("dropna", dropna), ("sort", sort)],
-        )?;
+        unsupported_params("DataFrame.pivot_table", &[("dropna", dropna)])?;
         let names = |spec: Option<&Bound<'py, PyAny>>| -> PyResult<Vec<String>> {
             match spec.filter(|spec| !spec.is_none()) {
                 None => Ok(Vec::new()),
@@ -27148,7 +27280,9 @@ impl PyDataFrame {
         };
         let values_list = PyList::new(py, &value_names)?;
         let aggregate = |keys: &[String]| -> PyResult<Bound<'py, PyAny>> {
-            slf.call_method1("groupby", (key_list(keys)?,))?
+            let groupby_kwargs = PyDict::new(py);
+            groupby_kwargs.set_item("sort", sort)?;
+            slf.call_method("groupby", (key_list(keys)?,), Some(&groupby_kwargs))?
                 .get_item(&values_list)?
                 .call_method1("agg", (aggfunc,))
         };
@@ -27160,11 +27294,56 @@ impl PyDataFrame {
             aggregate(&index_keys)?
         } else if simple {
             let name = aggfunc.extract::<String>()?;
-            let res = slf
-                .borrow()
-                .inner
+            let frame = slf.borrow().inner.clone();
+            let mut res = frame
                 .pivot_table(&value_names[0], &index_keys[0], &column_keys[0], &name)
                 .map_err(frame_error_to_py)?;
+            // pandas unstacks the aggregate: an int one (a count, or sum /
+            // min / max / first / last of an int column) with every cell
+            // present stays int64 (it came back float64).
+            let int_aggregate = match name.as_str() {
+                "count" | "size" => true,
+                "sum" | "min" | "max" | "first" | "last" => frame
+                    .column(&value_names[0])
+                    .is_some_and(|column| column.dtype() == DType::Int64),
+                _ => false,
+            };
+            let complete = (0..res.num_columns()).all(|position| {
+                res.column_at(position)
+                    .is_some_and(|column| !column.values().iter().any(Scalar::is_missing))
+            });
+            if int_aggregate && complete {
+                res = res.astype(DType::Int64).map_err(frame_error_to_py)?;
+            }
+            // sort=False: rows and columns in the order their key value
+            // first appears (they were refused).
+            if !sort {
+                let first_seen = |key: &str| {
+                    let mut order: HashMap<String, usize> = HashMap::new();
+                    if let Some(column) = frame.column(key) {
+                        for (position, value) in column.values().iter().enumerate() {
+                            order
+                                .entry(scalar_to_index_label_converter(value).to_string())
+                                .or_insert(position);
+                        }
+                    }
+                    order
+                };
+                let rows = first_seen(&index_keys[0]);
+                let mut positions: Vec<usize> = (0..res.len()).collect();
+                let labels = res.index().labels().to_vec();
+                positions.sort_by_key(|&row| {
+                    rows.get(&labels[row].to_string())
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+                res = res.take_rows(&positions).map_err(frame_error_to_py)?;
+                let columns = first_seen(&column_keys[0]);
+                let mut names: Vec<String> = res.column_names().into_iter().cloned().collect();
+                names.sort_by_key(|name| columns.get(name).copied().unwrap_or(usize::MAX));
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                res = res.select_columns(&refs).map_err(frame_error_to_py)?;
+            }
             Bound::new(py, PyDataFrame { inner: res })?.into_any()
         } else {
             return Err(not_implemented(
@@ -27250,77 +27429,49 @@ impl PyDataFrame {
 
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (n=None, frac=None, replace=false, weights=None, random_state=None, axis=None, ignore_index=false))]
+    /// pandas' `DataFrame.sample`: the rows (or, axis=1, columns) pandas
+    /// draws for the same seed, `weights` included - a column name, a Series
+    /// aligned by label, or one weight per item (see
+    /// [`pandas_sample_positions`]; fp-frame's own generator drew others,
+    /// and weights were refused).
     fn sample(
         &self,
-        n: Option<usize>,
+        py: Python<'_>,
+        n: Option<i64>,
         frac: Option<f64>,
         replace: bool,
         weights: Option<&Bound<'_, PyAny>>,
-        random_state: Option<u64>,
+        random_state: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
         ignore_index: bool,
     ) -> PyResult<PyDataFrame> {
-        unsupported_params("DataFrame.sample", &[("weights", weights.is_none())])?;
         let ax = parse_axis_param(axis)?;
+        let names: Vec<String> = self.inner.column_names().into_iter().cloned().collect();
+        let labels: Vec<IndexLabel> = if ax == 1 {
+            names
+                .iter()
+                .map(|name| IndexLabel::Utf8(name.clone()))
+                .collect()
+        } else {
+            self.inner.index().labels().to_vec()
+        };
+        let weights = weights
+            .filter(|weights| !weights.is_none())
+            .map(|weights| sample_weights(py, weights, &labels, (ax == 0).then_some(&self.inner)))
+            .transpose()?;
+        let positions =
+            pandas_sample_positions(py, labels.len(), n, frac, replace, weights, random_state)?;
         let mut res = if ax == 1 {
-            let total = self.inner.column_names().len();
-            if total == 0 {
-                return Ok(PyDataFrame {
-                    inner: self.inner.clone(),
-                });
-            }
-            if let Some(f) = frac {
-                if !f.is_finite() || f < 0.0 || (!replace && f > 1.0) {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "sample: invalid frac",
-                    ));
-                }
-            }
-            let sample_n = match (n, frac) {
-                (Some(count), None) => count,
-                (None, Some(f)) => (total as f64 * f).round() as usize,
-                (None, None) => 1,
-                (Some(_), Some(_)) => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "cannot specify both n and frac",
-                    ));
-                }
-            };
-            if !replace && sample_n > total {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "cannot sample {sample_n} columns from {total} without replacement"
-                )));
-            }
-            let mut rng_state = fp_frame::sample_seed(random_state);
-            let mut next_rand = || -> usize {
-                rng_state = rng_state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                (rng_state >> 33) as usize
-            };
-            let cols: Vec<String> = self.inner.column_names().into_iter().cloned().collect();
-            let selected_cols: Vec<String> = if replace {
-                (0..sample_n)
-                    .map(|_| cols[next_rand() % total].clone())
-                    .collect()
-            } else {
-                let mut pool: Vec<usize> = (0..total).collect();
-                for i in 0..sample_n {
-                    let j = i + (next_rand() % (total - i));
-                    pool.swap(i, j);
-                }
-                pool[..sample_n]
-                    .iter()
-                    .map(|&idx| cols[idx].clone())
-                    .collect()
-            };
-            let str_refs: Vec<&str> = selected_cols.iter().map(String::as_str).collect();
+            let picked: Vec<&str> = positions
+                .iter()
+                .map(|&position| names[position].as_str())
+                .collect();
             self.inner
-                .select_columns(&str_refs)
+                .select_columns(&picked)
                 .map_err(frame_error_to_py)?
         } else {
             self.inner
-                .sample(n, frac, replace, random_state)
+                .take_rows(&positions)
                 .map_err(frame_error_to_py)?
         };
         if ignore_index {
@@ -27491,6 +27642,50 @@ impl PyDataFrame {
                     )));
                 }
             };
+            // pandas names the result after q, along either axis (axis=1
+            // was named 'quantile').
+            let q_name = pyo3::types::PyFloat::new(py, q_val).str()?.to_string();
+            let res = res.rename(&q_name).map_err(frame_error_to_py)?;
+            if interpolation == "linear" {
+                return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            }
+            // Any other interpolation was ignored for a single q: each
+            // numeric column's (axis=0) or row's (axis=1) quantile under it,
+            // over the cells the linear result used.
+            let numeric: Vec<(&String, &Column)> = target_df
+                .column_names()
+                .into_iter()
+                .filter_map(|name| target_df.column(name).map(|column| (name, column)))
+                .filter(|(_, column)| matches!(column.dtype(), DType::Int64 | DType::Float64))
+                .collect();
+            let quantile = |values: Vec<Scalar>| {
+                let labels = (0..values.len())
+                    .map(|position| IndexLabel::Int64(position as i64))
+                    .collect();
+                Series::from_values("", labels, values)
+                    .and_then(|series| series.quantile_with_interpolation(q_val, interpolation))
+            };
+            let values = if ax == 0 {
+                numeric
+                    .iter()
+                    .map(|(_, column)| quantile(column.values().to_vec()))
+                    .collect::<Result<Vec<_>, _>>()
+            } else {
+                (0..target_df.len())
+                    .map(|row| {
+                        quantile(
+                            numeric
+                                .iter()
+                                .map(|(_, column)| column.values()[row].clone())
+                                .collect(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            }
+            .map_err(frame_error_to_py)?;
+            let column = Column::from_values(values).map_err(column_error_to_py)?;
+            let res =
+                Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
 
@@ -29500,64 +29695,59 @@ impl PyDataFrame {
         Ok(())
     }
 
+    /// pandas' `df.value_counts(subset=None, normalize=False, sort=True,
+    /// ascending=False, dropna=True)`: the size of each group over `subset`
+    /// (every column by default; a missing key is a group with
+    /// dropna=False), sorted by count when `sort` (ties keep key order), as
+    /// proportions with `normalize`, named 'count' / 'proportion', over a
+    /// MultiIndex whenever `subset` is list-like - one level too. sort=False
+    /// and dropna=False were refused and the index was flat 'x, p' text.
     #[pyo3(signature = (subset=None, normalize=false, sort=true, ascending=false, dropna=true))]
-    fn value_counts(
-        &self,
-        subset: Option<&Bound<'_, PyAny>>,
+    fn value_counts<'py>(
+        slf: &Bound<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
         normalize: bool,
         sort: bool,
         ascending: bool,
         dropna: bool,
-    ) -> PyResult<PySeries> {
-        unsupported_params(
-            "DataFrame.value_counts",
-            &[("sort", sort), ("dropna", dropna)],
-        )?;
-        let cols = extract_col_names_flexible(subset)?;
-        let mut s = if cols.is_empty() {
-            self.inner.value_counts()
-        } else {
-            let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-            self.inner.value_counts_subset(&refs)
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let keys = match subset.filter(|subset| !subset.is_none()) {
+            Some(subset) => subset.clone(),
+            None => PyList::new(py, slf.borrow().inner.column_names())?.into_any(),
+        };
+        let list_like = !keys.is_instance_of::<pyo3::types::PyString>() && keys.try_iter().is_ok();
+        let groupby_kwargs = PyDict::new(py);
+        groupby_kwargs.set_item("dropna", dropna)?;
+        groupby_kwargs.set_item("observed", false)?;
+        let mut counts = slf
+            .call_method("groupby", (keys,), Some(&groupby_kwargs))?
+            .call_method0("size")?;
+        if sort {
+            let sort_kwargs = PyDict::new(py);
+            sort_kwargs.set_item("ascending", ascending)?;
+            sort_kwargs.set_item("kind", "stable")?;
+            counts = counts.call_method("sort_values", (), Some(&sort_kwargs))?;
         }
-        .map_err(frame_error_to_py)?;
-
-        if ascending {
-            let mut labels = s.index().labels().to_vec();
-            let mut values = s.column().values().to_vec();
-            labels.reverse();
-            values.reverse();
-            s = Series::from_values(s.name().to_string(), labels, values)
-                .map_err(frame_error_to_py)?;
-        }
-
         if normalize {
-            let total: f64 = s
-                .column()
-                .values()
-                .iter()
-                .filter_map(|v| v.to_f64().ok())
-                .sum();
-            if total > 0.0 {
-                let norm_values: Vec<Scalar> = s
-                    .column()
-                    .values()
-                    .iter()
-                    .map(|v| match v.to_f64() {
-                        Ok(cnt) => Scalar::Float64(cnt / total),
-                        Err(_) => Scalar::Null(NullKind::NaN),
-                    })
-                    .collect();
-                s = Series::from_values(
-                    "proportion".to_string(),
-                    s.index().labels().to_vec(),
-                    norm_values,
-                )
-                .map_err(frame_error_to_py)?;
-            }
+            let total = counts.call_method0("sum")?;
+            counts = counts.call_method1("__truediv__", (total,))?;
         }
-
-        Ok(PySeries { inner: s })
+        let counts = counts.extract::<PyRef<'_, PySeries>>()?.inner.clone();
+        let mut index = counts.index().clone();
+        if list_like && index.row_multiindex().is_none() {
+            let levels = fp_index::MultiIndex::from_arrays(vec![index.labels().to_vec()])
+                .map_err(index_error_to_py)?
+                .set_names(vec![index.name().map(str::to_owned)]);
+            index = index
+                .with_row_multiindex(levels)
+                .map_err(index_error_to_py)?;
+        }
+        let name = if normalize { "proportion" } else { "count" };
+        PySeries {
+            inner: Series::new(name, index, counts.column().clone()).map_err(frame_error_to_py)?,
+        }
+        .into_bound_py_any(py)
     }
 
     #[pyo3(signature = (axis=None, dropna=true))]
@@ -36748,30 +36938,57 @@ impl PyGroupBy {
         self.prod(false, 0)
     }
 
+    /// pandas' `gb.quantile(q=0.5, interpolation='linear')`; another
+    /// interpolation runs each numeric column's SeriesGroupBy quantile (it
+    /// was refused).
     #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
     fn quantile(
-        &self,
+        slf: &Bound<'_, Self>,
         q: f64,
         interpolation: Option<&str>,
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
-        self.observed_only("quantile")?;
+        let this = slf.borrow();
+        this.observed_only("quantile")?;
         unsupported_params(
             "DataFrameGroupBy.quantile",
-            &[
-                (
-                    "interpolation",
-                    matches!(interpolation, None | Some("linear")),
-                ),
-                ("numeric_only", !numeric_only),
-            ],
+            &[("numeric_only", !numeric_only)],
         )?;
-        let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .quantile(q)
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        let interpolation = interpolation.unwrap_or("linear");
+        if interpolation == "linear" {
+            let result = this
+                .grouped()
+                .map_err(frame_error_to_py)?
+                .quantile(q)
+                .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner: result });
+        }
+        let names: Vec<String> = this
+            .df
+            .column_names()
+            .into_iter()
+            .filter(|name| {
+                !this.by.contains(name)
+                    && this.df.column(name).is_some_and(|column| {
+                        matches!(column.dtype(), DType::Int64 | DType::Float64)
+                    })
+            })
+            .cloned()
+            .collect();
+        drop(this);
+        let kwargs = PyDict::new(slf.py());
+        kwargs.set_item("interpolation", interpolation)?;
+        let mut columns = Vec::with_capacity(names.len());
+        for name in &names {
+            let result =
+                slf.as_any()
+                    .get_item(name)?
+                    .call_method("quantile", (q,), Some(&kwargs))?;
+            columns.push(result.extract::<PyRef<'_, PySeries>>()?.inner.clone());
+        }
+        Ok(PyDataFrame {
+            inner: DataFrame::from_series(columns).map_err(frame_error_to_py)?,
+        })
     }
 
     #[pyo3(signature = (ddof=1, numeric_only=false))]
@@ -37680,32 +37897,158 @@ impl PyGroupBy {
         .into_py_any(py)
     }
 
+    /// pandas' `gb.value_counts(subset=None, normalize=False, sort=True,
+    /// ascending=False, dropna=True)`: the size of every group of the keys
+    /// plus the other (or `subset`) columns - a Series over their MultiIndex
+    /// named 'count' / 'proportion' - sorted by count within each key group
+    /// when `sort` (the key groups in key order when the groupby sorts),
+    /// normalized by each key group's total, a frame with as_index=False.
+    /// It counted the keys with ONE other column and came back as a frame,
+    /// and every option was refused.
     #[pyo3(signature = (subset=None, normalize=false, sort=true, ascending=false, dropna=true))]
     fn value_counts(
         &self,
+        py: Python<'_>,
         subset: Option<Vec<String>>,
-        normalize: Option<bool>,
-        sort: Option<bool>,
-        ascending: Option<bool>,
-        dropna: Option<bool>,
-    ) -> PyResult<PyDataFrame> {
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> PyResult<Py<PyAny>> {
         self.observed_only("value_counts")?;
-        unsupported_params(
-            "DataFrameGroupBy.value_counts",
-            &[
-                ("subset", subset.is_none()),
-                ("normalize", normalize != Some(true)),
-                ("sort", sort != Some(false)),
-                ("ascending", ascending != Some(true)),
-                ("dropna", dropna != Some(false)),
-            ],
-        )?;
-        let res = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .value_counts()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        if dropna != self.dropna {
+            return Err(not_implemented(
+                "DataFrameGroupBy.value_counts(dropna=...) other than the groupby's own dropna",
+            ));
+        }
+        let column_keys: Vec<&str> = self
+            .by
+            .iter()
+            .zip(&self.key_names)
+            .filter(|(column, name)| name.as_deref() == Some(column.as_str()))
+            .map(|(column, _)| column.as_str())
+            .collect();
+        let others: Vec<String> = self
+            .df
+            .column_names()
+            .into_iter()
+            .filter(|name| !self.by.contains(name))
+            .cloned()
+            .collect();
+        let python_set = |names: &[&String]| {
+            let quoted: Vec<String> = names.iter().map(|name| format!("'{name}'")).collect();
+            format!("{{{}}}", quoted.join(", "))
+        };
+        if let Some(subset) = &subset {
+            let clashing: Vec<&String> = subset
+                .iter()
+                .filter(|name| column_keys.contains(&name.as_str()))
+                .collect();
+            if !clashing.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Keys {} in subset cannot be in the groupby column keys.",
+                    python_set(&clashing)
+                )));
+            }
+            let missing: Vec<&String> = subset
+                .iter()
+                .filter(|name| !others.contains(name))
+                .collect();
+            if !missing.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Keys {} in subset do not exist in the DataFrame.",
+                    python_set(&missing)
+                )));
+            }
+        }
+        let values: Vec<String> = others
+            .into_iter()
+            .filter(|name| subset.as_ref().is_none_or(|subset| subset.contains(name)))
+            .collect();
+        let mut by = self.by.clone();
+        by.extend(values.iter().cloned());
+        let mut key_names = self.key_names.clone();
+        key_names.extend(values.iter().map(|name| Some(name.clone())));
+        let counting = PyGroupBy {
+            df: self.df.clone(),
+            by,
+            key_names,
+            as_index: true,
+            sort: self.sort,
+            dropna: self.dropna,
+            group_keys: self.group_keys,
+            unused: Vec::new(),
+        };
+        let counts = counting
+            .size(py)?
+            .bind(py)
+            .extract::<PyRef<'_, PySeries>>()?
+            .inner
+            .clone();
+        let rows = index_rows(counts.index());
+        let sizes: Vec<i64> = counts
+            .column()
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(count) => *count,
+                _ => 0,
+            })
+            .collect();
+        let group_of = |row: usize| &rows[row][..self.by.len().min(rows[row].len())];
+        let mut order: Vec<usize> = (0..sizes.len()).collect();
+        if sort {
+            order.sort_by(|&a, &b| {
+                if ascending {
+                    sizes[a].cmp(&sizes[b])
+                } else {
+                    sizes[b].cmp(&sizes[a])
+                }
+            });
+        }
+        if self.sort {
+            order.sort_by(|&a, &b| group_of(a).cmp(group_of(b)));
+        }
+        let positions: Vec<i64> = order
+            .iter()
+            .map(|&row| i64::try_from(row).unwrap_or(i64::MAX))
+            .collect();
+        let taken = counts.take(&positions).map_err(frame_error_to_py)?;
+        let column = if normalize {
+            let mut totals: HashMap<&[IndexLabel], i64> = HashMap::new();
+            for (row, size) in sizes.iter().enumerate() {
+                *totals.entry(group_of(row)).or_default() += size;
+            }
+            Column::from_values(
+                order
+                    .iter()
+                    .map(|&row| {
+                        let total = totals[group_of(row)];
+                        Scalar::Float64(if total == 0 {
+                            0.0
+                        } else {
+                            sizes[row] as f64 / total as f64
+                        })
+                    })
+                    .collect(),
+            )
+            .map_err(column_error_to_py)?
+        } else {
+            taken.column().clone()
+        };
+        let name = if normalize { "proportion" } else { "count" };
+        let result = Series::new(name, taken.index().clone(), column).map_err(frame_error_to_py)?;
+        if self.as_index {
+            return PySeries { inner: result }.into_py_any(py);
+        }
+        match result.reset_index(false).map_err(frame_error_to_py)? {
+            fp_frame::SeriesResetIndexResult::DataFrame(frame) => {
+                PyDataFrame { inner: frame }.into_py_any(py)
+            }
+            fp_frame::SeriesResetIndexResult::Series(series) => {
+                PySeries { inner: series }.into_py_any(py)
+            }
+        }
     }
 }
 
@@ -38465,21 +38808,33 @@ impl PySeriesGroupBy {
         self.prod(false, 0)
     }
 
+    /// pandas' `sgb.quantile(q=0.5, interpolation='linear')`; another
+    /// interpolation takes each group's quantile under it (it was refused).
     #[pyo3(signature = (q=0.5, interpolation="linear"))]
     fn quantile(&self, q: f64, interpolation: Option<&str>) -> PyResult<PySeries> {
-        unsupported_params(
-            "SeriesGroupBy.quantile",
-            &[(
-                "interpolation",
-                matches!(interpolation, None | Some("linear")),
-            )],
-        )?;
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .quantile(q)
-            .map_err(frame_error_to_py)?;
+        let interpolation = interpolation.unwrap_or("linear");
+        let res = if interpolation == "linear" {
+            self.series
+                .groupby(&self.by)
+                .map_err(frame_error_to_py)?
+                .quantile(q)
+                .map_err(frame_error_to_py)?
+        } else {
+            let mut labels = Vec::new();
+            let mut values = Vec::new();
+            for (key, positions) in self.ordered_groups(false)? {
+                labels.push(key);
+                values.push(
+                    self.group_rows(&positions)?
+                        .quantile_with_interpolation(q, interpolation)
+                        .map_err(frame_error_to_py)?,
+                );
+            }
+            let key_name = self.by.name();
+            let index = Index::new(labels).set_names((!key_name.is_empty()).then_some(key_name));
+            let column = Column::from_values(values).map_err(column_error_to_py)?;
+            Series::new(self.series.name(), index, column).map_err(frame_error_to_py)?
+        };
         Ok(PySeries {
             inner: self.per_group("quantile", res)?,
         })
@@ -43564,94 +43919,165 @@ fn get_dummies(
     Ok(PyDataFrame { inner: df })
 }
 
+/// pandas' `crosstab(index, columns, values=None, rownames=None,
+/// colnames=None, aggfunc=None, margins=False, margins_name='All',
+/// dropna=True, normalize=False)`, built as pandas builds it: a frame of the
+/// row keys, the column keys and the values (zeros when counting), pivoted
+/// with `aggfunc` (a count, filled with 0, when there are no values),
+/// margins included, then normalized over everything / each row / each
+/// column. It counted text-converted labels (ints sorted as text: 10 before
+/// 2), refused values / aggfunc / margins / names and took only a bool
+/// normalize.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (index, columns, values=None, rownames=None, colnames=None, aggfunc=None, margins=false, dropna=true, normalize=false))]
-fn crosstab(
-    py: Python<'_>,
-    index: &Bound<'_, PyAny>,
-    columns: &Bound<'_, PyAny>,
-    values: Option<&Bound<'_, PyAny>>,
+#[pyo3(signature = (index, columns, values=None, rownames=None, colnames=None, aggfunc=None, margins=false, margins_name="All", dropna=true, normalize=None))]
+fn crosstab<'py>(
+    py: Python<'py>,
+    index: &Bound<'py, PyAny>,
+    columns: &Bound<'py, PyAny>,
+    values: Option<&Bound<'py, PyAny>>,
     rownames: Option<Vec<String>>,
     colnames: Option<Vec<String>>,
-    aggfunc: Option<&str>,
+    aggfunc: Option<&Bound<'py, PyAny>>,
     margins: bool,
+    margins_name: &str,
     dropna: bool,
-    normalize: bool,
-) -> PyResult<PyDataFrame> {
-    // This counts co-occurrences. values/aggfunc (which aggregate instead
-    // of counting), margins and the axis names were dropped, so
-    // crosstab(a, b, values=v, aggfunc='sum') returned counts (fvsao.5).
-    unsupported_params(
-        "crosstab",
-        &[
-            ("values", values.is_none()),
-            ("aggfunc", aggfunc.is_none()),
-            ("rownames", rownames.is_none()),
-            ("colnames", colnames.is_none()),
-            ("margins", !margins),
-        ],
-    )?;
-    let s_idx = PySeries::from_data(py, Some(index), None, None)?;
-    let s_col = PySeries::from_data(py, Some(columns), None, None)?;
-
-    if s_idx.inner.len() != s_col.inner.len() {
+    normalize: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let values = values.filter(|values| !values.is_none());
+    let aggfunc = aggfunc.filter(|aggfunc| !aggfunc.is_none());
+    match (values, aggfunc) {
+        (None, Some(_)) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "aggfunc cannot be used without values.",
+            ));
+        }
+        (Some(_), None) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "values cannot be used without an aggfunc.",
+            ));
+        }
+        _ => {}
+    }
+    // Several arrays per axis (a list of Series) make a MultiIndex axis.
+    let several = |keys: &Bound<'py, PyAny>| {
+        keys.is_instance_of::<PyList>()
+            && keys
+                .try_iter()
+                .ok()
+                .and_then(|mut items| items.next())
+                .and_then(Result::ok)
+                .is_some_and(|first| is_sequence(&first))
+    };
+    if several(index) || several(columns) {
+        return Err(not_implemented(
+            "crosstab over several index / columns arrays",
+        ));
+    }
+    // "all" / True over everything, "index" per row, "columns" per column.
+    let normalize = match normalize.filter(|value| !value.is_none()) {
+        None => None,
+        Some(value) => match (value.extract::<bool>(), value.extract::<String>()) {
+            (Ok(false), _) => None,
+            (Ok(true), _) => Some("all".to_owned()),
+            (_, Ok(how)) if matches!(how.as_str(), "all" | "index" | "columns") => Some(how),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Not a valid normalize argument",
+                ));
+            }
+        },
+    };
+    if normalize.is_some() && margins {
+        return Err(not_implemented("crosstab(normalize=..., margins=True)"));
+    }
+    let row = PySeries::from_data(py, Some(index), None, None)?;
+    let col = PySeries::from_data(py, Some(columns), None, None)?;
+    if row.inner.len() != col.inner.len() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "index and columns must have the same length",
         ));
     }
-    let n = s_idx.inner.len();
-    let idx_vals = s_idx.inner.column().values();
-    let col_vals = s_col.inner.column().values();
-
-    let mut distinct_rows = Vec::new();
-    let mut row_set = HashSet::new();
-    let mut distinct_cols = Vec::new();
-    let mut col_set = HashSet::new();
-
-    let mut counts: HashMap<(String, String), i64> = HashMap::new();
-
-    for i in 0..n {
-        let r = &idx_vals[i];
-        let c = &col_vals[i];
-        if dropna && (r.is_null() || c.is_null()) {
-            continue;
-        }
-        let r_str = scalar_to_label_str(r);
-        let c_str = scalar_to_label_str(c);
-        if row_set.insert(r_str.clone()) {
-            distinct_rows.push(r_str.clone());
-        }
-        if col_set.insert(c_str.clone()) {
-            distinct_cols.push(c_str.clone());
-        }
-        *counts.entry((r_str, c_str)).or_insert(0) += 1;
+    // pandas' _get_names: the given name, else the array's, else row_0 / col_0.
+    let name_of = |given: Option<Vec<String>>, series: &PySeries, prefix: &str| {
+        given
+            .and_then(|names| names.into_iter().next())
+            .or_else(|| (!series.inner.name().is_empty()).then(|| series.inner.name().to_owned()))
+            .unwrap_or_else(|| format!("{prefix}_0"))
+    };
+    let row_name = name_of(rownames, &row, "row");
+    let col_name = name_of(colnames, &col, "col");
+    if row_name == col_name {
+        return Err(not_implemented(
+            "crosstab whose row and column arrays share a name",
+        ));
     }
-
-    distinct_rows.sort();
-    distinct_cols.sort();
-
-    let total: f64 = counts.values().sum::<i64>() as f64;
-
-    let mut col_map = BTreeMap::new();
-    for c_name in &distinct_cols {
-        let mut vals = Vec::with_capacity(distinct_rows.len());
-        for r_name in &distinct_rows {
-            let count = *counts.get(&(r_name.clone(), c_name.clone())).unwrap_or(&0);
-            if normalize && total > 0.0 {
-                vals.push(Scalar::Float64(count as f64 / total));
-            } else {
-                vals.push(Scalar::Int64(count));
-            }
-        }
-        let col = Column::from_values(vals)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        col_map.insert(c_name.clone(), col);
+    // dropna=False keeps missing keys and all-missing columns; a count over
+    // keys with no missing value has neither.
+    let has_missing = |series: &PySeries| {
+        series
+            .inner
+            .column()
+            .values()
+            .iter()
+            .any(Scalar::is_missing)
+    };
+    if !dropna && (values.is_some() || has_missing(&row) || has_missing(&col)) {
+        return Err(not_implemented(
+            "crosstab(dropna=False) with values or missing keys",
+        ));
     }
-    let row_labels: Vec<IndexLabel> = distinct_rows.into_iter().map(IndexLabel::Utf8).collect();
-    let df = DataFrame::new_with_column_order(Index::new(row_labels), col_map, distinct_cols)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    Ok(PyDataFrame { inner: df })
+    let data = PyDict::new(py);
+    data.set_item(&row_name, Py::new(py, row.clone())?)?;
+    data.set_item(&col_name, Py::new(py, col)?)?;
+    let pivot_kwargs = PyDict::new(py);
+    match (values, aggfunc) {
+        (Some(values), Some(aggfunc)) => {
+            data.set_item(
+                "__dummy__",
+                PySeries::from_data(py, Some(values), None, None)?,
+            )?;
+            pivot_kwargs.set_item("aggfunc", aggfunc)?;
+        }
+        _ => {
+            data.set_item("__dummy__", PyList::new(py, vec![0_i64; row.inner.len()])?)?;
+            pivot_kwargs.set_item("aggfunc", "count")?;
+            pivot_kwargs.set_item("fill_value", 0_i64)?;
+        }
+    }
+    pivot_kwargs.set_item("values", "__dummy__")?;
+    pivot_kwargs.set_item("index", &row_name)?;
+    pivot_kwargs.set_item("columns", &col_name)?;
+    pivot_kwargs.set_item("margins", margins)?;
+    pivot_kwargs.set_item("margins_name", margins_name)?;
+    let frame = py.get_type::<PyDataFrame>().call1((data,))?;
+    let table = frame.call_method("pivot_table", (), Some(&pivot_kwargs))?;
+    let table = match normalize.as_deref() {
+        None => table,
+        Some("all") => {
+            let total = table.call_method0("sum")?.call_method0("sum")?;
+            table.call_method1("__truediv__", (total,))?
+        }
+        Some("index") => {
+            let sums = PyDict::new(py);
+            sums.set_item("axis", 1)?;
+            let row_sums = table.call_method("sum", (), Some(&sums))?;
+            let div = PyDict::new(py);
+            div.set_item("axis", 0)?;
+            table.call_method("div", (row_sums,), Some(&div))?
+        }
+        Some(_) => {
+            let column_sums = table.call_method0("sum")?;
+            table.call_method1("__truediv__", (column_sums,))?
+        }
+    };
+    let table = if normalize.is_some() {
+        table.call_method1("fillna", (0_i64,))?
+    } else {
+        table
+    };
+    table.getattr("index")?.setattr("name", &row_name)?;
+    Ok(table)
 }
 
 fn flatten_dict(
@@ -43683,6 +44109,227 @@ fn flatten_dict(
     Ok(())
 }
 
+/// pandas' `json_normalize(record_path=, meta=)` (its `_recursive_extract`):
+/// the records found by following `record_path` through `data`, each
+/// flattened, with every `meta` path's value repeated over the records it
+/// came with.
+struct JsonRecords<'py> {
+    py: Python<'py>,
+    /// Each meta path, and its column name (the path joined by `sep`).
+    meta: Vec<(Vec<Bound<'py, PyAny>>, String)>,
+    ignore_missing: bool,
+    sep: &'py str,
+    max_level: Option<usize>,
+    records: Vec<Bound<'py, PyAny>>,
+    lengths: Vec<usize>,
+    meta_values: Vec<Vec<Bound<'py, PyAny>>>,
+}
+
+impl<'py> JsonRecords<'py> {
+    #[allow(clippy::too_many_arguments)]
+    fn extract(
+        py: Python<'py>,
+        data: &Bound<'py, PyAny>,
+        record_path: &Bound<'py, PyAny>,
+        meta: Option<&Bound<'py, PyAny>>,
+        meta_prefix: Option<&str>,
+        record_prefix: Option<&str>,
+        ignore_missing: bool,
+        sep: &'py str,
+        max_level: Option<usize>,
+    ) -> PyResult<PyDataFrame> {
+        let path_of = |spec: &Bound<'py, PyAny>| -> PyResult<Vec<Bound<'py, PyAny>>> {
+            if spec.is_instance_of::<PyList>() {
+                spec.try_iter()?.collect()
+            } else {
+                Ok(vec![spec.clone()])
+            }
+        };
+        let meta_specs: Vec<Bound<'py, PyAny>> = match meta {
+            None => Vec::new(),
+            Some(meta) if meta.is_instance_of::<PyList>() => {
+                meta.try_iter()?.collect::<PyResult<_>>()?
+            }
+            Some(meta) => vec![meta.clone()],
+        };
+        let mut paths = Vec::with_capacity(meta_specs.len());
+        for spec in &meta_specs {
+            let path = path_of(spec)?;
+            let name = path
+                .iter()
+                .map(|field| field.str().map(|text| text.to_string()))
+                .collect::<PyResult<Vec<_>>>()?
+                .join(sep);
+            paths.push((path, name));
+        }
+        let mut extractor = Self {
+            py,
+            meta_values: vec![Vec::new(); paths.len()],
+            meta: paths,
+            ignore_missing,
+            sep,
+            max_level,
+            records: Vec::new(),
+            lengths: Vec::new(),
+        };
+        let data = if data.is_instance_of::<PyDict>() {
+            PyList::new(py, [data])?.into_any()
+        } else {
+            data.clone()
+        };
+        let mut seen = HashMap::new();
+        extractor.walk(&data, &path_of(record_path)?, &mut seen, 0)?;
+        let built = py
+            .get_type::<PyDataFrame>()
+            .call1((PyList::new(py, &extractor.records)?,))?;
+        let mut frame = built.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
+        if let Some(prefix) = record_prefix {
+            let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let renames: Vec<(String, String)> = names
+                .iter()
+                .map(|name| (name.clone(), format!("{prefix}{name}")))
+                .collect();
+            let pairs: Vec<(&str, &str)> = renames
+                .iter()
+                .map(|(from, to)| (from.as_str(), to.as_str()))
+                .collect();
+            frame = frame.rename_columns(&pairs).map_err(frame_error_to_py)?;
+        }
+        for ((_, name), values) in extractor.meta.iter().zip(&extractor.meta_values) {
+            let name = format!("{}{name}", meta_prefix.unwrap_or(""));
+            if frame.column(&name).is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Conflicting metadata name {name}, need distinguishing prefix "
+                )));
+            }
+            // pandas repeats the values in an object array.
+            let mut cells = Vec::with_capacity(extractor.records.len());
+            for (value, &count) in values.iter().zip(&extractor.lengths) {
+                let cell = py_to_scalar(py, value)?;
+                cells.extend(std::iter::repeat_n(cell, count));
+            }
+            frame = frame
+                .with_column(name, Column::from_object_values(cells))
+                .map_err(frame_error_to_py)?;
+        }
+        Ok(PyDataFrame { inner: frame })
+    }
+
+    /// `obj[spec...]`: pandas' `_pull_field`, a missing key its KeyError
+    /// (or NaN with errors='ignore' outside the record path).
+    fn pull(
+        &self,
+        obj: &Bound<'py, PyAny>,
+        spec: &[Bound<'py, PyAny>],
+        record: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut value = obj.clone();
+        for field in spec {
+            let next = if value.is_none() {
+                None
+            } else {
+                match value.get_item(field) {
+                    Ok(next) => Some(next),
+                    Err(error) if error.is_instance_of::<pyo3::exceptions::PyKeyError>(self.py) => {
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            match next {
+                Some(next) => value = next,
+                None => {
+                    let key = field.repr()?;
+                    if record {
+                        return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                            "Key {key} not found. If specifying a record_path, all elements of data should have the path."
+                        )));
+                    }
+                    if self.ignore_missing {
+                        return Ok(pyo3::types::PyFloat::new(self.py, f64::NAN).into_any());
+                    }
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                        "Key {key} not found. To replace missing values of {key} with np.nan, pass in errors='ignore'"
+                    )));
+                }
+            }
+        }
+        Ok(value)
+    }
+
+    fn walk(
+        &mut self,
+        data: &Bound<'py, PyAny>,
+        path: &[Bound<'py, PyAny>],
+        seen: &mut HashMap<usize, Bound<'py, PyAny>>,
+        level: usize,
+    ) -> PyResult<()> {
+        let items: Vec<Bound<'py, PyAny>> = if data.is_instance_of::<PyDict>() {
+            vec![data.clone()]
+        } else {
+            data.try_iter()?.collect::<PyResult<_>>()?
+        };
+        if let [head, rest @ ..] = path
+            && !rest.is_empty()
+        {
+            for obj in &items {
+                for (slot, (meta, _)) in self.meta.iter().enumerate() {
+                    if level + 1 == meta.len() {
+                        let value = self.pull(obj, &meta[meta.len() - 1..], false)?;
+                        seen.insert(slot, value);
+                    }
+                }
+                self.walk(&obj.get_item(head)?, rest, seen, level + 1)?;
+            }
+            return Ok(());
+        }
+        for obj in &items {
+            let found = self.pull(obj, path, true)?;
+            let records: Vec<Bound<'py, PyAny>> = if found.is_instance_of::<PyList>() {
+                found.try_iter()?.collect::<PyResult<_>>()?
+            } else if found.is_none() || found.extract::<f64>().is_ok_and(f64::is_nan) {
+                Vec::new()
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "{} has non list value {} for path {}. Must be list or null.",
+                    obj.repr()?,
+                    found.repr()?,
+                    path.last().map_or_else(
+                        || Ok(String::new()),
+                        |key| key.str().map(|k| k.to_string())
+                    )?
+                )));
+            };
+            self.lengths.push(records.len());
+            for (slot, (meta, _)) in self.meta.iter().enumerate() {
+                let value = if level + 1 > meta.len() {
+                    seen.get(&slot)
+                        .cloned()
+                        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(slot))?
+                } else {
+                    self.pull(obj, &meta[level..], false)?
+                };
+                self.meta_values[slot].push(value);
+            }
+            for record in records {
+                self.records.push(match record.cast::<PyDict>() {
+                    Ok(dict) => {
+                        let mut flat = Vec::new();
+                        flatten_dict(dict, "", self.sep, self.max_level, 0, &mut flat)?;
+                        let out = PyDict::new(self.py);
+                        for (key, value) in flat {
+                            out.set_item(key, value)?;
+                        }
+                        out.into_any()
+                    }
+                    Err(_) => record,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (data, record_path=None, meta=None, meta_prefix=None, record_prefix=None, errors="raise", sep=".", max_level=None))]
@@ -43697,21 +44344,26 @@ fn json_normalize(
     sep: &str,
     max_level: Option<usize>,
 ) -> PyResult<PyDataFrame> {
-    // This flattens nested dicts; the record/meta keywords (which unpack
-    // nested lists of records) were dropped. errors only acts on meta keys.
-    unsupported_params(
-        "json_normalize",
-        &[
-            ("record_path", record_path.is_none()),
-            ("meta", meta.is_none()),
-            ("meta_prefix", meta_prefix.is_none()),
-            ("record_prefix", record_prefix.is_none()),
-        ],
-    )?;
     if !matches!(errors, "raise" | "ignore") {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "errors must be 'raise' or 'ignore', got '{errors}'"
         )));
+    }
+    // Records under `record_path`, each repeated with its `meta` fields
+    // (they were refused). Without a record path pandas ignores meta and
+    // the prefixes and flattens each dict, as below.
+    if let Some(record_path) = record_path.filter(|path| !path.is_none()) {
+        return JsonRecords::extract(
+            py,
+            data,
+            record_path,
+            meta.filter(|meta| !meta.is_none()),
+            meta_prefix,
+            record_prefix,
+            errors == "ignore",
+            sep,
+            max_level,
+        );
     }
     let mut records: Vec<Vec<(String, Py<PyAny>)>> = Vec::new();
     if let Ok(d) = data.cast::<PyDict>() {
@@ -46453,15 +47105,10 @@ fn merge_asof(
     allow_exact_matches: bool,
     direction: &str,
 ) -> PyResult<PyDataFrame> {
-    // Joining on the index, and suffixes other than pandas' default, were
-    // dropped (fvsao.5).
+    // Joining on the index was dropped (fvsao.5).
     unsupported_params(
         "merge_asof",
-        &[
-            ("left_index", !left_index),
-            ("right_index", !right_index),
-            ("suffixes", suffixes.is_none_or(|s| s == ("_x", "_y"))),
-        ],
+        &[("left_index", !left_index), ("right_index", !right_index)],
     )?;
     let on_col = on.or(left_on).or(right_on).ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -46493,11 +47140,41 @@ fn merge_asof(
         }
     }
 
+    // The columns both sides carry besides the keys: fp-join suffixes them
+    // `_x` / `_y`; other `suffixes` rename exactly those.
+    let keys: Vec<&str> = std::iter::once(on_col)
+        .chain(opts.by.iter().flatten().map(String::as_str))
+        .collect();
+    let overlap: Vec<String> = left
+        .inner
+        .column_names()
+        .into_iter()
+        .filter(|name| !keys.contains(&name.as_str()) && right.inner.column(name).is_some())
+        .cloned()
+        .collect();
+
     let merged = fp_join::merge_asof_with_options(&left.inner, &right.inner, on_col, dir, opts)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    let frame = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let mut frame =
+        DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    if let Some((left_suffix, right_suffix)) = suffixes.filter(|given| *given != ("_x", "_y")) {
+        let renames: Vec<(String, String)> = overlap
+            .iter()
+            .flat_map(|name| {
+                [
+                    (format!("{name}_x"), format!("{name}{left_suffix}")),
+                    (format!("{name}_y"), format!("{name}{right_suffix}")),
+                ]
+            })
+            .collect();
+        let pairs: Vec<(&str, &str)> = renames
+            .iter()
+            .map(|(from, to)| (from.as_str(), to.as_str()))
+            .collect();
+        frame = frame.rename_columns(&pairs).map_err(frame_error_to_py)?;
+    }
 
     Ok(PyDataFrame { inner: frame })
 }
@@ -51536,22 +52213,21 @@ mod tests {
                 ],
             )
             .expect("df_vc");
-            let py_df_vc = PyDataFrame { inner: df_vc };
-            let df_counts = py_df_vc
-                .value_counts(None, false, true, false, true)
-                .expect("df value_counts");
-            assert_eq!(df_counts.shape(), (2,));
+            let py_df_vc = Py::new(py, PyDataFrame { inner: df_vc })
+                .expect("df_vc object")
+                .into_bound(py);
+            let value_counts = |subset: Option<&Bound<'_, PyAny>>, normalize: bool| {
+                PyDataFrame::value_counts(&py_df_vc, subset, normalize, true, false, true)
+                    .expect("df value_counts")
+                    .extract::<PySeries>()
+                    .expect("a Series")
+            };
+            assert_eq!(value_counts(None, false).shape(), (2,));
 
             let sub_list = pyo3::types::PyList::new(py, vec!["a"]).expect("list");
-            let df_counts_sub = py_df_vc
-                .value_counts(Some(sub_list.as_any()), false, true, false, true)
-                .expect("df value_counts subset");
-            assert_eq!(df_counts_sub.shape(), (2,));
+            assert_eq!(value_counts(Some(sub_list.as_any()), false).shape(), (2,));
 
-            let df_counts_norm = py_df_vc
-                .value_counts(None, true, true, false, true)
-                .expect("df value_counts norm");
-            assert_eq!(df_counts_norm.shape(), (2,));
+            assert_eq!(value_counts(None, true).shape(), (2,));
 
             // Test cumulative operations on PySeries
             let s_cum = Series::from_values(

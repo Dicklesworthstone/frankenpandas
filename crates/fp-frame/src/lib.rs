@@ -16484,11 +16484,17 @@ impl Series {
         if let Some(data) = self.column.as_i64_slice()
             && !data.is_empty()
         {
-            return Ok(Scalar::Float64(typed_quantile_f64(
-                data.iter().map(|&x| x as f64).collect(),
-                q,
-                mode,
-            )));
+            let value = typed_quantile_f64(data.iter().map(|&x| x as f64).collect(), q, mode);
+            // lower / higher / nearest pick one of the integers, which pandas
+            // returns as an integer (linear and midpoint interpolate: float).
+            return Ok(match mode {
+                QuantileInterpolation::Lower
+                | QuantileInterpolation::Higher
+                | QuantileInterpolation::Nearest => Scalar::Int64(value as i64),
+                QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+                    Scalar::Float64(value)
+                }
+            });
         }
         // Typed NULLABLE Float64 fast path: the all-valid paths above bail on any
         // missing, so a nullable Float64 column fell to the generic filter +
@@ -116949,6 +116955,53 @@ mod tests {
         assert!(
             (trailing.column("x").unwrap().values()[2].to_f64().unwrap() - 8.0 / 3.0).abs() < 1e-12
         );
+    }
+
+    #[test]
+    fn integer_quantile_that_picks_a_value_stays_integer() {
+        let s = Series::from_values(
+            "v",
+            (0..5_i64).map(IndexLabel::from).collect(),
+            (1..=5_i64).map(Scalar::Int64).collect(),
+        )
+        .unwrap();
+        // pandas 2.2.3: pd.Series([1, 2, 3, 4, 5]).quantile(0.3, ...)
+        assert_eq!(
+            s.quantile_with_interpolation(0.3, "lower").unwrap(),
+            Scalar::Int64(2)
+        );
+        assert_eq!(
+            s.quantile_with_interpolation(0.3, "higher").unwrap(),
+            Scalar::Int64(3)
+        );
+        assert_eq!(
+            s.quantile_with_interpolation(0.3, "nearest").unwrap(),
+            Scalar::Int64(2)
+        );
+        // NEGATIVE: linear and midpoint interpolate, so they are floats.
+        assert_eq!(
+            s.quantile_with_interpolation(0.3, "linear").unwrap(),
+            Scalar::Float64(2.2)
+        );
+        assert_eq!(
+            s.quantile_with_interpolation(0.3, "midpoint").unwrap(),
+            Scalar::Float64(2.5)
+        );
+        // A column with a missing value is float in pandas; it stays float.
+        let gappy = Series::from_values(
+            "v",
+            (0..3_i64).map(IndexLabel::from).collect(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            gappy.quantile_with_interpolation(0.5, "lower").unwrap(),
+            Scalar::Float64(_)
+        ));
     }
 
     #[test]
