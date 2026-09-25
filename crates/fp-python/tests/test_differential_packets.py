@@ -10,6 +10,7 @@ import itertools
 import json
 import math
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -3798,11 +3799,13 @@ def test_category_refusals_and_errors_match_pandas() -> None:
         # An unordered categorical has no min.
         with pytest.raises(TypeError):
             m.Series(["b", "a"]).astype("category").min()
-    # observed=False (pandas' default) adds the unused categories as groups;
-    # grouping by value would drop them, so it raises instead.
-    frame = fpd.DataFrame({"c": fpd.Categorical(["x"], categories=["x", "y"]), "v": [1]})
-    with pytest.raises(NotImplementedError, match="observed"):
-        frame.groupby("c")["v"].sum()
+    # observed=False (pandas' default) adds the unused categories as groups
+    # (fvsao.39; it raised NotImplementedError).
+    for m in (pd, fpd):
+        frame = m.DataFrame({"c": m.Categorical(["x"], categories=["x", "y"]), "v": [1]})
+        with pytest.warns(FutureWarning, match="observed=False"):
+            summed = frame.groupby("c")["v"].sum()
+        assert ([str(k) for k in summed.index], summed.tolist()) == (["x", "y"], [1, 0])
     # The Categorical class keeps value types (it stringified them).
     assert fpd.Categorical([1, None, 2]).tolist()[0] == 1
     assert list(fpd.Categorical([2, 1]).categories) == [1, 2]
@@ -6492,22 +6495,136 @@ def test_bool_frame_arithmetic_and_binned_categoricals_match_pandas(case: str) -
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-def test_category_groupby_default_observed_warns_and_unused_categories_refuse() -> None:
+def test_category_groupby_default_observed_warns_and_unused_combinations_refuse() -> None:
     for m in (pd, fpd):
         d = _ages(m)
         with pytest.warns(FutureWarning, match="default of observed=False is deprecated"):
             d.groupby("bin")["v"].sum()
         with pytest.warns(FutureWarning, match="default of observed=False is deprecated"):
             d["v"].groupby(d["bin"]).sum()
-    # pandas adds a 0 row for the unused (10, 20] bin; frankenpandas does not
-    # model unused categories yet and refuses rather than dropping the row.
+    # Over SEVERAL keys pandas adds every unused (category x value)
+    # combination; frankenpandas does not model that yet and refuses rather
+    # than dropping the rows (a single key's unused categories answer: see
+    # test_unused_categories_and_category_key_methods_match_pandas).
     sparse = {"age": [3, 7, 25], "v": [1, 2, 3]}
-    expected = pd.DataFrame(sparse).assign(bin=lambda d: pd.cut(d["age"], [0, 5, 10, 20, 50])).groupby("bin", observed=False)["v"].sum()
-    assert expected.tolist() == [1, 2, 0, 3]
+    expected = pd.DataFrame(sparse).assign(bin=lambda d: pd.cut(d["age"], [0, 5, 10, 20, 50])).groupby(["bin", "age"], observed=False)["v"].sum()
+    assert len(expected) == 12
     frame = fpd.DataFrame(sparse).assign(bin=lambda d: fpd.cut(d["age"], [0, 5, 10, 20, 50]))
     with pytest.raises(NotImplementedError):
-        frame.groupby("bin", observed=False)["v"].sum()
-    with pytest.raises(NotImplementedError):
         frame.groupby(["bin", "age"], observed=False)["v"].sum()
+    # The per-group operations without a modelled empty-group answer refuse
+    # over unused categories too, rather than dropping the unused rows.
+    unmodelled = {
+        "describe": lambda g: g.describe(),
+        "quantile": lambda g: g.quantile(0.5),
+        "idxmax": lambda g: g.idxmax(),
+        "ohlc": lambda g: g.ohlc(),
+        "corr": lambda g: g.corr(),
+        "skew": lambda g: g.skew(),
+        "ngroup": lambda g: g.ngroup(),
+        "series describe": lambda g: g["v"].describe(),
+        "series ngroup": lambda g: g["v"].ngroup(),
+        "series value_counts": lambda g: g["v"].value_counts(),
+    }
+    for op, call in unmodelled.items():
+        with pytest.raises(NotImplementedError):
+            call(frame.groupby("bin", observed=False))
+            pytest.fail(op)
     # observed=True over the same frame answers.
     assert frame.groupby("bin", observed=True)["v"].sum().tolist() == [1, 2, 3]
+
+
+def _sparse_bins(m: Any) -> Any:
+    return m.DataFrame(
+        {"age": [3, 7, 25, 30], "v": [1, 2, 3, 4], "w": [1.5, 2.5, 3.5, None], "s": list("abcd"), "b": [True, False, True, True]}
+    ).assign(bin=lambda d: m.cut(d["age"], [0, 5, 10, 20, 50]))
+
+
+def _unused(m: Any) -> Any:
+    return _sparse_bins(m).groupby("bin", observed=False)
+
+
+def _shuffled_bins(m: Any) -> Any:
+    return m.DataFrame({"age": [25, 3, 7, 30, 12, 8], "v": [1, 5, 2, 4, 3, 6]}).assign(
+        bin=lambda d: m.cut(d["age"], [0, 5, 10, 20, 50])
+    )
+
+
+def _vc_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["b", "a", "b", "a", "c", "b", "b"], "v": [9, 5, 1, 5, 6, 1, 3]})
+
+
+def _labelled(r: Any) -> Any:
+    """A result as (row keys as text, column -> (dtype, values)) - pandas'
+    keys are Interval objects, frankenpandas' the bin labels."""
+    if hasattr(r, "columns"):
+        return (
+            [str(tuple(map(str, k))) if isinstance(k, tuple) else str(k) for k in r.index],
+            {str(c): (str(r[c].dtype), _sweep_plain(r[c].tolist())) for c in r.columns},
+        )
+    return (
+        [str(tuple(map(str, k))) if isinstance(k, tuple) else str(k) for k in r.index],
+        str(r.dtype),
+        _sweep_plain(r.tolist()),
+    )
+
+
+# fvsao.39: groupby(observed=False) - pandas 2.2's default - over a pd.cut
+# column with an EMPTY bin refused (NotImplementedError); pandas adds the
+# unused category's row holding each reduction's answer over no rows (0 for
+# sum/count/size/nunique, 1 for prod, NaN otherwise with int turning float,
+# False/True for any/all, None for an object first). Over a category key
+# (observed=True) SeriesGroupBy ngroup / describe / ohlc / value_counts came
+# in first-seen order, value_counts' index was one level of "group, value"
+# strings (pandas: a (key, value) MultiIndex, count ties in value order),
+# and gb.ngroups was a method where pandas has a property.
+_UNUSED_CATEGORY_CASES = {
+    **{
+        f"frame {op}": (lambda op: lambda m: _labelled(getattr(_unused(m)[["v", "w"]], op)()))(op)
+        for op in ["sum", "count", "mean", "median", "min", "max", "std", "var", "first", "last", "prod", "nunique", "sem"]
+    },
+    "frame size": lambda m: _labelled(_unused(m).size()),
+    "frame any": lambda m: _labelled(_unused(m)[["b"]].any()),
+    "frame all": lambda m: _labelled(_unused(m)[["b"]].all()),
+    "frame sum min_count": lambda m: _labelled(_unused(m)[["v", "w"]].sum(min_count=1)),
+    "series groupby sum": lambda m: (lambda d: _labelled(d["v"].groupby(d["bin"], observed=False).sum()))(_sparse_bins(m)),
+    "series groupby mean": lambda m: (lambda d: _labelled(d["v"].groupby(d["bin"], observed=False).mean()))(_sparse_bins(m)),
+    "series groupby size": lambda m: (lambda d: _labelled(d["v"].groupby(d["bin"], observed=False).size()))(_sparse_bins(m)),
+    "column min": lambda m: _labelled(_unused(m)["v"].min()),
+    "column str first": lambda m: _labelled(_unused(m)["s"].first()),
+    "column str min": lambda m: _labelled(_unused(m)["s"].min()),
+    "column str count": lambda m: _labelled(_unused(m)["s"].count()),
+    "agg list": lambda m: _labelled(_unused(m)["v"].agg(["sum", "mean"])),
+    "agg dict": lambda m: _labelled(_unused(m).agg({"v": "sum", "w": "mean"})),
+    "agg named": lambda m: _labelled(_unused(m).agg(total=("v", "sum"), avg=("w", "mean"))),
+    "frame agg list": lambda m: _labelled(_unused(m)[["v", "w"]].agg(["sum", "max"])),
+    "apply sees empty group": lambda m: _labelled(_unused(m)["v"].apply(lambda s: int(s.sum()))),
+    "ngroups property": lambda m: _unused(m).ngroups,
+    "groups include unused": lambda m: [str(k) for k in _unused(m).groups],
+    "cumsum unaffected": lambda m: _unused(m)["v"].cumsum().tolist(),
+    "transform unaffected": lambda m: _unused(m)["v"].transform("sum").tolist(),
+    "sort False appends unused": lambda m: _labelled(_sparse_bins(m).groupby("bin", observed=False, sort=False)["v"].sum()),
+    # NEGATIVE: observed=True leaves the empty bin out.
+    "observed True omits unused": lambda m: _labelled(_sparse_bins(m).groupby("bin", observed=True)["v"].sum()),
+    "category key ngroup": lambda m: _shuffled_bins(m).groupby("bin", observed=True)["v"].ngroup().tolist(),
+    "category key describe": lambda m: _labelled(_shuffled_bins(m).groupby("bin", observed=True)["v"].describe()),
+    "category key ohlc order": lambda m: [str(k) for k in _shuffled_bins(m).groupby("bin", observed=True)["v"].ohlc().index],
+    "category key value_counts": lambda m: _labelled(_shuffled_bins(m).groupby("bin", observed=True)["v"].value_counts()),
+    "value_counts MultiIndex": lambda m: (lambda r: (_labelled(r), list(r.index.names), r.name, r.index.nlevels))(_vc_frame(m).groupby("k")["v"].value_counts()),
+    "series value_counts": lambda m: (lambda d: _labelled(d["v"].groupby(d["k"]).value_counts()))(_vc_frame(m)),
+}
+
+
+def _unused_category_outcome(m: Any, case: str) -> Any:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        try:
+            return _UNUSED_CATEGORY_CASES[case](m)
+        except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+            return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_UNUSED_CATEGORY_CASES))
+def test_unused_categories_and_category_key_methods_match_pandas(case: str) -> None:
+    assert _unused_category_outcome(fpd, case) == _unused_category_outcome(pd, case), case

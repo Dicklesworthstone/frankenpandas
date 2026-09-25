@@ -17570,10 +17570,12 @@ impl PySeries {
                 ));
             }
         };
-        if by_series.column().categorical().is_some() {
+        let unused = if by_series.column().categorical().is_some() {
             let keys = by_series.to_frame(Some("key")).map_err(frame_error_to_py)?;
-            check_category_keys(py, &keys, &["key".to_owned()], observed)?;
-        }
+            check_category_keys(py, &keys, &["key".to_owned()], observed)?
+        } else {
+            Vec::new()
+        };
         let (series, by) = if self.inner.index() != by_series.index()
             && !self.inner.index().has_duplicates()
             && !by_series.index().has_duplicates()
@@ -17603,6 +17605,7 @@ impl PySeries {
             sort,
             as_index: true,
             groups: None,
+            unused,
         }
         .into_py_any(py)
     }
@@ -25387,7 +25390,7 @@ impl PyDataFrame {
                 "DataFrame.groupby(as_index=False) over keys that are not columns",
             ));
         }
-        check_category_keys(py, &df, &by, observed)?;
+        let unused = check_category_keys(py, &df, &by, observed)?;
         let gb = PyGroupBy {
             df,
             by,
@@ -25395,6 +25398,7 @@ impl PyDataFrame {
             as_index,
             sort,
             dropna,
+            unused,
         };
         gb.grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -32729,18 +32733,20 @@ impl PySeriesCategoricalAccessor {
 /// fp-frame's groupby follows): observed=False (the 2.2 default, which warns
 /// when not passed) adds a group for every unused category - over several
 /// keys, for every combination of the categories with the other keys'
-/// values. The groupby runs over the observed groups, so it answers
-/// observed=False only when no such combination is missing, and raises
-/// rather than dropping them otherwise (br-frankenpandas-hrxn9).
+/// values. The groupby runs over the observed groups: a single category
+/// key's unused categories are returned for the reductions to add as rows
+/// (fvsao.39); over several keys it answers only when no combination is
+/// missing, and raises rather than dropping them otherwise
+/// (br-frankenpandas-hrxn9).
 fn check_category_keys(
     py: Python<'_>,
     keys: &DataFrame,
     by: &[String],
     observed: Option<bool>,
-) -> PyResult<()> {
+) -> PyResult<Vec<Scalar>> {
     let columns: Vec<&Column> = by.iter().filter_map(|key| keys.column(key)).collect();
     if !columns.iter().any(|column| column.categorical().is_some()) {
-        return Ok(());
+        return Ok(Vec::new());
     }
     if observed.is_none() {
         PyErr::warn(
@@ -32751,7 +32757,26 @@ fn check_category_keys(
         )?;
     }
     if observed == Some(true) {
-        return Ok(());
+        return Ok(Vec::new());
+    }
+    let key_refs: Vec<&str> = by.iter().map(String::as_str).collect();
+    let (_, groups) = keys
+        .groupby_full_options(&key_refs, true, false, true)
+        .and_then(|grouped| grouped.group_codes())
+        .map_err(frame_error_to_py)?;
+    if let [column] = columns.as_slice()
+        && let Some(meta) = column.categorical()
+    {
+        return Ok(meta
+            .categories
+            .iter()
+            .filter(|category| {
+                !groups
+                    .labels()
+                    .contains(&scalar_to_index_label_converter(category))
+            })
+            .cloned()
+            .collect());
     }
     let mut combinations = 1_usize;
     for column in &columns {
@@ -32763,17 +32788,91 @@ fn check_category_keys(
         };
         combinations = combinations.saturating_mul(levels);
     }
-    let key_refs: Vec<&str> = by.iter().map(String::as_str).collect();
-    let (_, groups) = keys
-        .groupby_full_options(&key_refs, true, false, true)
-        .and_then(|grouped| grouped.group_codes())
-        .map_err(frame_error_to_py)?;
     if groups.len() != combinations {
         return Err(not_implemented(
-            "groupby over a category key with observed=False (pandas adds the unused categories)",
+            "groupby over several keys, one a category, with observed=False (pandas adds the unused combinations)",
         ));
     }
-    Ok(())
+    Ok(Vec::new())
+}
+
+/// A per-group reduction `op` with a row added for each unused category
+/// (`unused`, groupby observed=False: pandas' 2.2 default) holding pandas'
+/// answer over no rows - 0 for sum/count/size/nunique, 1 for prod,
+/// False/True for any/all, NaN for the other numeric reductions (an int
+/// result turning float) - so the unused bins of a `pd.cut` show up as
+/// pandas shows them (fvsao.39). An `op` whose empty-group answer is not
+/// modelled raises rather than drop the row.
+fn with_unused_categories(op: &str, s: Series, unused: &[Scalar]) -> PyResult<Series> {
+    if unused.is_empty() {
+        return Ok(s);
+    }
+    let dtype = s.column().dtype();
+    let fill = match (op, &dtype) {
+        ("count" | "size" | "nunique", _) | ("sum", DType::Int64) => Scalar::Int64(0),
+        ("sum", DType::Float64) => Scalar::Float64(0.0),
+        ("prod", DType::Int64) => Scalar::Int64(1),
+        ("prod", DType::Float64) => Scalar::Float64(1.0),
+        ("any", DType::Bool) => Scalar::Bool(false),
+        ("all", DType::Bool) => Scalar::Bool(true),
+        // pandas: None for an object first/last, NaN for its min/max.
+        ("first" | "last", DType::Utf8) => Scalar::Null(NullKind::Null),
+        ("min" | "max", DType::Utf8) => Scalar::Null(NullKind::NaN),
+        (
+            "mean" | "median" | "min" | "max" | "std" | "var" | "sem" | "first" | "last"
+            | "quantile" | "sum(min_count)" | "prod(min_count)",
+            // Null: a reduction that came out all-NaN.
+            DType::Int64 | DType::Float64 | DType::Null,
+        ) => Scalar::Null(NullKind::NaN),
+        _ => {
+            return Err(not_implemented(&format!(
+                "groupby(observed=False).{op} over unused categories (pandas adds their rows)"
+            )));
+        }
+    };
+    let to_float = fill.is_missing() && dtype == DType::Int64;
+    let mut labels = s.index().labels().to_vec();
+    let mut values: Vec<Scalar> = s
+        .values()
+        .iter()
+        .map(|value| match value {
+            Scalar::Int64(v) if to_float => Scalar::Float64(*v as f64),
+            other => other.clone(),
+        })
+        .collect();
+    for category in unused {
+        labels.push(scalar_to_index_label_converter(category));
+        values.push(fill.clone());
+    }
+    let index = Index::new(labels).set_names(s.index().name());
+    let column = if to_float || matches!(dtype, DType::Float64 | DType::Null) {
+        Column::new(DType::Float64, values)
+    } else {
+        Column::new(dtype, values)
+    }
+    .map_err(column_error_to_py)?;
+    Series::new(s.name(), index, column).map_err(frame_error_to_py)
+}
+
+/// The stable row order that sorts a category key's per-group rows by
+/// category (pandas' group order); keys that are no category go last. A
+/// result indexed by (group, value) - value_counts - ranks by its group
+/// level, keeping each group's rows in their order.
+fn category_order(meta: &CategoricalMetadata, index: &Index) -> Vec<usize> {
+    let keys = index
+        .row_multiindex()
+        .and_then(|levels| levels.get_level_values(0).ok())
+        .map_or_else(|| index.labels().to_vec(), |level| level.labels().to_vec());
+    let rank = |label: &IndexLabel| {
+        let value = index_label_to_scalar(label);
+        meta.categories
+            .iter()
+            .position(|category| *category == value)
+            .unwrap_or(usize::MAX)
+    };
+    let mut positions: Vec<usize> = (0..keys.len()).collect();
+    positions.sort_by_key(|&position| rank(&keys[position]));
+    positions
 }
 
 /// A groupby's `.groups` (with `row_labels`: each group's row labels as an
@@ -34730,6 +34829,9 @@ pub struct PyGroupBy {
     as_index: bool,
     sort: bool,
     dropna: bool,
+    /// A category key's unused categories under observed=False (pandas'
+    /// 2.2 default): the reductions add a row for each (fvsao.39).
+    unused: Vec<Scalar>,
 }
 
 impl PyGroupBy {
@@ -34743,14 +34845,16 @@ impl PyGroupBy {
     }
 
     /// Every group's label and row positions in pandas' group order (by key,
-    /// a category key by its categories, when `sort`; else first seen).
-    /// fp-frame's `groups()` is a map: `.groups` came out in hash order and
-    /// apply/filter in plain label order whatever `sort` said.
-    fn ordered_groups(&self) -> PyResult<Vec<(IndexLabel, Vec<usize>)>> {
+    /// a category key by its categories, when `sort`; else first seen);
+    /// `include_unused` adds observed=False's unused categories as empty
+    /// groups (pandas' apply and `.groups` see them). fp-frame's `groups()`
+    /// is a map: `.groups` came out in hash order and apply/filter in plain
+    /// label order whatever `sort` said.
+    fn ordered_groups(&self, include_unused: bool) -> PyResult<Vec<(IndexLabel, Vec<usize>)>> {
         let gb = self.grouped().map_err(frame_error_to_py)?;
         let (_, order) = gb.group_codes().map_err(frame_error_to_py)?;
         let mut groups = gb.groups();
-        Ok(order
+        let mut ordered: Vec<(IndexLabel, Vec<usize>)> = order
             .labels()
             .iter()
             .filter_map(|label| {
@@ -34758,7 +34862,26 @@ impl PyGroupBy {
                     .remove(label)
                     .map(|positions| (label.clone(), positions))
             })
-            .collect())
+            .collect();
+        if include_unused && !self.unused.is_empty() {
+            ordered.extend(
+                self.unused
+                    .iter()
+                    .map(|category| (scalar_to_index_label_converter(category), Vec::new())),
+            );
+            if self.sort
+                && let Some(meta) = self.df.column(&self.by[0]).and_then(Column::categorical)
+            {
+                ordered.sort_by_key(|(key, _)| {
+                    let value = index_label_to_scalar(key);
+                    meta.categories
+                        .iter()
+                        .position(|category| *category == value)
+                        .unwrap_or(usize::MAX)
+                });
+            }
+        }
+        Ok(ordered)
     }
 
     /// This groupby over another frame with the same keys and options.
@@ -34770,7 +34893,92 @@ impl PyGroupBy {
             as_index: self.as_index,
             sort: self.sort,
             dropna: self.dropna,
+            unused: self.unused.clone(),
         }
+    }
+
+    /// A per-group reduction frame with pandas' rows for the unused
+    /// categories (observed=False): each column holds `op` over no rows (see
+    /// [`with_unused_categories`]), in category order when `sort` (fvsao.39).
+    fn with_unused(&self, op: &str, df: DataFrame) -> PyResult<DataFrame> {
+        if self.unused.is_empty() {
+            return Ok(df);
+        }
+        if !self.as_index {
+            return Err(not_implemented(&format!(
+                "DataFrameGroupBy.{op} with as_index=False and observed=False over unused categories"
+            )));
+        }
+        let names: Vec<String> = df.column_names().into_iter().cloned().collect();
+        let mut index = None;
+        let mut columns = std::collections::BTreeMap::new();
+        for name in &names {
+            let column = df
+                .column(name)
+                .cloned()
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone()))?;
+            let series = Series::new(name.as_str(), df.index().clone(), column)
+                .map_err(frame_error_to_py)?;
+            let filled = with_unused_categories(op, series, &self.unused)?;
+            index = Some(filled.index().clone());
+            columns.insert(name.clone(), filled.column().clone());
+        }
+        let index = index.unwrap_or_else(|| {
+            let mut labels = df.index().labels().to_vec();
+            labels.extend(self.unused.iter().map(scalar_to_index_label_converter));
+            Index::new(labels).set_names(df.index().name())
+        });
+        let frame =
+            DataFrame::new_with_column_order(index, columns, names).map_err(frame_error_to_py)?;
+        match self.category_order(frame.index()) {
+            Some(positions) => frame.take_rows(&positions).map_err(frame_error_to_py),
+            None => Ok(frame),
+        }
+    }
+
+    /// A per-group reduction Series with the unused categories' rows (see
+    /// [`Self::with_unused`]).
+    fn with_unused_series(&self, op: &str, s: Series) -> PyResult<Series> {
+        if self.unused.is_empty() {
+            return Ok(s);
+        }
+        let filled = with_unused_categories(op, s, &self.unused)?;
+        match self.category_order(filled.index()) {
+            Some(positions) => {
+                let positions: Vec<i64> = positions.into_iter().map(|p| p as i64).collect();
+                filled.take(&positions).map_err(frame_error_to_py)
+            }
+            None => Ok(filled),
+        }
+    }
+
+    /// The row order that sorts `index` (a category key's groups) by
+    /// category, when `sort`; None otherwise.
+    fn category_order(&self, index: &Index) -> Option<Vec<usize>> {
+        let meta = self
+            .df
+            .column(&self.by[0])
+            .and_then(Column::categorical)
+            .filter(|_| self.sort)?;
+        Some(category_order(meta, index))
+    }
+
+    /// A reduction `op`'s frame as Python's, with the unused categories'
+    /// rows (see [`Self::with_unused`]).
+    fn finish(&self, op: &str, result: Result<DataFrame, FrameError>) -> PyResult<PyDataFrame> {
+        let inner = self.with_unused(op, result.map_err(frame_error_to_py)?)?;
+        Ok(PyDataFrame { inner })
+    }
+
+    /// NotImplementedError for a per-group operation that does not add
+    /// pandas' rows for unused categories (observed=False) yet.
+    fn observed_only(&self, op: &str) -> PyResult<()> {
+        if !self.unused.is_empty() {
+            return Err(not_implemented(&format!(
+                "DataFrameGroupBy.{op} with observed=False over unused categories (pandas adds their rows)"
+            )));
+        }
+        Ok(())
     }
 
     /// `op` over this groupby, or with `numeric_only` over its keys and
@@ -34939,6 +35147,7 @@ impl PyGroupBy {
                 sort: self.sort,
                 as_index: self.as_index,
                 groups: Some(groups),
+                unused: Vec::new(),
             });
         };
         // A Series groupby drops missing keys; keeping them is not supported.
@@ -34960,6 +35169,7 @@ impl PyGroupBy {
             sort: self.sort,
             as_index: self.as_index,
             groups: None,
+            unused: self.unused.clone(),
         })
     }
 }
@@ -35026,9 +35236,17 @@ impl PyGroupBy {
         let _ = engine_kwargs;
         groupby_engine("DataFrameGroupBy.sum", engine)?;
         let min_count = usize::try_from(min_count).unwrap_or(0);
-        wrap_frame(self.reduce(numeric_only, |gb| {
-            gb.with_min_count(gb.sum()?, min_count, true)
-        }))
+        let op = if min_count == 0 {
+            "sum"
+        } else {
+            "sum(min_count)"
+        };
+        self.finish(
+            op,
+            self.reduce(numeric_only, |gb| {
+                gb.with_min_count(gb.sum()?, min_count, true)
+            }),
+        )
     }
 
     #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
@@ -35040,7 +35258,7 @@ impl PyGroupBy {
     ) -> PyResult<PyDataFrame> {
         let _ = engine_kwargs;
         groupby_engine("DataFrameGroupBy.mean", engine)?;
-        wrap_frame(self.reduce(numeric_only, |gb| gb.mean()))
+        self.finish("mean", self.reduce(numeric_only, |gb| gb.mean()))
     }
 
     fn count(&self) -> PyResult<PyDataFrame> {
@@ -35049,7 +35267,9 @@ impl PyGroupBy {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .count()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+        Ok(PyDataFrame {
+            inner: self.with_unused("count", result)?,
+        })
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, engine=None, engine_kwargs=None))]
@@ -35063,9 +35283,12 @@ impl PyGroupBy {
         let _ = engine_kwargs;
         groupby_engine("DataFrameGroupBy.min", engine)?;
         let min_count = usize::try_from(min_count).unwrap_or(0);
-        wrap_frame(self.reduce(numeric_only, |gb| {
-            gb.with_min_count(gb.min()?, min_count, false)
-        }))
+        self.finish(
+            "min",
+            self.reduce(numeric_only, |gb| {
+                gb.with_min_count(gb.min()?, min_count, false)
+            }),
+        )
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, engine=None, engine_kwargs=None))]
@@ -35079,9 +35302,12 @@ impl PyGroupBy {
         let _ = engine_kwargs;
         groupby_engine("DataFrameGroupBy.max", engine)?;
         let min_count = usize::try_from(min_count).unwrap_or(0);
-        wrap_frame(self.reduce(numeric_only, |gb| {
-            gb.with_min_count(gb.max()?, min_count, false)
-        }))
+        self.finish(
+            "max",
+            self.reduce(numeric_only, |gb| {
+                gb.with_min_count(gb.max()?, min_count, false)
+            }),
+        )
     }
 
     #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
@@ -35095,7 +35321,7 @@ impl PyGroupBy {
         let _ = engine_kwargs;
         groupby_engine("DataFrameGroupBy.var", engine)?;
         let ddof = groupby_ddof("DataFrameGroupBy.var", ddof)?;
-        wrap_frame(self.reduce(numeric_only, |gb| gb.var_ddof(ddof)))
+        self.finish("var", self.reduce(numeric_only, |gb| gb.var_ddof(ddof)))
     }
 
     #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
@@ -35109,38 +35335,55 @@ impl PyGroupBy {
         let _ = engine_kwargs;
         groupby_engine("DataFrameGroupBy.std", engine)?;
         let ddof = groupby_ddof("DataFrameGroupBy.std", ddof)?;
-        self.reduce(numeric_only, |gb| gb.std_ddof(ddof))
-            .map(|inner| PyDataFrame { inner })
-            .map_err(groupby_moment_error_to_py)
+        let result = self
+            .reduce(numeric_only, |gb| gb.std_ddof(ddof))
+            .map_err(groupby_moment_error_to_py)?;
+        Ok(PyDataFrame {
+            inner: self.with_unused("std", result)?,
+        })
     }
 
     #[pyo3(signature = (numeric_only=false))]
     fn median(&self, numeric_only: bool) -> PyResult<PyDataFrame> {
-        wrap_frame(self.reduce(numeric_only, |gb| gb.median()))
+        self.finish("median", self.reduce(numeric_only, |gb| gb.median()))
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=0))]
     fn prod(&self, numeric_only: bool, min_count: i64) -> PyResult<PyDataFrame> {
         let min_count = usize::try_from(min_count).unwrap_or(0);
-        wrap_frame(self.reduce(numeric_only, |gb| {
-            gb.with_min_count(gb.prod()?, min_count, true)
-        }))
+        let op = if min_count == 0 {
+            "prod"
+        } else {
+            "prod(min_count)"
+        };
+        self.finish(
+            op,
+            self.reduce(numeric_only, |gb| {
+                gb.with_min_count(gb.prod()?, min_count, true)
+            }),
+        )
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
     fn first(&self, numeric_only: bool, min_count: i64, skipna: bool) -> PyResult<PyDataFrame> {
         let min_count = usize::try_from(min_count).unwrap_or(0);
-        wrap_frame(self.reduce(numeric_only, |gb| {
-            gb.with_min_count(gb.first_skipna(skipna)?, min_count, true)
-        }))
+        self.finish(
+            "first",
+            self.reduce(numeric_only, |gb| {
+                gb.with_min_count(gb.first_skipna(skipna)?, min_count, true)
+            }),
+        )
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
     fn last(&self, numeric_only: bool, min_count: i64, skipna: bool) -> PyResult<PyDataFrame> {
         let min_count = usize::try_from(min_count).unwrap_or(0);
-        wrap_frame(self.reduce(numeric_only, |gb| {
-            gb.with_min_count(gb.last_skipna(skipna)?, min_count, true)
-        }))
+        self.finish(
+            "last",
+            self.reduce(numeric_only, |gb| {
+                gb.with_min_count(gb.last_skipna(skipna)?, min_count, true)
+            }),
+        )
     }
 
     /// pandas' `gb.size()`: an unnamed count per group whose index is named
@@ -35160,6 +35403,7 @@ impl PyGroupBy {
         let index = counts.index().rename_index(key);
         let name = if self.as_index { "" } else { "size" };
         let named = Series::new(name, index, counts.column().clone()).map_err(frame_error_to_py)?;
+        let named = self.with_unused_series("size", named)?;
         if self.as_index {
             return Ok(Py::new(py, PySeries { inner: named })?.into_any());
         }
@@ -35179,7 +35423,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .nunique()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        Ok(PyDataFrame {
+            inner: self.with_unused("nunique", result)?,
+        })
     }
 
     fn any(&self) -> PyResult<PyDataFrame> {
@@ -35188,7 +35434,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .any()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        Ok(PyDataFrame {
+            inner: self.with_unused("any", result)?,
+        })
     }
 
     fn all(&self) -> PyResult<PyDataFrame> {
@@ -35197,7 +35445,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .all()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        Ok(PyDataFrame {
+            inner: self.with_unused("all", result)?,
+        })
     }
 
     fn cumsum(&self) -> PyResult<PyDataFrame> {
@@ -35277,6 +35527,7 @@ impl PyGroupBy {
     }
 
     fn corr(&self) -> PyResult<PyDataFrame> {
+        self.observed_only("corr")?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -35286,6 +35537,7 @@ impl PyGroupBy {
     }
 
     fn cov(&self) -> PyResult<PyDataFrame> {
+        self.observed_only("cov")?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -35295,6 +35547,7 @@ impl PyGroupBy {
     }
 
     fn ohlc(&self) -> PyResult<PyDataFrame> {
+        self.observed_only("ohlc")?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -35303,8 +35556,10 @@ impl PyGroupBy {
         Ok(PyDataFrame { inner: result })
     }
 
+    /// pandas' `gb.ngroups` property (it was a method).
+    #[getter]
     fn ngroups(&self) -> PyResult<usize> {
-        Ok(self.grouped().map_err(frame_error_to_py)?.ngroups())
+        Ok(self.grouped().map_err(frame_error_to_py)?.ngroups() + self.unused.len())
     }
 
     #[getter]
@@ -35323,6 +35578,7 @@ impl PyGroupBy {
         interpolation: Option<&str>,
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
+        self.observed_only("quantile")?;
         unsupported_params(
             "DataFrameGroupBy.quantile",
             &[
@@ -35344,12 +35600,16 @@ impl PyGroupBy {
     #[pyo3(signature = (ddof=1, numeric_only=false))]
     fn sem(&self, ddof: i64, numeric_only: bool) -> PyResult<PyDataFrame> {
         let ddof = groupby_ddof("DataFrameGroupBy.sem", ddof)?;
-        self.reduce(numeric_only, |gb| gb.sem_ddof(ddof))
-            .map(|inner| PyDataFrame { inner })
-            .map_err(groupby_moment_error_to_py)
+        let result = self
+            .reduce(numeric_only, |gb| gb.sem_ddof(ddof))
+            .map_err(groupby_moment_error_to_py)?;
+        Ok(PyDataFrame {
+            inner: self.with_unused("sem", result)?,
+        })
     }
 
     fn skew(&self) -> PyResult<PyDataFrame> {
+        self.observed_only("skew")?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -35359,6 +35619,7 @@ impl PyGroupBy {
     }
 
     fn kurt(&self) -> PyResult<PyDataFrame> {
+        self.observed_only("kurt")?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -35414,6 +35675,11 @@ impl PyGroupBy {
         // Callables (fvsao.7): a `_cython_table` one runs as its name, as
         // pandas'; any other (a lambda) runs per group, column by column.
         let given = func.filter(|f| !f.is_none());
+        // observed=False's unused categories: column by column, each
+        // function adding their rows (the frame-level paths do not).
+        if !self.unused.is_empty() {
+            return self.agg_per_group(py, given, args, kwargs);
+        }
         let renamed_func = match given {
             Some(spec) if agg_spec_has_callable(spec) => {
                 match named_agg_spec(spec, "DataFrameGroupBy")? {
@@ -35594,6 +35860,7 @@ impl PyGroupBy {
     }
 
     fn describe(&self) -> PyResult<PyDataFrame> {
+        self.observed_only("describe")?;
         let res = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -35617,13 +35884,13 @@ impl PyGroupBy {
     /// pandas' `gb.groups`: each group's row labels, in group order.
     #[getter]
     fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        groups_dict(py, &self.ordered_groups()?, Some(self.df.index()))
+        groups_dict(py, &self.ordered_groups(true)?, Some(self.df.index()))
     }
 
     /// pandas' `gb.indices`: each group's row positions, in group order.
     #[getter]
     fn indices(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        groups_dict(py, &self.ordered_groups()?, None)
+        groups_dict(py, &self.ordered_groups(true)?, None)
     }
 
     #[getter]
@@ -35634,6 +35901,7 @@ impl PyGroupBy {
     }
 
     fn corrwith(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+        self.observed_only("corrwith")?;
         let res = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -35656,7 +35924,7 @@ impl PyGroupBy {
         let mut out_dfs = Vec::new();
         let mut out_series = Vec::new();
         let mut out_scalars = Vec::new();
-        for (key, positions) in self.ordered_groups()? {
+        for (key, positions) in self.ordered_groups(true)? {
             let group_df = self.df.take_rows(&positions).map_err(frame_error_to_py)?;
             let py_df = PyDataFrame { inner: group_df }.into_bound_py_any(py)?;
             // pandas calls func(group, *args, **kwargs); both used to be
@@ -35812,7 +36080,7 @@ impl PyGroupBy {
         // The kept groups' rows in their original order, as pandas' filter
         // (it concatenated the kept groups in key order; fvsao.30).
         let mut kept: Vec<usize> = Vec::new();
-        for (_, positions) in self.ordered_groups()? {
+        for (_, positions) in self.ordered_groups(false)? {
             let group_df = self.df.take_rows(&positions).map_err(frame_error_to_py)?;
             let res = func.call1((PyDataFrame { inner: group_df },))?;
             if res.is_truthy()? {
@@ -35848,6 +36116,7 @@ impl PyGroupBy {
 
     #[pyo3(signature = (ascending=true))]
     fn ngroup(&self, ascending: Option<bool>) -> PyResult<PySeries> {
+        self.observed_only("ngroup")?;
         let res = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -35900,6 +36169,7 @@ impl PyGroupBy {
         skipna: Option<bool>,
         numeric_only: Option<bool>,
     ) -> PyResult<PyDataFrame> {
+        self.observed_only("idxmax")?;
         unsupported_params(
             "DataFrameGroupBy.idxmax",
             &[
@@ -35923,6 +36193,7 @@ impl PyGroupBy {
         skipna: Option<bool>,
         numeric_only: Option<bool>,
     ) -> PyResult<PyDataFrame> {
+        self.observed_only("idxmin")?;
         unsupported_params(
             "DataFrameGroupBy.idxmin",
             &[
@@ -36029,6 +36300,7 @@ impl PyGroupBy {
         ascending: Option<bool>,
         dropna: Option<bool>,
     ) -> PyResult<PyDataFrame> {
+        self.observed_only("value_counts")?;
         unsupported_params(
             "DataFrameGroupBy.value_counts",
             &[
@@ -36064,6 +36336,9 @@ pub struct PySeriesGroupBy {
     /// levels), which relabels a per-group result as pandas labels it
     /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
     groups: Option<Index>,
+    /// A category key's unused categories under observed=False (pandas'
+    /// 2.2 default): the reductions add a row for each (fvsao.39).
+    unused: Vec<Scalar>,
 }
 
 impl PySeriesGroupBy {
@@ -36103,39 +36378,59 @@ impl PySeriesGroupBy {
     /// A per-group result in pandas' group order - sorted by key when `sort`
     /// (quantile, idxmax, idxmin and is_monotonic_* came back in first-seen
     /// order) - and, over several keys, relabelled from group codes.
-    fn per_group(&self, s: Series) -> PyResult<Series> {
+    fn per_group(&self, op: &str, s: Series) -> PyResult<Series> {
+        let s = with_unused_categories(op, s, &self.unused)?;
         let s = match (self.sort, self.by.column().categorical()) {
             (false, _) => s,
             // A category key sorts by its categories' order (cut/qcut bins
             // as bins, not as label text).
             (true, Some(meta)) => {
-                let rank = |label: &IndexLabel| {
-                    let value = index_label_to_scalar(label);
-                    meta.categories
-                        .iter()
-                        .position(|category| *category == value)
-                        .unwrap_or(usize::MAX)
-                };
-                let mut positions: Vec<usize> = (0..s.len()).collect();
-                positions.sort_by_key(|&position| rank(&s.index().labels()[position]));
-                let positions: Vec<i64> = positions.into_iter().map(|p| p as i64).collect();
+                let positions: Vec<i64> = category_order(meta, s.index())
+                    .into_iter()
+                    .map(|p| p as i64)
+                    .collect();
                 s.take(&positions).map_err(frame_error_to_py)?
             }
-            (true, None) => s.sort_index(true).map_err(frame_error_to_py)?,
+            // A (group, value) result - value_counts - orders its groups
+            // and keeps each group's rows (by count) in their order; a
+            // whole-label sort put them in value-text order.
+            (true, None) => match s
+                .index()
+                .row_multiindex()
+                .and_then(|levels| levels.get_level_values(0).ok())
+            {
+                Some(groups) => {
+                    let mut positions: Vec<usize> = (0..s.len()).collect();
+                    positions.sort_by(|&a, &b| groups.labels()[a].cmp(&groups.labels()[b]));
+                    let positions: Vec<i64> = positions.into_iter().map(|p| p as i64).collect();
+                    s.take(&positions).map_err(frame_error_to_py)?
+                }
+                None => s.sort_index(true).map_err(frame_error_to_py)?,
+            },
         };
         self.label_groups(s)
     }
 
     /// Every group's key and row positions in pandas' group order - by key
     /// (a category key by its categories) when `sort`, else first seen - as
-    /// `per_group` orders a reduction. fp-frame's `groups()` is a map:
-    /// `.groups` came out in hash order and apply/filter in plain label
-    /// order whatever `sort` said.
-    fn ordered_groups(&self) -> PyResult<Vec<(IndexLabel, Vec<usize>)>> {
+    /// `per_group` orders a reduction; `include_unused` adds observed=False's
+    /// unused categories as empty groups (pandas' apply and `.groups` see
+    /// them). fp-frame's `groups()` is a map: `.groups` came out in hash
+    /// order and apply/filter in plain label order whatever `sort` said.
+    fn ordered_groups(&self, include_unused: bool) -> PyResult<Vec<(IndexLabel, Vec<usize>)>> {
         let gb = self.grouped()?;
         let mut groups: Vec<(IndexLabel, Vec<usize>)> = gb.groups().into_iter().collect();
+        if include_unused {
+            groups.extend(
+                self.unused
+                    .iter()
+                    .map(|category| (scalar_to_index_label_converter(category), Vec::new())),
+            );
+        }
         match (self.sort, self.by.column().categorical()) {
-            (false, _) => groups.sort_by_key(|(_, positions)| positions.first().copied()),
+            // First seen; the unused categories (no rows) after them.
+            (false, _) => groups
+                .sort_by_key(|(_, positions)| positions.first().copied().unwrap_or(usize::MAX)),
             (true, Some(meta)) => groups.sort_by_key(|(key, _)| {
                 let value = index_label_to_scalar(key);
                 meta.categories
@@ -36146,6 +36441,17 @@ impl PySeriesGroupBy {
             (true, None) => groups.sort_by(|a, b| a.0.cmp(&b.0)),
         }
         Ok(groups)
+    }
+
+    /// A per-group frame (describe, ohlc) in category order for a category
+    /// key; fp-frame's came in first-seen order.
+    fn category_rows(&self, df: DataFrame) -> PyResult<DataFrame> {
+        match self.by.column().categorical().filter(|_| self.sort) {
+            Some(meta) => df
+                .take_rows(&category_order(meta, df.index()))
+                .map_err(frame_error_to_py),
+            None => Ok(df),
+        }
     }
 
     /// The series' rows at `positions` (one group's values).
@@ -36244,10 +36550,21 @@ impl PySeriesGroupBy {
         Ok(())
     }
 
+    /// NotImplementedError for a per-group operation that does not add
+    /// pandas' rows for unused categories (observed=False) yet.
+    fn observed_only(&self, op: &str) -> PyResult<()> {
+        if !self.unused.is_empty() {
+            return Err(not_implemented(&format!(
+                "SeriesGroupBy.{op} with observed=False over unused categories (pandas adds their rows)"
+            )));
+        }
+        Ok(())
+    }
+
     /// A reduction's result: sorted by key when `sort`, and with
     /// as_index=False the keys moved into a column beside it, as pandas does.
-    fn wrap_result(&self, s: Series) -> PyResult<Py<PyAny>> {
-        let res = self.per_group(s)?;
+    fn wrap_result(&self, op: &str, s: Series) -> PyResult<Py<PyAny>> {
+        let res = self.per_group(op, s)?;
         Python::attach(|py| {
             if self.as_index {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());
@@ -36294,6 +36611,21 @@ impl PySeriesGroupBy {
     /// `agg` of a list of function names: a frame, one column per name.
     fn agg_names(&self, py: Python<'_>, names: &[String]) -> PyResult<Py<PyAny>> {
         self.single_key("agg with a list of functions")?;
+        // A category key runs each name through its reduction, which orders
+        // the groups by category and adds the unused ones (fp-frame's
+        // multi-agg orders by value and knows neither).
+        if self.by.column().categorical().is_some() {
+            let mut results = Vec::with_capacity(names.len());
+            for name in names {
+                let result = self.agg_name(py, name)?.ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyAttributeError, _>(format!(
+                        "'{name}' is not a valid function for 'SeriesGroupBy' object"
+                    ))
+                })?;
+                results.push(result.into_bound(py));
+            }
+            return Ok(concat_side_by_side(py, results, names.to_vec())?.unbind());
+        }
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let df = self
             .series
@@ -36408,7 +36740,14 @@ impl PySeriesGroupBy {
             .sum()
             .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result(
+            if min_count == 0 {
+                "sum"
+            } else {
+                "sum(min_count)"
+            },
+            res,
+        )
     }
 
     #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
@@ -36422,7 +36761,7 @@ impl PySeriesGroupBy {
         groupby_engine("SeriesGroupBy.mean", engine)?;
         self.check_numeric_only("mean", numeric_only)?;
         let res = self.grouped()?.mean().map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("mean", res)
     }
 
     #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
@@ -36441,7 +36780,7 @@ impl PySeriesGroupBy {
             .grouped()?
             .std_ddof(ddof)
             .map_err(groupby_moment_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("std", res)
     }
 
     #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
@@ -36457,7 +36796,7 @@ impl PySeriesGroupBy {
         self.check_numeric_only("var", numeric_only)?;
         let ddof = groupby_ddof("SeriesGroupBy.var", ddof)?;
         let res = self.grouped()?.var_ddof(ddof).map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("var", res)
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, engine=None, engine_kwargs=None))]
@@ -36477,7 +36816,7 @@ impl PySeriesGroupBy {
             .min()
             .and_then(|s| gb.with_min_count(s, min_count, false))
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("min", res)
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, engine=None, engine_kwargs=None))]
@@ -36497,7 +36836,7 @@ impl PySeriesGroupBy {
             .max()
             .and_then(|s| gb.with_min_count(s, min_count, false))
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("max", res)
     }
 
     fn count(&self) -> PyResult<Py<PyAny>> {
@@ -36507,7 +36846,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .count()
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("count", res)
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
@@ -36519,7 +36858,7 @@ impl PySeriesGroupBy {
             .first_skipna(skipna)
             .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("first", res)
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
@@ -36531,14 +36870,14 @@ impl PySeriesGroupBy {
             .last_skipna(skipna)
             .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("last", res)
     }
 
     #[pyo3(signature = (numeric_only=false))]
     fn median(&self, numeric_only: bool) -> PyResult<Py<PyAny>> {
         self.check_numeric_only("median", numeric_only)?;
         let res = self.grouped()?.median().map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("median", res)
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=0))]
@@ -36550,7 +36889,14 @@ impl PySeriesGroupBy {
             .prod()
             .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result(
+            if min_count == 0 {
+                "prod"
+            } else {
+                "prod(min_count)"
+            },
+            res,
+        )
     }
 
     fn size(&self) -> PyResult<Py<PyAny>> {
@@ -36560,7 +36906,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .size()
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("size", res)
     }
 
     fn nunique(&self) -> PyResult<Py<PyAny>> {
@@ -36570,7 +36916,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .nunique()
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("nunique", res)
     }
 
     fn any(&self) -> PyResult<Py<PyAny>> {
@@ -36580,7 +36926,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .any()
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("any", res)
     }
 
     fn all(&self) -> PyResult<Py<PyAny>> {
@@ -36590,7 +36936,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .all()
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("all", res)
     }
 
     fn value_counts(&self) -> PyResult<Py<PyAny>> {
@@ -36601,7 +36947,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .value_counts()
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("value_counts", res)
     }
 
     #[pyo3(signature = (n=5))]
@@ -36690,12 +37036,15 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
+    /// pandas' `gb.ngroups` property (it was a method).
+    #[getter]
     fn ngroups(&self) -> PyResult<usize> {
         Ok(self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .ngroups())
+            .ngroups()
+            + self.unused.len())
     }
 
     #[getter]
@@ -36723,7 +37072,7 @@ impl PySeriesGroupBy {
             .quantile(q)
             .map_err(frame_error_to_py)?;
         Ok(PySeries {
-            inner: self.per_group(res)?,
+            inner: self.per_group("quantile", res)?,
         })
     }
 
@@ -36735,7 +37084,7 @@ impl PySeriesGroupBy {
             .grouped()?
             .sem_ddof(ddof)
             .map_err(groupby_moment_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("sem", res)
     }
 
     fn skew(&self) -> PyResult<Py<PyAny>> {
@@ -36745,7 +37094,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .skew()
             .map_err(groupby_moment_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("skew", res)
     }
 
     fn kurt(&self) -> PyResult<Py<PyAny>> {
@@ -36755,7 +37104,7 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .kurtosis()
             .map_err(frame_error_to_py)?;
-        self.wrap_result(res)
+        self.wrap_result("kurt", res)
     }
 
     fn kurtosis(&self) -> PyResult<Py<PyAny>> {
@@ -36860,13 +37209,16 @@ impl PySeriesGroupBy {
 
     fn describe(&self) -> PyResult<PyDataFrame> {
         self.single_key("describe")?;
+        self.observed_only("describe")?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .describe()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        Ok(PyDataFrame {
+            inner: self.category_rows(res)?,
+        })
     }
 
     fn get_group(&self, name: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -36887,14 +37239,14 @@ impl PySeriesGroupBy {
     #[getter]
     fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         self.single_key("groups")?;
-        groups_dict(py, &self.ordered_groups()?, Some(self.series.index()))
+        groups_dict(py, &self.ordered_groups(true)?, Some(self.series.index()))
     }
 
     /// pandas' `gb.indices`: each group's row positions, in group order.
     #[getter]
     fn indices(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         self.single_key("indices")?;
-        groups_dict(py, &self.ordered_groups()?, None)
+        groups_dict(py, &self.ordered_groups(true)?, None)
     }
 
     #[getter]
@@ -36914,7 +37266,7 @@ impl PySeriesGroupBy {
         let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
         let mut out_series = Vec::new();
         let mut out_scalars = Vec::new();
-        for (key, positions) in self.ordered_groups()? {
+        for (key, positions) in self.ordered_groups(true)? {
             let group_s = self.group_rows(&positions)?;
             let py_s = PySeries { inner: group_s }.into_bound_py_any(py)?;
             // pandas calls func(group, *args, **kwargs); both used to be
@@ -36969,7 +37321,7 @@ impl PySeriesGroupBy {
             .corr(&other.inner)
             .map_err(frame_error_to_py)?;
         Ok(PySeries {
-            inner: self.per_group(res)?,
+            inner: self.per_group("corr", res)?,
         })
     }
 
@@ -36994,7 +37346,7 @@ impl PySeriesGroupBy {
             .cov(&other.inner)
             .map_err(frame_error_to_py)?;
         Ok(PySeries {
-            inner: self.per_group(res)?,
+            inner: self.per_group("cov", res)?,
         })
     }
 
@@ -37056,7 +37408,7 @@ impl PySeriesGroupBy {
         // The kept groups' rows in their original order, as pandas' filter
         // (it concatenated the kept groups in key order; fvsao.30).
         let mut kept: Vec<i64> = Vec::new();
-        for (_, positions) in self.ordered_groups()? {
+        for (_, positions) in self.ordered_groups(false)? {
             let res = func.call1((PySeries {
                 inner: self.group_rows(&positions)?,
             },))?;
@@ -37117,7 +37469,7 @@ impl PySeriesGroupBy {
             .idxmax()
             .map_err(frame_error_to_py)?;
         Ok(PySeries {
-            inner: self.per_group(res)?,
+            inner: self.per_group("idxmax", res)?,
         })
     }
 
@@ -37137,7 +37489,7 @@ impl PySeriesGroupBy {
             .idxmin()
             .map_err(frame_error_to_py)?;
         Ok(PySeries {
-            inner: self.per_group(res)?,
+            inner: self.per_group("idxmin", res)?,
         })
     }
 
@@ -37150,7 +37502,7 @@ impl PySeriesGroupBy {
             .is_monotonic_decreasing()
             .map_err(frame_error_to_py)?;
         Ok(PySeries {
-            inner: self.per_group(res)?,
+            inner: self.per_group("is_monotonic_decreasing", res)?,
         })
     }
 
@@ -37163,7 +37515,7 @@ impl PySeriesGroupBy {
             .is_monotonic_increasing()
             .map_err(frame_error_to_py)?;
         Ok(PySeries {
-            inner: self.per_group(res)?,
+            inner: self.per_group("is_monotonic_increasing", res)?,
         })
     }
 
@@ -37184,13 +37536,35 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (ascending=true))]
     fn ngroup(&self, ascending: Option<bool>) -> PyResult<PySeries> {
+        self.observed_only("ngroup")?;
+        let ascending = ascending.unwrap_or(true);
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .ngroup_with_ascending(ascending.unwrap_or(true))
+            .ngroup_with_ascending(ascending)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        if self.by.column().categorical().is_none() {
+            return Ok(PySeries { inner: res });
+        }
+        // A category key numbers its groups in category order (fp-frame's
+        // numbers follow first sight).
+        let groups = self.ordered_groups(false)?;
+        let mut codes: Vec<Scalar> = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+        for (number, (_, positions)) in groups.iter().enumerate() {
+            let number = if ascending {
+                number
+            } else {
+                groups.len() - 1 - number
+            };
+            for &position in positions {
+                codes[position] = Scalar::Int64(number as i64);
+            }
+        }
+        let column = Column::from_values(codes).map_err(column_error_to_py)?;
+        let inner =
+            Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     #[pyo3(signature = (n, dropna=None))]
@@ -37207,13 +37581,16 @@ impl PySeriesGroupBy {
 
     fn ohlc(&self) -> PyResult<PyDataFrame> {
         self.single_key("ohlc")?;
+        self.observed_only("ohlc")?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .ohlc()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        Ok(PyDataFrame {
+            inner: self.category_rows(res)?,
+        })
     }
 
     #[pyo3(signature = (periods=1, fill_method=None, limit=None, freq=None))]
@@ -37357,7 +37734,7 @@ impl PySeriesGroupBy {
         // per-group aggregate for np.mean / a scalar lambda, and Series
         // results in group order, not row order (fvsao.7).
         let mut values = vec![Scalar::Null(NullKind::NaN); self.series.len()];
-        for (_, positions) in &self.ordered_groups()? {
+        for (_, positions) in &self.ordered_groups(false)? {
             let group = self.group_rows(positions)?;
             let group = PySeries { inner: group }.into_bound_py_any(py)?;
             let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
@@ -37385,6 +37762,7 @@ impl PySeriesGroupBy {
 
     fn unique(&self) -> PyResult<PySeries> {
         self.single_key("unique")?;
+        self.observed_only("unique")?;
         let res = self
             .series
             .groupby(&self.by)
@@ -48974,6 +49352,7 @@ mod tests {
             sort: true,
             as_index: true,
             groups: None,
+            unused: Vec::new(),
         };
 
         // Reductions return a Series (or, with as_index=False, a frame).
@@ -49032,6 +49411,7 @@ mod tests {
             as_index: true,
             sort: true,
             dropna: true,
+            unused: Vec::new(),
         };
         let gb_first = gb.first(false, -1, true).expect("first"); // ubs:ignore — test fixture
         assert_eq!(gb_first.shape(), (2, 1));

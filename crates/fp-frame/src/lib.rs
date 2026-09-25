@@ -45579,6 +45579,8 @@ impl SeriesGroupBy<'_> {
         let (order, order_keys, groups) = self.build_groups();
         let values = self.series.column.values();
         let mut out_labels = Vec::new();
+        let mut group_level = Vec::new();
+        let mut value_level = Vec::new();
         let mut out_counts = Vec::new();
 
         for (group_idx, key) in order_keys.iter().enumerate() {
@@ -45601,24 +45603,40 @@ impl SeriesGroupBy<'_> {
             }
             drop(index_by_key);
 
-            value_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+            // pandas counts over (group, value) keys sorted by value, then
+            // sorts each group by count descending: a tie keeps value order.
+            value_counts.sort_by(|(left, left_count), (right, right_count)| {
+                right_count
+                    .cmp(left_count)
+                    .then_with(|| compare_scalars_with_na_position(left, right, true, false))
+            });
 
             for (value, count) in value_counts {
                 out_labels.push(IndexLabel::Utf8(format!("{group_label}, {value}")));
+                group_level.push(group_label.clone());
+                value_level.push(scalar_to_index_label(&value)?);
                 out_counts.push(Scalar::Int64(count));
             }
         }
 
         // Per br-frankenpandas-6snf4: pandas SeriesGroupBy.value_counts result
-        // is MultiIndex with [by-name, source-name]. Our flat-composite axis
-        // preserves at least the by-name.
+        // is a MultiIndex with [by-name, source-name]: the flat composite
+        // labels carry those two levels (the result was a one-level index
+        // of "group, value" strings).
         let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
             Some(by_name)
         };
-        let index = Index::new(out_labels).rename_index(idx_name);
+        let level_name = |name: &str| (!name.is_empty()).then(|| name.to_owned());
+        let levels = fp_index::MultiIndex::from_frame(vec![
+            (level_name(by_name), group_level),
+            (level_name(self.series.name()), value_level),
+        ])?;
+        let index = Index::new(out_labels)
+            .rename_index(idx_name)
+            .with_row_multiindex(levels)?;
         let column = Column::from_values(out_counts)?;
         Series::new("count", index, column)
     }
@@ -171935,6 +171953,69 @@ mod tests {
             aggregated.column("nunique").unwrap().values()
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn series_groupby_value_counts_is_a_key_value_multiindex() -> Result<(), FrameError> {
+        // pandas: df.groupby('k')['v'].value_counts() is indexed by a
+        // (k, v) MultiIndex; within a group counts descend and a tie keeps
+        // value order (9 was seen before 3, yet (b, 3) comes first).
+        let values = Series::from_values(
+            "v",
+            (0_i64..5).map(Into::into).collect(),
+            vec![
+                Scalar::Int64(9),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+            ],
+        )?;
+        let keys = Series::from_values(
+            "k",
+            (0_i64..5).map(Into::into).collect(),
+            ["b", "b", "b", "b", "a"]
+                .into_iter()
+                .map(|key| Scalar::Utf8(key.into()))
+                .collect(),
+        )?;
+        let counts = values.groupby(&keys)?.value_counts()?;
+        let levels = counts
+            .index()
+            .row_multiindex()
+            .expect("value_counts carries its (key, value) levels");
+        assert_eq!(
+            levels.names(),
+            &[Some("k".to_owned()), Some("v".to_owned())]
+        );
+        assert_eq!(
+            levels.get_level_values(1)?.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(9),
+                IndexLabel::Int64(5),
+            ]
+        );
+        assert_eq!(
+            counts.column().values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+            ]
+        );
+        // NEGATIVE: an unnamed series leaves its level unnamed.
+        let unnamed = values.rename("")?.groupby(&keys)?.value_counts()?;
+        assert_eq!(
+            unnamed
+                .index()
+                .row_multiindex()
+                .map(|levels| levels.names().to_vec()),
+            Some(vec![Some("k".to_owned()), None])
+        );
         Ok(())
     }
 
