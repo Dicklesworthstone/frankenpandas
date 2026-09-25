@@ -5618,6 +5618,132 @@ fn asfreq_target_labels(index: &Index, freq: &str) -> Result<Vec<IndexLabel>, Fr
         .collect()
 }
 
+/// pandas `date_range` over a calendar offset (W and W-MON..W-SAT, MS/ME,
+/// QS/QE, YS/YE, B, BMS/BME, BQS/BQE, BYS/BYE, SMS/SME, anchored and with a
+/// count): the offset's anchors from `start` on (`periods` of them, or every
+/// one through `end`), or the `periods` anchors that end on or before `end`.
+/// Each keeps the endpoint's time of day, as pandas' offsets do
+/// (`date_range('2024-01-01 10:00', periods=3, freq='MS')` is 10:00 on the
+/// first of each month). `Ok(None)` for a fixed step (D, h, min, ...), which
+/// the caller ranges affinely.
+pub fn calendar_date_range(
+    start: Option<i64>,
+    end: Option<i64>,
+    periods: Option<usize>,
+    freq: &str,
+) -> Result<Option<Vec<i64>>, FrameError> {
+    let (step, unit) = parse_asfreq_step(freq).map_err(|_| {
+        FrameError::CompatibilityRejected(format!(
+            "Invalid frequency: {freq}, failed to parse with error message: ValueError(\"Invalid frequency: {freq}, failed to parse with error message: KeyError('{freq}')\")"
+        ))
+    })?;
+    if unit.is_fixed() {
+        return Ok(None);
+    }
+    let step = usize::try_from(step).unwrap_or(1).max(1);
+    let out_of_range =
+        || FrameError::CompatibilityRejected("date_range: timestamp out of range".to_owned());
+    let to_datetime = |nanos: i64| -> Result<NaiveDateTime, FrameError> {
+        let subsec = u32::try_from(nanos.rem_euclid(1_000_000_000)).map_err(|_| out_of_range())?;
+        DateTime::from_timestamp(nanos.div_euclid(1_000_000_000), subsec)
+            .map(|dt| dt.naive_utc())
+            .ok_or_else(out_of_range)
+    };
+    // The widest gap between two consecutive anchors of `unit`, in days: it
+    // bounds the window `periods` anchors can span.
+    let gap_days: i64 = match unit {
+        AsFreqUnit::Week(_) | AsFreqUnit::BusinessDay => 7,
+        AsFreqUnit::QuarterEnd(_)
+        | AsFreqUnit::QuarterStart(_)
+        | AsFreqUnit::BusinessQuarterEnd(_)
+        | AsFreqUnit::BusinessQuarterStart(_) => 96,
+        AsFreqUnit::YearEnd(_)
+        | AsFreqUnit::YearStart(_)
+        | AsFreqUnit::BusinessYearEnd(_)
+        | AsFreqUnit::BusinessYearStart(_) => 370,
+        _ => 35,
+    };
+    let window = |count: usize| -> Result<Duration, FrameError> {
+        i64::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_add(2))
+            .and_then(|count| count.checked_mul(gap_days))
+            .and_then(Duration::try_days)
+            .ok_or_else(out_of_range)
+    };
+    // Anchors on the dates of [lo, hi], moved to `time` and kept in [lo, hi].
+    let anchors_between = |lo: NaiveDateTime,
+                           hi: NaiveDateTime,
+                           time: chrono::NaiveTime|
+     -> Result<Vec<NaiveDateTime>, FrameError> {
+        let anchors = anchored_asfreq_anchors(
+            lo.date().and_time(chrono::NaiveTime::MIN),
+            hi.date().and_time(chrono::NaiveTime::MIN),
+            unit,
+        )?;
+        Ok(anchors
+            .into_iter()
+            .map(|anchor| anchor.date().and_time(time))
+            .filter(|anchor| *anchor >= lo && *anchor <= hi)
+            .collect())
+    };
+    let three_of_four = || {
+        FrameError::CompatibilityRejected(
+            "Of the four parameters: start, end, periods, and freq, exactly three must be specified"
+                .to_owned(),
+        )
+    };
+    let picked: Vec<NaiveDateTime> = match (start, end, periods) {
+        (Some(start), Some(end), None) => {
+            let (start, end) = (to_datetime(start)?, to_datetime(end)?);
+            if end < start {
+                Vec::new()
+            } else {
+                anchors_between(start, end, start.time())?
+                    .into_iter()
+                    .step_by(step)
+                    .collect()
+            }
+        }
+        (Some(start), None, Some(periods)) => {
+            let start = to_datetime(start)?;
+            let reach = periods.saturating_sub(1).saturating_mul(step) + 1;
+            let hi = start
+                .checked_add_signed(window(reach)?)
+                .ok_or_else(out_of_range)?;
+            anchors_between(start, hi, start.time())?
+                .into_iter()
+                .step_by(step)
+                .take(periods)
+                .collect()
+        }
+        (None, Some(end), Some(periods)) => {
+            let end = to_datetime(end)?;
+            let reach = periods.saturating_sub(1).saturating_mul(step) + 1;
+            let lo = end
+                .checked_sub_signed(window(reach)?)
+                .ok_or_else(out_of_range)?;
+            let mut picked: Vec<NaiveDateTime> = anchors_between(lo, end, end.time())?
+                .into_iter()
+                .rev()
+                .step_by(step)
+                .take(periods)
+                .collect();
+            picked.reverse();
+            picked
+        }
+        _ => return Err(three_of_four()),
+    };
+    if periods.is_some_and(|periods| picked.len() != periods) {
+        return Err(out_of_range());
+    }
+    picked
+        .into_iter()
+        .map(|dt| dt.and_utc().timestamp_nanos_opt().ok_or_else(out_of_range))
+        .collect::<Result<Vec<i64>, FrameError>>()
+        .map(Some)
+}
+
 /// Convert (year, month, day) to Julian Day Number.
 fn date_to_jdn(year: i32, month: i32, day: i32) -> i32 {
     let a = (14 - month) / 12;
@@ -44266,7 +44392,7 @@ impl SeriesGroupBy<'_> {
                 }
             }
             let index = self.series.index.clone();
-            return Series::new("cumcount", index, Column::from_i64_values_owned(out));
+            return Series::new("", index, Column::from_i64_values_owned(out));
         }
 
         let (_order, order_keys, groups) = self.build_groups();
@@ -44289,7 +44415,7 @@ impl SeriesGroupBy<'_> {
         // a Series whose index.name == source df.index.name.
         let index = self.series.index.clone();
         let column = Column::from_values(out)?;
-        Series::new("cumcount", index, column)
+        Series::new("", index, column)
     }
 
     /// Assign ordinal group number to each source row.
@@ -44316,7 +44442,7 @@ impl SeriesGroupBy<'_> {
                 })
                 .collect();
             let index = self.series.index.clone();
-            return Series::new("ngroup", index, Column::from_i64_values_owned(out));
+            return Series::new("", index, Column::from_i64_values_owned(out));
         }
 
         let (_order, order_keys, groups) = self.build_groups();
@@ -44338,7 +44464,7 @@ impl SeriesGroupBy<'_> {
         // a Series whose index.name == source df.index.name.
         let index = self.series.index.clone();
         let column = Column::from_values(out)?;
-        Series::new("ngroup", index, column)
+        Series::new("", index, column)
     }
 
     /// GroupBy cumulative sum.
@@ -84746,7 +84872,16 @@ impl DataFrame {
                     values.push(c.values()[row].clone());
                 }
             }
-            Column::from_values(values)?
+            // Columns sharing one dtype keep it, as pandas' stack does even
+            // when every cell is missing (inferring from the values stacked
+            // an all-NaN float64 frame to a Null column; fvsao.31).
+            let shared = col_refs.first().map(|c| c.dtype()).filter(|dtype| {
+                *dtype != DType::Categorical && col_refs.iter().all(|c| c.dtype() == *dtype)
+            });
+            match shared {
+                Some(dtype) => Column::new(dtype, values)?,
+                None => Column::from_values(values)?,
+            }
         };
         let mut cols = BTreeMap::new();
         cols.insert("value".to_string(), value_col);
@@ -85268,8 +85403,24 @@ impl DataFrame {
         }
 
         let column_order: Vec<String> = data.iter().map(|(n, _)| n.clone()).collect();
+        // pandas' pivot unstacks one int64 block, so a gap anywhere makes
+        // EVERY column float64; it stayed int64 beside the NaN (fvsao.31).
+        let promote = val_vals.dtype() == DType::Int64
+            && data
+                .iter()
+                .any(|(_, vals)| vals.iter().any(Scalar::is_missing));
         let mut columns = BTreeMap::new();
         for (name, vals) in data {
+            let vals = if promote {
+                vals.into_iter()
+                    .map(|value| match value {
+                        Scalar::Int64(v) => Scalar::Float64(v as f64),
+                        other => other,
+                    })
+                    .collect()
+            } else {
+                vals
+            };
             columns.insert(name, Column::from_values(vals)?);
         }
 
@@ -105553,7 +105704,7 @@ impl DataFrameGroupBy<'_> {
         }
         let index = self.df.index().clone();
         let column = Column::from_i64_values_owned(out);
-        Series::new("cumcount".to_owned(), index, column).ok()
+        Series::new(String::new(), index, column).ok()
     }
 
     /// Assign within-group cumulative count (0-based) with explicit direction.
@@ -105585,7 +105736,7 @@ impl DataFrameGroupBy<'_> {
         // source row-axis name. Sister to br-i72df SeriesGroupBy fix.
         let index = self.df.index().clone();
         let column = Column::from_values(out)?;
-        Series::new("cumcount".to_owned(), index, column)
+        Series::new(String::new(), index, column)
     }
 
     /// Assign group number to each row.
@@ -105639,7 +105790,7 @@ impl DataFrameGroupBy<'_> {
             .collect();
         let index = self.df.index().clone();
         let column = Column::from_i64_values_owned(out);
-        Ok(Some(Series::new("ngroup".to_owned(), index, column)?))
+        Ok(Some(Series::new(String::new(), index, column)?))
     }
 
     pub fn ngroup_with_ascending(&self, ascending: bool) -> Result<Series, FrameError> {
@@ -105666,7 +105817,7 @@ impl DataFrameGroupBy<'_> {
         // row-axis name. Sister to cumcount fix above.
         let index = self.df.index().clone();
         let column = Column::from_values(out)?;
-        Series::new("ngroup".to_owned(), index, column)
+        Series::new(String::new(), index, column)
     }
 
     /// Pipe the GroupBy through a function.
@@ -164379,6 +164530,8 @@ mod tests {
         .unwrap();
         let pivoted = df.pivot("r", "c", "v").unwrap();
         // pandas: rows ['a','z'], cols ['x','y'], a×x=2, z×y=1, rest NaN.
+        // GOLDEN-CHANGE (fvsao.31): the gaps make pandas' columns float64
+        // (2.0, NaN); these pinned int64 values beside NaN.
         assert_eq!(
             pivoted.index.labels(),
             &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("z".into())]
@@ -164386,11 +164539,11 @@ mod tests {
         assert_eq!(pivoted.column_order, vec!["x".to_owned(), "y".to_owned()]);
         assert_eq!(
             pivoted.columns["x"].values(),
-            &[Scalar::Int64(2), Scalar::Null(NullKind::NaN)]
+            &[Scalar::Float64(2.0), Scalar::Null(NullKind::NaN)]
         );
         assert_eq!(
             pivoted.columns["y"].values(),
-            &[Scalar::Null(NullKind::NaN), Scalar::Int64(1)]
+            &[Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)]
         );
 
         let idx = Series::from_values(

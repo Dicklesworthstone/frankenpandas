@@ -27234,15 +27234,26 @@ impl PyDataFrame {
         Ok(())
     }
 
-    #[pyo3(signature = (other, on=None, how="left", lsuffix="", rsuffix="", sort=false))]
+    /// pandas' `join(other, on=None, how='left', lsuffix='', rsuffix='',
+    /// sort=False, validate=None)`: index on index through [`merge_impl`],
+    /// keeping the caller's (typed) index labels - it stringified both
+    /// indexes into a key column and returned a fresh 0..n-1 index, and an
+    /// int label 1 met a string '1' (fvsao.31); `on=` matches the caller's
+    /// column against `other`'s index (it matched a same-named column of
+    /// `other`), keeping the caller's index; overlapping columns without a
+    /// suffix are pandas' ValueError.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (other, on=None, how="left", lsuffix="", rsuffix="", sort=false, validate=None))]
     fn join(
         &self,
+        py: Python<'_>,
         other: &Bound<'_, PyAny>,
-        on: Option<&str>,
+        on: Option<&Bound<'_, PyAny>>,
         how: &str,
         lsuffix: &str,
         rsuffix: &str,
         sort: bool,
+        validate: Option<&str>,
     ) -> PyResult<PyDataFrame> {
         let right_df = if let Ok(odf) = other.extract::<PyRef<'_, PyDataFrame>>() {
             odf.inner.clone()
@@ -27261,98 +27272,110 @@ impl PyDataFrame {
                 "join expects DataFrame or Series",
             ));
         };
-        let join_type = match how {
-            "inner" => fp_join::JoinType::Inner,
-            "left" => fp_join::JoinType::Left,
-            "right" => fp_join::JoinType::Right,
-            "outer" => fp_join::JoinType::Outer,
-            _ => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "unknown how={how:?}; expected inner/left/right/outer"
-                )));
-            }
-        };
-        let options = fp_join::MergeExecutionOptions {
-            indicator_name: None,
-            validate_mode: None,
-            suffixes: if lsuffix.is_empty() && rsuffix.is_empty() {
-                None
-            } else {
-                Some([
-                    if lsuffix.is_empty() {
-                        None
-                    } else {
-                        Some(lsuffix.to_string())
-                    },
-                    if rsuffix.is_empty() {
-                        None
-                    } else {
-                        Some(rsuffix.to_string())
-                    },
-                ])
-            },
-            sort,
-        };
-        if let Some(on_col) = on {
-            let merged = fp_join::merge_dataframes_on_with_options(
-                &self.inner,
-                &right_df,
-                &[on_col],
-                &[on_col],
-                join_type,
-                options,
-            )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            let df =
-                DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-                    .map_err(frame_error_to_py)?;
-            Ok(PyDataFrame { inner: df })
-        } else {
-            let make_indexed_df = |df: &DataFrame| -> PyResult<DataFrame> {
-                let idx_col = Column::from_values(
-                    df.index()
-                        .labels()
-                        .iter()
-                        .map(|l| Scalar::Utf8(l.to_string()))
-                        .collect(),
-                )
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                let mut cols = df.columns().clone();
-                let mut order: Vec<String> =
-                    df.column_names().iter().map(|s| (*s).clone()).collect();
-                cols.insert("__fp_join_idx__".to_string(), idx_col);
-                order.push("__fp_join_idx__".to_string());
-                DataFrame::new_with_column_order(df.index().clone(), cols, order)
-                    .map_err(frame_error_to_py)
-            };
-            let left_with_idx = make_indexed_df(&self.inner)?;
-            let right_with_idx = make_indexed_df(&right_df)?;
-            let merged = fp_join::merge_dataframes_on_with_options(
-                &left_with_idx,
-                &right_with_idx,
-                &["__fp_join_idx__"],
-                &["__fp_join_idx__"],
-                join_type,
-                options,
-            )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            let mut final_cols = merged.columns;
-            final_cols.remove("__fp_join_idx__");
-            if !lsuffix.is_empty() {
-                final_cols.remove(&format!("__fp_join_idx__{lsuffix}"));
-            }
-            if !rsuffix.is_empty() {
-                final_cols.remove(&format!("__fp_join_idx__{rsuffix}"));
-            }
-            let final_order: Vec<String> = merged
-                .column_order
-                .into_iter()
-                .filter(|c| !c.starts_with("__fp_join_idx__"))
-                .collect();
-            let df = DataFrame::new_with_column_order(merged.index, final_cols, final_order)
-                .map_err(frame_error_to_py)?;
-            Ok(PyDataFrame { inner: df })
+        let on_keys = on
+            .filter(|on| !on.is_none())
+            .map(merge_key_names)
+            .transpose()?;
+        let overlap: Vec<String> = self
+            .inner
+            .column_names()
+            .iter()
+            .filter(|name| right_df.column(name).is_some())
+            .map(|name| format!("'{name}'"))
+            .collect();
+        if !overlap.is_empty() && lsuffix.is_empty() && rsuffix.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "columns overlap but no suffix specified: Index([{}], dtype='object')",
+                overlap.join(", ")
+            )));
         }
+        let suffixes = PyTuple::new(py, [lsuffix, rsuffix])?;
+        let Some(keys) = on_keys else {
+            let args = MergeArgs {
+                how,
+                on: None,
+                left_on: None,
+                right_on: None,
+                left_index: true,
+                right_index: true,
+                sort,
+                suffixes: Some(suffixes.as_any()),
+                indicator: None,
+                validate,
+            };
+            return Ok(PyDataFrame {
+                inner: merge_impl(&self.inner, &right_df, &args)?,
+            });
+        };
+        let [key] = keys.as_slice() else {
+            return Err(not_implemented(
+                "DataFrame.join(on=[several columns]) against a MultiIndex",
+            ));
+        };
+        if !matches!(how, "left" | "inner") {
+            return Err(not_implemented(&format!(
+                "DataFrame.join(on=..., how='{how}')"
+            )));
+        }
+        // `other`'s index as a key column, and each caller row's position,
+        // so the result keeps the caller's labels.
+        const OTHER_INDEX: &str = "__fp_join_other_index__";
+        const CALLER_ROW: &str = "__fp_join_caller_row__";
+        let other_labels: Vec<Scalar> = right_df
+            .index()
+            .labels()
+            .iter()
+            .map(index_label_to_scalar)
+            .collect();
+        let other_keyed = right_df
+            .with_column(
+                OTHER_INDEX,
+                Column::from_values(other_labels).map_err(column_error_to_py)?,
+            )
+            .map_err(frame_error_to_py)?;
+        let rows = i64::try_from(self.inner.len()).unwrap_or(i64::MAX);
+        let caller_keyed = self
+            .inner
+            .with_column(CALLER_ROW, Column::from_i64_values((0..rows).collect()))
+            .map_err(frame_error_to_py)?;
+        let left_on = pyo3::types::PyString::new(py, key);
+        let right_on = pyo3::types::PyString::new(py, OTHER_INDEX);
+        let args = MergeArgs {
+            how,
+            on: None,
+            left_on: Some(left_on.as_any()),
+            right_on: Some(right_on.as_any()),
+            left_index: false,
+            right_index: false,
+            sort,
+            suffixes: Some(suffixes.as_any()),
+            indicator: None,
+            validate,
+        };
+        let merged = merge_impl(&caller_keyed, &other_keyed, &args)?;
+        let caller_labels = self.inner.index().labels();
+        let labels: Vec<IndexLabel> = merged
+            .column(CALLER_ROW)
+            .map(|rows| {
+                rows.values()
+                    .iter()
+                    .filter_map(|row| match row {
+                        Scalar::Int64(row) => usize::try_from(*row).ok(),
+                        _ => None,
+                    })
+                    .filter_map(|row| caller_labels.get(row).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut frame = merged
+            .drop_column(CALLER_ROW)
+            .and_then(|frame| frame.drop_column(OTHER_INDEX))
+            .and_then(|frame| frame.set_axis(labels, 0))
+            .map_err(frame_error_to_py)?;
+        if let Some(name) = self.inner.index().name() {
+            frame = frame.rename_axis(name).map_err(frame_error_to_py)?;
+        }
+        Ok(PyDataFrame { inner: frame })
     }
 
     #[pyo3(signature = (copy=None))]
@@ -27401,9 +27424,100 @@ impl PyDataFrame {
         ))
     }
 
-    fn stack(&self) -> PyResult<PyDataFrame> {
-        let df = self.inner.stack().map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+    /// pandas `DataFrame.stack` over a one-level column axis: a Series under
+    /// the (row label..., column) MultiIndex, row-major, with the missing
+    /// cells dropped as pandas 2.2's default implementation does
+    /// (`dropna=False` or `future_stack=True` keep them). An explicit
+    /// `dropna=`/`sort=` warns as pandas' deprecated implementation does;
+    /// `sort` never reorders a one-level column axis.
+    #[pyo3(signature = (level=-1, dropna=None, sort=None, future_stack=false))]
+    fn stack(
+        &self,
+        py: Python<'_>,
+        level: i64,
+        dropna: Option<bool>,
+        sort: Option<bool>,
+        future_stack: bool,
+    ) -> PyResult<PySeries> {
+        if self.inner.columns_multiindex().is_some() {
+            return Err(not_implemented("stack of a MultiIndex column axis"));
+        }
+        if level > 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Too many levels: Index has only 1 level, not {}",
+                level + 1
+            )));
+        }
+        if level < -1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Too many levels: Index has only 1 level, {level} is not a valid level number"
+            )));
+        }
+        if future_stack && dropna.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "dropna must be unspecified with future_stack=True as the new implementation does not introduce rows of NA values. This argument will be removed in a future version of pandas.",
+            ));
+        }
+        if !future_stack && (dropna.is_some() || sort.is_some()) {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                c"The previous implementation of stack is deprecated and will be removed in a future version of pandas. See the What's New notes for pandas 2.1.0 for details. Specify future_stack=True to adopt the new implementation and silence this warning.",
+                1,
+            )?;
+        }
+        let drop_missing = !future_stack && dropna.unwrap_or(true);
+        let stacked = self.inner.stack().map_err(frame_error_to_py)?;
+        let values = stacked
+            .column_names()
+            .first()
+            .and_then(|name| stacked.column(name))
+            .ok_or_else(|| not_implemented("stack of a frame without columns"))?;
+        let index = self.inner.index();
+        let row_levels: Vec<Vec<IndexLabel>> = match index.row_multiindex() {
+            Some(multi) => (0..multi.nlevels())
+                .map(|lvl| {
+                    multi
+                        .get_level_values(lvl)
+                        .map(|level| level.labels().to_vec())
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+                })
+                .collect::<PyResult<_>>()?,
+            None => vec![index.labels().to_vec()],
+        };
+        let mut names: Vec<Option<String>> = match index.row_multiindex() {
+            Some(multi) => multi.names().to_vec(),
+            None => vec![index.name().map(str::to_owned)],
+        };
+        names.push(None);
+        let row_labels = index.labels();
+        let columns = self.inner.column_names();
+        let mut arrays: Vec<Vec<IndexLabel>> = vec![Vec::new(); row_levels.len() + 1];
+        let mut flat = Vec::new();
+        let mut keep = Vec::new();
+        for (row, row_label) in row_labels.iter().enumerate() {
+            for (col, name) in columns.iter().enumerate() {
+                let position = row * columns.len() + col;
+                if drop_missing && !values.validity().get(position) {
+                    continue;
+                }
+                for (array, level) in arrays.iter_mut().zip(&row_levels) {
+                    array.push(level[row].clone());
+                }
+                arrays[row_levels.len()].push(IndexLabel::Utf8((*name).clone()));
+                flat.push(IndexLabel::Utf8(format!("{row_label}|{name}")));
+                keep.push(position);
+            }
+        }
+        let levels = fp_index::MultiIndex::from_arrays(arrays)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            .set_names(names);
+        let index = Index::new(flat)
+            .with_row_multiindex(levels)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let out =
+            Series::new("", index, values.take_positions(&keep)).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: out })
     }
 
     fn unstack(&self) -> PyResult<PyDataFrame> {
@@ -36935,23 +37049,44 @@ fn parse_json_orient(orient: &str) -> PyResult<fp_io::JsonOrient> {
 /// its common shapes: an object of columns (its own default output) and an
 /// array of records - so the orient is taken from the first JSON token.
 /// (This defaulted to "records" and refused pandas' default files.) (4qg5w.19)
+/// `path_or_buf` is pandas': a path, a file-like object (it took a path
+/// string only, so `read_json(io.StringIO(...))` raised; fvsao.31), or - with
+/// pandas 2.2's FutureWarning - a literal JSON string; `lines=True` reads
+/// line-delimited records.
 #[pyfunction]
-#[pyo3(signature = (path, orient=None))]
-fn read_json(path: &str, orient: Option<&str>) -> PyResult<PyDataFrame> {
-    let path = std::path::Path::new(path);
+#[pyo3(signature = (path_or_buf, orient=None, lines=false))]
+fn read_json(
+    py: Python<'_>,
+    path_or_buf: &Bound<'_, PyAny>,
+    orient: Option<&str>,
+    lines: bool,
+) -> PyResult<PyDataFrame> {
+    let literal = path_or_buf
+        .extract::<String>()
+        .ok()
+        .filter(|text| text.trim_start().starts_with(['[', '{']));
+    let text = match literal {
+        Some(text) => {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                c"Passing literal json to 'read_json' is deprecated and will be removed in a future version. To read from a literal string, wrap it in a 'StringIO' object.",
+                1,
+            )?;
+            text
+        }
+        None => py_input_text(path_or_buf)?,
+    };
+    if lines {
+        let df = fp_io::read_jsonl_str(&text).map_err(io_error_to_py)?;
+        return Ok(PyDataFrame { inner: df });
+    }
     let orient = match orient {
         Some(orient) => parse_json_orient(orient)?,
-        None => {
-            let text =
-                std::fs::read_to_string(path).map_err(|e| io_error_to_py(fp_io::IoError::Io(e)))?;
-            if text.trim_start().starts_with('[') {
-                fp_io::JsonOrient::Records
-            } else {
-                fp_io::JsonOrient::Columns
-            }
-        }
+        None if text.trim_start().starts_with('[') => fp_io::JsonOrient::Records,
+        None => fp_io::JsonOrient::Columns,
     };
-    let df = fp_io::read_json(path, orient).map_err(io_error_to_py)?;
+    let df = fp_io::read_json_str(&text, orient).map_err(io_error_to_py)?;
     Ok(PyDataFrame { inner: df })
 }
 
@@ -37118,13 +37253,20 @@ fn merge_impl(
             .set_index(KEY, true)
             .map_err(frame_error_to_py)?;
         let labels = merged.index().labels().to_vec();
-        let mut frame = merged.set_axis(labels, 0).map_err(frame_error_to_py)?;
-        if let Some(name) = left.index().name()
-            && right.index().name() == Some(name)
-        {
-            frame = frame.rename_axis(name).map_err(frame_error_to_py)?;
-        }
-        return Ok(frame);
+        let frame = merged.set_axis(labels, 0).map_err(frame_error_to_py)?;
+        // pandas' index name: a left join keeps the left index's, a right
+        // join the right's, inner / outer the name both share - never the
+        // internal key column's, which leaked (fvsao.31).
+        let name = match args.how {
+            "left" => left.index().name(),
+            "right" => right.index().name(),
+            _ => left
+                .index()
+                .name()
+                .filter(|name| right.index().name() == Some(*name)),
+        };
+        let index = frame.index().rename_index(name);
+        return frame.with_index(index).map_err(frame_error_to_py);
     }
 
     let (left_on, right_on) = match (args.on, args.left_on, args.right_on) {
@@ -37357,21 +37499,225 @@ fn to_datetime(
     ))
 }
 
-/// Return a fixed frequency DatetimeIndex (pandas `date_range`).
+/// A `date_range` endpoint as tz-naive nanoseconds: a string, a Timestamp, a
+/// `datetime.datetime` or a `datetime.date`.
+fn date_range_endpoint(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<i64>> {
+    let Some(obj) = obj.filter(|obj| !obj.is_none()) else {
+        return Ok(None);
+    };
+    if let Ok(ts) = obj.extract::<PyRef<'_, PyTimestamp>>() {
+        return Ok(Some(ts.inner.nanos));
+    }
+    if let Ok(dt) = obj.cast::<PyDateTime>() {
+        return py_datetime_nanos(dt).map(Some);
+    }
+    if let Ok(date) = obj.cast::<pyo3::types::PyDate>() {
+        let days = days_from_ymd(
+            i64::from(date.get_year()),
+            i64::from(date.get_month()),
+            i64::from(date.get_day()),
+        );
+        return Ok(Some(days * 86_400_000_000_000));
+    }
+    let text: String = obj.extract()?;
+    let ts = Timestamp::parse(&text)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    Ok(Some(ts.nanos))
+}
+
+/// The replacement pandas 2.2 names when `freq` spells a deprecated alias
+/// ('M' for 'ME', 'H' for 'h', 'A-JUN' for 'YE-JUN', ...): the alias without
+/// its count, and its replacement.
+fn deprecated_freq_alias(freq: &str) -> Option<(String, String)> {
+    let alias = freq.trim_start_matches(|c: char| c.is_ascii_digit());
+    let (head, anchor) = match alias.split_once('-') {
+        Some((head, anchor)) => (head, Some(anchor)),
+        None => (alias, None),
+    };
+    let replacement = match (head, anchor) {
+        ("M", None) => "ME",
+        ("Q", _) => "QE",
+        ("Y" | "A", _) => "YE",
+        ("AS", _) => "YS",
+        ("BA" | "BY", _) => "BYE",
+        ("BAS", _) => "BYS",
+        ("BM", None) => "BME",
+        ("BQ", _) => "BQE",
+        ("SM", None) => "SME",
+        ("H", None) => "h",
+        ("T", None) => "min",
+        ("S", None) => "s",
+        ("L", None) => "ms",
+        ("U", None) => "us",
+        ("N", None) => "ns",
+        _ => return None,
+    };
+    let replacement = anchor.map_or_else(
+        || replacement.to_owned(),
+        |anchor| format!("{replacement}-{anchor}"),
+    );
+    Some((alias.to_owned(), replacement))
+}
+
+/// Return a fixed frequency DatetimeIndex (pandas `date_range`): fixed steps
+/// (D, h, min, s, ms, us, ns with a count) and calendar offsets (W and its
+/// weekday anchors, MS/ME, QS/QE, YS/YE, B and the business month/quarter/
+/// year anchors, SMS/SME; see [`fp_frame::calendar_date_range`]), from
+/// string, Timestamp, datetime or date endpoints; `start`, `end` and
+/// `periods` without a freq space the points evenly (pandas' linspace).
+/// `inclusive` drops an endpoint the range lands on; `normalize` floors the
+/// endpoints to midnight. A zone (`tz=`) is not supported yet.
 #[pyfunction]
-#[pyo3(signature = (start=None, end=None, periods=None, freq=None, name=None))]
+#[pyo3(signature = (start=None, end=None, periods=None, freq=None, tz=None, normalize=false, name=None, inclusive="both", *, unit=None))]
+#[allow(clippy::too_many_arguments)]
 fn date_range(
-    start: Option<&str>,
-    end: Option<&str>,
+    py: Python<'_>,
+    start: Option<&Bound<'_, PyAny>>,
+    end: Option<&Bound<'_, PyAny>>,
     periods: Option<usize>,
     freq: Option<&str>,
+    tz: Option<&Bound<'_, PyAny>>,
+    normalize: bool,
     name: Option<&str>,
+    inclusive: &str,
+    unit: Option<&str>,
 ) -> PyResult<PyDatetimeIndex> {
-    let freq_str = freq.unwrap_or("D");
-    let freq_nanos = parse_freq_to_nanos(freq_str)?;
-    let idx = fp_index::date_range(start, end, periods, freq_nanos, name)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let dti = DatetimeIndex::from_index(idx)
+    const DAY: i64 = 86_400_000_000_000;
+    if tz.is_some_and(|tz| !tz.is_none()) {
+        return Err(not_implemented("date_range(tz=...)"));
+    }
+    if unit.is_some_and(|unit| unit != "ns") {
+        return Err(not_implemented("date_range(unit=...) other than 'ns'"));
+    }
+    let (left_inclusive, right_inclusive) = match inclusive {
+        "both" => (true, true),
+        "neither" => (false, false),
+        "left" => (true, false),
+        "right" => (false, true),
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Inclusive has to be either 'both', 'neither', 'left' or 'right'",
+            ));
+        }
+    };
+    let floor = |nanos: i64| {
+        if normalize {
+            nanos - nanos.rem_euclid(DAY)
+        } else {
+            nanos
+        }
+    };
+    let start = date_range_endpoint(start)?.map(floor);
+    let end = date_range_endpoint(end)?.map(floor);
+    let three_of_four = || {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Of the four parameters: start, end, periods, and freq, exactly three must be specified",
+        )
+    };
+    let out_of_range =
+        || PyErr::new::<pyo3::exceptions::PyValueError, _>("date_range: timestamp out of range");
+    let given = (start.is_some(), end.is_some(), periods.is_some());
+    if !matches!(
+        (given, freq),
+        ((true, true, true), None)
+            | (
+                (true, true, false) | (true, false, true) | (false, true, true),
+                _
+            )
+    ) {
+        return Err(three_of_four());
+    }
+    let mut nanos: Vec<i64> = match (start, end, periods, freq) {
+        // pandas' linspace: numpy spaces the points in float64, truncates
+        // them to int64, and pins the last one to `end`.
+        (Some(first), Some(last), Some(periods), None) => {
+            let step = if periods > 1 {
+                (last as f64 - first as f64) / (periods - 1) as f64
+            } else {
+                0.0
+            };
+            (0..periods)
+                .map(|i| {
+                    if i + 1 == periods && periods > 1 {
+                        last
+                    } else {
+                        (first as f64 + i as f64 * step) as i64
+                    }
+                })
+                .collect()
+        }
+        (_, _, _, freq) => {
+            let freq = freq.unwrap_or("D");
+            if let Some((alias, replacement)) = deprecated_freq_alias(freq) {
+                let message = std::ffi::CString::new(format!(
+                    "'{alias}' is deprecated and will be removed in a future version, please use '{replacement}' instead."
+                ))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                    &message,
+                    1,
+                )?;
+            }
+            match parse_freq_to_nanos(freq) {
+                Ok(step) if step > 0 => {
+                    let (first, count) = match (start, end, periods) {
+                        (Some(first), Some(last), None) => {
+                            let count = if last < first {
+                                0
+                            } else {
+                                usize::try_from((last - first) / step + 1)
+                                    .map_err(|_| out_of_range())?
+                            };
+                            (first, count)
+                        }
+                        (Some(first), None, Some(periods)) => (first, periods),
+                        (None, Some(last), Some(periods)) => {
+                            let back = i64::try_from(periods.saturating_sub(1))
+                                .ok()
+                                .and_then(|steps| steps.checked_mul(step))
+                                .ok_or_else(out_of_range)?;
+                            (last.checked_sub(back).ok_or_else(out_of_range)?, periods)
+                        }
+                        _ => return Err(three_of_four()),
+                    };
+                    Index::from_datetime64_affine_range(first, step, count)
+                        .ok_or_else(out_of_range)?
+                        .labels()
+                        .iter()
+                        .map(|label| match label {
+                            IndexLabel::Datetime64(nanos) => Ok(*nanos),
+                            _ => Err(out_of_range()),
+                        })
+                        .collect::<PyResult<Vec<i64>>>()?
+                }
+                _ => fp_frame::calendar_date_range(start, end, periods, freq)
+                    .map_err(|e| match e {
+                        fp_frame::FrameError::CompatibilityRejected(message) => {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+                        }
+                        other => frame_error_to_py(other),
+                    })?
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Invalid frequency: {freq}"
+                        ))
+                    })?,
+            }
+        }
+    };
+    if !left_inclusive && start.is_some() && nanos.first() == start.as_ref() {
+        nanos.remove(0);
+    }
+    if !right_inclusive && end.is_some() && nanos.last() == end.as_ref() {
+        nanos.pop();
+    }
+    let mut index = Index::from_datetime64(nanos);
+    if let Some(name) = name {
+        index = index.set_name(name);
+    }
+    let dti = DatetimeIndex::from_index(index)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     Ok(PyDatetimeIndex { inner: dti })
 }
@@ -37752,26 +38098,48 @@ fn period_range(
     Ok(PyPeriodIndex { inner })
 }
 
-/// Return a fixed frequency DatetimeIndex with business day frequency (pandas `bdate_range`).
+/// Return a fixed frequency DatetimeIndex with business day frequency
+/// (pandas `bdate_range`): [`date_range`] with pandas' defaults here, freq
+/// 'B' and normalized endpoints. A custom calendar (`weekmask=`/`holidays=`,
+/// freq 'C') is not supported yet.
 #[pyfunction]
-#[pyo3(signature = (start=None, end=None, periods=None, freq=None, name=None))]
+#[pyo3(signature = (start=None, end=None, periods=None, freq=Some("B"), tz=None, normalize=true, name=None, weekmask=None, holidays=None, inclusive="both"))]
+#[allow(clippy::too_many_arguments)]
 fn bdate_range(
-    start: Option<&str>,
-    end: Option<&str>,
+    py: Python<'_>,
+    start: Option<&Bound<'_, PyAny>>,
+    end: Option<&Bound<'_, PyAny>>,
     periods: Option<usize>,
     freq: Option<&str>,
+    tz: Option<&Bound<'_, PyAny>>,
+    normalize: bool,
     name: Option<&str>,
+    weekmask: Option<&Bound<'_, PyAny>>,
+    holidays: Option<&Bound<'_, PyAny>>,
+    inclusive: &str,
 ) -> PyResult<PyDatetimeIndex> {
-    let freq_str = freq.unwrap_or("B");
-    if freq_str.eq_ignore_ascii_case("b") {
-        let idx = fp_index::bdate_range(start, end, periods, name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let dti = DatetimeIndex::from_index(idx)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDatetimeIndex { inner: dti })
-    } else {
-        date_range(start, end, periods, Some(freq_str), name)
+    let Some(freq) = freq else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "freq must be specified for bdate_range; use date_range instead",
+        ));
+    };
+    if weekmask.is_some_and(|w| !w.is_none()) || holidays.is_some_and(|h| !h.is_none()) {
+        return Err(not_implemented(
+            "bdate_range(weekmask=/holidays=), a custom business calendar",
+        ));
     }
+    date_range(
+        py,
+        start,
+        end,
+        periods,
+        Some(freq),
+        tz,
+        normalize,
+        name,
+        inclusive,
+        None,
+    )
 }
 
 /// Unpivot a DataFrame from wide to long format (pandas `melt`).
@@ -43092,7 +43460,6 @@ fn write_csv_py(
     unsupported_params(
         method,
         &[
-            ("float_format", args.float_format.is_none()),
             (
                 "header",
                 args.header.is_none_or(|h| h.extract::<bool>().is_ok()),
@@ -43139,6 +43506,45 @@ fn write_csv_py(
             &selected
         }
         _ => frame,
+    };
+    // float_format: each float cell as the format string (`fmt % v`) or the
+    // callable renders it, a missing cell still na_rep (it was refused;
+    // fvsao.31).
+    let formatted;
+    let frame = match args.float_format.filter(|fmt| !fmt.is_none()) {
+        Some(fmt) => {
+            let py = fmt.py();
+            let mut out = frame.clone();
+            for position in 0..frame.shape().1 {
+                let Some(column) = frame.column_at(position) else {
+                    continue;
+                };
+                if !matches!(column.dtype(), DType::Float64 | DType::Float64Nullable) {
+                    continue;
+                }
+                let values = column
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Float64(v) if !v.is_nan() => {
+                            let v = v.into_pyobject(py)?;
+                            let text = if fmt.is_callable() {
+                                fmt.call1((v,))?
+                            } else {
+                                fmt.call_method1("__mod__", (v,))?
+                            };
+                            Ok(Scalar::Utf8(text.str()?.to_string()))
+                        }
+                        _ => Ok(Scalar::Null(NullKind::NaN)),
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                let column = Column::from_values(values).map_err(column_error_to_py)?;
+                out = out.isetitem(position, column).map_err(frame_error_to_py)?;
+            }
+            formatted = out;
+            &formatted
+        }
+        None => frame,
     };
     let options = fp_io::CsvWriteOptions {
         delimiter,
@@ -46043,10 +46449,26 @@ mod tests {
 
     #[test]
     fn test_bdate_range_helper() {
-        let bdr = bdate_range(Some("2024-01-01"), None, Some(5), None, Some("bday"))
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let start = pyo3::types::PyString::new(py, "2024-01-01");
+            let bdr = bdate_range(
+                py,
+                Some(start.as_any()),
+                None,
+                Some(5),
+                Some("B"),
+                None,
+                true,
+                Some("bday"),
+                None,
+                None,
+                "both",
+            )
             .expect("bdate_range"); // ubs:ignore — test fixture
-        assert_eq!(bdr.len(), 5);
-        assert_eq!(bdr.name().as_deref(), Some("bday"));
+            assert_eq!(bdr.len(), 5);
+            assert_eq!(bdr.name().as_deref(), Some("bday"));
+        });
     }
 
     #[test]

@@ -2653,8 +2653,10 @@ def test_implemented_parameter_values_match_pandas(case: Any) -> None:
 def test_to_csv_keywords_and_targets_match_pandas(tmp_path: Path) -> None:
     frame = {"a": [1.5, _NAN, 3.0], "s": ["x,y", 'q"t', "z"]}
     pdf, fdf = pd.DataFrame(frame, index=["r1", "r2", "r3"]), fpd.DataFrame(frame, index=["r1", "r2", "r3"])
+    # float_format moved here from the refusals below when fvsao.31 wrote it.
     for kw in ({}, {"sep": ";"}, {"na_rep": "NA"}, {"header": False}, {"index": False},
-               {"index_label": "idx"}, {"columns": ["s"]}):
+               {"index_label": "idx"}, {"columns": ["s"]}, {"float_format": "%.1f"},
+               {"float_format": "%.3e", "na_rep": "NA"}):
         assert fdf.to_csv(**kw) == pdf.to_csv(**kw), kw
     s = [1.5, _NAN]
     assert fpd.Series(s).to_csv(na_rep="-") == pd.Series(s).to_csv(na_rep="-")
@@ -2668,7 +2670,7 @@ def test_to_csv_keywords_and_targets_match_pandas(tmp_path: Path) -> None:
     pdf.to_csv(tmp_path / "b.csv", mode="a", header=False)
     assert (tmp_path / "a.csv").read_text() == (tmp_path / "b.csv").read_text()
     # NEGATIVE: keywords the writer cannot honour raise instead of vanishing.
-    for kw in ({"float_format": "%.1f"}, {"quoting": 1}, {"decimal": ","}):
+    for kw in ({"quoting": 1}, {"decimal": ","}):
         with pytest.raises(NotImplementedError):
             fdf.to_csv(**kw)
     with pytest.raises(NotImplementedError, match="compression"):
@@ -5794,3 +5796,161 @@ def test_numpy_ufuncs_operands_and_delegation_match_pandas(case: str) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert _numpy_outcome(fpd, case) == _numpy_outcome(pd, case), case
+
+
+def _jr_left(m: Any) -> Any:
+    return m.DataFrame({"city": ["NYC", "LA", "SF"], "k": ["a", "b", "z"]}, index=m.Index([1, 2, 3], name="id"))
+
+
+def _jr_timestamps(m: Any, idx: Any) -> list[str]:
+    return [str(t) for t in idx]
+
+
+# fvsao.31: join reset the caller's index to 0..n-1; pivot kept int64 beside
+# a gap; cumcount/ngroup were named; read_json took only a path; to_csv
+# refused float_format; stack returned a one-column frame with 'r|c' labels;
+# date_range knew only fixed steps and string endpoints.
+_JOIN_RESHAPE_CASES = {
+    "join index left": lambda m: _jr_left(m).join(m.DataFrame({"v": [9, 8]}, index=[1, 2])),
+    "join index inner": lambda m: _jr_left(m).join(m.DataFrame({"v": [9, 8]}, index=[1, 2]), how="inner"),
+    "join index outer": lambda m: _jr_left(m).join(m.DataFrame({"v": [9, 7]}, index=[1, 5]), how="outer"),
+    "join index right": lambda m: _jr_left(m).join(m.DataFrame({"v": [9, 8]}, index=[1, 2]), how="right"),
+    "join on column": lambda m: _jr_left(m).join(m.DataFrame({"w": [5, 6]}, index=["a", "b"]), on="k"),
+    "join on column inner": lambda m: _jr_left(m).join(
+        m.DataFrame({"w": [5, 6]}, index=["a", "b"]), on="k", how="inner"
+    ),
+    "join overlap without suffix": lambda m: _jr_left(m).join(m.DataFrame({"city": ["x"]}, index=[1])),
+    "join overlap suffixes": lambda m: _jr_left(m).join(
+        m.DataFrame({"city": ["x"]}, index=[1]), lsuffix="_l", rsuffix="_r"
+    ),
+    "join Series": lambda m: _jr_left(m).join(m.Series([7, 6], index=[2, 3], name="s")),
+    "join shared index name": lambda m: _jr_left(m).join(m.DataFrame({"v": [9]}, index=m.Index([1], name="id"))),
+    "pivot gap promotes every column": lambda m: m.DataFrame(
+        {"k": ["x", "x", "y"], "c": ["p", "q", "p"], "v": [1, 2, 3]}
+    ).pivot(index="k", columns="c", values="v"),
+    # NEGATIVE: without a gap the pivot stays int64.
+    "pivot without gap stays int64": lambda m: m.DataFrame(
+        {"k": ["x", "x", "y", "y"], "c": ["p", "q", "p", "q"], "v": [1, 2, 3, 4]}
+    ).pivot(index="k", columns="c", values="v"),
+    "groupby cumcount": lambda m: m.DataFrame({"g": ["a", "b", "a"]}).groupby("g").cumcount(),
+    "groupby ngroup": lambda m: m.DataFrame({"g": ["b", "a", "b"]}).groupby("g").ngroup(),
+    "series groupby cumcount": lambda m: m.Series([1, 2, 3]).groupby(m.Series(["a", "b", "a"])).cumcount(),
+    "read_json buffer": lambda m: m.read_json(io.StringIO('[{"a":1,"b":"x"},{"a":2,"b":"y"}]')),
+    "read_json lines": lambda m: m.read_json(io.StringIO('{"a":1}\n{"a":2}\n'), lines=True),
+    "to_csv float_format": lambda m: m.DataFrame({"a": [1.25, None], "b": [1, 2]}).to_csv(index=False, float_format="%.1f"),
+    "to_csv float_format callable": lambda m: m.DataFrame({"a": [1.25]}).to_csv(float_format=lambda v: f"<{v}>"),
+    "stack drops missing": lambda m: m.DataFrame(
+        {"a": [1, 2], "b": [3.0, None]}, index=m.Index(["r0", "r1"], name="rid")
+    ).stack(),
+    "stack keeps int64": lambda m: m.DataFrame({"a": [1, 2], "b": [3, 4]}).stack(),
+    "stack dropna False": lambda m: m.DataFrame({"a": [1.0, None]}).stack(dropna=False),
+    "stack future_stack": lambda m: m.DataFrame({"a": [1.0, None]}).stack(future_stack=True),
+    "stack all missing keeps float64": lambda m: m.DataFrame({"a": [None, None]}, dtype=float).stack(),
+    "stack level 1 raises": lambda m: m.DataFrame({"a": [1]}).stack(level=1),
+    "stack dropna with future_stack raises": lambda m: m.DataFrame({"a": [1]}).stack(dropna=False, future_stack=True),
+    "date_range W": lambda m: _jr_timestamps(m, m.date_range("2024-01-01", periods=3, freq="W")),
+    "date_range W-MON": lambda m: _jr_timestamps(m, m.date_range("2024-01-03", periods=3, freq="W-MON")),
+    "date_range MS keeps time": lambda m: _jr_timestamps(m, m.date_range("2024-01-01 10:00", periods=3, freq="MS")),
+    "date_range MS rolls forward": lambda m: _jr_timestamps(m, m.date_range("2024-01-15", periods=3, freq="MS")),
+    "date_range 2ME": lambda m: _jr_timestamps(m, m.date_range("2024-01-15", periods=3, freq="2ME")),
+    "date_range QS start end": lambda m: _jr_timestamps(m, m.date_range("2024-01-15", "2024-06-01", freq="QS")),
+    "date_range end periods ME": lambda m: _jr_timestamps(m, m.date_range(end="2024-06-01", periods=3, freq="ME")),
+    "date_range B": lambda m: _jr_timestamps(m, m.date_range("2024-01-05", periods=4, freq="B")),
+    "date_range YS": lambda m: _jr_timestamps(m, m.date_range("2024-01-01", periods=2, freq="YS")),
+    "date_range SMS": lambda m: _jr_timestamps(m, m.date_range("2024-01-01", periods=3, freq="SMS")),
+    "date_range periods 0": lambda m: _jr_timestamps(m, m.date_range("2024-01-01", periods=0, freq="W")),
+    "date_range Timestamp start": lambda m: _jr_timestamps(m, m.date_range(m.Timestamp("2024-01-01"), periods=2)),
+    "date_range date start": lambda m: _jr_timestamps(m, m.date_range(datetime.date(2024, 1, 1), periods=2)),
+    "date_range datetime start": lambda m: _jr_timestamps(
+        m, m.date_range(datetime.datetime(2024, 1, 1, 6), periods=2, freq="D")
+    ),
+    "date_range linspace": lambda m: _jr_timestamps(m, m.date_range("2024-01-01", "2024-01-02", periods=4)),
+    "date_range normalize": lambda m: _jr_timestamps(m, m.date_range("2024-01-01 10:30", periods=2, normalize=True)),
+    "date_range inclusive neither": lambda m: _jr_timestamps(
+        m, m.date_range("2024-01-07", "2024-01-21", freq="W", inclusive="neither")
+    ),
+    "date_range inclusive right periods": lambda m: _jr_timestamps(
+        m, m.date_range("2024-01-01", periods=3, freq="D", inclusive="right")
+    ),
+    # NEGATIVE: an inclusive side the range does not land on drops nothing.
+    "date_range inclusive off anchor": lambda m: _jr_timestamps(
+        m, m.date_range("2024-01-01", "2024-01-20", freq="W", inclusive="neither")
+    ),
+    "date_range end before start": lambda m: _jr_timestamps(m, m.date_range("2024-01-05", "2024-01-01", freq="W")),
+    "date_range three of four": lambda m: m.date_range("2024-01-01", "2024-01-02", periods=2, freq="D"),
+    "date_range bad inclusive": lambda m: m.date_range("2024-01-01", periods=2, inclusive="x"),
+    "date_range bad freq": lambda m: m.date_range("2024-01-01", periods=2, freq="XYZ"),
+    "bdate_range normalizes": lambda m: _jr_timestamps(m, m.bdate_range("2024-01-05 10:00", periods=3)),
+}
+
+
+def _join_reshape_outcome(m: Any, case: str) -> Any:
+    import warnings
+
+    def cell(v: Any) -> Any:
+        if hasattr(v, "item"):
+            v = v.item()
+        if isinstance(v, float):
+            return None if math.isnan(v) else round(v, 9)
+        return v
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            r = _JOIN_RESHAPE_CASES[case](m)
+        except Exception as e:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(e).__name__, str(e))
+    if hasattr(r, "columns"):
+        return (
+            "frame",
+            [str(d) for d in r.dtypes.tolist()],
+            [str(i) for i in r.index.tolist()],
+            list(r.index.names),
+            [str(c) for c in r.columns.tolist()],
+            [[cell(v) for v in r.iloc[:, j].tolist()] for j in range(r.shape[1])],
+        )
+    if hasattr(r, "index") and hasattr(r, "tolist"):
+        return (
+            "series",
+            str(r.dtype),
+            r.name,
+            [str(i) for i in r.index.tolist()],
+            list(r.index.names),
+            [cell(v) for v in r.tolist()],
+        )
+    return ("value", r)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_JOIN_RESHAPE_CASES))
+def test_join_reshape_io_and_date_range_match_pandas(case: str) -> None:
+    assert _join_reshape_outcome(fpd, case) == _join_reshape_outcome(pd, case), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_stack_and_date_range_deprecations_warn_like_pandas() -> None:
+    import warnings
+
+    def caught(call: Any) -> list[str]:
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            call()
+        return [f"{w.category.__name__}: {w.message}" for w in record]
+
+    for m in (pd, fpd):
+        frame = m.DataFrame({"a": [1.0, None]})
+        got = {
+            "stack default": caught(lambda: frame.stack()),
+            "stack dropna": caught(lambda: frame.stack(dropna=False)),
+            "stack future": caught(lambda: frame.stack(future_stack=True)),
+            "date_range M": caught(lambda: m.date_range("2024-01-15", periods=2, freq="M")),
+            "date_range 2H": caught(lambda: m.date_range("2024-01-01", periods=2, freq="2H")),
+            "date_range A-JUN": caught(lambda: m.date_range("2024-01-01", periods=2, freq="A-JUN")),
+            # NEGATIVE: the current spellings do not warn.
+            "date_range ME": caught(lambda: m.date_range("2024-01-15", periods=2, freq="ME")),
+            "date_range h": caught(lambda: m.date_range("2024-01-01", periods=2, freq="h")),
+        }
+        if m is pd:
+            want = got
+        else:
+            assert got == want
