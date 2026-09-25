@@ -12161,6 +12161,458 @@ fn generic_getattr_error(obj: &Bound<'_, PyAny>, name: &str, class: &str) -> PyR
     }
 }
 
+/// pandas' `_cython_table`: the numpy and builtin callables pandas' `agg` /
+/// `transform` run as the method of that name (`s.agg(np.mean)` is
+/// `s.agg('mean')`); None for any other callable.
+fn cython_func_name(func: &Bound<'_, PyAny>) -> PyResult<Option<&'static str>> {
+    const NUMPY: [(&str, &str); 22] = [
+        ("sum", "sum"),
+        ("nansum", "sum"),
+        ("mean", "mean"),
+        ("nanmean", "mean"),
+        ("prod", "prod"),
+        ("nanprod", "prod"),
+        ("std", "std"),
+        ("nanstd", "std"),
+        ("var", "var"),
+        ("nanvar", "var"),
+        ("median", "median"),
+        ("nanmedian", "median"),
+        ("max", "max"),
+        ("nanmax", "max"),
+        ("min", "min"),
+        ("nanmin", "min"),
+        ("all", "all"),
+        ("any", "any"),
+        ("cumprod", "cumprod"),
+        ("nancumprod", "cumprod"),
+        ("cumsum", "cumsum"),
+        ("nancumsum", "cumsum"),
+    ];
+    let py = func.py();
+    let numpy = py.import("numpy")?;
+    for (attribute, name) in NUMPY {
+        if numpy.getattr(attribute).is_ok_and(|f| func.is(&f)) {
+            return Ok(Some(name));
+        }
+    }
+    let builtins = py.import("builtins")?;
+    for name in ["sum", "max", "min"] {
+        if func.is(&builtins.getattr(name)?) {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+/// pandas' FutureWarning for a `_cython_table` callable, which runs as the
+/// method `owner.name` today.
+fn warn_cython_callable(func: &Bound<'_, PyAny>, owner: &str, name: &str) -> PyResult<()> {
+    let py = func.py();
+    let message = format!(
+        "The provided callable {} is currently using {owner}.{name}. In a future version of \
+         pandas, the provided callable will be used directly. To keep current behavior pass the \
+         string \"{name}\" instead.",
+        func.str()?
+    );
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        &std::ffi::CString::new(message)?,
+        1,
+    )
+}
+
+/// The label a function gets in a list or dict aggregation (pandas'
+/// `get_callable_name`): a string as given, a callable's `__name__` (a
+/// `functools.partial`'s function's), else its text.
+fn agg_label(func: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(name) = func.extract::<String>() {
+        return Ok(name);
+    }
+    if let Ok(name) = func.getattr("__name__").and_then(|n| n.extract::<String>()) {
+        return Ok(name);
+    }
+    if let Ok(inner) = func.getattr("func") {
+        return agg_label(&inner);
+    }
+    Ok(func.str()?.to_string())
+}
+
+/// pandas' `_managle_lambda_list` for a groupby's list of functions: with
+/// more than one function, each `<lambda>` is `<lambda_0>`, `<lambda_1>`...
+fn mangled_agg_labels(funcs: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
+    let mut lambdas = 0;
+    funcs
+        .iter()
+        .map(|func| {
+            let label = agg_label(func)?;
+            Ok(if funcs.len() > 1 && label == "<lambda>" {
+                lambdas += 1;
+                format!("<lambda_{}>", lambdas - 1)
+            } else {
+                label
+            })
+        })
+        .collect()
+}
+
+/// `results` side by side under `keys` (`concat(results, axis=1, keys=...)`):
+/// a frame with those column labels, two-level for frame results.
+fn concat_side_by_side<'py>(
+    py: Python<'py>,
+    results: Vec<Bound<'py, PyAny>>,
+    keys: Vec<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let kw = PyDict::new(py);
+    kw.set_item("axis", 1)?;
+    kw.set_item(
+        "keys",
+        Py::new(
+            py,
+            PyIndex {
+                inner: Index::new(keys.into_iter().map(IndexLabel::Utf8).collect()),
+            },
+        )?,
+    )?;
+    py.import("frankenpandas")?
+        .getattr("concat")?
+        .call((PyList::new(py, results)?,), Some(&kw))
+}
+
+/// Whether a groupby agg spec (a function, a list, a dict, a named
+/// aggregation's `(column, function)`) holds a callable anywhere.
+fn agg_spec_has_callable(spec: &Bound<'_, PyAny>) -> bool {
+    if spec.extract::<String>().is_ok() {
+        return false;
+    }
+    if let Ok(mapping) = spec.cast::<PyDict>() {
+        return mapping
+            .values()
+            .iter()
+            .any(|value| agg_spec_has_callable(&value));
+    }
+    if spec.is_instance_of::<PyList>() || spec.is_instance_of::<PyTuple>() {
+        return spec.try_iter().is_ok_and(|mut items| {
+            items.any(|item| item.is_ok_and(|item| agg_spec_has_callable(&item)))
+        });
+    }
+    spec.is_callable()
+}
+
+/// `spec` with each `_cython_table` callable as its name (warning as pandas
+/// does, naming `owner`'s method); None when a callable has no name and has
+/// to run per group.
+fn named_agg_spec<'py>(
+    spec: &Bound<'py, PyAny>,
+    owner: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = spec.py();
+    if spec.extract::<String>().is_ok() {
+        return Ok(Some(spec.clone()));
+    }
+    if let Ok(mapping) = spec.cast::<PyDict>() {
+        let out = PyDict::new(py);
+        for (key, value) in mapping.iter() {
+            let Some(value) = named_agg_spec(&value, owner)? else {
+                return Ok(None);
+            };
+            out.set_item(key, value)?;
+        }
+        return Ok(Some(out.into_any()));
+    }
+    if spec.is_instance_of::<PyList>() || spec.is_instance_of::<PyTuple>() {
+        let mut items = Vec::new();
+        for item in spec.try_iter()? {
+            let Some(item) = named_agg_spec(&item?, owner)? else {
+                return Ok(None);
+            };
+            items.push(item);
+        }
+        return Ok(Some(if spec.is_instance_of::<PyTuple>() {
+            PyTuple::new(py, items)?.into_any()
+        } else {
+            PyList::new(py, items)?.into_any()
+        }));
+    }
+    if spec.is_callable() {
+        return match cython_func_name(spec)? {
+            Some(name) => {
+                warn_cython_callable(spec, owner, name)?;
+                Ok(Some(pyo3::types::PyString::new(py, name).into_any()))
+            }
+            None => Ok(None),
+        };
+    }
+    Ok(Some(spec.clone()))
+}
+
+/// One window of `Rolling.apply` / `Expanding.apply` as pandas hands it to
+/// the function: a Series under the window's labels (`raw=False`), or a
+/// numpy array (`raw=True`). It was a Python list, so `x.max()` raised and
+/// raw=True was refused (fvsao.7).
+fn window_arg<'py>(
+    py: Python<'py>,
+    values: &[Scalar],
+    labels: &[IndexLabel],
+    name: &str,
+    raw: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    if raw {
+        let column = Column::from_values(values.to_vec()).map_err(column_error_to_py)?;
+        return column_ndarray(py, &column);
+    }
+    let window =
+        Series::from_values(name, labels.to_vec(), values.to_vec()).map_err(frame_error_to_py)?;
+    PySeries { inner: window }.into_bound_py_any(py)
+}
+
+/// Whether `value` is a Series or DataFrame (not a scalar result).
+fn is_pandas_object(value: &Bound<'_, PyAny>) -> bool {
+    value.is_instance_of::<PySeries>() || value.is_instance_of::<PyDataFrame>()
+}
+
+/// `Series.agg(func, axis, *args, **kwargs)`, as pandas' `SeriesApply.agg`:
+/// a name is that reduction (any other method name is that method); a
+/// `_cython_table` callable is its name; any other callable is tried
+/// elementwise first and else called on the Series (pandas' deprecated
+/// rule); a list gives one value per function, labelled by
+/// [`agg_label`], a dict one per key. Callables, lists of them and dicts
+/// raised (fvsao.7).
+fn series_agg<'py>(
+    this: &Bound<'py, PySeries>,
+    func: &Bound<'py, PyAny>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = this.py();
+    let plain = args.is_empty() && kwargs.is_none_or(|kwargs| kwargs.is_empty());
+    if let Ok(name) = func.extract::<String>() {
+        if plain && let Some(result) = this.borrow().agg_name(py, &name)? {
+            return Ok(result.into_bound(py));
+        }
+        return match this.getattr(name.as_str()) {
+            Ok(method) if method.is_callable() => method.call(args, kwargs),
+            Ok(value) => Ok(value),
+            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                format!("'{name}' is not a valid function for 'Series' object"),
+            )),
+        };
+    }
+    let (labels, funcs): (Vec<String>, Vec<Bound<'py, PyAny>>) = if let Ok(mapping) =
+        func.cast::<PyDict>()
+    {
+        let labels = mapping
+            .keys()
+            .iter()
+            .map(|key| key.str().map(|key| key.to_string()))
+            .collect::<PyResult<_>>()?;
+        (labels, mapping.values().iter().collect())
+    } else if func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>() {
+        let funcs: Vec<_> = func.try_iter()?.collect::<PyResult<_>>()?;
+        let labels = funcs.iter().map(agg_label).collect::<PyResult<_>>()?;
+        (labels, funcs)
+    } else if func.is_callable() {
+        if plain && let Some(name) = cython_func_name(func)? {
+            warn_cython_callable(func, "Series", name)?;
+            return series_agg(
+                this,
+                pyo3::types::PyString::new(py, name).as_any(),
+                args,
+                kwargs,
+            );
+        }
+        let apply_kwargs = kwargs.map_or_else(|| Ok(PyDict::new(py)), |kwargs| kwargs.copy())?;
+        if !args.is_empty() {
+            apply_kwargs.set_item("args", args)?;
+        }
+        return match this.call_method("apply", (func,), Some(&apply_kwargs)) {
+            Ok(result) => {
+                let message = format!(
+                    "using {} in Series.agg cannot aggregate and has been deprecated. Use \
+                         Series.transform to keep behavior unchanged.",
+                    func.str()?
+                );
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                    &std::ffi::CString::new(message)?,
+                    1,
+                )?;
+                Ok(result)
+            }
+            Err(err)
+                if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+                    || err.is_instance_of::<pyo3::exceptions::PyAttributeError>(py)
+                    || err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) =>
+            {
+                func.call(prepend_arg(this.clone().into_any(), Some(args))?, kwargs)
+            }
+            Err(err) => Err(err),
+        };
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "'{}' object is not callable",
+            func.get_type().name()?
+        )));
+    };
+    let results = funcs
+        .iter()
+        .map(|func| series_agg(this, func, args, kwargs))
+        .collect::<PyResult<Vec<_>>>()?;
+    if results.iter().any(is_pandas_object) {
+        return concat_side_by_side(py, results, labels);
+    }
+    let index = PyIndex {
+        inner: Index::new(labels.into_iter().map(IndexLabel::Utf8).collect()),
+    };
+    let kw = PyDict::new(py);
+    kw.set_item("index", Py::new(py, index)?)?;
+    kw.set_item("name", this.getattr("name")?)?;
+    py.get_type::<PySeries>()
+        .call((PyList::new(py, results)?,), Some(&kw))
+}
+
+/// `DataFrame.agg(func, axis, *args, **kwargs)`, as pandas' `FrameApply.agg`:
+/// a name is that method (`axis` passed on); a `_cython_table` callable is
+/// its name; any other callable runs on each column (a Series of scalars,
+/// or a frame when it returns Series); a list runs every function on every
+/// column (a frame, one row per function); a dict runs its functions on
+/// its columns in its order (a Series, or a frame when any value is a
+/// list). axis=1 works on the transpose. Lists of names, callables and
+/// dicts with single functions raised; a dict lost its order (fvsao.7).
+fn frame_agg<'py>(
+    this: &Bound<'py, PyDataFrame>,
+    func: &Bound<'py, PyAny>,
+    axis: usize,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = this.py();
+    let plain = args.is_empty() && kwargs.is_none_or(|kwargs| kwargs.is_empty());
+    if let Ok(name) = func.extract::<String>() {
+        let method = this.getattr(name.as_str()).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(format!(
+                "'{name}' is not a valid function for 'DataFrame' object"
+            ))
+        })?;
+        if !method.is_callable() {
+            return Ok(method);
+        }
+        let method_kwargs = kwargs.map_or_else(|| Ok(PyDict::new(py)), |kwargs| kwargs.copy())?;
+        if axis == 1 {
+            method_kwargs.set_item("axis", 1)?;
+        }
+        return method.call(args, Some(&method_kwargs));
+    }
+    if func.is_callable()
+        && plain
+        && let Some(name) = cython_func_name(func)?
+    {
+        warn_cython_callable(func, "DataFrame", name)?;
+        return frame_agg(
+            this,
+            pyo3::types::PyString::new(py, name).as_any(),
+            axis,
+            args,
+            kwargs,
+        );
+    }
+    if axis == 1 {
+        let transposed = Bound::new(py, this.borrow().transposed()?)?;
+        let result = frame_agg(&transposed, func, 0, args, kwargs)?;
+        return if result.is_instance_of::<PyDataFrame>() {
+            result.call_method0("transpose")
+        } else {
+            Ok(result)
+        };
+    }
+    let side_by_side =
+        |results: Vec<Bound<'py, PyAny>>, keys: Vec<String>| concat_side_by_side(py, results, keys);
+    let series_of = |values: Vec<Bound<'py, PyAny>>, labels: Vec<String>| {
+        let kw = PyDict::new(py);
+        kw.set_item(
+            "index",
+            Py::new(
+                py,
+                PyIndex {
+                    inner: Index::new(labels.into_iter().map(IndexLabel::Utf8).collect()),
+                },
+            )?,
+        )?;
+        py.get_type::<PySeries>()
+            .call((PyList::new(py, values)?,), Some(&kw))
+    };
+    let (width, names) = {
+        let frame = this.borrow();
+        let width = frame.inner.shape().1;
+        let names: Vec<String> = (0..width)
+            .filter_map(|position| frame.inner.column_name_at(position))
+            .collect();
+        (width, names)
+    };
+    let column = |position: usize| -> PyResult<Bound<'py, PySeries>> {
+        Bound::new(py, this.borrow().column_series_at(position)?)
+    };
+    if let Ok(mapping) = func.cast::<PyDict>() {
+        let mut labels = Vec::with_capacity(mapping.len());
+        let mut results = Vec::with_capacity(mapping.len());
+        let listed = mapping.values().iter().any(|f| {
+            f.is_instance_of::<PyList>()
+                || f.is_instance_of::<PyTuple>()
+                || f.is_instance_of::<PyDict>()
+        });
+        let missing: Vec<String> = mapping
+            .keys()
+            .iter()
+            .filter_map(|key| key.extract::<String>().ok())
+            .filter(|key| !names.contains(key))
+            .collect();
+        if !missing.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Column(s) {missing:?} do not exist"
+            )));
+        }
+        for (key, f) in mapping.iter() {
+            let label = key.str()?.to_string();
+            let target = this.as_any().get_item(&key)?;
+            let target = target.cast::<PySeries>()?;
+            let mut result = series_agg(target, &f, args, kwargs)?;
+            if listed && !is_pandas_object(&result) {
+                result = series_of(vec![result], vec![agg_label(&f)?])?;
+            }
+            labels.push(label);
+            results.push(result);
+        }
+        return if listed {
+            side_by_side(results, labels)
+        } else {
+            series_of(results, labels)
+        };
+    }
+    let listed = func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>();
+    if !listed && !func.is_callable() {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "'{}' object is not callable",
+            func.get_type().name()?
+        )));
+    }
+    let mut results = Vec::with_capacity(width);
+    for position in 0..width {
+        let target = column(position)?;
+        results.push(if listed {
+            series_agg(&target, func, args, kwargs)?
+        } else {
+            func.call(prepend_arg(target.into_any(), Some(args))?, kwargs)?
+        });
+    }
+    if listed || results.iter().any(is_pandas_object) {
+        side_by_side(results, names)
+    } else {
+        series_of(results, names)
+    }
+}
+
 /// The operator pandas' `maybe_dispatch_ufunc_to_dunder_op` sends a ufunc
 /// to, forward and reflected (`np.less(x, s)` is `s > x`).
 fn ufunc_dunder(name: &str) -> Option<(&'static str, &'static str)> {
@@ -12931,6 +13383,42 @@ impl PySeries {
             )));
         }
         numpy_compat_kwargs(name, kwargs)
+    }
+
+    /// The reductions `agg` runs by name; None for any other name (which
+    /// [`series_agg`] reads as a method name).
+    fn agg_name(&self, py: Python<'_>, name: &str) -> PyResult<Option<Py<PyAny>>> {
+        let scalar = |value: PyResult<Py<PyAny>>| value.map(Some);
+        match name {
+            "sum" => scalar(self.sum(None, true, false, 0, None)),
+            "mean" => scalar(self.mean(None, true, false, None)),
+            "min" => scalar(self.min(None, true, false, None)),
+            "max" => scalar(self.max(None, true, false, None)),
+            "std" => scalar(self.std(None, true, None, false, None)),
+            "var" => scalar(self.var(None, true, None, false, None)),
+            "count" => Ok(Some(self.count().into_pyobject(py)?.into_any().unbind())),
+            "median" => scalar(self.median(None, true, false, None)),
+            "prod" | "product" => scalar(self.prod(None, true, false, None, None)),
+            "sem" => Ok(Some(
+                self.sem(None, true, None, false)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
+            )),
+            "skew" => Ok(Some(
+                self.skew(None, true, false)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
+            )),
+            "kurt" | "kurtosis" => Ok(Some(
+                self.kurt(None, true, false)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
+            )),
+            _ => Ok(None),
+        }
     }
 
     /// `self <op> other` for the logical operators (see [`series_logical`]).
@@ -16152,50 +16640,30 @@ impl PySeries {
         self.bfill(axis, inplace, limit, downcast, None)
     }
 
-    fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(name) = func.extract::<String>() {
-            match name.as_str() {
-                "sum" => self.sum(None, true, false, 0, None),
-                "mean" => self.mean(None, true, false, None),
-                "min" => self.min(None, true, false, None),
-                "max" => self.max(None, true, false, None),
-                "std" => self.std(None, true, None, false, None),
-                "var" => self.var(None, true, None, false, None),
-                "count" => Ok(self.count().into_pyobject(py)?.into_any().unbind()),
-                "median" => self.median(None, true, false, None),
-                "prod" | "product" => self.prod(None, true, false, None, None),
-                "sem" => Ok(self
-                    .sem(None, true, None, false)?
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind()),
-                "skew" => Ok(self
-                    .skew(None, true, false)?
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind()),
-                "kurt" | "kurtosis" => Ok(self
-                    .kurt(None, true, false)?
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind()),
-                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unsupported agg function '{other}'"
-                ))),
-            }
-        } else if let Ok(list) = func.extract::<Vec<String>>() {
-            let refs: Vec<&str> = list.iter().map(String::as_str).collect();
-            let res = self.inner.agg(&refs).map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PySeries { inner: res })?.into_any())
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "func must be a string or list of strings",
-            ))
-        }
+    /// pandas' `Series.agg(func, axis=0, *args, **kwargs)` (see
+    /// [`series_agg`]).
+    #[pyo3(signature = (func, axis=None, *args, **kwargs))]
+    fn agg<'py>(
+        slf: &Bound<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Option<&Bound<'py, PyAny>>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        check_series_axis(axis)?;
+        series_agg(slf, func, args, kwargs)
     }
 
-    fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.agg(py, func)
+    #[pyo3(signature = (func, axis=None, *args, **kwargs))]
+    fn aggregate<'py>(
+        slf: &Bound<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Option<&Bound<'py, PyAny>>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        check_series_axis(axis)?;
+        series_agg(slf, func, args, kwargs)
     }
 
     /// pandas' `Series.repeat(repeats, axis=None)`; `np.repeat(s, 2)` passes
@@ -25126,127 +25594,30 @@ impl PyDataFrame {
         self.bfill(axis, inplace, limit, downcast, None)
     }
 
-    fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(name) = func.extract::<String>() {
-            match name.as_str() {
-                "sum" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .sum_internal(0, true, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "mean" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .mean_internal(0, true, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "min" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .min_internal(0, true, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "max" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .max_internal(0, true, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "std" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .std_internal(0, true, 1, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "var" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .var_internal(0, true, 1, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "count" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self.count_internal(0, false).map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "median" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .median_internal(0, true, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "prod" | "product" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .prod_internal(0, true, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "sem" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self
-                            .sem_internal(0, true, 1, false)
-                            .map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "skew" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self.skew_internal(0, false).map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                "kurt" | "kurtosis" => Ok(Py::new(
-                    py,
-                    PySeries {
-                        inner: self.kurt_internal(0, false).map_err(frame_error_to_py)?,
-                    },
-                )?
-                .into_any()),
-                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unsupported agg function '{other}'"
-                ))),
-            }
-        } else if let Ok(dict) = func.extract::<std::collections::HashMap<String, Vec<String>>>() {
-            let res = self.inner.agg(&dict).map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "func must be a string or dict of column -> list of functions",
-            ))
-        }
+    /// pandas' `DataFrame.agg(func, axis=0, *args, **kwargs)` (see
+    /// [`frame_agg`]).
+    #[pyo3(signature = (func, axis=None, *args, **kwargs))]
+    fn agg<'py>(
+        slf: &Bound<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Option<&Bound<'py, PyAny>>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        frame_agg(slf, func, axis, args, kwargs)
     }
 
-    fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.agg(py, func)
+    #[pyo3(signature = (func, axis=None, *args, **kwargs))]
+    fn aggregate<'py>(
+        slf: &Bound<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Option<&Bound<'py, PyAny>>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        frame_agg(slf, func, axis, args, kwargs)
     }
 
     #[pyo3(signature = (index=true))]
@@ -30629,7 +31000,19 @@ impl PyRolling {
         )
     }
 
+    /// pandas' `Rolling.agg`: a name (or a list of them) is that
+    /// aggregation, a `_cython_table` callable its name, any other callable
+    /// `apply(func, raw=False)`; callables raised (fvsao.7).
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if agg_spec_has_callable(func) {
+            return match named_agg_spec(func, "Rolling")? {
+                Some(named) => self.agg(py, &named),
+                None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
+                None => Err(not_implemented(
+                    "Rolling.agg with a list holding a callable pandas runs per window",
+                )),
+            };
+        }
         if let Ok(func_name) = func.extract::<String>() {
             match func_name.as_str() {
                 "sum" => self.sum(py),
@@ -30695,13 +31078,12 @@ impl PyRolling {
         args: Option<&Bound<'_, PyTuple>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        // func receives each window as a list, and args/kwargs are passed
-        // through; raw=True (ndarrays) and the numba engine are not
-        // supported yet.
+        // func receives each window as pandas hands it (see `window_arg`:
+        // a Series, or an ndarray with raw=True), and args/kwargs are passed
+        // through; the numba engine is not supported.
         unsupported_params(
             "apply",
             &[
-                ("raw", !raw),
                 ("engine", matches!(engine, None | Some("cython"))),
                 ("engine_kwargs", engine_kwargs.is_none()),
             ],
@@ -30722,12 +31104,9 @@ impl PyRolling {
                     if slice.len() < min_p {
                         out_vals.push(Scalar::Float64(f64::NAN));
                     } else {
-                        let py_slice: Vec<Py<PyAny>> = slice
-                            .iter()
-                            .map(|v| scalar_to_py(py, v))
-                            .collect::<Result<_, _>>()?;
-                        let arg = PyList::new(py, py_slice)?;
-                        let res = call_window_func(func, arg.into_any(), args, kwargs)?;
+                        let labels = &s.index().labels()[start..=i];
+                        let arg = window_arg(py, slice, labels, s.name(), raw)?;
+                        let res = call_window_func(func, arg, args, kwargs)?;
                         let res_scalar = py_to_scalar(py, &res)?;
                         out_vals.push(res_scalar);
                     }
@@ -30766,12 +31145,9 @@ impl PyRolling {
                         if slice.len() < min_p {
                             out_vals.push(Scalar::Float64(f64::NAN));
                         } else {
-                            let py_slice: Vec<Py<PyAny>> = slice
-                                .iter()
-                                .map(|v| scalar_to_py(py, v))
-                                .collect::<Result<_, _>>()?;
-                            let arg = PyList::new(py, py_slice)?;
-                            let res = call_window_func(func, arg.into_any(), args, kwargs)?;
+                            let labels = &df.index().labels()[start..=i];
+                            let arg = window_arg(py, slice, labels, col_name, raw)?;
+                            let res = call_window_func(func, arg, args, kwargs)?;
                             let res_scalar = py_to_scalar(py, &res)?;
                             out_vals.push(res_scalar);
                         }
@@ -31130,7 +31506,18 @@ impl PyExpanding {
         )
     }
 
+    /// pandas' `Expanding.agg`: as [`PyRolling::agg`] (callables raised;
+    /// fvsao.7).
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if agg_spec_has_callable(func) {
+            return match named_agg_spec(func, "Expanding")? {
+                Some(named) => self.agg(py, &named),
+                None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
+                None => Err(not_implemented(
+                    "Expanding.agg with a list holding a callable pandas runs per window",
+                )),
+            };
+        }
         if let Ok(func_name) = func.extract::<String>() {
             match func_name.as_str() {
                 "sum" => self.sum(py),
@@ -31196,13 +31583,12 @@ impl PyExpanding {
         args: Option<&Bound<'_, PyTuple>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        // func receives each window as a list, and args/kwargs are passed
-        // through; raw=True (ndarrays) and the numba engine are not
-        // supported yet.
+        // func receives each window as pandas hands it (see `window_arg`:
+        // a Series, or an ndarray with raw=True), and args/kwargs are passed
+        // through; the numba engine is not supported.
         unsupported_params(
             "apply",
             &[
-                ("raw", !raw),
                 ("engine", matches!(engine, None | Some("cython"))),
                 ("engine_kwargs", engine_kwargs.is_none()),
             ],
@@ -31221,12 +31607,9 @@ impl PyExpanding {
                     if slice.len() < min_p {
                         out_vals.push(Scalar::Float64(f64::NAN));
                     } else {
-                        let py_slice: Vec<Py<PyAny>> = slice
-                            .iter()
-                            .map(|v| scalar_to_py(py, v))
-                            .collect::<Result<_, _>>()?;
-                        let arg = PyList::new(py, py_slice)?;
-                        let res = call_window_func(func, arg.into_any(), args, kwargs)?;
+                        let labels = &s.index().labels()[0..=i];
+                        let arg = window_arg(py, slice, labels, s.name(), raw)?;
+                        let res = call_window_func(func, arg, args, kwargs)?;
                         let res_scalar = py_to_scalar(py, &res)?;
                         out_vals.push(res_scalar);
                     }
@@ -31263,12 +31646,9 @@ impl PyExpanding {
                         if slice.len() < min_p {
                             out_vals.push(Scalar::Float64(f64::NAN));
                         } else {
-                            let py_slice: Vec<Py<PyAny>> = slice
-                                .iter()
-                                .map(|v| scalar_to_py(py, v))
-                                .collect::<Result<_, _>>()?;
-                            let arg = PyList::new(py, py_slice)?;
-                            let res = call_window_func(func, arg.into_any(), args, kwargs)?;
+                            let labels = &df.index().labels()[0..=i];
+                            let arg = window_arg(py, slice, labels, col_name, raw)?;
+                            let res = call_window_func(func, arg, args, kwargs)?;
                             let res_scalar = py_to_scalar(py, &res)?;
                             out_vals.push(res_scalar);
                         }
@@ -31429,7 +31809,14 @@ impl PyExponentialMovingWindow {
         )
     }
 
+    /// pandas' `ExponentialMovingWindow.agg`: a name (or a list of them), a
+    /// `_cython_table` callable as its name (callables raised; fvsao.7).
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if agg_spec_has_callable(func)
+            && let Some(named) = named_agg_spec(func, "ExponentialMovingWindow")?
+        {
+            return self.agg(py, &named);
+        }
         if let Ok(func_name) = func.extract::<String>() {
             match func_name.as_str() {
                 "mean" => self.mean(py),
@@ -31896,6 +32283,74 @@ impl PyGroupBy {
     }
 
     /// One column grouped by this groupby's key: pandas' `gb["col"]` / `gb.col`.
+    /// `agg` with a callable pandas runs per group (a lambda): column by
+    /// column through [`series_groupby_agg`], put side by side as pandas
+    /// does - a callable or a list over every value column, a dict over its
+    /// columns (a list anywhere gives the two-level (column, function) axis),
+    /// or named aggregation `out=(column, function)`.
+    fn agg_per_group<'py>(
+        &self,
+        py: Python<'py>,
+        func: Option<&Bound<'py, PyAny>>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let per_column = |column: &str, spec: &Bound<'py, PyAny>| {
+            let grouped = Bound::new(py, self.column_groupby(column)?)?;
+            series_groupby_agg(&grouped, Some(spec), args, None)
+        };
+        let mut keys = Vec::new();
+        let mut results = Vec::new();
+        match func {
+            None => {
+                for (out, spec) in kwargs.into_iter().flat_map(|named| named.iter()) {
+                    let (column, spec): (String, Bound<'py, PyAny>) =
+                        spec.extract().map_err(|_| {
+                            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "Must provide 'func' or tuples of '(column, aggfunc).",
+                            )
+                        })?;
+                    results.push(per_column(&column, &spec)?);
+                    keys.push(out.extract::<String>()?);
+                }
+            }
+            Some(spec) => {
+                if let Ok(mapping) = spec.cast::<PyDict>() {
+                    let listed = mapping.values().iter().any(|value| {
+                        value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>()
+                    });
+                    for (column, value) in mapping.iter() {
+                        let column: String = column.extract()?;
+                        if self.df.column(&column).is_none() {
+                            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                                "Column(s) ['{column}'] do not exist"
+                            )));
+                        }
+                        let mut result = per_column(&column, &value)?;
+                        if listed && result.is_instance_of::<PySeries>() {
+                            result = result.call_method1("to_frame", (agg_label(&value)?,))?;
+                        }
+                        results.push(result);
+                        keys.push(column);
+                    }
+                } else {
+                    for column in self.df.column_names() {
+                        if !self.by.contains(column) {
+                            results.push(per_column(column, spec)?);
+                            keys.push(column.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let frame = concat_side_by_side(py, results, keys)?;
+        Ok(if self.as_index {
+            frame.unbind()
+        } else {
+            frame.call_method0("reset_index")?.unbind()
+        })
+    }
+
     fn column_groupby(&self, name: &str) -> PyResult<PySeriesGroupBy> {
         let column = |col: &str| -> PyResult<Series> {
             let values = self.df.column(col).ok_or_else(|| {
@@ -32390,6 +32845,29 @@ impl PyGroupBy {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        // Callables (fvsao.7): a `_cython_table` one runs as its name, as
+        // pandas'; any other (a lambda) runs per group, column by column.
+        let given = func.filter(|f| !f.is_none());
+        let renamed_func = match given {
+            Some(spec) if agg_spec_has_callable(spec) => {
+                match named_agg_spec(spec, "DataFrameGroupBy")? {
+                    Some(named) => Some(named),
+                    None => return self.agg_per_group(py, given, args, kwargs),
+                }
+            }
+            _ => None,
+        };
+        let renamed_kwargs = match (given, kwargs.filter(|k| !k.is_empty())) {
+            (None, Some(named)) if agg_spec_has_callable(named.as_any()) => {
+                match named_agg_spec(named.as_any(), "DataFrameGroupBy")? {
+                    Some(renamed) => Some(renamed.cast_into::<PyDict>()?),
+                    None => return self.agg_per_group(py, None, args, kwargs),
+                }
+            }
+            _ => None,
+        };
+        let func = renamed_func.as_ref().or(func);
+        let kwargs = renamed_kwargs.as_ref().or(kwargs);
         let named = kwargs.filter(|k| !k.is_empty());
         if !args.is_empty() || (func.is_some() && named.is_some()) {
             return Err(not_implemented(
@@ -33203,6 +33681,121 @@ impl PySeriesGroupBy {
             }
         })
     }
+
+    /// The aggregations `agg` runs by name; None for any other name (which
+    /// [`series_groupby_agg`] reads as a method name).
+    fn agg_name(&self, py: Python<'_>, name: &str) -> PyResult<Option<Py<PyAny>>> {
+        Ok(Some(match name {
+            "sum" => self.sum(false, 0, None, None)?,
+            "mean" => self.mean(false, None, None)?,
+            "min" => self.min(false, -1, None, None)?,
+            "max" => self.max(false, -1, None, None)?,
+            "std" => self.std(1, None, None, false)?,
+            "var" => self.var(1, None, None, false)?,
+            "sem" => self.sem(1, false)?,
+            "count" => self.count()?,
+            "first" => self.first(false, -1, true)?,
+            "last" => self.last(false, -1, true)?,
+            "median" => self.median(false)?,
+            "prod" => self.prod(false, 0)?,
+            "size" => self.size()?,
+            "nunique" => self.nunique()?,
+            "any" => self.any()?,
+            "all" => self.all()?,
+            "cumsum" => Py::new(py, self.cumsum()?)?.into_any(),
+            "cumprod" => Py::new(py, self.cumprod()?)?.into_any(),
+            "cummin" => Py::new(py, self.cummin()?)?.into_any(),
+            "cummax" => Py::new(py, self.cummax()?)?.into_any(),
+            _ => return Ok(None),
+        }))
+    }
+
+    /// `agg` of a list of function names: a frame, one column per name.
+    fn agg_names(&self, py: Python<'_>, names: &[String]) -> PyResult<Py<PyAny>> {
+        self.single_key("agg with a list of functions")?;
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let df = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .agg(&refs)
+            .map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
+    }
+}
+
+/// `SeriesGroupBy.agg(func=None, *args, **kwargs)`, as pandas': a name is
+/// that aggregation (any other method name is that method); a
+/// `_cython_table` callable is its name; any other callable runs on each
+/// group; a list gives a frame, one column per function (a lambda labelled
+/// `<lambda_0>`... when there are several functions); named aggregation
+/// (`agg(total='sum', avg=np.mean)`) a frame, one column per keyword; a dict
+/// is pandas' SpecificationError. Callables, lists holding them and named
+/// aggregation raised (fvsao.7).
+fn series_groupby_agg<'py>(
+    this: &Bound<'py, PySeriesGroupBy>,
+    func: Option<&Bound<'py, PyAny>>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = this.py();
+    let concat_keyed =
+        |results: Vec<Bound<'py, PyAny>>, keys: Vec<String>| concat_side_by_side(py, results, keys);
+    let Some(func) = func.filter(|func| !func.is_none()) else {
+        let Some(named) = kwargs.filter(|kwargs| !kwargs.is_empty()) else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Must provide 'func' or named aggregation **kwargs.",
+            ));
+        };
+        let mut keys = Vec::with_capacity(named.len());
+        let mut results = Vec::with_capacity(named.len());
+        for (key, spec) in named.iter() {
+            keys.push(key.extract::<String>()?);
+            results.push(series_groupby_agg(this, Some(&spec), args, None)?);
+        }
+        return concat_keyed(results, keys);
+    };
+    let plain = args.is_empty() && kwargs.is_none_or(|kwargs| kwargs.is_empty());
+    if let Ok(name) = func.extract::<String>() {
+        if plain && let Some(result) = this.borrow().agg_name(py, &name)? {
+            return Ok(result.into_bound(py));
+        }
+        return match this.getattr(name.as_str()) {
+            Ok(method) if method.is_callable() => method.call(args, kwargs),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                format!("'{name}' is not a valid function for 'SeriesGroupBy' object"),
+            )),
+        };
+    }
+    if func.is_instance_of::<PyDict>() {
+        return Err(PyErr::new::<SpecificationError, _>(
+            "nested renamer is not supported",
+        ));
+    }
+    if func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>() {
+        let funcs: Vec<Bound<'py, PyAny>> = func.try_iter()?.collect::<PyResult<_>>()?;
+        if plain && let Ok(names) = func.extract::<Vec<String>>() {
+            return Ok(this.borrow().agg_names(py, &names)?.into_bound(py));
+        }
+        let labels = mangled_agg_labels(&funcs)?;
+        let results = funcs
+            .iter()
+            .map(|func| series_groupby_agg(this, Some(func), args, kwargs))
+            .collect::<PyResult<Vec<_>>>()?;
+        return concat_keyed(results, labels);
+    }
+    if plain && let Some(name) = cython_func_name(func)? {
+        warn_cython_callable(func, "SeriesGroupBy", name)?;
+        return series_groupby_agg(
+            this,
+            Some(pyo3::types::PyString::new(py, name).as_any()),
+            args,
+            kwargs,
+        );
+    }
+    let mut apply_args = vec![func.clone()];
+    apply_args.extend(args.iter());
+    this.call_method("apply", PyTuple::new(py, apply_args)?, kwargs)
 }
 
 #[pymethods]
@@ -33618,54 +34211,26 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(name) = func.extract::<String>() {
-            let res = match name.as_str() {
-                "sum" => self.sum(false, 0, None, None)?,
-                "mean" => self.mean(false, None, None)?,
-                "min" => self.min(false, -1, None, None)?,
-                "max" => self.max(false, -1, None, None)?,
-                "std" => self.std(1, None, None, false)?,
-                "var" => self.var(1, None, None, false)?,
-                "sem" => self.sem(1, false)?,
-                "count" => self.count()?,
-                "first" => self.first(false, -1, true)?,
-                "last" => self.last(false, -1, true)?,
-                "median" => self.median(false)?,
-                "prod" => self.prod(false, 0)?,
-                "size" => self.size()?,
-                "nunique" => self.nunique()?,
-                "any" => self.any()?,
-                "all" => self.all()?,
-                "cumsum" => Py::new(py, self.cumsum()?)?.into_any(),
-                "cumprod" => Py::new(py, self.cumprod()?)?.into_any(),
-                "cummin" => Py::new(py, self.cummin()?)?.into_any(),
-                "cummax" => Py::new(py, self.cummax()?)?.into_any(),
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "unsupported aggregation '{name}'"
-                    )));
-                }
-            };
-            return Ok(res);
-        } else if let Ok(list) = func.extract::<Vec<String>>() {
-            self.single_key("agg with a list of functions")?;
-            let refs: Vec<&str> = list.iter().map(String::as_str).collect();
-            let df = self
-                .series
-                .groupby(&self.by)
-                .map_err(frame_error_to_py)?
-                .agg(&refs)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "agg expects a string or list of function names",
-        ))
+    /// pandas' `SeriesGroupBy.agg(func=None, *args, **kwargs)` (see
+    /// [`series_groupby_agg`]).
+    #[pyo3(signature = (func=None, *args, **kwargs))]
+    fn agg<'py>(
+        slf: &Bound<'py, Self>,
+        func: Option<&Bound<'py, PyAny>>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        series_groupby_agg(slf, func, args, kwargs)
     }
 
-    fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.agg(py, func)
+    #[pyo3(signature = (func=None, *args, **kwargs))]
+    fn aggregate<'py>(
+        slf: &Bound<'py, Self>,
+        func: Option<&Bound<'py, PyAny>>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        series_groupby_agg(slf, func, args, kwargs)
     }
 
     #[pyo3(signature = (n=5))]
@@ -33798,9 +34363,14 @@ impl PySeriesGroupBy {
             let combined = concat_series(&refs).map_err(frame_error_to_py)?;
             Ok(Py::new(py, PySeries { inner: combined })?.into_any())
         } else if !out_scalars.is_empty() {
+            // Named after the Series, indexed by the key's name, as pandas'
+            // (it was unnamed; fvsao.7).
             let labels: Vec<IndexLabel> = out_scalars.iter().map(|(lbl, _)| lbl.clone()).collect();
             let values: Vec<Scalar> = out_scalars.into_iter().map(|(_, v)| v).collect();
-            let s = Series::from_values("", labels, values).map_err(frame_error_to_py)?;
+            let key_name = self.by.name();
+            let index = Index::new(labels).set_names((!key_name.is_empty()).then_some(key_name));
+            let column = Column::from_values(values).map_err(column_error_to_py)?;
+            let s = Series::new(self.series.name(), index, column).map_err(frame_error_to_py)?;
             Ok(Py::new(py, PySeries { inner: s })?.into_any())
         } else {
             let first = gb.first().map_err(frame_error_to_py)?;
@@ -34218,7 +34788,50 @@ impl PySeriesGroupBy {
             let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
-        self.apply(py, func, args, kwargs)
+        let plain = args.is_empty() && kwargs.is_none_or(|k| k.is_empty());
+        if plain && let Some(name) = cython_func_name(func)? {
+            warn_cython_callable(func, "SeriesGroupBy", name)?;
+            let res = gb.transform(name).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        // Any other callable runs on each group, as pandas': a scalar result
+        // fills the group's rows, a Series result goes back onto them, rows of
+        // a dropped group stay NaN. It went through apply, which returned the
+        // per-group aggregate for np.mean / a scalar lambda, and Series
+        // results in group order, not row order (fvsao.7).
+        let mut values = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+        let groups = gb.groups();
+        let mut keys: Vec<&IndexLabel> = groups.keys().collect();
+        keys.sort();
+        for key in keys {
+            let positions = &groups[key];
+            let at: Vec<i64> = positions
+                .iter()
+                .map(|&position| i64::try_from(position).unwrap_or(i64::MAX))
+                .collect();
+            let group = self.series.take(&at).map_err(frame_error_to_py)?;
+            let group = PySeries { inner: group }.into_bound_py_any(py)?;
+            let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
+            if let Ok(series) = result.extract::<PyRef<'_, PySeries>>() {
+                if series.inner.len() != positions.len() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "transform must return a scalar value for each group",
+                    ));
+                }
+                for (&position, value) in positions.iter().zip(series.inner.column().values()) {
+                    values[position] = value.clone();
+                }
+            } else {
+                let scalar = py_to_scalar(py, &result)?;
+                for &position in positions {
+                    values[position] = scalar.clone();
+                }
+            }
+        }
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        let res = Series::new(self.series.name(), self.series.index().clone(), column)
+            .map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PySeries { inner: res })?.into_any())
     }
 
     fn unique(&self) -> PyResult<PySeries> {
@@ -34251,6 +34864,32 @@ pub struct PyResampler {
 }
 
 impl PyResampler {
+    /// The aggregation `agg` / `apply` run by name.
+    fn agg_name(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        match name {
+            "sum" => self.sum(py, false),
+            "mean" => self.mean(py, false),
+            "min" => self.min(py, false),
+            "max" => self.max(py, false),
+            "count" => self.count(py),
+            "first" => self.first(py, false),
+            "last" => self.last(py, false),
+            "std" => self.std(py, false),
+            "var" => self.var(py, false),
+            "median" => self.median(py, false),
+            "prod" => self.prod(py, false),
+            "size" => self.size(py),
+            "ohlc" => self.ohlc(py),
+            "sem" => self.sem(py, false),
+            "skew" => self.skew(py),
+            "kurt" | "kurtosis" => self.kurt(py),
+            "nearest" => self.nearest(py),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "unsupported resampler aggregation '{name}'"
+            ))),
+        }
+    }
+
     /// One of pandas' resampler reductions over the Series or every frame
     /// column, with `numeric_only` as pandas takes it: a frame reduces only
     /// its int/float/bool columns, and a non-numeric Series raises. std/sem
@@ -34594,33 +35233,47 @@ impl PyResampler {
         }
     }
 
-    fn agg(&self, py: Python<'_>, func: &str) -> PyResult<Py<PyAny>> {
-        match func {
-            "sum" => self.sum(py, false),
-            "mean" => self.mean(py, false),
-            "min" => self.min(py, false),
-            "max" => self.max(py, false),
-            "count" => self.count(py),
-            "first" => self.first(py, false),
-            "last" => self.last(py, false),
-            "std" => self.std(py, false),
-            "var" => self.var(py, false),
-            "median" => self.median(py, false),
-            "prod" => self.prod(py, false),
-            "size" => self.size(py),
-            "ohlc" => self.ohlc(py),
-            "sem" => self.sem(py, false),
-            "skew" => self.skew(py),
-            "kurt" | "kurtosis" => self.kurt(py),
-            "nearest" => self.nearest(py),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "unsupported resampler aggregation '{func}'"
-            ))),
+    /// pandas' `Resampler.agg(func, *args, **kwargs)`: a name is that
+    /// aggregation; a `_cython_table` callable is its name; any other callable
+    /// runs on each bin (`apply`); a list gives a frame, one column per
+    /// function. Callables and lists raised (fvsao.7).
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn agg(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = args.is_empty() && kwargs.is_none_or(|k| k.is_empty());
+        if let Ok(name) = func.extract::<String>() {
+            return self.agg_name(py, &name);
         }
+        if func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>() {
+            let funcs: Vec<Bound<'_, PyAny>> = func.try_iter()?.collect::<PyResult<_>>()?;
+            let labels = funcs.iter().map(agg_label).collect::<PyResult<Vec<_>>>()?;
+            let results = funcs
+                .iter()
+                .map(|func| self.agg(py, func, args, kwargs).map(|r| r.into_bound(py)))
+                .collect::<PyResult<Vec<_>>>()?;
+            return Ok(concat_side_by_side(py, results, labels)?.unbind());
+        }
+        if plain && let Some(name) = cython_func_name(func)? {
+            warn_cython_callable(func, "Resampler", name)?;
+            return self.agg_name(py, name);
+        }
+        self.apply(py, func, args, kwargs)
     }
 
-    fn aggregate(&self, py: Python<'_>, func: &str) -> PyResult<Py<PyAny>> {
-        self.agg(py, func)
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn aggregate(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.agg(py, func, args, kwargs)
     }
 
     #[pyo3(signature = (fill_value=None))]
@@ -34914,17 +35567,64 @@ impl PyResampler {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         if let Ok(name) = func.extract::<String>() {
-            return self.agg(py, &name);
+            return self.agg_name(py, &name);
         }
-        let first_res = self.first(py, false)?;
-        let bound = first_res.bind(py);
-        bound
-            .call_method("apply", (func,), kwargs)
-            .map(|b| b.unbind())
-            .or_else(|_| {
-                let res = func.call(args, kwargs)?;
-                Ok(res.unbind())
-            })
+        // Any other callable runs on each bin's rows, as pandas' (a Series per
+        // bin, empty bins included; it applied the callable to each bin's
+        // FIRST value; fvsao.7). A frame goes column by column.
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let resampler = s.resample_ext(
+                    &self.freq,
+                    self.closed.as_deref(),
+                    self.label.as_deref(),
+                    self.origin.as_deref(),
+                );
+                let bins = resampler.size().map_err(frame_error_to_py)?;
+                let indices = resampler.indices();
+                let mut values = Vec::with_capacity(bins.len());
+                for label in bins.index().labels() {
+                    let at: Vec<i64> = indices
+                        .get(label)
+                        .map(|positions| {
+                            positions
+                                .iter()
+                                .map(|&position| i64::try_from(position).unwrap_or(i64::MAX))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let window = s.take(&at).map_err(frame_error_to_py)?;
+                    let window = PySeries { inner: window }.into_bound_py_any(py)?;
+                    let result = func.call(prepend_arg(window, Some(args))?, kwargs)?;
+                    values.push(py_to_scalar(py, &result)?);
+                }
+                let column = Column::from_values(values).map_err(column_error_to_py)?;
+                let res = Series::new(s.name(), bins.index().clone(), column)
+                    .map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let mut results = Vec::new();
+                let mut keys = Vec::new();
+                for name in df.column_names() {
+                    let Some(column) = df.column(name) else {
+                        continue;
+                    };
+                    let series = Series::new(name.as_str(), df.index().clone(), column.clone())
+                        .map_err(frame_error_to_py)?;
+                    let per_column = PyResampler {
+                        target: ResampleTarget::Series(series),
+                        freq: self.freq.clone(),
+                        closed: self.closed.clone(),
+                        label: self.label.clone(),
+                        origin: self.origin.clone(),
+                    };
+                    results.push(per_column.apply(py, func, args, kwargs)?.into_bound(py));
+                    keys.push(name.clone());
+                }
+                Ok(concat_side_by_side(py, results, keys)?.unbind())
+            }
+        }
     }
 
     #[pyo3(signature = (arg, *args, **kwargs))]

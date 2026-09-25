@@ -5473,6 +5473,122 @@ def _numpy_outcome(m: Any, case: str) -> Any:
         return ("raise", type(e).__name__, str(e))
 
 
+def _agg_s(m: Any) -> Any:
+    return m.Series([1.0, 4.0, 9.0], name="v")
+
+
+def _agg_df(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "b", "a"], "v": [1.0, 2.0, 3.0], "w": [10, 20, 30]})
+
+
+def _agg_num(m: Any) -> Any:
+    return m.DataFrame({"x": [1.0, 4.0], "y": [9.0, 16.0]})
+
+
+# fvsao.7: agg with a callable raised everywhere ("func must be a string or
+# list of strings"); df.agg(['min', 'max']) and df.agg({'a': 'sum'}) raised;
+# gb['v'].transform(np.mean) returned the per-group aggregate, not the
+# broadcast; gb['v'].apply(f) was unnamed.
+_AGG_CASES = {
+    "s.agg(np.mean)": lambda m: _agg_s(m).agg(np.mean),
+    "s.agg(builtin sum)": lambda m: _agg_s(m).agg(sum),
+    "s.agg(np.std) is ddof=1": lambda m: _agg_s(m).agg(np.std),
+    "s.agg(lambda aggregates)": lambda m: _agg_s(m).agg(lambda x: x.max() - x.min()),
+    # NEGATIVE: an elementwise lambda is pandas' deprecated apply path.
+    "s.agg(lambda elementwise)": lambda m: _agg_s(m).agg(lambda x: x + 1),
+    "s.agg(len)": lambda m: _agg_s(m).agg(len),
+    "s.agg(list with callables)": lambda m: _agg_s(m).agg(["min", np.mean, lambda x: x.sum() * 2]),
+    "s.agg(dict)": lambda m: _agg_s(m).agg({"lo": "min", "hi": np.max}),
+    "s.agg(method name)": lambda m: _agg_s(m).agg("nunique"),
+    "s.agg(unknown name) raises": lambda m: _agg_s(m).agg("no_such_function"),
+    "s.agg(args, kwargs)": lambda m: _agg_s(m).agg(lambda x, a, b=0: x.sum() * a + b, 0, 2, b=1),
+    "df.agg(np.mean)": lambda m: _agg_num(m).agg(np.mean),
+    "df.agg(list of names)": lambda m: _agg_num(m).agg(["min", "max"]),
+    "df.agg(list with callables)": lambda m: _agg_num(m).agg(["sum", np.min, lambda c: c.max()]),
+    "df.agg(dict of names)": lambda m: _agg_num(m).agg({"y": "sum", "x": np.mean}),
+    "df.agg(dict with lists)": lambda m: _agg_num(m).agg({"x": ["sum", "max"], "y": "min"}),
+    "df.agg(lambda)": lambda m: _agg_num(m).agg(lambda c: c.max() - c.min()),
+    "df.agg(axis=1)": lambda m: _agg_num(m).agg("sum", axis=1),
+    "df.agg(missing column) raises": lambda m: _agg_num(m).agg({"z": "sum"}),
+    "gb.agg(np.mean)": lambda m: _agg_df(m).groupby("k").agg(np.mean),
+    "gb.agg(['min', np.max])": lambda m: _agg_df(m).groupby("k").agg(["min", np.max]),
+    "gb.agg(dict with callables)": lambda m: _agg_df(m).groupby("k").agg({"v": np.sum, "w": "max"}),
+    "gb.agg(dict with a lambda)": lambda m: _agg_df(m).groupby("k").agg({"v": lambda x: x.max() - x.min()}),
+    "gb.agg(named with a lambda)": lambda m: _agg_df(m).groupby("k").agg(
+        rng=("v", lambda x: x.max() - x.min()), top=("w", "max")
+    ),
+    "gb.agg(lambda)": lambda m: _agg_df(m).groupby("k").agg(lambda x: x.max()),
+    "gb['v'].agg(lambda)": lambda m: _agg_df(m).groupby("k")["v"].agg(lambda x: x.max() - x.min()),
+    "gb['v'].agg(np.mean)": lambda m: _agg_df(m).groupby("k")["v"].agg(np.mean),
+    "gb['v'].agg(list with lambdas)": lambda m: _agg_df(m).groupby("k")["v"].agg(
+        ["sum", lambda x: x.max(), lambda x: x.min()]
+    ),
+    "gb['v'].agg(named)": lambda m: _agg_df(m).groupby("k")["v"].agg(total="sum", avg=np.mean),
+    # NEGATIVE: a dict on a SeriesGroupBy is pandas' "nested renamer" error.
+    "gb['v'].agg(dict) raises": lambda m: _agg_df(m).groupby("k")["v"].agg({"a": "sum"}),
+    "gb['v'].apply named": lambda m: _agg_df(m).groupby("k")["v"].apply(lambda x: x.max()),
+    # NEGATIVE: transform broadcasts to the rows, in row order (groups interleave).
+    "gb['v'].transform(np.mean)": lambda m: _agg_df(m).groupby("k")["v"].transform(np.mean),
+    "gb['v'].transform(scalar lambda)": lambda m: _agg_df(m).groupby("k")["v"].transform(lambda x: x.sum()),
+    "gb['v'].transform(len)": lambda m: _agg_df(m).groupby("k")["v"].transform(len),
+    "gb['v'].transform(Series lambda)": lambda m: _agg_df(m).groupby("k")["v"].transform(lambda x: x - x.mean()),
+    "rolling.agg(np.mean)": lambda m: _agg_s(m).rolling(2).agg(np.mean),
+    "rolling.agg(lambda)": lambda m: _agg_s(m).rolling(2).agg(lambda x: x.max()),
+    "rolling.agg(list with a callable)": lambda m: _agg_s(m).rolling(2).agg(["sum", np.max]),
+    "resample.agg(np.sum)": lambda m: m.Series(
+        [1.0, 2.0, 3.0], index=m.to_datetime(["2024-01-01 00:00", "2024-01-01 12:00", "2024-01-02 00:00"])
+    ).resample("D").agg(np.sum),
+    "resample.agg(lambda)": lambda m: m.Series(
+        [1.0, 2.0, 3.0], index=m.to_datetime(["2024-01-01 00:00", "2024-01-01 12:00", "2024-01-02 00:00"])
+    ).resample("D").agg(lambda x: x.max()),
+}
+
+
+def _agg_outcome(m: Any, case: str) -> Any:
+    import warnings
+
+    def cell(v: Any) -> Any:
+        if isinstance(v, float):
+            return None if math.isnan(v) else round(v, 9)
+        return v
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            r = _AGG_CASES[case](m)
+        except Exception as e:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(e).__name__)
+    if hasattr(r, "columns"):
+        return (
+            "frame",
+            [str(d) for d in r.dtypes.tolist()],
+            [str(i) for i in r.index.tolist()],
+            [str(c) for c in r.columns.tolist()],
+            [[cell(v) for v in r.iloc[:, j].tolist()] for j in range(r.shape[1])],
+        )
+    if hasattr(r, "index") and hasattr(r, "tolist"):
+        return ("series", str(r.dtype), r.name, [str(i) for i in r.index.tolist()], [cell(v) for v in r.tolist()])
+    return ("scalar", cell(r.item() if hasattr(r, "item") else r))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_AGG_CASES))
+def test_agg_with_callables_lists_and_dicts_matches_pandas(case: str) -> None:
+    assert _agg_outcome(fpd, case) == _agg_outcome(pd, case), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_agg_numpy_callable_warns_like_pandas() -> None:
+    import warnings
+
+    for m in (pd, fpd):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _agg_s(m).agg(np.mean)
+        messages = [str(w.message) for w in caught if issubclass(w.category, FutureWarning)]
+        assert any("is currently using Series.mean" in text for text in messages), m.__name__
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("axis", [0, 1])
 @pytest.mark.parametrize(
