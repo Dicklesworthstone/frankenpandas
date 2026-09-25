@@ -5165,3 +5165,27 @@ def test_repr_matches_pandas(case: str) -> None:
     # index-name header and padded columns its own way.
     make = _REPR_CASES[case]
     assert repr(make(fpd)) == repr(make(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_index_name_writes_through_and_index_compares_elementwise_like_pandas() -> None:
+    # fvsao.7: df.index.name = 'k' renamed a copy (the frame kept no name),
+    # and index == x compared the objects, not the labels.
+    for m in (pd, fpd):
+        df = m.DataFrame({"a": [1, 2]}, index=["p", "q"])
+        df.index.name = "k"
+        assert df.index.name == "k"
+        assert repr(df).splitlines()[1].startswith("k")
+        s = m.Series([1, 2])
+        s.index.name = "pos"
+        assert s.index.name == "pos"
+        # NEGATIVE: renaming a copy of the index leaves the frame alone.
+        copy = df.index.copy()
+        copy.name = "other"
+        assert df.index.name == "k"
+        frame = m.DataFrame({"a": [1, 2], "b": [3, 4]})
+        assert (frame.columns == "a").tolist() == [True, False]
+        assert (frame.columns != "a").tolist() == [False, True]
+        assert (frame.index == [0, 5]).tolist() == [True, False]
+        assert (frame.columns == m.Index(["a", "x"])).tolist() == [True, False]
+        assert frame.loc[:, frame.columns != "a"].columns.tolist() == ["b"]

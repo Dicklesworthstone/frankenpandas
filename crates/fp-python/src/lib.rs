@@ -2752,10 +2752,62 @@ impl PyIndexStringMethods {
 }
 
 /// Python wrapper for FrankenPandas Index.
-#[pyclass(name = "Index", module = "frankenpandas", from_py_object)]
+#[pyclass(name = "Index", module = "frankenpandas", from_py_object, subclass)]
 #[derive(Clone)]
 pub struct PyIndex {
     pub(crate) inner: Index,
+}
+
+/// The Index a Series' or DataFrame's `.index` returns: an `Index` that
+/// also writes its `name` back to the object it came from, as pandas'
+/// shared Index does - `df.index.name = 'k'` renamed a copy.
+#[pyclass(extends = PyIndex, name = "Index", module = "frankenpandas")]
+pub struct PyOwnedIndex {
+    owner: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyOwnedIndex {
+    #[getter]
+    fn name(slf: PyRef<'_, Self>) -> Option<String> {
+        slf.as_super().inner.name().map(str::to_owned)
+    }
+
+    /// `index.name = value`: this Index and its owner's index are renamed.
+    #[setter]
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: Option<&str>) -> PyResult<()> {
+        let py = slf.py();
+        let owner = slf.owner.clone_ref(py);
+        let base = slf.as_super();
+        base.inner = base.inner.set_names(name);
+        let owner = owner.bind(py);
+        if let Ok(mut frame) = owner.extract::<PyRefMut<'_, PyDataFrame>>() {
+            let renamed = frame.inner.index().rename_index(name);
+            frame.inner = frame.inner.with_index(renamed).map_err(frame_error_to_py)?;
+        } else if let Ok(mut series) = owner.extract::<PyRefMut<'_, PySeries>>() {
+            let renamed = series.inner.index().rename_index(name);
+            series.inner = Series::new(series.inner.name(), renamed, series.inner.column().clone())
+                .map_err(frame_error_to_py)?;
+        }
+        Ok(())
+    }
+}
+
+/// `index` as the `.index` of `owner`: a plain Index comes back as a
+/// [`PyOwnedIndex`] so a name set on it reaches `owner`; the other kinds
+/// (MultiIndex, DatetimeIndex, ...) as [`row_index_to_py`] builds them.
+fn owned_index(py: Python<'_>, owner: &Bound<'_, PyAny>, index: &Index) -> PyResult<Py<PyAny>> {
+    let object = row_index_to_py(py, index)?;
+    if !object.bind(py).get_type().is(py.get_type::<PyIndex>()) {
+        return Ok(object);
+    }
+    let initializer = pyo3::PyClassInitializer::from(PyIndex {
+        inner: index.clone(),
+    })
+    .add_subclass(PyOwnedIndex {
+        owner: owner.clone().unbind(),
+    });
+    Ok(Py::new(py, initializer)?.into_any())
 }
 
 impl PyIndex {
@@ -2987,6 +3039,23 @@ impl PyIndex {
     ) -> PyResult<Bound<'py, PyAny>> {
         let _ = copy;
         finish_to_numpy(labels_ndarray(py, self.inner.labels())?, None, dtype, None)
+    }
+
+    /// `index == x` (and the other comparisons) compare every label, as
+    /// pandas': a numpy bool array against a scalar, a list/array or
+    /// another Index of the same length (it compared the objects).
+    fn __richcmp__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+        op: pyo3::class::basic::CompareOp,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let labels = labels_ndarray(py, self.inner.labels())?;
+        let other = match other.extract::<PyRef<'_, PyIndex>>() {
+            Ok(index) => labels_ndarray(py, index.inner.labels())?,
+            Err(_) => other.clone(),
+        };
+        labels.rich_compare(other, op)
     }
 
     fn unique(&self) -> Self {
@@ -11605,6 +11674,12 @@ fn execute_series_where(inner: &Series, cond: &Series, other: &SeriesOrScalar) -
 }
 
 impl PySeries {
+    /// The index as a Python object, for Rust callers; the `.index` getter
+    /// returns one that writes its name back.
+    fn index_object(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        row_index_to_py(py, self.inner.index())
+    }
+
     /// A Series from various data structures (list, tuple, dict, Series,
     /// Index, scalar); [`Self::new`] adds `Categorical` data and `dtype=`.
     fn from_data(
@@ -11826,10 +11901,11 @@ impl PySeries {
 
     /// Return the index of the Series: a MultiIndex when its labels carry row
     /// MultiIndex levels (a multi-key groupby result, a column of a frame
-    /// indexed by several columns), as pandas returns, else the flat Index.
-    #[getter]
-    fn index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        row_index_to_py(py, self.inner.index())
+    /// indexed by several columns), as pandas returns, else the flat Index -
+    /// one that renames this Series' index when its `name` is set.
+    #[getter(index)]
+    fn index_getter(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        owned_index(slf.py(), slf.as_any(), slf.borrow().inner.index())
     }
 
     /// `s.name = value` renames the Series in place, as pandas' (None
@@ -14811,7 +14887,7 @@ impl PySeries {
 
     #[getter]
     fn axes(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        Ok(vec![self.index(py)?])
+        Ok(vec![self.index_object(py)?])
     }
 
     #[getter]
@@ -16763,6 +16839,22 @@ impl PyDataFrame {
         (0..self.inner.num_columns())
             .filter_map(|position| self.inner.column_name_at(position))
             .collect()
+    }
+
+    /// The index as a Python object (a MultiIndex for a row MultiIndex),
+    /// for Rust callers; the `.index` getter returns one that writes its
+    /// name back.
+    fn index_object(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(multi) = self.inner.row_multiindex() {
+            return Ok(Py::new(
+                py,
+                PyMultiIndex {
+                    inner: multi.clone(),
+                },
+            )?
+            .into_any());
+        }
+        row_index_to_py(py, self.inner.index())
     }
 
     /// The columns `key` names on a two-level column axis, as pandas'
@@ -18759,20 +18851,16 @@ impl PyDataFrame {
     /// returns, else the flat Index. The flat labels of a MultiIndex frame are
     /// fp-frame's joined 'x|1' strings, which surfaced as the index
     /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
-    #[getter]
-    fn index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(multi) = self.inner.row_multiindex() {
-            return Ok(Py::new(
-                py,
-                PyMultiIndex {
-                    inner: multi.clone(),
-                },
-            )?
-            .into_any());
+    #[getter(index)]
+    fn index_getter(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let frame = slf.borrow();
+        if frame.inner.row_multiindex().is_some() {
+            return frame.index_object(slf.py());
         }
         // A DatetimeIndex/TimedeltaIndex where the labels are instants or
-        // durations, as the Series getter (fvsao.18).
-        row_index_to_py(py, self.inner.index())
+        // durations, as the Series getter (fvsao.18); a plain Index renames
+        // this frame's index when its `name` is set.
+        owned_index(slf.py(), slf.as_any(), frame.inner.index())
     }
 
     #[getter]
@@ -23435,7 +23523,7 @@ impl PyDataFrame {
     #[getter]
     fn axes(&self) -> Vec<Py<PyAny>> {
         Python::attach(|py| {
-            let idx = self.index(py).ok()?;
+            let idx = self.index_object(py).ok()?;
             let cols = self.columns(py).ok()?;
             Some(vec![idx, cols])
         })
@@ -26687,6 +26775,24 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
         } else {
             Vec::new()
         }));
+    }
+    // A boolean list/array marks the columns to keep (df.loc[:, df.columns != 'a']).
+    if let Ok(mask) = key.extract::<Vec<bool>>() {
+        let names: Vec<String> = df.column_names().iter().map(|s| s.to_string()).collect();
+        if mask.len() != names.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Boolean index has wrong length: {} instead of {}",
+                mask.len(),
+                names.len()
+            )));
+        }
+        return Ok(Some(
+            names
+                .into_iter()
+                .zip(mask)
+                .filter_map(|(name, keep)| keep.then_some(name))
+                .collect(),
+        ));
     }
     key.extract::<Vec<String>>().map(Some)
 }
@@ -42046,7 +42152,7 @@ mod tests {
 
         // Index getter: a flat Series index is a flat Index.
         Python::attach(|py| {
-            let idx = py_s.index(py).expect("index"); // ubs:ignore — test fixture
+            let idx = py_s.index_object(py).expect("index"); // ubs:ignore — test fixture
             let idx = idx.extract::<PyRef<'_, PyIndex>>(py).expect("flat Index"); // ubs:ignore — test fixture
             assert_eq!(idx.len(), 3);
             assert_eq!(idx.inner.labels(), &labels);
@@ -42103,7 +42209,7 @@ mod tests {
         assert_eq!(py_df.shape(), (3, 2));
         let idx_len = Python::attach(|py| {
             py_df
-                .index(py)
+                .index_object(py)
                 .and_then(|idx| idx.bind(py).len())
                 .expect("index length") // ubs:ignore — test fixture
         });
