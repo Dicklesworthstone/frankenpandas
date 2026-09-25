@@ -211,8 +211,9 @@ fn trim_float_zeros(mut cells: Vec<String>) -> Vec<String> {
 }
 
 /// pandas' datetime cells: a date when every instant is a midnight, else
-/// the time too with one fraction width (3, 6 or 9 digits) for all; NaT.
-fn pandas_datetime_cells(values: &[Option<i64>]) -> Vec<String> {
+/// the time too with one fraction width for all - 3, 6 or 9 digits in a
+/// Series, 6 or 9 in an `index` (DatetimeIndex's repr) - and NaT.
+fn pandas_datetime_cells(values: &[Option<i64>], index: bool) -> Vec<String> {
     const DAY: i64 = 86_400_000_000_000;
     let instants = || values.iter().flatten();
     let dates_only = instants().all(|&nanos| nanos.rem_euclid(DAY) == 0);
@@ -221,7 +222,7 @@ fn pandas_datetime_cells(values: &[Option<i64>]) -> Vec<String> {
     } else if instants().any(|&nanos| nanos.rem_euclid(1_000_000) != 0) {
         6
     } else if instants().any(|&nanos| nanos.rem_euclid(1_000_000_000) != 0) {
-        3
+        if index { 6 } else { 3 }
     } else {
         0
     };
@@ -325,7 +326,7 @@ fn pandas_cells(column: &Column) -> Option<Vec<String>> {
                 })
                 .collect();
             match tz.as_deref() {
-                None => pandas_datetime_cells(&instants),
+                None => pandas_datetime_cells(&instants, false),
                 Some("UTC") => instants
                     .iter()
                     .map(|nanos| {
@@ -393,7 +394,7 @@ fn pandas_label_texts(labels: &[IndexLabel]) -> Vec<String> {
                 _ => None,
             })
             .collect();
-        return pandas_datetime_cells(&instants);
+        return pandas_datetime_cells(&instants, false);
     }
     labels
         .iter()
@@ -3406,11 +3407,195 @@ impl PyIndexStringMethods {
     }
 }
 
+/// pandas' `Index.__repr__` (format_object_summary + _format_attrs at the
+/// default display.width 80 and display.max_seq_items 100): labels wrapped
+/// at 80 columns under `Index([`, the first and last 10 around `...` past
+/// 100 labels, non-string labels right-justified once the labels wrap,
+/// then `dtype=` / `name=` / `length=`. It printed every label on one line
+/// with no dtype.
+fn pandas_index_repr(py: Python<'_>, index: &Index) -> PyResult<String> {
+    let dtype = index.dtype();
+    let items = index
+        .labels()
+        .iter()
+        .map(|label| -> PyResult<String> {
+            Ok(match label {
+                IndexLabel::Utf8(s) => format!(
+                    "'{}'",
+                    s.replace('\t', "\\t")
+                        .replace('\r', "\\r")
+                        .replace('\n', "\\n")
+                ),
+                IndexLabel::Null(_) if dtype == "object" => "None".to_owned(),
+                IndexLabel::Null(_) => "nan".to_owned(),
+                other => index_label_to_py(py, other)?.bind(py).str()?.to_string(),
+            })
+        })
+        .collect::<PyResult<Vec<String>>>()?;
+    let mut attrs = vec![format!("dtype='{dtype}'")];
+    attrs.extend(index.name().map(|name| format!("name='{name}'")));
+    Ok(pandas_index_text(
+        "Index",
+        &items,
+        index.inferred_type() != "string",
+        attrs,
+    ))
+}
+
+/// pandas' `<Class>(<summary>, <attrs>)` for an index of `items` (each
+/// already formatted as pandas prints it): format_object_summary at the
+/// default display.width 80 and display.max_seq_items 100, then `attrs`
+/// with `length=` inserted after them (before a trailing `freq=`) once the
+/// items are truncated. `justify` right-aligns the items when they wrap.
+fn pandas_index_text(
+    class: &str,
+    items: &[String],
+    justify: bool,
+    mut attrs: Vec<String>,
+) -> String {
+    const WIDTH: usize = 80;
+    const MAX_SEQ_ITEMS: usize = 100;
+    let space1 = format!("\n{}", " ".repeat(class.len() + 1));
+    let space2 = format!("\n{}", " ".repeat(class.len() + 2));
+    let n = items.len();
+    let truncated = n > MAX_SEQ_ITEMS;
+    let width_of = |text: &str| text.chars().count();
+    let data = match n {
+        0 => "[], ".to_owned(),
+        1 => format!("[{}], ", items[0]),
+        2 => format!("[{}, {}], ", items[0], items[1]),
+        _ => {
+            let (mut head, mut tail) = if truncated {
+                let shown = (MAX_SEQ_ITEMS / 2).min(10);
+                (items[..shown].to_vec(), items[n - shown..].to_vec())
+            } else {
+                (Vec::new(), items.to_vec())
+            };
+            let one_line = width_of(&head.join(", ")) < WIDTH && width_of(&tail.join(", ")) < WIDTH;
+            if justify && (truncated || !one_line) {
+                let widest = head
+                    .iter()
+                    .chain(&tail)
+                    .map(|s| width_of(s))
+                    .max()
+                    .unwrap_or(0);
+                for text in head.iter_mut().chain(tail.iter_mut()) {
+                    *text = format!("{text:>widest$}");
+                }
+            }
+            let extend = |summary: &mut String, line: &mut String, value: &str, width: usize| {
+                if width_of(line.trim_end()) + width_of(value.trim_end()) >= width {
+                    summary.push_str(line.trim_end());
+                    line.clone_from(&space2);
+                }
+                line.push_str(value);
+            };
+            let mut summary = String::new();
+            let mut line = space2.clone();
+            for value in &head {
+                extend(&mut summary, &mut line, &format!("{value}, "), WIDTH);
+            }
+            if truncated {
+                summary.push_str(line.trim_end());
+                summary.push_str(&space2);
+                summary.push_str("...");
+                line.clone_from(&space2);
+            }
+            if let Some((last, rest)) = tail.split_last() {
+                for value in rest {
+                    extend(&mut summary, &mut line, &format!("{value}, "), WIDTH);
+                }
+                extend(&mut summary, &mut line, last, WIDTH - 2);
+            }
+            summary.push_str(&line);
+            summary.push_str("],");
+            if width_of(&summary) > WIDTH {
+                summary.push_str(&space1);
+            } else {
+                summary.push(' ');
+            }
+            format!("[{}", &summary[space2.len()..])
+        }
+    };
+    if truncated {
+        let at = if attrs.last().is_some_and(|attr| attr.starts_with("freq=")) {
+            attrs.len() - 1
+        } else {
+            attrs.len()
+        };
+        attrs.insert(at, format!("length={n}"));
+    }
+    format!("{class}({data}{})", attrs.join(", "))
+}
+
 /// Python wrapper for FrankenPandas Index.
 #[pyclass(name = "Index", module = "frankenpandas", from_py_object, subclass)]
 #[derive(Clone)]
 pub struct PyIndex {
     pub(crate) inner: Index,
+}
+
+/// An index-like argument. pandas' set operations, append, get_indexer and
+/// asof_locs take any array-like (`df.columns.difference(['id'])`); they
+/// raised TypeError unless handed an Index. An Index is taken as is,
+/// anything else through `Index(obj)`.
+pub struct IndexArg(PyIndex);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for IndexArg {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok(index) = obj.extract::<PyRef<'_, PyIndex>>() {
+            return Ok(Self(index.clone()));
+        }
+        PyIndex::new(Some(&obj), None).map(Self)
+    }
+}
+
+impl std::ops::Deref for IndexArg {
+    type Target = PyIndex;
+
+    fn deref(&self) -> &PyIndex {
+        &self.0
+    }
+}
+
+/// pandas' `sort=` for union / difference / symmetric_difference: None (the
+/// default) sorts the result unless the two indexes are equal, either is
+/// empty, or the labels are of mixed kinds (left in first-seen order); False
+/// keeps first-seen order; True sorts. fp-index keeps first-seen order, so
+/// `df.columns.union(['c'])` came back unsorted.
+fn setop_sorted(result: Index, left: &Index, right: &Index, sort: Option<bool>) -> Index {
+    let sorts = match sort {
+        Some(sort) => sort,
+        None => {
+            !(left.is_empty()
+                || right.is_empty()
+                || left.equals(right)
+                || result.inferred_type() == "mixed")
+        }
+    };
+    if sorts { result.sort_values() } else { result }
+}
+
+/// `get_indexer`'s positions (-1 where a label is absent) as pandas returns
+/// them: an int64 numpy array (they came back as a list).
+pub struct IndexerArray(Vec<i64>);
+
+impl FromIterator<i64> for IndexerArray {
+    fn from_iter<I: IntoIterator<Item = i64>>(positions: I) -> Self {
+        Self(positions.into_iter().collect())
+    }
+}
+
+impl<'py> IntoPyObject<'py> for IndexerArray {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        column_ndarray(py, &Column::from_i64_values_owned(self.0))
+    }
 }
 
 /// The Index a Series' or DataFrame's `.index` returns: an `Index` that
@@ -3435,16 +3620,70 @@ impl PyOwnedIndex {
         let owner = slf.owner.clone_ref(py);
         let base = slf.as_super();
         base.inner = base.inner.set_names(name);
-        let owner = owner.bind(py);
-        if let Ok(mut frame) = owner.extract::<PyRefMut<'_, PyDataFrame>>() {
-            let renamed = frame.inner.index().rename_index(name);
-            frame.inner = frame.inner.with_index(renamed).map_err(frame_error_to_py)?;
-        } else if let Ok(mut series) = owner.extract::<PyRefMut<'_, PySeries>>() {
-            let renamed = series.inner.index().rename_index(name);
-            series.inner = Series::new(series.inner.name(), renamed, series.inner.column().clone())
-                .map_err(frame_error_to_py)?;
-        }
-        Ok(())
+        rename_owner_index(owner.bind(py), name)
+    }
+}
+
+/// Rename the row index of `owner` (the DataFrame or Series an `.index`
+/// came from), as pandas' shared Index object renames it.
+fn rename_owner_index(owner: &Bound<'_, PyAny>, name: Option<&str>) -> PyResult<()> {
+    if let Ok(mut frame) = owner.extract::<PyRefMut<'_, PyDataFrame>>() {
+        let renamed = frame.inner.index().rename_index(name);
+        frame.inner = frame.inner.with_index(renamed).map_err(frame_error_to_py)?;
+    } else if let Ok(mut series) = owner.extract::<PyRefMut<'_, PySeries>>() {
+        let renamed = series.inner.index().rename_index(name);
+        series.inner = Series::new(series.inner.name(), renamed, series.inner.column().clone())
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(())
+}
+
+/// A DataFrame's or Series' `.index` of instants: a DatetimeIndex whose
+/// `name` also renames its owner's index. `df.index.name = 'date'` renamed
+/// a copy, so the frame's index stayed unnamed (reset_index gave 'index').
+#[pyclass(extends = PyDatetimeIndex, name = "DatetimeIndex", module = "frankenpandas")]
+pub struct PyOwnedDatetimeIndex {
+    owner: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyOwnedDatetimeIndex {
+    #[getter]
+    fn name(slf: PyRef<'_, Self>) -> Option<String> {
+        slf.as_super().inner.name().map(str::to_owned)
+    }
+
+    #[setter]
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: Option<&str>) -> PyResult<()> {
+        let py = slf.py();
+        let owner = slf.owner.clone_ref(py);
+        let base = slf.as_super();
+        base.inner = base.inner.set_names(name);
+        rename_owner_index(owner.bind(py), name)
+    }
+}
+
+/// A DataFrame's or Series' `.index` of durations: a TimedeltaIndex whose
+/// `name` also renames its owner's index (it was not writable at all).
+#[pyclass(extends = PyTimedeltaIndex, name = "TimedeltaIndex", module = "frankenpandas")]
+pub struct PyOwnedTimedeltaIndex {
+    owner: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyOwnedTimedeltaIndex {
+    #[getter]
+    fn name(slf: PyRef<'_, Self>) -> Option<String> {
+        slf.as_super().inner.name().map(str::to_owned)
+    }
+
+    #[setter]
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: Option<&str>) -> PyResult<()> {
+        let py = slf.py();
+        let owner = slf.owner.clone_ref(py);
+        let base = slf.as_super();
+        base.inner = base.inner.set_names(name);
+        rename_owner_index(owner.bind(py), name)
     }
 }
 
@@ -3453,7 +3692,22 @@ impl PyOwnedIndex {
 /// (MultiIndex, DatetimeIndex, ...) as [`row_index_to_py`] builds them.
 fn owned_index(py: Python<'_>, owner: &Bound<'_, PyAny>, index: &Index) -> PyResult<Py<PyAny>> {
     let object = row_index_to_py(py, index)?;
-    if !object.bind(py).get_type().is(py.get_type::<PyIndex>()) {
+    let bound = object.bind(py);
+    if let Ok(instants) = bound.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        let initializer =
+            pyo3::PyClassInitializer::from(instants.clone()).add_subclass(PyOwnedDatetimeIndex {
+                owner: owner.clone().unbind(),
+            });
+        return Ok(Py::new(py, initializer)?.into_any());
+    }
+    if let Ok(durations) = bound.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+        let initializer =
+            pyo3::PyClassInitializer::from(durations.clone()).add_subclass(PyOwnedTimedeltaIndex {
+                owner: owner.clone().unbind(),
+            });
+        return Ok(Py::new(py, initializer)?.into_any());
+    }
+    if !bound.get_type().is(py.get_type::<PyIndex>()) {
         return Ok(object);
     }
     let initializer = pyo3::PyClassInitializer::from(PyIndex {
@@ -3473,12 +3727,12 @@ impl PyIndex {
             .map(|inner| Self { inner })
             .map_err(index_error_to_py)
     }
-}
 
-#[pymethods]
-impl PyIndex {
-    #[new]
-    #[pyo3(signature = (data=None, name=None))]
+    /// An Index of `data` (the methods taking an index-like argument build
+    /// theirs through this): an Index's labels, a Series' VALUES (its name
+    /// when `name` is None) - it took the Series' index labels - or a
+    /// sequence of labels, bools kept as bools (a list of bools went
+    /// through the int path and came back 1/0).
     fn new(data: Option<&Bound<'_, PyAny>>, name: Option<&str>) -> PyResult<Self> {
         let mut labels: Vec<IndexLabel> = Vec::new();
         if let Some(d) = data {
@@ -3489,9 +3743,16 @@ impl PyIndex {
                 }
                 return Ok(PyIndex { inner });
             } else if let Ok(s) = d.extract::<PyRef<'_, PySeries>>() {
-                labels = s.inner.index().labels().to_vec();
-            } else if let Ok(list) = d.extract::<Vec<i64>>() {
-                labels = list.into_iter().map(IndexLabel::Int64).collect();
+                let labels = s
+                    .inner
+                    .values()
+                    .iter()
+                    .map(scalar_to_index_label_converter)
+                    .collect();
+                let series_name = Some(s.inner.name()).filter(|n| !n.is_empty());
+                return Ok(PyIndex {
+                    inner: Index::new(labels).set_names(name.or(series_name)),
+                });
             } else if let Ok(list) = d.extract::<Vec<String>>() {
                 labels = list.into_iter().map(IndexLabel::Utf8).collect();
             } else if let Ok(seq) = d.cast::<pyo3::types::PySequence>() {
@@ -3512,6 +3773,30 @@ impl PyIndex {
             inner = inner.set_name(n);
         }
         Ok(PyIndex { inner })
+    }
+}
+
+#[pymethods]
+impl PyIndex {
+    /// pandas' `Index(data=None, dtype=None, copy=False, name=None,
+    /// tupleize_cols=True)`; it took `(data, name)`, so a positional dtype
+    /// was read as the name and `dtype=` raised TypeError.
+    #[new]
+    #[pyo3(signature = (data=None, dtype=None, copy=false, name=None, tupleize_cols=true))]
+    fn py_new(
+        data: Option<&Bound<'_, PyAny>>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        copy: bool,
+        name: Option<&str>,
+        tupleize_cols: bool,
+    ) -> PyResult<Self> {
+        let _ = copy; // pandas' copy= does not change the labels
+        unsupported_params("Index", &[("tupleize_cols", tupleize_cols)])?;
+        let index = Self::new(data, name)?;
+        match dtype.filter(|dtype| !dtype.is_none()) {
+            Some(dtype) => index.astype(dtype, true),
+            None => Ok(index),
+        }
     }
 
     #[getter]
@@ -3546,21 +3831,8 @@ impl PyIndex {
         self.inner.len()
     }
 
-    fn __repr__(&self) -> String {
-        let labels_str: Vec<String> = self
-            .inner
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => format!("'{s}'"),
-                other => format!("{other}"),
-            })
-            .collect();
-        let name_str = match self.inner.name() {
-            Some(n) => format!(", name='{n}'"),
-            None => String::new(),
-        };
-        format!("Index([{}]{name_str})", labels_str.join(", "))
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        pandas_index_repr(py, &self.inner)
     }
 
     fn __reduce__<'py>(
@@ -3576,7 +3848,17 @@ impl PyIndex {
             .collect::<PyResult<Vec<_>>>()?;
         let idx_list = PyList::new(py, &idx_labels)?;
         let name = self.inner.name().into_bound_py_any(py)?;
-        let args = PyTuple::new(py, [idx_list.as_any(), &name])?;
+        // Index(data, dtype, copy, name), as pandas' constructor reads its
+        // positional arguments.
+        let args = PyTuple::new(
+            py,
+            [
+                idx_list.as_any(),
+                &py.None().into_bound(py),
+                &false.into_bound_py_any(py)?,
+                &name,
+            ],
+        )?;
         Ok((constructor, args))
     }
 
@@ -3776,25 +4058,37 @@ impl PyIndex {
         self.inner.notna()
     }
 
-    fn intersection(&self, other: &PyIndex) -> Self {
+    fn intersection(&self, other: IndexArg) -> Self {
         PyIndex {
             inner: self.inner.intersection(&other.inner),
         }
     }
 
-    fn union(&self, other: &PyIndex) -> Self {
+    #[pyo3(signature = (other, sort=None))]
+    fn union(&self, other: IndexArg, sort: Option<bool>) -> Self {
         PyIndex {
-            inner: self.inner.union(&other.inner),
+            inner: setop_sorted(
+                self.inner.union(&other.inner),
+                &self.inner,
+                &other.inner,
+                sort,
+            ),
         }
     }
 
-    fn difference(&self, other: &PyIndex) -> Self {
+    #[pyo3(signature = (other, sort=None))]
+    fn difference(&self, other: IndexArg, sort: Option<bool>) -> Self {
         PyIndex {
-            inner: self.inner.difference(&other.inner),
+            inner: setop_sorted(
+                self.inner.difference(&other.inner),
+                &self.inner,
+                &other.inner,
+                sort,
+            ),
         }
     }
 
-    fn append(&self, other: &PyIndex) -> Self {
+    fn append(&self, other: IndexArg) -> Self {
         PyIndex {
             inner: self.inner.append(&other.inner),
         }
@@ -3830,8 +4124,12 @@ impl PyIndex {
         self.inner.is_unique()
     }
 
-    fn equals(&self, other: &PyIndex) -> bool {
-        self.inner == other.inner
+    /// pandas' `Index.equals`: same labels in the same order, names ignored;
+    /// anything that is not an Index is False (a list raised TypeError).
+    fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<PyRef<'_, PyIndex>>()
+            .is_ok_and(|other| self.inner.equals(&other.inner))
     }
 
     #[getter]
@@ -4143,13 +4441,19 @@ impl PyIndex {
         self.inner.holds_integer()
     }
 
-    fn symmetric_difference(&self, other: &PyIndex) -> Self {
+    #[pyo3(signature = (other, sort=None))]
+    fn symmetric_difference(&self, other: IndexArg, sort: Option<bool>) -> Self {
         PyIndex {
-            inner: self.inner.symmetric_difference(&other.inner),
+            inner: setop_sorted(
+                self.inner.symmetric_difference(&other.inner),
+                &self.inner,
+                &other.inner,
+                sort,
+            ),
         }
     }
 
-    fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+    fn get_indexer(&self, target: IndexArg) -> IndexerArray {
         self.inner
             .get_indexer(&target.inner)
             .into_iter()
@@ -4428,7 +4732,7 @@ impl PyIndex {
     }
 
     #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
         self.inner.asof_locs(&where_.inner, mask.as_deref())
     }
 
@@ -4632,7 +4936,7 @@ impl PyIndex {
 }
 
 /// Python wrapper for FrankenPandas DatetimeIndex.
-#[pyclass(name = "DatetimeIndex", from_py_object)]
+#[pyclass(name = "DatetimeIndex", from_py_object, subclass)]
 #[derive(Clone)]
 pub struct PyDatetimeIndex {
     pub(crate) inner: DatetimeIndex,
@@ -5118,20 +5422,26 @@ impl PyDatetimeIndex {
         self.inner.equals(&other.inner)
     }
 
+    /// pandas' DatetimeIndex repr: dates alone when every instant is a
+    /// midnight, else times with 6 or 9 fraction digits when needed, quoted
+    /// ('NaT' too), wrapped / truncated as Index's (it printed ISO strings
+    /// with '+00:00' on one line). No freq is tracked, so freq=None - right
+    /// for an index built from data, not for date_range's (fvsao.35).
     fn __repr__(&self) -> String {
-        let strings: Vec<String> = self.inner.format();
-        let name_str = match self.inner.name() {
-            Some(n) => format!(", name='{n}'"),
-            None => String::new(),
-        };
-        format!(
-            "DatetimeIndex([{}], dtype='datetime64[ns]'{name_str})",
-            strings
-                .iter()
-                .map(|s| format!("'{s}'"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        let instants: Vec<Option<i64>> = self
+            .inner
+            .asi8()
+            .into_iter()
+            .map(|nanos| (nanos != i64::MIN).then_some(nanos))
+            .collect();
+        let items: Vec<String> = pandas_datetime_cells(&instants, true)
+            .into_iter()
+            .map(|text| format!("'{text}'"))
+            .collect();
+        let mut attrs = vec!["dtype='datetime64[ns]'".to_owned()];
+        attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
+        attrs.push("freq=None".to_owned());
+        pandas_index_text("DatetimeIndex", &items, true, attrs)
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -5239,7 +5549,7 @@ impl PyDatetimeIndex {
         false
     }
 
-    fn symmetric_difference(&self, other: &PyIndex) -> PyIndex {
+    fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.as_index().symmetric_difference(&other.inner),
         }
@@ -5253,7 +5563,7 @@ impl PyDatetimeIndex {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
     }
 
-    fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+    fn get_indexer(&self, target: IndexArg) -> IndexerArray {
         self.inner
             .as_index()
             .get_indexer(&target.inner)
@@ -5524,7 +5834,7 @@ impl PyDatetimeIndex {
     }
 
     #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
         self.as_py_index().asof_locs(where_, mask)
     }
 
@@ -7531,7 +7841,7 @@ impl PyMultiIndex {
 }
 
 /// Python wrapper for FrankenPandas TimedeltaIndex.
-#[pyclass(name = "TimedeltaIndex", from_py_object)]
+#[pyclass(name = "TimedeltaIndex", from_py_object, subclass)]
 #[derive(Clone)]
 pub struct PyTimedeltaIndex {
     pub(crate) inner: TimedeltaIndex,
@@ -7716,6 +8026,12 @@ impl PyTimedeltaIndex {
         self.inner.name().map(str::to_owned)
     }
 
+    /// `index.name = value` (pandas' Index name is writable; it raised).
+    #[setter]
+    fn set_name(&mut self, name: Option<&str>) {
+        self.inner = self.inner.set_names(name);
+    }
+
     #[getter]
     pub fn is_monotonic_increasing(&self) -> bool {
         self.inner.is_monotonic_increasing()
@@ -7894,11 +8210,37 @@ impl PyTimedeltaIndex {
         self.inner.len()
     }
 
+    /// pandas' TimedeltaIndex repr: '1 days' when every duration is whole
+    /// days, else '1 days 00:00:00' for all, quoted, NaT bare, wrapped /
+    /// truncated as Index's (it printed a Rust debug list of nanoseconds).
+    /// No freq is tracked: freq=None.
     pub fn __repr__(&self) -> String {
-        format!(
-            "TimedeltaIndex({:?}, dtype='timedelta64[ns]')",
-            self.inner.tolist()
-        )
+        const DAY: i64 = 86_400_000_000_000;
+        let durations: Vec<Option<i64>> = self
+            .inner
+            .as_index()
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(nanos) if *nanos != i64::MIN => Some(*nanos),
+                _ => None,
+            })
+            .collect();
+        let long = durations
+            .iter()
+            .flatten()
+            .any(|nanos| nanos.rem_euclid(DAY) != 0);
+        let items: Vec<String> = durations
+            .iter()
+            .map(|nanos| match nanos {
+                Some(nanos) => format!("'{}'", pandas_timedelta_text(*nanos, long)),
+                None => "NaT".to_owned(),
+            })
+            .collect();
+        let mut attrs = vec!["dtype='timedelta64[ns]'".to_owned()];
+        attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
+        attrs.push("freq=None".to_owned());
+        pandas_index_text("TimedeltaIndex", &items, true, attrs)
     }
 
     pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -8013,25 +8355,25 @@ impl PyTimedeltaIndex {
         false
     }
 
-    fn union(&self, other: &PyIndex) -> PyIndex {
+    fn union(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.as_index().union(&other.inner),
         }
     }
 
-    fn intersection(&self, other: &PyIndex) -> PyIndex {
+    fn intersection(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.as_index().intersection(&other.inner),
         }
     }
 
-    fn difference(&self, other: &PyIndex) -> PyIndex {
+    fn difference(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.as_index().difference(&other.inner),
         }
     }
 
-    fn symmetric_difference(&self, other: &PyIndex) -> PyIndex {
+    fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.as_index().symmetric_difference(&other.inner),
         }
@@ -8045,7 +8387,7 @@ impl PyTimedeltaIndex {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
     }
 
-    fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+    fn get_indexer(&self, target: IndexArg) -> IndexerArray {
         self.inner
             .as_index()
             .get_indexer(&target.inner)
@@ -8308,7 +8650,7 @@ impl PyTimedeltaIndex {
     }
 
     #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
         self.as_py_index().asof_locs(where_, mask)
     }
 
@@ -8930,28 +9272,28 @@ impl PyRangeIndex {
         true
     }
 
-    fn union(&self, other: &PyIndex) -> PyIndex {
+    fn union(&self, other: IndexArg) -> PyIndex {
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
         PyIndex {
             inner: idx.union(&other.inner),
         }
     }
 
-    fn intersection(&self, other: &PyIndex) -> PyIndex {
+    fn intersection(&self, other: IndexArg) -> PyIndex {
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
         PyIndex {
             inner: idx.intersection(&other.inner),
         }
     }
 
-    fn difference(&self, other: &PyIndex) -> PyIndex {
+    fn difference(&self, other: IndexArg) -> PyIndex {
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
         PyIndex {
             inner: idx.difference(&other.inner),
         }
     }
 
-    fn symmetric_difference(&self, other: &PyIndex) -> PyIndex {
+    fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
         PyIndex {
             inner: idx.symmetric_difference(&other.inner),
@@ -8983,7 +9325,7 @@ impl PyRangeIndex {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
     }
 
-    fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+    fn get_indexer(&self, target: IndexArg) -> IndexerArray {
         let idx = Index::from_range(self.inner.start(), self.inner.stop(), self.inner.step());
         idx.get_indexer(&target.inner)
             .into_iter()
@@ -9901,25 +10243,25 @@ impl PyPeriodIndex {
         false
     }
 
-    pub fn union(&self, other: &PyIndex) -> PyIndex {
+    pub fn union(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.to_index().union(&other.inner),
         }
     }
 
-    pub fn intersection(&self, other: &PyIndex) -> PyIndex {
+    pub fn intersection(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.to_index().intersection(&other.inner),
         }
     }
 
-    pub fn difference(&self, other: &PyIndex) -> PyIndex {
+    pub fn difference(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.to_index().difference(&other.inner),
         }
     }
 
-    pub fn symmetric_difference(&self, other: &PyIndex) -> PyIndex {
+    pub fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.to_index().symmetric_difference(&other.inner),
         }
@@ -9933,7 +10275,7 @@ impl PyPeriodIndex {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
     }
 
-    pub fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+    pub fn get_indexer(&self, target: IndexArg) -> IndexerArray {
         self.inner
             .to_index()
             .get_indexer(&target.inner)
@@ -10196,7 +10538,7 @@ impl PyPeriodIndex {
     }
 
     #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
         self.as_py_index().asof_locs(where_, mask)
     }
 
@@ -10876,25 +11218,25 @@ impl PyCategoricalIndex {
         false
     }
 
-    pub fn union(&self, other: &PyIndex) -> PyIndex {
+    pub fn union(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.to_index().union(&other.inner),
         }
     }
 
-    pub fn intersection(&self, other: &PyIndex) -> PyIndex {
+    pub fn intersection(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.to_index().intersection(&other.inner),
         }
     }
 
-    pub fn difference(&self, other: &PyIndex) -> PyIndex {
+    pub fn difference(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.to_index().difference(&other.inner),
         }
     }
 
-    pub fn symmetric_difference(&self, other: &PyIndex) -> PyIndex {
+    pub fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
         PyIndex {
             inner: self.inner.to_index().symmetric_difference(&other.inner),
         }
@@ -10908,7 +11250,7 @@ impl PyCategoricalIndex {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
     }
 
-    pub fn get_indexer(&self, target: &PyIndex) -> Vec<i64> {
+    pub fn get_indexer(&self, target: IndexArg) -> IndexerArray {
         self.inner
             .to_index()
             .get_indexer(&target.inner)
@@ -11184,7 +11526,7 @@ impl PyCategoricalIndex {
     }
 
     #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: &PyIndex, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
+    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
         self.as_py_index().asof_locs(where_, mask)
     }
 
@@ -15084,12 +15426,18 @@ impl PySeries {
         if let Some(selected) = series_multiindex_loc(py, &self.inner, key)? {
             return Ok(selected);
         }
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>()
+            && !slice_is_positional(slice)?
+        {
+            let s = series_loc_slice(&self.inner, slice)?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
-            let idx = slice.indices(self.inner.len() as isize)?;
-            let s = self
-                .inner
-                .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let s = match slice_rows(slice, self.inner.len())? {
+                SliceRows::Range(start, stop) => self.inner.iloc_slice(Some(start), Some(stop)),
+                SliceRows::Positions(positions) => self.inner.iloc(&positions),
+            }
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         if let Ok(idx) = key.extract::<PyRef<'_, PyIndex>>() {
@@ -19856,11 +20204,11 @@ impl PySeriesILoc {
             return scalar_to_py(py, &scalar);
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
-            let idx = slice.indices(self.inner.len() as isize)?;
-            let s = self
-                .inner
-                .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let s = match slice_rows(slice, self.inner.len())? {
+                SliceRows::Range(start, stop) => self.inner.iloc_slice(Some(start), Some(stop)),
+                SliceRows::Positions(positions) => self.inner.iloc(&positions),
+            }
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
@@ -19924,25 +20272,7 @@ impl PySeriesLoc {
             Ok(Py::new(py, PySeries { inner: s })?.into_any())
         };
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
-            if !slice.getattr("step")?.is_none() {
-                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                    "loc label slices with a step are not supported yet",
-                ));
-            }
-            let bound = |name: &str| -> PyResult<Option<IndexLabel>> {
-                let v = slice.getattr(name)?;
-                if v.is_none() {
-                    Ok(None)
-                } else {
-                    py_to_index_label(&v).map(Some)
-                }
-            };
-            let (start, stop) = (bound("start")?, bound("stop")?);
-            return series(
-                self.inner
-                    .loc_slice(start.as_ref(), stop.as_ref())
-                    .map_err(loc_key_error)?,
-            );
+            return series(series_loc_slice(&self.inner, slice)?);
         }
         if let Some(mask) = loc_bool_series_mask(key) {
             return series(
@@ -22616,13 +22946,20 @@ impl PyDataFrame {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
+        // `df['b':'d']` -> rows by label (see slice_is_positional)
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>()
+            && !slice_is_positional(slice)?
+            && let LocRows::Frame(frame) = resolve_loc_rows(&self.inner, key)?
+        {
+            return Ok(Py::new(py, PyDataFrame { inner: *frame })?.into_any());
+        }
         // `df[slice]` -> sliced rows
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
-            let idx = slice.indices(self.inner.len() as isize)?;
-            let frame = self
-                .inner
-                .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let frame = match slice_rows(slice, self.inner.len())? {
+                SliceRows::Range(start, stop) => self.inner.iloc_slice(Some(start), Some(stop)),
+                SliceRows::Positions(positions) => self.inner.iloc(&positions),
+            }
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
         // `df[mask]` with a boolean list -> filtered rows
@@ -30070,12 +30407,13 @@ impl PyDataFrameILoc {
                     .iloc_row(r)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
                 if let Ok(col_slice) = col_key.cast::<pyo3::types::PySlice>() {
-                    let c_idx = col_slice.indices(self.inner.num_columns() as isize)?;
-                    let sub = row_series
-                        .iloc_slice(Some(c_idx.start as i64), Some(c_idx.stop as i64))
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
+                    let sub = match slice_rows(col_slice, self.inner.num_columns())? {
+                        SliceRows::Range(start, stop) => {
+                            row_series.iloc_slice(Some(start), Some(stop))
+                        }
+                        SliceRows::Positions(positions) => row_series.iloc(&positions),
+                    }
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                     return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
                 } else if let Ok(col_positions) = col_key.extract::<Vec<i64>>() {
                     let sub = row_series.iloc(&col_positions).map_err(|e| {
@@ -30106,12 +30444,13 @@ impl PyDataFrameILoc {
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
                 if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
-                    let r_idx = row_slice.indices(self.inner.len() as isize)?;
-                    let sub = col_series
-                        .iloc_slice(Some(r_idx.start as i64), Some(r_idx.stop as i64))
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
+                    let sub = match slice_rows(row_slice, self.inner.len())? {
+                        SliceRows::Range(start, stop) => {
+                            col_series.iloc_slice(Some(start), Some(stop))
+                        }
+                        SliceRows::Positions(positions) => col_series.iloc(&positions),
+                    }
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                     return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
                 } else if let Ok(row_positions) = row_key.extract::<Vec<i64>>() {
                     let sub = col_series.iloc(&row_positions).map_err(|e| {
@@ -30136,49 +30475,40 @@ impl PyDataFrameILoc {
             // Both row and col are slices or lists: df.iloc[:, :] -> DataFrame.
             // The columns are taken by POSITION, so a duplicated name keeps
             // its own column (br-frankenpandas-5ihhi).
-            let col_positions: Vec<usize> =
-                if let Ok(col_slice) = col_key.cast::<pyo3::types::PySlice>() {
-                    let c_idx = col_slice.indices(self.inner.num_columns() as isize)?;
-                    let mut cols = Vec::new();
-                    let mut i = c_idx.start;
-                    if c_idx.step > 0 {
-                        while i < c_idx.stop {
-                            cols.push(i as usize);
-                            i += c_idx.step;
-                        }
+            let col_positions: Vec<usize> = if let Ok(col_slice) =
+                col_key.cast::<pyo3::types::PySlice>()
+            {
+                match slice_rows(col_slice, self.inner.num_columns())? {
+                    SliceRows::Range(start, stop) => (start..stop).map(|c| c as usize).collect(),
+                    SliceRows::Positions(positions) => {
+                        positions.into_iter().map(|c| c as usize).collect()
                     }
-                    cols
-                } else if let Ok(col_positions) = col_key.extract::<Vec<i64>>() {
-                    let width = self.inner.num_columns() as i64;
-                    let mut cols = Vec::new();
-                    for pos in col_positions {
-                        let norm = if pos < 0 { width + pos } else { pos };
-                        if norm < 0 || norm >= width {
-                            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                                "column index out of bounds",
-                            ));
-                        }
-                        cols.push(norm as usize);
+                }
+            } else if let Ok(col_positions) = col_key.extract::<Vec<i64>>() {
+                let width = self.inner.num_columns() as i64;
+                let mut cols = Vec::new();
+                for pos in col_positions {
+                    let norm = if pos < 0 { width + pos } else { pos };
+                    if norm < 0 || norm >= width {
+                        return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                            "column index out of bounds",
+                        ));
                     }
-                    cols
-                } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "Invalid column indexer for iloc",
-                    ));
-                };
+                    cols.push(norm as usize);
+                }
+                cols
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Invalid column indexer for iloc",
+                ));
+            };
 
             let row_positions: Vec<i64> =
                 if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
-                    let r_idx = row_slice.indices(self.inner.len() as isize)?;
-                    let mut rows = Vec::new();
-                    let mut i = r_idx.start;
-                    if r_idx.step > 0 {
-                        while i < r_idx.stop {
-                            rows.push(i as i64);
-                            i += r_idx.step;
-                        }
+                    match slice_rows(row_slice, self.inner.len())? {
+                        SliceRows::Range(start, stop) => (start..stop).collect(),
+                        SliceRows::Positions(positions) => positions,
                     }
-                    rows
                 } else if let Ok(rows) = row_key.extract::<Vec<i64>>() {
                     rows
                 } else {
@@ -30204,11 +30534,11 @@ impl PyDataFrameILoc {
             return Ok(Py::new(py, PySeries { inner: row })?.into_any());
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
-            let idx = slice.indices(self.inner.len() as isize)?;
-            let frame = self
-                .inner
-                .iloc_slice(Some(idx.start as i64), Some(idx.stop as i64))
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let frame = match slice_rows(slice, self.inner.len())? {
+                SliceRows::Range(start, stop) => self.inner.iloc_slice(Some(start), Some(stop)),
+                SliceRows::Positions(positions) => self.inner.iloc(&positions),
+            }
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
         if let Ok(positions) = key.extract::<Vec<i64>>() {
@@ -30293,30 +30623,97 @@ fn loc_label_list(key: &Bound<'_, PyAny>) -> Option<PyResult<Vec<IndexLabel>>> {
     Some(list.iter().map(|item| py_to_index_label(&item)).collect())
 }
 
+/// A `.loc` label slice as the inclusive label window it reads (low bound,
+/// high bound) and its step. pandas reads a negative step from `start` BACK
+/// to `stop`, so that window is `stop..=start` taken in reverse (it raised
+/// NotImplementedError for any step).
+fn loc_slice_parts(
+    slice: &Bound<'_, pyo3::types::PySlice>,
+) -> PyResult<(Option<IndexLabel>, Option<IndexLabel>, i64)> {
+    let bound = |name: &str| -> PyResult<Option<IndexLabel>> {
+        let v = slice.getattr(name)?;
+        if v.is_none() {
+            Ok(None)
+        } else {
+            py_to_index_label(&v).map(Some)
+        }
+    };
+    let step = slice.getattr("step")?;
+    let step = if step.is_none() {
+        1
+    } else {
+        step.extract::<i64>()?
+    };
+    if step == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "slice step cannot be zero",
+        ));
+    }
+    let (start, stop) = (bound("start")?, bound("stop")?);
+    Ok(if step > 0 {
+        (start, stop, step)
+    } else {
+        (stop, start, step)
+    })
+}
+
+/// `series.loc[slice]`: the inclusive label window, every step-th row.
+fn series_loc_slice(series: &Series, slice: &Bound<'_, pyo3::types::PySlice>) -> PyResult<Series> {
+    let (low, high, step) = loc_slice_parts(slice)?;
+    let window = series
+        .loc_slice(low.as_ref(), high.as_ref())
+        .map_err(loc_key_error)?;
+    match loc_step_positions(window.len(), step) {
+        None => Ok(window),
+        Some(positions) => window.iloc(&positions).map_err(frame_error_to_py),
+    }
+}
+
+/// Whether `obj[slice]` reads positions: pandas' `[]` slices by position
+/// when both bounds are integers or None, and by label otherwise
+/// (`s['b':'d']`, `s['2024-01':'2024-03']`); the binding always read
+/// positions, so a label-bounded slice raised TypeError.
+fn slice_is_positional(slice: &Bound<'_, pyo3::types::PySlice>) -> PyResult<bool> {
+    for name in ["start", "stop"] {
+        let bound = slice.getattr(name)?;
+        if !bound.is_none() && bound.extract::<i64>().is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Every `step`-th row of a `.loc` window of `len` rows, backwards for a
+/// negative step; None for the unit step (the window itself).
+fn loc_step_positions(len: usize, step: i64) -> Option<Vec<i64>> {
+    if step == 1 {
+        return None;
+    }
+    let stride = usize::try_from(step.unsigned_abs()).unwrap_or(usize::MAX);
+    Some(if step > 0 {
+        (0..len).step_by(stride).map(|p| p as i64).collect()
+    } else {
+        (0..len).rev().step_by(stride).map(|p| p as i64).collect()
+    })
+}
+
 /// Resolve a `.loc` row indexer the way pandas does. ORDER MATTERS: a Python
 /// bool is an int, so boolean masks must be recognised before any integer-label
 /// extraction (the old order read `df.loc[df.a > 2, 'b']`'s mask as labels 1/0).
 fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows> {
     if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
-        if !slice.getattr("step")?.is_none() {
-            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "loc label slices with a step are not supported yet",
-            ));
-        }
-        let bound = |name: &str| -> PyResult<Option<IndexLabel>> {
-            let v = slice.getattr(name)?;
-            if v.is_none() {
-                Ok(None)
-            } else {
-                py_to_index_label(&v).map(Some)
-            }
-        };
-        let (start, stop) = (bound("start")?, bound("stop")?);
+        let (low, high, step) = loc_slice_parts(slice)?;
         // pandas label slices are INCLUSIVE of the stop label.
-        return df
-            .loc_slice(start.as_ref(), stop.as_ref())
-            .map(LocRows::frame)
-            .map_err(loc_key_error);
+        let window = df
+            .loc_slice(low.as_ref(), high.as_ref())
+            .map_err(loc_key_error)?;
+        return match loc_step_positions(window.len(), step) {
+            None => Ok(LocRows::frame(window)),
+            Some(positions) => window
+                .iloc(&positions)
+                .map(LocRows::frame)
+                .map_err(frame_error_to_py),
+        };
     }
     if let Some(mask) = loc_bool_series_mask(key) {
         return df
@@ -30629,6 +31026,32 @@ enum RowTarget {
     Append(IndexLabel),
 }
 
+/// The rows (or columns) a positional slice reads out of `len`.
+enum SliceRows {
+    /// A unit step: the contiguous `start..stop` (`iloc_slice`'s zero-copy
+    /// window).
+    Range(i64, i64),
+    /// Any other step: the positions in slice order (`iloc`'s gather).
+    Positions(Vec<i64>),
+}
+
+/// Python's `start:stop:step` over `len` positions. Every positional read
+/// took start and stop alone, so `s[::-1]` / `df.iloc[::-1]` were empty and
+/// `s.iloc[::2]` every row.
+fn slice_rows(slice: &Bound<'_, pyo3::types::PySlice>, len: usize) -> PyResult<SliceRows> {
+    let indices = slice.indices(isize::try_from(len).unwrap_or(isize::MAX))?;
+    if indices.step == 1 {
+        return Ok(SliceRows::Range(indices.start as i64, indices.stop as i64));
+    }
+    let mut positions = Vec::new();
+    let mut at = indices.start;
+    while (indices.step > 0 && at < indices.stop) || (indices.step < 0 && at > indices.stop) {
+        positions.push(at as i64);
+        at += indices.step;
+    }
+    Ok(SliceRows::Positions(positions))
+}
+
 /// The rows `.iloc[key]` writes, of `len`: a position (negative counts from
 /// the end), a slice, a list of positions or a boolean list/array; a
 /// position past the end is pandas' IndexError.
@@ -30879,11 +31302,6 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
         return Ok(None);
     }
     if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
-        if !slice.getattr("step")?.is_none() {
-            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "loc column slices with a step are not supported yet",
-            ));
-        }
         let names: Vec<String> = df.column_names().iter().map(|s| s.to_string()).collect();
         let find = |name: &str, last: bool| -> PyResult<usize> {
             let pos = if last {
@@ -30893,22 +31311,45 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
             };
             pos.ok_or_else(|| loc_key_error(name))
         };
-        let start = slice.getattr("start")?;
-        let stop = slice.getattr("stop")?;
-        let lo = if start.is_none() {
+        let step = slice.getattr("step")?;
+        let step = if step.is_none() {
+            1
+        } else {
+            step.extract::<i64>()?
+        };
+        if step == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "slice step cannot be zero",
+            ));
+        }
+        // A negative step reads from `start` back to `stop` (see
+        // loc_slice_parts): the window is stop..=start, reversed below.
+        let (low, high) = if step > 0 {
+            (slice.getattr("start")?, slice.getattr("stop")?)
+        } else {
+            (slice.getattr("stop")?, slice.getattr("start")?)
+        };
+        let lo = if low.is_none() {
             0
         } else {
-            find(&start.extract::<String>()?, false)?
+            find(&low.extract::<String>()?, false)?
         };
-        let hi = if stop.is_none() {
+        let hi = if high.is_none() {
             names.len()
         } else {
-            find(&stop.extract::<String>()?, true)? + 1
+            find(&high.extract::<String>()?, true)? + 1
         };
-        return Ok(Some(if lo < hi {
+        let window = if lo < hi {
             names[lo..hi].to_vec()
         } else {
             Vec::new()
+        };
+        return Ok(Some(match loc_step_positions(window.len(), step) {
+            None => window,
+            Some(positions) => positions
+                .into_iter()
+                .map(|p| window[p as usize].clone())
+                .collect(),
         }));
     }
     // A boolean list/array marks the columns to keep (df.loc[:, df.columns != 'a']).
@@ -48509,29 +48950,50 @@ mod tests {
         assert_eq!(idx.len(), 3);
         assert_eq!(idx.name(), Some("my_idx".to_string()));
         assert!(idx.is_unique());
-        assert_eq!(idx.__repr__(), "Index([10, 20, 30], name='my_idx')");
+        Python::initialize();
+        Python::attach(|py| {
+            // pandas' repr carries the dtype (br-frankenpandas-1tkrg).
+            assert_eq!(
+                idx.__repr__(py).expect("repr"), // ubs:ignore — test fixture
+                "Index([10, 20, 30], dtype='int64', name='my_idx')"
+            );
+        });
 
         idx.set_name(Some("renamed"));
         assert_eq!(idx.name(), Some("renamed".to_string()));
 
-        let other = PyIndex {
-            inner: Index::new(vec![
-                IndexLabel::Int64(10),
-                IndexLabel::Int64(20),
-                IndexLabel::Int64(30),
-            ])
-            .set_name("renamed"),
-        };
-        assert!(idx.equals(&other));
+        Python::attach(|py| {
+            let other = Bound::new(
+                py,
+                PyIndex {
+                    inner: Index::new(vec![
+                        IndexLabel::Int64(10),
+                        IndexLabel::Int64(20),
+                        IndexLabel::Int64(30),
+                    ])
+                    .set_name("other"),
+                },
+            )
+            .expect("index object"); // ubs:ignore — test fixture
+            // pandas' equals ignores names.
+            assert!(idx.equals(other.as_any()));
 
-        let non_matching = PyIndex {
-            inner: Index::new(vec![
-                IndexLabel::Int64(1),
-                IndexLabel::Int64(2),
-                IndexLabel::Int64(3),
-            ]),
-        };
-        assert!(!idx.equals(&non_matching));
+            let non_matching = Bound::new(
+                py,
+                PyIndex {
+                    inner: Index::new(vec![
+                        IndexLabel::Int64(1),
+                        IndexLabel::Int64(2),
+                        IndexLabel::Int64(3),
+                    ]),
+                },
+            )
+            .expect("index object"); // ubs:ignore — test fixture
+            assert!(!idx.equals(non_matching.as_any()));
+            // NEGATIVE: a list of the same labels is not an Index.
+            let listed = PyList::new(py, [10, 20, 30]).expect("list"); // ubs:ignore — test fixture
+            assert!(!idx.equals(listed.as_any()));
+        });
     }
 
     #[test]
@@ -48815,10 +49277,33 @@ mod tests {
         let idx_b = PyIndex {
             inner: Index::new(vec![IndexLabel::Int64(2), IndexLabel::Int64(3)]),
         };
-        assert_eq!(idx_a.union(&idx_b).len(), 3);
-        assert_eq!(idx_a.intersection(&idx_b).len(), 1);
-        assert_eq!(idx_a.difference(&idx_b).len(), 1);
-        assert_eq!(idx_a.append(&idx_b).len(), 4);
+        let arg = || IndexArg(idx_b.clone());
+        assert_eq!(idx_a.union(arg(), None).len(), 3);
+        assert_eq!(idx_a.intersection(arg()).len(), 1);
+        assert_eq!(idx_a.difference(arg(), None).len(), 1);
+        assert_eq!(idx_a.append(arg()).len(), 4);
+        // union sorts (pandas' sort=None) unless sort=False.
+        let unsorted = PyIndex {
+            inner: Index::new(vec![IndexLabel::Int64(9), IndexLabel::Int64(1)]),
+        };
+        assert_eq!(
+            unsorted.union(arg(), None).inner.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(9)
+            ]
+        );
+        assert_eq!(
+            unsorted.union(arg(), Some(false)).inner.labels(),
+            &[
+                IndexLabel::Int64(9),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3)
+            ]
+        );
     }
 
     #[test]

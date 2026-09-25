@@ -3628,7 +3628,6 @@ def test_series_drop_rename_inplace_and_errors_match_pandas() -> None:
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="br-frankenpandas-1tkrg: the Index repr omits dtype=")
 def test_set_index_duplicate_keys_message_is_pandas_exactly() -> None:
     messages = []
     for m in (pd, fpd):
@@ -6628,3 +6627,114 @@ def _unused_category_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_UNUSED_CATEGORY_CASES))
 def test_unused_categories_and_category_key_methods_match_pandas(case: str) -> None:
     assert _unused_category_outcome(fpd, case) == _unused_category_outcome(pd, case), case
+
+
+def _steps_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [10, 11, 12, 13, 14], "b": [0.5, 1.5, 2.5, 3.5, 4.5]})
+
+
+def _lettered(m: Any) -> Any:
+    return m.Series([1, 2, 3, 4], index=["a", "b", "c", "d"])
+
+
+# Slices with a step were read as start:stop alone at every positional read:
+# s.iloc[::2] / df.iloc[::2] returned EVERY row, s[::-1] / df.iloc[::-1] an
+# EMPTY result; .loc refused any step; s['b':'d'] (label bounds) raised
+# TypeError. The Index repr had no dtype, never wrapped or truncated;
+# Index(series) took the Series' INDEX labels (pandas: its values), a bool
+# list became 1/0, dtype= raised; set operations and get_indexer refused a
+# list (df.columns.difference(['id'])), union came back unsorted,
+# get_indexer returned a list, equals(list) raised; df.index.name = 'x' on
+# a datetime index renamed a copy and a TimedeltaIndex name was read-only.
+_SLICE_AND_INDEX_CASES = {
+    "iloc step": lambda m: _steps_frame(m).iloc[::2]["a"].tolist(),
+    "iloc step index": lambda m: list(_steps_frame(m).iloc[::2].index),
+    "iloc offset step": lambda m: _steps_frame(m).iloc[1::2]["a"].tolist(),
+    "iloc reverse": lambda m: _steps_frame(m).iloc[::-1]["a"].tolist(),
+    "iloc reverse bounded": lambda m: _steps_frame(m).iloc[4:0:-2]["a"].tolist(),
+    "series iloc step": lambda m: _steps_frame(m)["a"].iloc[::2].tolist(),
+    "series reverse": lambda m: _steps_frame(m)["a"][::-1].tolist(),
+    "frame getitem reverse": lambda m: _steps_frame(m)[::-1]["a"].tolist(),
+    "iloc rows step col": lambda m: _steps_frame(m).iloc[::2, 0].tolist(),
+    "iloc 2d reverse both": lambda m: _steps_frame(m).iloc[::-1, ::-1].values.tolist(),
+    "iloc row reverse cols": lambda m: _steps_frame(m).iloc[0, ::-1].tolist(),
+    # NEGATIVE: unit steps and negative bounds are unchanged.
+    "iloc negative bounds": lambda m: (_steps_frame(m)["a"].iloc[-3:].tolist(), _steps_frame(m)["a"].iloc[:-2].tolist()),
+    "loc step": lambda m: _steps_frame(m).loc[::2, "a"].tolist(),
+    "loc reverse bounded": lambda m: _steps_frame(m).loc[3:1:-1, "a"].tolist(),
+    "loc reverse from": lambda m: _steps_frame(m).loc[3::-2, "a"].tolist(),
+    "series loc reverse": lambda m: _steps_frame(m)["a"].loc[::-1].tolist(),
+    "loc column step": lambda m: list(m.DataFrame({"a": [1], "b": [2], "c": [3], "d": [4]}).loc[:, "a":"c":2].columns),
+    "loc column reverse": lambda m: list(m.DataFrame({"a": [1], "b": [2], "c": [3], "d": [4]}).loc[:, "c":"a":-1].columns),
+    "label slice getitem": lambda m: _lettered(m)["b":"c"].tolist(),
+    "label slice open": lambda m: (_lettered(m)["b":].tolist(), _lettered(m)[:"b"].tolist()),
+    "label slice reverse": lambda m: _lettered(m)["d":"b":-1].tolist(),
+    "frame label slice": lambda m: m.DataFrame({"v": [1, 2, 3, 4]}, index=list("abcd"))["b":"c"]["v"].tolist(),
+    "date string slice": lambda m: m.Series([1, 2, 3, 4], index=m.to_datetime(["2024-01-05", "2024-02-01", "2024-02-20", "2024-03-02"]))["2024-02":"2024-03"].tolist(),
+    # NEGATIVE: integer bounds on an integer index stay positional.
+    "int index positional": lambda m: m.Series([10, 20, 30], index=[5, 6, 7])[1:3].tolist(),
+    **{
+        f"repr {label}": (lambda make: lambda m: repr(make(m)))(make)
+        for label, make in {
+            "ints": lambda m: m.Index([0, 1, 2]),
+            "strings": lambda m: m.Index(["a", "b"]),
+            "empty": lambda m: m.Index([]),
+            "floats": lambda m: m.Index([1.5, 2.0]),
+            "bools": lambda m: m.Index([True, False]),
+            "named": lambda m: m.Index(["a", "b"], name="k"),
+            "wrapped strings": lambda m: m.Index(list("abcdefghijklmnopqrstuvwxyz") * 2),
+            "wrapped justified ints": lambda m: m.Index(list(range(95, 130))),
+            "truncated ints": lambda m: m.Index(list(range(1000))),
+            "truncated strings": lambda m: m.Index([f"x{i}" for i in range(200)]),
+            "float nan": lambda m: m.Index([1.0, None, 3.5]),
+            "object none": lambda m: m.Index(["a", None]),
+            "mixed": lambda m: m.Index([1, "a", 2.5]),
+            "columns": lambda m: m.DataFrame({"alpha": [1], "beta": [2]}).columns,
+            "set_index name": lambda m: m.DataFrame({"alpha": [1, 2], "b": [3, 4]}).set_index("alpha").index,
+            "datetime dates": lambda m: m.to_datetime(["2024-01-01", "2024-01-02"]),
+            "datetime nat named": lambda m: m.DatetimeIndex(["2024-01-01", None], name="d"),
+            "datetime times": lambda m: m.to_datetime(["2024-01-01 12:30", "2024-01-02 00:00"]),
+            "datetime fraction": lambda m: m.to_datetime(["2024-01-01 00:00:00.5"]),
+            "datetime wrapped": lambda m: m.to_datetime(["2024-01-01"] * 8),
+            "datetime truncated": lambda m: m.to_datetime(["2024-01-01"] * 120),
+            "datetime frame index": lambda m: m.Series([1, 2], index=m.to_datetime(["2024-01-01", "2024-01-02"])).index,
+            "timedelta days": lambda m: m.to_timedelta(["1D", "2D"]),
+            "timedelta long nat": lambda m: m.to_timedelta(["1D", "2h", None]),
+            "timedelta named": lambda m: m.TimedeltaIndex(["1D"], name="lag"),
+        }.items()
+    },
+    "Index of Series values": lambda m: repr(m.Index(m.Series([3, 1], index=["a", "b"], name="v"))),
+    "Index dtype float": lambda m: repr(m.Index([1, 2], dtype="float64")),
+    "Index dtype parses": lambda m: repr(m.Index(["1", "2"], dtype="int64")),
+    "columns difference list": lambda m: repr(m.DataFrame({"id": [1], "a": [2], "b": [3]}).columns.difference(["id"])),
+    "columns union sorts": lambda m: repr(m.DataFrame({"id": [1], "a": [2], "b": [3]}).columns.union(["c"])),
+    "union sort False": lambda m: repr(m.Index(["c", "a", "b"]).union(["d"], sort=False)),
+    "union equal unsorted": lambda m: repr(m.Index(["c", "a", "b"]).union(m.Index(["c", "a", "b"]))),
+    "union empty unsorted": lambda m: repr(m.Index(["c", "a", "b"]).union([])),
+    "intersection keeps order": lambda m: repr(m.Index(["c", "a", "b"]).intersection(["b", "c"])),
+    "symmetric_difference": lambda m: repr(m.Index(["c", "a", "b"]).symmetric_difference(["z", "a"])),
+    "get_indexer list": lambda m: m.Index(["id", "a", "b"]).get_indexer(["b", "q"]).tolist(),
+    "get_indexer Series": lambda m: m.Index([10, 20, 30]).get_indexer(m.Series([20, 40])).tolist(),
+    "equals": lambda m: (m.Index([1, 2]).equals(m.Index([1, 2], name="x")), m.Index([1, 2]).equals([1, 2])),
+    "datetime index name writes through": lambda m: (lambda d: (setattr(d.index, "name", "date"), d.index.name, list(d.reset_index().columns))[1:])(
+        m.DataFrame({"v": [1, 2]}, index=m.to_datetime(["2024-01-01", "2024-01-02"]))
+    ),
+    "timedelta index name writes through": lambda m: (lambda s: (setattr(s.index, "name", "lag"), s.index.name)[1])(
+        m.Series([1, 2], index=m.to_timedelta(["1D", "2D"]))
+    ),
+    # NEGATIVE: a plain index still writes through.
+    "plain index name writes through": lambda m: (lambda d: (setattr(d.index, "name", "row"), list(d.reset_index().columns))[1])(m.DataFrame({"v": [1, 2]})),
+}
+
+
+def _slice_and_index_outcome(m: Any, case: str) -> Any:
+    try:
+        return _SLICE_AND_INDEX_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SLICE_AND_INDEX_CASES))
+def test_stepped_and_label_slices_and_index_basics_match_pandas(case: str) -> None:
+    assert _slice_and_index_outcome(fpd, case) == _slice_and_index_outcome(pd, case), case
