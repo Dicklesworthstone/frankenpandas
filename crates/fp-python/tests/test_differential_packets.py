@@ -3169,8 +3169,20 @@ def test_drop_rename_keywords_match_pandas(case: Any) -> None:
         lambda d: d.query("a > 1", inplace=True),
         lambda d: d.eval("c = a + b", inplace=True),
         lambda d: d.dropna(inplace=True),
+        # fvsao.6: these refused inplace=True.
+        lambda d: d.sort_values("a", ascending=False, inplace=True),
+        lambda d: d.sort_index(ascending=False, inplace=True),
+        lambda d: d.reset_index(inplace=True),
+        lambda d: d.reset_index(drop=True, inplace=True),
+        lambda d: d.replace(2, 20, inplace=True),
+        lambda d: d.clip(2, 5, inplace=True),
+        lambda d: d.drop_duplicates(subset=["a"], inplace=True),
     ],
-    ids=["drop", "drop_columns", "rename", "rename_callable", "set_index", "query", "eval", "dropna"],
+    ids=[
+        "drop", "drop_columns", "rename", "rename_callable", "set_index", "query", "eval", "dropna",
+        "sort_values", "sort_index", "reset_index", "reset_index_drop", "replace", "clip",
+        "drop_duplicates",
+    ],
 )
 def test_inplace_keywords_mutate_and_return_none_like_pandas(call: Any) -> None:
     after = []
@@ -4820,3 +4832,153 @@ def test_etl_journey_matches_pandas(tmp_path: Path) -> None:
     got = _etl_journey(fpd, tmp_path / "fpd")
     for step in want:
         assert _plain_any(got[step]) == _plain_any(want[step]), step
+
+
+_INPLACE_WITH_GAPS = {
+    "frame fillna": lambda m, d, s: d.fillna(0, inplace=True),
+    "frame ffill": lambda m, d, s: d.ffill(inplace=True),
+    "frame bfill": lambda m, d, s: d.bfill(inplace=True),
+    "frame interpolate": lambda m, d, s: d.interpolate(inplace=True),
+    "series fillna": lambda m, d, s: s.fillna(-1, inplace=True),
+    "series ffill": lambda m, d, s: s.ffill(inplace=True),
+    "series bfill": lambda m, d, s: s.bfill(inplace=True),
+    "series interpolate": lambda m, d, s: s.interpolate(inplace=True),
+    "series sort_values": lambda m, d, s: s.sort_values(inplace=True),
+    "series sort_index": lambda m, d, s: s.sort_index(ascending=False, inplace=True),
+    "series replace": lambda m, d, s: s.replace(3.0, 30.0, inplace=True),
+    "series clip": lambda m, d, s: s.clip(1.5, 2.5, inplace=True),
+    "series drop_duplicates": lambda m, d, s: s.drop_duplicates(inplace=True),
+    "series reset_index drop": lambda m, d, s: s.reset_index(drop=True, inplace=True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", sorted(_INPLACE_WITH_GAPS))
+def test_inplace_on_gaps_mutates_and_returns_none_like_pandas(op: str) -> None:
+    # fvsao.6: inplace=True was refused by 20 Series/DataFrame methods.
+    after = []
+    for m in (pd, fpd):
+        d = m.DataFrame({"a": [1.0, None, 3.0, None], "b": [None, 2.0, 2.0, 4.0]},
+                        index=[3, 1, 2, 0])
+        s = m.Series([3.0, None, 1.0, 3.0], index=[3, 1, 2, 0], name="v")
+        assert _INPLACE_WITH_GAPS[op](m, d, s) is None, op
+        after.append((_plain(d), _plain(s)))
+    assert after[1] == after[0], op
+    # NEGATIVE: a Series cannot become a frame in place.
+    for m in (pd, fpd):
+        with pytest.raises(TypeError, match="Cannot reset_index inplace on a Series"):
+            m.Series([1, 2]).reset_index(inplace=True)
+
+
+def _series_writes(m: Any) -> dict:
+    out = {}
+
+    def run(name: str, make: Any, write: Any) -> None:
+        obj = make()
+        write(obj)
+        out[name] = obj
+
+    labeled = lambda: m.Series([1, 2, 3], index=["a", "b", "c"])  # noqa: E731
+    plain = lambda: m.Series([1, 2, 3, 4])  # noqa: E731
+    run("label", labeled, lambda s: s.__setitem__("b", 20))
+    run("position on a string index", labeled, lambda s: s.__setitem__(0, 9))
+    run("new int label enlarges", lambda: m.Series([1, 2, 3], index=[10, 20, 30]),
+        lambda s: s.__setitem__(0, 9))
+    run("int slice by position", plain, lambda s: s.__setitem__(slice(1, 3), 0))
+    run("label slice", labeled, lambda s: s.__setitem__(slice("a", "b"), 0))
+    run("bool list", lambda: m.Series([1, 2, 3]), lambda s: s.__setitem__([True, False, True], 5))
+    run("mask", plain, lambda s: s.__setitem__(s > 2, 0))
+    run("mask with aligned values", plain, lambda s: s.__setitem__(s > 1, s * 10))
+    run("label list", labeled, lambda s: s.__setitem__(["a", "c"], 0))
+    run("string into ints", plain, lambda s: s.__setitem__(1, "x"))
+    run("nan into ints", plain, lambda s: s.__setitem__(1, np.nan))
+    run("float into ints", plain, lambda s: s.__setitem__(1, 2.5))
+    run("loc new label", lambda: m.Series([1, 2]), lambda s: s.loc.__setitem__(5, 9))
+    run("setitem new label float", lambda: m.Series([1, 2]), lambda s: s.__setitem__(5, 9.5))
+    run("loc mask", lambda: m.Series([1.5, 2.5, 3.5]), lambda s: s.loc.__setitem__(s > 2, np.nan))
+    run("iloc", plain, lambda s: s.iloc.__setitem__(0, 9))
+    run("iloc negative", plain, lambda s: s.iloc.__setitem__(-1, 0))
+    run("iloc slice", plain, lambda s: s.iloc.__setitem__(slice(1, 3), 0))
+    run("iloc list", plain, lambda s: s.iloc.__setitem__([0, 2], [7, 8]))
+    run("at", labeled, lambda s: s.at.__setitem__("c", 30))
+    run("iat", labeled, lambda s: s.iat.__setitem__(1, 21))
+    run("category keeps its dtype", lambda: m.Series(["x", "y", "x"], dtype="category"),
+        lambda s: s.__setitem__(1, "x"))
+    run("None into bools is NaN", lambda: m.Series([True, False]), lambda s: s.__setitem__(0, None))
+    return out
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_series_writes_match_pandas() -> None:
+    # fvsao.6: a Series took no writes at all - s[k] = v, s.loc/.iloc/.at/.iat
+    # setters all raised "does not support item assignment".
+    want, got = _series_writes(pd), _series_writes(fpd)
+    for step in want:
+        assert _plain(got[step]) == _plain(want[step]), step
+    # NEGATIVES: .iloc cannot enlarge, a value list must match, and the
+    # accessor writes the Series it came from, not a copy.
+    for m in (pd, fpd):
+        s = m.Series([1, 2, 3])
+        with pytest.raises(IndexError, match="iloc cannot enlarge its target object"):
+            s.iloc[5] = 0
+        with pytest.raises(ValueError):
+            s.iloc[[0, 1]] = [1]
+        loc = s.loc
+        s[0] = 7
+        loc[1] = 8
+        assert s.tolist() == [7, 8, 3]
+        categories = m.Series(["x", "y"], dtype="category")
+        with pytest.raises(TypeError, match="Cannot setitem on a Categorical with a new category"):
+            categories[0] = "z"
+        assert categories.tolist() == ["x", "y"]
+
+
+def _frame_writes(m: Any) -> dict:
+    out = {}
+
+    def run(name: str, write: Any) -> None:
+        df = m.DataFrame({"a": [1, 2], "b": [3.0, 4.0]})
+        write(df)
+        out[name] = df
+
+    run("iloc cell", lambda d: d.iloc.__setitem__((0, 1), 9.0))
+    run("iloc row list", lambda d: d.iloc.__setitem__(0, [9, 9.5]))
+    run("iloc row scalar", lambda d: d.iloc.__setitem__(1, 0))
+    run("iloc column", lambda d: d.iloc.__setitem__((slice(None), 0), [5, 6]))
+    run("at", lambda d: d.at.__setitem__((1, "b"), 7.5))
+    run("at new row", lambda d: d.at.__setitem__((5, "a"), 7))
+    run("iat", lambda d: d.iat.__setitem__((0, 0), 5))
+    run("bool frame", lambda d: d.__setitem__(d > 2, 0))
+    run("bool series rows", lambda d: d.__setitem__(d["a"] > 1, 0))
+    run("columns from a frame", lambda d: d.__setitem__(["a", "b"], d[["b", "a"]]))
+    run("columns from an aligned frame", lambda d: d.__setitem__(
+        ["a", "b"], m.DataFrame({"a": [10, 20], "b": [30.0, 40.0]}, index=[1, 0])))
+    run("new columns from rows", lambda d: d.__setitem__(["x", "y"], [[1, 2], [3, 4]]))
+    run("columns from a scalar", lambda d: d.__setitem__(["a", "z"], 0))
+    run("column from a reordered series", lambda d: d.__setitem__(
+        "c", m.Series([10, 20], index=[1, 0])))
+    run("column from a partial series", lambda d: d.__setitem__("c", m.Series([10], index=[1])))
+    run("loc row by label list", lambda d: d.loc.__setitem__(0, [7, 7.5]))
+    run("del", lambda d: d.__delitem__("a"))
+    return out
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_writes_match_pandas() -> None:
+    # fvsao.6: df.iloc/.at/.iat had no setters; df[bool_frame] = v,
+    # df[[cols]] = values and del df[col] raised; df[col] = series took the
+    # Series by POSITION (a reordered Series landed on the wrong rows).
+    want, got = _frame_writes(pd), _frame_writes(fpd)
+    for step in want:
+        assert _plain(got[step]) == _plain(want[step]), step
+    # NEGATIVES: iloc cannot enlarge, a missing column cannot be deleted, a
+    # frame value must have as many columns as the key.
+    for m in (pd, fpd):
+        df = m.DataFrame({"a": [1, 2], "b": [3.0, 4.0]})
+        with pytest.raises(IndexError, match="iloc cannot enlarge its target object"):
+            df.iloc[5, 0] = 1
+        with pytest.raises(KeyError):
+            del df["zz"]
+        with pytest.raises(ValueError, match="Columns must be same length as key"):
+            df[["a", "b"]] = df[["a"]]
+        assert df["a"].tolist() == [1, 2]

@@ -12783,6 +12783,22 @@ impl Series {
         self.filter(mask)
     }
 
+    /// The positions `.loc[start:stop]` selects, resolved as
+    /// [`Self::loc_slice`] resolves them - for writes through them
+    /// (`s.loc[a:b] = value`).
+    pub fn loc_slice_positions(
+        &self,
+        start: Option<&IndexLabel>,
+        stop: Option<&IndexLabel>,
+    ) -> Result<Vec<usize>, FrameError> {
+        let labels = self.index.labels();
+        if labels.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(loc_slice_positions(labels, start, stop)?
+            .map_or_else(Vec::new, |(first, last)| (first..=last).collect()))
+    }
+
     /// Label-based slice selection (inclusive on both ends).
     ///
     /// Matches `series.loc[start:stop]` in pandas. Both `start` and `stop` are
@@ -73053,6 +73069,9 @@ impl DataFrame {
         start: Option<&IndexLabel>,
         stop: Option<&IndexLabel>,
     ) -> Result<Vec<usize>, FrameError> {
+        if self.index.labels().is_empty() {
+            return Ok(Vec::new());
+        }
         Ok(loc_slice_positions(self.index.labels(), start, stop)?
             .map_or_else(Vec::new, |(first, last)| (first..=last).collect()))
     }
@@ -203169,6 +203188,25 @@ mod tests {
                 .values(),
             [Scalar::Int64(30)]
         );
+        // The same rows as positions, for s.loc[2:4] = value; an empty
+        // Series has none.
+        assert_eq!(
+            ints.loc_slice_positions(Some(&IndexLabel::Int64(2)), Some(&IndexLabel::Int64(4)))
+                .unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            ints.loc_slice_positions(None, Some(&IndexLabel::Int64(3)))
+                .unwrap(),
+            vec![0, 1]
+        );
+        let empty = Series::new(
+            "v",
+            Index::new(Vec::new()),
+            Column::from_i64_values(Vec::new()),
+        )
+        .unwrap();
+        assert!(empty.loc_slice_positions(None, None).unwrap().is_empty());
         // NEGATIVE: a non-monotonic index still needs the labels themselves.
         let shuffled = Series::new(
             "v",
