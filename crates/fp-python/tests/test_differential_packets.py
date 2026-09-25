@@ -6831,3 +6831,66 @@ def _construct_bin_shift_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_CONSTRUCT_BIN_SHIFT_CASES))
 def test_null_int_construction_value_count_bins_shift_freq_and_cut_edges_match_pandas(case: str) -> None:
     assert _construct_bin_shift_outcome(fpd, case) == _construct_bin_shift_outcome(pd, case), case
+
+
+def _csv_frame(r: Any) -> Any:
+    return (
+        [str(c) for c in r.columns],
+        [str(d) for d in r.dtypes],
+        [[None if isinstance(v, float) and math.isnan(v) else v for v in r[c].tolist()] for c in r.columns],
+    )
+
+
+def _nth_frame(m: Any) -> Any:
+    return m.DataFrame({"g": ["a", "a", "b"], "v": [1, 2, 3], "w": [4, 5, 6]}, index=[10, 20, 30])
+
+
+# read_csv refused every parser option fp-io's CsvReadOptions already
+# implements (thousands=',' raised NotImplementedError); fp-io's comment=
+# only skipped lines that START with it ('2 # note' stayed text); a too-long
+# row / unterminated quote raised ValueError where pandas raises its
+# ParserError (a ValueError); DataFrameGroupBy.nth dropped the key column
+# (pandas 2.x nth is a row filter keeping every column).
+_READ_CSV_NTH_CASES = {
+    "thousands": lambda m: _csv_frame(m.read_csv(io.StringIO('a,b\n"1,234",x\n5,y\n'), thousands=",")),
+    "thousands float": lambda m: _csv_frame(m.read_csv(io.StringIO('a\n"1,234.5"\n2\n'), thousands=",")),
+    "decimal comma": lambda m: _csv_frame(m.read_csv(io.StringIO("a;b\n1,5;2\n3,25;4\n"), sep=";", decimal=",")),
+    "decimal and thousands": lambda m: _csv_frame(m.read_csv(io.StringIO("a;b\n1.234,5;2\n"), sep=";", decimal=",", thousands=".")),
+    "comment inline": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,2 # note\n# whole line\n3,4\n"), comment="#")),
+    "comment quoted": lambda m: _csv_frame(m.read_csv(io.StringIO('a,b\n"x#y",2\n'), comment="#")),
+    "comment before header": lambda m: _csv_frame(m.read_csv(io.StringIO("# top\na,b\n1,2\n"), comment="#")),
+    "comment crlf": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\r\n# c\r\n1,2 #x\r\n"), comment="#")),
+    "true false values": lambda m: _csv_frame(m.read_csv(io.StringIO("a\nyes\nno\nyes\n"), true_values=["yes"], false_values=["no"])),
+    "na_filter false": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,\n2,NA\n"), na_filter=False)),
+    "skipfooter": lambda m: _csv_frame(m.read_csv(io.StringIO("a\n1\n2\ntotal\n"), skipfooter=1, engine="python")),
+    "quotechar": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n'x,y',2\n"), quotechar="'")),
+    "escapechar": lambda m: _csv_frame(m.read_csv(io.StringIO('a,b\n"x\\"y",2\n'), escapechar="\\", doublequote=False)),
+    "skipinitialspace": lambda m: _csv_frame(m.read_csv(io.StringIO("a, b\n1, 2\n"), skipinitialspace=True)),
+    "on_bad_lines skip": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,2\n3,4,5\n6,7\n"), on_bad_lines="skip")),
+    "lineterminator": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b~1,2~3,4"), lineterminator="~")),
+    # NEGATIVES: a bad row / unterminated quote is ParserError; a 2-char marker is ValueError.
+    "on_bad_lines error": lambda m: m.read_csv(io.StringIO("a,b\n1,2\n3,4,5\n"), on_bad_lines="error"),
+    "unterminated quote": lambda m: m.read_csv(io.StringIO('a,b\n"x,2\n')),
+    "thousands two chars": lambda m: m.read_csv(io.StringIO("a\n1\n"), thousands=",,"),
+    "no options": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,x\n"))),
+    "nth first": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth(0)),
+    "nth last": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth(-1)),
+    "nth list": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth([0, 1])),
+    "nth two keys": lambda m: (lambda r: (list(r.columns), list(r.index)))(_nth_frame(m).groupby(["g", "w"]).nth(0)),
+    "nth array key": lambda m: (lambda r: (list(r.columns), list(r.index)))(_nth_frame(m).groupby(np.array(["x", "y", "x"])).nth(0)),
+    # NEGATIVE: a position past every group is an empty frame with the columns.
+    "nth out of range": lambda m: (lambda r: (list(r.columns), list(r.index)))(_nth_frame(m).groupby("g").nth(5)),
+}
+
+
+def _read_csv_nth_outcome(m: Any, case: str) -> Any:
+    try:
+        return _READ_CSV_NTH_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_READ_CSV_NTH_CASES))
+def test_read_csv_parser_options_and_groupby_nth_match_pandas(case: str) -> None:
+    assert _read_csv_nth_outcome(fpd, case) == _read_csv_nth_outcome(pd, case), case

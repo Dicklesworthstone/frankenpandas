@@ -36664,15 +36664,51 @@ impl PyGroupBy {
         Ok(PySeries { inner: res })
     }
 
+    /// pandas 2.x's `nth` is a row filter: each group's row(s) at position
+    /// `n` (an int, negative from the end, or a list of them), in the
+    /// frame's order with its index and every column, the key columns
+    /// included (it dropped the key column).
     #[pyo3(signature = (n, dropna=None))]
-    fn nth(&self, n: i64, dropna: Option<&str>) -> PyResult<PyDataFrame> {
+    fn nth(&self, n: &Bound<'_, PyAny>, dropna: Option<&str>) -> PyResult<PyDataFrame> {
         unsupported_params("DataFrameGroupBy.nth", &[("dropna", dropna.is_none())])?;
-        let res = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .nth(n)
+        let wanted: Vec<i64> = match n.extract::<i64>() {
+            Ok(n) => vec![n],
+            Err(_) => n.extract::<Vec<i64>>()?,
+        };
+        let mut rows: Vec<usize> = Vec::new();
+        for (_, positions) in self.ordered_groups(false)? {
+            let len = positions.len() as i64;
+            for &at in &wanted {
+                let at = if at < 0 { len + at } else { at };
+                if (0..len).contains(&at) {
+                    rows.push(positions[at as usize]);
+                }
+            }
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        // A key the caller passed as an array rides in the frame as a key
+        // column of its own; it is not a column of the result.
+        let own_keys: Vec<&str> = self
+            .by
+            .iter()
+            .zip(&self.key_names)
+            .filter(|(column, name)| name.as_deref() != Some(column.as_str()))
+            .map(|(column, _)| column.as_str())
+            .collect();
+        let kept: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .filter(|column| !own_keys.contains(column))
+            .collect();
+        let inner = self
+            .df
+            .take_rows(&rows)
+            .and_then(|frame| frame.select_columns(&kept))
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        Ok(PyDataFrame { inner })
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]
@@ -39550,6 +39586,68 @@ fn read_csv_impl(
         };
         kwargs.del_item("header")?;
     }
+    // The parser options fp-io's CsvReadOptions already implements; the
+    // binding refused every one of them (read_csv(thousands=',') raised).
+    let take = |name: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
+        let Some(kwargs) = args.kwargs else {
+            return Ok(None);
+        };
+        let value = kwargs.get_item(name)?;
+        if value.is_some() {
+            kwargs.del_item(name)?;
+        }
+        Ok(value.filter(|value| !value.is_none()))
+    };
+    let one_byte = |name: &str, value: &Bound<'_, PyAny>| -> PyResult<u8> {
+        let text = value.extract::<String>()?;
+        match text.as_bytes() {
+            [byte] if byte.is_ascii() => Ok(*byte),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Only length-1 {name} markers supported"
+            ))),
+        }
+    };
+    let thousands = take("thousands")?
+        .map(|v| one_byte("thousands", &v))
+        .transpose()?;
+    let decimal = take("decimal")?
+        .map(|v| one_byte("decimal", &v))
+        .transpose()?;
+    let comment = take("comment")?
+        .map(|v| one_byte("comment", &v))
+        .transpose()?;
+    let quotechar = take("quotechar")?
+        .map(|v| one_byte("quotechar", &v))
+        .transpose()?;
+    let escapechar = take("escapechar")?
+        .map(|v| one_byte("escapechar", &v))
+        .transpose()?;
+    let lineterminator = take("lineterminator")?
+        .map(|v| one_byte("lineterminator", &v))
+        .transpose()?;
+    let true_values = take("true_values")?
+        .map(|v| v.extract::<Vec<String>>())
+        .transpose()?;
+    let false_values = take("false_values")?
+        .map(|v| v.extract::<Vec<String>>())
+        .transpose()?;
+    let na_filter = take("na_filter")?.map(|v| v.is_truthy()).transpose()?;
+    let doublequote = take("doublequote")?.map(|v| v.is_truthy()).transpose()?;
+    let skipinitialspace = take("skipinitialspace")?
+        .map(|v| v.is_truthy())
+        .transpose()?;
+    let skipfooter = take("skipfooter")?
+        .map(|v| v.extract::<usize>())
+        .transpose()?;
+    let on_bad_lines = match take("on_bad_lines")? {
+        None => None,
+        Some(v) => Some(match v.extract::<String>().as_deref() {
+            Ok("error") => fp_io::CsvOnBadLines::Error,
+            Ok("warn") => fp_io::CsvOnBadLines::Warn,
+            Ok("skip") => fp_io::CsvOnBadLines::Skip,
+            _ => return Err(not_implemented("read_csv(on_bad_lines=<callable>)")),
+        }),
+    };
     reject_unsupported_kwargs(
         "read_csv",
         args.kwargs,
@@ -39592,13 +39690,27 @@ fn read_csv_impl(
         text = stripped.to_owned();
     }
 
+    let defaults = fp_io::CsvReadOptions::default();
     let mut opts = fp_io::CsvReadOptions {
         delimiter: sep,
         has_headers: header_row.is_some(),
         keep_default_na: args.keep_default_na,
         nrows: args.nrows,
         skiprows: args.skiprows.unwrap_or(0) + header_row.unwrap_or(0),
-        ..Default::default()
+        thousands,
+        decimal: decimal.unwrap_or(defaults.decimal),
+        comment,
+        quotechar: quotechar.unwrap_or(defaults.quotechar),
+        escapechar,
+        lineterminator,
+        true_values: true_values.unwrap_or_default(),
+        false_values: false_values.unwrap_or_default(),
+        na_filter: na_filter.unwrap_or(defaults.na_filter),
+        doublequote: doublequote.unwrap_or(defaults.doublequote),
+        skipinitialspace: skipinitialspace.unwrap_or(defaults.skipinitialspace),
+        skipfooter: skipfooter.unwrap_or(defaults.skipfooter),
+        on_bad_lines: on_bad_lines.unwrap_or(defaults.on_bad_lines),
+        ..defaults
     };
     if let Some(na) = args.na_values.filter(|v| !v.is_none()) {
         opts.na_values = if let Ok(one) = na.extract::<String>() {
@@ -46036,6 +46148,11 @@ fn io_error_to_py(e: fp_io::IoError) -> PyErr {
         fp_io::IoError::Io(_) => PyErr::new::<pyo3::exceptions::PyOSError, _>(e.to_string()),
         fp_io::IoError::Deferred(_) | fp_io::IoError::Orc(_) => {
             PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(e.to_string())
+        }
+        // pandas raises its ParserError (a ValueError) for a too-long row and
+        // an unterminated quote (they were plain ValueError).
+        fp_io::IoError::CsvFieldCount { .. } | fp_io::IoError::CsvUnterminatedQuote => {
+            PyErr::new::<ParserError, _>(e.to_string())
         }
         _ => PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()),
     }

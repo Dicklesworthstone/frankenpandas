@@ -5557,6 +5557,90 @@ fn apply_skipinitialspace(
     String::from_utf8(out).unwrap_or_else(|_| input.to_string())
 }
 
+/// pandas `comment` over raw CSV text: from an unquoted `comment` byte to the
+/// end of its line nothing is kept, and a line left with nothing (a whole-line
+/// comment) is dropped with its terminator, as pandas skips it. Quote state
+/// (a quote opens only at a field start; `doublequote`, `escapechar`) keeps a
+/// comment byte inside a quoted field literal. Every other byte is copied, so
+/// the output stays valid UTF-8.
+fn strip_csv_comments(
+    input: &str,
+    comment: u8,
+    delimiter: u8,
+    quotechar: u8,
+    doublequote: bool,
+    escapechar: Option<u8>,
+    lineterminator: Option<u8>,
+) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let is_terminator = |b: u8| match lineterminator {
+        Some(t) => b == t,
+        None => b == b'\n' || b == b'\r',
+    };
+    let mut in_quote = false;
+    let mut at_field_start = true;
+    let mut line_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(esc) = escapechar
+            && b == esc
+            && i + 1 < bytes.len()
+        {
+            out.extend_from_slice(&bytes[i..i + 2]);
+            at_field_start = false;
+            i += 2;
+            continue;
+        }
+        if in_quote {
+            out.push(b);
+            if b == quotechar {
+                if doublequote && i + 1 < bytes.len() && bytes[i + 1] == quotechar {
+                    out.push(quotechar);
+                    i += 2;
+                    continue;
+                }
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == comment {
+            while i < bytes.len() && !is_terminator(bytes[i]) {
+                i += 1;
+            }
+            if out.len() == line_start {
+                // A whole-line comment: drop its terminator (CRLF included).
+                if lineterminator.is_some() {
+                    i = (i + 1).min(bytes.len());
+                } else {
+                    if i < bytes.len() && bytes[i] == b'\r' {
+                        i += 1;
+                    }
+                    if i < bytes.len() && bytes[i] == b'\n' {
+                        i += 1;
+                    }
+                }
+                at_field_start = true;
+            }
+            continue;
+        }
+        out.push(b);
+        if at_field_start && b == quotechar {
+            in_quote = true;
+            at_field_start = false;
+        } else {
+            at_field_start = b == delimiter || is_terminator(b);
+        }
+        if is_terminator(b) {
+            line_start = out.len();
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
     // br-frankenpandas-i4h5g: pandas `skipinitialspace` strips leading ASCII
     // spaces at each field start BEFORE quote handling, so it cannot be expressed
@@ -5574,6 +5658,24 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         );
         let mut opts = options.clone();
         opts.skipinitialspace = false;
+        return read_csv_with_options(&processed, &opts);
+    }
+    // pandas `comment`: the rest of a line from the comment character (outside
+    // quotes) is not parsed, and a line that is only a comment is skipped. The
+    // csv crate's comment option only skips lines that START with it, so
+    // `1,2 # note` read '2 # note' as the field. Rewrite once and re-enter.
+    if let Some(comment) = options.comment {
+        let processed = strip_csv_comments(
+            input,
+            comment,
+            options.delimiter,
+            options.quotechar,
+            options.doublequote,
+            options.escapechar,
+            options.lineterminator,
+        );
+        let mut opts = options.clone();
+        opts.comment = None;
         return read_csv_with_options(&processed, &opts);
     }
     if csv_read_options_match_default_fast_path(options) {
@@ -21540,6 +21642,37 @@ mod tests {
             Scalar::Utf8("alice".to_string())
         );
         assert_eq!(frame.column("age").unwrap().values()[1], Scalar::Int64(25));
+    }
+
+    #[test]
+    fn test_csv_comment_ends_the_line_mid_row() {
+        // pandas: `1,2 # note` reads b = 2 (the rest of the line is not
+        // parsed); a `#` inside a quoted field stays text.
+        let input = "a,b\r\n1,2 # note\r\n\"x#y\",3\r\n# whole line\r\n4,5\r\n";
+        let options = CsvReadOptions {
+            comment: Some(b'#'),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(frame.index().len(), 3);
+        assert_eq!(
+            frame.column("a").unwrap().values(),
+            &[
+                Scalar::Utf8("1".into()),
+                Scalar::Utf8("x#y".into()),
+                Scalar::Utf8("4".into())
+            ]
+        );
+        assert_eq!(
+            frame.column("b").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(5)]
+        );
+        // NEGATIVE: without `comment` the text after `#` is data.
+        let plain = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(
+            plain.column("b").unwrap().values()[0],
+            Scalar::Utf8("2 # note".into())
+        );
     }
 
     #[test]
