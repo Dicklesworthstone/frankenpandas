@@ -2319,10 +2319,13 @@ def test_merge_errors_match_pandas() -> None:
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_concat_refuses_what_it_cannot_match() -> None:
     frame = fpd.DataFrame(_CA)
-    # keys= side by side makes a column MultiIndex; pandas 2.2.3 truncates
-    # keys of another length (deprecated); names= only names keys= levels.
-    with pytest.raises(NotImplementedError, match="column"):
-        fpd.concat([frame, frame], keys=["p", "q"], axis=1)
+    # pandas 2.2.3 truncates keys of another length (deprecated); names= only
+    # names keys= levels. (keys= side by side is supported now:
+    # test_concat_keys_side_by_side_match_pandas; keying frames whose columns
+    # are already two-level would need a third level.)
+    keyed = fpd.concat([frame, frame], keys=["p", "q"], axis=1)
+    with pytest.raises(NotImplementedError, match="MultiIndex"):
+        fpd.concat([keyed, keyed], keys=["r", "s"], axis=1)
     with pytest.raises(NotImplementedError, match="different length"):
         fpd.concat([frame, frame], keys=["p"])
     with pytest.raises(NotImplementedError, match="names"):
@@ -5016,3 +5019,43 @@ def test_invented_gap_marker_matches_pandas(case: str) -> None:
     # is kept either way.
     run = _GAP_MARKER_CASES[case]
     assert _plain(run(fpd)) == _plain(run(pd)), case
+
+
+def _concat_side_keys(m: Any) -> dict:
+    left = m.DataFrame({"a": [1, 2], "b": [3.0, 4.0]})
+    right = m.DataFrame({"a": [5, 6], "c": ["x", "y"]}, index=[1, 2])
+    outer = m.concat([left, right], axis=1, keys=["p", "q"])
+    inner = m.concat([left, right], axis=1, keys=["p", "q"], join="inner")
+    return {
+        "outer": outer,
+        "outer columns": [str(c) for c in outer.columns],
+        "inner": inner,
+        "top level": outer["q"],
+        "one column": outer[("p", "b")],
+        "the other side's same-named column": outer[("q", "a")],
+        "flattened": [f"{k}_{c}" for k, c in outer.columns],
+    }
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_concat_keys_side_by_side_match_pandas() -> None:
+    # fvsao.6.3: concat(frames, axis=1, keys=[...]) raised - the result's
+    # columns are a (key, column) MultiIndex, which the binding now carries.
+    want, got = _concat_side_keys(pd), _concat_side_keys(fpd)
+    for step in want:
+        assert _plain_any(got[step]) == _plain_any(want[step]), step
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_duplicated_label_selects_every_column_like_pandas() -> None:
+    # df[name] for a label two columns share is a frame of both, as pandas
+    # (frankenpandas returned the first as a Series).
+    for m in (pd, fpd):
+        side = m.concat([m.DataFrame({"k": [1, 2], "a": [3, 4]}), m.DataFrame({"k": [5, 6]})], axis=1)
+        picked = side["k"]
+        assert type(picked).__name__ == "DataFrame"
+        assert list(picked.columns) == ["k", "k"]
+        assert [picked.iloc[:, i].tolist() for i in range(2)] == [[1, 2], [5, 6]]
+        # NEGATIVE: a unique label is still a Series.
+        assert type(side["a"]).__name__ == "Series"
+        assert side["a"].tolist() == [3, 4]

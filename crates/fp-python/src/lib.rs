@@ -16002,11 +16002,8 @@ impl PyDataFrame {
                 key.clone().unbind(),
             ));
         };
-        let storage_key = |position: usize| {
-            self.inner
-                .column_name_at(position)
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind()))
-        };
+        // Columns are read by POSITION: the storage keys can repeat (frames
+        // concatenated side by side under keys= keep their own names).
         match positions {
             [] => {
                 return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
@@ -16014,7 +16011,7 @@ impl PyDataFrame {
                 ));
             }
             [position] if depth == multi.nlevels() => {
-                let series = self.column_series(&storage_key(*position)?)?;
+                let series = self.column_series_at(*position)?;
                 return Ok(Py::new(py, series)?.into_any());
             }
             _ => {}
@@ -16044,7 +16041,7 @@ impl PyDataFrame {
             && sub.is_empty()
         {
             let top = key.str()?.to_string();
-            let series = self.column_series(&storage_key(*position)?)?;
+            let series = self.column_series_at(*position)?;
             let inner = series.inner.rename(&top).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner })?.into_any());
         }
@@ -16253,6 +16250,22 @@ impl PyDataFrame {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.to_owned()))?;
         let series = Series::new(col, self.inner.series_index(), column.clone())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PySeries { inner: series })
+    }
+
+    /// The column at `position` as a Series - by position, so a repeated
+    /// label (two frames concatenated side by side) reads its own column.
+    fn column_series_at(&self, position: usize) -> PyResult<PySeries> {
+        let (Some(name), Some(column)) = (
+            self.inner.column_name_at(position),
+            self.inner.column_at(position),
+        ) else {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "column position {position} is out of range"
+            )));
+        };
+        let series = Series::new(name, self.inner.series_index(), column.clone())
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: series })
     }
 
@@ -18087,8 +18100,21 @@ impl PyDataFrame {
         if let Some((depth, positions)) = self.multi_column_selection(key)? {
             return self.multi_column_item(py, key, depth, &positions);
         }
-        // `df["a"]` -> Series
+        // `df["a"]` -> Series; a label several columns share selects them
+        // all as a frame, as pandas (it returned the first).
         if let Ok(col) = key.extract::<String>() {
+            if self.inner.column_occurrences(&col) > 1 {
+                let positions: Vec<usize> = (0..self.inner.num_columns())
+                    .filter(|&position| {
+                        self.inner.column_name_at(position).as_deref() == Some(col.as_str())
+                    })
+                    .collect();
+                let frame = self
+                    .inner
+                    .take_columns(&positions)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+            }
             return Ok(Py::new(py, self.column_series(&col)?)?.into_any());
         }
         // `df[["a", "b"]]` -> DataFrame with those columns in that order
@@ -32269,9 +32295,9 @@ fn keyed_rows(
 /// `keys=`) of DataFrames or of Series, `axis` 0/1 ("index"/"columns"), `join`
 /// outer/inner, `ignore_index`, and `keys=`/`names=`, which put each piece's
 /// rows under its key in a row MultiIndex (or, for Series side by side, name
-/// the columns). `sort=True`, mixed Series/DataFrame lists, `keys=` for frames
-/// side by side (a column MultiIndex) and keys that do not pair with the
-/// objects one to one raise NotImplementedError.
+/// the columns; for frames side by side, a (key, column) column MultiIndex).
+/// `sort=True`, mixed Series/DataFrame lists and keys that do not pair with
+/// the objects one to one raise NotImplementedError.
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3)
 #[pyfunction]
 #[pyo3(signature = (
@@ -32424,11 +32450,31 @@ fn concat(
             Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)?;
         return PySeries { inner: out }.into_py_any(py);
     }
-    if keys.is_some() && axis == 1 && series.is_empty() {
-        return Err(not_implemented(
-            "concat(keys=..., axis=1) of DataFrames (the columns become a MultiIndex)",
-        ));
-    }
+    // Frames side by side under keys= get pandas' two-level column axis,
+    // (key, column) per column; a piece whose columns are already two-level
+    // would need a third level.
+    let keyed_columns = match &keys {
+        Some(keys) if axis == 1 && series.is_empty() => {
+            if frames
+                .iter()
+                .any(|frame| frame.columns_multiindex().is_some())
+            {
+                return Err(not_implemented(
+                    "concat(keys=..., axis=1) of DataFrames whose columns are a MultiIndex",
+                ));
+            }
+            let mut top = Vec::new();
+            let mut bottom = Vec::new();
+            for (key, frame) in keys.iter().zip(&frames) {
+                for name in frame.column_names() {
+                    top.push(key.clone());
+                    bottom.push(IndexLabel::Utf8(name.clone()));
+                }
+            }
+            Some(fp_index::MultiIndex::from_arrays(vec![top, bottom]).map_err(index_error_to_py)?)
+        }
+        _ => None,
+    };
     if names.is_some() && axis == 1 {
         return Err(not_implemented("concat(names=..., axis=1)"));
     }
@@ -32447,6 +32493,11 @@ fn concat(
     let refs: Vec<&DataFrame> = frames.iter().collect();
     let mut out =
         fp_frame::concat_dataframes_with_axis_join(&refs, axis, join).map_err(frame_error_to_py)?;
+    if let Some(multi) = keyed_columns {
+        out = out
+            .with_columns_multiindex(Some(multi))
+            .map_err(frame_error_to_py)?;
+    }
     if let Some(keys) = &keys
         && axis == 0
     {

@@ -5698,7 +5698,8 @@ fn partial_date_bounds(text: &str) -> Result<(i64, i64), FrameError> {
     const SECOND: i64 = 1_000_000_000;
     let text = text.trim();
     let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
-    let first_of = |year: i64, month: u32| parse_datetime64_nanos(&format!("{year:04}-{month:02}-01"));
+    let first_of =
+        |year: i64, month: u32| parse_datetime64_nanos(&format!("{year:04}-{month:02}-01"));
     if text.len() == 4 && digits(text) {
         let year: i64 = text.parse().unwrap_or_default();
         return Ok((first_of(year, 1)?, first_of(year + 1, 1)? - 1));
@@ -5746,27 +5747,29 @@ fn loc_slice_positions(
     let datetime_index = labels
         .iter()
         .all(|label| matches!(label, IndexLabel::Datetime64(_)));
-    let resolve = |label: Option<&IndexLabel>, end: bool| -> Result<Option<IndexLabel>, FrameError> {
-        Ok(match label {
-            Some(IndexLabel::Utf8(text)) if datetime_index => {
-                let (first, last) = partial_date_bounds(text)?;
-                Some(IndexLabel::Datetime64(if end { last } else { first }))
-            }
-            other => other.cloned(),
-        })
-    };
+    let resolve =
+        |label: Option<&IndexLabel>, end: bool| -> Result<Option<IndexLabel>, FrameError> {
+            Ok(match label {
+                Some(IndexLabel::Utf8(text)) if datetime_index => {
+                    let (first, last) = partial_date_bounds(text)?;
+                    Some(IndexLabel::Datetime64(if end { last } else { first }))
+                }
+                other => other.cloned(),
+            })
+        };
     let start = resolve(start, false)?;
     let stop = resolve(stop, true)?;
     let kind = labels.first().map(std::mem::discriminant);
     let same_kind = |label: &IndexLabel| kind == Some(std::mem::discriminant(label));
-    let monotonic = labels.iter().all(same_kind) && labels.windows(2).all(|pair| pair[0] <= pair[1]);
+    let monotonic =
+        labels.iter().all(same_kind) && labels.windows(2).all(|pair| pair[0] <= pair[1]);
     if monotonic && start.as_ref().is_none_or(same_kind) && stop.as_ref().is_none_or(same_kind) {
         let first = start
             .as_ref()
             .map_or(0, |bound| labels.partition_point(|label| label < bound));
-        let end = stop
-            .as_ref()
-            .map_or(labels.len(), |bound| labels.partition_point(|label| label <= bound));
+        let end = stop.as_ref().map_or(labels.len(), |bound| {
+            labels.partition_point(|label| label <= bound)
+        });
         return Ok((first < end).then(|| (first, end - 1)));
     }
     let start_pos = match &start {
@@ -10588,7 +10591,9 @@ impl Series {
                     .zip(right)
                     .map(|(a, b)| match (nanos(a), nanos(b)) {
                         (Some(_), Some(0)) => Some(0),
-                        (Some(a), Some(b)) => Some(a.div_euclid(b) - i64::from(b < 0 && a.rem_euclid(b) != 0)),
+                        (Some(a), Some(b)) => {
+                            Some(a.div_euclid(b) - i64::from(b < 0 && a.rem_euclid(b) != 0))
+                        }
                         _ => None,
                     })
                     .collect();
@@ -10610,7 +10615,11 @@ impl Series {
                         (Some(a), Some(0)) => a,
                         (Some(a), Some(b)) => {
                             let r = a % b;
-                            if r != 0 && (r < 0) != (b < 0) { r + b } else { r }
+                            if r != 0 && (r < 0) != (b < 0) {
+                                r + b
+                            } else {
+                                r
+                            }
                         }
                         _ => Timedelta::NAT,
                     })
@@ -25616,10 +25625,16 @@ impl Series {
         };
         let rows = sorted_unique(outer.labels());
         let cols = sorted_unique(inner.labels());
-        let row_of: FxHashMap<&IndexLabel, usize> =
-            rows.iter().enumerate().map(|(i, label)| (label, i)).collect();
-        let col_of: FxHashMap<&IndexLabel, usize> =
-            cols.iter().enumerate().map(|(i, label)| (label, i)).collect();
+        let row_of: FxHashMap<&IndexLabel, usize> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, label)| (label, i))
+            .collect();
+        let col_of: FxHashMap<&IndexLabel, usize> = cols
+            .iter()
+            .enumerate()
+            .map(|(i, label)| (label, i))
+            .collect();
         let mut grid: Vec<Vec<Option<Scalar>>> = vec![vec![None; rows.len()]; cols.len()];
         for (position, value) in self.column.values().iter().enumerate() {
             let row = row_of[&outer.labels()[position]];
@@ -35479,21 +35494,32 @@ impl Resample<'_> {
                 "min" => Scalar::Bool(bools.all(is_true)),
                 "max" => Scalar::Bool(bools.any(is_true)),
                 "first" => bools.next().cloned().unwrap_or(Scalar::Null(NullKind::NaN)),
-                _ => bools.next_back().cloned().unwrap_or(Scalar::Null(NullKind::NaN)),
+                _ => bools
+                    .next_back()
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::NaN)),
             })
         };
         Some(match how {
             "sum" => self.per_bin_reduction(Some(DType::Int64), &Scalar::Int64(0), |rows| {
-                Ok(Scalar::Int64(rows.values().iter().filter(|v| is_true(v)).count() as i64))
+                Ok(Scalar::Int64(
+                    rows.values().iter().filter(|v| is_true(v)).count() as i64,
+                ))
             }),
             "prod" => self.per_bin_reduction(Some(DType::Int64), &Scalar::Int64(1), |rows| {
-                Ok(Scalar::Int64(i64::from(!rows.values().iter().any(&is_false))))
+                Ok(Scalar::Int64(i64::from(
+                    !rows.values().iter().any(&is_false),
+                )))
             }),
             "min" | "max" | "first" | "last" => self
                 .per_bin_reduction(None, &Scalar::Null(NullKind::NaN), located)
                 .and_then(|bins| {
                     let values = int_bins_with_gaps_as_float(bins.values().to_vec());
-                    Series::new(bins.name(), bins.index().clone(), Column::from_values(values)?)
+                    Series::new(
+                        bins.name(),
+                        bins.index().clone(),
+                        Column::from_values(values)?,
+                    )
                 }),
             _ => return None,
         })
@@ -61282,6 +61308,18 @@ fn reindex_concat_axis1_column(
     positions: &[Option<usize>],
 ) -> Result<Column, FrameError> {
     let invented_a_gap = positions.iter().any(Option::is_none);
+    // A gap concat invents in an object, bool or category lane is NaN, as
+    // pandas; a supplied None stays None (it was None;
+    // br-frankenpandas-7u2td).
+    if invented_a_gap
+        && matches!(
+            column.dtype(),
+            DType::Utf8 | DType::Bool | DType::Categorical
+        )
+    {
+        return Ok(column
+            .reindex_by_positions_with_absent_scalar(positions, Scalar::Null(NullKind::NaN))?);
+    }
     let source_was_all_valid = !column.values().iter().any(fp_types::Scalar::is_missing);
 
     if invented_a_gap && source_was_all_valid && column.dtype() == DType::Int64 {
@@ -69761,6 +69799,13 @@ impl DataFrame {
         )?;
         out.allows_duplicate_labels = allows_duplicate_labels;
         Ok(out)
+    }
+
+    /// How many columns carry the label `name` (0 when none; more than one
+    /// for a duplicated label, which `df[name]` selects as a frame).
+    #[must_use]
+    pub fn column_occurrences(&self, name: &str) -> usize {
+        self.columns.occurrences(name)
     }
 
     /// Single column indexing matching `df[name]` in pandas.
@@ -203354,10 +203399,7 @@ mod tests {
         let (kept, _) = strings(vec![0, 1], vec![none.clone(), text_scalar("b")])
             .align(&strings(vec![5], vec![text_scalar("c")]), AlignMode::Outer)
             .unwrap();
-        assert_eq!(
-            kept.values(),
-            [none.clone(), text_scalar("b"), nan.clone()]
-        );
+        assert_eq!(kept.values(), [none.clone(), text_scalar("b"), nan.clone()]);
         let frame = |label: i64, value: &str| {
             DataFrame::new_with_column_order(
                 Index::new(vec![IndexLabel::Int64(label)]),
@@ -203372,7 +203414,26 @@ mod tests {
         let (aligned, _) = frame(0, "a")
             .align(&frame(1, "b"), AlignMode::Outer)
             .unwrap();
-        assert_eq!(aligned.columns()["s"].values(), [text_scalar("a"), nan.clone()]);
+        assert_eq!(
+            aligned.columns()["s"].values(),
+            [text_scalar("a"), nan.clone()]
+        );
+        // concat(axis=1) invents the same kind of gap (read by position: both
+        // pieces are named "s").
+        let side = concat_dataframes_with_axis_join(
+            &[&frame(0, "a"), &frame(1, "b")],
+            1,
+            ConcatJoin::Outer,
+        )
+        .unwrap();
+        assert_eq!(
+            side.column_at(0).unwrap().values(),
+            [text_scalar("a"), nan.clone()]
+        );
+        assert_eq!(
+            side.column_at(1).unwrap().values(),
+            [nan.clone(), text_scalar("b")]
+        );
         let shifted = strings(vec![0, 1], vec![text_scalar("a"), text_scalar("b")])
             .shift(1)
             .unwrap();
@@ -203407,7 +203468,12 @@ mod tests {
         };
         // The premise: the store's first column is `a`.
         assert_eq!(misaligned.columns().name_at(0), Some("a"));
-        let floats = |values: &[f64]| values.iter().map(|&v| Scalar::Float64(v)).collect::<Vec<_>>();
+        let floats = |values: &[f64]| {
+            values
+                .iter()
+                .map(|&v| Scalar::Float64(v))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(misaligned.column_at(0).unwrap().values(), floats(&z));
         let first = misaligned.take_columns(&[0]).unwrap();
         assert_eq!(first.column_names(), vec!["z"]);
@@ -203419,7 +203485,10 @@ mod tests {
         assert_eq!(renamed.columns()["A"].values(), floats(&a));
         // Column-parallel ops keep the frame's order.
         assert_eq!(
-            misaligned.fillna(&Scalar::Float64(0.0)).unwrap().column_names(),
+            misaligned
+                .fillna(&Scalar::Float64(0.0))
+                .unwrap()
+                .column_names(),
             vec!["z", "a"]
         );
         let diffed = misaligned.diff(1).unwrap();
@@ -203463,11 +203532,20 @@ mod tests {
             vec![&IndexLabel::from("x"), &IndexLabel::from("max")]
         );
         let flat = aggregated
-            .set_axis(vec![IndexLabel::from("x_sum"), IndexLabel::from("x_max")], 1)
+            .set_axis(
+                vec![IndexLabel::from("x_sum"), IndexLabel::from("x_max")],
+                1,
+            )
             .unwrap();
         assert!(flat.columns_multiindex().is_none());
-        assert_eq!(flat.columns()["x_sum"].values(), [4_i64, 2].map(Scalar::Int64));
-        assert_eq!(flat.columns()["x_max"].values(), [3_i64, 2].map(Scalar::Int64));
+        assert_eq!(
+            flat.columns()["x_sum"].values(),
+            [4_i64, 2].map(Scalar::Int64)
+        );
+        assert_eq!(
+            flat.columns()["x_max"].values(),
+            [3_i64, 2].map(Scalar::Int64)
+        );
 
         // df.columns = MultiIndex / df.index = Index: NEGATIVE, a wrong width
         // or length is refused.
@@ -203531,7 +203609,10 @@ mod tests {
                 .unwrap(),
             vec![1]
         );
-        assert_eq!(sparse.loc_slice_positions(None, None).unwrap(), vec![0, 1, 2]);
+        assert_eq!(
+            sparse.loc_slice_positions(None, None).unwrap(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -203545,14 +203626,22 @@ mod tests {
             Series::new("x", index.clone(), Column::new(dtype, values).unwrap()).unwrap()
         };
         let text = |s: &str| Scalar::Utf8(s.to_owned());
-        let strings = series(DType::Utf8, vec![text("a"), text("b"), text("c"), text("d")]);
+        let strings = series(
+            DType::Utf8,
+            vec![text("a"), text("b"), text("c"), text("d")],
+        );
         let r = strings.resample("D");
         // object: mean/median/var raise TypeError text, std the float ValueError.
         for (how, result) in [("mean", r.mean()), ("median", r.median()), ("var", r.var())] {
             let message = result.unwrap_err().to_string();
             assert!(message.contains(&format!("agg function failed [how->{how},dtype->object]")));
         }
-        assert!(r.std().unwrap_err().to_string().contains("could not convert string to float: 'a'"));
+        assert!(
+            r.std()
+                .unwrap_err()
+                .to_string()
+                .contains("could not convert string to float: 'a'")
+        );
         // Two strings in a bin cannot multiply.
         assert!(r.prod().is_err());
         // first/last of the empty bin is None; min of a column with no gap works.
@@ -203561,7 +203650,12 @@ mod tests {
         // A single string's product is itself, an empty bin's is 1.
         let sparse = series(
             DType::Utf8,
-            vec![text("a"), Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)],
+            vec![
+                text("a"),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ],
         );
         assert_eq!(
             sparse.resample("D").prod().unwrap().values(),
@@ -203582,7 +203676,10 @@ mod tests {
         assert_eq!(min.column().dtype(), DType::Float64);
         assert_eq!(min.values()[0], Scalar::Float64(0.0));
         assert!(min.values()[1].is_missing());
-        assert_eq!(r.nunique().unwrap().values(), [2_i64, 0, 1].map(Scalar::Int64));
+        assert_eq!(
+            r.nunique().unwrap().values(),
+            [2_i64, 0, 1].map(Scalar::Int64)
+        );
 
         // datetime: min/mean keep datetime64 with NaT; sum/prod/var refused; std is a duration.
         let jan = |day: i64| 1_577_836_800_000_000_000 + (day - 1) * DAY;
@@ -203595,16 +203692,25 @@ mod tests {
         assert!(matches!(min.column().dtype(), DType::Datetime64 { .. }));
         assert_eq!(min.values()[0], Scalar::Datetime64(jan(2)));
         assert!(min.values()[1].is_missing());
-        assert_eq!(r.mean().unwrap().values()[2], Scalar::Datetime64(jan(3) + DAY / 2));
+        assert_eq!(
+            r.mean().unwrap().values()[2],
+            Scalar::Datetime64(jan(3) + DAY / 2)
+        );
         for result in [r.sum(), r.prod(), r.var()] {
-            assert!(result.unwrap_err().to_string().contains("datetime64 type does not support"));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("datetime64 type does not support")
+            );
         }
         assert_eq!(r.std().unwrap().column().dtype(), DType::Timedelta64);
         // A tz-aware column keeps its zone on the result (pandas: datetime64[ns, UTC]).
         let utc = DType::Datetime64 {
             tz: Some("UTC".to_owned()),
         };
-        let aware = Series::new("x", index.clone(), dates.column().with_dtype(utc.clone())).unwrap();
+        let aware =
+            Series::new("x", index.clone(), dates.column().with_dtype(utc.clone())).unwrap();
         let aware_min = aware.resample("D").min().unwrap();
         assert_eq!(aware_min.column().dtype(), utc);
         assert_eq!(aware_min.values()[0], Scalar::Datetime64(jan(2)));
@@ -203645,7 +203751,10 @@ mod tests {
             IndexLabel::Datetime64(base)
         );
         // NEGATIVE: a float column's resample is unchanged.
-        let floats = series(DType::Float64, [1.0, 2.0, 3.0, 4.0].map(Scalar::Float64).to_vec());
+        let floats = series(
+            DType::Float64,
+            [1.0, 2.0, 3.0, 4.0].map(Scalar::Float64).to_vec(),
+        );
         assert_eq!(
             floats.resample("D").sum().unwrap().values(),
             [3.0, 0.0, 7.0].map(Scalar::Float64)
@@ -203698,7 +203807,10 @@ mod tests {
         assert_eq!(d.max().unwrap(), Scalar::Datetime64(jan(5)));
         assert_eq!(d.mean().unwrap(), Scalar::Datetime64(jan(3) + 8 * HOUR));
         assert_eq!(d.median().unwrap(), Scalar::Datetime64(jan(3)));
-        assert_eq!(d.quantile(0.25).unwrap(), Scalar::Datetime64(jan(2) + 12 * HOUR));
+        assert_eq!(
+            d.quantile(0.25).unwrap(),
+            Scalar::Datetime64(jan(2) + 12 * HOUR)
+        );
         assert_eq!(d.idxmax().unwrap(), IndexLabel::Int64(0));
         // pandas: std 1 days 12:39:38.180014728, a Timedelta.
         assert_eq!(
@@ -203707,7 +203819,10 @@ mod tests {
         );
         // rank was all-NaN; NaT stays NaN.
         let ranks = d.rank("average", true, "keep").unwrap();
-        assert_eq!(ranks.values()[..2], [Scalar::Float64(3.0), Scalar::Float64(1.0)]);
+        assert_eq!(
+            ranks.values()[..2],
+            [Scalar::Float64(3.0), Scalar::Float64(1.0)]
+        );
         assert!(ranks.values()[2].is_missing());
         // NEGATIVE: instants 1ns apart (merged by an f64 key) rank apart.
         let close = temporal(
@@ -203751,14 +203866,19 @@ mod tests {
         assert_eq!(hours.values()[0], Scalar::Float64(24.0));
         assert!(hours.values()[2].is_missing());
         let small = temporal(DType::Timedelta64, vec![Scalar::Timedelta64(-7)]);
-        let by = |value: Scalar| Series::from_values("x", small.index().labels().to_vec(), vec![value]).unwrap();
+        let by = |value: Scalar| {
+            Series::from_values("x", small.index().labels().to_vec(), vec![value]).unwrap()
+        };
         assert_eq!(
             small.floordiv(&by(Scalar::Float64(2.5))).unwrap().values(),
             [Scalar::Timedelta64(-2)]
         );
         // td // td floors (int64 with no NaT); td % td is floor modulo.
         assert_eq!(
-            small.floordiv(&by(Scalar::Timedelta64(2))).unwrap().values(),
+            small
+                .floordiv(&by(Scalar::Timedelta64(2)))
+                .unwrap()
+                .values(),
             [Scalar::Int64(-4)]
         );
         assert_eq!(
