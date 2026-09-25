@@ -5358,3 +5358,126 @@ def _object_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_OBJECT_DTYPE_CASES))
 def test_object_dtype_keeps_values_like_pandas(case: str) -> None:
     assert _object_outcome(fpd, case) == _object_outcome(pd, case), case
+
+
+def _npv(m: Any) -> Any:
+    return m.Series([1.0, 4.0, 9.0], index=["a", "b", "c"], name="v")
+
+
+def _npi(m: Any) -> Any:
+    return m.Series([1, -2, 3], name="i")
+
+
+def _npdf(m: Any) -> Any:
+    return m.DataFrame({"x": [1.0, 4.25], "y": [9.0, 16.0]}, index=["p", "q"])
+
+
+# fvsao.7: numpy ufuncs returned bare ndarrays (index and name lost), an
+# ndarray / list operand raised "Cannot convert ndarray to Scalar", and numpy
+# functions that delegate to methods (np.round, np.cumsum, np.clip, np.any,
+# np.transpose, np.repeat) fell back to ndarrays because the methods refused
+# numpy's out= / dtype= / axis= keywords.
+_NUMPY_INTEROP_CASES = {
+    "np.sqrt(s)": lambda m: np.sqrt(_npv(m)),
+    "np.log(s)": lambda m: np.log(_npv(m)),
+    "np.exp(int)": lambda m: np.exp(_npi(m)),
+    "np.abs(int) is abs": lambda m: np.abs(_npi(m)),
+    "np.negative": lambda m: np.negative(_npi(m)),
+    "np.sign": lambda m: np.sign(_npi(m)),
+    "np.isnan unnamed": lambda m: np.isnan(m.Series([1.0, np.nan])),
+    "np.maximum(s, 0) keeps name": lambda m: np.maximum(_npi(m), 0),
+    "np.add(s, s)": lambda m: np.add(_npv(m), _npv(m)),
+    "np.power(s, 2)": lambda m: np.power(_npv(m), 2),
+    # NEGATIVE: two Series align by label first (outer), as pandas.
+    "np.maximum unaligned": lambda m: np.maximum(_npv(m), m.Series([5.0, 0.0], index=["c", "d"], name="v")),
+    "np.maximum names differ": lambda m: np.maximum(_npv(m), m.Series([5.0, 0.0, 1.0], index=["a", "b", "c"], name="w")),
+    "np.modf tuple": lambda m: np.modf(m.Series([1.5, -2.25])),
+    "np.divide int": lambda m: np.divide(_npi(m), 2),
+    "np.floor": lambda m: np.floor(m.Series([1.5, -2.5])),
+    "np.isfinite": lambda m: np.isfinite(m.Series([1.0, np.inf, np.nan])),
+    "np.log1p(df)": lambda m: np.log1p(_npdf(m)),
+    "np.sqrt(df)": lambda m: np.sqrt(_npdf(m)),
+    "np.maximum(df, 0) 2-D": lambda m: np.maximum(m.DataFrame({"a": [1, -2], "b": [0.5, -1.0]}), 0),
+    "np.modf(df)": lambda m: np.modf(_npdf(m)),
+    "np.sqrt(mixed df) raises": lambda m: np.sqrt(m.DataFrame({"a": [1.0], "s": ["x"]})),
+    "mixed frame and Series raises": lambda m: np.maximum(_npdf(m), m.Series([1.0, 2.0], index=["x", "y"])),
+    "np.sqrt(Int64) is Float64": lambda m: np.sqrt(m.Series([1, None, 4], dtype="Int64")),
+    "np.isnan(Float64) is boolean": lambda m: np.isnan(m.Series([1.5, None], dtype="Float64")),
+    "np.sqrt(category) raises": lambda m: np.sqrt(m.Series([1.0, 4.0], dtype="category")),
+    "np.add.reduce skips no NaN": lambda m: np.add.reduce(m.Series([1.0, np.nan])),
+    "np.add.accumulate": lambda m: np.add.accumulate(_npv(m)),
+    "np.add.outer raises": lambda m: np.add.outer(_npv(m), _npv(m)),
+    "out=": lambda m: np.sqrt(_npv(m), out=np.empty(3)),
+    "ndarray + s": lambda m: np.array([1.0, 2.0, 3.0]) + _npv(m),
+    "s + ndarray": lambda m: _npv(m) + np.array([1.0, 2.0, 3.0]),
+    "s * list": lambda m: _npv(m) * [1, 2, 3],
+    "s + length-1 list broadcasts": lambda m: _npv(m) + [1],
+    "s + wrong-length list": lambda m: _npv(m) + [1, 2],
+    "s > ndarray": lambda m: _npv(m) > np.array([0.0, 5.0, 5.0]),
+    "s == wrong-length list": lambda m: _npv(m) == [1, 2],
+    "s + Index keeps a shared name": lambda m: _npi(m) + m.Index([1, 2, 3], name="i"),
+    "np.float64 * s": lambda m: np.float64(2.0) * _npv(m),
+    "np.int64 + s": lambda m: np.int64(2) + _npi(m),
+    "df + list row": lambda m: _npdf(m) + [1, 2],
+    "df + wrong-length list": lambda m: _npdf(m) + [1, 2, 3],
+    "df + 2-D": lambda m: _npdf(m) + np.array([[1, 2], [3, 4]]),
+    "df + wrong-shape 2-D": lambda m: _npdf(m) + np.ones((3, 2)),
+    "df > list": lambda m: _npdf(m) > [1, 10],
+    "ndarray + df": lambda m: np.array([[1.0, 1.0], [1.0, 1.0]]) + _npdf(m),
+    "np.round(s, 1)": lambda m: np.round(m.Series([3.0, 1.26, 2.5], name="v"), 1),
+    "np.round(df, 1)": lambda m: np.round(_npdf(m), 1),
+    "np.cumsum(s)": lambda m: np.cumsum(_npi(m)),
+    "np.cumprod(s)": lambda m: np.cumprod(_npi(m)),
+    "np.cumsum(df)": lambda m: np.cumsum(_npdf(m)),
+    "np.clip(s)": lambda m: np.clip(_npv(m), 1.5, 5),
+    "np.clip(df)": lambda m: np.clip(_npdf(m), 2, 10),
+    "np.any(s)": lambda m: bool(np.any(_npi(m) > 2)),
+    "np.all(s)": lambda m: bool(np.all(_npi(m) > 2)),
+    "any(skipna=False) NaN is True": lambda m: bool(m.Series([0.0, np.nan]).any(skipna=False)),
+    "all(skipna=False) None is False": lambda m: bool(m.Series([True, None]).all(skipna=False)),
+    "np.transpose(df)": lambda m: np.transpose(_npdf(m)),
+    "np.repeat(s, 2)": lambda m: np.repeat(_npi(m), 2),
+    # NEGATIVE: numpy's keywords are accepted only at their defaults.
+    "cumsum(out=array) raises": lambda m: _npi(m).cumsum(out=np.empty(3)),
+    "round(foo=1) raises": lambda m: _npi(m).round(foo=1),
+    "transpose((1, 0)) raises": lambda m: _npdf(m).transpose((1, 0)),
+    "repeat(axis=1) raises": lambda m: _npi(m).repeat(2, axis=1),
+}
+
+
+def _numpy_outcome(m: Any, case: str) -> Any:
+    def cell(v: Any) -> Any:
+        return None if v is pd.NA or (isinstance(v, float) and math.isnan(v)) else v
+
+    def shape(r: Any) -> Any:
+        if isinstance(r, tuple):
+            return tuple(shape(x) for x in r)
+        if hasattr(r, "columns"):
+            return (
+                "frame",
+                [str(d) for d in r.dtypes.tolist()],
+                [str(i) for i in r.index.tolist()],
+                [str(c) for c in r.columns.tolist()],
+                [[cell(v) for v in r[c].tolist()] for c in r.columns],
+            )
+        if hasattr(r, "index") and hasattr(r, "tolist"):
+            return ("series", str(r.dtype), r.name, [str(i) for i in r.index.tolist()], [cell(v) for v in r.tolist()])
+        if isinstance(r, np.ndarray):
+            return ("ndarray", str(r.dtype), [cell(v) for v in r.tolist()])
+        # Scalars by value: numpy-vs-Python scalar TYPES are a separate item.
+        return ("scalar", cell(r.item() if hasattr(r, "item") else r))
+
+    try:
+        return shape(_NUMPY_INTEROP_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NUMPY_INTEROP_CASES))
+def test_numpy_ufuncs_operands_and_delegation_match_pandas(case: str) -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert _numpy_outcome(fpd, case) == _numpy_outcome(pd, case), case

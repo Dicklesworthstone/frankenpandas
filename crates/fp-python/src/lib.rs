@@ -11191,11 +11191,152 @@ enum SeriesOrScalarBound {
 
 /// The right-hand side of a Series dunder: another Series as-is, or a Python
 /// scalar broadcast over `like`'s index (what pandas does for `s + 1`).
+/// A list, tuple, 1-D numpy array or Index operand of a Series operator, as
+/// pandas reads it: the values by position against `like`'s index (they
+/// raised "Cannot convert list to Scalar"; fvsao.7), named after an Index
+/// operand, else after `like`. A length-1 operand broadcasts in arithmetic;
+/// any other length mismatch is numpy's broadcast error there and pandas'
+/// "Lengths must match to compare" for a `comparison`. None when `other` is
+/// not array-like (a 0-d array is a scalar).
+fn listlike_series_operand(
+    py: Python<'_>,
+    other: &Bound<'_, PyAny>,
+    like: &Series,
+    comparison: bool,
+) -> PyResult<Option<Series>> {
+    let column = if other.is_instance_of::<PyList>() || other.is_instance_of::<PyTuple>() {
+        let values = other
+            .try_iter()?
+            .map(|value| value.and_then(|value| py_to_scalar(py, &value)))
+            .collect::<PyResult<Vec<_>>>()?;
+        Column::from_values(pandas_promote_int_with_missing(values)).map_err(column_error_to_py)?
+    } else if other.get_type().name()? == "ndarray"
+        && other.getattr("ndim")?.extract::<usize>()? == 0
+    {
+        return Ok(None);
+    } else if let Some(column) = py_array_like_column(py, other)? {
+        column
+    } else {
+        return Ok(None);
+    };
+    let rows = like.len();
+    let column = match column.len() {
+        len if len == rows => column,
+        1 if !comparison => Column::from_values(vec![column.values()[0].clone(); rows])
+            .map_err(column_error_to_py)?,
+        len if comparison => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>((
+                "Lengths must match to compare",
+                (rows,),
+                (len,),
+            )));
+        }
+        len => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "operands could not be broadcast together with shapes ({rows},) ({len},) "
+            )));
+        }
+    };
+    let name = if other.get_type().name()?.to_str()?.ends_with("Index") {
+        let label = other.getattr("name")?;
+        if label.is_none() {
+            String::new()
+        } else {
+            label.str()?.to_string()
+        }
+    } else {
+        like.name().to_owned()
+    };
+    Series::new(name, like.index().clone(), column)
+        .map(Some)
+        .map_err(frame_error_to_py)
+}
+
+/// An array-like operand of a DataFrame operator, as pandas coerces it.
+enum FrameOperand {
+    /// A list, tuple or 1-D array: one value per column, broadcast down.
+    Row(Series),
+    /// A 2-D array of the frame's shape, under the frame's labels.
+    Frame(DataFrame),
+}
+
+/// `other` as a [`FrameOperand`] of `frame` ("Unable to coerce to Series /
+/// DataFrame" on another length or shape, as pandas); None when it is not
+/// array-like. `df + [1, 2]` and `df + np.ones((2, 2))` raised.
+fn frame_listlike_operand(
+    py: Python<'_>,
+    frame: &DataFrame,
+    other: &Bound<'_, PyAny>,
+) -> PyResult<Option<FrameOperand>> {
+    let (rows, width) = frame.shape();
+    let ndim = if other.get_type().name()? == "ndarray" {
+        Some(other.getattr("ndim")?.extract::<usize>()?)
+    } else {
+        None
+    };
+    if ndim == Some(2) {
+        let shape: (usize, usize) = other.getattr("shape")?.extract()?;
+        if shape != (rows, width) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Unable to coerce to DataFrame, shape must be ({rows}, {width}): given ({}, {})",
+                shape.0, shape.1
+            )));
+        }
+        let mut out = frame.clone();
+        for position in 0..width {
+            let slice = other.get_item((pyo3::types::PySlice::full(py), position))?;
+            out = out
+                .isetitem(position, py_value_to_column(py, &slice, rows)?)
+                .map_err(frame_error_to_py)?;
+        }
+        return Ok(Some(FrameOperand::Frame(out)));
+    }
+    if !(other.is_instance_of::<PyList>() || other.is_instance_of::<PyTuple>() || ndim == Some(1)) {
+        return Ok(None);
+    }
+    let given = other.len()?;
+    if given != width {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Unable to coerce to Series, length must be {width}: given {given}"
+        )));
+    }
+    let row = py_value_to_column(py, other, width)?;
+    let labels = (0..width)
+        .filter_map(|position| frame.column_name_at(position))
+        .map(IndexLabel::Utf8)
+        .collect();
+    Series::new("", Index::new(labels), row)
+        .map(|row| Some(FrameOperand::Row(row)))
+        .map_err(frame_error_to_py)
+}
+
+/// numpy's truthiness of one value when missing values are not skipped
+/// (pandas' `any` / `all` with `skipna=False`): NaN is True, None False.
+fn missing_as_truthy(value: &Scalar) -> bool {
+    match value {
+        Scalar::Null(NullKind::NaN) => true,
+        Scalar::Float64(value) if value.is_nan() => true,
+        Scalar::Null(_) => false,
+        value => scalar_truthy(value),
+    }
+}
+
+/// A 0-d numpy array as the scalar it holds (numpy's `item()`).
+fn unwrap_0d<'py>(other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    if other.get_type().name()? == "ndarray" && other.getattr("ndim")?.extract::<usize>()? == 0 {
+        return other.call_method0("item");
+    }
+    Ok(other.clone())
+}
+
 fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> PyResult<Series> {
     if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
         return Ok(series.inner.clone());
     }
-    let scalar = py_to_scalar(py, other)?;
+    if let Some(series) = listlike_series_operand(py, other, like, false)? {
+        return Ok(series);
+    }
+    let scalar = py_to_scalar(py, &unwrap_0d(other)?)?;
     Series::from_values(
         like.name(),
         like.index().labels().to_vec(),
@@ -11239,7 +11380,10 @@ fn comparison_operand(
     if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
         return Ok(Some(series.inner.clone()));
     }
-    let Some(scalar) = comparison_scalar(py, other, &like.dtype())? else {
+    if let Some(series) = listlike_series_operand(py, other, like, true)? {
+        return Ok(Some(series));
+    }
+    let Some(scalar) = comparison_scalar(py, &unwrap_0d(other)?, &like.dtype())? else {
         return Ok(None);
     };
     Series::from_values(
@@ -12017,6 +12161,390 @@ fn generic_getattr_error(obj: &Bound<'_, PyAny>, name: &str, class: &str) -> PyR
     }
 }
 
+/// The operator pandas' `maybe_dispatch_ufunc_to_dunder_op` sends a ufunc
+/// to, forward and reflected (`np.less(x, s)` is `s > x`).
+fn ufunc_dunder(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name {
+        "add" => ("__add__", "__radd__"),
+        "subtract" => ("__sub__", "__rsub__"),
+        "multiply" => ("__mul__", "__rmul__"),
+        "true_divide" | "divide" => ("__truediv__", "__rtruediv__"),
+        "floor_divide" => ("__floordiv__", "__rfloordiv__"),
+        "remainder" => ("__mod__", "__rmod__"),
+        "power" => ("__pow__", "__rpow__"),
+        "equal" => ("__eq__", "__eq__"),
+        "not_equal" => ("__ne__", "__ne__"),
+        "less" => ("__lt__", "__gt__"),
+        "less_equal" => ("__le__", "__ge__"),
+        "greater" => ("__gt__", "__lt__"),
+        "greater_equal" => ("__ge__", "__le__"),
+        "bitwise_and" => ("__and__", "__rand__"),
+        "bitwise_or" => ("__or__", "__ror__"),
+        "bitwise_xor" => ("__xor__", "__rxor__"),
+        "matmul" => ("__matmul__", "__rmatmul__"),
+        "divmod" => ("__divmod__", "__rdivmod__"),
+        "negative" => ("__neg__", "__neg__"),
+        "positive" => ("__pos__", "__pos__"),
+        "absolute" => ("__abs__", "__abs__"),
+        _ => return None,
+    })
+}
+
+/// The ufunc as the operator it stands for, when `this` is one of the
+/// inputs and the operator exists; None to take the array path.
+fn dispatch_ufunc_to_dunder<'py>(
+    this: &Bound<'py, PyAny>,
+    name: &str,
+    inputs: &Bound<'py, PyTuple>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Some((forward, reflected)) = ufunc_dunder(name) else {
+        return Ok(None);
+    };
+    let first = inputs.get_item(0)?;
+    let (method, argument) = if first.is(this) {
+        (forward, inputs.get_item(1).ok())
+    } else if inputs.len() == 2 && inputs.get_item(1)?.is(this) {
+        (reflected, Some(first))
+    } else {
+        return Ok(None);
+    };
+    let Ok(bound) = this.getattr(method) else {
+        return Ok(None);
+    };
+    match argument {
+        Some(argument) => bound.call1((argument,)).map(Some),
+        None => bound.call0().map(Some),
+    }
+}
+
+/// A Series input of a ufunc as numpy reads it: its values (a nullable
+/// dtype's data with missing slots filled, and its mask), refused for a
+/// categorical as pandas' `Categorical.__array_ufunc__` refuses.
+fn ufunc_series_values<'py>(
+    py: Python<'py>,
+    series: &Series,
+    ufunc_name: &str,
+    mask: &mut Vec<bool>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let fill = match series.dtype() {
+        DType::Categorical => {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Object with dtype category cannot perform the numpy op {ufunc_name}"
+            )));
+        }
+        DType::Int64Nullable => Scalar::Int64(1),
+        DType::Float64Nullable => Scalar::Float64(f64::NAN),
+        DType::BoolNullable => Scalar::Bool(false),
+        _ => return column_ndarray(py, series.column()),
+    };
+    let values = series.column().values();
+    if mask.is_empty() {
+        mask.resize(values.len(), false);
+    }
+    let data = values
+        .iter()
+        .zip(mask.iter_mut())
+        .map(|(value, masked)| {
+            if value.is_missing() {
+                *masked = true;
+                fill.clone()
+            } else {
+                value.clone()
+            }
+        })
+        .collect();
+    column_ndarray(py, &Column::from_values(data).map_err(column_error_to_py)?)
+}
+
+/// A ufunc's 1-D result as the column of a Series, a masked input's
+/// missing slots `<NA>` in pandas' nullable dtype for the result kind.
+fn ufunc_result_column(
+    py: Python<'_>,
+    result: &Bound<'_, PyAny>,
+    mask: &[bool],
+) -> PyResult<Column> {
+    let column = py_array_like_column(py, result)?.ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>("a ufunc returned no array")
+    })?;
+    if !mask.contains(&true) {
+        return Ok(column);
+    }
+    let dtype = match column.dtype() {
+        DType::Bool => DType::BoolNullable,
+        DType::Int64 => DType::Int64Nullable,
+        DType::Float64 => DType::Float64Nullable,
+        other => other,
+    };
+    let values = column
+        .values()
+        .iter()
+        .zip(mask)
+        .map(|(value, masked)| {
+            if *masked {
+                Scalar::Null(NullKind::Null)
+            } else {
+                value.clone()
+            }
+        })
+        .collect();
+    Column::new(dtype, values).map_err(column_error_to_py)
+}
+
+/// numpy's ufunc protocol for a Series or DataFrame, as pandas'
+/// `arraylike.array_ufunc`: a binary operator ufunc is the operator
+/// (`np.add(s, x)` is `s + x`); `ufunc.reduce` of add / multiply / maximum
+/// / minimum is sum / prod / max / min without skipping NaN; otherwise the
+/// Series inputs are aligned, the ufunc runs on the values and the result
+/// gets the index and name back - a DataFrame's column by column for a
+/// plain call, on its 2-D values otherwise. They returned bare ndarrays
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.7).
+fn array_ufunc<'py>(
+    this: &Bound<'py, PyAny>,
+    ufunc: &Bound<'py, PyAny>,
+    method: &str,
+    inputs: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = this.py();
+    let name: String = ufunc.getattr("__name__")?.extract()?;
+    let nin: usize = ufunc.getattr("nin")?.extract()?;
+    let nout: usize = ufunc.getattr("nout")?.extract()?;
+    let no_kwargs = kwargs.is_none_or(|kwargs| kwargs.is_empty());
+    if method == "__call__"
+        && no_kwargs
+        && nin <= 2
+        && let Some(result) = dispatch_ufunc_to_dunder(this, &name, inputs)?
+    {
+        return Ok(result);
+    }
+    let has_series = inputs.iter().any(|x| x.is_instance_of::<PySeries>());
+    let has_frame = inputs.iter().any(|x| x.is_instance_of::<PyDataFrame>());
+    if has_series && has_frame {
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            format!(
+                "Cannot apply ufunc {} to mixed DataFrame and Series inputs.",
+                ufunc.repr()?
+            ),
+        ));
+    }
+    let np = py.import("numpy")?;
+    let call = |arguments: Vec<Bound<'py, PyAny>>, kwargs: Option<&Bound<'py, PyDict>>| {
+        ufunc
+            .getattr(method)?
+            .call(PyTuple::new(py, arguments)?, kwargs)
+    };
+    // out=: compute without it, write into it, and return this shape
+    // (pandas' dispatch_ufunc_with_out).
+    if let Some(kwargs) = kwargs
+        && let Some(out) = kwargs.get_item("out")?
+    {
+        let rest = kwargs.copy()?;
+        rest.del_item("out")?;
+        let where_ = rest.get_item("where")?;
+        if where_.is_some() {
+            rest.del_item("where")?;
+        }
+        let result = call(inputs.iter().collect(), Some(&rest))?;
+        let out = match out.cast::<PyTuple>() {
+            Ok(outs) if outs.len() == 1 => outs.get_item(0)?,
+            Ok(_) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "out= with several arrays",
+                ));
+            }
+            Err(_) => out,
+        };
+        let copy_kwargs = PyDict::new(py);
+        if let Some(where_) = where_ {
+            copy_kwargs.set_item("where", where_)?;
+        }
+        np.call_method(
+            "copyto",
+            (&out, np.call_method1("asarray", (result,))?),
+            Some(&copy_kwargs),
+        )?;
+        return ufunc_rebuild(this, &out, &[], this);
+    }
+    if method == "reduce"
+        && inputs.len() == 1
+        && inputs.get_item(0)?.is(this)
+        && let Some(reduction) = match name.as_str() {
+            "add" => Some("sum"),
+            "multiply" => Some("prod"),
+            "maximum" => Some("max"),
+            "minimum" => Some("min"),
+            _ => None,
+        }
+    {
+        let reduce_kwargs = kwargs.map_or_else(|| Ok(PyDict::new(py)), |kwargs| kwargs.copy())?;
+        if this.is_instance_of::<PyDataFrame>() {
+            reduce_kwargs.set_item("numeric_only", false)?;
+            if !reduce_kwargs.contains("axis")? {
+                reduce_kwargs.set_item("axis", 0)?;
+            }
+        }
+        reduce_kwargs.set_item("skipna", false)?;
+        return this.call_method(reduction, (), Some(&reduce_kwargs));
+    }
+    // Align the Series / DataFrame inputs (outer), as pandas does first.
+    let mut arguments: Vec<Bound<'py, PyAny>> = inputs.iter().collect();
+    let alignable: Vec<usize> = (0..arguments.len())
+        .filter(|&i| {
+            arguments[i].is_instance_of::<PySeries>()
+                || arguments[i].is_instance_of::<PyDataFrame>()
+        })
+        .collect();
+    if let [first, rest @ ..] = alignable.as_slice() {
+        for &other in rest {
+            let join = PyDict::new(py);
+            join.set_item("join", "outer")?;
+            let pair = arguments[*first].call_method("align", (&arguments[other],), Some(&join))?;
+            arguments[*first] = pair.get_item(0)?;
+            arguments[other] = pair.get_item(1)?;
+        }
+        for &other in rest {
+            let join = PyDict::new(py);
+            join.set_item("join", "outer")?;
+            let pair = arguments[other].call_method("align", (&arguments[*first],), Some(&join))?;
+            arguments[other] = pair.get_item(0)?;
+        }
+    }
+    let shape_of = alignable
+        .first()
+        .map_or_else(|| this.clone(), |&first| arguments[first].clone());
+    if let Ok(frame) = shape_of.extract::<PyRef<'_, PyDataFrame>>() {
+        if arguments.len() == 1 && nout == 1 && method == "__call__" && no_kwargs {
+            // Column by column, each through the Series path.
+            let mut out = frame.inner.clone();
+            for position in 0..frame.inner.shape().1 {
+                let column = Py::new(py, frame.column_series_at(position)?)?;
+                let result = ufunc.call1((column,))?;
+                let result = result.extract::<PyRef<'_, PySeries>>()?;
+                out = out
+                    .isetitem(position, result.inner.column().clone())
+                    .map_err(frame_error_to_py)?;
+            }
+            return Ok(Py::new(py, PyDataFrame { inner: out })?
+                .into_bound(py)
+                .into_any());
+        }
+        let arrays = arguments
+            .iter()
+            .map(|argument| {
+                if argument.is_instance_of::<PyDataFrame>() {
+                    np.call_method1("asarray", (argument,))
+                } else {
+                    Ok(argument.clone())
+                }
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let result = call(arrays, kwargs)?;
+        return ufunc_rebuild(this, &result, &[], &shape_of);
+    }
+    // Series: the values (and a nullable input's mask), then the index and
+    // the name back - the one name the inputs share, else None.
+    let mut mask = Vec::new();
+    let mut names = Vec::new();
+    let mut arrays = Vec::with_capacity(arguments.len());
+    for argument in &arguments {
+        if let Ok(series) = argument.extract::<PyRef<'_, PySeries>>() {
+            names.push(series.inner.name().to_owned());
+            arrays.push(ufunc_series_values(py, &series.inner, &name, &mut mask)?);
+        } else {
+            if argument.get_type().name()?.to_str()?.ends_with("Index") {
+                let label = argument.getattr("name")?;
+                names.push(if label.is_none() {
+                    String::new()
+                } else {
+                    label.str()?.to_string()
+                });
+            }
+            arrays.push(argument.clone());
+        }
+    }
+    let result = call(arrays, kwargs)?;
+    names.dedup();
+    let name = match names.as_slice() {
+        [only] => only.clone(),
+        _ => String::new(),
+    };
+    let shaped = shape_of.extract::<PyRef<'_, PySeries>>()?;
+    let rebuild = |result: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+        if result.get_type().name()? != "ndarray" {
+            return Ok(result.clone());
+        }
+        if result.getattr("ndim")?.extract::<usize>()? != 1 {
+            if method == "outer" {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(""));
+            }
+            return Ok(result.clone());
+        }
+        let column = ufunc_result_column(py, result, &mask)?;
+        let inner = Series::new(name.clone(), shaped.inner.index().clone(), column)
+            .map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PySeries { inner })?.into_bound(py).into_any())
+    };
+    if nout > 1 {
+        let parts = result
+            .try_iter()?
+            .map(|part| rebuild(&part?))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(PyTuple::new(py, parts)?.into_any());
+    }
+    rebuild(&result)
+}
+
+/// A ufunc's result (a tuple of them for several outputs) in the shape of
+/// `shape_of`, a DataFrame or Series: a same-shaped array becomes it with
+/// its labels, anything else comes back as numpy gave it.
+fn ufunc_rebuild<'py>(
+    this: &Bound<'py, PyAny>,
+    result: &Bound<'py, PyAny>,
+    mask: &[bool],
+    shape_of: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = this.py();
+    if let Ok(parts) = result.cast::<PyTuple>() {
+        let parts = parts
+            .iter()
+            .map(|part| ufunc_rebuild(this, &part, mask, shape_of))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(PyTuple::new(py, parts)?.into_any());
+    }
+    if result.get_type().name()? != "ndarray" {
+        return Ok(result.clone());
+    }
+    let ndim: usize = result.getattr("ndim")?.extract()?;
+    if let Ok(frame) = shape_of.extract::<PyRef<'_, PyDataFrame>>() {
+        let (rows, width) = frame.inner.shape();
+        let shape: Vec<usize> = result.getattr("shape")?.extract()?;
+        if ndim != 2 || shape != [rows, width] {
+            return Ok(result.clone());
+        }
+        let mut out = frame.inner.clone();
+        for position in 0..width {
+            let slice = result.get_item((pyo3::types::PySlice::full(py), position))?;
+            out = out
+                .isetitem(position, ufunc_result_column(py, &slice, mask)?)
+                .map_err(frame_error_to_py)?;
+        }
+        return Ok(Py::new(py, PyDataFrame { inner: out })?
+            .into_bound(py)
+            .into_any());
+    }
+    let series = shape_of.extract::<PyRef<'_, PySeries>>()?;
+    if ndim != 1 || result.len()? != series.inner.len() {
+        return Ok(result.clone());
+    }
+    let inner = Series::new(
+        series.inner.name(),
+        series.inner.index().clone(),
+        ufunc_result_column(py, result, mask)?,
+    )
+    .map_err(frame_error_to_py)?;
+    Ok(Py::new(py, PySeries { inner })?.into_bound(py).into_any())
+}
+
 /// The name of `left <op> other`: an operand Series or Index with another
 /// name leaves the result unnamed (pandas' `get_op_result_name`).
 fn op_result_name(left: &Series, other: &Bound<'_, PyAny>) -> PyResult<String> {
@@ -12386,6 +12914,23 @@ impl PySeries {
     /// returns one that writes its name back.
     fn index_object(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         row_index_to_py(py, self.inner.index())
+    }
+
+    /// `any` / `all`'s axis (a Series has only axis 0) and numpy's
+    /// compatibility keywords (`np.any(s)` passes `axis=None, out=None`).
+    fn check_logical_reduction(
+        &self,
+        name: &str,
+        axis: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let axis = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if axis != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {axis} for object type Series"
+            )));
+        }
+        numpy_compat_kwargs(name, kwargs)
     }
 
     /// `self <op> other` for the logical operators (see [`series_logical`]).
@@ -13726,8 +14271,14 @@ impl PySeries {
     }
 
     /// Return the cumulative sum as a new Series.
-    #[pyo3(signature = (axis=None, skipna=true))]
-    fn cumsum(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, skipna=true, **kwargs))]
+    fn cumsum(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        numpy_compat_kwargs("cumsum", kwargs)?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -13954,8 +14505,14 @@ impl PySeries {
     }
 
     /// Return the cumulative product as a new Series.
-    #[pyo3(signature = (axis=None, skipna=true))]
-    fn cumprod(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, skipna=true, **kwargs))]
+    fn cumprod(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        numpy_compat_kwargs("cumprod", kwargs)?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -13970,8 +14527,14 @@ impl PySeries {
     }
 
     /// Return the cumulative minimum as a new Series.
-    #[pyo3(signature = (axis=None, skipna=true))]
-    fn cummin(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, skipna=true, **kwargs))]
+    fn cummin(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        numpy_compat_kwargs("cummin", kwargs)?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -13986,8 +14549,14 @@ impl PySeries {
     }
 
     /// Return the cumulative maximum as a new Series.
-    #[pyo3(signature = (axis=None, skipna=true))]
-    fn cummax(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PySeries> {
+    #[pyo3(signature = (axis=None, skipna=true, **kwargs))]
+    fn cummax(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        numpy_compat_kwargs("cummax", kwargs)?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -14036,8 +14605,9 @@ impl PySeries {
     }
 
     /// Round each value to `decimals` places, returning a new Series.
-    #[pyo3(signature = (decimals=0))]
-    fn round(&self, decimals: i32) -> PyResult<PySeries> {
+    #[pyo3(signature = (decimals=0, **kwargs))]
+    fn round(&self, decimals: i32, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PySeries> {
+        numpy_compat_kwargs("round", kwargs)?;
         let r = self.inner.round(decimals).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
@@ -14244,7 +14814,7 @@ impl PySeries {
     }
 
     /// Clip values to the `[lower, upper]` range (either bound optional).
-    #[pyo3(signature = (lower=None, upper=None, axis=None, inplace=false))]
+    #[pyo3(signature = (lower=None, upper=None, axis=None, inplace=false, **kwargs))]
     fn clip(
         &mut self,
         py: Python<'_>,
@@ -14252,7 +14822,9 @@ impl PySeries {
         upper: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
         inplace: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<PySeries>> {
+        numpy_compat_kwargs("clip", kwargs)?;
         let result = (|| -> PyResult<PySeries> {
             let ax_opt = parse_axis_param_for_type(axis, "Series")?;
             if let Some(ax) = ax_opt {
@@ -14665,6 +15237,19 @@ impl PySeries {
     ) -> PyResult<Bound<'py, PyAny>> {
         let _ = copy;
         finish_to_numpy(column_ndarray(py, self.inner.column())?, None, dtype, None)
+    }
+
+    /// numpy's ufunc protocol: `np.log(s)` is a Series with this index and
+    /// name, as pandas' (see [`array_ufunc`]).
+    #[pyo3(signature = (ufunc, method, *inputs, **kwargs))]
+    fn __array_ufunc__<'py>(
+        slf: &Bound<'py, Self>,
+        ufunc: &Bound<'py, PyAny>,
+        method: &str,
+        inputs: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        array_ufunc(slf.as_any(), ufunc, method, inputs, kwargs)
     }
 
     fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -15289,12 +15874,42 @@ impl PySeries {
         scalar_to_py(py, &s)
     }
 
-    fn any(&self) -> PyResult<bool> {
-        self.inner.any().map_err(frame_error_to_py)
+    /// pandas' `Series.any(axis=0, bool_only=False, skipna=True, **kwargs)`
+    /// (it took no arguments, so `np.any(s)` raised): `skipna=False` reads
+    /// NaN as True and None as False, as pandas; `bool_only` is accepted and,
+    /// as pandas' Series does, ignored.
+    #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
+    fn any(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        bool_only: bool,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<bool> {
+        let _ = bool_only;
+        self.check_logical_reduction("any", axis, kwargs)?;
+        if skipna || !self.inner.column().has_nulls() {
+            return self.inner.any().map_err(frame_error_to_py);
+        }
+        Ok(self.inner.column().values().iter().any(missing_as_truthy))
     }
 
-    fn all(&self) -> PyResult<bool> {
-        self.inner.all().map_err(frame_error_to_py)
+    /// pandas' `Series.all(axis=0, bool_only=False, skipna=True, **kwargs)`
+    /// (see [`Self::any`]).
+    #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
+    fn all(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        bool_only: bool,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<bool> {
+        let _ = bool_only;
+        self.check_logical_reduction("all", axis, kwargs)?;
+        if skipna || !self.inner.column().has_nulls() {
+            return self.inner.all().map_err(frame_error_to_py);
+        }
+        Ok(self.inner.column().values().iter().all(missing_as_truthy))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false))]
@@ -15583,7 +16198,15 @@ impl PySeries {
         self.agg(py, func)
     }
 
-    fn repeat(&self, repeats: usize) -> PyResult<PySeries> {
+    /// pandas' `Series.repeat(repeats, axis=None)`; `np.repeat(s, 2)` passes
+    /// `axis=None` (it raised), any other axis is pandas' ValueError.
+    #[pyo3(signature = (repeats, axis=None))]
+    fn repeat(&self, repeats: usize, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        if axis.is_some_and(|axis| !axis.is_none()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "the 'axis' parameter is not supported in the pandas implementation of repeat()",
+            ));
+        }
         let res = self.inner.repeat(repeats).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
@@ -17659,6 +18282,15 @@ impl PyDataFrame {
         row_index_to_py(py, self.inner.index())
     }
 
+    /// The frame with rows and columns swapped (`transpose`, `.T`, `swapaxes`).
+    fn transposed(&self) -> PyResult<PyDataFrame> {
+        let result = self
+            .inner
+            .transpose()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: result })
+    }
+
     /// `self <op> other` for the logical operators, column by column as
     /// pandas' `DataFrame._arith_method`: another DataFrame with the same
     /// row labels and the same column labels, a Series or a list/1-D array
@@ -17949,7 +18581,21 @@ impl PyDataFrame {
         if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
             return wrap_frame(self.inner.arith_series(&series.inner, op, 1, reflected));
         }
-        if let Some(scalar) = number_scalar(other) {
+        match frame_listlike_operand(other.py(), &self.inner, other)? {
+            Some(FrameOperand::Row(row)) => {
+                return wrap_frame(self.inner.arith_series(&row, op, 1, reflected));
+            }
+            Some(FrameOperand::Frame(right)) => {
+                let (left, right) = if reflected {
+                    (&right, &self.inner)
+                } else {
+                    (&self.inner, &right)
+                };
+                return wrap_frame(frame_arith(left, right, op));
+            }
+            None => {}
+        }
+        if let Some(scalar) = number_scalar(&unwrap_0d(other)?) {
             return wrap_frame(self.inner.arith_scalar(&scalar, op, reflected));
         }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
@@ -17971,7 +18617,16 @@ impl PyDataFrame {
         if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
             return wrap_frame(frame_cmp(&self.inner, &frame.inner, op));
         }
-        let scalar = py_to_scalar(py, other)?;
+        match frame_listlike_operand(py, &self.inner, other)? {
+            Some(FrameOperand::Row(row)) => {
+                return wrap_frame(self.inner.cmp_series(&row, op, 1));
+            }
+            Some(FrameOperand::Frame(right)) => {
+                return wrap_frame(frame_cmp(&self.inner, &right, op));
+            }
+            None => {}
+        }
+        let scalar = py_to_scalar(py, &unwrap_0d(other)?)?;
         wrap_frame(self.inner.compare_scalar_df(&scalar, op))
     }
 
@@ -19929,6 +20584,19 @@ impl PyDataFrame {
         finish_to_numpy(frame_ndarray(py, &self.inner)?, None, dtype, None)
     }
 
+    /// numpy's ufunc protocol: `np.sqrt(df)` is a DataFrame with these
+    /// labels, as pandas' (see [`array_ufunc`]).
+    #[pyo3(signature = (ufunc, method, *inputs, **kwargs))]
+    fn __array_ufunc__<'py>(
+        slf: &Bound<'py, Self>,
+        ufunc: &Bound<'py, PyAny>,
+        method: &str,
+        inputs: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        array_ufunc(slf.as_any(), ufunc, method, inputs, kwargs)
+    }
+
     /// Return the number of rows.
     fn __len__(&self) -> usize {
         self.inner.len()
@@ -21476,13 +22144,22 @@ impl PyDataFrame {
         Ok(frame_inplace(&mut self.inner, result, inplace))
     }
 
-    /// Transpose: swap rows and columns, returning a new DataFrame.
-    fn transpose(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .inner
-            .transpose()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+    /// Transpose: swap rows and columns, returning a new DataFrame. pandas'
+    /// `transpose(*args, copy=False)` takes numpy's `axes` only as None
+    /// (`np.transpose(df)` passes it; it raised).
+    #[pyo3(signature = (*args, copy=None))]
+    fn transpose(
+        &self,
+        args: &Bound<'_, PyTuple>,
+        copy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let _ = copy; // pandas' copy= does not change the result
+        if args.len() > 1 || args.iter().any(|axes| !axes.is_none()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "the 'axes' parameter is not supported in the pandas implementation of transpose()",
+            ));
+        }
+        self.transposed()
     }
 
     /// pandas' `df.drop(labels=None, *, axis=0, index=None, columns=None,
@@ -21757,14 +22434,16 @@ impl PyDataFrame {
     }
 
     /// Clip values to the `[lower, upper]` range (either bound optional).
-    #[pyo3(signature = (lower=None, upper=None, axis=None, inplace=false))]
+    #[pyo3(signature = (lower=None, upper=None, axis=None, inplace=false, **kwargs))]
     fn clip(
         &mut self,
         lower: Option<&Bound<'_, PyAny>>,
         upper: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
         inplace: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<PyDataFrame>> {
+        numpy_compat_kwargs("clip", kwargs)?;
         let result = (|| -> PyResult<PyDataFrame> {
             let ax_opt = parse_axis_param_for_type(axis, "DataFrame")?;
 
@@ -21881,8 +22560,13 @@ impl PyDataFrame {
     }
 
     /// Round each numeric value to `decimals` places, returning a new DataFrame.
-    #[pyo3(signature = (decimals=None))]
-    fn round(&self, decimals: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (decimals=None, **kwargs))]
+    fn round(
+        &self,
+        decimals: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        numpy_compat_kwargs("round", kwargs)?;
         match decimals {
             None => {
                 let res = self.inner.round(0).map_err(frame_error_to_py)?;
@@ -23087,8 +23771,14 @@ impl PyDataFrame {
     }
 
     /// Return cumulative sum over a DataFrame or Series axis.
-    #[pyo3(signature = (axis=None, skipna=true))]
-    fn cumsum(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (axis=None, skipna=true, **kwargs))]
+    fn cumsum(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        numpy_compat_kwargs("cumsum", kwargs)?;
         let ax = parse_axis_param(axis)?;
         let res = if ax == 0 {
             self.inner.cumsum_with_skipna(skipna)
@@ -23100,8 +23790,14 @@ impl PyDataFrame {
     }
 
     /// Return cumulative product over a DataFrame or Series axis.
-    #[pyo3(signature = (axis=None, skipna=true))]
-    fn cumprod(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (axis=None, skipna=true, **kwargs))]
+    fn cumprod(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        numpy_compat_kwargs("cumprod", kwargs)?;
         let ax = parse_axis_param(axis)?;
         let res = if ax == 0 {
             self.inner.cumprod_with_skipna(skipna)
@@ -23113,8 +23809,14 @@ impl PyDataFrame {
     }
 
     /// Return cumulative minimum over a DataFrame or Series axis.
-    #[pyo3(signature = (axis=None, skipna=true))]
-    fn cummin(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (axis=None, skipna=true, **kwargs))]
+    fn cummin(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        numpy_compat_kwargs("cummin", kwargs)?;
         let ax = parse_axis_param(axis)?;
         let res = if ax == 0 {
             self.inner.cummin_with_skipna(skipna)
@@ -23126,8 +23828,14 @@ impl PyDataFrame {
     }
 
     /// Return cumulative maximum over a DataFrame or Series axis.
-    #[pyo3(signature = (axis=None, skipna=true))]
-    fn cummax(&self, axis: Option<&Bound<'_, PyAny>>, skipna: bool) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (axis=None, skipna=true, **kwargs))]
+    fn cummax(
+        &self,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        numpy_compat_kwargs("cummax", kwargs)?;
         let ax = parse_axis_param(axis)?;
         let res = if ax == 0 {
             self.inner.cummax_with_skipna(skipna)
@@ -23446,7 +24154,7 @@ impl PyDataFrame {
     #[getter]
     #[allow(non_snake_case)]
     fn T(&self) -> PyResult<PyDataFrame> {
-        self.transpose()
+        self.transposed()
     }
 
     #[pyo3(signature = (id_vars=None, value_vars=None, var_name=None, value_name=None, col_level=None, ignore_index=true))]
@@ -26267,7 +26975,7 @@ impl PyDataFrame {
         if axis1 == axis2 {
             return Ok(self.clone());
         }
-        self.transpose()
+        self.transposed()
     }
 
     // Writers: each either writes through fp-io or raises. These used to be
@@ -43697,13 +44405,13 @@ mod tests {
             .expect("pct_change"); // ubs:ignore — test fixture
         assert_eq!(pct_df.shape(), (3, 2));
 
-        let cs = py_df.cumsum(None, true).expect("cumsum"); // ubs:ignore — test fixture
+        let cs = py_df.cumsum(None, true, None).expect("cumsum"); // ubs:ignore — test fixture
         assert_eq!(cs.shape(), (3, 2));
-        let cp = py_df.cumprod(None, true).expect("cumprod"); // ubs:ignore — test fixture
+        let cp = py_df.cumprod(None, true, None).expect("cumprod"); // ubs:ignore — test fixture
         assert_eq!(cp.shape(), (3, 2));
-        let cmin = py_df.cummin(None, true).expect("cummin"); // ubs:ignore — test fixture
+        let cmin = py_df.cummin(None, true, None).expect("cummin"); // ubs:ignore — test fixture
         assert_eq!(cmin.shape(), (3, 2));
-        let cmax = py_df.cummax(None, true).expect("cummax"); // ubs:ignore — test fixture
+        let cmax = py_df.cummax(None, true, None).expect("cummax"); // ubs:ignore — test fixture
         assert_eq!(cmax.shape(), (3, 2));
 
         let sh = py_df.shift(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
@@ -43934,7 +44642,7 @@ mod tests {
             assert_eq!(roll.window, 2);
             assert!(!roll.center);
 
-            let tr = py_df.transpose().expect("transpose"); // ubs:ignore — test fixture
+            let tr = py_df.transposed().expect("transpose"); // ubs:ignore — test fixture
             assert_eq!(tr.shape(), (2, 3));
             let t_prop = py_df.T().expect("T property"); // ubs:ignore — test fixture
             assert_eq!(t_prop.shape(), (2, 3));
@@ -43951,7 +44659,7 @@ mod tests {
             let lo = pyo3::types::PyFloat::new(py, 2.0);
             let hi = pyo3::types::PyFloat::new(py, 5.0);
             let clip_df = py_df
-                .clip(Some(lo.as_any()), Some(hi.as_any()), None, false)
+                .clip(Some(lo.as_any()), Some(hi.as_any()), None, false, None)
                 .expect("clip")
                 .expect("a copy"); // ubs:ignore — test fixture
             assert_eq!(clip_df.shape(), (3, 2));
@@ -44531,13 +45239,13 @@ mod tests {
             )
             .expect("s_cum");
             let py_s_cum = PySeries { inner: s_cum };
-            let cs = py_s_cum.cumsum(None, true).expect("cumsum");
+            let cs = py_s_cum.cumsum(None, true, None).expect("cumsum");
             assert_eq!(cs.shape(), (3,));
-            let cp = py_s_cum.cumprod(None, true).expect("cumprod");
+            let cp = py_s_cum.cumprod(None, true, None).expect("cumprod");
             assert_eq!(cp.shape(), (3,));
-            let cmin = py_s_cum.cummin(None, true).expect("cummin");
+            let cmin = py_s_cum.cummin(None, true, None).expect("cummin");
             assert_eq!(cmin.shape(), (3,));
-            let cmax = py_s_cum.cummax(None, true).expect("cummax");
+            let cmax = py_s_cum.cummax(None, true, None).expect("cummax");
             assert_eq!(cmax.shape(), (3,));
 
             // Test cumulative operations on PyDataFrame (axis 0 and axis 1)
@@ -44565,47 +45273,49 @@ mod tests {
             .expect("df_cum");
             let py_df_cum = PyDataFrame { inner: df_cum };
 
-            let df_cs0 = py_df_cum.cumsum(None, true).expect("df cumsum axis 0");
+            let df_cs0 = py_df_cum
+                .cumsum(None, true, None)
+                .expect("df cumsum axis 0");
             assert_eq!(df_cs0.shape(), (3, 2));
 
             let axis_1 = pyo3::types::PyInt::new(py, 1);
             let df_cs1 = py_df_cum
-                .cumsum(Some(axis_1.as_any()), true)
+                .cumsum(Some(axis_1.as_any()), true, None)
                 .expect("df cumsum axis 1");
             assert_eq!(df_cs1.shape(), (3, 2));
 
             let df_cp1 = py_df_cum
-                .cumprod(Some(axis_1.as_any()), true)
+                .cumprod(Some(axis_1.as_any()), true, None)
                 .expect("df cumprod axis 1");
             assert_eq!(df_cp1.shape(), (3, 2));
 
             let df_cmin1 = py_df_cum
-                .cummin(Some(axis_1.as_any()), true)
+                .cummin(Some(axis_1.as_any()), true, None)
                 .expect("df cummin axis 1");
             assert_eq!(df_cmin1.shape(), (3, 2));
 
             let df_cmax1 = py_df_cum
-                .cummax(Some(axis_1.as_any()), true)
+                .cummax(Some(axis_1.as_any()), true, None)
                 .expect("df cummax axis 1");
             assert_eq!(df_cmax1.shape(), (3, 2));
 
             let df_cs1_noskip = py_df_cum
-                .cumsum(Some(axis_1.as_any()), false)
+                .cumsum(Some(axis_1.as_any()), false, None)
                 .expect("df cumsum axis 1 skipna false");
             assert_eq!(df_cs1_noskip.shape(), (3, 2));
 
             let df_cp1_noskip = py_df_cum
-                .cumprod(Some(axis_1.as_any()), false)
+                .cumprod(Some(axis_1.as_any()), false, None)
                 .expect("df cumprod axis 1 skipna false");
             assert_eq!(df_cp1_noskip.shape(), (3, 2));
 
             let df_cmin1_noskip = py_df_cum
-                .cummin(Some(axis_1.as_any()), false)
+                .cummin(Some(axis_1.as_any()), false, None)
                 .expect("df cummin axis 1 skipna false");
             assert_eq!(df_cmin1_noskip.shape(), (3, 2));
 
             let df_cmax1_noskip = py_df_cum
-                .cummax(Some(axis_1.as_any()), false)
+                .cummax(Some(axis_1.as_any()), false, None)
                 .expect("df cummax axis 1 skipna false");
             assert_eq!(df_cmax1_noskip.shape(), (3, 2));
         });
@@ -44633,7 +45343,7 @@ mod tests {
             let mut py_s = PySeries { inner: s };
 
             // Series round
-            let rounded = py_s.round(1).expect("round 1");
+            let rounded = py_s.round(1, None).expect("round 1");
             assert_eq!(
                 rounded.inner.column().values(),
                 &[
@@ -44686,6 +45396,7 @@ mod tests {
                     Some(hi.as_any()),
                     Some(ax0.as_any()),
                     false,
+                    None,
                 )
                 .expect("clip s")
                 .expect("a copy");
@@ -44711,7 +45422,9 @@ mod tests {
 
             // DataFrame round with int
             let dec_int = pyo3::types::PyInt::new(py, 1);
-            let rd_int = py_df.round(Some(dec_int.as_any())).expect("round df int");
+            let rd_int = py_df
+                .round(Some(dec_int.as_any()), None)
+                .expect("round df int");
             assert_eq!(
                 rd_int.inner.columns()["a"].values(),
                 &[Scalar::Float64(1.2), Scalar::Float64(5.7)]
@@ -44721,7 +45434,9 @@ mod tests {
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("a", 1).expect("set item a");
             dict.set_item("b", 0).expect("set item b");
-            let rd_dict = py_df.round(Some(dict.as_any())).expect("round df dict");
+            let rd_dict = py_df
+                .round(Some(dict.as_any()), None)
+                .expect("round df dict");
             assert_eq!(
                 rd_dict.inner.columns()["b"].values(),
                 &[Scalar::Float64(2.0), Scalar::Float64(5.0)]
@@ -44749,7 +45464,7 @@ mod tests {
             clip_dict.set_item("a", 2.0).expect("set clip a");
             clip_dict.set_item("b", 3.0).expect("set clip b");
             let clipped_df = py_df
-                .clip(Some(clip_dict.as_any()), None, None, false)
+                .clip(Some(clip_dict.as_any()), None, None, false, None)
                 .expect("clip df dict")
                 .expect("a copy");
             assert_eq!(
@@ -46025,40 +46740,40 @@ mod tests {
             let ax2 = 2.into_bound_py_any(py).expect("ax2"); // ubs:ignore — test fixture
 
             // Series cumsum
-            let s_cumsum = py_s.cumsum(None, true).expect("cumsum"); // ubs:ignore — test fixture
+            let s_cumsum = py_s.cumsum(None, true, None).expect("cumsum"); // ubs:ignore — test fixture
             assert_eq!(s_cumsum.inner.values()[2], Scalar::Float64(9.0));
-            assert!(py_s.cumsum(Some(&ax0), true).is_ok());
-            assert!(py_s.cumsum(Some(&ax1), true).is_err());
+            assert!(py_s.cumsum(Some(&ax0), true, None).is_ok());
+            assert!(py_s.cumsum(Some(&ax1), true, None).is_err());
 
             // Series cumprod
-            let s_cumprod = py_s.cumprod(None, true).expect("cumprod"); // ubs:ignore — test fixture
+            let s_cumprod = py_s.cumprod(None, true, None).expect("cumprod"); // ubs:ignore — test fixture
             assert_eq!(s_cumprod.inner.values()[2], Scalar::Float64(24.0));
-            assert!(py_s.cumprod(Some(&ax0), true).is_ok());
-            assert!(py_s.cumprod(Some(&ax1), true).is_err());
+            assert!(py_s.cumprod(Some(&ax0), true, None).is_ok());
+            assert!(py_s.cumprod(Some(&ax1), true, None).is_err());
 
             // Series cummin
-            let s_cummin = py_s.cummin(None, true).expect("cummin"); // ubs:ignore — test fixture
+            let s_cummin = py_s.cummin(None, true, None).expect("cummin"); // ubs:ignore — test fixture
             assert_eq!(s_cummin.inner.values()[2], Scalar::Float64(2.0));
-            assert!(py_s.cummin(Some(&ax0), true).is_ok());
-            assert!(py_s.cummin(Some(&ax1), true).is_err());
+            assert!(py_s.cummin(Some(&ax0), true, None).is_ok());
+            assert!(py_s.cummin(Some(&ax1), true, None).is_err());
 
             // Series cummax
-            let s_cummax = py_s.cummax(None, true).expect("cummax"); // ubs:ignore — test fixture
+            let s_cummax = py_s.cummax(None, true, None).expect("cummax"); // ubs:ignore — test fixture
             assert_eq!(s_cummax.inner.values()[2], Scalar::Float64(4.0));
-            assert!(py_s.cummax(Some(&ax0), true).is_ok());
-            assert!(py_s.cummax(Some(&ax1), true).is_err());
+            assert!(py_s.cummax(Some(&ax0), true, None).is_ok());
+            assert!(py_s.cummax(Some(&ax1), true, None).is_err());
 
             // Series clip inplace: returns None, as pandas (it was refused).
             let mut in_place = py_s.clone();
             assert!(
                 in_place
-                    .clip(py, None, None, None, true)
+                    .clip(py, None, None, None, true, None)
                     .expect("s clip inplace") // ubs:ignore — test fixture
                     .is_none()
             );
             assert!(
                 py_s.clone()
-                    .clip(py, None, None, Some(&ax1), false)
+                    .clip(py, None, None, Some(&ax1), false, None)
                     .is_err()
             );
 
@@ -46074,11 +46789,11 @@ mod tests {
             let mut py_df = PyDataFrame { inner: df };
             assert!(
                 py_df
-                    .clip(None, None, None, true)
+                    .clip(None, None, None, true, None)
                     .expect("df clip inplace") // ubs:ignore — test fixture
                     .is_none()
             );
-            assert!(py_df.clip(None, None, Some(&ax2), false).is_err());
+            assert!(py_df.clip(None, None, Some(&ax2), false, None).is_err());
         });
     }
 
