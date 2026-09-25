@@ -5639,6 +5639,94 @@ def test_pivot_table_forms_match_pandas(case: str) -> None:
         assert shape(_PIVOT_CASES[case](fpd)) == shape(_PIVOT_CASES[case](pd)), case
 
 
+def _people(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "name": ["Ann", "Bob", "Cid", "Dee", "Eve"],
+            "city": ["NYC", "LA", "NYC", "SF", "LA"],
+            "age": [34, 45, 29, 51, 38],
+            "score": [88.5, None, 92.0, 75.25, 81.0],
+        }
+    )
+
+
+# fvsao.30: everyday idioms a wide probe found wrong or raising.
+_EVERYDAY_CASES = {
+    # NEGATIVE: filter keeps the original row order when groups interleave.
+    "gb.filter keeps row order": lambda m: _people(m).groupby("city").filter(lambda g: len(g) > 1),
+    "sgb.filter keeps row order": lambda m: _people(m).groupby("city")["age"].filter(lambda g: len(g) > 1),
+    "apply(axis=1) returning a Series": lambda m: _people(m)[["age", "score"]].apply(
+        lambda r: m.Series({"s": r["age"] + 1}), axis=1
+    ),
+    "apply(axis=1) returning a scalar": lambda m: _people(m)[["age"]].apply(lambda r: r["age"] + 1, axis=1),
+    "value_counts(normalize) name": lambda m: _people(m)["city"].value_counts(normalize=True),
+    "Index.value_counts(normalize) name": lambda m: m.Index(["a", "b", "a"]).value_counts(normalize=True),
+    "unique is an ndarray": lambda m: (type(_people(m)["city"].unique()).__name__, _people(m)["city"].unique().tolist()),
+    "pd.unique(Index) is an ndarray": lambda m: (
+        type(m.unique(m.Index([2, 1, 2]))).__name__,
+        m.unique(m.Index([2, 1, 2])).tolist(),
+    ),
+    "memory_usage unnamed, deep=": lambda m: m.DataFrame({"a": [1, 2]}).memory_usage(index=False, deep=True).name,
+    "insert a scalar": lambda m: (lambda d: (d.insert(1, "z", 0), d)[1])(_people(m)),
+    "get_dummies prefix str": lambda m: m.get_dummies(_people(m)[["city"]], prefix="c"),
+    "get_dummies prefix dict": lambda m: m.get_dummies(_people(m)[["name", "city"]], prefix={"city": "t", "name": "n"}),
+    "describe(include='all')": lambda m: _people(m).describe(include="all"),
+    "describe(include='object')": lambda m: _people(m).describe(include="object"),
+    "describe(exclude='number')": lambda m: _people(m).describe(exclude="number"),
+    "describe(percentiles=)": lambda m: _people(m).describe(percentiles=[0.1, 0.9]),
+}
+
+
+def _everyday_outcome(m: Any, case: str) -> Any:
+    import warnings
+
+    def cell(v: Any) -> Any:
+        if hasattr(v, "item"):
+            v = v.item()
+        if isinstance(v, float):
+            return None if math.isnan(v) else round(v, 9)
+        return v
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            r = _EVERYDAY_CASES[case](m)
+        except Exception as e:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(e).__name__)
+    if hasattr(r, "columns"):
+        return (
+            "frame",
+            [str(d) for d in r.dtypes.tolist()],
+            [str(i) for i in r.index.tolist()],
+            [str(c) for c in r.columns.tolist()],
+            [[cell(v) for v in r.iloc[:, j].tolist()] for j in range(r.shape[1])],
+        )
+    if hasattr(r, "index") and hasattr(r, "tolist"):
+        return ("series", str(r.dtype), r.name, [str(i) for i in r.index.tolist()], [cell(v) for v in r.tolist()])
+    return ("value", r)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY_CASES))
+def test_everyday_idioms_match_pandas(case: str) -> None:
+    assert _everyday_outcome(fpd, case) == _everyday_outcome(pd, case), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_info_writes_pandas_layout_to_buf() -> None:
+    import io
+
+    texts = {}
+    for m in (pd, fpd):
+        buf = io.StringIO()
+        assert _people(m).info(buf=buf) is None
+        lines = buf.getvalue().splitlines()
+        # The class line names each library's own class; the byte count is
+        # each library's own (the layout, not the number, is the contract).
+        texts[m.__name__] = lines[1:-1] + [lines[-1].split(":")[0]]
+    assert texts["frankenpandas"] == texts["pandas"]
+
+
 _QUERY_GLOBAL_LIMIT = 40
 
 

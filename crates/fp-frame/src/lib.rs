@@ -14294,7 +14294,9 @@ impl Series {
         };
         let index = Index::new(labels).rename_index(idx_name);
         let column = Column::from_values(values)?;
-        Self::new("count", index, column)
+        // pandas names a normalized count 'proportion' (fvsao.30).
+        let name = if normalize { "proportion" } else { "count" };
+        Self::new(name, index, column)
     }
 
     /// Hash-free first-seen `(value, count)` tally for an all-valid,
@@ -14722,7 +14724,9 @@ impl Series {
         };
         let index = Index::new(labels).rename_index(index_name);
         let column = Column::from_values(values)?;
-        Self::new("count".to_string(), index, column)
+        // pandas names a normalized count 'proportion' (fvsao.30).
+        let name = if normalize { "proportion" } else { "count" };
+        Self::new(name.to_string(), index, column)
     }
 
     /// Count values binned into equal-width intervals.
@@ -74543,40 +74547,41 @@ impl DataFrame {
                 }
                 let vals = col.values();
                 let count = vals.iter().filter(|v| !v.is_missing()).count();
-                let mut freq_map: HashMap<ScalarKey<'_>, (Scalar, usize)> = HashMap::new();
+                // Each value's count and first-seen slot: pandas' top is
+                // value_counts().index[0], the first-seen value among the
+                // most frequent (a HashMap max broke ties arbitrarily).
+                let mut freq_map: HashMap<ScalarKey<'_>, usize> = HashMap::new();
+                let mut seen: Vec<(Scalar, usize)> = Vec::new();
                 for v in vals {
                     if let Some(key) = scalar_key_skip_missing(v) {
-                        freq_map
-                            .entry(key)
-                            .and_modify(|(_, c)| *c += 1)
-                            .or_insert_with(|| (v.clone(), 1));
+                        match freq_map.entry(key) {
+                            std::collections::hash_map::Entry::Occupied(slot) => {
+                                seen[*slot.get()].1 += 1;
+                            }
+                            std::collections::hash_map::Entry::Vacant(slot) => {
+                                slot.insert(seen.len());
+                                seen.push((v.clone(), 1));
+                            }
+                        }
                     }
                 }
-                let unique = freq_map.len();
-                let (top, freq) = freq_map
-                    .values()
-                    .max_by_key(|(_, c)| *c)
-                    .map(|(v, c)| {
-                        let label = scalar_to_value_counts_index_label(v);
-                        let rendered = match label {
-                            IndexLabel::Int64(n) => n.to_string(),
-                            IndexLabel::Utf8(s) => s,
-                            IndexLabel::Timedelta64(ns) => Timedelta::format(ns),
-                            IndexLabel::Datetime64(ns) => format_datetime_ns(ns),
-                            f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
-                            null @ IndexLabel::Null(_) => null.to_string(),
-                        };
-                        (rendered, *c)
-                    })
-                    .unwrap_or_default();
+                let unique = seen.len();
+                let (top, freq) = seen.iter().fold(
+                    (Scalar::Null(NullKind::NaN), 0_usize),
+                    |best, (value, freq)| {
+                        if *freq > best.1 {
+                            (value.clone(), *freq)
+                        } else {
+                            best
+                        }
+                    },
+                );
+                let as_int = |n: usize| Scalar::Int64(i64::try_from(n).unwrap_or(i64::MAX));
 
-                let stats = vec![
-                    Scalar::Utf8(count.to_string()),
-                    Scalar::Utf8(unique.to_string()),
-                    Scalar::Utf8(top),
-                    Scalar::Utf8(freq.to_string()),
-                ];
-                out_columns.insert(name.clone(), Column::from_values(stats)?);
+                // pandas' object describe holds ints and the top value itself,
+                // an object column - they were all strings (fvsao.30).
+                let stats = vec![as_int(count), as_int(unique), top, as_int(freq)];
+                out_columns.insert(name.clone(), Column::from_object_values(stats));
                 out_order.push(name.clone());
             }
             return Self::new_with_column_order(out_index, out_columns, out_order);
@@ -85489,7 +85494,8 @@ impl DataFrame {
             values.push(Scalar::Int64(bytes as i64));
         }
 
-        Series::from_values("memory_usage".to_owned(), labels, values)
+        // Unnamed, as pandas' (fvsao.30: it was named 'memory_usage').
+        Series::from_values(String::new(), labels, values)
     }
 
     // ── DataFrame column-wise aggregation stats ──

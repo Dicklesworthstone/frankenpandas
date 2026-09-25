@@ -3654,7 +3654,9 @@ impl PyIndex {
         }
         let col = Column::from_values(vals)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let s = Series::new("count", Index::new(idx_labels), col).map_err(frame_error_to_py)?;
+        // pandas names a normalized count 'proportion' (fvsao.30).
+        let name = if normalize { "proportion" } else { "count" };
+        let s = Series::new(name, Index::new(idx_labels), col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
@@ -12457,6 +12459,311 @@ fn resolve_expr_locals(
     Ok((text, locals))
 }
 
+/// `describe`'s include / exclude as fp-frame's dtype names: a string
+/// ('O', 'object', 'number', 'all', 'category', 'int64' ...), a type
+/// (`object`, `np.number`, `np.float64`), or a list of them.
+fn describe_dtype_names(spec: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
+    let Some(spec) = spec.filter(|spec| !spec.is_none()) else {
+        return Ok(Vec::new());
+    };
+    let items: Vec<Bound<'_, PyAny>> =
+        if spec.is_instance_of::<PyList>() || spec.is_instance_of::<PyTuple>() {
+            spec.try_iter()?.collect::<PyResult<_>>()?
+        } else {
+            vec![spec.clone()]
+        };
+    items
+        .iter()
+        .map(|item| {
+            let name = match item.extract::<String>() {
+                Ok(name) => name,
+                Err(_) => match item.cast::<pyo3::types::PyType>() {
+                    Ok(ty) => ty.name()?.to_string(),
+                    Err(_) => item.str()?.to_string(),
+                },
+            };
+            Ok(match name.as_str() {
+                "O" | "object" | "object_" | "str" | "string" => "object".to_owned(),
+                "number" | "numeric" => "number".to_owned(),
+                "int" | "int64" | "integer" => "int64".to_owned(),
+                "float" | "float64" | "floating" => "float64".to_owned(),
+                "all" | "category" | "bool" | "boolean" | "datetime" | "datetime64"
+                | "datetime64[ns]" | "timedelta" | "timedelta64" | "timedelta64[ns]" => name,
+                // An unknown name is pandas' (numpy's) TypeError, not a
+                // filter that silently matches nothing.
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "data type '{other}' not understood"
+                    )));
+                }
+            })
+        })
+        .collect()
+}
+
+/// Whether a column of `dtype` is what a `describe` include / exclude name
+/// selects ('all', 'number', 'object', 'category', 'bool', 'datetime',
+/// 'timedelta', or a pandas dtype name).
+fn describe_dtype_matches(dtype: &DType, spec: &str) -> bool {
+    match spec {
+        "all" => true,
+        "number" => matches!(
+            dtype,
+            DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable
+        ),
+        "object" => matches!(dtype, DType::Utf8),
+        "category" => matches!(dtype, DType::Categorical),
+        "bool" | "boolean" => matches!(dtype, DType::Bool | DType::BoolNullable),
+        "datetime" | "datetime64" | "datetime64[ns]" => matches!(dtype, DType::Datetime64 { .. }),
+        "timedelta" | "timedelta64" | "timedelta64[ns]" => matches!(dtype, DType::Timedelta64),
+        other => pandas_dtype_name(dtype) == other,
+    }
+}
+
+/// pandas' `describe(include='all')`: count, unique, top, freq, then the
+/// numeric statistics, every column in the frame's order, NaN where a
+/// statistic does not apply (a numeric column has no top; a text column no
+/// mean).
+fn describe_all<'py>(
+    py: Python<'py>,
+    frame: &DataFrame,
+    numeric_describe: impl Fn(&DataFrame) -> Result<DataFrame, FrameError>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+    let numeric: Vec<&str> = names
+        .iter()
+        .filter(|name| {
+            frame
+                .column(name)
+                .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
+        })
+        .map(String::as_str)
+        .collect();
+    let objects: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !numeric.contains(name))
+        .collect();
+    let numeric_part = if numeric.is_empty() {
+        None
+    } else {
+        let selected = frame.select_columns(&numeric).map_err(frame_error_to_py)?;
+        Some(numeric_describe(&selected).map_err(frame_error_to_py)?)
+    };
+    let object_part = if objects.is_empty() {
+        None
+    } else {
+        let selected = frame.select_columns(&objects).map_err(frame_error_to_py)?;
+        Some(
+            selected
+                .describe_dtypes(&["all"], &[])
+                .map_err(frame_error_to_py)?,
+        )
+    };
+    let mut labels: Vec<String> = Vec::new();
+    if object_part.is_some() {
+        labels.extend(["count", "unique", "top", "freq"].map(str::to_owned));
+    }
+    if let Some(part) = &numeric_part {
+        for label in part.index().labels() {
+            let label = label.to_string();
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+    }
+    let cells = PyDict::new(py);
+    for name in &names {
+        let part = if numeric.contains(&name.as_str()) {
+            numeric_part.as_ref()
+        } else {
+            object_part.as_ref()
+        };
+        let Some(part) = part else {
+            continue;
+        };
+        let column = part
+            .column(name)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone()))?;
+        let row_of: HashMap<String, usize> = part
+            .index()
+            .labels()
+            .iter()
+            .enumerate()
+            .map(|(row, label)| (label.to_string(), row))
+            .collect();
+        let values = labels
+            .iter()
+            .map(|label| match row_of.get(label) {
+                Some(&row) => scalar_to_py(py, &column.values()[row]),
+                None => Ok(f64::NAN.into_pyobject(py)?.into_any().unbind()),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        cells.set_item(name, PyList::new(py, values)?)?;
+    }
+    let kw = PyDict::new(py);
+    kw.set_item(
+        "index",
+        Py::new(
+            py,
+            PyIndex {
+                inner: Index::new(labels.into_iter().map(IndexLabel::Utf8).collect()),
+            },
+        )?,
+    )?;
+    py.get_type::<PyDataFrame>().call((cells,), Some(&kw))
+}
+
+/// pandas' `DataFrame.info` text: the class, the index line, the column
+/// table (# / Column / Non-Null Count / Dtype, each column left-justified
+/// to its widest cell) or pandas' one-line summary past `max_cols`, the
+/// dtypes line and the memory line (pandas' size format, `+` when an object
+/// column's size is a lower bound). The index reads RangeIndex when its
+/// labels are 0..n-1 (frankenpandas keeps no range provenance, fvsao.18);
+/// the byte count is frankenpandas' own.
+fn pandas_info_text(
+    this: &Bound<'_, PyDataFrame>,
+    verbose: Option<bool>,
+    max_cols: Option<usize>,
+    memory_usage: Option<&Bound<'_, PyAny>>,
+    show_counts: Option<bool>,
+) -> PyResult<String> {
+    let frame = &this.borrow().inner;
+    let (rows, width) = frame.shape();
+    let mut out = format!("{}\n", this.get_type().str()?);
+    let labels = frame.index().labels();
+    let is_range = labels
+        .iter()
+        .enumerate()
+        .all(|(position, label)| matches!(label, IndexLabel::Int64(v) if usize::try_from(*v) == Ok(position)));
+    let index_kind = if is_range { "RangeIndex" } else { "Index" };
+    match (labels.first(), labels.last()) {
+        (Some(first), Some(last)) => {
+            out.push_str(&format!(
+                "{index_kind}: {rows} entries, {first} to {last}\n"
+            ));
+        }
+        _ => out.push_str(&format!("{index_kind}: 0 entries\n")),
+    }
+    let names: Vec<String> = (0..width)
+        .filter_map(|position| frame.column_name_at(position))
+        .collect();
+    let dtypes: Vec<String> = (0..width)
+        .filter_map(|position| frame.column_at(position))
+        .map(|column| pandas_dtype_name(&column.dtype()))
+        .collect();
+    let verbose = verbose.unwrap_or(width <= max_cols.unwrap_or(100));
+    if width == 0 {
+        out.push_str("Empty DataFrame\n");
+    } else if verbose {
+        out.push_str(&format!("Data columns (total {width} columns):\n"));
+        let counts = show_counts.unwrap_or(true);
+        let mut table: Vec<Vec<String>> = vec![vec![
+            " # ".to_owned(),
+            "Column".to_owned(),
+            if counts { "Non-Null Count" } else { "" }.to_owned(),
+            "Dtype".to_owned(),
+        ]];
+        for (position, name) in names.iter().enumerate() {
+            let non_null = frame
+                .column_at(position)
+                .map_or(0, |column| column.len() - column.validity().count_invalid());
+            table.push(vec![
+                format!(" {position}"),
+                name.clone(),
+                if counts {
+                    format!("{non_null} non-null")
+                } else {
+                    String::new()
+                },
+                dtypes[position].clone(),
+            ]);
+        }
+        let columns: Vec<usize> = if counts {
+            vec![0, 1, 2, 3]
+        } else {
+            vec![0, 1, 3]
+        };
+        let widths: Vec<usize> = (0..4)
+            .map(|c| {
+                table
+                    .iter()
+                    .map(|row| row[c].chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let line = |cells: Vec<String>| -> String {
+            let mut text = String::new();
+            for (i, &c) in columns.iter().enumerate() {
+                if i > 0 {
+                    text.push_str("  ");
+                }
+                text.push_str(&format!("{:<width$}", cells[c], width = widths[c]));
+            }
+            text.push('\n');
+            text
+        };
+        out.push_str(&line(table[0].clone()));
+        out.push_str(&line(
+            table[0]
+                .iter()
+                .map(|header| "-".repeat(header.chars().count()))
+                .collect(),
+        ));
+        for row in &table[1..] {
+            out.push_str(&line(row.clone()));
+        }
+    } else {
+        out.push_str(&format!(
+            "Columns: {width} entries, {} to {}\n",
+            names.first().map_or("", String::as_str),
+            names.last().map_or("", String::as_str)
+        ));
+    }
+    let mut tally: BTreeMap<&str, usize> = BTreeMap::new();
+    for dtype in &dtypes {
+        *tally.entry(dtype.as_str()).or_default() += 1;
+    }
+    let summary: Vec<String> = tally
+        .iter()
+        .map(|(dtype, count)| format!("{dtype}({count})"))
+        .collect();
+    out.push_str(&format!("dtypes: {}\n", summary.join(", ")));
+    let show_memory = memory_usage.is_none_or(|m| m.is_none() || m.is_truthy().unwrap_or(true));
+    if show_memory {
+        let deep = memory_usage.is_some_and(|m| m.extract::<String>().is_ok_and(|m| m == "deep"));
+        let bytes: usize = frame
+            .memory_usage_with_options(true, deep)
+            .map_err(frame_error_to_py)?
+            .column()
+            .values()
+            .iter()
+            .filter_map(|value| match value {
+                Scalar::Int64(bytes) => usize::try_from(*bytes).ok(),
+                _ => None,
+            })
+            .sum();
+        let qualifier = if !deep && dtypes.iter().any(|dtype| dtype == "object") {
+            "+"
+        } else {
+            ""
+        };
+        #[allow(clippy::cast_precision_loss)] // a displayed size
+        let mut size = bytes as f64;
+        let mut unit = "bytes";
+        for next in ["KB", "MB", "GB", "TB"] {
+            if size < 1024.0 {
+                break;
+            }
+            size /= 1024.0;
+            unit = next;
+        }
+        out.push_str(&format!("memory usage: {size:.1}{qualifier} {unit}\n"));
+    }
+    Ok(out)
+}
+
 /// One window of `Rolling.apply` / `Expanding.apply` as pandas hands it to
 /// the function: a Series under the window's labels (`raw=False`), or a
 /// numpy array (`raw=True`). It was a Python list, so `x.max()` raised and
@@ -14906,15 +15213,12 @@ impl PySeries {
         Ok(PySeries { inner: r })
     }
 
-    /// Return the distinct values as a Python list (order of first appearance).
+    /// Return the distinct values (order of first appearance) as a numpy
+    /// array in the column's numpy dtype, as pandas' - it was a Python list
+    /// (fvsao.30).
     fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let values: Vec<Py<PyAny>> = self
-            .inner
-            .unique()
-            .iter()
-            .map(|s| scalar_to_py(py, s))
-            .collect::<PyResult<Vec<Py<PyAny>>>>()?;
-        Ok(PyList::new(py, values)?.into_any().unbind())
+        let column = Column::from_values(self.inner.unique()).map_err(column_error_to_py)?;
+        Ok(column_ndarray(py, &column)?.unbind())
     }
 
     /// Sort the Series by value, returning a new Series.
@@ -22011,13 +22315,95 @@ impl PyDataFrame {
             .is_ok_and(|name| self.inner.column(&name).is_some()))
     }
 
-    /// Return summary statistics.
-    fn describe(&self) -> PyResult<PyDataFrame> {
-        let result = self
+    /// pandas' `describe(percentiles=None, include=None, exclude=None)` (it
+    /// took no arguments; fvsao.30): the numeric columns by default,
+    /// `percentiles` for the quantile rows, include / exclude by dtype, and
+    /// include='all' pandas' union layout - count, unique, top, freq, then the
+    /// numeric rows, NaN where a statistic does not apply.
+    #[pyo3(signature = (percentiles=None, include=None, exclude=None))]
+    fn describe<'py>(
+        slf: &Bound<'py, Self>,
+        percentiles: Option<Vec<f64>>,
+        include: Option<&Bound<'py, PyAny>>,
+        exclude: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let include = describe_dtype_names(include)?;
+        let exclude = describe_dtype_names(exclude)?;
+        let this = slf.borrow();
+        let numeric_describe = |frame: &DataFrame| match &percentiles {
+            Some(percentiles) => frame.describe_with_percentiles(percentiles),
+            None => frame.describe(),
+        };
+        let wrap = |frame: DataFrame| -> PyResult<Bound<'py, PyAny>> {
+            Ok(Bound::new(py, PyDataFrame { inner: frame })?.into_any())
+        };
+        if include.is_empty() && exclude.is_empty() {
+            return wrap(numeric_describe(&this.inner).map_err(frame_error_to_py)?);
+        }
+        // pandas' selection: include (every dtype when only exclude is
+        // given) minus exclude; then numeric, object-style, or - both kinds
+        // selected - pandas' union layout.
+        let selected: Vec<String> = (0..this.inner.shape().1)
+            .filter_map(|position| {
+                let name = this.inner.column_name_at(position)?;
+                let dtype = this.inner.column_at(position)?.dtype();
+                let wanted = include.is_empty()
+                    || include
+                        .iter()
+                        .any(|spec| describe_dtype_matches(&dtype, spec));
+                let dropped = exclude
+                    .iter()
+                    .any(|spec| describe_dtype_matches(&dtype, spec));
+                (wanted && !dropped).then_some(name)
+            })
+            .collect();
+        let refs: Vec<&str> = selected.iter().map(String::as_str).collect();
+        let frame = this
             .inner
-            .describe()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyDataFrame { inner: result })
+            .select_columns(&refs)
+            .map_err(frame_error_to_py)?;
+        let numeric = |name: &&str| {
+            frame
+                .column(name)
+                .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
+        };
+        if refs.iter().all(numeric) {
+            wrap(numeric_describe(&frame).map_err(frame_error_to_py)?)
+        } else if !refs.iter().any(numeric) {
+            wrap(
+                frame
+                    .describe_dtypes(&["all"], &[])
+                    .map_err(frame_error_to_py)?,
+            )
+        } else {
+            describe_all(py, &frame, numeric_describe)
+        }
+    }
+
+    /// pandas' `info(verbose=None, buf=None, max_cols=None, memory_usage=None,
+    /// show_counts=None)`: pandas' summary written to `buf` (stdout by
+    /// default), returning None. It returned fp's own text and took no
+    /// arguments (fvsao.30).
+    #[pyo3(signature = (verbose=None, buf=None, max_cols=None, memory_usage=None, show_counts=None))]
+    fn info(
+        slf: &Bound<'_, Self>,
+        verbose: Option<bool>,
+        buf: Option<&Bound<'_, PyAny>>,
+        max_cols: Option<usize>,
+        memory_usage: Option<&Bound<'_, PyAny>>,
+        show_counts: Option<bool>,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        let text = pandas_info_text(slf, verbose, max_cols, memory_usage, show_counts)?;
+        match buf.filter(|buf| !buf.is_none()) {
+            Some(buf) => buf.call_method1("write", (text,))?,
+            None => py
+                .import("sys")?
+                .getattr("stdout")?
+                .call_method1("write", (text,))?,
+        };
+        Ok(())
     }
 
     /// Return the sum of each column or row. A column (or row) with fewer
@@ -25902,11 +26288,13 @@ impl PyDataFrame {
         frame_agg(slf, func, axis, args, kwargs)
     }
 
-    #[pyo3(signature = (index=true))]
-    fn memory_usage(&self, index: bool) -> PyResult<PySeries> {
+    /// pandas' `memory_usage(index=True, deep=False)` (deep= was an unknown
+    /// keyword; fvsao.30).
+    #[pyo3(signature = (index=true, deep=false))]
+    fn memory_usage(&self, index: bool, deep: bool) -> PyResult<PySeries> {
         let res = self
             .inner
-            .memory_usage_with_options(index, false)
+            .memory_usage_with_options(index, deep)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
@@ -26409,6 +26797,12 @@ impl PyDataFrame {
         let mut scalars = Vec::with_capacity(nrows);
         let mut all_scalars = true;
         for r in &row_results {
+            // A Series result expands into columns below, even a one-element
+            // Series that converts to a float (fvsao.30).
+            if is_pandas_object(r) {
+                all_scalars = false;
+                break;
+            }
             if let Ok(sc) = py_to_scalar(py, r) {
                 scalars.push(sc);
             } else {
@@ -26825,19 +27219,13 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
         allow_duplicates: bool,
     ) -> PyResult<()> {
+        // A Series as it stands; a list, tuple, array or Index by position; a
+        // scalar broadcast down every row, as pandas (a scalar raised;
+        // fvsao.30).
         let col = if let Ok(py_s) = value.extract::<PyRef<'_, PySeries>>() {
             py_s.inner.column().clone()
-        } else if let Ok(list) = value.cast::<PyList>() {
-            let mut scalars = Vec::with_capacity(list.len());
-            for item in list.iter() {
-                scalars.push(py_to_scalar(py, &item)?);
-            }
-            Column::from_values(scalars)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "insert value must be a Series or list",
-            ));
+            py_value_to_column(py, value, self.inner.len())?
         };
         self.inner = self
             .inner
@@ -27082,10 +27470,6 @@ impl PyDataFrame {
             self.inner.clone()
         };
         Ok(PyDataFrame { inner: out })
-    }
-
-    fn info(&self) -> String {
-        self.inner.info()
     }
 
     fn update(&mut self, other: &PyDataFrame) -> PyResult<()> {
@@ -33543,7 +33927,9 @@ impl PyGroupBy {
         let groups = gb.groups();
         let mut keys: Vec<_> = groups.keys().cloned().collect();
         keys.sort();
-        let mut kept_dfs = Vec::new();
+        // The kept groups' rows in their original order, as pandas' filter
+        // (it concatenated the kept groups in key order; fvsao.30).
+        let mut kept: Vec<usize> = Vec::new();
         for k in &keys {
             let k_str = match k {
                 IndexLabel::Utf8(s) => s.clone(),
@@ -33551,23 +33937,16 @@ impl PyGroupBy {
                 _ => format!("{k:?}"),
             };
             if let Ok(group_df) = gb.get_group(&k_str) {
-                let py_df = PyDataFrame {
-                    inner: group_df.clone(),
-                };
+                let py_df = PyDataFrame { inner: group_df };
                 let res = func.call1((py_df,))?;
                 if res.is_truthy()? {
-                    kept_dfs.push(group_df);
+                    kept.extend(groups[k].iter().copied());
                 }
             }
         }
-        if !kept_dfs.is_empty() {
-            let refs: Vec<&DataFrame> = kept_dfs.iter().collect();
-            let combined = concat_dataframes(&refs).map_err(frame_error_to_py)?;
-            Ok(PyDataFrame { inner: combined })
-        } else {
-            let empty = self.df.head(0).map_err(frame_error_to_py)?;
-            Ok(PyDataFrame { inner: empty })
-        }
+        kept.sort_unstable();
+        let rows = self.df.take_rows(&kept).map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: rows })
     }
 
     #[getter]
@@ -34771,7 +35150,9 @@ impl PySeriesGroupBy {
         let groups = gb.groups();
         let mut keys: Vec<_> = groups.keys().cloned().collect();
         keys.sort();
-        let mut kept_series = Vec::new();
+        // The kept groups' rows in their original order, as pandas' filter
+        // (it concatenated the kept groups in key order; fvsao.30).
+        let mut kept: Vec<i64> = Vec::new();
         for k in &keys {
             let k_str = match k {
                 IndexLabel::Utf8(s) => s.clone(),
@@ -34779,23 +35160,20 @@ impl PySeriesGroupBy {
                 _ => format!("{k:?}"),
             };
             if let Ok(group_s) = gb.get_group(&k_str) {
-                let py_s = PySeries {
-                    inner: group_s.clone(),
-                };
+                let py_s = PySeries { inner: group_s };
                 let res = func.call1((py_s,))?;
                 if res.is_truthy()? {
-                    kept_series.push(group_s);
+                    kept.extend(
+                        groups[k]
+                            .iter()
+                            .map(|&position| i64::try_from(position).unwrap_or(i64::MAX)),
+                    );
                 }
             }
         }
-        if !kept_series.is_empty() {
-            let refs: Vec<&Series> = kept_series.iter().collect();
-            let combined = concat_series(&refs).map_err(frame_error_to_py)?;
-            Ok(PySeries { inner: combined })
-        } else {
-            let empty = self.series.head(0).map_err(frame_error_to_py)?;
-            Ok(PySeries { inner: empty })
-        }
+        kept.sort_unstable();
+        let rows = self.series.take(&kept).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: rows })
     }
 
     #[getter]
@@ -38621,14 +38999,9 @@ fn unique(py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         return s.unique(py);
     }
     if let Ok(idx) = values.extract::<PyRef<'_, PyIndex>>() {
-        let u = idx.unique();
-        let list: Vec<Py<PyAny>> = u
-            .inner
-            .labels()
-            .iter()
-            .map(|l| index_label_to_py(py, l))
-            .collect::<PyResult<Vec<_>>>()?;
-        return Ok(PyList::new(py, list)?.into_any().unbind());
+        // A numpy array, as pandas 2.2's pd.unique of an Index (it was a
+        // list; fvsao.30).
+        return Ok(labels_ndarray(py, idx.unique().inner.labels())?.unbind());
     }
     let s = PySeries::from_data(py, Some(values), None, None)?;
     s.unique(py)
@@ -38733,13 +39106,33 @@ fn factorize(
 fn get_dummies(
     py: Python<'_>,
     data: &Bound<'_, PyAny>,
-    prefix: Option<&str>,
+    prefix: Option<&Bound<'_, PyAny>>,
     prefix_sep: &str,
     dummy_na: bool,
     columns: Option<Vec<String>>,
     drop_first: bool,
     dtype: Option<&str>,
 ) -> PyResult<PyDataFrame> {
+    let prefix = prefix.filter(|prefix| !prefix.is_none());
+    let series_prefix: Option<String> = prefix.and_then(|prefix| prefix.extract().ok());
+    let prefix_of = |position: usize, column: &str| -> PyResult<String> {
+        // pandas' prefix for a frame: one string for every column, a list by
+        // position, a dict by column (it was ignored; fvsao.30).
+        let Some(prefix) = prefix else {
+            return Ok(column.to_owned());
+        };
+        if let Ok(text) = prefix.extract::<String>() {
+            return Ok(text);
+        }
+        if let Ok(mapping) = prefix.cast::<PyDict>() {
+            return match mapping.get_item(column)? {
+                Some(text) => text.extract(),
+                None => Ok(column.to_owned()),
+            };
+        }
+        prefix.get_item(position)?.extract()
+    };
+    let prefix = series_prefix.as_deref();
     if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
         let all_df_cols = df.column_labels();
         let target_cols: Vec<String> = columns.unwrap_or_else(|| {
@@ -38770,7 +39163,8 @@ fn get_dummies(
         }
 
         // 2. Dummy columns for each target column
-        for c_name in &target_cols {
+        for (position, c_name) in target_cols.iter().enumerate() {
+            let label = prefix_of(position, c_name)?;
             if let Some(col) = df.inner.column(c_name) {
                 let vals = col.values();
                 let mut distinct_cats = Vec::new();
@@ -38795,10 +39189,10 @@ fn get_dummies(
                 };
                 for cat in distinct_cats.iter().skip(start_idx) {
                     let dummy_name = if cat.is_null() {
-                        format!("{c_name}{prefix_sep}nan")
+                        format!("{label}{prefix_sep}nan")
                     } else {
                         let cat_str = scalar_to_label_str(cat);
-                        format!("{c_name}{prefix_sep}{cat_str}")
+                        format!("{label}{prefix_sep}{cat_str}")
                     };
                     let bool_vals: Vec<Scalar> = vals
                         .iter()
