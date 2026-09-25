@@ -5059,3 +5059,56 @@ def test_duplicated_label_selects_every_column_like_pandas() -> None:
         # NEGATIVE: a unique label is still a Series.
         assert type(side["a"]).__name__ == "Series"
         assert side["a"].tolist() == [3, 4]
+
+
+def _array_view(a: Any) -> Any:
+    if isinstance(a, np.ndarray):
+        return ("ndarray", str(a.dtype), a.shape, [str(v) for v in a.ravel().tolist()])
+    return (type(a).__name__, str(a))
+
+
+def _numpy_results(m: Any) -> dict:
+    ints = m.Series([1, 2, 3])
+    floats = m.Series([1.5, None, 3.0])
+    strings = m.Series(["a", None, "c"])
+    frame = m.DataFrame({"a": [1, 2], "b": [3.5, 4.5]})
+    int_frame = m.DataFrame({"a": [1, 2], "b": [3, 4]})
+    mixed = m.DataFrame({"a": [1, 2], "s": ["x", "y"]})
+    return {
+        "int values": ints.values,
+        "float values": floats.values,
+        "object values": strings.values,
+        "bool values": m.Series([True, False]).values,
+        "datetime values": m.Series(m.to_datetime(["2024-01-01", None])).values,
+        "timedelta values": m.Series(m.to_timedelta(["1h", None])).values,
+        "to_numpy": ints.to_numpy(),
+        "to_numpy dtype": ints.to_numpy(dtype=float),
+        "to_numpy na_value": floats.to_numpy(na_value=0.0),
+        "np.asarray(series)": np.asarray(floats),
+        "np.array(series)": np.array(ints),
+        "frame values": frame.values,
+        "int frame values": int_frame.values,
+        "mixed frame values": mixed.values,
+        "frame to_numpy dtype": int_frame.to_numpy(dtype="float64"),
+        "np.asarray(frame)": np.asarray(int_frame),
+        "values.sum(axis=0)": frame.values.sum(axis=0),
+        "index values": frame.index.values,
+        "columns values": frame.columns.values,
+        "values shape": frame.values.shape,
+    }
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_values_and_to_numpy_are_numpy_arrays_like_pandas() -> None:
+    # fvsao.7: .values / to_numpy() returned Python lists, to_numpy took no
+    # dtype/na_value, and np.asarray(series) made a 0-d object array of the
+    # repr text (no __array__).
+    want, got = _numpy_results(pd), _numpy_results(fpd)
+    for step in want:
+        assert _array_view(got[step]) == _array_view(want[step]), step
+    # NEGATIVE: the array is a copy - writing it leaves the Series alone.
+    for m in (pd, fpd):
+        s = m.Series([1, 2, 3])
+        a = s.to_numpy(copy=True)
+        a[0] = 99
+        assert s.tolist() == [1, 2, 3]

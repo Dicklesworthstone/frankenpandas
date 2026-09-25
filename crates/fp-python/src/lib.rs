@@ -2483,13 +2483,36 @@ impl PyIndex {
         self.to_list(py)
     }
 
+    /// pandas' `Index.values`: a numpy array of the labels (it was a list).
     #[getter]
-    fn values(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.to_list(py)
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        labels_ndarray(py, self.inner.labels())
     }
 
-    fn to_numpy(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.to_list(py)
+    #[pyo3(signature = (dtype=None, copy=false, na_value=None))]
+    fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: bool,
+        na_value: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        if na_value.is_some() {
+            return Err(not_implemented("Index.to_numpy(na_value=...)"));
+        }
+        finish_to_numpy(labels_ndarray(py, self.inner.labels())?, None, dtype, None)
+    }
+
+    #[pyo3(signature = (dtype=None, copy=None))]
+    fn __array__<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        finish_to_numpy(labels_ndarray(py, self.inner.labels())?, None, dtype, None)
     }
 
     fn unique(&self) -> Self {
@@ -3659,13 +3682,42 @@ impl PyDatetimeIndex {
         self.to_list(py)
     }
 
+    /// pandas' `DatetimeIndex.values`: a datetime64[ns] numpy array (it
+    /// was a list of nanosecond integers).
     #[getter]
-    fn values(&self) -> Vec<Option<i64>> {
-        self.inner.values()
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let bytes: Vec<u8> = self
+            .inner
+            .values()
+            .into_iter()
+            .flat_map(|nanos| nanos.unwrap_or(i64::MIN).to_ne_bytes())
+            .collect();
+        py.import("numpy")?.call_method1(
+            "frombuffer",
+            (pyo3::types::PyByteArray::new(py, &bytes), "datetime64[ns]"),
+        )
     }
 
-    fn to_numpy(&self) -> Vec<Option<i64>> {
-        self.inner.values()
+    #[pyo3(signature = (dtype=None, copy=false))]
+    fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        finish_to_numpy(self.values(py)?, None, dtype, None)
+    }
+
+    #[pyo3(signature = (dtype=None, copy=None))]
+    fn __array__<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        finish_to_numpy(self.values(py)?, None, dtype, None)
     }
 
     // Timestamps (NaT when there is no instant), as pandas; these were
@@ -5187,9 +5239,21 @@ impl PyMultiIndex {
         false
     }
 
+    /// pandas' `MultiIndex.values`: an object numpy array of the tuples,
+    /// set one by one so a tuple is not read as a second dimension (it was
+    /// a list).
     #[getter]
-    fn values(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.to_list(py)
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let tuples = self.to_list(py)?.into_bound(py);
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "object")?;
+        let array = py
+            .import("numpy")?
+            .call_method("empty", (tuples.len(),), Some(&kwargs))?;
+        for (position, tuple) in tuples.iter().enumerate() {
+            array.set_item(position, tuple)?;
+        }
+        Ok(array)
     }
 
     fn union(&self, other: &PyMultiIndex) -> PyResult<Self> {
@@ -5448,8 +5512,8 @@ impl PyMultiIndex {
         self.to_list(py)
     }
 
-    fn to_numpy(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.to_list(py)
+    fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.values(py)
     }
 
     fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -13188,13 +13252,44 @@ impl PySeries {
         }
     }
 
+    /// pandas' `Series.values`: a numpy array (int64 / float64 / bool /
+    /// datetime64[ns] / timedelta64[ns], else object) - it was a list.
     #[getter]
-    fn values(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.tolist(py)
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        column_ndarray(py, self.inner.column())
     }
 
-    fn to_numpy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.tolist(py)
+    /// pandas' `Series.to_numpy(dtype=None, copy=False, na_value=...)`:
+    /// always a fresh array; `na_value` fills the missing cells, then
+    /// `dtype` casts.
+    #[pyo3(signature = (dtype=None, copy=false, na_value=None))]
+    fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: bool,
+        na_value: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy; // the array is always a fresh copy
+        let column = self.inner.column();
+        let missing = na_value
+            .map(|_| missing_ndarray(py, &[column], column.len()))
+            .transpose()?;
+        finish_to_numpy(column_ndarray(py, column)?, missing, dtype, na_value)
+    }
+
+    /// The numpy array protocol: `np.asarray(s)`, `np.array(s)` and numpy
+    /// functions read the values (they made a 0-d object array of the
+    /// repr text).
+    #[pyo3(signature = (dtype=None, copy=None))]
+    fn __array__<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        finish_to_numpy(column_ndarray(py, self.inner.column())?, None, dtype, None)
     }
 
     fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -14214,7 +14309,7 @@ impl PySeries {
 
     #[getter]
     fn array(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.values(py)
+        self.values(py).map(Bound::unbind)
     }
 
     #[getter]
@@ -15658,6 +15753,224 @@ impl PySeries {
     fn swaplevel(&self, i: isize, j: isize, copy: Option<bool>) -> PyResult<PySeries> {
         let _ = (i, j, copy);
         Err(not_implemented("Series.swaplevel (a MultiIndex)"))
+    }
+}
+
+/// The numpy dtype pandas' `.values` gives `column` when it is a plain
+/// numpy dtype frankenpandas hands over as raw bytes; None for an object
+/// array (strings, nullable and categorical cells, periods, intervals).
+fn numpy_kind(column: &Column) -> Option<&'static str> {
+    let all_valid = column.validity().all();
+    match column.dtype() {
+        DType::Int64 if all_valid => Some("int64"),
+        DType::Int64 | DType::Float64 => Some("float64"),
+        DType::Bool if all_valid => Some("bool"),
+        DType::Datetime64 { .. } => Some("datetime64[ns]"),
+        DType::Timedelta64 => Some("timedelta64[ns]"),
+        _ => None,
+    }
+}
+
+/// `column`'s cells as the native-endian bytes of numpy `kind` (see
+/// [`numpy_kind`]): a missing float is NaN, a missing datetime/timedelta
+/// NaT (`i64::MIN`).
+#[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
+fn numpy_bytes(column: &Column, kind: &str) -> Vec<u8> {
+    match kind {
+        "int64" => {
+            if let Some(data) = column.as_i64_slice() {
+                return data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            }
+            column
+                .values()
+                .iter()
+                .flat_map(|value| match value {
+                    Scalar::Int64(v) => v.to_ne_bytes(),
+                    _ => 0_i64.to_ne_bytes(),
+                })
+                .collect()
+        }
+        "float64" => {
+            if let Some(data) = column.as_f64_slice() {
+                return data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            }
+            column
+                .values()
+                .iter()
+                .flat_map(|value| match value {
+                    Scalar::Float64(v) => v.to_ne_bytes(),
+                    Scalar::Int64(v) => (*v as f64).to_ne_bytes(),
+                    _ => f64::NAN.to_ne_bytes(),
+                })
+                .collect()
+        }
+        "bool" => {
+            if let Some(data) = column.as_bool_slice() {
+                return data.iter().map(|&b| u8::from(b)).collect();
+            }
+            column
+                .values()
+                .iter()
+                .map(|value| u8::from(matches!(value, Scalar::Bool(true))))
+                .collect()
+        }
+        _ => column
+            .values()
+            .iter()
+            .flat_map(|value| match value {
+                Scalar::Datetime64(v) | Scalar::Timedelta64(v) => v.to_ne_bytes(),
+                _ => i64::MIN.to_ne_bytes(),
+            })
+            .collect(),
+    }
+}
+
+/// A 1-D numpy array of `column` as pandas' `.values` / `to_numpy()` give
+/// it: int64 / float64 (NaN for a gap) / bool / datetime64[ns] /
+/// timedelta64[ns] from one byte buffer, else an object array of the
+/// Python values (they were Python lists, fvsao.7).
+fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    if let Some(kind) = numpy_kind(column) {
+        let buffer = pyo3::types::PyByteArray::new(py, &numpy_bytes(column, kind));
+        return np.call_method1("frombuffer", (buffer, kind));
+    }
+    object_ndarray(py, &np, column.values())
+}
+
+/// An object numpy array holding `values` as Python objects, filled
+/// through a slice so a list-like cell is not read as a second dimension.
+fn object_ndarray<'py>(
+    py: Python<'py>,
+    np: &Bound<'py, PyModule>,
+    values: &[Scalar],
+) -> PyResult<Bound<'py, PyAny>> {
+    let items = values
+        .iter()
+        .map(|value| scalar_to_py(py, value))
+        .collect::<PyResult<Vec<_>>>()?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    let array = np.call_method("empty", (items.len(),), Some(&kwargs))?;
+    array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
+    Ok(array)
+}
+
+/// A numpy array of an index's labels, as pandas' `Index.values`: the
+/// labels' column dtype (int64, float64, object ...), an object array when
+/// they do not form one column.
+fn labels_ndarray<'py>(py: Python<'py>, labels: &[IndexLabel]) -> PyResult<Bound<'py, PyAny>> {
+    let scalars: Vec<Scalar> = labels.iter().map(index_label_to_scalar).collect();
+    match Column::from_values(scalars.clone()) {
+        Ok(column) => column_ndarray(py, &column),
+        Err(_) => object_ndarray(py, &py.import("numpy")?, &scalars),
+    }
+}
+
+/// A 2-D numpy array of `frame` as pandas' `DataFrame.values` gives it:
+/// the columns' common numpy dtype (one kind for all; int64 with float64
+/// -> float64; no columns -> float64) interleaved row-major from byte
+/// buffers, else an object array filled column by column.
+fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let (rows, width) = frame.shape();
+    let columns: Vec<&Column> = (0..width)
+        .filter_map(|position| frame.column_at(position))
+        .collect();
+    let kinds: Vec<Option<&str>> = columns.iter().map(|column| numpy_kind(column)).collect();
+    let common = match kinds.first() {
+        None => Some("float64"),
+        Some(first) if kinds.iter().all(|kind| kind == first) => *first,
+        Some(_)
+            if kinds
+                .iter()
+                .all(|kind| matches!(kind, Some("int64" | "float64"))) =>
+        {
+            Some("float64")
+        }
+        Some(_) => None,
+    };
+    if let Some(kind) = common {
+        let cell = if kind == "bool" { 1 } else { 8 };
+        let per_column: Vec<Vec<u8>> = columns
+            .iter()
+            .map(|column| numpy_bytes(column, kind))
+            .collect();
+        let mut bytes = Vec::with_capacity(rows * width * cell);
+        for row in 0..rows {
+            for column in &per_column {
+                bytes.extend_from_slice(&column[row * cell..(row + 1) * cell]);
+            }
+        }
+        let flat = np.call_method1(
+            "frombuffer",
+            (pyo3::types::PyByteArray::new(py, &bytes), kind),
+        )?;
+        return flat.call_method1("reshape", ((rows, width),));
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    let array = np.call_method("empty", ((rows, width),), Some(&kwargs))?;
+    for (position, column) in columns.iter().enumerate() {
+        let cells = object_ndarray(py, &np, column.values())?;
+        array.set_item((pyo3::types::PySlice::full(py), position), cells)?;
+    }
+    Ok(array)
+}
+
+/// A numpy bool array marking the missing cells of `columns` (row-major
+/// for a frame, flat for one column).
+fn missing_ndarray<'py>(
+    py: Python<'py>,
+    columns: &[&Column],
+    rows: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let mut marks = Vec::with_capacity(rows * columns.len());
+    for row in 0..rows {
+        for column in columns {
+            marks.push(u8::from(column.values()[row].is_missing()));
+        }
+    }
+    let flat = np.call_method1(
+        "frombuffer",
+        (pyo3::types::PyByteArray::new(py, &marks), "bool"),
+    )?;
+    if columns.len() == 1 {
+        return Ok(flat);
+    }
+    flat.call_method1("reshape", ((rows, columns.len()),))
+}
+
+/// pandas' `to_numpy(dtype=None, copy=False, na_value=...)` on `array`:
+/// `na_value` fills the cells `missing` marks (an object array when the
+/// fill is not a number), then `dtype` casts.
+fn finish_to_numpy<'py>(
+    array: Bound<'py, PyAny>,
+    missing: Option<Bound<'py, PyAny>>,
+    dtype: Option<&Bound<'py, PyAny>>,
+    na_value: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let mut array = array;
+    if let (Some(fill), Some(mask)) = (na_value, missing)
+        && mask.call_method0("any")?.is_truthy()?
+    {
+        let numeric_fill = fill.is_instance_of::<pyo3::types::PyInt>()
+            || fill.is_instance_of::<pyo3::types::PyFloat>();
+        if !numeric_fill
+            && array
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?
+                != "O"
+        {
+            array = array.call_method1("astype", ("object",))?;
+        }
+        array.set_item(mask, fill)?;
+    }
+    match dtype.filter(|dtype| !dtype.is_none()) {
+        Some(dtype) => array.call_method1("astype", (dtype,)),
+        None => Ok(array),
     }
 }
 
@@ -17969,26 +18282,51 @@ impl PyDataFrame {
         Ok(PySeries { inner: s })
     }
 
-    fn to_numpy(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let (nrows, ncols) = self.inner.shape();
-        let mut rows = Vec::with_capacity(nrows);
-        for r in 0..nrows {
-            let mut row = Vec::with_capacity(ncols);
-            for c in 0..ncols {
-                let val = self
-                    .inner
-                    .iat(r as i64, c as i64)
-                    .map_err(frame_error_to_py)?;
-                row.push(scalar_to_py(py, &val)?);
+    /// pandas' `DataFrame.to_numpy(dtype=None, copy=False, na_value=...)`:
+    /// a 2-D numpy array in the columns' common dtype (see
+    /// [`frame_ndarray`]) - it was a list of row lists, built cell by cell.
+    #[pyo3(signature = (dtype=None, copy=false, na_value=None))]
+    fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: bool,
+        na_value: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy; // the array is always a fresh copy
+        let missing = match na_value {
+            Some(_) => {
+                let columns: Vec<&Column> = (0..self.inner.num_columns())
+                    .filter_map(|position| self.inner.column_at(position))
+                    .collect();
+                let mask = missing_ndarray(py, &columns, self.inner.len())?;
+                Some(if columns.len() == 1 {
+                    mask.call_method1("reshape", ((self.inner.len(), 1),))?
+                } else {
+                    mask
+                })
             }
-            rows.push(PyList::new(py, row)?.into_any().unbind());
-        }
-        Ok(PyList::new(py, rows)?.unbind())
+            None => None,
+        };
+        finish_to_numpy(frame_ndarray(py, &self.inner)?, missing, dtype, na_value)
     }
 
+    /// pandas' `DataFrame.values`: the 2-D numpy array `to_numpy()` gives.
     #[getter]
-    fn values(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.to_numpy(py)
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        frame_ndarray(py, &self.inner)
+    }
+
+    /// The numpy array protocol: `np.asarray(df)` reads the values.
+    #[pyo3(signature = (dtype=None, copy=None))]
+    fn __array__<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        finish_to_numpy(frame_ndarray(py, &self.inner)?, None, dtype, None)
     }
 
     /// Return the number of rows.
