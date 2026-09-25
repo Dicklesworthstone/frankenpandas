@@ -5189,3 +5189,117 @@ def test_index_name_writes_through_and_index_compares_elementwise_like_pandas() 
         assert (frame.index == [0, 5]).tolist() == [True, False]
         assert (frame.columns == m.Index(["a", "x"])).tolist() == [True, False]
         assert frame.loc[:, frame.columns != "a"].columns.tolist() == ["b"]
+
+
+def _abc(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2, 3], "b": [3, 2, 1]})
+
+
+# fvsao.7: & | ^ raised "unsupported operand type(s)" on every Series and
+# DataFrame, so df[(df.a > 1) & (df.b < 3)] could not be written; df.a raised
+# AttributeError. Each case runs under pandas and frankenpandas.
+_LOGICAL_CASES = {
+    "bool & bool": lambda m: m.Series([True, True, False, False], name="m")
+    & m.Series([True, False, True, False], name="m"),
+    "bool | bool": lambda m: m.Series([True, True, False, False], name="m")
+    | m.Series([True, False, True, False], name="m"),
+    "bool ^ bool": lambda m: m.Series([True, True, False, False], name="m")
+    ^ m.Series([True, False, True, False], name="m"),
+    "names differ": lambda m: m.Series([True, False], name="m") & m.Series([True, True], name="n"),
+    "reflected scalar": lambda m: False | m.Series([True, False], name="m"),
+    # NEGATIVE: bitwise, not truthiness - True & 2 is 0.
+    "bool & 2": lambda m: m.Series([True, False]) & 2,
+    # NEGATIVE: a dtype-less list is an object array, cast to bool (truthiness).
+    "bool & int list": lambda m: m.Series([True, True, False, False]) & [1, 2, 3, 0],
+    "bool & int ndarray": lambda m: m.Series([True, True, False, False]) & np.array([1, 2, 3, 0]),
+    "list broadcast": lambda m: m.Series([True, True, False]) & [True],
+    "list wrong length": lambda m: m.Series([True, True, False]) & [True, False],
+    "bool & None": lambda m: m.Series([True, False]) & None,
+    "bool & float": lambda m: m.Series([True, False]) & 1.5,
+    "int & int": lambda m: m.Series([6, 3, 5]) & m.Series([3, 5, 1]),
+    "int ^ scalar": lambda m: m.Series([6, 3, 5]) ^ 1,
+    "int & True": lambda m: m.Series([6, 3, 5]) & True,
+    "int & Index": lambda m: m.Series([6, 3], name="q") & m.Index([3, 1], name="q"),
+    "float & bool": lambda m: m.Series([1.0, 0.0]) & m.Series([True, False]),
+    "str & True": lambda m: m.Series(["a", "b"]) & True,
+    # NEGATIVE: the alignment fill is one-sided - a missing LEFT value is
+    # False even against True (y | x differs from x | y).
+    "unaligned x | y": lambda m: m.Series([True, True, False], index=["a", "b", "c"])
+    | m.Series([True, False], index=["b", "d"]),
+    "unaligned y | x": lambda m: m.Series([True, False], index=["b", "d"])
+    | m.Series([True, True, False], index=["a", "b", "c"]),
+    "unaligned ints": lambda m: m.Series([6, 3], index=[0, 1]) & m.Series([3, 1], index=[1, 2]),
+    "object with None | True": lambda m: m.Series([True, None, False]) | True,
+    "bool | object with None": lambda m: m.Series([True, False, False]) | m.Series([True, None, False]),
+    # NEGATIVE: the nullable dtype is three-valued (Kleene), numpy bool is not.
+    "boolean & boolean": lambda m: m.Series([True, None, False], dtype="boolean")
+    & m.Series([None, None, True], dtype="boolean"),
+    "boolean | boolean": lambda m: m.Series([True, None, False], dtype="boolean")
+    | m.Series([None, None, True], dtype="boolean"),
+    "bool & boolean": lambda m: m.Series([True, True, True]) & m.Series([True, None, False], dtype="boolean"),
+    "boolean | NA": lambda m: m.Series([True, False], dtype="boolean") | m.NA,
+    "bool | NA": lambda m: m.Series([True, False]) | m.NA,
+    "boolean & int": lambda m: m.Series([True], dtype="boolean") & 1,
+    "Int64 & Int64": lambda m: m.Series([6, None], dtype="Int64") & m.Series([3, 1], dtype="Int64"),
+    "Int64 & True": lambda m: m.Series([6, None], dtype="Int64") & True,
+    "category & True": lambda m: m.Series(["a"], dtype="category") & True,
+    "datetime & True": lambda m: m.Series(m.to_datetime(["2024-01-01"])) & True,
+    "frame & frame": lambda m: m.DataFrame({"a": [True, False], "b": [True, True]})
+    | m.DataFrame({"a": [True, True], "b": [False, True]}),
+    "frame & reordered frame": lambda m: m.DataFrame({"a": [True, False], "b": [True, True]})
+    & m.DataFrame({"b": [False, False], "a": [True, True]}),
+    "frame ^ scalar": lambda m: True ^ m.DataFrame({"a": [True, False], "b": [True, True]}),
+    "frame & Series": lambda m: m.DataFrame({"a": [True, False], "b": [True, True]})
+    & m.Series([False, True], index=["b", "a"]),
+    "frame & list": lambda m: m.DataFrame({"a": [True, False], "b": [True, True]}) & [True, False],
+    "frame & short list": lambda m: m.DataFrame({"a": [True, False], "b": [True, True]}) & [True],
+    "frame & 2-D": lambda m: m.DataFrame({"a": [True, False], "b": [True, True]})
+    & np.array([[True, True], [False, True]]),
+    "int frame & 1": lambda m: m.DataFrame({"a": [3, 2]}) & 1,
+    "mixed frame & True": lambda m: m.DataFrame({"a": [True], "s": ["x"]}) & True,
+    "filter &": lambda m: _abc(m)[(_abc(m)["a"] > 1) & (_abc(m)["b"] > 1)],
+    "filter | ~": lambda m: _abc(m)[~(_abc(m)["a"] > 1) | (_abc(m)["b"] == 1)],
+    "loc filter": lambda m: _abc(m).loc[(_abc(m)["a"] > 1) & (_abc(m)["b"] > 0), "a"],
+    "isin & notna": lambda m: (lambda df: df[df["k"].isin(["x", "y"]) & df["v"].notna()])(
+        m.DataFrame({"k": ["x", "y", "z", "x"], "v": [1.0, None, 2.0, 3.0]})
+    ),
+    "df.a": lambda m: _abc(m).a,
+    "df.a filter": lambda m: (lambda df: df[(df.a > 1) & (df.b > 1)])(_abc(m)),
+    "s.label": lambda m: m.Series({"x": 1, "y": 2}).x,
+    # NEGATIVE: attribute access reads labels only, not missing names.
+    "df.missing": lambda m: _abc(m).nope,
+    "s.missing": lambda m: m.Series([1]).nope,
+    "hasattr": lambda m: (hasattr(_abc(m), "a"), hasattr(_abc(m), "zz")),
+}
+
+
+def _logical_outcome(m: Any, case: str) -> Any:
+    import warnings
+
+    def cell(v: Any) -> Any:
+        return None if v is pd.NA or (isinstance(v, float) and math.isnan(v)) else v
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = _LOGICAL_CASES[case](m)
+        except Exception as e:  # noqa: BLE001 - the exception is the outcome
+            r = ("raise", type(e).__name__, str(e))
+    categories = sorted({w.category.__name__ for w in caught})
+    if hasattr(r, "columns"):
+        return (
+            [str(d) for d in r.dtypes.tolist()],
+            [str(i) for i in r.index.tolist()],
+            [str(c) for c in r.columns.tolist()],
+            [[cell(v) for v in row] for row in r.values.tolist()],
+            categories,
+        )
+    if hasattr(r, "index") and hasattr(r, "tolist"):
+        return (str(r.dtype), r.name, [str(i) for i in r.index.tolist()], [cell(v) for v in r.tolist()], categories)
+    return (r.item() if hasattr(r, "item") else r, categories)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LOGICAL_CASES))
+def test_logical_operators_and_attribute_access_match_pandas(case: str) -> None:
+    assert _logical_outcome(fpd, case) == _logical_outcome(pd, case), case

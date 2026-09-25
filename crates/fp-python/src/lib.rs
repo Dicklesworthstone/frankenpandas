@@ -11330,6 +11330,714 @@ fn check_comparable(this: &Series, other: &Bound<'_, PyAny>) -> PyResult<()> {
     Ok(())
 }
 
+/// pandas' `&`, `|` and `^` (`pandas.core.ops.logical_op`). Series and
+/// DataFrame had none, so `df[(df.a > 1) & (df.b < 3)]` raised
+/// "unsupported operand type(s) for &"
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.7).
+#[derive(Clone, Copy)]
+enum LogicalOp {
+    And,
+    Or,
+    Xor,
+}
+
+impl LogicalOp {
+    const fn symbol(self) -> &'static str {
+        match self {
+            Self::And => "&",
+            Self::Or => "|",
+            Self::Xor => "^",
+        }
+    }
+
+    /// The `operator` function pandas' messages name.
+    const fn operator_name(self) -> &'static str {
+        match self {
+            Self::And => "and_",
+            Self::Or => "or_",
+            Self::Xor => "xor",
+        }
+    }
+
+    /// The numpy ufunc a refusing array names.
+    const fn ufunc_name(self) -> &'static str {
+        match self {
+            Self::And => "bitwise_and",
+            Self::Or => "bitwise_or",
+            Self::Xor => "bitwise_xor",
+        }
+    }
+
+    /// The op on two integers (a bool as 0 or 1), as Python and numpy apply it.
+    const fn apply(self, left: i64, right: i64) -> i64 {
+        match self {
+            Self::And => left & right,
+            Self::Or => left | right,
+            Self::Xor => left ^ right,
+        }
+    }
+
+    /// The three-valued logic of pandas' nullable `boolean` dtype.
+    fn kleene(self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
+        match (self, left, right) {
+            (Self::And, Some(false), _) | (Self::And, _, Some(false)) => Some(false),
+            (Self::Or, Some(true), _) | (Self::Or, _, Some(true)) => Some(true),
+            (_, Some(left), Some(right)) => {
+                Some(self.apply(i64::from(left), i64::from(right)) != 0)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// One value as pandas' logical ops see it once numpy works on objects.
+#[derive(Clone, Copy)]
+enum LogicCell {
+    /// None, NaN, NaT or NA: the result there is missing, so False.
+    Missing,
+    Bool(bool),
+    Int(i64),
+    /// A value the operators refuse, by its Python type name.
+    Other(&'static str),
+}
+
+impl LogicCell {
+    fn of(value: &Scalar) -> Self {
+        match value {
+            Scalar::Bool(value) => Self::Bool(*value),
+            Scalar::Int64(value) => Self::Int(*value),
+            value if value.is_missing() => Self::Missing,
+            Scalar::Float64(_) => Self::Other("float"),
+            Scalar::Utf8(_) => Self::Other("str"),
+            Scalar::Datetime64(_) => Self::Other("Timestamp"),
+            Scalar::Timedelta64(_) => Self::Other("Timedelta"),
+            _ => Self::Other("object"),
+        }
+    }
+
+    const fn type_name(self) -> &'static str {
+        match self {
+            Self::Missing => "NoneType",
+            Self::Bool(_) => "bool",
+            Self::Int(_) => "int",
+            Self::Other(name) => name,
+        }
+    }
+
+    fn as_int(self) -> Option<i64> {
+        match self {
+            Self::Bool(value) => Some(i64::from(value)),
+            Self::Int(value) => Some(value),
+            Self::Missing | Self::Other(_) => None,
+        }
+    }
+
+    /// `self <op> right` on two Python objects; a missing side gives a
+    /// missing result (pandas' `vec_binop`).
+    fn apply(self, right: Self, op: LogicalOp) -> PyResult<Self> {
+        match (self, right) {
+            (Self::Missing, _) | (_, Self::Missing) => Ok(Self::Missing),
+            (Self::Bool(left), Self::Bool(right)) => {
+                Ok(Self::Bool(op.apply(i64::from(left), i64::from(right)) != 0))
+            }
+            (left, right) => match (left.as_int(), right.as_int()) {
+                (Some(left), Some(right)) => Ok(Self::Int(op.apply(left, right))),
+                _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "unsupported operand type(s) for {}: '{}' and '{}'",
+                    op.symbol(),
+                    left.type_name(),
+                    right.type_name()
+                ))),
+            },
+        }
+    }
+
+    /// The bool pandas keeps (`fill_bool`): a missing result is False.
+    const fn truth(self) -> bool {
+        match self {
+            Self::Bool(value) => value,
+            Self::Int(value) => value != 0,
+            Self::Missing | Self::Other(_) => false,
+        }
+    }
+}
+
+/// numpy's `astype(bool)` of one value: a number is non-zero, a string
+/// non-empty, any other object True.
+fn scalar_truthy(value: &Scalar) -> bool {
+    match value {
+        Scalar::Bool(value) => *value,
+        Scalar::Int64(value) => *value != 0,
+        Scalar::Float64(value) => value.classify() != std::num::FpCategory::Zero,
+        Scalar::Utf8(text) => !text.is_empty(),
+        _ => true,
+    }
+}
+
+/// The numpy dtype kind pandas' logical ops see for `column`: a bool or an
+/// int64 column holding a missing value is an object / float64 array there.
+fn logical_kind(column: &Column) -> char {
+    let all_valid = column.validity().all();
+    match column.dtype() {
+        DType::Bool if all_valid => 'b',
+        DType::Int64 if all_valid => 'i',
+        DType::Int64 | DType::Float64 | DType::Float64Nullable => 'f',
+        DType::Datetime64 { .. } => 'M',
+        DType::Timedelta64 => 'm',
+        _ => 'O',
+    }
+}
+
+/// The numpy dtype pandas' messages print for a [`logical_kind`].
+const fn logical_kind_dtype(kind: char) -> &'static str {
+    match kind {
+        'b' => "bool",
+        'i' => "int64",
+        'f' => "float64",
+        'M' => "datetime64[ns]",
+        'm' => "timedelta64[ns]",
+        _ => "object",
+    }
+}
+
+/// The column a logical op leaves: int64 for int with int, else bool, a
+/// missing result False (pandas' `fill_bool`).
+fn logical_result(cells: &[LogicCell], integer: bool) -> PyResult<Column> {
+    if integer {
+        return Ok(Column::from_i64_values(
+            cells
+                .iter()
+                .map(|cell| cell.as_int().unwrap_or(0))
+                .collect(),
+        ));
+    }
+    Column::new(
+        DType::Bool,
+        cells
+            .iter()
+            .map(|cell| Scalar::Bool(cell.truth()))
+            .collect(),
+    )
+    .map_err(column_error_to_py)
+}
+
+/// pandas' numpy-path logical op of `left` against equal-length `right`
+/// values of kind `right_kind` (see [`logical_kind`]): the right side's
+/// missing values become False, and it is cast to bool when `left` is bool
+/// (unless it is a bool or int array); a missing left value gives False;
+/// int with int stays int64 (bitwise), anything else is a bool column.
+fn logical_arrays(
+    left: &[Scalar],
+    left_kind: char,
+    right: &[Scalar],
+    right_kind: char,
+    op: LogicalOp,
+) -> PyResult<Column> {
+    let right = right.iter().map(|value| match right_kind {
+        'b' | 'i' => LogicCell::of(value),
+        'f' | 'O' if value.is_missing() => LogicCell::Bool(false),
+        _ if left_kind == 'b' => LogicCell::Bool(scalar_truthy(value)),
+        _ => LogicCell::of(value),
+    });
+    let cells = left
+        .iter()
+        .zip(right)
+        .map(|(value, right)| LogicCell::of(value).apply(right, op))
+        .collect::<PyResult<Vec<_>>>()?;
+    logical_result(&cells, left_kind == 'i' && right_kind == 'i')
+}
+
+/// A scalar right operand of a logical op, as pandas classifies it.
+struct LogicalScalar {
+    cell: LogicCell,
+    /// `lib.is_integer`: an int that is not a bool.
+    integer: bool,
+    /// Python's `bool(value)`.
+    truthy: bool,
+    /// pandas' `NA`, which pandas' nullable arrays accept.
+    na: bool,
+    /// `type(value).__name__`.
+    type_name: String,
+}
+
+impl LogicalScalar {
+    fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let type_name = value.get_type().name()?.to_string();
+        let na = value.is_instance_of::<PyNAType>();
+        let cell = if value.is_none() || na {
+            LogicCell::Missing
+        } else if value.is_instance_of::<pyo3::types::PyBool>() || type_name == "bool" {
+            LogicCell::Bool(value.is_truthy()?)
+        } else if let Ok(integer) = value.extract::<i64>() {
+            LogicCell::Int(integer)
+        } else if let Ok(float) = value.extract::<f64>() {
+            if float.is_nan() {
+                LogicCell::Missing
+            } else {
+                LogicCell::Other("float")
+            }
+        } else if value.is_instance_of::<pyo3::types::PyString>() {
+            LogicCell::Other("str")
+        } else {
+            LogicCell::Other("object")
+        };
+        Ok(Self {
+            integer: matches!(cell, LogicCell::Int(_)),
+            truthy: !na && value.is_truthy()?,
+            cell,
+            na,
+            type_name,
+        })
+    }
+}
+
+/// pandas' logical op of `left` (kind `left_kind`) against a scalar:
+/// numpy's own op when every value takes it, else pandas' fallback, which
+/// needs an object array and reads the scalar as a bool.
+fn logical_scalar(
+    left: &Column,
+    left_kind: char,
+    right: &LogicalScalar,
+    op: LogicalOp,
+) -> PyResult<Column> {
+    if right.na {
+        // `pd.NA`: its numpy protocol makes every cell NA (so False), but an
+        // object array of bools meets NA's own three-valued logic.
+        let cells = left
+            .values()
+            .iter()
+            .map(|value| match (left_kind, LogicCell::of(value)) {
+                ('O', LogicCell::Bool(value)) => Some(op.kleene(Some(value), None)),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_else(|| vec![None; left.len()]);
+        let cells: Vec<LogicCell> = cells
+            .into_iter()
+            .map(|cell| cell.map_or(LogicCell::Missing, LogicCell::Bool))
+            .collect();
+        return logical_result(&cells, false);
+    }
+    let direct = left
+        .values()
+        .iter()
+        .map(|value| match (LogicCell::of(value), right.cell) {
+            (LogicCell::Missing, _) | (_, LogicCell::Missing) => None,
+            (cell, right) => cell.apply(right, op).ok(),
+        })
+        .collect::<Option<Vec<_>>>();
+    if let Some(cells) = direct {
+        return logical_result(&cells, left_kind == 'i' && right.integer);
+    }
+    let missing = matches!(right.cell, LogicCell::Missing);
+    let refuse = || {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Cannot perform '{}' with a dtyped [{}] array and scalar of type [{}]",
+            op.operator_name(),
+            logical_kind_dtype(left_kind),
+            if missing {
+                right.type_name.as_str()
+            } else {
+                "bool"
+            },
+        ))
+    };
+    if left_kind != 'O' {
+        return Err(refuse());
+    }
+    let scalar = if missing {
+        LogicCell::Missing
+    } else {
+        LogicCell::Bool(right.truthy)
+    };
+    let cells = left
+        .values()
+        .iter()
+        .map(|value| LogicCell::of(value).apply(scalar, op).map_err(|_| refuse()))
+        .collect::<PyResult<Vec<_>>>()?;
+    logical_result(&cells, false)
+}
+
+/// pandas' nullable-boolean reading of a value: a bool, missing, or the ints
+/// 0 and 1 (`coerce_to_array`).
+fn kleene_value(value: &Scalar) -> PyResult<Option<bool>> {
+    match value {
+        Scalar::Bool(value) => Ok(Some(*value)),
+        Scalar::Int64(0) => Ok(Some(false)),
+        Scalar::Int64(1) => Ok(Some(true)),
+        value if value.is_missing() => Ok(None),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Need to pass bool-like values",
+        )),
+    }
+}
+
+/// A nullable `boolean` column of `cells` (None is `<NA>`).
+fn kleene_column(cells: impl Iterator<Item = Option<bool>>) -> PyResult<Column> {
+    Column::new(
+        DType::BoolNullable,
+        cells
+            .map(|cell| cell.map_or(Scalar::Null(NullKind::Null), Scalar::Bool))
+            .collect(),
+    )
+    .map_err(column_error_to_py)
+}
+
+/// A masked nullable-Int64 op: bitwise Int64 against ints, a nullable
+/// `boolean` against bools, `<NA>` where either side is missing.
+fn masked_int_logical(
+    left: &[Scalar],
+    right: &[LogicCell],
+    boolean: bool,
+    op: LogicalOp,
+) -> PyResult<Column> {
+    let cells = left
+        .iter()
+        .zip(right)
+        .map(
+            |(value, right)| match (LogicCell::of(value).as_int(), right) {
+                (Some(left), LogicCell::Bool(_) | LogicCell::Int(_)) => {
+                    Ok(Some(op.apply(left, right.as_int().unwrap_or(0))))
+                }
+                (None, _) | (_, LogicCell::Missing) => Ok(None),
+                (Some(_), LogicCell::Other(name)) => {
+                    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "unsupported operand type(s) for {}: 'int' and '{name}'",
+                        op.symbol()
+                    )))
+                }
+            },
+        )
+        .collect::<PyResult<Vec<_>>>()?;
+    if boolean {
+        return kleene_column(cells.into_iter().map(|cell| cell.map(|value| value != 0)));
+    }
+    Column::new(
+        DType::Int64Nullable,
+        cells
+            .into_iter()
+            .map(|cell| cell.map_or(Scalar::Null(NullKind::Null), Scalar::Int64))
+            .collect(),
+    )
+    .map_err(column_error_to_py)
+}
+
+/// The dtypes pandas refuses `&`, `|` and `^` on, against a scalar of type
+/// `scalar_type`, or against an array when that is None.
+fn refuse_logical_dtype(dtype: &DType, op: LogicalOp, scalar_type: Option<&str>) -> PyResult<()> {
+    let array = match dtype {
+        DType::Categorical => "Categorical",
+        DType::Datetime64 { .. } => "DatetimeArray",
+        DType::Timedelta64 => "TimedeltaArray",
+        DType::Float64Nullable => {
+            return match scalar_type {
+                Some(_) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "Cannot perform '{}' with a dtyped [float64] array and scalar of type [bool]",
+                    op.operator_name()
+                ))),
+                None => Ok(()),
+            };
+        }
+        _ => return Ok(()),
+    };
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        match scalar_type {
+            Some(scalar) => format!(
+                "unsupported operand type(s) for {}: '{array}' and '{scalar}'",
+                op.symbol()
+            ),
+            None if array == "Categorical" => format!(
+                "Object with dtype category cannot perform the numpy op {}",
+                op.ufunc_name()
+            ),
+            None => format!(
+                "ufunc '{}' not supported for the input types, and the inputs could not be safely coerced to any supported types according to the casting rule ''safe''",
+                op.ufunc_name()
+            ),
+        },
+    ))
+}
+
+/// `left <op> right` over two equal-length columns (a Series and its
+/// same-labelled operand, two frame columns, a column and a broadcast row),
+/// `left_dtype` / `right_dtype` their pandas dtypes.
+fn logical_columns(
+    left: &Column,
+    left_dtype: &DType,
+    right: &[Scalar],
+    right_kind: char,
+    right_dtype: &DType,
+    op: LogicalOp,
+) -> PyResult<Column> {
+    refuse_logical_dtype(left_dtype, op, None)?;
+    refuse_logical_dtype(right_dtype, op, None)?;
+    if matches!(left_dtype, DType::BoolNullable) || matches!(right_dtype, DType::BoolNullable) {
+        let lhs = left
+            .values()
+            .iter()
+            .map(kleene_value)
+            .collect::<PyResult<Vec<_>>>()?;
+        let rhs = right
+            .iter()
+            .map(kleene_value)
+            .collect::<PyResult<Vec<_>>>()?;
+        return kleene_column(
+            lhs.into_iter()
+                .zip(rhs)
+                .map(|(left, right)| op.kleene(left, right)),
+        );
+    }
+    if matches!(left_dtype, DType::Int64Nullable) {
+        let right: Vec<LogicCell> = right.iter().map(LogicCell::of).collect();
+        return masked_int_logical(left.values(), &right, right_kind == 'b', op);
+    }
+    logical_arrays(left.values(), logical_kind(left), right, right_kind, op)
+}
+
+/// A position `align` carried through its float64 gap lane (integral,
+/// non-negative and far below 2^53, so the cast is exact).
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn aligned_position(value: &Scalar) -> Option<usize> {
+    match value {
+        Scalar::Int64(position) => usize::try_from(*position).ok(),
+        Scalar::Float64(position) if position.is_finite() && *position >= 0.0 => {
+            Some(*position as usize)
+        }
+        _ => None,
+    }
+}
+
+/// `left <op> scalar` for one column (a Series, or a frame column) of
+/// pandas dtype `left_dtype`.
+fn logical_column_scalar(
+    left: &Column,
+    left_dtype: &DType,
+    right: &LogicalScalar,
+    op: LogicalOp,
+) -> PyResult<Column> {
+    refuse_logical_dtype(left_dtype, op, Some(&right.type_name))?;
+    match left_dtype {
+        DType::BoolNullable => {
+            let scalar = match right.cell {
+                LogicCell::Bool(value) => Some(value),
+                LogicCell::Missing if right.na => None,
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "'other' should be pandas.NA or a bool. Got {} instead.",
+                        right.type_name
+                    )));
+                }
+            };
+            let lhs = left
+                .values()
+                .iter()
+                .map(kleene_value)
+                .collect::<PyResult<Vec<_>>>()?;
+            kleene_column(lhs.into_iter().map(|left| op.kleene(left, scalar)))
+        }
+        DType::Int64Nullable => masked_int_logical(
+            left.values(),
+            &vec![right.cell; left.len()],
+            matches!(right.cell, LogicCell::Bool(_)),
+            op,
+        ),
+        _ => logical_scalar(left, logical_kind(left), right, op),
+    }
+}
+
+/// A list, tuple, 1-D numpy array or Index operand of a logical op.
+struct LogicalArray {
+    values: Vec<Scalar>,
+    /// The numpy kind pandas sees (see [`logical_kind`]).
+    kind: char,
+    dtype: DType,
+    /// A dtype-less list/tuple: an object array to pandas, and deprecated.
+    listed: bool,
+}
+
+/// `other` as a [`LogicalArray`], None when it is not array-like (a 0-d
+/// numpy array is a scalar).
+fn logical_array_operand(
+    py: Python<'_>,
+    other: &Bound<'_, PyAny>,
+) -> PyResult<Option<LogicalArray>> {
+    if other.is_instance_of::<PyList>() || other.is_instance_of::<PyTuple>() {
+        let values = other
+            .try_iter()?
+            .map(|value| value.and_then(|value| py_to_scalar(py, &value)))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(Some(LogicalArray {
+            values,
+            kind: 'O',
+            dtype: DType::Utf8,
+            listed: true,
+        }));
+    }
+    if other.get_type().name()? == "ndarray" && other.getattr("ndim")?.extract::<usize>()? == 0 {
+        return Ok(None);
+    }
+    Ok(py_array_like_column(py, other)?.map(|column| LogicalArray {
+        kind: logical_kind(&column),
+        dtype: column.dtype(),
+        values: column.values().to_vec(),
+        listed: false,
+    }))
+}
+
+/// Warn as pandas does for a logical op against a list or tuple.
+fn warn_dtype_less_logical(py: Python<'_>) -> PyResult<()> {
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        c"Logical ops (and, or, xor) between Pandas objects and dtype-less sequences (e.g. list, tuple) are deprecated and will raise in a future version. Wrap the object in a Series, Index, or np.array before operating instead.",
+        1,
+    )
+}
+
+/// `left <op> other` for a Series (pandas' `Series._logical_method`): the
+/// result's index and values. A Series with other labels is aligned first
+/// (outer, both read as object arrays).
+fn series_logical(
+    py: Python<'_>,
+    left: &Series,
+    other: &Bound<'_, PyAny>,
+    op: LogicalOp,
+) -> PyResult<(Index, Column)> {
+    let left_dtype = left.dtype();
+    if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+        let right = &series.inner;
+        if left.index().labels() == right.index().labels() {
+            let column = logical_columns(
+                left.column(),
+                &left_dtype,
+                right.column().values(),
+                logical_kind(right.column()),
+                &right.dtype(),
+                op,
+            )?;
+            return Ok((left.index().clone(), column));
+        }
+        let plain = |series: &Series| matches!(series.dtype(), DType::Bool | DType::Utf8);
+        if !(plain(left) && plain(right)) {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                c"Operation between non boolean Series with different indexes will no longer return a boolean result in a future version. Cast both Series to object type to maintain the prior behavior.",
+                1,
+            )?;
+        }
+        // Align positions, not values: pandas casts both sides to object
+        // first, so an int side keeps its ints (align widens it to float64).
+        let positions = |series: &Series| {
+            let count = i64::try_from(series.len()).unwrap_or(i64::MAX);
+            Series::new(
+                "",
+                series.index().clone(),
+                Column::from_i64_values((0..count).collect()),
+            )
+        };
+        let (left_at, right_at) = positions(left)
+            .and_then(|lp| positions(right).and_then(|rp| lp.align(&rp, AlignMode::Outer)))
+            .map_err(frame_error_to_py)?;
+        let gather = |at: &Series, source: &Series| -> Vec<Scalar> {
+            at.column()
+                .values()
+                .iter()
+                .map(|position| {
+                    aligned_position(position)
+                        .and_then(|position| source.column().values().get(position).cloned())
+                        .unwrap_or(Scalar::Null(NullKind::NaN))
+                })
+                .collect()
+        };
+        let column = logical_arrays(
+            &gather(&left_at, left),
+            'O',
+            &gather(&right_at, right),
+            'O',
+            op,
+        )?;
+        return Ok((left_at.index().clone(), column));
+    }
+    if let Some(right) = logical_array_operand(py, other)? {
+        if right.listed {
+            warn_dtype_less_logical(py)?;
+        }
+        let rows = left.len();
+        let nullable = matches!(left_dtype, DType::BoolNullable);
+        let values = match right.values.len() {
+            len if len == rows => right.values,
+            1 if !nullable => vec![right.values[0].clone(); rows],
+            _ if nullable => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Lengths must match",
+                ));
+            }
+            len => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "operands could not be broadcast together with shapes ({rows},) ({len},) "
+                )));
+            }
+        };
+        let column = logical_columns(
+            left.column(),
+            &left_dtype,
+            &values,
+            right.kind,
+            &right.dtype,
+            op,
+        )?;
+        return Ok((left.index().clone(), column));
+    }
+    let scalar = LogicalScalar::from_py(other)?;
+    Ok((
+        left.index().clone(),
+        logical_column_scalar(left.column(), &left_dtype, &scalar, op)?,
+    ))
+}
+
+/// The error of an attribute `__getattr__` does not answer, as pandas'
+/// `object.__getattribute__` re-raise: a property that raised (`s.cat` on a
+/// non-categorical) keeps its own message; a missing name is pandas'
+/// "'Series' object has no attribute ..." (Python names the module too).
+fn generic_getattr_error(obj: &Bound<'_, PyAny>, name: &str, class: &str) -> PyResult<Py<PyAny>> {
+    let py = obj.py();
+    let object = py.import("builtins")?.getattr("object")?;
+    match object.call_method1("__getattribute__", (obj, name)) {
+        Ok(value) => Ok(value.unbind()),
+        Err(err)
+            if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(py)
+                && err.value(py).to_string().contains("has no attribute") =>
+        {
+            Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                format!("'{class}' object has no attribute '{name}'"),
+            ))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// The name of `left <op> other`: an operand Series or Index with another
+/// name leaves the result unnamed (pandas' `get_op_result_name`).
+fn op_result_name(left: &Series, other: &Bound<'_, PyAny>) -> PyResult<String> {
+    let other_name = if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+        Some(series.inner.name().to_owned())
+    } else if other.get_type().name()?.to_str()?.ends_with("Index") {
+        let name = other.getattr("name")?;
+        Some(if name.is_none() {
+            String::new()
+        } else {
+            name.str()?.to_string()
+        })
+    } else {
+        None
+    };
+    Ok(match other_name {
+        Some(name) if name != left.name() => String::new(),
+        _ => left.name().to_owned(),
+    })
+}
+
 fn extract_or_build_series(
     py: Python<'_>,
     by: &Bound<'_, PyAny>,
@@ -11678,6 +12386,22 @@ impl PySeries {
     /// returns one that writes its name back.
     fn index_object(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         row_index_to_py(py, self.inner.index())
+    }
+
+    /// `self <op> other` for the logical operators (see [`series_logical`]).
+    fn logical(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        op: LogicalOp,
+    ) -> PyResult<Py<PyAny>> {
+        if other.is_instance_of::<PyDataFrame>() {
+            return Ok(py.NotImplemented());
+        }
+        let name = op_result_name(&self.inner, other)?;
+        let (index, column) = series_logical(py, &self.inner, other, op)?;
+        let inner = Series::new(name, index, column).map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PySeries { inner })?.into_any())
     }
 
     /// A Series from various data structures (list, tuple, dict, Series,
@@ -12207,6 +12931,42 @@ impl PySeries {
     }
     fn __pos__(&self) -> PyResult<PySeries> {
         wrap_series(self.inner.positive())
+    }
+    /// `s & other`, `s | other`, `s ^ other` and their reflected forms, as
+    /// pandas (see [`series_logical`]); a DataFrame operand answers itself.
+    fn __and__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.logical(py, other, LogicalOp::And)
+    }
+    fn __rand__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.logical(py, other, LogicalOp::And)
+    }
+    fn __or__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.logical(py, other, LogicalOp::Or)
+    }
+    fn __ror__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.logical(py, other, LogicalOp::Or)
+    }
+    fn __xor__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.logical(py, other, LogicalOp::Xor)
+    }
+    fn __rxor__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.logical(py, other, LogicalOp::Xor)
+    }
+    /// `s.label` reads that label of a string index, as pandas' attribute
+    /// access (`s.x` for `s['x']`); any other name is an AttributeError.
+    fn __getattr__(slf: &Bound<'_, Self>, name: &str) -> PyResult<Py<PyAny>> {
+        let holds = !(name.starts_with("__") && name.ends_with("__"))
+            && slf
+                .borrow()
+                .inner
+                .index()
+                .labels()
+                .iter()
+                .any(|label| matches!(label, IndexLabel::Utf8(text) if text == name));
+        if holds {
+            return Ok(slf.as_any().get_item(name)?.unbind());
+        }
+        generic_getattr_error(slf.as_any(), name, "Series")
     }
     fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let rhs = self.ordering_operand(py, other)?;
@@ -16857,6 +17617,179 @@ impl PyDataFrame {
         row_index_to_py(py, self.inner.index())
     }
 
+    /// `self <op> other` for the logical operators, column by column as
+    /// pandas' `DataFrame._arith_method`: another DataFrame with the same
+    /// row labels and the same column labels, a Series or a list/1-D array
+    /// matched to the columns and broadcast down the rows, a 2-D array of
+    /// this shape, or a scalar. Column labels in another order give pandas'
+    /// sorted union order; other labels are refused.
+    fn logical(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        op: LogicalOp,
+    ) -> PyResult<PyDataFrame> {
+        let frame = &self.inner;
+        let (rows, width) = frame.shape();
+        let names: Vec<String> = (0..width)
+            .filter_map(|position| frame.column_name_at(position))
+            .collect();
+        // The order a same-set-but-reordered operand leaves (None: as is),
+        // and each column's right operand (values, kind, dtype).
+        let refuse = |what: &str| {
+            PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(format!(
+                "DataFrame {} with {what} is not supported",
+                op.symbol()
+            ))
+        };
+        let reorder = |right_names: &[String]| -> PyResult<Option<Vec<String>>> {
+            if right_names == names.as_slice() {
+                return Ok(None);
+            }
+            let mut left_sorted = names.clone();
+            let mut right_sorted = right_names.to_vec();
+            left_sorted.sort();
+            right_sorted.sort();
+            left_sorted.dedup();
+            if left_sorted.len() != names.len() || left_sorted != right_sorted {
+                return Err(refuse("other column labels"));
+            }
+            Ok(Some(left_sorted))
+        };
+        /// Each column's right operand (values, numpy kind, dtype), or one scalar.
+        enum Right {
+            Columns(Vec<(Vec<Scalar>, char, DType)>),
+            Scalar(LogicalScalar),
+        }
+        let mut order = None;
+        let right = if let Ok(right) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            if right.inner.index().labels() != frame.index().labels() {
+                return Err(refuse("a DataFrame with other row labels"));
+            }
+            let right_names: Vec<String> = (0..right.inner.shape().1)
+                .filter_map(|position| right.inner.column_name_at(position))
+                .collect();
+            order = reorder(&right_names)?;
+            Right::Columns(
+                (0..width)
+                    .map(|position| {
+                        let column = if order.is_some() {
+                            right.inner.column(&names[position])
+                        } else {
+                            right.inner.column_at(position)
+                        }
+                        .ok_or_else(|| refuse("other column labels"))?;
+                        Ok((
+                            column.values().to_vec(),
+                            logical_kind(column),
+                            column.dtype(),
+                        ))
+                    })
+                    .collect::<PyResult<_>>()?,
+            )
+        } else if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+            let labels: Vec<String> = series
+                .inner
+                .index()
+                .labels()
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Utf8(text) => text.clone(),
+                    label => label.to_string(),
+                })
+                .collect();
+            order = reorder(&labels)?;
+            let column = series.inner.column();
+            let (kind, dtype) = (logical_kind(column), series.inner.dtype());
+            Right::Columns(
+                names
+                    .iter()
+                    .map(|name| {
+                        let position = labels
+                            .iter()
+                            .position(|label| label == name)
+                            .ok_or_else(|| refuse("other column labels"))?;
+                        Ok((
+                            vec![column.values()[position].clone(); rows],
+                            kind,
+                            dtype.clone(),
+                        ))
+                    })
+                    .collect::<PyResult<_>>()?,
+            )
+        } else if other.get_type().name()? == "ndarray"
+            && other.getattr("ndim")?.extract::<usize>()? == 2
+        {
+            let shape: (usize, usize) = other.getattr("shape")?.extract()?;
+            if shape != (rows, width) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unable to coerce to DataFrame, shape must be ({rows}, {width}): given ({}, {})",
+                    shape.0, shape.1
+                )));
+            }
+            Right::Columns(
+                (0..width)
+                    .map(|position| {
+                        let slice = other.get_item((pyo3::types::PySlice::full(py), position))?;
+                        let column = py_value_to_column(py, &slice, rows)?;
+                        Ok((
+                            column.values().to_vec(),
+                            logical_kind(&column),
+                            column.dtype(),
+                        ))
+                    })
+                    .collect::<PyResult<_>>()?,
+            )
+        } else if other.is_instance_of::<PyList>()
+            || other.is_instance_of::<PyTuple>()
+            || (other.get_type().name()? == "ndarray"
+                && other.getattr("ndim")?.extract::<usize>()? == 1)
+        {
+            let given = other.len()?;
+            if given != width {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unable to coerce to Series, length must be {width}: given {given}"
+                )));
+            }
+            let row = py_value_to_column(py, other, width)?;
+            let (kind, dtype) = (logical_kind(&row), row.dtype());
+            Right::Columns(
+                row.values()
+                    .iter()
+                    .map(|value| (vec![value.clone(); rows], kind, dtype.clone()))
+                    .collect(),
+            )
+        } else {
+            Right::Scalar(LogicalScalar::from_py(other)?)
+        };
+        let mut out = frame.clone();
+        for position in 0..width {
+            let left = frame.column_at(position).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "column position {position} is out of range"
+                ))
+            })?;
+            let left_dtype = left.dtype();
+            let column = match &right {
+                Right::Columns(right) => {
+                    let (values, kind, dtype) = right.get(position).ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                            "no operand for column position {position}"
+                        ))
+                    })?;
+                    logical_columns(left, &left_dtype, values, *kind, dtype, op)?
+                }
+                Right::Scalar(scalar) => logical_column_scalar(left, &left_dtype, scalar, op)?,
+            };
+            out = out.isetitem(position, column).map_err(frame_error_to_py)?;
+        }
+        if let Some(order) = order {
+            let order: Vec<&str> = order.iter().map(String::as_str).collect();
+            out = out.select_columns(&order).map_err(frame_error_to_py)?;
+        }
+        Ok(PyDataFrame { inner: out })
+    }
+
     /// The columns `key` names on a two-level column axis, as pandas'
     /// `df[key]` reads it: a full `(top, sub)` tuple one column, a bare
     /// top-level label every column under it; with the key's depth. None
@@ -19285,6 +20218,40 @@ impl PyDataFrame {
     }
     fn __pos__(&self) -> PyResult<PyDataFrame> {
         wrap_frame(self.inner.positive())
+    }
+    /// `df & other`, `df | other`, `df ^ other` and their reflected forms,
+    /// column by column as pandas (see [`PyDataFrame::logical`]).
+    fn __and__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.logical(py, other, LogicalOp::And)
+    }
+    fn __rand__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.logical(py, other, LogicalOp::And)
+    }
+    fn __or__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.logical(py, other, LogicalOp::Or)
+    }
+    fn __ror__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.logical(py, other, LogicalOp::Or)
+    }
+    fn __xor__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.logical(py, other, LogicalOp::Xor)
+    }
+    fn __rxor__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.logical(py, other, LogicalOp::Xor)
+    }
+    /// `df.name` reads the column `name`, as pandas' attribute access
+    /// (`df.a` for `df['a']`, a top-level label under a two-level column
+    /// axis); any other name is an AttributeError.
+    fn __getattr__(slf: &Bound<'_, Self>, name: &str) -> PyResult<Py<PyAny>> {
+        let dunder = name.starts_with("__") && name.ends_with("__");
+        let holds = !dunder
+            && slf
+                .borrow()
+                .__contains__(pyo3::types::PyString::new(slf.py(), name).as_any())?;
+        if holds {
+            return Ok(slf.as_any().get_item(name)?.unbind());
+        }
+        generic_getattr_error(slf.as_any(), name, "DataFrame")
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         self.cmp_operator(py, other, ComparisonOp::Eq)
