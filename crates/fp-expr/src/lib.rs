@@ -8856,13 +8856,14 @@ mod tests {
         ])
         .map_err(ExprError::from)?;
 
+        // An int64 column that gains a NaN is float64, as pandas' shift.
         let shifted = super::eval_str("a.shift()", &frame, &policy, &mut ledger)?;
         assert_eq!(
             shifted.values(),
             &[
                 Scalar::Null(NullKind::NaN),
-                Scalar::Int64(1),
-                Scalar::Int64(4)
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0)
             ]
         );
 
@@ -8872,7 +8873,7 @@ mod tests {
             &[
                 Scalar::Null(NullKind::NaN),
                 Scalar::Null(NullKind::NaN),
-                Scalar::Int64(1)
+                Scalar::Float64(1.0)
             ]
         );
 

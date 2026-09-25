@@ -20507,7 +20507,9 @@ impl Series {
             }
             _ => Scalar::Null(NullKind::NaN),
         };
-        self.shift_with_fill_value(periods, fill)
+        let shifted = self.shift_with_fill_value(periods, fill)?;
+        let column = shifted_column_dtype(&self.column.dtype(), shifted.column)?;
+        Self::new(shifted.name, shifted.index, column)
     }
 
     /// Shift index by `periods`, filling the vacated positions with `fill_value`
@@ -39710,6 +39712,27 @@ fn dense_groupby_pct_change_f64(
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
 
+/// pandas' dtype for a column `shift` filled with NaN, given the column's
+/// `original` dtype: numpy int64 cannot hold NaN, so an int64 column that
+/// gained a missing value is float64 (it stayed int64 with a null), a numeric
+/// column shifted wholly out is float64 (it came back object), and the
+/// nullable Int64 / Float64 / boolean dtypes keep their dtype with <NA> (they
+/// came back int64 / float64 / object). Anything else is unchanged.
+fn shifted_column_dtype(original: &DType, shifted: Column) -> Result<Column, FrameError> {
+    if !shifted.has_any_missing() {
+        return Ok(shifted);
+    }
+    let target = match original {
+        DType::Int64 | DType::Float64 => DType::Float64,
+        DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable => original.clone(),
+        _ => return Ok(shifted),
+    };
+    if shifted.dtype() == target {
+        return Ok(shifted);
+    }
+    Ok(shifted.astype(target)?)
+}
+
 /// Single-pass dense groupby `shift(periods)` (positive periods only) over an
 /// all-valid no-NaN Float64 slice and a precomputed dense gid per row
 /// (br-frankenpandas-gbcum). Sister to [`dense_groupby_diff_f64`] but emits the
@@ -44995,20 +45018,23 @@ impl SeriesGroupBy<'_> {
                 return Series::new(self.series.name(), index, column);
             }
         }
-        if let Some(r) = self.try_dense_shift_i64(periods) {
-            return r;
-        }
-        self.transform_groups(|vals| {
-            let n = vals.len();
-            let mut out = vec![Scalar::Null(NullKind::NaN); n];
-            for (idx, slot) in out.iter_mut().enumerate() {
-                let src = idx as i64 - periods;
-                if src >= 0 && (src as usize) < n {
-                    *slot = vals[src as usize].clone();
+        let shifted = match self.try_dense_shift_i64(periods) {
+            Some(result) => result?,
+            None => self.transform_groups(|vals| {
+                let n = vals.len();
+                let mut out = vec![Scalar::Null(NullKind::NaN); n];
+                for (idx, slot) in out.iter_mut().enumerate() {
+                    let src = idx as i64 - periods;
+                    if src >= 0 && (src as usize) < n {
+                        *slot = vals[src as usize].clone();
+                    }
                 }
-            }
-            out
-        })
+                out
+            })?,
+        };
+        // pandas' dtype for the NaN-filled shift (int64 -> float64, ...).
+        let column = shifted_column_dtype(&self.series.column.dtype(), shifted.column)?;
+        Series::new(shifted.name, shifted.index, column)
     }
 
     /// Dense typed within-group shift for an **Int64** value column, replacing
@@ -60173,22 +60199,25 @@ fn cut_round_frac(x: f64, precision: i32) -> f64 {
     if !x.is_finite() || x == 0.0 {
         return x;
     }
-    let whole = x.trunc();
-    let frac = x - whole;
-    let digits = if whole == 0.0 {
-        (-(frac.abs().log10().floor() as i32) - 1 + precision).max(0)
-    } else {
-        precision
-    };
-    let factor = 10f64.powi(digits);
+    let factor = 10f64.powi(cut_frac_digits(x, precision));
     (x * factor).round() / factor
 }
 
-/// Format a cut/qcut bin edge to match pandas' Interval repr: round via
-/// `cut_round_frac`, then use the shortest round-trip float form but always
-/// keep a trailing `.0` for whole numbers (pandas prints `4.0`, not `4`).
-fn cut_format_edge(x: f64) -> String {
-    let rounded = cut_round_frac(x, 3);
+/// The decimals `cut_round_frac` keeps for `x`: `precision` when it has a
+/// whole part, `precision` significant digits of a pure fraction.
+fn cut_frac_digits(x: f64, precision: i32) -> i32 {
+    let whole = x.trunc();
+    if whole == 0.0 && x != 0.0 {
+        (-((x - whole).abs().log10().floor() as i32) - 1 + precision).max(0)
+    } else {
+        precision
+    }
+}
+
+/// A rounded cut/qcut bin edge as pandas' Interval repr prints it: the
+/// shortest round-trip float form, always with a trailing `.0` for whole
+/// numbers (pandas prints `4.0`, not `4`).
+fn cut_edge_text(rounded: f64) -> String {
     let s = format!("{rounded}");
     if s.contains('.')
         || s.contains('e')
@@ -60199,6 +60228,89 @@ fn cut_format_edge(x: f64) -> String {
     } else {
         format!("{s}.0")
     }
+}
+
+/// pandas' `_infer_precision`: the smallest precision from 3 up at which the
+/// rounded edges are all distinct (3 when none is).
+fn cut_infer_precision(edges: &[f64]) -> i32 {
+    (3..20)
+        .find(|&precision| {
+            let mut levels: Vec<f64> = edges
+                .iter()
+                .map(|&edge| cut_round_frac(edge, precision))
+                .collect();
+            levels.sort_by(f64::total_cmp);
+            levels.dedup();
+            levels.len() == edges.len()
+        })
+        .unwrap_or(3)
+}
+
+/// pandas' `_format_labels` for the intervals between `edges`: each edge
+/// rounded at the inferred precision (a fixed 3 printed [0.5, 0.5) for the
+/// bins pandas shows as [0.5, 0.5005)); right-closed with `include_lowest`,
+/// the first lowered by 10^-precision; `integer_edges` print as integers
+/// unless that lowering makes the breaks fractional.
+fn cut_interval_labels(
+    edges: &[f64],
+    right: bool,
+    include_lowest: bool,
+    integer_edges: bool,
+) -> Vec<String> {
+    let precision = cut_infer_precision(edges);
+    let mut breaks: Vec<f64> = edges
+        .iter()
+        .map(|&edge| cut_round_frac(edge, precision))
+        .collect();
+    let lowered = right && include_lowest;
+    if lowered && let Some(first) = breaks.first_mut() {
+        // Exact decimal subtraction: both terms have at most `digits`
+        // decimals, so rounding there only removes binary noise.
+        let digits = cut_frac_digits(*first, precision).max(precision);
+        let step = 10f64.powi(digits);
+        *first = ((*first - 10f64.powi(-precision)) * step).round() / step;
+    }
+    let text = |edge: f64| {
+        if integer_edges && !lowered {
+            format!("{}", edge as i64)
+        } else {
+            cut_edge_text(edge)
+        }
+    };
+    breaks
+        .windows(2)
+        .map(|pair| {
+            let (left, right_edge) = (text(pair[0]), text(pair[1]));
+            if right {
+                format!("({left}, {right_edge}]")
+            } else {
+                format!("[{left}, {right_edge})")
+            }
+        })
+        .collect()
+}
+
+/// pandas' equal-width bins for `pd.cut(x, bins)` (right-closed) over
+/// values from `min_val` to `max_val`: numpy's linspace between them with
+/// the first edge lowered by 0.1% of the range, or, for one repeated
+/// value, the range padded by 0.1% of it (0.001 at zero) - the constant
+/// case printed (5.0, 5.0]. Returns the base and width a value's bin is
+/// computed from (`ceil((v - base) / width) - 1`, clamped) and the labels.
+fn cut_equal_width(min_val: f64, max_val: f64, bins: usize) -> (f64, f64, Vec<String>) {
+    let constant = min_val == max_val;
+    let pad = |v: f64| if v == 0.0 { 0.001 } else { 0.001 * v.abs() };
+    let (lo, hi) = if constant {
+        (min_val - pad(min_val), max_val + pad(max_val))
+    } else {
+        (min_val, max_val)
+    };
+    let width = (hi - lo) / bins as f64;
+    let mut edges: Vec<f64> = (0..=bins).map(|i| lo + width * i as f64).collect();
+    edges[bins] = hi;
+    if !constant {
+        edges[0] -= 0.001 * (hi - lo);
+    }
+    (lo, width, cut_interval_labels(&edges, true, false, false))
 }
 
 /// A cut/qcut result as pandas returns it: an ordered categorical whose
@@ -60539,24 +60651,12 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
                         .fold(f64::NEG_INFINITY, f64::max),
                 ),
             };
-            let width = (max_val - min_val) / bins as f64;
-            let edges: Vec<f64> = (0..=bins).map(|i| min_val + width * i as f64).collect();
-            let first_left = min_val - 0.001 * (max_val - min_val);
-            let bin_labels: Vec<String> = (0..bins)
-                .map(|i| {
-                    let left = if i == 0 { first_left } else { edges[i] };
-                    format!(
-                        "({}, {}]",
-                        cut_format_edge(left),
-                        cut_format_edge(edges[i + 1])
-                    )
-                })
-                .collect();
+            let (base, width, bin_labels) = cut_equal_width(min_val, max_val, bins);
             let bin_idx = |f: f64| -> usize {
                 if width == 0.0 {
                     0
                 } else {
-                    (((f - min_val) / width).ceil() as i64 - 1).clamp(0, (bins as i64) - 1) as usize
+                    (((f - base) / width).ceil() as i64 - 1).clamp(0, (bins as i64) - 1) as usize
                 }
             };
             let mut bytes: Vec<u8> = Vec::with_capacity(n * 12);
@@ -60623,29 +60723,12 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
 
     let min_val = valid.iter().copied().fold(f64::INFINITY, f64::min);
     let max_val = valid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let width = (max_val - min_val) / bins as f64;
-
-    // Build bin edges
-    let edges: Vec<f64> = (0..=bins).map(|i| min_val + width * i as f64).collect();
 
     // Per br-frankenpandas-21a14: pre-format bin labels ONCE (one per bin)
     // and compute bucket index in O(1) per value. Was O(n × bins) inner
-    // scan plus n redundant String allocations.
-    // pandas widens the first bin's left edge down by 0.1% of the data range
-    // so the minimum value is included in the right-closed first interval, and
-    // formats edges to 3 significant digits (br-frankenpandas-4rfy1). Only the
-    // displayed label changes — bucket assignment below is unchanged.
-    let first_left = min_val - 0.001 * (max_val - min_val);
-    let bin_labels: Vec<String> = (0..bins)
-        .map(|i| {
-            let left = if i == 0 { first_left } else { edges[i] };
-            format!(
-                "({}, {}]",
-                cut_format_edge(left),
-                cut_format_edge(edges[i + 1])
-            )
-        })
-        .collect();
+    // scan plus n redundant String allocations. pandas' edges, padding and
+    // label precision: see cut_equal_width (br-frankenpandas-4rfy1).
+    let (base, width, bin_labels) = cut_equal_width(min_val, max_val, bins);
 
     // FAST PATH (all-valid): emit the pre-formatted bin labels into ONE
     // contiguous byte buffer instead of n Scalar::Utf8(label.clone()) +
@@ -60660,7 +60743,7 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
             let bin_idx = if width == 0.0 {
                 0
             } else {
-                (((f - min_val) / width).ceil() as i64 - 1).clamp(0, (bins as i64) - 1) as usize
+                (((f - base) / width).ceil() as i64 - 1).clamp(0, (bins as i64) - 1) as usize
             };
             bytes.extend_from_slice(bin_labels[bin_idx].as_bytes());
             offsets.push(bytes.len());
@@ -60677,10 +60760,11 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
         .map(|v| match v {
             None => Scalar::Null(NullKind::NaN),
             Some(f) => {
-                // Compute bucket index directly from uniform bin width.
+                // Compute bucket index directly from uniform bin width
+                // from `base` (min_val, or the padded min of a constant
+                // range, whose single value then falls in its middle bin
+                // as pandas' searchsorted places it).
                 // Edge cases:
-                // - All values equal min_val (width == 0): every value
-                //   lands in bin 0.
                 // - Value == min_val: pandas's first-bin-inclusive on
                 //   both sides means bin 0 (the floor formula gives 0).
                 // - Value == max_val: floor((max - min) / width) == bins,
@@ -60698,7 +60782,7 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
                     // left edge too — handled by clamping the raw
                     // result to [0, bins-1] (a value at min gives -1
                     // before clamping).
-                    let raw = ((*f - min_val) / width).ceil() as i64 - 1;
+                    let raw = ((*f - base) / width).ceil() as i64 - 1;
                     raw.clamp(0, (bins as i64) - 1) as usize
                 };
                 Scalar::Utf8(bin_labels[bin_idx].clone())
@@ -60736,7 +60820,7 @@ pub fn cut_bins(
     // right=False) and makes the first bin left-inclusive by lowering its left
     // edge 0.001 — which also forces float-formatted labels.
     let lowest = include_lowest && right;
-    let all_int = !lowest && edges.iter().all(|e| matches!(e, Scalar::Int64(_)));
+    let integer_edges = edges.iter().all(|e| matches!(e, Scalar::Int64(_)));
     let edge_vals: Vec<f64> = edges
         .iter()
         .map(|e| {
@@ -60751,13 +60835,6 @@ pub fn cut_bins(
         ));
     }
 
-    let fmt_edge = |x: f64| -> String {
-        if all_int {
-            format!("{}", x as i64)
-        } else {
-            cut_format_edge(x)
-        }
-    };
     let n_bins = edge_vals.len() - 1;
     let labels: Vec<String> = match labels {
         Some(custom) => {
@@ -60769,21 +60846,7 @@ pub fn cut_bins(
             }
             custom.iter().map(|s| (*s).to_string()).collect()
         }
-        None => (0..n_bins)
-            .map(|i| {
-                let left_val = if i == 0 && lowest {
-                    edge_vals[0] - 0.001
-                } else {
-                    edge_vals[i]
-                };
-                let (l, r) = (fmt_edge(left_val), fmt_edge(edge_vals[i + 1]));
-                if right {
-                    format!("({l}, {r}]")
-                } else {
-                    format!("[{l}, {r})")
-                }
-            })
-            .collect(),
+        None => cut_interval_labels(&edge_vals, right, lowest, integer_edges),
     };
 
     // The first bin's effective lower bound (left-inclusive under include_lowest).
@@ -60958,10 +61021,9 @@ pub fn qcut_at_quantiles(
 
     // Per br-frankenpandas-e00ce: pre-format labels ONCE (q of them) and
     // resolve the bucket via binary search (O(log q)) per value.
-    // pandas widens qcut's first left edge down by 10^-precision (0.001 at the
-    // default precision 3) and formats edges to 3 significant digits
+    // pandas labels qcut's bins as cut's with include_lowest: the first left
+    // edge lowered by 10^-precision, edges at the inferred precision
     // (br-frankenpandas-4rfy1). Label-only; bucket assignment is unchanged.
-    let first_left = edges[0] - 0.001;
     let bin_labels: Vec<String> = match labels {
         Some(custom) => {
             if custom.len() != q {
@@ -60972,16 +61034,7 @@ pub fn qcut_at_quantiles(
             }
             custom.iter().map(|s| (*s).to_string()).collect()
         }
-        None => (0..q)
-            .map(|i| {
-                let left = if i == 0 { first_left } else { edges[i] };
-                format!(
-                    "({}, {}]",
-                    cut_format_edge(left),
-                    cut_format_edge(edges[i + 1])
-                )
-            })
-            .collect(),
+        None => cut_interval_labels(&edges, true, true, false),
     };
 
     // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name
@@ -89933,7 +89986,21 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.shift(periods, axis=1)`.
     pub fn shift_axis1(&self, periods: i64) -> Result<Self, FrameError> {
-        self.shift_axis1_with_fill_value(periods, fp_types::Scalar::Null(fp_types::NullKind::NaN))
+        let n_cols = self.num_columns();
+        if n_cols == 0 {
+            return Ok(self.clone());
+        }
+        // pandas fills a vacated column by shifting the edge column wholly
+        // out (the first for periods > 0, else the last), so it takes that
+        // column's shift dtype: None for object, float64 NaN for int64, NaN
+        // object for bool (it was an object column of NaN).
+        let edge = if periods > 0 { 0 } else { n_cols - 1 };
+        let edge_column = self.column_at(edge).expect("column in bounds"); // ubs:ignore — n_cols > 0
+        let rows = self.len() as i64;
+        let vacated = Series::new("", self.index.clone(), edge_column.clone())?
+            .shift(if periods > 0 { rows } else { -rows })?
+            .column;
+        self.shift_axis1_with(periods, &vacated)
     }
 
     /// Shift index horizontally by desired number of periods, filling vacated positions with `fill_value`.
@@ -89944,11 +90011,16 @@ impl DataFrame {
         periods: i64,
         fill_value: Scalar,
     ) -> Result<Self, FrameError> {
-        let n_cols = self.num_columns();
-        if n_cols == 0 {
+        if self.num_columns() == 0 {
             return Ok(self.clone());
         }
+        let vacated = Column::from_values(vec![fill_value; self.len()])?;
+        self.shift_axis1_with(periods, &vacated)
+    }
 
+    /// The columns moved `periods` places, each vacated one `vacated`.
+    fn shift_axis1_with(&self, periods: i64, vacated: &Column) -> Result<Self, FrameError> {
+        let n_cols = self.num_columns();
         let mut pairs = Vec::with_capacity(n_cols);
         let mut column_order = Vec::with_capacity(n_cols);
 
@@ -89960,7 +90032,7 @@ impl DataFrame {
                     .expect("column in bounds") // ubs:ignore — bounded index traversal
                     .clone()
             } else {
-                Column::from_values(vec![fill_value.clone(); self.len()])?
+                vacated.clone()
             };
             pairs.push((name.clone(), col));
             column_order.push(name);
@@ -105427,22 +105499,36 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `df.groupby(col).shift(periods)`.
     pub fn shift(&self, periods: i64) -> Result<DataFrame, FrameError> {
-        if periods > 0
-            && let Some(df) = self.try_shift_dense(periods as usize)
-        {
-            return Ok(df);
-        }
-        self.transform_groups(|vals| {
-            let n = vals.len();
-            let mut out = vec![Scalar::Null(NullKind::NaN); n];
-            for (i, slot) in out.iter_mut().enumerate() {
-                let src = i as i64 - periods;
-                if src >= 0 && (src as usize) < n {
-                    *slot = vals[src as usize].clone();
+        let dense = if periods > 0 {
+            self.try_shift_dense(periods as usize)
+        } else {
+            None
+        };
+        let mut shifted = match dense {
+            Some(df) => df,
+            None => self.transform_groups(|vals| {
+                let n = vals.len();
+                let mut out = vec![Scalar::Null(NullKind::NaN); n];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    let src = i as i64 - periods;
+                    if src >= 0 && (src as usize) < n {
+                        *slot = vals[src as usize].clone();
+                    }
+                }
+                out
+            })?,
+        };
+        // pandas' dtype for each NaN-filled column (int64 -> float64, ...).
+        let names: Vec<String> = shifted.column_order.to_vec();
+        for name in names {
+            if let (Some(original), Some(column)) = (self.df.column(&name), shifted.column(&name)) {
+                let fixed = shifted_column_dtype(&original.dtype(), column.clone())?;
+                if fixed.dtype() != column.dtype() {
+                    shifted = shifted.with_column(name, fixed)?;
                 }
             }
-            out
-        })
+        }
+        Ok(shifted)
     }
 
     /// GroupBy diff within each group.
@@ -116446,10 +116532,12 @@ mod tests {
         )
         .unwrap();
 
+        // pandas: an int64 column that gains a NaN is float64.
         let shifted = s.shift(1).unwrap();
+        assert_eq!(shifted.dtype(), DType::Float64);
         assert!(shifted.values()[0].is_missing());
-        assert_eq!(shifted.values()[1], Scalar::Int64(10));
-        assert_eq!(shifted.values()[2], Scalar::Int64(20));
+        assert_eq!(shifted.values()[1], Scalar::Float64(10.0));
+        assert_eq!(shifted.values()[2], Scalar::Float64(20.0));
     }
 
     #[test]
@@ -116466,9 +116554,43 @@ mod tests {
         .unwrap();
 
         let shifted = s.shift(-1).unwrap();
-        assert_eq!(shifted.values()[0], Scalar::Int64(20));
-        assert_eq!(shifted.values()[1], Scalar::Int64(30));
+        assert_eq!(shifted.dtype(), DType::Float64);
+        assert_eq!(shifted.values()[0], Scalar::Float64(20.0));
+        assert_eq!(shifted.values()[1], Scalar::Float64(30.0));
         assert!(shifted.values()[2].is_missing());
+    }
+
+    #[test]
+    fn shift_that_introduces_nan_follows_pandas_dtypes() {
+        let labels = || vec![0_i64.into(), 1_i64.into(), 2_i64.into()];
+        let ints = || vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
+        // Shifted wholly out, an int64 column is all-NaN float64 (not object).
+        let plain = Series::from_values("v", labels(), ints()).unwrap();
+        assert_eq!(plain.shift(5).unwrap().dtype(), DType::Float64);
+        // The nullable dtypes keep their dtype.
+        let nullable = Series::new(
+            "v",
+            Index::new(labels()),
+            Column::new(DType::Int64Nullable, ints()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(nullable.shift(1).unwrap().dtype(), DType::Int64Nullable);
+        // A grouped shift follows the same rule.
+        let keys = Series::from_values(
+            "g",
+            labels(),
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+            ],
+        )
+        .unwrap();
+        let grouped = plain.groupby(&keys).unwrap().shift(1).unwrap();
+        assert_eq!(grouped.dtype(), DType::Float64);
+        assert_eq!(grouped.values()[1], Scalar::Float64(1.0));
+        // NEGATIVE: shift(0) introduces nothing and stays int64.
+        assert_eq!(plain.shift(0).unwrap().dtype(), DType::Int64);
     }
 
     #[test]
@@ -116512,10 +116634,10 @@ mod tests {
             ]
         );
 
-        // Bare shift still introduces NaN (unchanged).
+        // Bare shift introduces NaN, so the column is float64 as pandas'.
         let nan_shift = s.shift(1).unwrap();
         assert!(nan_shift.values()[0].is_missing());
-        assert_eq!(nan_shift.values()[1], Scalar::Int64(1));
+        assert_eq!(nan_shift.values()[1], Scalar::Float64(1.0));
     }
 
     #[test]
@@ -156740,12 +156862,13 @@ mod tests {
         let result = df.groupby(&["g"]).unwrap().shift(1).unwrap();
         let v = result.column_as_series("v").unwrap();
         // Group a positions: [0,1,3] with vals [1,2,3], shifted by 1: [NaN,1,2]
+        // (int64 with a NaN is float64, as pandas')
         assert!(v.values()[0].is_missing());
-        assert_eq!(v.values()[1], Scalar::Int64(1));
+        assert_eq!(v.values()[1], Scalar::Float64(1.0));
         // Group b positions: [2] with vals [10], shifted by 1: [NaN]
         assert!(v.values()[2].is_missing());
         // Group a position 3 → shifted → value at group position 1 → 2
-        assert_eq!(v.values()[3], Scalar::Int64(2));
+        assert_eq!(v.values()[3], Scalar::Float64(2.0));
     }
 
     #[test]
@@ -166117,6 +166240,50 @@ mod tests {
     }
 
     #[test]
+    fn cut_labels_use_pandas_padding_and_precision() {
+        let labels_of = |series: &Series| -> Vec<String> {
+            series
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Utf8(label) => label.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        let from = |values: Vec<Scalar>| {
+            let n = values.len() as i64;
+            Series::from_values("x", (0..n).map(IndexLabel::from).collect(), values).unwrap()
+        };
+        // A constant range is padded by 0.1% of the value: pandas'
+        // (4.995, 5.0] (it printed (5.0, 5.0]).
+        let constant = from(vec![Scalar::Int64(5); 3]);
+        assert_eq!(labels_of(&cut(&constant, 2).unwrap()), ["(4.995, 5.0]"; 3]);
+        // Label precision grows until the edges differ: (1.0001, 1.0002].
+        let close = from(vec![
+            Scalar::Float64(1.0001),
+            Scalar::Float64(1.0002),
+            Scalar::Float64(1.0003),
+        ]);
+        assert_eq!(
+            labels_of(&cut(&close, 2).unwrap()),
+            ["(1.0001, 1.0002]", "(1.0001, 1.0002]", "(1.0002, 1.0003]"]
+        );
+        // Integer edges print as integers; include_lowest lowers the first
+        // edge by 10^-3 and makes them all floats, as pandas.
+        let ints = from(vec![Scalar::Int64(0), Scalar::Int64(5), Scalar::Int64(7)]);
+        let edges = [Scalar::Int64(0), Scalar::Int64(5), Scalar::Int64(10)];
+        assert_eq!(
+            labels_of(&super::cut_bins(&ints, &edges, true, None, true).unwrap()),
+            ["(-0.001, 5.0]", "(-0.001, 5.0]", "(5.0, 10.0]"]
+        );
+        // NEGATIVE: without include_lowest the 0 falls out and the labels stay integers.
+        let plain = super::cut_bins(&ints, &edges, true, None, false).unwrap();
+        assert!(plain.values()[0].is_missing());
+        assert_eq!(labels_of(&plain)[1..], ["(0, 5]", "(5, 10]"]);
+    }
+
+    #[test]
     fn cut_lists_empty_bins_and_groups_sort_by_bin() {
         // pandas: cut is an ordered categorical of every bin, the empty
         // (10, 20] included, and a groupby over it orders the groups as
@@ -166135,7 +166302,10 @@ mod tests {
         let edges: Vec<Scalar> = [0, 5, 10, 20, 50].into_iter().map(Scalar::Int64).collect();
         let bins = super::cut_bins(&ages, &edges, true, None, false).unwrap();
         let bin_labels = ["(0, 5]", "(5, 10]", "(10, 20]", "(20, 50]"];
-        let meta = bins.column().categorical().expect("cut_bins is categorical");
+        let meta = bins
+            .column()
+            .categorical()
+            .expect("cut_bins is categorical");
         assert!(meta.ordered);
         assert_eq!(
             meta.categories,
@@ -166173,10 +166343,7 @@ mod tests {
         );
         // NEGATIVE: the same labels as a plain string key sort as text.
         let text = df
-            .with_column(
-                "bin",
-                Column::from_values(bins.values().to_vec()).unwrap(),
-            )
+            .with_column("bin", Column::from_values(bins.values().to_vec()).unwrap())
             .unwrap();
         let keys: Vec<String> = text
             .groupby(&["bin"])

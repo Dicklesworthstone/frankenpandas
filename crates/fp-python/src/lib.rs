@@ -86,6 +86,64 @@ fn parse_freq_to_nanos(freq: &str) -> PyResult<i64> {
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("frequency overflow"))
 }
 
+/// `obj.shift(periods, freq=...)`: the row index moved by `periods` x
+/// `freq`, the values left where they are, as pandas shifts an index (it
+/// was refused). A fixed-duration freq over a datetime or timedelta index;
+/// a fill_value is ignored with pandas' FutureWarning.
+fn shift_index_by_freq(
+    index: &Index,
+    periods: i64,
+    freq: &str,
+    fill_value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Index> {
+    if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
+        let py = fill.py();
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"Passing a 'freq' together with a 'fill_value' silently ignores the fill_value and is deprecated. This will raise in a future version.",
+            1,
+        )?;
+    }
+    let labels = index.labels();
+    let kind = |datetime: bool| {
+        labels.iter().any(|label| match label {
+            IndexLabel::Datetime64(_) => datetime,
+            IndexLabel::Timedelta64(_) => !datetime,
+            _ => false,
+        }) && labels.iter().all(|label| match label {
+            IndexLabel::Datetime64(_) => datetime,
+            IndexLabel::Timedelta64(_) => !datetime,
+            IndexLabel::Null(_) => true,
+            _ => false,
+        })
+    };
+    if !kind(true) && !kind(false) {
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex; Got type Index",
+        ));
+    }
+    let overflow = || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timestamp overflow");
+    let step = parse_freq_to_nanos(freq)?
+        .checked_mul(periods)
+        .ok_or_else(overflow)?;
+    let moved = labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => nanos
+                .checked_add(step)
+                .map(IndexLabel::Datetime64)
+                .ok_or_else(overflow),
+            IndexLabel::Timedelta64(nanos) if *nanos != i64::MIN => nanos
+                .checked_add(step)
+                .map(IndexLabel::Timedelta64)
+                .ok_or_else(overflow),
+            other => Ok(other.clone()),
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Index::new(moved).set_names(index.name()))
+}
+
 /// Map a pandas dtype name to a FrankenPandas `DType` with pandas' meanings:
 /// "Int64"/"Float64"/"boolean" are the nullable dtypes, "category" is
 /// categorical (fp-types' `FromStr`); "i64"/"f64" are binding aliases.
@@ -16373,17 +16431,33 @@ impl PySeries {
         Ok(PySeries { inner: r })
     }
 
-    /// Return counts of unique values (descending) as a new Series.
-    #[pyo3(signature = (normalize=false, sort=true, ascending=false, dropna=true))]
+    /// Return counts of unique values (descending) as a new Series. With
+    /// `bins` (pandas' 4th parameter; dropna was read in its place and
+    /// bins= raised TypeError) the values are counted per `pd.cut(bins,
+    /// include_lowest=True)` bin, empty bins included.
+    #[pyo3(signature = (normalize=false, sort=true, ascending=false, bins=None, dropna=true))]
     fn value_counts(
         &self,
+        py: Python<'_>,
         normalize: bool,
         sort: bool,
         ascending: bool,
+        bins: Option<&Bound<'_, PyAny>>,
         dropna: bool,
     ) -> PyResult<PySeries> {
-        let r = self
-            .inner
+        let counted = match bins.filter(|bins| !bins.is_none()) {
+            Some(bins) => {
+                let series = Bound::new(
+                    py,
+                    PySeries {
+                        inner: self.inner.clone(),
+                    },
+                )?;
+                cut(py, series.as_any(), bins, true, None, 3, true)?.inner
+            }
+            None => self.inner.clone(),
+        };
+        let r = counted
             .value_counts_with_options(normalize, sort, ascending, dropna)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
@@ -17428,15 +17502,18 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         suffix: Option<&str>,
     ) -> PyResult<PySeries> {
-        unsupported_params(
-            "Series.shift",
-            &[("freq", freq.is_none()), ("suffix", suffix.is_none())],
-        )?;
+        unsupported_params("Series.shift", &[("suffix", suffix.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {ax} for object type Series"
             )));
+        }
+        if let Some(freq) = freq {
+            let index = shift_index_by_freq(self.inner.index(), periods, freq, fill_value)?;
+            let res = Series::new(self.inner.name(), index, self.inner.column().clone())
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: res });
         }
         let res = if let Some(fv) = fill_value {
             let sc = py_to_scalar(fv.py(), fv)?;
@@ -22110,6 +22187,18 @@ impl PyDataFrame {
         columns: Option<&Bound<'_, PyAny>>,
         dtype: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        // ints with a missing value become float64 with NaN, as pandas (and
+        // the Series constructor) build them - except under dtype=object,
+        // which keeps the values as given (DISC-011).
+        let keep_objects =
+            dtype.is_some_and(|dtype| !dtype.is_none() && is_object_dtype_arg(dtype));
+        let promote = |scalars: Vec<Scalar>| {
+            if keep_objects {
+                scalars
+            } else {
+                pandas_promote_int_with_missing(scalars)
+            }
+        };
         let built = (|| -> PyResult<Self> {
             let explicit_cols = extract_columns_names(columns)?;
 
@@ -22270,7 +22359,10 @@ impl PyDataFrame {
                         } else {
                             detected_nrows = Some(scalars.len());
                         }
-                        Column::from_values(scalars).map_err(|e| {
+                        // ints with a missing value are float64 with NaN, as
+                        // the Series constructor already made them (the frame
+                        // kept int64 with a null; DISC-011).
+                        Column::from_values(promote(scalars)).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?
                     } else if let Ok(tuple) = value.cast::<PyTuple>() {
@@ -22287,7 +22379,7 @@ impl PyDataFrame {
                         } else {
                             detected_nrows = Some(scalars.len());
                         }
-                        Column::from_values(scalars).map_err(|e| {
+                        Column::from_values(promote(scalars)).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?
                     } else if !value.is_instance_of::<pyo3::types::PyString>()
@@ -22309,7 +22401,7 @@ impl PyDataFrame {
                         } else {
                             detected_nrows = Some(scalars.len());
                         }
-                        Column::from_values(scalars).map_err(column_error_to_py)?
+                        Column::from_values(promote(scalars)).map_err(column_error_to_py)?
                     } else {
                         let scalar = py_to_scalar(py, &value)?;
                         let nr = common_labels
@@ -22415,9 +22507,10 @@ impl PyDataFrame {
 
                     let mut col_map = BTreeMap::new();
                     for (i, name) in col_order.iter().enumerate() {
-                        let col = Column::from_values(col_scalars[i].clone()).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
+                        let col =
+                            Column::from_values(promote(col_scalars[i].clone())).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                            })?;
                         col_map.insert(name.clone(), col);
                     }
 
@@ -22459,7 +22552,7 @@ impl PyDataFrame {
                     // map kept only the last (br-frankenpandas-5ihhi).
                     let mut pairs = Vec::with_capacity(num_cols);
                     for (name, scalars) in col_order.iter().zip(col_scalars) {
-                        let col = Column::from_values(scalars).map_err(|e| {
+                        let col = Column::from_values(promote(scalars)).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?;
                         pairs.push((name.clone(), col));
@@ -22495,7 +22588,7 @@ impl PyDataFrame {
                     .unwrap_or_else(|| "0".to_string());
                 let column_order = vec![col_name.clone()];
                 let mut col_map = BTreeMap::new();
-                let col = Column::from_values(scalars)
+                let col = Column::from_values(promote(scalars))
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                 col_map.insert(col_name, col);
 
@@ -26336,11 +26429,16 @@ impl PyDataFrame {
         fill_value: Option<&Bound<'_, PyAny>>,
         suffix: Option<&str>,
     ) -> PyResult<PyDataFrame> {
-        unsupported_params(
-            "DataFrame.shift",
-            &[("freq", freq.is_none()), ("suffix", suffix.is_none())],
-        )?;
+        unsupported_params("DataFrame.shift", &[("suffix", suffix.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        if let Some(freq) = freq {
+            if ax != 0 {
+                return Err(not_implemented("DataFrame.shift(freq=..., axis=1)"));
+            }
+            let index = shift_index_by_freq(self.inner.index(), periods, freq, fill_value)?;
+            let inner = self.inner.with_index(index).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner });
+        }
         let fill_sc = match fill_value {
             Some(fv) => Some(py_to_scalar(fv.py(), fv)?),
             None => None,
@@ -40941,14 +41039,31 @@ fn cut(
                     "cannot cut empty or all-null series",
                 ));
             }
-            if (min_v - max_v).abs() < f64::EPSILON {
-                min_v -= 0.001 * min_v.abs().max(1.0);
-                max_v += 0.001 * max_v.abs().max(1.0);
+            // pandas' bins for an integer count: numpy's linspace from the
+            // min to the max (the last edge exactly the max), then the open
+            // side widened by 0.1% of the range so the extreme value lands
+            // in its bin - the first edge when right-closed, the LAST when
+            // left-closed (the max fell out as NaN with right=False) - or,
+            // for one repeated value, the range padded by 0.1% of it (0.001
+            // at zero).
+            let constant = min_v == max_v;
+            if constant {
+                let pad = |v: f64| if v == 0.0 { 0.001 } else { 0.001 * v.abs() };
+                min_v -= pad(min_v);
+                max_v += pad(max_v);
             }
             let step = (max_v - min_v) / n_bins as f64;
-            let edges: Vec<Scalar> = (0..=n_bins)
-                .map(|i| Scalar::Float64(min_v + i as f64 * step))
-                .collect();
+            let mut edges: Vec<f64> = (0..=n_bins).map(|i| min_v + i as f64 * step).collect();
+            edges[n_bins] = max_v;
+            if !constant {
+                let adj = (max_v - min_v) * 0.001;
+                if right {
+                    edges[0] -= adj;
+                } else {
+                    edges[n_bins] += adj;
+                }
+            }
+            let edges: Vec<Scalar> = edges.into_iter().map(Scalar::Float64).collect();
             fp_frame::cut_bins(
                 &series,
                 &edges,
@@ -50314,12 +50429,12 @@ mod tests {
             .expect("s_vc");
             let py_s_vc = PySeries { inner: s_vc };
             let counts = py_s_vc
-                .value_counts(false, true, false, true)
+                .value_counts(py, false, true, false, None, true)
                 .expect("value_counts default");
             assert_eq!(counts.shape(), (2,));
 
             let counts_norm = py_s_vc
-                .value_counts(true, true, false, true)
+                .value_counts(py, true, true, false, None, true)
                 .expect("value_counts norm");
             assert_eq!(counts_norm.shape(), (2,));
 

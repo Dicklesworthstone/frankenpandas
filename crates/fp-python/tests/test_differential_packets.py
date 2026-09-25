@@ -6738,3 +6738,96 @@ def _slice_and_index_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_SLICE_AND_INDEX_CASES))
 def test_stepped_and_label_slices_and_index_basics_match_pandas(case: str) -> None:
     assert _slice_and_index_outcome(fpd, case) == _slice_and_index_outcome(pd, case), case
+
+
+def _dated(m: Any) -> Any:
+    return m.Series([1, 2], index=m.to_datetime(["2024-01-01", "2024-01-02"]), name="x")
+
+
+def _dtype_values(r: Any) -> Any:
+    """dtype and values, NaN and pd.NA as None (frankenpandas' tolist gives
+    None for a nullable dtype's NA where pandas gives pd.NA - a separate,
+    known divergence; these cases pin the dtype)."""
+    missing = lambda v: v is None or (isinstance(v, float) and math.isnan(v)) or type(v).__name__ == "NAType"  # noqa: E731
+    return (str(r.dtype), [None if missing(v) else v for v in r.tolist()])
+
+
+# DataFrame construction kept int64 with a missing value (dict of lists /
+# tuples / iterables, records, list rows, a flat list) where pandas - and
+# the binding's own Series constructor - give float64 with NaN (DISC-011);
+# value_counts(bins=) raised (and dropna sat in its 4th positional slot);
+# shift(freq=) was refused; pd.cut with an integer bin count skipped the
+# 0.1% range widening outside the default path, so right=False dropped the
+# maximum to NaN and include_lowest printed (0.999, ...] for pandas'
+# (0.995, ...]; a constant series printed (5.0, 5.0]; labels used a fixed 3
+# digits where pandas raises the precision until the edges differ.
+_CONSTRUCT_BIN_SHIFT_CASES = {
+    "frame dict none int": lambda m: _dtype_values(m.DataFrame({"a": [None, 1]})["a"]),
+    "frame dict int none": lambda m: _dtype_values(m.DataFrame({"a": [1, None]})["a"]),
+    "frame dict tuple": lambda m: _dtype_values(m.DataFrame({"a": (1, None)})["a"]),
+    "frame dict generator": lambda m: _dtype_values(m.DataFrame({"a": (x for x in [1, None])})["a"]),
+    "frame records": lambda m: _dtype_values(m.DataFrame([{"a": 1}, {"a": None}])["a"]),
+    "frame records missing key": lambda m: _dtype_values(m.DataFrame([{"a": 1}, {"b": 2}])["a"]),
+    "frame list rows": lambda m: _dtype_values(m.DataFrame([[1, None], [2, 3]], columns=["x", "y"])["y"]),
+    "frame flat list": lambda m: _dtype_values(m.DataFrame([1, None]).iloc[:, 0]),
+    "frame dropna how all": lambda m: _dtype_values(m.DataFrame({"a": [None, 1], "b": [None, None]}).dropna(how="all")["a"]),
+    # NEGATIVE: no missing value stays int64; bool / str with None stay object.
+    "frame no missing": lambda m: _dtype_values(m.DataFrame({"a": [1, 2]})["a"]),
+    "frame bool none": lambda m: _dtype_values(m.DataFrame({"a": [True, None]})["a"]),
+    "frame str none": lambda m: _dtype_values(m.DataFrame({"a": ["x", None]})["a"]),
+    "value_counts bins": lambda m: (lambda r: ([str(i) for i in r.index], r.tolist(), r.name))(m.Series([3, 1, 4, 1, 5]).value_counts(bins=2)),
+    "value_counts bins edges": lambda m: (lambda r: ([str(i) for i in r.index], r.tolist()))(m.Series([3, 1, 4, 1, 5]).value_counts(bins=[0, 2, 10], sort=False)),
+    "value_counts bins normalize": lambda m: (lambda r: ([str(i) for i in r.index], r.tolist()))(m.Series([3, 1, 4, 1, 5]).value_counts(bins=3, normalize=True)),
+    "shift freq hours": lambda m: ([str(t) for t in _dated(m).shift(2, freq="h").index], _dated(m).shift(2, freq="h").tolist(), _dated(m).shift(1, freq="D").name),
+    "shift freq negative": lambda m: [str(t) for t in _dated(m).shift(-1, freq="30min").index],
+    "frame shift freq": lambda m: (lambda d: ([str(t) for t in d.index], d["v"].tolist()))(m.DataFrame({"v": [1, 2]}, index=m.to_datetime(["2024-01-01", "2024-01-02"])).shift(1, freq="D")),
+    "timedelta index shift freq": lambda m: [str(t) for t in m.Series([5, 6], index=m.to_timedelta(["1h", "2h"])).shift(1, freq="h").index],
+    # NEGATIVE: freq on a non-temporal index is pandas' NotImplementedError.
+    "shift freq int index raises": lambda m: m.Series([1, 2]).shift(1, freq="D"),
+    "cut include_lowest int bins": lambda m: m.cut(m.Series([3, 1, 4, 1, 5]), 2, include_lowest=True).astype(str).tolist(),
+    "cut right False keeps max": lambda m: m.cut(m.Series([3, 1, 4, 1, 5]), 3, right=False).astype(str).tolist(),
+    "cut constant": lambda m: m.cut(m.Series([5, 5, 5]), 2).astype(str).tolist(),
+    "cut constant right False": lambda m: m.cut(m.Series([0.5, 0.5]), 2, right=False).astype(str).tolist(),
+    "cut constant zero": lambda m: m.cut(m.Series([0.0, 0.0]), 2).astype(str).tolist(),
+    "cut int edges include_lowest": lambda m: m.cut(m.Series([0, 5, 7]), [0, 5, 10], include_lowest=True).astype(str).tolist(),
+    "cut precision grows": lambda m: m.cut(m.Series([1.0001, 1.0002, 1.0003]), 2).astype(str).tolist(),
+    "qcut precision grows": lambda m: m.qcut(m.Series([1.0001, 1.0002, 1.0003, 1.0004]), 2).astype(str).tolist(),
+    "qcut quartiles": lambda m: m.qcut(m.Series(range(10)), 4).astype(str).tolist(),
+    "cut small fractions": lambda m: m.cut(m.Series([0.001, 0.002, 0.004]), 2).astype(str).tolist(),
+    # shift filled with NaN: int64 -> float64 (it stayed int64 with a null),
+    # a numeric column shifted wholly out -> float64 (object), the nullable
+    # dtypes keep theirs (int64 / float64 / object), groupby shift and a
+    # vacated axis=1 column the same.
+    "shift int": lambda m: _dtype_values(m.Series([1, 2, 3]).shift(1)),
+    "shift int back": lambda m: _dtype_values(m.Series([1, 2]).shift(-1)),
+    "shift int all out": lambda m: _dtype_values(m.Series([1, 2]).shift(5)),
+    "shift Int64": lambda m: _dtype_values(m.Series([1, 2], dtype="Int64").shift(1)),
+    "shift Float64": lambda m: _dtype_values(m.Series([1.5, 2.0], dtype="Float64").shift(1)),
+    "shift boolean": lambda m: _dtype_values(m.Series([True, False], dtype="boolean").shift(1)),
+    "frame shift int": lambda m: _dtype_values(m.DataFrame({"a": [1, 2]}).shift(1)["a"]),
+    "groupby shift int": lambda m: _dtype_values(m.DataFrame({"g": ["x", "x", "y"], "v": [1, 2, 3]}).groupby("g")["v"].shift(1)),
+    "frame groupby shift int": lambda m: _dtype_values(m.DataFrame({"g": ["x", "x", "y"], "v": [1, 2, 3]}).groupby("g").shift(1)["v"]),
+    "shift axis1 vacated": lambda m: (lambda r: ([str(d) for d in r.dtypes], [[None if isinstance(v, float) and math.isnan(v) else v for v in row] for row in r.values.tolist()]))(
+        m.DataFrame({"a": [1, 2], "b": [3, 4], "c": [5, 6]}).shift(-1, axis=1)
+    ),
+    "shift axis1 object edge": lambda m: [str(d) for d in m.DataFrame({"s": ["x", "y"], "a": [1, 2]}).shift(1, axis=1).dtypes],
+    # NEGATIVE: no missing introduced keeps int64; a fill value keeps int64; bool stays object.
+    "shift int zero": lambda m: _dtype_values(m.Series([1, 2]).shift(0)),
+    "shift int fill": lambda m: _dtype_values(m.Series([1, 2]).shift(1, fill_value=0)),
+    "shift bool": lambda m: _dtype_values(m.Series([True, False, True]).shift(1)),
+}
+
+
+def _construct_bin_shift_outcome(m: Any, case: str) -> Any:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        try:
+            return _CONSTRUCT_BIN_SHIFT_CASES[case](m)
+        except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+            return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CONSTRUCT_BIN_SHIFT_CASES))
+def test_null_int_construction_value_count_bins_shift_freq_and_cut_edges_match_pandas(case: str) -> None:
+    assert _construct_bin_shift_outcome(fpd, case) == _construct_bin_shift_outcome(pd, case), case
