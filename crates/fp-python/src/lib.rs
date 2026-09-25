@@ -401,13 +401,48 @@ fn pandas_label_texts(labels: &[IndexLabel]) -> Vec<String> {
         .collect()
 }
 
-/// The rows a repr shows of `len`: all of them, or the first and last 5
-/// when there are more than 60 (pandas' max_rows / min_rows).
-fn pandas_shown_rows(len: usize) -> (Vec<usize>, bool) {
-    if len > 60 {
-        ((0..5).chain(len - 5..len).collect(), true)
-    } else {
-        ((0..len).collect(), false)
+/// pandas' `max_rows` / `min_rows` for the text layouts: the repr's are 60
+/// and 10; `to_string` shows every row unless given them.
+#[derive(Clone, Copy)]
+struct RowLimits {
+    max_rows: Option<usize>,
+    min_rows: Option<usize>,
+}
+
+impl RowLimits {
+    const REPR: Self = Self {
+        max_rows: Some(60),
+        min_rows: Some(10),
+    };
+
+    /// The rows shown of `len`: all of them, or, past `max_rows`, the first
+    /// and last `min(min_rows, max_rows) / 2` (the first alone when that
+    /// is 1), with where the '...' row goes.
+    fn shown(self, len: usize) -> (Vec<usize>, Option<usize>) {
+        match self.max_rows {
+            Some(max_rows) if max_rows > 0 && len > max_rows => {
+                let limit = match self.min_rows {
+                    Some(min_rows) if min_rows > 0 => min_rows.min(max_rows),
+                    _ => max_rows,
+                };
+                if limit == 1 {
+                    (vec![0], Some(1))
+                } else {
+                    let half = limit / 2;
+                    ((0..half).chain(len - half..len).collect(), Some(half))
+                }
+            }
+            _ => ((0..len).collect(), None),
+        }
+    }
+}
+
+/// `cell` as pandas formats it without the leading space it keeps for a
+/// sign, which `to_string(index=False)` drops.
+fn without_leading_space(cell: String) -> String {
+    match cell.strip_prefix(' ') {
+        Some(rest) => rest.to_owned(),
+        None => cell,
     }
 }
 
@@ -426,59 +461,141 @@ fn text_width(text: &String) -> usize {
     text.chars().count()
 }
 
-/// pandas' `repr(series)`; None where this layout does not render the
-/// Series (a row MultiIndex, a non-UTC timezone), which keeps
-/// frankenpandas' own Display.
+/// pandas' `sparsify_labels` over per-level label texts: a label equal to
+/// the one before it, with every outer level equal too, prints blank; the
+/// innermost level always prints.
+fn sparsify_level_texts(levels: &mut [Vec<String>]) {
+    let Some(inner) = levels.len().checked_sub(1) else {
+        return;
+    };
+    let count = levels.first().map_or(0, Vec::len);
+    // Bottom-up, so each row is compared with the unblanked row above it.
+    for row in (1..count).rev() {
+        for texts in levels.iter_mut().take(inner) {
+            match (texts.get(row - 1), texts.get(row)) {
+                (Some(above), Some(here)) if above == here => {}
+                _ => break,
+            }
+            if let Some(here) = texts.get_mut(row) {
+                here.clear();
+            }
+        }
+    }
+}
+
+/// An index's printed texts, one list per level, and its level names (None
+/// when no level is named).
+type LevelTexts = (Vec<Vec<String>>, Option<Vec<String>>);
+
+/// The texts pandas prints for a row MultiIndex at `rows`: one list per
+/// level, sparsified, and the level names when any level is named ("" for
+/// an unnamed one).
+fn pandas_multiindex_texts(multi: &fp_index::MultiIndex, rows: &[usize]) -> Option<LevelTexts> {
+    let mut levels = Vec::with_capacity(multi.nlevels());
+    for level in 0..multi.nlevels() {
+        let values = multi.get_level_values(level).ok()?;
+        let shown: Vec<IndexLabel> = rows
+            .iter()
+            .map(|&row| values.labels().get(row).cloned())
+            .collect::<Option<_>>()?;
+        levels.push(pandas_label_texts(&shown));
+    }
+    sparsify_level_texts(&mut levels);
+    let names = multi.names().iter().any(Option::is_some).then(|| {
+        multi
+            .names()
+            .iter()
+            .map(|name| name.clone().unwrap_or_default())
+            .collect()
+    });
+    Some((levels, names))
+}
+
+/// pandas' `adjoin(space, *lists)`: the lists side by side, each padded
+/// left-justified to its widest text with `space` blanks after it (the last
+/// only to its width).
+fn adjoin_left(space: usize, lists: &[Vec<String>]) -> Vec<String> {
+    let rows = lists.iter().map(Vec::len).max().unwrap_or(0);
+    let widths: Vec<usize> = lists
+        .iter()
+        .enumerate()
+        .map(|(position, list)| {
+            let width = list.iter().map(text_width).max().unwrap_or(0);
+            if position + 1 < lists.len() {
+                width + space
+            } else {
+                width
+            }
+        })
+        .collect();
+    (0..rows)
+        .map(|row| {
+            lists
+                .iter()
+                .zip(&widths)
+                .map(|(list, &width)| {
+                    let text = list.get(row).map_or("", String::as_str);
+                    format!("{text:<width$}")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Which footer parts pandas' Series layout prints: the repr prints the
+/// name and dtype, and the length only when it truncates (`length: None`);
+/// `to_string` prints none of them unless asked.
+#[derive(Clone, Copy)]
+struct SeriesFooter {
+    name: bool,
+    dtype: bool,
+    length: Option<bool>,
+}
+
+impl SeriesFooter {
+    const REPR: Self = Self {
+        name: true,
+        dtype: true,
+        length: None,
+    };
+}
+
+/// pandas' `repr(series)` (see [`pandas_series_text`]); None where the
+/// layout does not render the Series, which keeps frankenpandas' own
+/// Display.
 fn pandas_series_repr(series: &Series) -> Option<String> {
+    pandas_series_text(series, RowLimits::REPR, true, true, SeriesFooter::REPR)
+}
+
+/// pandas' Series text layout (`SeriesFormatter`), shared by the repr and
+/// `to_string`: the index and the values three blanks apart, a row
+/// MultiIndex as one sparsified column per level two blanks apart under a
+/// line of the level names when any is named (`show_header`; printed even
+/// without the index, as pandas does), `limits` rows, the chosen footer
+/// parts. Without the index the values lose their sign space, as pandas'
+/// `leading_space=index`. None for a column the layout does not render (a
+/// non-UTC timezone).
+fn pandas_series_text(
+    series: &Series,
+    limits: RowLimits,
+    show_index: bool,
+    show_header: bool,
+    parts: SeriesFooter,
+) -> Option<String> {
     let index = series.index();
-    if index.row_multiindex().is_some() {
-        return None;
-    }
     let column = series.column();
-    let dtype = column_pandas_dtype_name(column);
-    let name = (!series.name().is_empty()).then(|| series.name().to_owned());
-    if series.is_empty() {
-        let named = name.map_or_else(String::new, |name| format!("Name: {name}, "));
-        return Some(format!("Series([], {named}dtype: {dtype})"));
-    }
-    let (rows, truncated) = pandas_shown_rows(series.len());
-    let mut cells = pandas_cells(&column.take_positions(&rows))?;
-    let width = cells.iter().map(text_width).max().unwrap_or(0);
-    for cell in &mut cells {
-        *cell = format!("{cell:>width$}");
-    }
-    let shown: Vec<IndexLabel> = rows
-        .iter()
-        .map(|&row| index.labels()[row].clone())
-        .collect();
-    let mut labels = pandas_label_texts(&shown);
-    if truncated {
-        let dots = if width > 3 { "..." } else { ".." };
-        cells.insert(5, python_center(dots, width));
-        labels.insert(5, String::new());
-    }
-    let label_width = labels.iter().map(text_width).max().unwrap_or(0) + 3;
-    let body: Vec<String> = labels
-        .iter()
-        .zip(&cells)
-        .map(|(label, cell)| format!("{label:<label_width$}{cell}"))
-        .collect();
+    let (rows, dots_at) = limits.shown(series.len());
     let mut footer = Vec::new();
-    if let Some(name) = &name {
-        footer.push(format!("Name: {name}"));
+    if parts.name && !series.name().is_empty() {
+        footer.push(format!("Name: {}", series.name()));
     }
-    if truncated {
+    if parts.length.unwrap_or(dots_at.is_some()) {
         footer.push(format!("Length: {}", series.len()));
     }
-    footer.push(format!("dtype: {dtype}"));
-    let mut text = String::new();
-    if let Some(index_name) = index.name() {
-        text.push_str(index_name);
-        text.push('\n');
+    if parts.dtype {
+        footer.push(format!("dtype: {}", column_pandas_dtype_name(column)));
     }
-    text.push_str(&body.join("\n"));
-    text.push('\n');
-    text.push_str(&footer.join(", "));
+    let mut footer = footer.join(", ");
     if let Some(meta) = column.categorical() {
         let shown: Vec<String> = meta
             .categories
@@ -496,89 +613,265 @@ fn pandas_series_repr(series: &Series) -> Option<String> {
                 .map_or_else(|| "object".to_owned(), |c| pandas_dtype_name(&c.dtype()))
         };
         let joiner = if meta.ordered { " < " } else { ", " };
-        text.push_str(&format!(
-            "\nCategories ({}, {kind}): [{}]",
+        if !footer.is_empty() {
+            footer.push('\n');
+        }
+        footer.push_str(&format!(
+            "Categories ({}, {kind}): [{}]",
             meta.categories.len(),
             shown.join(joiner)
         ));
     }
+    if series.is_empty() {
+        return Some(format!("Series([], {footer})"));
+    }
+    let mut cells = pandas_cells(&column.take_positions(&rows))?;
+    if !show_index {
+        cells = cells.into_iter().map(without_leading_space).collect();
+    }
+    let width = cells.iter().map(text_width).max().unwrap_or(0);
+    for cell in &mut cells {
+        *cell = format!("{cell:>width$}");
+    }
+    // The header line: a flat index's name as is, or a MultiIndex's level
+    // names laid out over its level columns (which the names widen).
+    let (mut labels, header) = match index.row_multiindex() {
+        Some(multi) => {
+            let (levels, names) = pandas_multiindex_texts(multi, &rows)?;
+            let lists: Vec<Vec<String>> = levels
+                .into_iter()
+                .enumerate()
+                .map(|(level, mut texts)| {
+                    let name = names.as_ref().map_or_else(String::new, |names| {
+                        names.get(level).cloned().unwrap_or_default()
+                    });
+                    texts.insert(0, name);
+                    texts
+                })
+                .collect();
+            let mut lines = adjoin_left(2, &lists);
+            let names_line = lines.remove(0);
+            (lines, names.map(|_| names_line))
+        }
+        None => {
+            let shown: Vec<IndexLabel> = rows
+                .iter()
+                .map(|&row| index.labels()[row].clone())
+                .collect();
+            (pandas_label_texts(&shown), index.name().map(str::to_owned))
+        }
+    };
+    if let Some(at) = dots_at {
+        let dots = if width > 3 { "..." } else { ".." };
+        cells.insert(at, python_center(dots, width));
+        labels.insert(at, String::new());
+    }
+    let body: Vec<String> = if show_index {
+        let label_width = labels.iter().map(text_width).max().unwrap_or(0) + 3;
+        labels
+            .iter()
+            .zip(&cells)
+            .map(|(label, cell)| format!("{label:<label_width$}{cell}"))
+            .collect()
+    } else {
+        cells
+    };
+    let mut text = String::new();
+    if let Some(header) = header.filter(|_| show_header) {
+        text.push_str(&header);
+        text.push('\n');
+    }
+    text.push_str(&body.join("\n"));
+    if !footer.is_empty() {
+        text.push('\n');
+        text.push_str(&footer);
+    }
     Some(text)
 }
 
-/// pandas' `repr(df)`; None where this layout does not render the frame
-/// (a row or column MultiIndex, a non-UTC timezone). More than 20 columns
-/// are all shown (pandas truncates them to the display width).
+/// The texts of a MultiIndex's entries as pandas lists them in an empty
+/// frame's repr, "(a, 1)".
+fn pandas_multiindex_tuples(multi: &fp_index::MultiIndex) -> Option<Vec<String>> {
+    let levels: Vec<Vec<String>> = (0..multi.nlevels())
+        .map(|level| {
+            multi
+                .get_level_values(level)
+                .ok()
+                .map(|values| pandas_label_texts(values.labels()))
+        })
+        .collect::<Option<_>>()?;
+    Some(
+        (0..multi.len())
+            .map(|entry| {
+                let parts: Vec<&str> = levels.iter().map(|texts| texts[entry].as_str()).collect();
+                format!("({})", parts.join(", "))
+            })
+            .collect(),
+    )
+}
+
+/// pandas' `repr(df)` (see [`pandas_frame_text`]); None where the layout
+/// does not render the frame, which keeps frankenpandas' own Display.
 fn pandas_frame_repr(frame: &DataFrame) -> Option<String> {
-    if frame.row_multiindex().is_some() || frame.columns_multiindex().is_some() {
-        return None;
-    }
+    pandas_frame_text(frame, RowLimits::REPR, true, None)
+}
+
+/// pandas' DataFrame text layout (`DataFrameFormatter`), shared by the repr
+/// and `to_string`. A row MultiIndex prints one sparsified column per
+/// level, one blank apart, over a line of the level names when any is
+/// named; a column MultiIndex prints one header line per level, sparsified
+/// across the columns, with the column-axis level names at the left when
+/// any is named. `limits` rows; the "[n rows x m columns]" line when
+/// `show_dimensions` (None: when truncated, as the repr). Without the index
+/// the cells lose their sign space, as pandas' `leading_space=index`. None
+/// for a column the layout does not render (a non-UTC timezone). More than
+/// 20 columns are all shown (pandas truncates them to the display width).
+fn pandas_frame_text(
+    frame: &DataFrame,
+    limits: RowLimits,
+    show_index: bool,
+    show_dimensions: Option<bool>,
+) -> Option<String> {
     let (len, width) = frame.shape();
     let names: Vec<String> = (0..width)
         .filter_map(|position| frame.column_name_at(position))
         .collect();
+    let column_multi = frame.columns_multiindex();
     if len == 0 || width == 0 {
-        let labels = pandas_label_texts(frame.index().labels());
+        let labels = match frame.row_multiindex() {
+            Some(multi) => pandas_multiindex_tuples(multi)?,
+            None => pandas_label_texts(frame.index().labels()),
+        };
+        let columns = match column_multi {
+            Some(multi) => pandas_multiindex_tuples(multi)?,
+            None => names.clone(),
+        };
         return Some(format!(
             "Empty DataFrame\nColumns: [{}]\nIndex: [{}]",
-            names.join(", "),
+            columns.join(", "),
             labels.join(", ")
         ));
     }
-    let (rows, truncated) = pandas_shown_rows(len);
-    let index_name = frame.index().name();
-    let blank_rows = usize::from(index_name.is_some());
+    let (rows, dots_at) = limits.shown(len);
+    // The column headers, one text per column-axis level for each column,
+    // and what the index column shows beside them.
+    let (headers, corner): (Vec<Vec<String>>, Vec<String>) = match column_multi {
+        Some(multi) => {
+            let mut levels: Vec<Vec<String>> = (0..multi.nlevels())
+                .map(|level| {
+                    multi
+                        .get_level_values(level)
+                        .ok()
+                        .map(|values| pandas_label_texts(values.labels()))
+                })
+                .collect::<Option<_>>()?;
+            if levels.iter().any(|texts| texts.len() != width) {
+                return None;
+            }
+            sparsify_level_texts(&mut levels);
+            let headers = (0..width)
+                .map(|column| levels.iter().map(|texts| texts[column].clone()).collect())
+                .collect();
+            let corner = if multi.names().iter().any(Option::is_some) {
+                multi
+                    .names()
+                    .iter()
+                    .map(|name| name.clone().unwrap_or_default())
+                    .collect()
+            } else {
+                vec![String::new(); multi.nlevels()]
+            };
+            (headers, corner)
+        }
+        None => {
+            let mut headers = Vec::with_capacity(width);
+            for (position, name) in names.iter().enumerate() {
+                let column = frame.column_at(position)?;
+                let dtype = column.dtype();
+                let numeric = matches!(
+                    dtype,
+                    DType::Int64
+                        | DType::Float64
+                        | DType::Bool
+                        | DType::Int64Nullable
+                        | DType::Float64Nullable
+                        | DType::BoolNullable
+                ) && !(dtype == DType::Bool && column.has_any_missing());
+                headers.push(vec![if numeric {
+                    format!(" {name}")
+                } else {
+                    name.clone()
+                }]);
+            }
+            (headers, vec![String::new()])
+        }
+    };
+    let header_rows = corner.len();
+    let (index_levels, row_names) = match frame.row_multiindex() {
+        Some(multi) => pandas_multiindex_texts(multi, &rows)?,
+        None => {
+            let shown: Vec<IndexLabel> = rows
+                .iter()
+                .map(|&row| frame.index().labels()[row].clone())
+                .collect();
+            (
+                vec![pandas_label_texts(&shown)],
+                frame.index().name().map(|name| vec![name.to_owned()]),
+            )
+        }
+    };
+    let blank_rows = usize::from(show_index && row_names.is_some());
     let mut strcols: Vec<Vec<String>> = Vec::with_capacity(width + 1);
-    let shown: Vec<IndexLabel> = rows
-        .iter()
-        .map(|&row| frame.index().labels()[row].clone())
-        .collect();
-    let mut index_col = vec![String::new()];
-    if let Some(name) = index_name {
-        index_col.push(name.to_owned());
+    if show_index {
+        let lists: Vec<Vec<String>> = index_levels
+            .into_iter()
+            .enumerate()
+            .map(|(level, mut texts)| {
+                if let Some(row_names) = &row_names {
+                    texts.insert(0, row_names.get(level).cloned().unwrap_or_default());
+                }
+                texts
+            })
+            .collect();
+        let mut index_col = corner;
+        index_col.extend(adjoin_left(1, &lists));
+        let index_width = index_col.iter().map(text_width).max().unwrap_or(0);
+        let mut index_col: Vec<String> = index_col
+            .iter()
+            .map(|cell| format!("{cell:<index_width$}"))
+            .collect();
+        if let Some(at) = dots_at {
+            let dots = if index_width > 3 { "..." } else { ".." };
+            index_col.insert(
+                header_rows + blank_rows + at,
+                format!("{dots:<index_width$}"),
+            );
+        }
+        strcols.push(index_col);
     }
-    index_col.extend(pandas_label_texts(&shown));
-    let index_width = index_col.iter().map(text_width).max().unwrap_or(0);
-    let mut index_col: Vec<String> = index_col
-        .iter()
-        .map(|cell| format!("{cell:<index_width$}"))
-        .collect();
-    if truncated {
-        let dots = if index_width > 3 { "..." } else { ".." };
-        index_col.insert(1 + blank_rows + 5, format!("{dots:<index_width$}"));
-    }
-    strcols.push(index_col);
-    for (position, name) in names.iter().enumerate() {
+    for (position, header) in headers.iter().enumerate() {
         let column = frame.column_at(position)?;
-        let dtype = column.dtype();
-        let numeric = matches!(
-            dtype,
-            DType::Int64
-                | DType::Float64
-                | DType::Bool
-                | DType::Int64Nullable
-                | DType::Float64Nullable
-                | DType::BoolNullable
-        ) && !(dtype == DType::Bool && column.has_any_missing());
-        let header = if numeric {
-            format!(" {name}")
-        } else {
-            name.clone()
-        };
-        let cells = pandas_cells(&column.take_positions(&rows))?;
+        let mut cells = pandas_cells(&column.take_positions(&rows))?;
+        if !show_index {
+            cells = cells.into_iter().map(without_leading_space).collect();
+        }
         let col_width = cells
             .iter()
+            .chain(header)
             .map(text_width)
-            .chain(std::iter::once(header.chars().count()))
             .max()
             .unwrap_or(0);
-        let mut strcol = vec![format!("{header:>col_width$}")];
+        let mut strcol: Vec<String> = header
+            .iter()
+            .map(|text| format!("{text:>col_width$}"))
+            .collect();
         if blank_rows == 1 {
             strcol.push(" ".repeat(col_width));
         }
         strcol.extend(cells.iter().map(|cell| format!("{cell:>col_width$}")));
-        if truncated {
+        if let Some(at) = dots_at {
             let dots = if col_width > 3 { "..." } else { ".." };
-            strcol.insert(1 + blank_rows + 5, format!("{dots:>col_width$}"));
+            strcol.insert(header_rows + blank_rows + at, format!("{dots:>col_width$}"));
         }
         strcols.push(strcol);
     }
@@ -599,7 +892,7 @@ fn pandas_frame_repr(frame: &DataFrame) -> Option<String> {
             }
         }
     }
-    if truncated {
+    if show_dimensions.unwrap_or(dots_at.is_some()) {
         text.push_str(&format!("\n\n[{len} rows x {width} columns]"));
     }
     Some(text)
@@ -2541,6 +2834,30 @@ fn axis_length_error_to_py(err: FrameError) -> PyErr {
 /// The row axis `obj.index = value` sets, as pandas builds it: an Index
 /// keeps its labels and name, a Series gives its values and name, a list or
 /// other iterable its items, unnamed.
+/// `frame` with `multi` as its column axis; the storage keys join each
+/// column's levels with '_'.
+fn frame_with_column_multiindex(
+    frame: &DataFrame,
+    multi: fp_index::MultiIndex,
+) -> PyResult<DataFrame> {
+    let keys = (0..multi.len())
+        .map(|position| {
+            let labels = multi.get_tuple(position).unwrap_or_default();
+            IndexLabel::Utf8(
+                labels
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("_"),
+            )
+        })
+        .collect();
+    frame
+        .set_axis(keys, 1)
+        .and_then(|frame| frame.with_columns_multiindex(Some(multi)))
+        .map_err(axis_length_error_to_py)
+}
+
 fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
     if value.is_instance_of::<pyo3::types::PyString>() {
         return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
@@ -14087,6 +14404,20 @@ impl PySeries {
             .map_err(frame_error_to_py)?,
             None => series,
         };
+        // A MultiIndex given as index= stays one (only its flattened labels
+        // were kept; fvsao.34).
+        let series = match index.and_then(|index| index.extract::<PyRef<'_, PyMultiIndex>>().ok()) {
+            Some(multi) => {
+                let index = series
+                    .index()
+                    .clone()
+                    .with_row_multiindex(multi.inner.clone())
+                    .map_err(index_error_to_py)?;
+                Series::new(series.name(), index, series.column().clone())
+                    .map_err(frame_error_to_py)?
+            }
+            None => series,
+        };
         let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) else {
             return Ok(PySeries { inner: series });
         };
@@ -18486,8 +18817,11 @@ impl PySeries {
         )
     }
 
-    /// pandas' `Series.to_string` keywords; the formatting keywords are not
-    /// implemented yet and raise instead of being dropped (fvsao.5).
+    /// pandas' `Series.to_string`: the repr's layout (see
+    /// [`pandas_series_text`]) with every row unless `max_rows`/`min_rows`
+    /// truncate, and only the footer parts asked for. It printed
+    /// frankenpandas' own Display and refused every keyword (fvsao.34);
+    /// `na_rep` and `float_format` still raise instead of being dropped.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (buf=None, na_rep="NaN", float_format=None, header=true, index=true, length=false, dtype=false, name=false, max_rows=None, min_rows=None))]
     fn to_string(
@@ -18508,16 +18842,21 @@ impl PySeries {
             &[
                 ("na_rep", na_rep == "NaN"),
                 ("float_format", float_format.is_none()),
-                ("header", header),
-                ("index", index),
-                ("length", !length),
-                ("dtype", !dtype),
-                ("name", !name),
-                ("max_rows", max_rows.is_none()),
-                ("min_rows", min_rows.is_none()),
             ],
         )?;
-        write_text_target(buf, self.inner.to_string(), false)
+        let text = pandas_series_text(
+            &self.inner,
+            RowLimits { max_rows, min_rows },
+            index,
+            header,
+            SeriesFooter {
+                name,
+                dtype,
+                length: Some(length),
+            },
+        )
+        .unwrap_or_else(|| self.inner.to_string());
+        write_text_target(buf, text, false)
     }
 
     /// A frankenpandas index is never a PeriodIndex yet (pandas raises
@@ -21253,6 +21592,46 @@ impl PyDataFrame {
             }
             None => built.inner,
         };
+        // A MultiIndex given as index= or columns= stays one, and a dict
+        // keyed by tuples makes a MultiIndex column axis, as pandas' (only
+        // the flattened labels were kept; fvsao.34).
+        let built = match index.and_then(|index| index.extract::<PyRef<'_, PyMultiIndex>>().ok()) {
+            Some(multi) => built
+                .with_row_multiindex(multi.inner.clone())
+                .map_err(frame_error_to_py)?,
+            None => built,
+        };
+        let column_multi = match columns {
+            Some(columns) => columns
+                .extract::<PyRef<'_, PyMultiIndex>>()
+                .ok()
+                .map(|multi| multi.inner.clone()),
+            None => match data.map(|data| data.cast::<PyDict>()) {
+                Some(Ok(dict))
+                    if !dict.is_empty()
+                        && dict
+                            .keys()
+                            .iter()
+                            .all(|key| key.is_instance_of::<PyTuple>()) =>
+                {
+                    let tuples = dict
+                        .keys()
+                        .iter()
+                        .map(|key| {
+                            key.try_iter()?
+                                .map(|label| py_to_index_label(&label?))
+                                .collect()
+                        })
+                        .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
+                    Some(fp_index::MultiIndex::from_tuples(tuples).map_err(index_error_to_py)?)
+                }
+                _ => None,
+            },
+        };
+        let built = match column_multi {
+            Some(multi) => frame_with_column_multiindex(&built, multi)?,
+            None => built,
+        };
         // dtype= casts every column once built, as the Series constructor
         // does; object keeps the values. The constructor took no dtype=
         // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.22).
@@ -21333,30 +21712,23 @@ impl PyDataFrame {
                 .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
             fp_index::MultiIndex::from_tuples(tuples).map_err(index_error_to_py)?
         };
-        let keys = (0..multi.len())
-            .map(|position| {
-                let labels = multi.get_tuple(position).unwrap_or_default();
-                IndexLabel::Utf8(
-                    labels
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("_"),
-                )
-            })
-            .collect();
-        self.inner = self
-            .inner
-            .set_axis(keys, 1)
-            .and_then(|frame| frame.with_columns_multiindex(Some(multi)))
-            .map_err(axis_length_error_to_py)?;
+        self.inner = frame_with_column_multiindex(&self.inner, multi)?;
         Ok(())
     }
 
     /// `df.index = labels`: a new row axis, labels and name, as pandas'
-    /// (a Series gives its values and name). It raised AttributeError.
+    /// (a Series gives its values and name; a MultiIndex its levels). It
+    /// raised AttributeError.
     #[setter(index)]
     fn assign_index(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        if let Ok(multi) = value.extract::<PyRef<'_, PyMultiIndex>>() {
+            self.inner = self
+                .inner
+                .with_index(multi.inner.to_flat_index(", "))
+                .and_then(|frame| frame.with_row_multiindex(multi.inner.clone()))
+                .map_err(axis_length_error_to_py)?;
+            return Ok(());
+        }
         self.inner = self
             .inner
             .with_index(index_from_axis_value(value)?)
@@ -24481,10 +24853,50 @@ impl PyDataFrame {
         write_text_target(buf, text, mode.starts_with('a'))
     }
 
-    /// Render the DataFrame as a plain-text table (pandas `DataFrame.to_string`).
-    #[pyo3(signature = (index=true))]
-    fn to_string(&self, index: bool) -> String {
-        self.inner.to_string_table(index)
+    /// pandas' `DataFrame.to_string`: the repr's layout (see
+    /// [`pandas_frame_text`]) over `columns`, every row unless
+    /// `max_rows`/`min_rows` truncate, the dimensions line per
+    /// `show_dimensions` (True, False or "truncate"), written to `buf` or
+    /// returned. It printed a different table (no index names, its own float
+    /// widths) and took only `index` (fvsao.34).
+    #[pyo3(signature = (buf=None, columns=None, index=true, max_rows=None, min_rows=None, show_dimensions=None))]
+    fn to_string(
+        &self,
+        buf: Option<&Bound<'_, PyAny>>,
+        columns: Option<Vec<String>>,
+        index: bool,
+        max_rows: Option<usize>,
+        min_rows: Option<usize>,
+        show_dimensions: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<String>> {
+        let show_dimensions = match show_dimensions {
+            None => Some(false),
+            Some(value)
+                if value
+                    .extract::<String>()
+                    .is_ok_and(|text| text == "truncate") =>
+            {
+                None
+            }
+            Some(value) => Some(value.is_truthy()?),
+        };
+        let frame = match &columns {
+            Some(columns) => {
+                let names: Vec<&str> = columns.iter().map(String::as_str).collect();
+                self.inner
+                    .select_columns(&names)
+                    .map_err(frame_error_to_py)?
+            }
+            None => self.inner.clone(),
+        };
+        let text = pandas_frame_text(
+            &frame,
+            RowLimits { max_rows, min_rows },
+            index,
+            show_dimensions,
+        )
+        .unwrap_or_else(|| frame.to_string_table(index));
+        write_text_target(buf, text, false)
     }
 
     /// Return a chainable Styler for HTML formatting (pandas `DataFrame.style`).
@@ -27474,7 +27886,8 @@ impl PyDataFrame {
             .and_then(|name| stacked.column(name))
             .ok_or_else(|| not_implemented("stack of a frame without columns"))?;
         let index = self.inner.index();
-        let row_levels: Vec<Vec<IndexLabel>> = match index.row_multiindex() {
+        let row_multi = self.inner.row_multiindex();
+        let row_levels: Vec<Vec<IndexLabel>> = match row_multi {
             Some(multi) => (0..multi.nlevels())
                 .map(|lvl| {
                     multi
@@ -27485,7 +27898,7 @@ impl PyDataFrame {
                 .collect::<PyResult<_>>()?,
             None => vec![index.labels().to_vec()],
         };
-        let mut names: Vec<Option<String>> = match index.row_multiindex() {
+        let mut names: Vec<Option<String>> = match row_multi {
             Some(multi) => multi.names().to_vec(),
             None => vec![index.name().map(str::to_owned)],
         };

@@ -5954,3 +5954,75 @@ def test_stack_and_date_range_deprecations_warn_like_pandas() -> None:
             want = got
         else:
             assert got == want
+
+
+def _mi_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {"a": ["x", "x", "y", "y"], "b": [1, 2, 1, 2], "v": [1.0, 2.5, 3.0, None], "w": [4, 5, 6, 7]}
+    )
+
+
+def _mi_index(m: Any) -> Any:
+    return m.MultiIndex.from_tuples([("x", 1), ("x", 22), ("yy", 1), ("x", 1)], names=["k", None])
+
+
+def _mi_assigned_index(m: Any) -> Any:
+    frame = m.DataFrame({"v": [1, 2]})
+    frame.index = m.MultiIndex.from_tuples([("p", 1), ("p", 2)], names=["g", "i"])
+    return frame
+
+
+# fvsao.34: a row or column MultiIndex fell out of pandas' repr layout into
+# frankenpandas' Display ('x|p' labels, '[3 rows x 2 columns]', dtype Int64);
+# the constructors dropped a MultiIndex index=/columns= to flat labels; and
+# to_string printed a different table.
+_MULTIINDEX_TEXT_CASES = {
+    "groupby two keys frame": lambda m: repr(_mi_frame(m).groupby(["a", "b"]).sum()),
+    "groupby two keys series": lambda m: repr(_mi_frame(m).groupby(["a", "b"])["w"].sum()),
+    "groupby agg list column MultiIndex": lambda m: repr(_mi_frame(m).groupby("a")[["v", "w"]].agg(["sum", "mean"])),
+    "groupby agg dict of lists": lambda m: repr(_mi_frame(m).groupby("a").agg({"v": ["sum", "max"], "w": ["min"]})),
+    "set_index two columns": lambda m: repr(_mi_frame(m).set_index(["a", "b"])),
+    "stack": lambda m: repr(m.DataFrame({"p": [1, 2], "q": [3.0, None]}, index=m.Index(["r0", "r1"], name="rid")).stack()),
+    "series MultiIndex with a NaN value": lambda m: repr(m.Series([1.5, 2.0, None, 4.0], index=_mi_index(m), name="v")),
+    "series three levels": lambda m: repr(
+        m.Series([1, 2, 3], index=m.MultiIndex.from_tuples([("a", "b", 1), ("a", "b", 2), ("a", "c", 1)], names=["l0", "l1", "l2"]))
+    ),
+    "frame row MultiIndex": lambda m: repr(m.DataFrame({"a": [1, 2, 3, 4], "bb": ["p", "q", "r", "s"]}, index=_mi_index(m))),
+    "frame column MultiIndex named": lambda m: repr(
+        m.DataFrame(
+            [[1, 2]],
+            columns=m.MultiIndex.from_tuples([("a", "b"), ("a", "c")], names=["top", "sub"]),
+            index=m.Index(["r"], name="row"),
+        )
+    ),
+    "frame tuple-keyed dict": lambda m: repr(m.DataFrame({("x", "p"): [1, 2], ("x", "q"): [3.5, 4.0], ("y", "p"): ["s", "t"]})),
+    "float and bool levels": lambda m: repr(
+        m.Series([1, 2, 3], index=m.MultiIndex.from_tuples([(1.5, True), (2.0, False), (2.0, True)], names=["f", "flag"]))
+    ),
+    "truncated series": lambda m: repr(m.Series(range(100), index=m.MultiIndex.from_product([list("ab"), range(50)]))),
+    "truncated frame": lambda m: repr(
+        m.DataFrame({"v": range(100)}, index=m.MultiIndex.from_product([list("ab"), range(50)], names=["g", "i"]))
+    ),
+    "empty frame MultiIndex": lambda m: repr(m.DataFrame({"a": []}, index=m.MultiIndex.from_tuples([], names=["x", "y"]))),
+    "no columns MultiIndex": lambda m: repr(m.DataFrame(index=m.MultiIndex.from_tuples([("x", 1), ("y", 2)]))),
+    "index setter MultiIndex": lambda m: repr(_mi_assigned_index(m)),
+    # NEGATIVE: outer labels that do not repeat blank nothing.
+    "no repeated outer labels": lambda m: repr(m.Series([1, 2], index=m.MultiIndex.from_tuples([("a", 1), ("b", 2)]))),
+    "frame to_string": lambda m: _mi_frame(m).set_index("a").to_string(),
+    "frame to_string index False": lambda m: _mi_frame(m).to_string(index=False),
+    "frame to_string MultiIndex": lambda m: _mi_frame(m).set_index(["a", "b"]).to_string(),
+    "frame to_string all rows": lambda m: m.DataFrame({"v": range(70)}).to_string(),
+    "frame to_string max_rows": lambda m: m.DataFrame({"v": range(10)}).to_string(max_rows=4),
+    "frame to_string show_dimensions": lambda m: _mi_frame(m).to_string(show_dimensions=True),
+    "frame to_string columns": lambda m: _mi_frame(m).to_string(columns=["w", "a"]),
+    "series to_string": lambda m: m.Series([1.5, 2.0], index=["a", "b"], name="v").to_string(),
+    "series to_string footer": lambda m: m.Series([1.5, 2.0], index=["a", "b"], name="v").to_string(name=True, dtype=True, length=True),
+    "series to_string index False": lambda m: m.Series([1.5, -2.0], name="v").to_string(index=False),
+    "series to_string MultiIndex": lambda m: _mi_frame(m).groupby(["a", "b"])["w"].sum().to_string(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MULTIINDEX_TEXT_CASES))
+def test_multiindex_repr_and_to_string_match_pandas(case: str) -> None:
+    assert _MULTIINDEX_TEXT_CASES[case](fpd) == _MULTIINDEX_TEXT_CASES[case](pd), case
