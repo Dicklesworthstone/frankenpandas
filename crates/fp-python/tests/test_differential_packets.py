@@ -5112,3 +5112,56 @@ def test_values_and_to_numpy_are_numpy_arrays_like_pandas() -> None:
         a = s.to_numpy(copy=True)
         a[0] = 99
         assert s.tolist() == [1, 2, 3]
+
+
+_REPR_CASES = {
+    "series int": lambda m: m.Series([1, 2, 3]),
+    "series named float with gap": lambda m: m.Series([1.5, None], name="v"),
+    "series str index": lambda m: m.Series(["a", "bb"], index=["x", "y"]),
+    "series index name": lambda m: m.Series([1, 2], index=m.Index(["a", "b"], name="k")),
+    "floats mixed decimals": lambda m: m.Series([1.0, 2.25, 3.5]),
+    "floats integral": lambda m: m.Series([1.0, 2.0]),
+    "floats big -> scientific": lambda m: m.Series([123456789.123, 1.5]),
+    "floats tiny": lambda m: m.Series([0.000012345, 1.0]),
+    "floats tinier -> scientific": lambda m: m.Series([0.0000001234, 1.0]),
+    "floats all NaN": lambda m: m.Series([np.nan, np.nan]),
+    "negative floats": lambda m: m.Series([-1.5, 2.0]),
+    "ints": lambda m: m.Series([1, -20, 300]),
+    "bools": lambda m: m.Series([True, False]),
+    "object None and NaN": lambda m: m.Series(["a", None, np.nan]),
+    "datetimes": lambda m: m.Series(m.to_datetime(["2024-01-01 00:00:00", "2024-01-02 03:04:05", None])),
+    "dates": lambda m: m.Series(m.to_datetime(["2024-01-01", None])),
+    "datetime millis": lambda m: m.Series(m.to_datetime(["2024-01-01 00:00:00.500", "2024-01-01 00:00:01.000"])),
+    "timedeltas": lambda m: m.Series(m.to_timedelta(["1h", "2 days 3h", None])),
+    "whole-day timedeltas": lambda m: m.Series(m.to_timedelta(["1 day", "2 days"])),
+    "long (truncated)": lambda m: m.Series(range(70)),
+    "long floats (truncated)": lambda m: m.Series([i / 4 for i in range(70)]),
+    "nullable Int64": lambda m: m.Series([1, None], dtype="Int64"),
+    "category": lambda m: m.Series(["a", "b", "a"], dtype="category"),
+    "empty": lambda m: m.Series([], dtype="float64"),
+    "empty named": lambda m: m.Series([], dtype="int64", name="v"),
+    "unicode": lambda m: m.Series(["é", "日本"]),
+    "float index": lambda m: m.Series([1, 2], index=[1.5, 2.0]),
+    "datetime index": lambda m: m.Series([1, 2], index=m.to_datetime(["2024-01-01", "2024-01-02"])),
+    "frame": lambda m: m.DataFrame({"a": [1, 2], "b": [1.5, None], "s": ["x", "yy"]}),
+    "frame index name": lambda m: m.DataFrame({"a": [1, 2]}, index=m.Index(["p", "q"], name="k")),
+    "frame renamed axis": lambda m: m.DataFrame({"a": [1, 2]}).rename_axis("k"),
+    "empty frame": lambda m: m.DataFrame(),
+    "empty frame with columns": lambda m: m.DataFrame({"a": [], "b": []}),
+    "frame without columns": lambda m: m.DataFrame(index=[0, 1, 2]),
+    "frame long (truncated)": lambda m: m.DataFrame({"a": range(70), "b": [i / 2 for i in range(70)]}),
+    "frame bool column": lambda m: m.DataFrame({"f": [True, False], "x": [1, 2]}),
+    "frame dates": lambda m: m.DataFrame({"d": m.to_datetime(["2024-01-01", "2024-02-01"]), "v": [1, 2]}),
+    "frame long header": lambda m: m.DataFrame({"long_column_name": [1, 2], "b": ["x", "y"]}),
+    "frame negatives": lambda m: m.DataFrame({"a": [-1, 2], "b": [-1.5, 2.25]}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", sorted(_REPR_CASES))
+def test_repr_matches_pandas(case: str) -> None:
+    # fvsao.7: every repr appended "Name: , Length: n" / "[n rows x m
+    # columns]", printed Rust dtype names (Int64, Utf8), dropped the
+    # index-name header and padded columns its own way.
+    make = _REPR_CASES[case]
+    assert repr(make(fpd)) == repr(make(pd)), case
