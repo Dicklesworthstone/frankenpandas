@@ -1,4 +1,4 @@
 0    True
 1    False
 2    False
-Name: all, Length: 3, dtype: Bool
+Name: , Length: 3, dtype: Bool

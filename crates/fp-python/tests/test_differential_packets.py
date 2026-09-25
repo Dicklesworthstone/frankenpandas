@@ -5474,6 +5474,21 @@ def _numpy_outcome(m: Any, case: str) -> Any:
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize(
+    "op",
+    ["sum", "prod", "mean", "median", "std", "var", "sem", "min", "max", "count", "nunique",
+     "any", "all", "skew", "kurt", "idxmin", "idxmax"],
+)
+def test_frame_reductions_are_unnamed_like_pandas(op: str, axis: int) -> None:
+    # fvsao.7: fp-frame named every DataFrame reduction after its op
+    # (df.sum().name == 'sum', df.kurt().name == 'kurtosis'); pandas' is None.
+    got = getattr(fpd.DataFrame({"a": [1.0, 2.0, 4.0], "b": [3.0, 5.0, 6.0]}), op)(axis=axis)
+    want = getattr(pd.DataFrame({"a": [1.0, 2.0, 4.0], "b": [3.0, 5.0, 6.0]}), op)(axis=axis)
+    assert (got.name, got.tolist()) == (want.name, pytest.approx(want.tolist(), nan_ok=True))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_NUMPY_INTEROP_CASES))
 def test_numpy_ufuncs_operands_and_delegation_match_pandas(case: str) -> None:
     import warnings

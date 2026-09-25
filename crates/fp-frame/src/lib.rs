@@ -70380,7 +70380,8 @@ impl DataFrame {
             labels.push(IndexLabel::Utf8(name.to_string()));
             values.push(Scalar::Int64(count));
         }
-        Series::from_values("count", labels, values)
+        // Unnamed, as pandas' `df.count()` (fvsao.7: it was named 'count').
+        Series::from_values("", labels, values)
     }
 
     /// Count of missing (NaN/null) values per column.
@@ -74736,7 +74737,8 @@ impl DataFrame {
                 };
                 values.push(agg);
             }
-            Series::from_values(func, labels, values)
+            // Unnamed, as pandas' reductions (fvsao.7: named after `func`).
+            Series::from_values("", labels, values)
         } else if axis == 1 {
             // Row-wise: aggregate each row across columns
             let mut values = Vec::with_capacity(self.len());
@@ -74978,7 +74980,7 @@ impl DataFrame {
             // preserves df.index.name on the row-wise result.
             let index = self.index.clone();
             let column = Column::from_values(values)?;
-            Series::new(func, index, column)
+            Series::new("", index, column)
         } else {
             Err(FrameError::CompatibilityRejected(format!(
                 "axis must be 0 or 1, got {axis}"
@@ -85701,7 +85703,7 @@ impl DataFrame {
         // df.index.name on the per-row unique-count result.
         let index = self.index.clone();
         let column = Column::from_values(values)?;
-        Series::new("nunique".to_owned(), index, column)
+        Series::new("", index, column)
     }
 
     /// Count unique non-null values per row (axis=1).
@@ -85826,8 +85828,9 @@ impl DataFrame {
 
         match axis {
             0 => {
+                // Results are unnamed, as pandas' (fvsao.7: named `op_name`).
                 if candidate_cols.is_empty() {
-                    return Series::from_values(op_name, vec![], vec![]);
+                    return Series::from_values("", vec![], vec![]);
                 }
                 if self.is_empty() {
                     return Err(FrameError::CompatibilityRejected(format!(
@@ -85878,15 +85881,11 @@ impl DataFrame {
                         .collect();
                 }
 
-                Series::from_values(op_name.to_string(), labels, values)
+                Series::from_values("", labels, values)
             }
             1 => {
                 if self.is_empty() {
-                    return Series::new(
-                        op_name.to_string(),
-                        self.index.clone(),
-                        Column::from_values(vec![])?,
-                    );
+                    return Series::new("", self.index.clone(), Column::from_values(vec![])?);
                 }
                 if candidate_cols.is_empty() {
                     return Err(FrameError::CompatibilityRejected(format!(
@@ -85946,7 +85945,7 @@ impl DataFrame {
 
                 let index = self.index.clone();
                 let column = Column::from_values(values)?;
-                Series::new(op_name.to_string(), index, column)
+                Series::new("", index, column)
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "No axis named {other} for object type DataFrame"
@@ -85971,7 +85970,6 @@ impl DataFrame {
     fn arg_axis1_names_parallel(
         &self,
         col_f64: &[&[f64]],
-        label: &str,
         find_best: impl Fn(&[&[f64]], usize) -> Option<usize> + Sync,
     ) -> Result<Series, FrameError> {
         let n = self.index.labels().len();
@@ -85987,7 +85985,7 @@ impl DataFrame {
                 });
             }
             let column = Column::from_values(values)?;
-            Series::new(label, self.index.clone(), column)
+            Series::new("", self.index.clone(), column)
         };
         const ARG_PAR_MIN_ROWS: usize = 50_000;
         const ARG_PAR_MIN_PER_WORKER: usize = 16_384;
@@ -86050,7 +86048,7 @@ impl DataFrame {
             base += b.len();
         }
         let column = Column::from_utf8_contiguous(bytes, offsets);
-        Series::new(label, self.index.clone(), column)
+        Series::new("", self.index.clone(), column)
     }
 
     /// Column label of the minimum value per row (axis=1).
@@ -86108,7 +86106,7 @@ impl DataFrame {
                 .collect();
             // Bit-identical per-row kernel (v < best, best=+INF, first-min-wins,
             // NaN skipped), now parallel contiguous-Utf8 build via the shared builder.
-            return self.arg_axis1_names_parallel(&col_f64, "idxmin", |cols, row| {
+            return self.arg_axis1_names_parallel(&col_f64, |cols, row| {
                 let mut best = f64::INFINITY;
                 let mut best_col: Option<usize> = None;
                 for (ci, c) in cols.iter().enumerate() {
@@ -86165,7 +86163,7 @@ impl DataFrame {
         // df.index.name on the per-row result.
         let index = self.index.clone();
         let column = Column::from_values(values)?;
-        Series::new("idxmin", index, column)
+        Series::new("", index, column)
     }
 
     /// Column label of the maximum value per row (axis=1).
@@ -86219,7 +86217,7 @@ impl DataFrame {
                 .collect();
             // Bit-identical per-row kernel (v > best, best=-INF, first-max-wins,
             // NaN skipped), now parallel contiguous-Utf8 build via the shared builder.
-            return self.arg_axis1_names_parallel(&col_f64, "idxmax", |cols, row| {
+            return self.arg_axis1_names_parallel(&col_f64, |cols, row| {
                 let mut best = f64::NEG_INFINITY;
                 let mut best_col: Option<usize> = None;
                 for (ci, c) in cols.iter().enumerate() {
@@ -86276,7 +86274,7 @@ impl DataFrame {
         // df.index.name on the per-row result.
         let index = self.index.clone();
         let column = Column::from_values(values)?;
-        Series::new("idxmax", index, column)
+        Series::new("", index, column)
     }
 
     /// Whether all non-null values are truthy, per column.
@@ -86293,7 +86291,7 @@ impl DataFrame {
             let s = self.column_as_series(name)?;
             values.push(Scalar::Bool(s.all()?));
         }
-        Series::from_values("all".to_string(), labels, values)
+        Series::from_values(String::new(), labels, values)
     }
 
     /// Whether any non-null value is truthy, per column.
@@ -86310,7 +86308,7 @@ impl DataFrame {
             let s = self.column_as_series(name)?;
             values.push(Scalar::Bool(s.any()?));
         }
-        Series::from_values("any".to_string(), labels, values)
+        Series::from_values(String::new(), labels, values)
     }
 
     /// Sum of non-null values per column.
@@ -87101,7 +87099,7 @@ impl DataFrame {
             .iter()
             .map(|name| IndexLabel::Utf8(name.clone()))
             .collect();
-        Series::from_values(func.to_string(), labels, values)
+        Series::from_values(String::new(), labels, values)
     }
 
     /// Internal: reduce each numeric column with skipna control.
@@ -87143,7 +87141,7 @@ impl DataFrame {
             .iter()
             .map(|name| IndexLabel::Utf8(name.clone()))
             .collect();
-        Series::from_values(func.to_string(), labels, values)
+        Series::from_values(String::new(), labels, values)
     }
 
     /// Sum per column with skipna control.
@@ -87272,12 +87270,7 @@ impl DataFrame {
             .collect()
     }
 
-    fn reduce_rows_int64<F>(
-        &self,
-        name: &str,
-        empty: i64,
-        op: F,
-    ) -> Result<Option<Series>, FrameError>
+    fn reduce_rows_int64<F>(&self, empty: i64, op: F) -> Result<Option<Series>, FrameError>
     where
         F: Fn(i64, i64) -> i64,
     {
@@ -87312,7 +87305,7 @@ impl DataFrame {
 
         let index = self.index.clone();
         let column = Column::from_i64_values_owned(values);
-        Series::new(name.to_owned(), index, column).map(Some)
+        Series::new("", index, column).map(Some)
     }
 
     /// Internal: typed Float64 row reduction (sister to `reduce_rows_int64`,
@@ -87322,12 +87315,7 @@ impl DataFrame {
     /// `func(&[f64])` over the same column-ordered values (no missing to skip, same
     /// left-to-right association ⇒ bit-identical f64 result) — skipping the per-row Scalar
     /// gather. Returns None (fall back to `reduce_rows`) if any column isn't no-NaN Float64.
-    fn reduce_rows_f64<F>(
-        &self,
-        name: &str,
-        empty: f64,
-        op: F,
-    ) -> Result<Option<Series>, FrameError>
+    fn reduce_rows_f64<F>(&self, empty: f64, op: F) -> Result<Option<Series>, FrameError>
     where
         F: Fn(f64, f64) -> f64,
     {
@@ -87413,7 +87401,7 @@ impl DataFrame {
 
         let index = self.index.clone();
         let column = Column::from_f64_values(values);
-        Series::new(name.to_owned(), index, column).map(Some)
+        Series::new("", index, column).map(Some)
     }
 
     /// Internal: typed Float64 per-row `Fn(&[f64])` reduction (br-frankenpandas-rrf64).
@@ -87424,7 +87412,7 @@ impl DataFrame {
     /// the same k values in column order, `func` is the same, and the output Scalars are built
     /// the same way. Returns None (→ fall back to `reduce_rows`) if any column isn't no-NaN
     /// Float64 (the missing/empty-row path the generic version handles stays on that path).
-    fn reduce_rows_func_f64<F>(&self, func: F, name: &str) -> Result<Option<Series>, FrameError>
+    fn reduce_rows_func_f64<F>(&self, func: F) -> Result<Option<Series>, FrameError>
     where
         F: Fn(&[f64]) -> f64,
     {
@@ -87492,7 +87480,7 @@ impl DataFrame {
         }
         let index = self.index.clone();
         let column = Column::from_f64_values(out);
-        Series::new(name, index, column).map(Some)
+        Series::new("", index, column).map(Some)
     }
 
     /// All-valid Float64 fast path for the two-pass axis=1 moment family.
@@ -87502,7 +87490,7 @@ impl DataFrame {
     /// row, both the mean fold and the M2 fold retain the exact left-to-right
     /// column order used by `row_sample_var`; SIMD lanes operate only across
     /// independent rows, so variance/std/sem remain bit-identical.
-    fn reduce_rows_moment_f64<F>(&self, finish: F, name: &str) -> Result<Option<Series>, FrameError>
+    fn reduce_rows_moment_f64<F>(&self, finish: F) -> Result<Option<Series>, FrameError>
     where
         F: Fn(f64, f64) -> f64 + Sync,
     {
@@ -87593,11 +87581,11 @@ impl DataFrame {
 
         let index = self.index.clone();
         let column = Column::from_f64_values(moments);
-        Series::new(name, index, column).map(Some)
+        Series::new("", index, column).map(Some)
     }
 
     /// Internal: reduce each row across numeric columns using a closure.
-    fn reduce_rows<F>(&self, func: F, name: &str, empty: Scalar) -> Result<Series, FrameError>
+    fn reduce_rows<F>(&self, func: F, empty: Scalar) -> Result<Series, FrameError>
     where
         F: Fn(&[f64]) -> f64,
     {
@@ -87684,7 +87672,7 @@ impl DataFrame {
                 }
                 let index = self.index.clone();
                 let column = Column::from_values(values)?;
-                return Series::new(name.to_owned(), index, column);
+                return Series::new("", index, column);
             }
         }
 
@@ -87722,7 +87710,7 @@ impl DataFrame {
             }
             let index = self.index.clone();
             let column = Column::from_values(values)?;
-            return Series::new(name.to_owned(), index, column);
+            return Series::new("", index, column);
         }
 
         let mut values = Vec::with_capacity(self.len());
@@ -87758,7 +87746,7 @@ impl DataFrame {
         // min_axis1, max_axis1, std_axis1, var_axis1, etc.
         let index = self.index.clone();
         let column = Column::from_values(values)?;
-        Series::new(name.to_owned(), index, column)
+        Series::new("", index, column)
     }
 
     fn row_sample_var(vals: &[f64]) -> f64 {
@@ -87821,30 +87809,25 @@ impl DataFrame {
         // columns. For uniformly-Timedelta DataFrames, route to a
         // Timedelta-typed row reducer.
         if self.all_columns_timedelta() {
-            return self.reduce_rows_timedelta(
-                |ns_vals| {
-                    let mut acc: i64 = 0;
-                    for v in ns_vals {
-                        acc = Timedelta::add(acc, *v);
-                    }
-                    if ns_vals.is_empty() {
-                        Timedelta::NAT
-                    } else {
-                        acc
-                    }
-                },
-                "sum",
-            );
+            return self.reduce_rows_timedelta(|ns_vals| {
+                let mut acc: i64 = 0;
+                for v in ns_vals {
+                    acc = Timedelta::add(acc, *v);
+                }
+                if ns_vals.is_empty() {
+                    Timedelta::NAT
+                } else {
+                    acc
+                }
+            });
         }
-        if let Some(series) =
-            self.reduce_rows_int64("sum", 0, |acc, value| acc.wrapping_add(value))?
-        {
+        if let Some(series) = self.reduce_rows_int64(0, |acc, value| acc.wrapping_add(value))? {
             return Ok(series);
         }
-        if let Some(series) = self.reduce_rows_f64("sum", 0.0, |acc, v| acc + v)? {
+        if let Some(series) = self.reduce_rows_f64(0.0, |acc, v| acc + v)? {
             return Ok(series);
         }
-        self.reduce_rows(|vals| vals.iter().sum(), "sum", Scalar::Float64(0.0))
+        self.reduce_rows(|vals| vals.iter().sum(), Scalar::Float64(0.0))
     }
 
     /// Mean across columns per row.
@@ -87853,21 +87836,18 @@ impl DataFrame {
     pub fn mean_axis1(&self) -> Result<Series, FrameError> {
         // Per br-frankenpandas-c0g3x: sister to sum_axis1 above.
         if self.all_columns_timedelta() {
-            return self.reduce_rows_timedelta(
-                |ns_vals| {
-                    if ns_vals.is_empty() {
-                        return Timedelta::NAT;
-                    }
-                    let sum: f64 = ns_vals.iter().map(|v| *v as f64).sum();
-                    let mean = sum / ns_vals.len() as f64;
-                    if !mean.is_finite() {
-                        Timedelta::NAT
-                    } else {
-                        mean.clamp(i64::MIN as f64, i64::MAX as f64) as i64
-                    }
-                },
-                "mean",
-            );
+            return self.reduce_rows_timedelta(|ns_vals| {
+                if ns_vals.is_empty() {
+                    return Timedelta::NAT;
+                }
+                let sum: f64 = ns_vals.iter().map(|v| *v as f64).sum();
+                let mean = sum / ns_vals.len() as f64;
+                if !mean.is_finite() {
+                    Timedelta::NAT
+                } else {
+                    mean.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+                }
+            });
         }
         // Typed Float64 row-mean (br-frankenpandas-rrf64): when every row-reduction column
         // is all-valid no-NaN Float64, the per-row count is exactly the column count, so
@@ -87913,11 +87893,10 @@ impl DataFrame {
                 start = end;
             }
             let index = self.index.clone();
-            return Series::new("mean", index, Column::from_f64_values(values));
+            return Series::new("", index, Column::from_f64_values(values));
         }
         self.reduce_rows(
             |vals| vals.iter().sum::<f64>() / vals.len() as f64,
-            "mean",
             Scalar::Null(NullKind::NaN),
         )
     }
@@ -87928,24 +87907,20 @@ impl DataFrame {
     pub fn min_axis1(&self) -> Result<Series, FrameError> {
         // Per br-frankenpandas-c0g3x: sister to sum_axis1 above.
         if self.all_columns_timedelta() {
-            return self.reduce_rows_timedelta(
-                |ns_vals| ns_vals.iter().copied().min().unwrap_or(Timedelta::NAT),
-                "min",
-            );
+            return self.reduce_rows_timedelta(|ns_vals| {
+                ns_vals.iter().copied().min().unwrap_or(Timedelta::NAT)
+            });
         }
-        if let Some(series) =
-            self.reduce_rows_int64("min", i64::MAX, |acc, value| acc.min(value))?
-        {
+        if let Some(series) = self.reduce_rows_int64(i64::MAX, |acc, value| acc.min(value))? {
             return Ok(series);
         }
         // Typed Float64 row-min (br-frankenpandas-rrf64): same fold as the Scalar path
         // (start INFINITY, f64::min, column order), bit-identical for no-NaN Float64.
-        if let Some(series) = self.reduce_rows_f64("min", f64::INFINITY, f64::min)? {
+        if let Some(series) = self.reduce_rows_f64(f64::INFINITY, f64::min)? {
             return Ok(series);
         }
         self.reduce_rows(
             |vals| vals.iter().copied().fold(f64::INFINITY, f64::min),
-            "min",
             Scalar::Null(NullKind::NaN),
         )
     }
@@ -87981,23 +87956,19 @@ impl DataFrame {
     pub fn max_axis1(&self) -> Result<Series, FrameError> {
         // Per br-frankenpandas-c0g3x: sister to sum_axis1 above.
         if self.all_columns_timedelta() {
-            return self.reduce_rows_timedelta(
-                |ns_vals| ns_vals.iter().copied().max().unwrap_or(Timedelta::NAT),
-                "max",
-            );
+            return self.reduce_rows_timedelta(|ns_vals| {
+                ns_vals.iter().copied().max().unwrap_or(Timedelta::NAT)
+            });
         }
-        if let Some(series) =
-            self.reduce_rows_int64("max", i64::MIN, |acc, value| acc.max(value))?
-        {
+        if let Some(series) = self.reduce_rows_int64(i64::MIN, |acc, value| acc.max(value))? {
             return Ok(series);
         }
         // Typed Float64 row-max (br-frankenpandas-rrf64): bit-identical fold (NEG_INFINITY, f64::max).
-        if let Some(series) = self.reduce_rows_f64("max", f64::NEG_INFINITY, f64::max)? {
+        if let Some(series) = self.reduce_rows_f64(f64::NEG_INFINITY, f64::max)? {
             return Ok(series);
         }
         self.reduce_rows(
             |vals| vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            "max",
             Scalar::Null(NullKind::NaN),
         )
     }
@@ -88005,7 +87976,7 @@ impl DataFrame {
     /// Per br-frankenpandas-c0g3x: Timedelta-typed row reducer for axis=1
     /// sum/mean/min/max. Collects ns from Timedelta64 columns per row
     /// (skipping NaT), applies the op, emits Scalar::Timedelta64.
-    fn reduce_rows_timedelta<F>(&self, op: F, name: &str) -> Result<Series, FrameError>
+    fn reduce_rows_timedelta<F>(&self, op: F) -> Result<Series, FrameError>
     where
         F: Fn(&[i64]) -> i64,
     {
@@ -88023,24 +87994,21 @@ impl DataFrame {
         }
         let index = self.index.clone();
         let column = Column::new(DType::Timedelta64, values)?;
-        Series::new(name.to_owned(), index, column)
+        Series::new("", index, column)
     }
 
     /// Standard deviation across columns per row.
     ///
     /// Matches `pd.DataFrame.std(axis=1)`.
     pub fn std_axis1(&self) -> Result<Series, FrameError> {
-        if let Some(s) = self.reduce_rows_moment_f64(|m2, n| (m2 / (n - 1.0)).sqrt(), "std")? {
+        if let Some(s) = self.reduce_rows_moment_f64(|m2, n| (m2 / (n - 1.0)).sqrt())? {
             return Ok(s);
         }
-        if let Some(s) =
-            self.reduce_rows_func_f64(|vals| Self::row_sample_var(vals).sqrt(), "std")?
-        {
+        if let Some(s) = self.reduce_rows_func_f64(|vals| Self::row_sample_var(vals).sqrt())? {
             return Ok(s);
         }
         self.reduce_rows(
             |vals| Self::row_sample_var(vals).sqrt(),
-            "std",
             Scalar::Null(NullKind::NaN),
         )
     }
@@ -88049,48 +88017,46 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.var(axis=1)`.
     pub fn var_axis1(&self) -> Result<Series, FrameError> {
-        if let Some(s) = self.reduce_rows_moment_f64(|m2, n| m2 / (n - 1.0), "var")? {
+        if let Some(s) = self.reduce_rows_moment_f64(|m2, n| m2 / (n - 1.0))? {
             return Ok(s);
         }
-        if let Some(s) = self.reduce_rows_func_f64(Self::row_sample_var, "var")? {
+        if let Some(s) = self.reduce_rows_func_f64(Self::row_sample_var)? {
             return Ok(s);
         }
-        self.reduce_rows(Self::row_sample_var, "var", Scalar::Null(NullKind::NaN))
+        self.reduce_rows(Self::row_sample_var, Scalar::Null(NullKind::NaN))
     }
 
     /// Standard error of the mean across columns per row.
     ///
     /// Matches `pd.DataFrame.sem(axis=1)`.
     pub fn sem_axis1(&self) -> Result<Series, FrameError> {
-        if let Some(s) =
-            self.reduce_rows_moment_f64(|m2, n| (m2 / (n - 1.0)).sqrt() / n.sqrt(), "sem")?
-        {
+        if let Some(s) = self.reduce_rows_moment_f64(|m2, n| (m2 / (n - 1.0)).sqrt() / n.sqrt())? {
             return Ok(s);
         }
-        if let Some(s) = self.reduce_rows_func_f64(Self::row_sem, "sem")? {
+        if let Some(s) = self.reduce_rows_func_f64(Self::row_sem)? {
             return Ok(s);
         }
-        self.reduce_rows(Self::row_sem, "sem", Scalar::Null(NullKind::NaN))
+        self.reduce_rows(Self::row_sem, Scalar::Null(NullKind::NaN))
     }
 
     /// Skewness across columns per row.
     ///
     /// Matches `pd.DataFrame.skew(axis=1)`.
     pub fn skew_axis1(&self) -> Result<Series, FrameError> {
-        if let Some(s) = self.reduce_rows_func_f64(Self::row_skew, "skew")? {
+        if let Some(s) = self.reduce_rows_func_f64(Self::row_skew)? {
             return Ok(s);
         }
-        self.reduce_rows(Self::row_skew, "skew", Scalar::Null(NullKind::NaN))
+        self.reduce_rows(Self::row_skew, Scalar::Null(NullKind::NaN))
     }
 
     /// Excess kurtosis across columns per row.
     ///
     /// Matches `pd.DataFrame.kurtosis(axis=1)`.
     pub fn kurtosis_axis1(&self) -> Result<Series, FrameError> {
-        if let Some(s) = self.reduce_rows_func_f64(Self::row_kurtosis, "kurtosis")? {
+        if let Some(s) = self.reduce_rows_func_f64(Self::row_kurtosis)? {
             return Ok(s);
         }
-        self.reduce_rows(Self::row_kurtosis, "kurtosis", Scalar::Null(NullKind::NaN))
+        self.reduce_rows(Self::row_kurtosis, Scalar::Null(NullKind::NaN))
     }
 
     /// Alias for `kurtosis_axis1()` — pandas exposes
@@ -88119,7 +88085,7 @@ impl DataFrame {
             let cnt = self.column_order.len() as i64;
             let index = self.index.clone();
             let column = Column::from_i64_values_owned(vec![cnt; self.len()]);
-            return Series::new("count".to_owned(), index, column);
+            return Series::new("", index, column);
         }
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
@@ -88133,7 +88099,7 @@ impl DataFrame {
         // Per br-frankenpandas-wgkw9: pandas df.count(axis=1) preserves row index name.
         let index = self.index.clone();
         let column = Column::from_values(values)?;
-        Series::new("count".to_owned(), index, column)
+        Series::new("", index, column)
     }
 
     /// Whether all non-null values are truthy across columns per row.
@@ -88164,7 +88130,7 @@ impl DataFrame {
             }
             let index = self.index.clone();
             let column = Column::from_bool_values(values);
-            return Series::new("all".to_owned(), index, column);
+            return Series::new("", index, column);
         }
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
@@ -88187,7 +88153,7 @@ impl DataFrame {
         // Per br-frankenpandas-tpwlx: pandas df.all(axis=1) preserves row index name.
         let index = self.index.clone();
         let column = Column::from_values(values)?;
-        Series::new("all".to_owned(), index, column)
+        Series::new("", index, column)
     }
 
     /// Whether any non-null value is truthy across columns per row.
@@ -88218,7 +88184,7 @@ impl DataFrame {
             }
             let index = self.index.clone();
             let column = Column::from_bool_values(values);
-            return Series::new("any".to_owned(), index, column);
+            return Series::new("", index, column);
         }
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
@@ -88241,7 +88207,7 @@ impl DataFrame {
         // Per br-frankenpandas-29wua: pandas df.any(axis=1) preserves row index name.
         let index = self.index.clone();
         let column = Column::from_values(values)?;
-        Series::new("any".to_owned(), index, column)
+        Series::new("", index, column)
     }
 
     /// Median across columns per row.
@@ -88413,8 +88379,7 @@ impl DataFrame {
             // (strict >), NaN skipped — bit-identical. Now parallel contiguous-Utf8
             // build via the shared builder (same kernel, row order preserved).
             let sign = if largest { 1.0_f64 } else { -1.0_f64 };
-            let label = if largest { "idxmax" } else { "idxmin" };
-            return self.arg_axis1_names_parallel(&col_f64, label, move |cols, row| {
+            return self.arg_axis1_names_parallel(&col_f64, move |cols, row| {
                 let mut best = f64::NEG_INFINITY;
                 let mut best_col: Option<usize> = None;
                 for (ci, c) in cols.iter().enumerate() {
@@ -88461,12 +88426,11 @@ impl DataFrame {
                 None => out.push(Scalar::Null(NullKind::NaN)),
             }
         }
-        let label = if largest { "idxmax" } else { "idxmin" };
         // Per br-frankenpandas-nbpsb: pandas df.idxmin(axis=1)/idxmax(axis=1)
-        // preserve row-axis name.
+        // preserve row-axis name; the result itself is unnamed (fvsao.7).
         let index = self.index.clone();
         let column = Column::from_values(out)?;
-        Series::new(label, index, column)
+        Series::new("", index, column)
     }
 
     pub fn median_axis1(&self) -> Result<Series, FrameError> {
@@ -88491,26 +88455,23 @@ impl DataFrame {
         // middle values); a NaN/missing-bearing or non-Float64 frame returns None
         // and keeps the generic per-row path. Handles the large-k tail where the
         // network's O(k log^2 k) comparators overtake select_nth's O(k) (crossover ~k=26).
-        if let Some(series) = self.reduce_rows_func_f64(
-            |vals| {
-                let n = vals.len();
-                if n == 0 {
-                    return f64::NAN;
-                }
-                let mut v = vals.to_vec();
-                let mid = n / 2;
-                let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-                let (_, upper, _) = v.select_nth_unstable_by(mid, cmp);
-                let upper = *upper;
-                if n % 2 == 1 {
-                    upper
-                } else {
-                    let lower = v[..mid].iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                    (lower + upper) / 2.0
-                }
-            },
-            "median",
-        )? {
+        if let Some(series) = self.reduce_rows_func_f64(|vals| {
+            let n = vals.len();
+            if n == 0 {
+                return f64::NAN;
+            }
+            let mut v = vals.to_vec();
+            let mid = n / 2;
+            let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+            let (_, upper, _) = v.select_nth_unstable_by(mid, cmp);
+            let upper = *upper;
+            if n % 2 == 1 {
+                upper
+            } else {
+                let lower = v[..mid].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                (lower + upper) / 2.0
+            }
+        })? {
             return Ok(series);
         }
         self.reduce_rows(
@@ -88524,7 +88485,6 @@ impl DataFrame {
                     sorted[n / 2]
                 }
             },
-            "median",
             Scalar::Null(NullKind::NaN),
         )
     }
@@ -88619,24 +88579,22 @@ impl DataFrame {
         }
         let index = self.index.clone();
         let column = Column::from_f64_values(values);
-        Series::new("median", index, column).map(Some)
+        Series::new("", index, column).map(Some)
     }
 
     /// Product across columns per row.
     ///
     /// Matches `pd.DataFrame.prod(axis=1)`.
     pub fn prod_axis1(&self) -> Result<Series, FrameError> {
-        if let Some(series) =
-            self.reduce_rows_int64("prod", 1, |acc, value| acc.wrapping_mul(value))?
-        {
+        if let Some(series) = self.reduce_rows_int64(1, |acc, value| acc.wrapping_mul(value))? {
             return Ok(series);
         }
         // Typed Float64 row-prod (br-frankenpandas-rrf64): bit-identical to vals.iter().product()
         // (start 1.0, multiply in column order).
-        if let Some(series) = self.reduce_rows_f64("prod", 1.0, |acc, v| acc * v)? {
+        if let Some(series) = self.reduce_rows_f64(1.0, |acc, v| acc * v)? {
             return Ok(series);
         }
-        self.reduce_rows(|vals| vals.iter().product(), "prod", Scalar::Float64(1.0))
+        self.reduce_rows(|vals| vals.iter().product(), Scalar::Float64(1.0))
     }
 
     /// Internal: extract a named column as a Series.
@@ -215807,7 +215765,7 @@ mod axis1_moment_void_audit_cod_fp {
     #[inline(never)]
     fn orig_var_axis1(df: &DataFrame) -> Result<Series, FrameError> {
         Ok(df
-            .reduce_rows_func_f64(DataFrame::row_sample_var, "var")?
+            .reduce_rows_func_f64(DataFrame::row_sample_var)?
             .expect("audit fixture must route through the legacy row-gather path"))
     }
 
