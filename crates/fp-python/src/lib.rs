@@ -3606,6 +3606,19 @@ impl<'a, 'py> FromPyObject<'a, 'py> for IndexArg {
         if let Ok(index) = obj.extract::<PyRef<'_, PyIndex>>() {
             return Ok(Self(index.clone()));
         }
+        // The typed index classes carry their labels directly.
+        let typed = if let Ok(instants) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            Some(instants.inner.clone().into_index())
+        } else if let Ok(durations) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+            Some(durations.inner.clone().into_index())
+        } else {
+            obj.extract::<PyRef<'_, PyRangeIndex>>()
+                .ok()
+                .map(|range| range.inner.to_index())
+        };
+        if let Some(inner) = typed {
+            return Ok(Self(PyIndex { inner }));
+        }
         PyIndex::new(Some(&obj), None).map(Self)
     }
 }
@@ -17900,10 +17913,9 @@ impl PySeries {
     }
 
     /// pandas' `Series.groupby` signature (br-frankenpandas-n57tz: only `by`
-    /// and `sort` were accepted). Grouping by index level, dropna=False and
-    /// group_keys=False are not supported yet; as_index=False raises as it
-    /// does in pandas; a category key is checked against `observed` and
-    /// `sort` (see `check_category_key`).
+    /// and `sort` were accepted); as_index=False raises as it does in pandas;
+    /// a category key is checked against `observed` and `sort` (see
+    /// `check_category_key`).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (by=None, axis=None, level=None, as_index=true, sort=true, group_keys=true, observed=None, dropna=true))]
     pub fn groupby(
@@ -17929,10 +17941,6 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        unsupported_params(
-            "Series.groupby",
-            &[("group_keys", group_keys), ("dropna", dropna)],
-        )?;
         // pd.Grouper(freq=) is pandas' TimeGrouper over the index: the same
         // bins as resample, empty ones included (it raised).
         if let Some(Ok(grouper)) = by.map(|by| by.extract::<PyRef<'_, PyGrouper>>()) {
@@ -18024,13 +18032,24 @@ impl PySeries {
         } else {
             (self.inner.clone(), by_series)
         };
+        let (by, groups) = if dropna {
+            (by, None)
+        } else if unused.is_empty() {
+            let (codes, groups) = missing_key_groups(&by, sort)?;
+            (codes, Some(groups))
+        } else {
+            return Err(not_implemented(
+                "Series.groupby(dropna=False) by a category key with unused categories",
+            ));
+        };
         PySeriesGroupBy {
             series,
             by,
             sort,
             as_index: true,
-            groups: None,
+            groups,
             unused,
+            group_keys,
         }
         .into_py_any(py)
     }
@@ -19004,19 +19023,8 @@ impl PySeries {
         let Some(idx_obj) = index else {
             return Ok(self.clone());
         };
-        let labels = if let Ok(py_idx) = idx_obj.extract::<PyRef<'_, PyIndex>>() {
-            py_idx.inner.labels().to_vec()
-        } else if let Ok(list) = idx_obj.cast::<PyList>() {
-            let mut lbls = Vec::with_capacity(list.len());
-            for item in list.iter() {
-                lbls.push(py_to_index_label(&item)?);
-            }
-            lbls
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "reindex expects Index or list of labels",
-            ));
-        };
+        // Any index-like target (a DatetimeIndex raised TypeError).
+        let labels = idx_obj.extract::<IndexArg>()?.inner.labels().to_vec();
         let reindexed = match method {
             Some(m) => self.inner.reindex_with_method(labels.clone(), m),
             None => self.inner.reindex(labels.clone()),
@@ -25723,10 +25731,9 @@ impl PyDataFrame {
 
     /// Group by one column name or a list of them, as `df.groupby("city")`
     /// and `df.groupby(["city", "year"])` both do in pandas, with pandas'
-    /// `as_index`, `sort` and `dropna` (br-frankenpandas-n57tz: only `by` was
-    /// accepted). Grouping by index level and group_keys=False are not
-    /// supported yet; a category key is checked against `observed` and
-    /// `sort` (see `check_category_key`).
+    /// `as_index`, `sort`, `group_keys` and `dropna` (br-frankenpandas-n57tz:
+    /// only `by` was accepted); a category key is checked against `observed`
+    /// and `sort` (see `check_category_key`).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (by=None, axis=None, level=None, as_index=true, sort=true, group_keys=true, observed=None, dropna=true))]
     fn groupby(
@@ -25742,10 +25749,7 @@ impl PyDataFrame {
         dropna: bool,
     ) -> PyResult<Py<PyAny>> {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
-        unsupported_params(
-            "DataFrame.groupby",
-            &[("axis", ax == 0), ("group_keys", group_keys)],
-        )?;
+        unsupported_params("DataFrame.groupby", &[("axis", ax == 0)])?;
         let by = by.filter(|b| !b.is_none());
         let level = level.filter(|l| !l.is_none());
         // A lone pd.Grouper: with freq= it is pandas' TimeGrouper - the same
@@ -25828,6 +25832,7 @@ impl PyDataFrame {
             as_index,
             sort,
             dropna,
+            group_keys,
             unused,
         };
         gb.grouped()
@@ -26104,8 +26109,8 @@ impl PyDataFrame {
     }
 
     /// pandas' `df.set_index(keys, *, drop=True, append=False, inplace=False,
-    /// verify_integrity=False)` (br-frankenpandas-n57tz: only keys/drop).
-    /// `append=True` builds a MultiIndex over the old index, which is refused.
+    /// verify_integrity=False)`; `append=True` puts the old index's levels
+    /// before the keys in a MultiIndex.
     #[pyo3(signature = (keys, drop=true, append=false, inplace=false, verify_integrity=false))]
     fn set_index(
         &mut self,
@@ -26116,8 +26121,35 @@ impl PyDataFrame {
         inplace: bool,
         verify_integrity: bool,
     ) -> PyResult<Option<PyDataFrame>> {
-        unsupported_params("DataFrame.set_index", &[("append", !append)])?;
-        let res = if let Ok(single) = keys.extract::<String>() {
+        // pandas' KeyError for keys that are not columns (it was ValueError).
+        let wanted: Vec<String> = match keys.extract::<String>() {
+            Ok(single) => vec![single],
+            Err(_) => keys.extract::<Vec<String>>().unwrap_or_default(),
+        };
+        let missing: Vec<&String> = wanted
+            .iter()
+            .filter(|key| self.inner.column(key).is_none())
+            .collect();
+        if !missing.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "None of {} are in the columns",
+                PyList::new(py, missing)?.repr()?
+            )));
+        }
+        let res = if append {
+            let list = match keys.extract::<String>() {
+                Ok(single) => vec![single],
+                Err(_) => keys.extract::<Vec<String>>().map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "keys must be a column name or list of column names",
+                    )
+                })?,
+            };
+            let refs: Vec<&str> = list.iter().map(String::as_str).collect();
+            self.inner
+                .set_index_append(&refs, drop, "/")
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        } else if let Ok(single) = keys.extract::<String>() {
             self.inner
                 .set_index(&single, drop)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
@@ -26583,16 +26615,12 @@ impl PyDataFrame {
     }
 
     #[pyo3(signature = (window, min_periods=None, center=false))]
-    /// fp-frame's DataFrame windows are trailing only; `center=True` used to
-    /// be accepted and every aggregation still used trailing windows
-    /// (fvsao.5).
     fn rolling(
         &self,
         window: &Bound<'_, PyAny>,
         min_periods: Option<usize>,
         center: bool,
     ) -> PyResult<PyRolling> {
-        unsupported_params("DataFrame.rolling", &[("center", !center)])?;
         let (window, offset) = rolling_window_arg(window)?;
         if offset.is_some() {
             return Err(not_implemented(
@@ -28763,19 +28791,8 @@ impl PyDataFrame {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         let target_index = index.or_else(|| labels.filter(|_| ax == 0));
         if let Some(idx_obj) = target_index {
-            let row_labels = if let Ok(py_idx) = idx_obj.extract::<PyRef<'_, PyIndex>>() {
-                py_idx.inner.labels().to_vec()
-            } else if let Ok(list) = idx_obj.cast::<PyList>() {
-                let mut lbls = Vec::with_capacity(list.len());
-                for item in list.iter() {
-                    lbls.push(py_to_index_label(&item)?);
-                }
-                lbls
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "reindex expects Index or list of labels",
-                ));
-            };
+            // Any index-like target (a DatetimeIndex raised TypeError).
+            let row_labels = idx_obj.extract::<IndexArg>()?.inner.labels().to_vec();
             res = match (method, &fill) {
                 (Some(m), _) => res.reindex_with_method(row_labels, m),
                 (None, Some(f)) => res.reindex_fill(row_labels, f.clone()),
@@ -29645,12 +29662,55 @@ impl PyDataFrame {
         dtype: Option<&Bound<'_, PyAny>>,
         columns: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        unsupported_params(
-            "DataFrame.from_dict",
-            &[("orient", matches!(orient, None | Some("columns")))],
-        )?;
         // dtype= is the constructor's (it was refused while that took none).
-        Self::new(py, Some(data.as_any()), None, columns, dtype)
+        match orient.unwrap_or("columns") {
+            "columns" => Self::new(py, Some(data.as_any()), None, columns, dtype),
+            // Each key a row: its list is the row's values, its dict the
+            // row's {column: value} (it was refused).
+            "index" => {
+                let rows = PyList::new(py, data.values())?;
+                let keys = PyList::new(py, data.keys())?;
+                Self::new(py, Some(rows.as_any()), Some(keys.as_any()), columns, dtype)
+            }
+            "tight" => {
+                let part = |name: &str| -> PyResult<Bound<'_, PyAny>> {
+                    data.get_item(name)?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.to_owned())
+                    })
+                };
+                let index_names: Vec<Option<String>> = data
+                    .get_item("index_names")?
+                    .map(|names| names.extract())
+                    .transpose()?
+                    .unwrap_or_default();
+                if index_names.len() > 1
+                    || data
+                        .get_item("column_names")?
+                        .map(|names| names.extract::<Vec<Option<String>>>())
+                        .transpose()?
+                        .is_some_and(|names| names.len() > 1)
+                {
+                    return Err(not_implemented(
+                        "DataFrame.from_dict(orient='tight') of a MultiIndex",
+                    ));
+                }
+                let mut frame = Self::new(
+                    py,
+                    Some(&part("data")?),
+                    Some(&part("index")?),
+                    Some(&part("columns")?),
+                    dtype,
+                )?;
+                if let Some(Some(name)) = index_names.first() {
+                    let renamed = frame.inner.index().rename_index(Some(name.as_str()));
+                    frame.inner = frame.inner.with_index(renamed).map_err(frame_error_to_py)?;
+                }
+                Ok(frame)
+            }
+            other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Expected 'index', 'columns' or 'tight' for orient parameter. Got '{other}' instead"
+            ))),
+        }
     }
 
     #[classmethod]
@@ -33678,6 +33738,12 @@ where
     if let Some(s) = series {
         if let Some(ref o) = other_series {
             let res = op(s, &o.inner).map_err(frame_error_to_py)?;
+            // pandas keeps the name only when both Series share it.
+            let res = if s.name() == o.inner.name() {
+                res
+            } else {
+                res.rename("").map_err(frame_error_to_py)?
+            };
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         } else if let Some(ref o_df) = other_df {
             let mut out_series_list = Vec::new();
@@ -33788,6 +33854,31 @@ where
     ))
 }
 
+/// A frame window's `agg([...])` with pandas' (column, function) column
+/// MultiIndex; fp-frame names each column `{column}_{function}`, column by
+/// column in `funcs` order.
+fn func_columns(frame: DataFrame, funcs: &[&str]) -> PyResult<DataFrame> {
+    if funcs.is_empty() {
+        return Ok(frame);
+    }
+    let mut columns = Vec::new();
+    let mut functions = Vec::new();
+    for (position, name) in frame.column_names().into_iter().enumerate() {
+        let func = funcs[position % funcs.len()];
+        let column = name
+            .strip_suffix(func)
+            .and_then(|rest| rest.strip_suffix('_'))
+            .unwrap_or(name);
+        columns.push(IndexLabel::Utf8(column.to_owned()));
+        functions.push(IndexLabel::Utf8(func.to_owned()));
+    }
+    let multi =
+        fp_index::MultiIndex::from_arrays(vec![columns, functions]).map_err(index_error_to_py)?;
+    frame
+        .with_columns_multiindex(Some(multi))
+        .map_err(frame_error_to_py)
+}
+
 /// Python wrapper for rolling window calculations over Series or DataFrame.
 #[pyclass(name = "Rolling")]
 pub struct PyRolling {
@@ -33829,6 +33920,39 @@ impl PyRolling {
         }
     }
 
+    /// `apply(func)` over `s`'s count windows (centred when `center`):
+    /// `func` gets every window, NaN rows included, that holds at least
+    /// `min_periods` non-missing values; the others are NaN (pandas).
+    fn apply_windows(
+        &self,
+        py: Python<'_>,
+        s: &Series,
+        func: &Bound<'_, PyAny>,
+        raw: bool,
+        args: Option<&Bound<'_, PyTuple>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Series> {
+        let windows = s.rolling_with_center(self.window, self.min_periods, self.center);
+        let min_periods = self.min_periods.unwrap_or(self.window);
+        let values = s.column().values();
+        let labels = s.index().labels();
+        let mut out = Vec::with_capacity(values.len());
+        for i in 0..values.len() {
+            let (start, end) = windows.window_bounds(i, values.len());
+            let window = &values[start..end];
+            if window.iter().filter(|v| !v.is_missing()).count() < min_periods {
+                out.push(Scalar::Float64(f64::NAN));
+            } else {
+                let arg = window_arg(py, window, &labels[start..end], s.name(), raw)?;
+                out.push(py_to_scalar(
+                    py,
+                    &call_window_func(func, arg, args, kwargs)?,
+                )?);
+            }
+        }
+        Series::from_values(s.name(), labels.to_vec(), out).map_err(frame_error_to_py)
+    }
+
     /// Refuses a time-based window where `method` only runs count windows
     /// (it would have run a 0-row window).
     fn require_count_window(&self, method: &str) -> PyResult<()> {
@@ -33867,7 +33991,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .sum()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -33884,7 +34008,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .mean()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -33901,7 +34025,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .min()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -33918,7 +34042,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .max()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -33935,7 +34059,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .std()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -33952,7 +34076,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .var()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -33969,7 +34093,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .count()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -33986,7 +34110,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .median()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -34023,7 +34147,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .quantile(q)
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -34045,7 +34169,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .sem()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -34062,7 +34186,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .skew()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -34079,7 +34203,7 @@ impl PyRolling {
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .kurt()
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -34103,18 +34227,25 @@ impl PyRolling {
     ) -> PyResult<Py<PyAny>> {
         self.require_count_window("rank")?;
         let m = method.unwrap_or("average");
+        // pandas' rolling rank takes only these three (fp-frame also ranks
+        // 'first' and 'dense').
+        if !matches!(m, "average" | "min" | "max") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Method '{m}' is not supported"
+            )));
+        }
         let asc = ascending.unwrap_or(true);
         let na = na_option.unwrap_or("keep");
         if let Some(ref s) = self.series {
             let res = s
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .rank(m, asc, na)
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
             let res = df
-                .rolling(self.window, self.min_periods)
+                .rolling_with_center(self.window, self.min_periods, self.center)
                 .rank(m, asc, na)
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
@@ -34127,15 +34258,14 @@ impl PyRolling {
     #[pyo3(signature = (other=None))]
     pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
         self.require_count_window("corr")?;
-        let window = self.window;
-        let min_periods = self.min_periods;
+        let (window, min_periods, center) = (self.window, self.min_periods, self.center);
         execute_window_bivariate(
             py,
             self.series.as_ref(),
             self.dataframe.as_ref(),
             other,
-            |s1, s2| s1.rolling(window, min_periods).corr(s2),
-            Some(|df: &DataFrame| df.rolling(window, min_periods).corr()),
+            |s1, s2| s1.rolling_with_center(window, min_periods, center).corr(s2),
+            Some(|df: &DataFrame| df.rolling_with_center(window, min_periods, center).corr()),
             "Empty rolling object",
             "DataFrame rolling corr without other is not supported",
         )
@@ -34144,15 +34274,14 @@ impl PyRolling {
     #[pyo3(signature = (other=None))]
     pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
         self.require_count_window("cov")?;
-        let window = self.window;
-        let min_periods = self.min_periods;
+        let (window, min_periods, center) = (self.window, self.min_periods, self.center);
         execute_window_bivariate(
             py,
             self.series.as_ref(),
             self.dataframe.as_ref(),
             other,
-            |s1, s2| s1.rolling(window, min_periods).cov(s2),
-            Some(|df: &DataFrame| df.rolling(window, min_periods).cov()),
+            |s1, s2| s1.rolling_with_center(window, min_periods, center).cov(s2),
+            Some(|df: &DataFrame| df.rolling_with_center(window, min_periods, center).cov()),
             "Empty rolling object",
             "DataFrame rolling cov without other is not supported",
         )
@@ -34192,17 +34321,18 @@ impl PyRolling {
         } else if let Ok(list) = func.extract::<Vec<String>>() {
             let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
             if let Some(ref s) = self.series {
-                let res = s
-                    .rolling(self.window, self.min_periods)
+                let res = self
+                    .series_window(s)?
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
                 let res = df
-                    .rolling(self.window, self.min_periods)
+                    .rolling_with_center(self.window, self.min_periods, self.center)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
+                let res = func_columns(res, &str_slices)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -34253,33 +34383,10 @@ impl PyRolling {
         }
         if func.is_callable() {
             if let Some(ref s) = self.series {
-                let n = s.len();
-                let vals = s.column().values();
-                let mut out_vals = Vec::with_capacity(n);
-                let w = self.window;
-                let min_p = self.min_periods.unwrap_or(w);
-                for i in 0..n {
-                    let start = (i + 1).saturating_sub(w);
-                    let slice = &vals[start..=i];
-                    if slice.len() < min_p {
-                        out_vals.push(Scalar::Float64(f64::NAN));
-                    } else {
-                        let labels = &s.index().labels()[start..=i];
-                        let arg = window_arg(py, slice, labels, s.name(), raw)?;
-                        let res = call_window_func(func, arg, args, kwargs)?;
-                        let res_scalar = py_to_scalar(py, &res)?;
-                        out_vals.push(res_scalar);
-                    }
-                }
-                let res_series =
-                    Series::from_values(s.name(), s.index().labels().to_vec(), out_vals)
-                        .map_err(frame_error_to_py)?;
+                let res_series = self.apply_windows(py, s, func, raw, args, kwargs)?;
                 return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
-                let n = df.len();
-                let w = self.window;
-                let min_p = self.min_periods.unwrap_or(w);
                 let col_names = df.column_names();
                 if col_names.is_empty() {
                     let empty_df = DataFrame::new(df.index().clone(), BTreeMap::new())
@@ -34297,28 +34404,9 @@ impl PyRolling {
                             col.dtype()
                         )));
                     }
-                    let vals = col.values();
-                    let mut out_vals = Vec::with_capacity(n);
-                    for i in 0..n {
-                        let start = (i + 1_usize).saturating_sub(w);
-                        let slice = &vals[start..=i];
-                        if slice.len() < min_p {
-                            out_vals.push(Scalar::Float64(f64::NAN));
-                        } else {
-                            let labels = &df.index().labels()[start..=i];
-                            let arg = window_arg(py, slice, labels, col_name, raw)?;
-                            let res = call_window_func(func, arg, args, kwargs)?;
-                            let res_scalar = py_to_scalar(py, &res)?;
-                            out_vals.push(res_scalar);
-                        }
-                    }
-                    let s = Series::from_values(
-                        col_name.as_str(),
-                        df.index().labels().to_vec(),
-                        out_vals,
-                    )
-                    .map_err(frame_error_to_py)?;
-                    out_series_list.push(s);
+                    let s = Series::new(col_name.as_str(), df.index().clone(), col.clone())
+                        .map_err(frame_error_to_py)?;
+                    out_series_list.push(self.apply_windows(py, &s, func, raw, args, kwargs)?);
                 }
                 let res_df = DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
@@ -34709,6 +34797,7 @@ impl PyExpanding {
                     .expanding(self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
+                let res = func_columns(res, &str_slices)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -35001,6 +35090,7 @@ impl PyExponentialMovingWindow {
                     .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
+                let res = func_columns(res, &str_slices)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -35353,6 +35443,177 @@ fn group_by_index_level(
     Ok((df, vec![key_column], vec![index.name().map(str::to_owned)]))
 }
 
+/// One group's `groupby.apply(func)` result, sorted as pandas'
+/// `_wrap_applied_output` sorts them.
+enum Applied {
+    Frame(DataFrame),
+    Series(Series),
+    Scalar(Scalar),
+    Nothing,
+}
+
+impl Applied {
+    fn from_py(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if result.is_none() {
+            return Ok(Self::Nothing);
+        }
+        if let Ok(frame) = result.extract::<PyRef<'_, PyDataFrame>>() {
+            return Ok(Self::Frame(frame.inner.clone()));
+        }
+        if let Ok(series) = result.extract::<PyRef<'_, PySeries>>() {
+            return Ok(Self::Series(series.inner.clone()));
+        }
+        py_to_scalar(py, result).map(Self::Scalar)
+    }
+}
+
+/// Where `groupby.apply` puts the rows of its frame or Series results
+/// (pandas' `_concat_objects`).
+enum AppliedLayout {
+    /// Under leading levels holding each result's group key, named.
+    Keyed(Vec<Vec<IndexLabel>>, Vec<Option<String>>),
+    /// Back in the original row order: each concatenated row's original
+    /// position (every result kept its group's rows).
+    Restored(Vec<usize>),
+    /// One result after another, in group order.
+    Concatenated,
+}
+
+/// The concatenated rows of [`AppliedLayout::Restored`] in original order.
+fn restored_order(origin: &[usize]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..origin.len()).collect();
+    order.sort_by_key(|&row| origin[row]);
+    order
+}
+
+/// [`keyed_rows`] whose key levels are named `key_names`; each index level
+/// keeps the name its pieces share.
+fn keyed_group_rows(
+    keys: &[Vec<IndexLabel>],
+    key_names: Vec<Option<String>>,
+    pieces: &[&Index],
+) -> PyResult<(Vec<IndexLabel>, fp_index::MultiIndex)> {
+    let (flat, levels) = keyed_rows(keys, pieces, None)?;
+    let mut names = key_names;
+    let named = names.len();
+    names.extend(levels.names().iter().skip(named).cloned());
+    Ok((flat, levels.set_names(names)))
+}
+
+fn lay_out_frames(pieces: &[DataFrame], layout: AppliedLayout) -> PyResult<DataFrame> {
+    let refs: Vec<&DataFrame> = pieces.iter().collect();
+    let out = concat_dataframes(&refs).map_err(frame_error_to_py)?;
+    match layout {
+        AppliedLayout::Keyed(keys, names) => {
+            let indexes = pieces
+                .iter()
+                .map(frame_row_index)
+                .collect::<PyResult<Vec<_>>>()?;
+            let indexes: Vec<&Index> = indexes.iter().collect();
+            let (flat, levels) = keyed_group_rows(&keys, names, &indexes)?;
+            out.set_axis(flat, 0)
+                .and_then(|out| out.with_row_multiindex(levels))
+                .map_err(frame_error_to_py)
+        }
+        AppliedLayout::Restored(origin) => out
+            .take_rows(&restored_order(&origin))
+            .map_err(frame_error_to_py),
+        AppliedLayout::Concatenated => Ok(out),
+    }
+}
+
+fn lay_out_series(pieces: &[Series], layout: AppliedLayout) -> PyResult<Series> {
+    let refs: Vec<&Series> = pieces.iter().collect();
+    let out = concat_series(&refs).map_err(frame_error_to_py)?;
+    match layout {
+        AppliedLayout::Keyed(keys, names) => {
+            let indexes: Vec<&Index> = pieces.iter().map(Series::index).collect();
+            let (flat, levels) = keyed_group_rows(&keys, names, &indexes)?;
+            let index = Index::new(flat)
+                .with_row_multiindex(levels)
+                .map_err(index_error_to_py)?;
+            Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)
+        }
+        AppliedLayout::Restored(origin) => {
+            let order: Vec<i64> = restored_order(&origin)
+                .into_iter()
+                .map(|row| i64::try_from(row).unwrap_or(i64::MAX))
+                .collect();
+            out.take(&order).map_err(frame_error_to_py)
+        }
+        AppliedLayout::Concatenated => Ok(out),
+    }
+}
+
+/// Each row of `index` as its label on every level (one for a flat index).
+fn index_rows(index: &Index) -> Vec<Vec<IndexLabel>> {
+    match index.row_multiindex() {
+        Some(levels) => (0..levels.len())
+            .map(|row| {
+                levels
+                    .get_tuple(row)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            })
+            .collect(),
+        None => index
+            .labels()
+            .iter()
+            .map(|label| vec![label.clone()])
+            .collect(),
+    }
+}
+
+/// The name of every level of `index`.
+fn index_level_names(index: &Index) -> Vec<Option<String>> {
+    match index.row_multiindex() {
+        Some(levels) => levels.names().to_vec(),
+        None => vec![index.name().map(str::to_owned)],
+    }
+}
+
+/// pandas' frame of Series results sharing one index: a row per group
+/// (NaN for a None result), a column per label of that index, one common
+/// dtype as `np.vstack` gives (integers become floats beside a float or a
+/// NaN).
+fn stacked_series(results: &[Applied], labels: &[IndexLabel]) -> PyResult<Vec<(String, Column)>> {
+    let mut cells: Vec<Vec<Scalar>> = vec![Vec::with_capacity(results.len()); labels.len()];
+    for result in results {
+        for (position, column) in cells.iter_mut().enumerate() {
+            column.push(match result {
+                Applied::Series(s) => s.values()[position].clone(),
+                _ => Scalar::Null(NullKind::NaN),
+            });
+        }
+    }
+    let every = || cells.iter().flatten();
+    if every().all(|value| {
+        matches!(
+            value,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Null(_)
+        )
+    }) && every().any(|value| matches!(value, Scalar::Float64(_) | Scalar::Null(_)))
+    {
+        for value in cells.iter_mut().flatten() {
+            if let Scalar::Int64(v) = value {
+                *value = Scalar::Float64(*v as f64);
+            }
+        }
+    }
+    labels
+        .iter()
+        .zip(cells)
+        .map(|(label, values)| {
+            Ok((
+                label.to_string(),
+                Column::from_values(values).map_err(column_error_to_py)?,
+            ))
+        })
+        .collect()
+}
+
 /// Python wrapper for FrankenPandas GroupBy.
 #[derive(Clone)]
 #[pyclass(name = "DataFrameGroupBy", from_py_object)]
@@ -35368,6 +35629,9 @@ pub struct PyGroupBy {
     as_index: bool,
     sort: bool,
     dropna: bool,
+    /// pandas' `groupby(group_keys=)`: whether `apply` puts its frame and
+    /// Series results under the group keys.
+    group_keys: bool,
     /// A category key's unused categories under observed=False (pandas'
     /// 2.2 default): the reductions add a row for each (fvsao.39).
     unused: Vec<Scalar>,
@@ -35432,8 +35696,99 @@ impl PyGroupBy {
             as_index: self.as_index,
             sort: self.sort,
             dropna: self.dropna,
+            group_keys: self.group_keys,
             unused: self.unused.clone(),
         }
+    }
+
+    /// The key each `apply` result at `ordinals` (positions among the
+    /// groups) is laid out under: its group's key, or as pandas'
+    /// as_index=False its position.
+    fn apply_keys(&self, key_index: &Index, ordinals: &[usize]) -> Vec<Vec<IndexLabel>> {
+        if !self.as_index {
+            return ordinals
+                .iter()
+                .map(|&ordinal| {
+                    vec![IndexLabel::Int64(
+                        i64::try_from(ordinal).unwrap_or(i64::MAX),
+                    )]
+                })
+                .collect();
+        }
+        let rows = index_rows(key_index);
+        ordinals
+            .iter()
+            .map(|&ordinal| rows[ordinal].clone())
+            .collect()
+    }
+
+    /// The names of the key levels `apply` lays its results out under.
+    fn apply_key_names(&self, key_index: &Index) -> Vec<Option<String>> {
+        if self.as_index {
+            index_level_names(key_index)
+        } else {
+            vec![None]
+        }
+    }
+
+    /// pandas' frame of `apply`'s Series results sharing one index (see
+    /// [`stacked_series`]): indexed by the group keys or, with
+    /// as_index=False, the key columns first over a fresh RangeIndex.
+    fn stacked_apply(
+        &self,
+        py: Python<'_>,
+        results: &[Applied],
+        labels: &[IndexLabel],
+        key_index: &Index,
+    ) -> PyResult<Py<PyAny>> {
+        let mut pairs = stacked_series(results, labels)?;
+        let (index, levels) = if self.as_index {
+            (key_index.clone(), key_index.row_multiindex().cloned())
+        } else {
+            let rows = index_rows(key_index);
+            let mut keys = Vec::with_capacity(self.by.len());
+            for (level, key) in self.by.iter().enumerate() {
+                let values = rows
+                    .iter()
+                    .map(|row| index_label_to_scalar(&row[level]))
+                    .collect();
+                keys.push((
+                    key.clone(),
+                    Column::from_values(values).map_err(column_error_to_py)?,
+                ));
+            }
+            keys.append(&mut pairs);
+            pairs = keys;
+            let positions = (0..rows.len())
+                .map(|row| IndexLabel::Int64(i64::try_from(row).unwrap_or(i64::MAX)))
+                .collect();
+            (Index::new(positions), None)
+        };
+        let order: Vec<String> = pairs.iter().map(|(name, _)| name.clone()).collect();
+        let columns: BTreeMap<String, Column> = pairs.into_iter().collect();
+        let mut frame =
+            DataFrame::new_with_column_order(index, columns, order).map_err(frame_error_to_py)?;
+        if let Some(levels) = levels {
+            frame = frame
+                .with_row_multiindex(levels)
+                .map_err(frame_error_to_py)?;
+        }
+        PyDataFrame { inner: frame }.into_py_any(py)
+    }
+
+    /// pandas' `result_index` for `groups` (from [`Self::ordered_groups`]):
+    /// the keys' labels named after them, carrying the MultiIndex levels
+    /// over several keys.
+    fn group_key_index(&self, groups: &[(IndexLabel, Vec<usize>)]) -> PyResult<Index> {
+        if let [name] = self.key_names.as_slice() {
+            let labels = groups.iter().map(|(key, _)| key.clone()).collect();
+            return Ok(Index::new(labels).set_names(name.as_deref()));
+        }
+        let (_, order) = self
+            .grouped()
+            .and_then(|gb| gb.group_codes())
+            .map_err(frame_error_to_py)?;
+        Ok(order)
     }
 
     /// A per-group reduction frame with pandas' rows for the unused
@@ -35672,28 +36027,39 @@ impl PyGroupBy {
             Series::new(col, self.df.index().clone(), values.clone()).map_err(frame_error_to_py)
         };
         let series = column(name)?;
-        let [key] = self.by.as_slice() else {
-            // Several keys: group the column by each row's group code, whose
-            // groups the frame groupby orders (sort, dropna) and labels with
-            // their MultiIndex (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
-            let (codes, groups) = self
-                .grouped()
-                .and_then(|gb| gb.group_codes())
-                .map_err(frame_error_to_py)?;
-            return Ok(PySeriesGroupBy {
-                series,
-                by: Series::new("", self.df.index().clone(), codes).map_err(frame_error_to_py)?,
-                sort: self.sort,
-                as_index: self.as_index,
-                groups: Some(groups),
-                unused: Vec::new(),
-            });
+        let key = match self.by.as_slice() {
+            [key] if self.dropna => key,
+            // Several keys, or a missing key kept as a group (dropna=False):
+            // group the column by each row's group code, whose groups the
+            // frame groupby orders (sort, dropna) and labels, with their
+            // MultiIndex over several keys
+            // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+            by => {
+                if !self.unused.is_empty() {
+                    return Err(not_implemented(
+                        "selecting a column from DataFrame.groupby(dropna=False) by a category key with unused categories",
+                    ));
+                }
+                let (codes, groups) = self
+                    .grouped()
+                    .and_then(|gb| gb.group_codes())
+                    .map_err(frame_error_to_py)?;
+                let groups = match (by, self.key_names.as_slice()) {
+                    ([_], [name]) => groups.set_names(name.as_deref()),
+                    _ => groups,
+                };
+                return Ok(PySeriesGroupBy {
+                    series,
+                    by: Series::new("", self.df.index().clone(), codes)
+                        .map_err(frame_error_to_py)?,
+                    sort: self.sort,
+                    as_index: self.as_index,
+                    groups: Some(groups),
+                    unused: Vec::new(),
+                    group_keys: self.group_keys,
+                });
+            }
         };
-        // A Series groupby drops missing keys; keeping them is not supported.
-        unsupported_params(
-            "selecting a column from DataFrame.groupby",
-            &[("dropna", self.dropna)],
-        )?;
         // The key Series carries the key's own name (None -> ""), which
         // names the result's index (fvsao.19).
         let key_name = self
@@ -35709,6 +36075,7 @@ impl PyGroupBy {
             as_index: self.as_index,
             groups: None,
             unused: self.unused.clone(),
+            group_keys: self.group_keys,
         })
     }
 }
@@ -36449,50 +36816,185 @@ impl PyGroupBy {
         Ok(PyDataFrame { inner: res })
     }
 
-    #[pyo3(signature = (func, *args, include_groups=false, **kwargs))]
+    /// pandas' `gb.apply(func, *args, include_groups=True, **kwargs)`:
+    /// func(group, *args, **kwargs) for every group - without the grouping
+    /// columns when include_groups=False (pandas 2.2 warns that it keeps
+    /// them by default) - and the results combined as pandas'
+    /// `_wrap_applied_output`:
+    /// - scalars: a Series over the group keys (NaN for None);
+    /// - Series sharing one index: a frame, a row per group;
+    /// - other Series and frames: concatenated under the group keys when
+    ///   group_keys (the default), else back in the original row order when
+    ///   every frame kept its group's rows, else in group order.
+    ///
+    /// It concatenated without the keys, handed func the grouping columns
+    /// whatever include_groups said, and dropped None and unconvertible
+    /// results.
+    #[pyo3(signature = (func, *args, include_groups=true, **kwargs))]
     fn apply(
         &self,
         py: Python<'_>,
         func: &Bound<'_, PyAny>,
         args: &Bound<'_, pyo3::types::PyTuple>,
-        include_groups: Option<bool>,
+        include_groups: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = include_groups;
-        let gb = self.grouped().map_err(frame_error_to_py)?;
-        let mut out_dfs = Vec::new();
-        let mut out_series = Vec::new();
-        let mut out_scalars = Vec::new();
-        for (key, positions) in self.ordered_groups(true)? {
-            let group_df = self.df.take_rows(&positions).map_err(frame_error_to_py)?;
-            let py_df = PyDataFrame { inner: group_df }.into_bound_py_any(py)?;
-            // pandas calls func(group, *args, **kwargs); both used to be
-            // dropped (fvsao.5).
-            let res = func.call(prepend_arg(py_df, Some(args))?, kwargs)?;
-            if let Ok(df_res) = res.extract::<PyDataFrame>() {
-                out_dfs.push(df_res.inner);
-            } else if let Ok(s_res) = res.extract::<PySeries>() {
-                out_series.push(s_res.inner);
-            } else if let Ok(sc) = py_to_scalar(py, &res) {
-                out_scalars.push((key, sc));
+        // Column keys are the grouping columns include_groups governs; an
+        // array or level key rides as a key column of its own and never
+        // reaches func.
+        let mut column_keys = Vec::new();
+        let mut own_keys = Vec::new();
+        for (column, name) in self.by.iter().zip(&self.key_names) {
+            if name.as_deref() == Some(column.as_str()) {
+                column_keys.push(column.as_str());
+            } else {
+                own_keys.push(column.as_str());
             }
         }
-        if !out_dfs.is_empty() {
-            let refs: Vec<&DataFrame> = out_dfs.iter().collect();
-            let combined = concat_dataframes(&refs).map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PyDataFrame { inner: combined })?.into_any())
-        } else if !out_series.is_empty() {
-            let refs: Vec<&Series> = out_series.iter().collect();
-            let combined = concat_series(&refs).map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PySeries { inner: combined })?.into_any())
-        } else if !out_scalars.is_empty() {
-            let labels: Vec<IndexLabel> = out_scalars.iter().map(|(lbl, _)| lbl.clone()).collect();
-            let values: Vec<Scalar> = out_scalars.into_iter().map(|(_, v)| v).collect();
-            let s = Series::from_values("", labels, values).map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PySeries { inner: s })?.into_any())
-        } else {
-            let first = gb.first().map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PyDataFrame { inner: first })?.into_any())
+        if include_groups && !column_keys.is_empty() {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                c"DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.",
+                1,
+            )?;
+        }
+        let kept: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .filter(|column| {
+                !own_keys.contains(column) && (include_groups || !column_keys.contains(column))
+            })
+            .collect();
+        let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
+        let groups = self.ordered_groups(true)?;
+        let mut results = Vec::with_capacity(groups.len());
+        // pandas' `not_indexed_same` is false while every result is a frame
+        // over its group's rows.
+        let mut kept_rows = true;
+        for (_, positions) in &groups {
+            let group = frame.take_rows(positions).map_err(frame_error_to_py)?;
+            let rows = group.index().labels().to_vec();
+            let group = PyDataFrame { inner: group }.into_bound_py_any(py)?;
+            let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
+            let result = Applied::from_py(py, &result)?;
+            kept_rows &= matches!(&result, Applied::Frame(out) if out.index().labels() == rows);
+            results.push(result);
+        }
+        let key_index = self.group_key_index(&groups)?;
+        let mixed = || {
+            not_implemented(
+                "DataFrameGroupBy.apply of a function returning different kinds of results (frames, Series, scalars) for different groups",
+            )
+        };
+        match results
+            .iter()
+            .find(|result| !matches!(result, Applied::Nothing))
+        {
+            None | Some(Applied::Nothing) => PyDataFrame {
+                inner: DataFrame::new(Index::new(Vec::new()), BTreeMap::new())
+                    .map_err(frame_error_to_py)?,
+            }
+            .into_py_any(py),
+            Some(Applied::Scalar(_)) => {
+                if !self.as_index {
+                    return Err(not_implemented(
+                        "DataFrameGroupBy.apply(as_index=False) of a function returning scalars (pandas names the result column None)",
+                    ));
+                }
+                let values = results
+                    .into_iter()
+                    .map(|result| match result {
+                        Applied::Scalar(value) => Ok(value),
+                        Applied::Nothing => Ok(Scalar::Null(NullKind::NaN)),
+                        _ => Err(mixed()),
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                let column = Column::from_values(values).map_err(column_error_to_py)?;
+                PySeries {
+                    inner: Series::new("", key_index, column).map_err(frame_error_to_py)?,
+                }
+                .into_py_any(py)
+            }
+            Some(Applied::Series(first)) => {
+                let labels = first.index().labels().to_vec();
+                if !results
+                    .iter()
+                    .all(|result| matches!(result, Applied::Series(_) | Applied::Nothing))
+                {
+                    return Err(mixed());
+                }
+                let same_index = results.iter().all(|result| match result {
+                    Applied::Series(s) => s.index().labels() == labels,
+                    _ => true,
+                });
+                if same_index {
+                    return self.stacked_apply(py, &results, &labels, &key_index);
+                }
+                // A None result is a NaN row per label of the first
+                // result's index (pandas' backup Series).
+                let backup = Series::new(
+                    "",
+                    first.index().clone(),
+                    Column::from_values(vec![Scalar::Null(NullKind::NaN); labels.len()])
+                        .map_err(column_error_to_py)?,
+                )
+                .map_err(frame_error_to_py)?;
+                let pieces: Vec<Series> = results
+                    .into_iter()
+                    .map(|result| match result {
+                        Applied::Series(s) => s,
+                        _ => backup.clone(),
+                    })
+                    .collect();
+                let layout = if self.group_keys {
+                    let ordinals: Vec<usize> = (0..pieces.len()).collect();
+                    AppliedLayout::Keyed(
+                        self.apply_keys(&key_index, &ordinals),
+                        self.apply_key_names(&key_index),
+                    )
+                } else {
+                    AppliedLayout::Concatenated
+                };
+                PySeries {
+                    inner: lay_out_series(&pieces, layout)?,
+                }
+                .into_py_any(py)
+            }
+            Some(Applied::Frame(_)) => {
+                let mut pieces = Vec::new();
+                let mut ordinals = Vec::new();
+                let mut origin = Vec::new();
+                for (ordinal, (result, (_, positions))) in
+                    results.into_iter().zip(&groups).enumerate()
+                {
+                    match result {
+                        Applied::Frame(piece) => {
+                            pieces.push(piece);
+                            ordinals.push(ordinal);
+                            origin.extend_from_slice(positions);
+                        }
+                        Applied::Nothing => {}
+                        _ => return Err(mixed()),
+                    }
+                }
+                let layout = if self.group_keys {
+                    AppliedLayout::Keyed(
+                        self.apply_keys(&key_index, &ordinals),
+                        self.apply_key_names(&key_index),
+                    )
+                } else if kept_rows {
+                    AppliedLayout::Restored(origin)
+                } else {
+                    AppliedLayout::Concatenated
+                };
+                PyDataFrame {
+                    inner: lay_out_frames(&pieces, layout)?,
+                }
+                .into_py_any(py)
+            }
         }
     }
 
@@ -36863,7 +37365,48 @@ impl PyGroupBy {
             let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
-        self.apply(py, func, args, None, kwargs)
+        // pandas' transform(func): func over each group without the
+        // grouping columns, the results back in the original row order (it
+        // ran apply: the key columns went in and the rows came out in group
+        // order). A func that reduces, which pandas broadcasts over the
+        // group, is not supported.
+        let keys: Vec<&str> = self.by.iter().map(String::as_str).collect();
+        let kept: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .filter(|column| !keys.contains(column))
+            .collect();
+        let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
+        let mut pieces = Vec::new();
+        let mut origin = Vec::new();
+        for (_, positions) in self.ordered_groups(false)? {
+            let group = frame.take_rows(&positions).map_err(frame_error_to_py)?;
+            let rows = group.index().labels().to_vec();
+            let group = PyDataFrame { inner: group }.into_bound_py_any(py)?;
+            let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
+            match Applied::from_py(py, &result)? {
+                Applied::Frame(out) if out.index().labels() == rows => {
+                    pieces.push(out);
+                    origin.extend(positions);
+                }
+                _ => {
+                    return Err(not_implemented(
+                        "DataFrameGroupBy.transform(func) whose func does not return a frame over its group's rows (pandas broadcasts a reduction)",
+                    ));
+                }
+            }
+        }
+        if origin.len() != self.df.len() {
+            return Err(not_implemented(
+                "DataFrameGroupBy.transform(func) with rows whose key is missing (pandas gives them NaN)",
+            ));
+        }
+        PyDataFrame {
+            inner: lay_out_frames(&pieces, AppliedLayout::Restored(origin))?,
+        }
+        .into_py_any(py)
     }
 
     #[pyo3(signature = (subset=None, normalize=false, sort=true, ascending=false, dropna=true))]
@@ -36914,6 +37457,26 @@ pub struct PySeriesGroupBy {
     /// A category key's unused categories under observed=False (pandas'
     /// 2.2 default): the reductions add a row for each (fvsao.39).
     unused: Vec<Scalar>,
+    /// pandas' `groupby(group_keys=)`: whether `apply` puts its Series
+    /// results under the group keys.
+    group_keys: bool,
+}
+
+/// `by` as group codes over pandas' dropna=False groups (a missing key is a
+/// group of its own, last when `sort`), and those groups as an index named
+/// after the key: the several-key form of a SeriesGroupBy, whose `groups`
+/// relabel each per-group result.
+fn missing_key_groups(by: &Series, sort: bool) -> PyResult<(Series, Index)> {
+    let keys = by.to_frame(Some("key")).map_err(frame_error_to_py)?;
+    let (codes, groups) = keys
+        .groupby_full_options(&["key"], true, sort, false)
+        .and_then(|gb| gb.group_codes())
+        .map_err(frame_error_to_py)?;
+    let name = by.name();
+    Ok((
+        Series::new("", by.index().clone(), codes).map_err(frame_error_to_py)?,
+        groups.set_names((!name.is_empty()).then_some(name)),
+    ))
 }
 
 impl PySeriesGroupBy {
@@ -37119,7 +37682,7 @@ impl PySeriesGroupBy {
     fn single_key(&self, op: &str) -> PyResult<()> {
         if self.groups.is_some() {
             return Err(not_implemented(&format!(
-                "SeriesGroupBy.{op} over several keys"
+                "SeriesGroupBy.{op} over several keys or with dropna=False"
             )));
         }
         Ok(())
@@ -37838,38 +38401,87 @@ impl PySeriesGroupBy {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         self.single_key("apply")?;
-        let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
-        let mut out_series = Vec::new();
-        let mut out_scalars = Vec::new();
-        for (key, positions) in self.ordered_groups(true)? {
-            let group_s = self.group_rows(&positions)?;
-            let py_s = PySeries { inner: group_s }.into_bound_py_any(py)?;
+        if !self.as_index {
+            return Err(not_implemented("SeriesGroupBy.apply with as_index=False"));
+        }
+        let groups = self.ordered_groups(true)?;
+        let mut results = Vec::with_capacity(groups.len());
+        // pandas' `not_indexed_same` is false while every result is a
+        // Series over its group's rows.
+        let mut kept_rows = true;
+        for (_, positions) in &groups {
+            let group = self.group_rows(positions)?;
+            let rows = group.index().labels().to_vec();
+            let group = PySeries { inner: group }.into_bound_py_any(py)?;
             // pandas calls func(group, *args, **kwargs); both used to be
             // dropped (fvsao.5).
-            let res = func.call(prepend_arg(py_s, Some(args))?, kwargs)?;
-            if let Ok(s_res) = res.extract::<PySeries>() {
-                out_series.push(s_res.inner);
-            } else if let Ok(sc) = py_to_scalar(py, &res) {
-                out_scalars.push((key, sc));
-            }
+            let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
+            let result = Applied::from_py(py, &result)?;
+            kept_rows &= matches!(&result, Applied::Series(out) if out.index().labels() == rows);
+            results.push(result);
         }
-        if !out_series.is_empty() {
-            let refs: Vec<&Series> = out_series.iter().collect();
-            let combined = concat_series(&refs).map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PySeries { inner: combined })?.into_any())
-        } else if !out_scalars.is_empty() {
-            // Named after the Series, indexed by the key's name, as pandas'
-            // (it was unnamed; fvsao.7).
-            let labels: Vec<IndexLabel> = out_scalars.iter().map(|(lbl, _)| lbl.clone()).collect();
-            let values: Vec<Scalar> = out_scalars.into_iter().map(|(_, v)| v).collect();
-            let key_name = self.by.name();
-            let index = Index::new(labels).set_names((!key_name.is_empty()).then_some(key_name));
-            let column = Column::from_values(values).map_err(column_error_to_py)?;
-            let s = Series::new(self.series.name(), index, column).map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PySeries { inner: s })?.into_any())
-        } else {
-            let first = gb.first().map_err(frame_error_to_py)?;
-            Ok(Py::new(py, PySeries { inner: first })?.into_any())
+        let key_name = self.by.name();
+        let key_name = (!key_name.is_empty()).then_some(key_name);
+        // pandas' SeriesGroupBy decides on the FIRST result, None or not.
+        match results.first() {
+            Some(Applied::Frame(_)) => Err(not_implemented(
+                "SeriesGroupBy.apply of a function returning DataFrames",
+            )),
+            // Series results are concatenated - under the group keys when
+            // group_keys (the default), else back in the original row order
+            // when each kept its group's rows, else in group order - and
+            // named after the grouped Series (the keys were dropped).
+            Some(Applied::Series(_)) => {
+                let mut pieces = Vec::new();
+                let mut keys = Vec::new();
+                let mut origin = Vec::new();
+                for (result, (key, positions)) in results.into_iter().zip(&groups) {
+                    match result {
+                        Applied::Series(piece) => {
+                            pieces.push(piece);
+                            keys.push(vec![key.clone()]);
+                            origin.extend_from_slice(positions);
+                        }
+                        Applied::Nothing => {}
+                        _ => {
+                            return Err(not_implemented(
+                                "SeriesGroupBy.apply of a function returning Series for some groups and scalars for others",
+                            ));
+                        }
+                    }
+                }
+                let layout = if self.group_keys {
+                    AppliedLayout::Keyed(keys, vec![key_name.map(str::to_owned)])
+                } else if kept_rows {
+                    AppliedLayout::Restored(origin)
+                } else {
+                    AppliedLayout::Concatenated
+                };
+                let out = lay_out_series(&pieces, layout)?
+                    .rename(self.series.name())
+                    .map_err(frame_error_to_py)?;
+                PySeries { inner: out }.into_py_any(py)
+            }
+            // Scalars: a Series over the group keys named after the grouped
+            // Series (it was unnamed; fvsao.7), NaN for None.
+            _ => {
+                let values = results
+                    .into_iter()
+                    .map(|result| match result {
+                        Applied::Scalar(value) => Ok(value),
+                        Applied::Nothing => Ok(Scalar::Null(NullKind::NaN)),
+                        _ => Err(not_implemented(
+                            "SeriesGroupBy.apply of a function returning scalars for some groups and Series for others",
+                        )),
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                let index = Index::new(groups.into_iter().map(|(key, _)| key).collect())
+                    .set_names(key_name);
+                let column = Column::from_values(values).map_err(column_error_to_py)?;
+                let s =
+                    Series::new(self.series.name(), index, column).map_err(frame_error_to_py)?;
+                PySeries { inner: s }.into_py_any(py)
+            }
         }
     }
 
@@ -39189,41 +39801,88 @@ impl PyResampler {
 /// the outer level. The level names are `names=`, else no name and the pieces'
 /// shared index name. Returns the flat `key|label` labels and the levels
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3).
+/// A frame's row axis as one `Index`: its flat labels carrying the frame's
+/// row MultiIndex levels, as a Series index carries them.
+fn frame_row_index(frame: &DataFrame) -> PyResult<Index> {
+    match frame.row_multiindex() {
+        Some(levels) => frame
+            .index()
+            .clone()
+            .with_row_multiindex(levels.clone())
+            .map_err(index_error_to_py),
+        None => Ok(frame.index().clone()),
+    }
+}
+
 fn keyed_rows(
-    keys: &[IndexLabel],
+    keys: &[Vec<IndexLabel>],
     pieces: &[&Index],
     names: Option<Vec<Option<String>>>,
 ) -> PyResult<(Vec<IndexLabel>, fp_index::MultiIndex)> {
-    if pieces.iter().any(|piece| piece.row_multiindex().is_some()) {
+    // Each key is one level (several for a groupby's tuple keys); each
+    // piece's index adds its own levels after them.
+    let key_levels = keys.first().map_or(1, Vec::len);
+    let levels_of = |piece: &Index| piece.row_multiindex().map_or(1, |multi| multi.nlevels());
+    let index_levels = pieces.first().map_or(1, |piece| levels_of(piece));
+    if keys.iter().any(|key| key.len() != key_levels)
+        || pieces.iter().any(|piece| levels_of(piece) != index_levels)
+    {
         return Err(not_implemented(
-            "concat(keys=...) of objects that already have a MultiIndex",
+            "concat(keys=...) of objects whose indexes have different numbers of levels",
         ));
     }
+    let level_name = |piece: &Index, level: usize| match piece.row_multiindex() {
+        Some(multi) => multi.names().get(level).cloned().flatten(),
+        None => piece.name().map(str::to_owned),
+    };
     let rows: usize = pieces.iter().map(|piece| piece.len()).sum();
-    let (mut outer, mut inner, mut flat) = (
-        Vec::with_capacity(rows),
-        Vec::with_capacity(rows),
-        Vec::with_capacity(rows),
-    );
+    let mut arrays = vec![Vec::with_capacity(rows); key_levels + index_levels];
+    let mut flat = Vec::with_capacity(rows);
     for (key, piece) in keys.iter().zip(pieces) {
-        for label in piece.labels() {
-            outer.push(key.clone());
-            inner.push(label.clone());
-            flat.push(IndexLabel::Utf8(format!("{key}|{label}")));
+        let piece_arrays = match piece.row_multiindex() {
+            Some(multi) => (0..index_levels)
+                .map(|level| {
+                    multi
+                        .get_level_values(level)
+                        .map(|values| values.labels().to_vec())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(index_error_to_py)?,
+            None => vec![piece.labels().to_vec()],
+        };
+        let key_text = key
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("|");
+        for (row, label) in piece.labels().iter().enumerate() {
+            for (level, part) in key.iter().enumerate() {
+                arrays[level].push(part.clone());
+            }
+            for (level, values) in piece_arrays.iter().enumerate() {
+                arrays[key_levels + level].push(values[row].clone());
+            }
+            flat.push(IndexLabel::Utf8(format!("{key_text}|{label}")));
         }
     }
-    let shared_name = pieces
-        .first()
-        .and_then(|first| first.name())
-        .filter(|name| pieces.iter().all(|piece| piece.name() == Some(*name)))
-        .map(str::to_owned);
-    let names = names.unwrap_or_else(|| vec![None, shared_name]);
-    if names.len() != 2 {
+    let names = names.unwrap_or_else(|| {
+        let mut names = vec![None; key_levels];
+        names.extend((0..index_levels).map(|level| {
+            let first = pieces.first().and_then(|piece| level_name(piece, level));
+            first.filter(|name| {
+                pieces
+                    .iter()
+                    .all(|piece| level_name(piece, level).as_ref() == Some(name))
+            })
+        }));
+        names
+    });
+    if names.len() != key_levels + index_levels {
         return Err(not_implemented(
-            "concat(names=...) naming other than the key level and one index level",
+            "concat(names=...) naming other than every key and index level",
         ));
     }
-    let levels = fp_index::MultiIndex::from_arrays(vec![outer, inner])
+    let levels = fp_index::MultiIndex::from_arrays(arrays)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
         .set_names(names);
     Ok((flat, levels))
@@ -39380,7 +40039,8 @@ fn concat(
             return PySeries { inner: out }.into_py_any(py);
         };
         let pieces: Vec<&Index> = series.iter().map(Series::index).collect();
-        let (flat, levels) = keyed_rows(keys, &pieces, names)?;
+        let keys: Vec<Vec<IndexLabel>> = keys.iter().map(|key| vec![key.clone()]).collect();
+        let (flat, levels) = keyed_rows(&keys, &pieces, names)?;
         let index = Index::new(flat)
             .with_row_multiindex(levels)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -39439,8 +40099,13 @@ fn concat(
     if let Some(keys) = &keys
         && axis == 0
     {
-        let pieces: Vec<&Index> = frames.iter().map(DataFrame::index).collect();
-        let (flat, levels) = keyed_rows(keys, &pieces, names)?;
+        let pieces = frames
+            .iter()
+            .map(frame_row_index)
+            .collect::<PyResult<Vec<_>>>()?;
+        let pieces: Vec<&Index> = pieces.iter().collect();
+        let keys: Vec<Vec<IndexLabel>> = keys.iter().map(|key| vec![key.clone()]).collect();
+        let (flat, levels) = keyed_rows(&keys, &pieces, names)?;
         out = out
             .set_axis(flat, 0)
             .and_then(|framed| framed.with_row_multiindex(levels))
@@ -40281,18 +40946,33 @@ fn to_datetime(
             )));
         }
     };
-    unsupported_params(
-        "to_datetime",
-        &[("dayfirst", !dayfirst), ("yearfirst", !yearfirst)],
-    )?;
+    unsupported_params("to_datetime", &[("yearfirst", !yearfirst)])?;
     let opts = fp_frame::ToDatetimeOptions {
         format,
         unit,
         utc,
         errors,
+        dayfirst,
         ..Default::default()
     };
+    // pandas' UserWarning when the first string forces the other day/month
+    // order (13/02/2024 without dayfirst).
+    let warn_order = |values: &[Scalar]| -> PyResult<()> {
+        if format.is_some() || unit.is_some() {
+            return Ok(());
+        }
+        match fp_frame::day_month_format_warning(values, dayfirst) {
+            Some(message) => PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &std::ffi::CString::new(message)?,
+                1,
+            ),
+            None => Ok(()),
+        }
+    };
     if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
+        warn_order(s.inner.values())?;
         let res = fp_frame::to_datetime_with_options(&s.inner, opts).map_err(to_datetime_error)?;
         return Ok(Py::new(py, PySeries { inner: res })?.into_any());
     }
@@ -40312,6 +40992,7 @@ fn to_datetime(
             .iter()
             .map(index_label_to_scalar)
             .collect();
+        warn_order(&values)?;
         let temp_series = Series::from_values(
             "",
             (0..values.len())
@@ -40335,6 +41016,7 @@ fn to_datetime(
             .iter()
             .map(|v| py_to_scalar(py, &v))
             .collect::<PyResult<Vec<_>>>()?;
+        warn_order(&values)?;
         let temp_series = Series::from_values(
             "",
             (0..values.len())
@@ -40354,6 +41036,7 @@ fn to_datetime(
         .into_any());
     }
     if let Ok(s) = py_to_scalar(py, arg) {
+        warn_order(std::slice::from_ref(&s))?;
         let temp_series = Series::from_values("", vec![IndexLabel::Int64(0)], vec![s])
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res =
@@ -50070,6 +50753,7 @@ mod tests {
             as_index: true,
             groups: None,
             unused: Vec::new(),
+            group_keys: true,
         };
 
         // Reductions return a Series (or, with as_index=False, a frame).
@@ -50128,6 +50812,7 @@ mod tests {
             as_index: true,
             sort: true,
             dropna: true,
+            group_keys: true,
             unused: Vec::new(),
         };
         let gb_first = gb.first(false, -1, true).expect("first"); // ubs:ignore — test fixture

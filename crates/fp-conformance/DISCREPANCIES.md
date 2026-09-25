@@ -87,9 +87,9 @@
 - **Reference:** pandas `DataFrameGroupBy.apply` dynamically dispatches scalar, Series, and DataFrame return values from one Python callable.
 - **Our impl:** Rust's static return types expose the same shape families as explicit methods: `apply_scalar`, `apply_series`, `apply_series_stacked`, and DataFrame-returning `apply`. DataFrame-returning apply retains group-key row MultiIndex metadata; stacked Series output is represented as a one-column DataFrame until Series row MultiIndex metadata lands.
 - **Impact:** Shape semantics are available, but Rust callers choose the expected output family at compile time instead of receiving a dynamic Python object.
-- **Resolution:** INVESTIGATING - a future Python binding layer can restore one-call dynamic dispatch over these Rust shape-specific methods.
-- **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
-- **Review date:** 2026-04-25
+- **Resolution:** ACCEPTED for Rust (static return types keep the shape-explicit methods); RESOLVED in Python. The binding's `DataFrameGroupBy.apply` / `SeriesGroupBy.apply` infer the shape per call as pandas' `_wrap_applied_output`: scalars become a Series over the group keys (NaN for None); Series sharing one index become a frame, a row per group; other Series and frames are concatenated under the group-key levels when `group_keys` (the default), else back in the original row order when every result kept its group's rows, else in group order; `include_groups` (default True, with pandas' DeprecationWarning for column keys) decides whether func sees the grouping columns (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.10).
+- **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`; Python: the `apply *` / `sgb apply *` cases of `crates/fp-python/tests/test_differential_packets.py::test_centered_windows_reindex_fill_dayfirst_and_groupby_apply_match_pandas`.
+- **Review date:** 2026-09-25
 
 ### DISC-015: memory_usage exact bytes differ from pandas (structural divergence)
 - **Reference:** pandas `DataFrame.memory_usage()` reports exact bytes consumed by numpy-backed columns. For the test frame in `FP-P2D-364`, pandas returns 234 bytes (index + column overhead + numpy array backing).

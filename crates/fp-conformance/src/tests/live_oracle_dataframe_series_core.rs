@@ -21472,6 +21472,7 @@ fn live_oracle_series_to_datetime_unit_milliseconds() {
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
             errors: fp_frame::DatetimeErrors::Coerce,
+            dayfirst: false,
         },
     )
     .expect("to_datetime");
@@ -34178,6 +34179,7 @@ fn live_oracle_series_to_datetime_unit_microseconds() {
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
             errors: fp_frame::DatetimeErrors::Coerce,
+            dayfirst: false,
         },
     )
     .expect("to_datetime");
@@ -34234,6 +34236,7 @@ fn live_oracle_series_to_datetime_unit_minutes() {
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
             errors: fp_frame::DatetimeErrors::Coerce,
+            dayfirst: false,
         },
     )
     .expect("to_datetime");

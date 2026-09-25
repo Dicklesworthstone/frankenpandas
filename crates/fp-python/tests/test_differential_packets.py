@@ -2762,7 +2762,6 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
     "call",
     [
         lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), values=fpd.Series([1]), aggfunc="sum"),
-        lambda: _hd(fpd).rolling(2, center=True),
         lambda: _hd(fpd).groupby("a").value_counts(normalize=True),
         lambda: _hs(fpd).interpolate(method="nearest", limit_direction="both"),
         lambda: _hs(fpd).to_string(float_format="{:.1f}".format),
@@ -2921,11 +2920,12 @@ def test_groupby_option_refusals_and_errors_match_pandas() -> None:
             _gb_frame(m).groupby()
     # NEGATIVE: options the binding cannot honour raise, never drop.
     # (groupby(level=0) left this list when fvsao.19 implemented it; it is
-    # compared with pandas in test_groupby_by_array_like_keys_matches_pandas.)
+    # compared with pandas in test_groupby_by_array_like_keys_matches_pandas.
+    # dropna=False and group_keys=False left it when they were implemented;
+    # see test_centered_windows_reindex_fill_dayfirst_and_groupby_apply_match_pandas.)
     for call in (
-        lambda: _gb_frame(fpd).groupby("k", dropna=False)["a"],
-        lambda: _gb_frame(fpd).groupby("k", group_keys=False),
-        lambda: fpd.Series(series).groupby([1, 1, 2], dropna=False),
+        lambda: _gb_frame(fpd).groupby("k", dropna=False)["a"].apply(lambda s: s.sum()),
+        lambda: _gb_frame(fpd).groupby("k", as_index=False).apply(lambda d: d["a"].sum(), include_groups=False),
     ):
         with pytest.raises(NotImplementedError):
             call()
@@ -3221,8 +3221,6 @@ def test_drop_rename_errors_match_pandas() -> None:
         with pytest.raises(ValueError, match="Cannot operate inplace if there is no assignment"):
             _dr(m).eval("a + 1", inplace=True)
     # What the binding cannot do raises instead of being dropped.
-    with pytest.raises(NotImplementedError, match="append"):
-        _dr(fpd).set_index("a", append=True)
     with pytest.raises(NotImplementedError, match="level"):
         _dr(fpd).drop("x", level=0)
 
@@ -6894,3 +6892,144 @@ def _read_csv_nth_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_READ_CSV_NTH_CASES))
 def test_read_csv_parser_options_and_groupby_nth_match_pandas(case: str) -> None:
     assert _read_csv_nth_outcome(fpd, case) == _read_csv_nth_outcome(pd, case), case
+
+
+def _shaped(r: Any, digits: int | None = None) -> Any:
+    """A frame or Series as its kind, name, index (names and labels),
+    columns and values, NaN as None; floats to `digits` places when given
+    (a moving correlation's last bits depend on summation order)."""
+    plain = lambda v: None if isinstance(v, float) and math.isnan(v) else (round(v, digits) if digits is not None and isinstance(v, float) else v)  # noqa: E731
+    index = (list(r.index.names), [str(i) for i in r.index])
+    if hasattr(r, "columns"):
+        return ("frame", index, [str(c) for c in r.columns], [[plain(v) for v in r[c].tolist()] for c in r.columns])
+    return ("series", r.name, index, [plain(v) for v in r.tolist()])
+
+
+def _apply_frame(m: Any) -> Any:
+    return m.DataFrame({"g": ["b", "a", "b"], "v": [1, 2, 3], "w": [4.0, 5.0, 6.0]})
+
+
+def _five(m: Any) -> Any:
+    return m.DataFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0], "b": [2.0, 1.0, 5.0, 3.0, 8.0]})
+
+
+# Finished code the binding refused or never reached, and results that were
+# silently wrong:
+# - DataFrame.rolling(center=True) was refused although fp-frame's Series
+#   windows centre; Series rolling rank / agg([...]) / apply / corr / cov
+#   ignored center, and apply counted NaN rows toward min_periods;
+# - reindex(method='ffill'/'bfill') carried the previous TARGET row's value
+#   instead of searching the source index;
+# - DataFrame.from_dict(orient='index'/'tight') and set_index(append=True)
+#   were refused (a missing key raised ValueError, pandas' KeyError);
+# - to_datetime(dayfirst=True) was refused, a first value only readable
+#   day-first (13/02/2024) raised, and format='...%S.%f' read '.5' as 5 ns;
+# - groupby.apply concatenated without the group keys, handed func the key
+#   columns whatever include_groups said, and dropped None results;
+#   group_keys=False and dropna=False (Series groupby) were refused;
+#   groupby.transform(func) returned rows in group order with the keys.
+_WIRE_CASES = {
+    "frame rolling center mean": lambda m: _shaped(_five(m).rolling(3, center=True).mean()),
+    "frame rolling center even sum": lambda m: _shaped(_five(m).rolling(2, center=True).sum()),
+    "frame rolling center min_periods": lambda m: _shaped(_five(m).rolling(4, center=True, min_periods=1).max()),
+    "frame rolling center agg": lambda m: _shaped(_five(m).rolling(3, center=True).agg(["sum", "min"])),
+    "series rolling center rank": lambda m: _shaped(m.Series([3.0, 1.0, 4.0, 1.0, 5.0]).rolling(3, center=True).rank()),
+    "series rolling center agg list": lambda m: _shaped(m.Series([3.0, 1.0, 4.0, 1.0, 5.0]).rolling(3, center=True).agg(["sum", "max"])),
+    "series rolling center apply": lambda m: _shaped(m.Series([1.0, 2.0, 3.0, 4.0, 5.0]).rolling(3, center=True, min_periods=1).apply(lambda x: len(x))),
+    "series rolling apply nan min_periods": lambda m: _shaped(m.Series([1.0, float("nan"), 3.0, 4.0, 5.0]).rolling(2).apply(lambda x: x.sum())),
+    "series rolling center corr": lambda m: _shaped(_five(m)["a"].rolling(3, center=True, min_periods=2).corr(_five(m)["b"]), 10),
+    "frame rolling center cov series": lambda m: _shaped(_five(m).rolling(3, center=True).cov(m.Series([2.0, 1.0, 5.0, 3.0, 8.0])), 10),
+    # pandas names a moving corr / cov only when both Series share the name.
+    "rolling corr names differ": lambda m: m.Series([1.0, 2.0, 4.0], name="a").rolling(2).corr(m.Series([2.0, 1.0, 5.0], name="b")).name,
+    "expanding cov same name": lambda m: m.Series([1.0, 2.0, 4.0], name="a").expanding().cov(m.Series([2.0, 1.0, 5.0], name="a")).name,
+    "rolling rank center edges": lambda m: _shaped(m.Series([3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0]).rolling(4, center=True, min_periods=1).rank(method="max")),
+    # NEGATIVE: pandas' rolling rank takes only average / min / max.
+    "rolling rank first raises": lambda m: m.Series([1.0, 2.0]).rolling(2).rank(method="first"),
+    "expanding agg list": lambda m: _shaped(_five(m).expanding().agg(["sum", "max"])),
+    "frame rolling center apply raw": lambda m: _shaped(_five(m).rolling(3, center=True).apply(lambda x: x[0], raw=True)),
+    # NEGATIVE: center=False keeps the trailing windows.
+    "frame rolling trailing": lambda m: _shaped(_five(m).rolling(3).mean()),
+    "reindex ffill": lambda m: _shaped(m.Series([1.0, 2.0, 3.0], index=[0, 2, 4]).reindex([5, 1, 3, 0, -1], method="ffill")),
+    "reindex bfill": lambda m: _shaped(m.Series([1.0, 2.0, 3.0], index=[0, 2, 4]).reindex([5, 1, 3, 0, -1], method="bfill")),
+    "reindex ffill decreasing": lambda m: _shaped(m.Series([1.0, 2.0, 3.0], index=[4, 2, 0]).reindex([5, 3, 1], method="ffill")),
+    "frame reindex bfill": lambda m: _shaped(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=[0, 2, 4]).reindex([0, 1, 3], method="bfill")),
+    "reindex pad index target": lambda m: _shaped(m.Series([1.0, 2.0], index=[0, 10]).reindex(m.Index([3, 12]), method="pad")),
+    # NEGATIVE: a source that is not monotonic is pandas' ValueError.
+    "reindex ffill unsorted source": lambda m: m.Series([1.0, 2.0, 3.0], index=[2, 0, 4]).reindex([1], method="ffill"),
+    "from_dict index": lambda m: _shaped(m.DataFrame.from_dict({"r1": [1, 2], "r2": [3, 4]}, orient="index")),
+    "from_dict index columns": lambda m: _shaped(m.DataFrame.from_dict({"r1": [1, 2], "r2": [3, 4]}, orient="index", columns=["a", "b"])),
+    "from_dict index of dicts": lambda m: _shaped(m.DataFrame.from_dict({"r1": {"a": 1, "b": 2}, "r2": {"a": 3}}, orient="index")),
+    "from_dict tight": lambda m: _shaped(m.DataFrame.from_dict({"index": ["x", "y"], "columns": ["a"], "data": [[1], [2]], "index_names": ["k"], "column_names": [None]}, orient="tight")),
+    # NEGATIVE: an unknown orient is pandas' ValueError.
+    "from_dict bad orient": lambda m: m.DataFrame.from_dict({"a": [1]}, orient="rows"),
+    "set_index append": lambda m: _shaped(m.DataFrame({"a": [1, 2], "b": ["x", "y"]}).set_index("b", append=True)),
+    "set_index append twice": lambda m: _shaped(m.DataFrame({"a": [1, 2], "b": ["x", "y"], "c": [5, 6]}).set_index("b", append=True).set_index("c", append=True)),
+    "set_index append keep": lambda m: _shaped(m.DataFrame({"a": [1, 2], "b": ["x", "y"]}, index=m.Index([7, 8], name="k")).set_index(["b"], append=True, drop=False)),
+    # NEGATIVE: a key that is not a column is pandas' KeyError (it was ValueError).
+    "set_index missing": lambda m: m.DataFrame({"a": [1]}).set_index("zz"),
+    "set_index append missing": lambda m: m.DataFrame({"a": [1]}).set_index(["a", "zz"], append=True),
+    "dayfirst slash": lambda m: [str(t) for t in m.to_datetime(m.Series(["01/02/2024", "03/04/2024"]), dayfirst=True)],
+    "dayfirst dash time": lambda m: [str(t) for t in m.to_datetime(m.Series(["01-02-2024 10:30", "05-06-2024 11:45"]), dayfirst=True)],
+    "dayfirst dot fraction": lambda m: [str(t) for t in m.to_datetime(m.Series(["01.02.2024 10:30:15.5"]), dayfirst=True)],
+    "dayfirst iso": lambda m: [str(t) for t in m.to_datetime(m.Series(["2024-01-02", "2024-03-04"]), dayfirst=True)],
+    "dayfirst list": lambda m: [str(t) for t in m.to_datetime(["01/02/2024", "03/04/2024"], dayfirst=True)],
+    "dayfirst coerce": lambda m: [str(t) for t in m.to_datetime(m.Series(["01/02/2024", "2024-03-04", "31/12/2024"]), dayfirst=True, errors="coerce")],
+    "dayfirst null first": lambda m: [str(t) for t in m.to_datetime(m.Series([None, "01/02/2024"]), dayfirst=True)],
+    "day over twelve": lambda m: [str(t) for t in m.to_datetime(m.Series(["13/02/2024", "01/03/2024"]))],
+    "month over twelve dayfirst": lambda m: [str(t) for t in m.to_datetime(m.Series(["01/13/2024", "02/14/2024"]), dayfirst=True)],
+    "format fraction": lambda m: [str(t) for t in m.to_datetime(m.Series(["01/02/2024 10:30:15.25"]), format="%d/%m/%Y %H:%M:%S.%f")],
+    # Month-first dates with a time, '-' / '.' separators or AM/PM raised.
+    "monthfirst time": lambda m: [str(t) for t in m.to_datetime(m.Series(["01/02/2024 10:30", "03/04/2024 11:15"]))],
+    "monthfirst fraction": lambda m: [str(t) for t in m.to_datetime(m.Series(["01/02/2024 10:30:15.5"]))],
+    "monthfirst dash dot": lambda m: [[str(t) for t in m.to_datetime(m.Series([v]))] for v in ("01-02-2024", "01.02.2024")],
+    "monthfirst pm": lambda m: [str(t) for t in m.to_datetime(m.Series(["01/02/2024 10:30 PM"]))],
+    "scalar day over twelve": lambda m: str(m.to_datetime("13/02/2024")),
+    # NEGATIVES: month-first stays the default; a row off the guessed format raises.
+    "monthfirst default": lambda m: [str(t) for t in m.to_datetime(m.Series(["01/02/2024", "03/04/2024"]))],
+    "dayfirst mismatch raises": lambda m: m.to_datetime(m.Series(["01/02/2024", "2024-03-04"]), dayfirst=True),
+    "apply frame keyed": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: d * 1, include_groups=False)),
+    "apply frame group_keys false": lambda m: _shaped(_apply_frame(m).groupby("g", group_keys=False).apply(lambda d: d * 1, include_groups=False)),
+    "apply head keyed": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: d.head(1), include_groups=False)),
+    "apply head group_keys false": lambda m: _shaped(_apply_frame(m).groupby("g", group_keys=False).apply(lambda d: d.head(1), include_groups=False)),
+    "apply scalar": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: d["v"].sum(), include_groups=False)),
+    "apply scalar sort false": lambda m: _shaped(_apply_frame(m).groupby("g", sort=False).apply(lambda d: d["v"].sum(), include_groups=False)),
+    "apply scalar none": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: None if len(d) == 1 else d["v"].sum(), include_groups=False)),
+    "apply frame none": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: None if len(d) == 1 else d.head(1), include_groups=False)),
+    "apply series stacked": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: d.sum(), include_groups=False)),
+    "apply series varying": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: d["v"] * 2, include_groups=False)),
+    "apply series varying group_keys false": lambda m: _shaped(_apply_frame(m).groupby("g", group_keys=False).apply(lambda d: d["v"] * 2, include_groups=False)),
+    "apply agg shaped frame": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: m.DataFrame({"s": [d["v"].sum()]}), include_groups=False)),
+    "apply two keys scalar": lambda m: _shaped(_apply_frame(m).groupby(["g", "v"]).apply(lambda d: d["w"].sum(), include_groups=False)),
+    "apply two keys frame": lambda m: _shaped(_apply_frame(m).groupby(["g", "v"]).apply(lambda d: d * 2, include_groups=False)),
+    "apply as_index false frame": lambda m: _shaped(_apply_frame(m).groupby("g", as_index=False).apply(lambda d: d.head(1), include_groups=False)),
+    "apply as_index false stacked": lambda m: _shaped(_apply_frame(m).groupby("g", as_index=False).apply(lambda d: d.sum(), include_groups=False)),
+    "apply array key": lambda m: _shaped(_apply_frame(m).groupby(np.array(["x", "y", "x"])).apply(lambda d: d["v"].sum())),
+    "apply include_groups default": lambda m: _shaped(_apply_frame(m).groupby("g").apply(lambda d: d.head(1))),
+    "sgb apply scalar": lambda m: _shaped(_apply_frame(m).groupby("g")["v"].apply(lambda s: s.sum())),
+    "sgb apply series keyed": lambda m: _shaped(_apply_frame(m).groupby("g")["v"].apply(lambda s: s * 2)),
+    "sgb apply series group_keys false": lambda m: _shaped(_apply_frame(m).groupby("g", group_keys=False)["v"].apply(lambda s: s * 2)),
+    "Series groupby apply group_keys false": lambda m: _shaped(m.Series([1, 2, 3]).groupby([0, 1, 0], group_keys=False).apply(lambda s: s * 2)),
+    "transform func": lambda m: _shaped(_apply_frame(m).groupby("g").transform(lambda d: d - d.min())),
+    "dropna false column": lambda m: _shaped(m.DataFrame({"g": ["a", None, "a"], "v": [1, 2, 3]}).groupby("g", dropna=False)["v"].sum()),
+    "dropna false Series": lambda m: _shaped(m.Series([1, 2, 3], index=["x", "y", "z"]).groupby(m.Series(["a", None, "a"], index=["x", "y", "z"]), dropna=False).sum()),
+    "dropna false mean unsorted": lambda m: _shaped(m.Series([1.0, 2.0, 3.0, 4.0]).groupby(["b", None, "a", "b"], dropna=False, sort=False).mean()),
+    # NEGATIVE: dropna=True (the default) drops the missing key's rows.
+    "dropna true Series": lambda m: _shaped(m.Series([1, 2, 3]).groupby(["a", None, "a"]).sum()),
+    "concat keys multiindex pieces": lambda m: _shaped(m.concat([m.DataFrame({"v": [1]}, index=m.MultiIndex.from_tuples([("a", 1)])), m.DataFrame({"v": [2]}, index=m.MultiIndex.from_tuples([("b", 2)]))], keys=["x", "y"])),
+}
+
+
+def _wire_outcome(m: Any, case: str) -> Any:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            result = _WIRE_CASES[case](m)
+        except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+            result = ("raise", type(e).__name__)
+    return result, sorted({w.category.__name__ for w in caught if w.category in (UserWarning, DeprecationWarning)})
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WIRE_CASES))
+def test_centered_windows_reindex_fill_dayfirst_and_groupby_apply_match_pandas(case: str) -> None:
+    assert _wire_outcome(fpd, case) == _wire_outcome(pd, case), case

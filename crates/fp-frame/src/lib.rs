@@ -3692,26 +3692,52 @@ fn nearest_reindex_positions(
     Ok(out)
 }
 
-fn carry_reindex_positions(positions: &[Option<usize>], forward: bool) -> Vec<Option<usize>> {
-    let n = positions.len();
-    let mut out = vec![None; n];
-    let mut carried: Option<usize> = None;
-    if forward {
-        for i in 0..n {
-            if positions[i].is_some() {
-                carried = positions[i];
-            }
-            out[i] = carried;
-        }
-    } else {
-        for i in (0..n).rev() {
-            if positions[i].is_some() {
-                carried = positions[i];
-            }
-            out[i] = carried;
-        }
+/// pandas' `get_indexer(target, method='pad'|'backfill')`
+/// (`_get_fill_indexer_searchsorted`) over a monotonic source index: an exact
+/// label keeps its row; any other target label takes the last source label
+/// below it (`forward`, pad) or the first above it (backfill), in label order,
+/// or none past the ends. The rows were carried along the TARGET's order
+/// instead, so a label past the last matched one - or any label under
+/// backfill - took the wrong row or none (s.reindex([0, 1, 3],
+/// method='bfill') on labels [0, 2, 4] gave [1, NaN, NaN] for [1, 2, 3]).
+fn fill_reindex_positions(
+    src: &[IndexLabel],
+    target: &[IndexLabel],
+    positions: &[Option<usize>],
+    forward: bool,
+) -> Result<Vec<Option<usize>>, FrameError> {
+    let increasing = src.windows(2).all(|pair| pair[0] <= pair[1]);
+    let decreasing = src.windows(2).all(|pair| pair[0] >= pair[1]);
+    if !increasing && !decreasing {
+        return Err(FrameError::CompatibilityRejected(
+            "index must be monotonic increasing or decreasing".to_owned(),
+        ));
     }
-    out
+    let n = src.len();
+    Ok(target
+        .iter()
+        .zip(positions)
+        .map(|(label, &exact)| {
+            if exact.is_some() || label.is_missing() {
+                return exact;
+            }
+            if increasing {
+                if forward {
+                    // The last source label below `label`.
+                    src.partition_point(|s| s < label).checked_sub(1)
+                } else {
+                    // The first source label above `label`.
+                    Some(src.partition_point(|s| s <= label)).filter(|&at| at < n)
+                }
+            } else if forward {
+                // Decreasing: the last label (in order) greater than `label`.
+                src.partition_point(|s| s > label).checked_sub(1)
+            } else {
+                // Decreasing: the first label (in order) smaller than `label`.
+                Some(src.partition_point(|s| s >= label)).filter(|&at| at < n)
+            }
+        })
+        .collect())
 }
 
 fn reindex_positions_int64_direct(
@@ -12251,7 +12277,12 @@ impl Series {
         // Absent labels inherit the nearest present source position in the fill
         // direction; present labels (incl. source NaNs) keep their own position.
         let filled = match forward {
-            Some(direction) => carry_reindex_positions(&positions, direction),
+            Some(direction) => fill_reindex_positions(
+                self.index.labels(),
+                new_index.labels(),
+                &positions,
+                direction,
+            )?,
             None => nearest_reindex_positions(self.index.labels(), new_index.labels(), &positions)?,
         };
         let col = self.column.reindex_by_positions(&filled)?;
@@ -30832,7 +30863,7 @@ impl Rolling<'_> {
     /// Half-open window bounds `[start, end)` for output position `i`. Both
     /// bounds are non-decreasing in `i` for trailing AND centered windows, so a
     /// two-pointer sweep can slide an incremental structure across them.
-    fn window_bounds(&self, i: usize, len: usize) -> (usize, usize) {
+    pub fn window_bounds(&self, i: usize, len: usize) -> (usize, usize) {
         // Offset (time-based) window: per-row starts precomputed from the
         // datetime index (issue #20); trailing right-closed, so end = i + 1.
         if let Some(starts) = &self.offset_starts {
@@ -32027,7 +32058,9 @@ impl Rolling<'_> {
     /// Rank the current observation within each rolling window.
     ///
     /// Matches `series.rolling(window).rank()`. The emitted value is the
-    /// rank of the row's own value within its window.
+    /// rank of the window's last value within it: the row's own for a
+    /// trailing window, the window's newest (not its middle) when centered,
+    /// as pandas.
     pub fn rank(
         &self,
         method: &str,
@@ -32072,7 +32105,6 @@ impl Rolling<'_> {
 
         for i in 0..len {
             let (start, end) = self.window_bounds(i, len);
-            let current_pos = i - start;
             let window_slice = &vals[start..end];
             let valid_count = window_slice
                 .iter()
@@ -32086,9 +32118,24 @@ impl Rolling<'_> {
                 continue;
             }
 
+            // pandas ranks each window's LAST element (a centered window's
+            // too, not its middle one) among the `window` rows up to it: at
+            // a centered tail, whose end stops at the series' end, that is
+            // the full-width window the element entered, not the shrunken
+            // one.
+            let rank_start = if self.center {
+                end.saturating_sub(self.window)
+            } else {
+                start
+            };
+            let Some(current_pos) = (end - rank_start).checked_sub(1) else {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            };
+            let rank_slice = &vals[rank_start..end];
             let mut null_positions = Vec::new();
             let mut sortable = Vec::new();
-            for (pos, value) in window_slice.iter().enumerate() {
+            for (pos, value) in rank_slice.iter().enumerate() {
                 if value.is_missing() {
                     null_positions.push(pos);
                 } else if let Ok(f) = value.to_f64() {
@@ -32099,7 +32146,7 @@ impl Rolling<'_> {
             }
 
             let ranks = rank_numeric_positions(
-                window_slice.len(),
+                rank_slice.len(),
                 sortable,
                 &null_positions,
                 method,
@@ -32121,11 +32168,10 @@ impl Rolling<'_> {
     /// value presence) slid across the window with a two-pointer sweep.
     ///
     /// Mirrors `Expanding::expanding_rank_fast` but with removal as the window
-    /// slides. Only reached when the ranked element is last in its tie group
-    /// (trailing window; or a centered window with a method that does not depend
-    /// on within-group offset, i.e. not 'first'), so the newest element's
-    /// 'first' rank equals its 'max' rank. Counts are window-local. Caller has
-    /// already excluded -0.0 and center+first.
+    /// slides. The ranked element is the window's last (pandas' rule, centered
+    /// windows included), so it is last in its tie group and its 'first' rank
+    /// equals its 'max' rank. Counts are window-local. Caller has already
+    /// excluded -0.0 and center+first.
     /// Cache-hot O(n·w) rolling rank for trailing, non-`dense` windows: keep the
     /// window's valid values in a `Vec<f64>` sorted by `total_cmp` (a multiset),
     /// sliding via binary-search insert/remove. Bit-identical to
@@ -32299,6 +32345,16 @@ impl Rolling<'_> {
 
         for i in 0..len {
             let (start, end) = self.window_bounds(i, len);
+            // pandas ranks each window's LAST element (a centered window's
+            // too, not its middle one) among the `window` rows up to it, so
+            // the trees hold [rank_start, end): at a centered tail, whose end
+            // stops at the series' end, the full-width window the element
+            // entered. min_periods still counts [start, end).
+            let rank_start = if self.center {
+                end.saturating_sub(self.window)
+            } else {
+                start
+            };
             while r_ptr < end {
                 match numeric_at(r_ptr) {
                     Some(x) => {
@@ -32315,7 +32371,7 @@ impl Rolling<'_> {
                 }
                 r_ptr += 1;
             }
-            while l_ptr < start {
+            while l_ptr < rank_start {
                 match numeric_at(l_ptr) {
                     Some(x) => {
                         let r = rank_of(x);
@@ -32331,12 +32387,20 @@ impl Rolling<'_> {
                 l_ptr += 1;
             }
 
-            if non_null < min_periods {
+            let window_non_null = non_null
+                - (rank_start..start)
+                    .filter(|&j| numeric_at(j).is_some())
+                    .count();
+            if window_non_null < min_periods {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
+            let Some(ranked) = end.checked_sub(1).filter(|&last| last >= rank_start) else {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            };
 
-            let scalar = match numeric_at(i) {
+            let scalar = match numeric_at(ranked) {
                 Some(x) => {
                     let r = rank_of(x);
                     let cnt_le = fen_prefix(&count_tree, r as i64);
@@ -37589,6 +37653,9 @@ pub struct DataFrameRolling<'a> {
     df: &'a DataFrame,
     window: usize,
     min_periods: usize,
+    /// pandas' `rolling(center=True)`: each window centred on its row (the
+    /// DataFrame windows were trailing only).
+    center: bool,
 }
 
 impl DataFrameRolling<'_> {
@@ -37604,7 +37671,7 @@ impl DataFrameRolling<'_> {
     /// pandas). Gated so small frames keep the zero-overhead serial path.
     fn apply_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
-        F: Fn(&Series, usize, usize) -> Result<Series, FrameError> + Sync,
+        F: for<'s> Fn(Rolling<'s>) -> Result<Series, FrameError> + Sync,
     {
         let numeric_positions: Vec<usize> = (0..self.df.num_columns())
             .filter(|&pos| {
@@ -37619,7 +37686,8 @@ impl DataFrameRolling<'_> {
             let col = self.df.column_at(pos).expect("pos in bounds");
             let name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&name, self.df.index.clone(), col.clone())?;
-            let result = agg(&series, self.window, self.min_periods)?;
+            let result =
+                agg(series.rolling_with_center(self.window, Some(self.min_periods), self.center))?;
             Ok((name, result.column().clone()))
         };
 
@@ -37700,42 +37768,42 @@ impl DataFrameRolling<'_> {
 
     /// Rolling sum across all numeric columns.
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).sum())
+        self.apply_rolling(|r| r.sum())
     }
 
     /// Rolling mean across all numeric columns.
     pub fn mean(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).mean())
+        self.apply_rolling(|r| r.mean())
     }
 
     /// Rolling min across all numeric columns.
     pub fn min(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).min())
+        self.apply_rolling(|r| r.min())
     }
 
     /// Rolling max across all numeric columns.
     pub fn max(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).max())
+        self.apply_rolling(|r| r.max())
     }
 
     /// Rolling standard deviation across all numeric columns.
     pub fn std(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).std())
+        self.apply_rolling(|r| r.std())
     }
 
     /// Rolling count of non-null values across all numeric columns.
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).count())
+        self.apply_rolling(|r| r.count())
     }
 
     /// Rolling variance across all numeric columns.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).var())
+        self.apply_rolling(|r| r.var())
     }
 
     /// Rolling median across all numeric columns.
     pub fn median(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).median())
+        self.apply_rolling(|r| r.median())
     }
 
     /// Rolling skewness across all numeric columns.
@@ -37744,14 +37812,14 @@ impl DataFrameRolling<'_> {
     /// Series-level Rolling has skew()/kurt()/first()/last()/prod() but
     /// DataFrameRolling was missing all of them.
     pub fn skew(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).skew())
+        self.apply_rolling(|r| r.skew())
     }
 
     /// Rolling excess kurtosis across all numeric columns.
     ///
     /// Matches `df.rolling(window).kurt()`.
     pub fn kurt(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).kurt())
+        self.apply_rolling(|r| r.kurt())
     }
 
     /// Alias for `kurt()` — pandas exposes both spellings.
@@ -37763,26 +37831,26 @@ impl DataFrameRolling<'_> {
     ///
     /// Matches `df.rolling(window).first()`.
     pub fn first(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).first())
+        self.apply_rolling(|r| r.first())
     }
 
     /// Rolling last non-null value across all numeric columns.
     ///
     /// Matches `df.rolling(window).last()`.
     pub fn last(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).last())
+        self.apply_rolling(|r| r.last())
     }
 
     /// Rolling product across all numeric columns.
     ///
     /// Matches `df.rolling(window).prod()`.
     pub fn prod(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).prod())
+        self.apply_rolling(|r| r.prod())
     }
 
     /// Rolling quantile across all numeric columns.
     pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(move |s, w, mp| s.rolling(w, Some(mp)).quantile(q))
+        self.apply_rolling(move |r| r.quantile(q))
     }
 
     fn pairwise_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
@@ -37825,7 +37893,11 @@ impl DataFrameRolling<'_> {
                     .expect("numeric column in bounds");
                 let right_series = Series::new(&right_name, self.df.index.clone(), right_col)?;
 
-                let rolling = left_series.rolling(self.window, Some(self.min_periods));
+                let rolling = left_series.rolling_with_center(
+                    self.window,
+                    Some(self.min_periods),
+                    self.center,
+                );
                 let pair = agg(&rolling, &right_series)?;
                 let pair_name = format!("{left_name}__{right_name}");
                 pairs.push((pair_name.clone(), pair.column().clone()));
@@ -37896,7 +37968,8 @@ impl DataFrameRolling<'_> {
             }
             let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let left_series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
-            let rolling = left_series.rolling(self.window, Some(self.min_periods));
+            let rolling =
+                left_series.rolling_with_center(self.window, Some(self.min_periods), self.center);
             let paired = agg(&rolling, other)?;
             pairs.push((col_name.clone(), paired.column().clone()));
             col_order.push(col_name);
@@ -37932,7 +38005,7 @@ impl DataFrameRolling<'_> {
             let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
             let rolled = series
-                .rolling(self.window, Some(self.min_periods))
+                .rolling_with_center(self.window, Some(self.min_periods), self.center)
                 .agg(funcs)?;
             for func in funcs {
                 let out_name = format!("{col_name}_{func}");
@@ -37959,7 +38032,7 @@ impl DataFrameRolling<'_> {
 
     /// Rolling standard error of the mean across numeric columns.
     pub fn sem(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).sem())
+        self.apply_rolling(|r| r.sem())
     }
 
     /// Rolling rank across numeric columns.
@@ -37969,7 +38042,7 @@ impl DataFrameRolling<'_> {
         ascending: bool,
         na_option: &str,
     ) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).rank(method, ascending, na_option))
+        self.apply_rolling(|r| r.rank(method, ascending, na_option))
     }
 
     /// Frozenset-style label set excluded from this rolling window.
@@ -58576,6 +58649,9 @@ pub struct ToDatetimeOptions<'a> {
     /// here, which `read_csv(parse_dates=)` relies on) or pandas' ValueError
     /// (`Raise`, what `pd.to_datetime` defaults to).
     pub errors: DatetimeErrors,
+    /// pandas' `dayfirst=`: a numeric date's two short slots read day then
+    /// month (see [`guess_day_month_format`]).
+    pub dayfirst: bool,
 }
 
 /// pandas' `to_datetime(errors=)`.
@@ -58595,6 +58671,7 @@ impl Default for ToDatetimeOptions<'_> {
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
             errors: DatetimeErrors::Coerce,
+            dayfirst: false,
         }
     }
 }
@@ -58756,6 +58833,25 @@ pub fn to_datetime_values_with_options(
     {
         return Ok(normalize_mixed_timezone_values(values));
     }
+    // pandas parses the column under the format it guesses from the first
+    // non-null string: day/month order per dayfirst, or the other way round
+    // when only that reads (13/02/2024). A year-last date with a time, `-`
+    // or `.` separators or AM/PM raised here; an ISO (year-first) column
+    // keeps the fast ISO parser unless dayfirst swaps it.
+    let guessed_format = if parsed_unit.is_none() && options.format.is_none() && !per_element {
+        first_datetime_string(values)
+            .and_then(|first| guess_day_month_format(first, options.dayfirst))
+            .filter(|guess| {
+                options.dayfirst || guess.contradicts_dayfirst || !guess.format.starts_with("%Y")
+            })
+            .map(|guess| guess.format)
+    } else {
+        None
+    };
+    let options = ToDatetimeOptions {
+        format: guessed_format.as_deref().or(options.format),
+        ..options
+    };
     // The ONE format the column is parsed under (br-frankenpandas-hzayc).
     // pandas guesses it from the first non-null element and applies it to every
     // row; FrankenPandas used to parse each row on its own, so it accepted rows
@@ -58858,12 +58954,14 @@ pub fn to_datetime_values_with_options(
             && let Scalar::Utf8(text) = val
             && !is_datetime_null_token(text)
         {
-            let format = options
-                .format
-                .map_or_else(String::new, |format| format!(" with format \"{format}\""));
-            return Err(FrameError::CompatibilityRejected(format!(
-                "Unknown datetime string format, unable to parse: {text}{format}, at position {position}"
-            )));
+            return Err(FrameError::CompatibilityRejected(match options.format {
+                Some(format) => format!(
+                    "time data \"{text}\" doesn't match format \"{format}\", at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+                ),
+                None => format!(
+                    "Unknown datetime string format, unable to parse: {text}, at position {position}"
+                ),
+            }));
         }
         converted.push(result);
     }
@@ -59467,6 +59565,135 @@ fn fast_iso_datetime_nanos(s: &str) -> Option<i64> {
         .checked_mul(1_000_000_000)
 }
 
+/// The guess [`guess_day_month_format`] makes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayMonthGuess {
+    /// The strptime format, pandas' spelling (`%d/%m/%Y %H:%M`).
+    pub format: String,
+    /// The value can only be read in the other order than `dayfirst`
+    /// asked for; pandas warns ("Parsing dates in %d/%m/%Y format when
+    /// dayfirst=False (the default) was specified").
+    pub contradicts_dayfirst: bool,
+}
+
+/// pandas' `guess_datetime_format` for the numeric dates `dayfirst`
+/// changes: three `/`, `-` or `.` separated numbers with a four-digit year
+/// first or last, then optionally (after a space or `T`) `HH:MM`,
+/// `HH:MM:SS` or `HH:MM:SS.f`, with an ` AM`/` PM` for a 12-hour clock.
+/// The two short slots read day then month when `dayfirst`, month then day
+/// otherwise, swapped when the value is only valid the other way round
+/// (13/02/2024) - except year-first without `dayfirst` (2024-13-01), which
+/// pandas does not guess. Two-digit years and other shapes are `None`.
+pub fn guess_day_month_format(text: &str, dayfirst: bool) -> Option<DayMonthGuess> {
+    let text = text.trim();
+    let (date, rest) = text.split_at(text.find([' ', 'T']).unwrap_or(text.len()));
+    let sep = date.chars().find(|c| matches!(c, '/' | '-' | '.'))?;
+    let parts: Vec<&str> = date.split(sep).collect();
+    let is_number = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    if parts.len() != 3 || !parts.iter().all(|part| is_number(part)) {
+        return None;
+    }
+    let short = |part: &str| part.len() <= 2;
+    let (year_first, first, second) = if parts[0].len() == 4 && short(parts[1]) && short(parts[2]) {
+        (true, parts[1], parts[2])
+    } else if parts[2].len() == 4 && short(parts[0]) && short(parts[1]) {
+        (false, parts[0], parts[1])
+    } else {
+        return None;
+    };
+    let (first, second) = (first.parse::<u32>().ok()?, second.parse::<u32>().ok()?);
+    let day_then_month = (1..=31).contains(&first) && (1..=12).contains(&second);
+    let month_then_day = (1..=12).contains(&first) && (1..=31).contains(&second);
+    let day_first = match (dayfirst, day_then_month, month_then_day) {
+        (true, true, _) => true,
+        (true, false, true) | (false, _, true) => false,
+        (false, true, false) if !year_first => true,
+        _ => return None,
+    };
+    let time = if rest.is_empty() {
+        String::new()
+    } else {
+        let (join, clock) = rest.split_at(1);
+        let (clock, meridiem) = match clock
+            .strip_suffix(" AM")
+            .or_else(|| clock.strip_suffix(" PM"))
+        {
+            Some(clock) => (clock, " %p"),
+            None => (clock, ""),
+        };
+        let hour = if meridiem.is_empty() { "%H" } else { "%I" };
+        let two_digits = |part: &str| is_number(part) && short(part);
+        let pieces: Vec<&str> = clock.split(':').collect();
+        let body = match pieces.as_slice() {
+            [h, m] if two_digits(h) && two_digits(m) => format!("{hour}:%M"),
+            [h, m, s] if two_digits(h) && two_digits(m) => match s.split_once('.') {
+                None if two_digits(s) => format!("{hour}:%M:%S"),
+                Some((whole, frac)) if two_digits(whole) && is_number(frac) => {
+                    format!("{hour}:%M:%S.%f")
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        format!("{join}{body}{meridiem}")
+    };
+    let (a, b) = if day_first {
+        ("%d", "%m")
+    } else {
+        ("%m", "%d")
+    };
+    let date_format = if year_first {
+        format!("%Y{sep}{a}{sep}{b}")
+    } else {
+        format!("{a}{sep}{b}{sep}%Y")
+    };
+    Some(DayMonthGuess {
+        format: date_format + &time,
+        contradicts_dayfirst: day_first != dayfirst,
+    })
+}
+
+/// The first non-null value when it is a string: the one pandas guesses a
+/// column's datetime format from.
+fn first_datetime_string(values: &[Scalar]) -> Option<&str> {
+    match values.iter().find(|value| match value {
+        Scalar::Utf8(text) => !is_datetime_null_token(text),
+        other => !other.is_missing(),
+    })? {
+        Scalar::Utf8(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// pandas' UserWarning for `to_datetime(values, dayfirst=)` when the first
+/// string can only be read in the other day/month order.
+pub fn day_month_format_warning(values: &[Scalar], dayfirst: bool) -> Option<String> {
+    let guess = guess_day_month_format(first_datetime_string(values)?, dayfirst)?;
+    if !guess.contradicts_dayfirst {
+        return None;
+    }
+    let (asked, instead) = if dayfirst {
+        ("dayfirst=True", "dayfirst=False")
+    } else {
+        ("dayfirst=False (the default)", "dayfirst=True")
+    };
+    Some(format!(
+        "Parsing dates in {} format when {asked} was specified. Pass `{instead}` or specify a format to silence this warning.",
+        guess.format
+    ))
+}
+
+/// A pandas strptime format as chrono reads it: pandas' `%f` is the
+/// fraction's digits (`.5` is half a second), chrono's the nanosecond
+/// count (5 ns), so `.%f` becomes chrono's `%.f`.
+fn chrono_strptime_format(format: &str) -> std::borrow::Cow<'_, str> {
+    if format.contains(".%f") {
+        std::borrow::Cow::Owned(format.replace(".%f", "%.f"))
+    } else {
+        std::borrow::Cow::Borrowed(format)
+    }
+}
+
 /// Parse a datetime string in various common formats.
 fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     let trimmed = s.trim();
@@ -59476,6 +59703,7 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
 
     // If explicit format is provided, use it.
     if let Some(fmt) = format {
+        let fmt: &str = &chrono_strptime_format(fmt);
         return match NaiveDateTime::parse_from_str(trimmed, fmt) {
             Ok(dt) => Scalar::Utf8(format_naive_datetime(dt)),
             Err(_) => {
@@ -72564,6 +72792,47 @@ impl DataFrame {
         drop: bool,
         sep: &str,
     ) -> Result<Self, FrameError> {
+        self.check_index_columns(columns)?;
+        let row_multiindex = self.to_multi_index(columns)?;
+        self.install_row_multiindex(row_multiindex, columns, drop, sep)
+    }
+
+    /// `df.set_index(columns, append=True)`: a MultiIndex whose levels are
+    /// the current index's (every level of a row MultiIndex, keeping their
+    /// names) followed by `columns`.
+    pub fn set_index_append(
+        &self,
+        columns: &[&str],
+        drop: bool,
+        sep: &str,
+    ) -> Result<Self, FrameError> {
+        self.check_index_columns(columns)?;
+        let keys = self.to_multi_index(columns)?;
+        let (mut arrays, mut names) = match &self.row_multiindex {
+            Some(current) => (
+                (0..current.nlevels())
+                    .map(|level| {
+                        current
+                            .get_level_values(level)
+                            .map(|values| values.labels().to_vec())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                current.names().to_vec(),
+            ),
+            None => (
+                vec![self.index.labels().to_vec()],
+                vec![self.index.name().map(str::to_owned)],
+            ),
+        };
+        for level in 0..keys.nlevels() {
+            arrays.push(keys.get_level_values(level)?.labels().to_vec());
+        }
+        names.extend(keys.names().iter().cloned());
+        let row_multiindex = fp_index::MultiIndex::from_arrays(arrays)?.set_names(names);
+        self.install_row_multiindex(row_multiindex, columns, drop, sep)
+    }
+
+    fn check_index_columns(&self, columns: &[&str]) -> Result<(), FrameError> {
         for &col in columns {
             if !self.columns.contains_key(col) {
                 return Err(FrameError::CompatibilityRejected(format!(
@@ -72576,14 +72845,28 @@ impl DataFrame {
                 ));
             }
         }
+        Ok(())
+    }
 
-        let row_multiindex = self.to_multi_index(columns)?;
+    /// This frame with `row_multiindex` as its row axis (flattened with
+    /// `sep` for the flat index), `columns` dropped when `drop`.
+    fn install_row_multiindex(
+        &self,
+        row_multiindex: fp_index::MultiIndex,
+        columns: &[&str],
+        drop: bool,
+        sep: &str,
+    ) -> Result<Self, FrameError> {
         // Contiguous flat-index allocation (br-frankenpandas-21804). The MultiIndex
         // labels are already in memory, and its `to_flat_index` joins them via
         // an exact-capacity single-pass string builder. The old loop mapped each
         // row through `get_loc`, then formatted each tuple element into its own
         // fresh `String`, throwing away the contiguous build's whole benefit.
-        let new_name_parts: Vec<String> = columns.iter().map(|c| (*c).to_owned()).collect();
+        let new_name_parts: Vec<String> = row_multiindex
+            .names()
+            .iter()
+            .map(|name| name.clone().unwrap_or_default())
+            .collect();
         let index = row_multiindex
             .to_flat_index(sep)
             .set_name(&new_name_parts.join(sep));
@@ -82083,7 +82366,12 @@ impl DataFrame {
         // Absent labels inherit the nearest present source position in the fill
         // direction; present labels (incl. source NaNs) keep their own position.
         let filled = match forward {
-            Some(direction) => carry_reindex_positions(&positions, direction),
+            Some(direction) => fill_reindex_positions(
+                self.index.labels(),
+                new_index.labels(),
+                &positions,
+                direction,
+            )?,
             None => nearest_reindex_positions(self.index.labels(), new_index.labels(), &positions)?,
         };
         // Gather each column from the carried positions. Remaining `None` slots
@@ -82716,10 +83004,24 @@ impl DataFrame {
     ///
     /// Matches `df.rolling(window)` semantics.
     pub fn rolling(&self, window: usize, min_periods: Option<usize>) -> DataFrameRolling<'_> {
+        self.rolling_with_center(window, min_periods, false)
+    }
+
+    /// Create a rolling window view over all numeric columns, centered on
+    /// each row when `center` is true.
+    ///
+    /// Matches `df.rolling(window, min_periods, center)`.
+    pub fn rolling_with_center(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: bool,
+    ) -> DataFrameRolling<'_> {
         DataFrameRolling {
             df: self,
             window,
             min_periods: min_periods.unwrap_or(window),
+            center,
         }
     }
 
@@ -116591,6 +116893,172 @@ mod tests {
         assert_eq!(grouped.values()[1], Scalar::Float64(1.0));
         // NEGATIVE: shift(0) introduces nothing and stays int64.
         assert_eq!(plain.shift(0).unwrap().dtype(), DType::Int64);
+    }
+
+    #[test]
+    fn centered_rolling_ranks_the_newest_value_and_frames_center() {
+        let floats = |values: &[f64]| values.iter().map(|&v| Scalar::Float64(v)).collect();
+        let labels = |n: i64| (0..n).map(IndexLabel::from).collect::<Vec<_>>();
+        let s = Series::from_values("x", labels(7), floats(&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0]))
+            .unwrap();
+        let as_f64 = |out: &Series| -> Vec<Option<f64>> {
+            out.values()
+                .iter()
+                .map(|v| (!v.is_missing()).then(|| v.to_f64().unwrap()))
+                .collect()
+        };
+        // pandas 2.2.3 s.rolling(4, center=True, min_periods=1).rank(): the
+        // window's LAST value, over the full-width window at the tail.
+        let ranked = s
+            .rolling_with_center(4, Some(1), true)
+            .rank("average", true, "keep")
+            .unwrap();
+        assert_eq!(
+            as_f64(&ranked),
+            [1.0, 3.0, 1.5, 4.0, 4.0, 2.0, 2.0].map(Some).to_vec()
+        );
+        // 64+ rows take the Fenwick path; its 'max' must equal the per-window
+        // path's 'first' (the ranked value is last among its ties).
+        let long: Vec<f64> = (0..90_i64).map(|i| ((i * 37) % 11) as f64).collect();
+        let long = Series::from_values("x", labels(90), floats(&long)).unwrap();
+        for window in [4, 5] {
+            let roll = long.rolling_with_center(window, Some(2), true);
+            assert_eq!(
+                as_f64(&roll.rank("max", true, "keep").unwrap()),
+                as_f64(&roll.rank("first", true, "keep").unwrap()),
+                "window={window}"
+            );
+        }
+        // A frame's rolling(center=True) centres every column.
+        let frame = DataFrame::from_series(vec![s.clone()]).unwrap();
+        let centered = frame.rolling_with_center(3, None, true).mean().unwrap();
+        let column = Series::new(
+            "x",
+            centered.index().clone(),
+            centered.column("x").unwrap().clone(),
+        )
+        .unwrap();
+        let got = as_f64(&column);
+        assert_eq!(got[0], None);
+        assert!((got[1].unwrap() - 8.0 / 3.0).abs() < 1e-12);
+        assert!((got[2].unwrap() - 2.0).abs() < 1e-12);
+        assert!((got[5].unwrap() - 16.0 / 3.0).abs() < 1e-12);
+        assert_eq!(got[6], None);
+        // NEGATIVE: the trailing window at row 2 is rows 0..=2, not 1..=3.
+        let trailing = frame.rolling(3, None).mean().unwrap();
+        assert!(
+            (trailing.column("x").unwrap().values()[2].to_f64().unwrap() - 8.0 / 3.0).abs() < 1e-12
+        );
+    }
+
+    #[test]
+    fn set_index_append_puts_the_old_index_first() {
+        let labels = vec![IndexLabel::from(7_i64), IndexLabel::from(8_i64)];
+        let a = Series::from_values(
+            "a",
+            labels.clone(),
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            labels,
+            vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+        )
+        .unwrap();
+        let mut frame = DataFrame::from_series(vec![a, b]).unwrap();
+        frame.index = frame.index.rename_index(Some("k"));
+        let appended = frame.set_index_append(&["b"], true, "/").unwrap();
+        let levels = appended.row_multiindex().expect("a row MultiIndex");
+        assert_eq!(
+            levels.names(),
+            &[Some("k".to_owned()), Some("b".to_owned())]
+        );
+        assert_eq!(
+            levels.get_level_values(0).unwrap().labels(),
+            &[IndexLabel::from(7_i64), IndexLabel::from(8_i64)]
+        );
+        assert_eq!(
+            levels.get_level_values(1).unwrap().labels(),
+            &[IndexLabel::Utf8("x".into()), IndexLabel::Utf8("y".into())]
+        );
+        assert_eq!(appended.column_names(), vec![&"a".to_owned()]);
+        // Appending again adds a third level after the two.
+        let twice = appended.set_index_append(&["a"], false, "/").unwrap();
+        assert_eq!(twice.row_multiindex().unwrap().nlevels(), 3);
+        // NEGATIVE: a key that is not a column is refused.
+        assert!(frame.set_index_append(&["zz"], true, "/").is_err());
+    }
+
+    #[test]
+    fn day_month_guess_follows_pandas_dayfirst() {
+        use crate::{
+            DatetimeErrors, ToDatetimeOptions, guess_day_month_format, to_datetime_with_options,
+        };
+        let guess = |text: &str, dayfirst: bool| {
+            guess_day_month_format(text, dayfirst)
+                .map(|guess| (guess.format, guess.contradicts_dayfirst))
+        };
+        let format = |f: &str, contradicts: bool| Some((f.to_owned(), contradicts));
+        // pandas 2.2.3 guess_datetime_format(text, dayfirst=...).
+        assert_eq!(guess("01/02/2024", true), format("%d/%m/%Y", false));
+        assert_eq!(guess("01/02/2024", false), format("%m/%d/%Y", false));
+        assert_eq!(guess("13/02/2024", false), format("%d/%m/%Y", true));
+        assert_eq!(guess("01/13/2024", true), format("%m/%d/%Y", true));
+        assert_eq!(guess("2024-01-02", true), format("%Y-%d-%m", false));
+        assert_eq!(guess("2024-01-13", true), format("%Y-%m-%d", true));
+        assert_eq!(
+            guess("01.02.2024 10:30:15.5", true),
+            format("%d.%m.%Y %H:%M:%S.%f", false)
+        );
+        assert_eq!(
+            guess("01/02/2024 10:30 PM", true),
+            format("%d/%m/%Y %I:%M %p", false)
+        );
+        // NEGATIVE: pandas guesses nothing for these.
+        assert_eq!(guess("13/13/2024", true), None);
+        assert_eq!(guess("2024-13-01", false), None);
+        assert_eq!(guess("01/02/24", true), None);
+        assert_eq!(guess("20240102", true), None);
+        // The guess drives to_datetime(dayfirst=), and '.%f' is a fraction
+        // (chrono's %f counted '.5' as 5 nanoseconds).
+        let s = Series::from_values(
+            "d",
+            vec![IndexLabel::from(0_i64), IndexLabel::from(1_i64)],
+            vec![
+                Scalar::Utf8("01/02/2024 10:30:15.5".into()),
+                Scalar::Utf8("03/04/2024 00:00:00.25".into()),
+            ],
+        )
+        .unwrap();
+        let nanos = |y, mo, d, h, mi, sec, milli| {
+            chrono::NaiveDate::from_ymd_opt(y, mo, d)
+                .and_then(|date| date.and_hms_milli_opt(h, mi, sec, milli))
+                .and_then(|at| at.and_utc().timestamp_nanos_opt())
+                .unwrap()
+        };
+        let parsed = to_datetime_with_options(
+            &s,
+            ToDatetimeOptions {
+                dayfirst: true,
+                errors: DatetimeErrors::Raise,
+                ..ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.values(),
+            &[
+                Scalar::Datetime64(nanos(2024, 2, 1, 10, 30, 15, 500)),
+                Scalar::Datetime64(nanos(2024, 4, 3, 0, 0, 0, 250)),
+            ]
+        );
+        // NEGATIVE: without dayfirst the same text is month-first.
+        let month_first = to_datetime_with_options(&s, ToDatetimeOptions::default()).unwrap();
+        assert_eq!(
+            month_first.values()[0],
+            Scalar::Datetime64(nanos(2024, 1, 2, 10, 30, 15, 500))
+        );
     }
 
     #[test]
