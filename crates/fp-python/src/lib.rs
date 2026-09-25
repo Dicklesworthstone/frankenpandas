@@ -3708,6 +3708,40 @@ impl<'py> IntoPyObject<'py> for IndexerArray {
     }
 }
 
+/// Positions (`argsort`) as pandas returns them: an int64 numpy array.
+impl From<Vec<usize>> for IndexerArray {
+    fn from(positions: Vec<usize>) -> Self {
+        positions
+            .into_iter()
+            .map(|position| i64::try_from(position).unwrap_or(i64::MAX))
+            .collect()
+    }
+}
+
+/// An Index's per-label flags (`isin`, `duplicated`, `isna`) as pandas
+/// returns them: a bool numpy array, so `.any()` / `.sum()` work (they were
+/// lists: `df.index.duplicated().any()` raised AttributeError).
+pub struct BoolArray(Vec<bool>);
+
+impl From<Vec<bool>> for BoolArray {
+    fn from(flags: Vec<bool>) -> Self {
+        Self(flags)
+    }
+}
+
+impl<'py> IntoPyObject<'py> for BoolArray {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "bool")?;
+        py.import("numpy")?
+            .call_method("array", (self.0,), Some(&kwargs))
+    }
+}
+
 /// The Index a Series' or DataFrame's `.index` returns: an `Index` that
 /// also writes its `name` back to the object it came from, as pandas'
 /// shared Index does - `df.index.name = 'k'` renamed a copy.
@@ -4121,8 +4155,8 @@ impl PyIndex {
         }
     }
 
-    fn duplicated(&self) -> Vec<bool> {
-        self.inner.duplicated(DuplicateKeep::First)
+    fn duplicated(&self) -> BoolArray {
+        self.inner.duplicated(DuplicateKeep::First).into()
     }
 
     fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -4139,7 +4173,7 @@ impl PyIndex {
         }
     }
 
-    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
         let mut labels = Vec::new();
         if let Ok(seq) = values.cast::<pyo3::types::PySequence>() {
             let len = seq.len()?;
@@ -4149,23 +4183,23 @@ impl PyIndex {
                 labels.push(py_to_index_label(&item)?);
             }
         }
-        Ok(self.inner.isin(&labels))
+        Ok(self.inner.isin(&labels).into())
     }
 
-    fn isna(&self) -> Vec<bool> {
-        self.inner.isna()
+    fn isna(&self) -> BoolArray {
+        self.inner.isna().into()
     }
 
-    fn isnull(&self) -> Vec<bool> {
-        self.inner.isna()
+    fn isnull(&self) -> BoolArray {
+        self.inner.isna().into()
     }
 
-    fn notna(&self) -> Vec<bool> {
-        self.inner.notna()
+    fn notna(&self) -> BoolArray {
+        self.inner.notna().into()
     }
 
-    fn notnull(&self) -> Vec<bool> {
-        self.inner.notna()
+    fn notnull(&self) -> BoolArray {
+        self.inner.notna().into()
     }
 
     fn intersection(&self, other: IndexArg) -> Self {
@@ -4290,11 +4324,11 @@ impl PyIndex {
         Ok(min_idx)
     }
 
-    fn argsort(&self) -> Vec<usize> {
+    fn argsort(&self) -> IndexerArray {
         let labels = self.inner.labels();
         let mut indices: Vec<usize> = (0..labels.len()).collect();
         indices.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
-        indices
+        indices.into()
     }
 
     fn all(&self) -> bool {
@@ -4437,14 +4471,34 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    fn drop(&self, labels: &Bound<'_, PyAny>) -> PyResult<Self> {
+    /// pandas' `Index.drop(labels, errors='raise')`: a list-like drops each
+    /// of its labels (a list was read as ONE label, so nothing was dropped),
+    /// and a label that is not there is pandas' KeyError unless
+    /// errors='ignore'.
+    #[pyo3(signature = (labels, errors="raise"))]
+    fn drop(&self, labels: &Bound<'_, PyAny>, errors: &str) -> PyResult<Self> {
+        let items: Vec<Bound<'_, PyAny>> = if !labels.is_instance_of::<pyo3::types::PyString>()
+            && !labels.is_instance_of::<pyo3::types::PyTuple>()
+            && let Ok(iter) = labels.try_iter()
+        {
+            iter.collect::<PyResult<_>>()?
+        } else {
+            vec![labels.clone()]
+        };
         let mut to_drop = std::collections::HashSet::new();
-        if let Ok(single) = py_to_index_label(labels) {
-            to_drop.insert(single);
-        } else if let Ok(list) = labels.extract::<Vec<Bound<'_, PyAny>>>() {
-            for it in list {
-                to_drop.insert(py_to_index_label(&it)?);
+        let mut missing = Vec::new();
+        for item in items {
+            let label = py_to_index_label(&item)?;
+            if !self.inner.labels().contains(&label) {
+                missing.push(item.clone());
             }
+            to_drop.insert(label);
+        }
+        if errors != "ignore" && !missing.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "{} not found in axis",
+                PyList::new(labels.py(), missing)?.repr()?
+            )));
         }
         let current = self.inner.labels();
         let kept: Vec<IndexLabel> = current
@@ -5428,8 +5482,8 @@ impl PyDatetimeIndex {
         Ok(PyDatetimeIndex { inner })
     }
 
-    fn duplicated(&self) -> Vec<bool> {
-        self.inner.duplicated(DuplicateKeep::First)
+    fn duplicated(&self) -> BoolArray {
+        self.inner.duplicated(DuplicateKeep::First).into()
     }
 
     fn isna(&self) -> Vec<bool> {
@@ -5448,8 +5502,8 @@ impl PyDatetimeIndex {
         self.inner.notna()
     }
 
-    fn isin(&self, values: Vec<i64>) -> Vec<bool> {
-        self.inner.isin(&values)
+    fn isin(&self, values: Vec<i64>) -> BoolArray {
+        self.inner.isin(&values).into()
     }
 
     fn intersection(&self, other: &PyDatetimeIndex) -> Self {
@@ -5924,7 +5978,7 @@ impl PyDatetimeIndex {
         self.as_py_index().argmin()
     }
 
-    fn argsort(&self) -> Vec<usize> {
+    fn argsort(&self) -> IndexerArray {
         self.as_py_index().argsort()
     }
 
@@ -7248,7 +7302,7 @@ impl PyMultiIndex {
         PyIndex { inner: flat }.argmin()
     }
 
-    fn argsort(&self) -> Vec<usize> {
+    fn argsort(&self) -> IndexerArray {
         let flat = self.inner.to_flat_index("/");
         PyIndex { inner: flat }.argsort()
     }
@@ -7360,8 +7414,8 @@ impl PyMultiIndex {
         }
     }
 
-    fn duplicated(&self) -> Vec<bool> {
-        self.inner.duplicated(DuplicateKeep::First)
+    fn duplicated(&self) -> BoolArray {
+        self.inner.duplicated(DuplicateKeep::First).into()
     }
 
     fn equal_levels(&self, other: &PyMultiIndex) -> bool {
@@ -7623,7 +7677,7 @@ impl PyMultiIndex {
         &self,
         values: &Bound<'_, PyAny>,
         level: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Vec<bool>> {
+    ) -> PyResult<BoolArray> {
         if let Some(level) = level.filter(|level| !level.is_none()) {
             let position = multiindex_level_position(&self.inner, level)?;
             let level_values = self
@@ -7652,7 +7706,8 @@ impl PyMultiIndex {
                         .any(|want| want.iter().eq(tuple.iter().copied()))
                 })
             })
-            .collect())
+            .collect::<Vec<bool>>()
+            .into())
     }
 
     fn isna(&self) -> Vec<bool> {
@@ -8253,13 +8308,13 @@ impl PyTimedeltaIndex {
 
     /// pandas' default is keep='first' (the argument was required).
     #[pyo3(signature = (keep=None))]
-    pub fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<bool>> {
+    pub fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<BoolArray> {
         let k = parse_duplicate_keep(keep)?;
-        Ok(self.inner.duplicated(k))
+        Ok(self.inner.duplicated(k).into())
     }
 
-    pub fn isin(&self, values: Vec<i64>) -> Vec<bool> {
-        self.inner.isin(&values)
+    pub fn isin(&self, values: Vec<i64>) -> BoolArray {
+        self.inner.isin(&values).into()
     }
 
     /// The durations as Timedeltas, NaT kept, as pandas (these were raw
@@ -8768,7 +8823,7 @@ impl PyTimedeltaIndex {
         Ok(Self { inner: out })
     }
 
-    fn argsort(&self) -> Vec<usize> {
+    fn argsort(&self) -> IndexerArray {
         self.as_py_index().argsort()
     }
 
@@ -9691,8 +9746,8 @@ impl PyRangeIndex {
         self.inner.argmin().map_err(index_error_to_py)
     }
 
-    fn argsort(&self) -> Vec<usize> {
-        self.inner.argsort()
+    fn argsort(&self) -> IndexerArray {
+        self.inner.argsort().into()
     }
 
     fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -9758,8 +9813,8 @@ impl PyRangeIndex {
         self.clone()
     }
 
-    fn duplicated(&self) -> Vec<bool> {
-        vec![false; self.inner.len()]
+    fn duplicated(&self) -> BoolArray {
+        vec![false; self.inner.len()].into()
     }
 
     /// A range's labels are unique, so the codes are its positions; with
@@ -9886,7 +9941,7 @@ impl PyRangeIndex {
         }
     }
 
-    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
         let idx = self.inner.to_index();
         let py_idx = PyIndex { inner: idx };
         py_idx.isin(values)
@@ -10658,7 +10713,7 @@ impl PyPeriodIndex {
         self.as_py_index().argmin()
     }
 
-    fn argsort(&self) -> Vec<usize> {
+    fn argsort(&self) -> IndexerArray {
         self.as_py_index().argsort()
     }
 
@@ -10741,9 +10796,9 @@ impl PyPeriodIndex {
     }
 
     #[pyo3(signature = (keep=None))]
-    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<bool>> {
+    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<BoolArray> {
         let k = parse_duplicate_keep(keep)?;
-        Ok(self.inner.duplicated(k))
+        Ok(self.inner.duplicated(k).into())
     }
 
     #[getter]
@@ -10855,7 +10910,7 @@ impl PyPeriodIndex {
         self.inner.is_leap_year().map_err(index_error_to_py)
     }
 
-    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
         self.as_py_index().isin(values)
     }
 
@@ -11639,7 +11694,7 @@ impl PyCategoricalIndex {
         self.as_py_index().argmin()
     }
 
-    fn argsort(&self) -> Vec<usize> {
+    fn argsort(&self) -> IndexerArray {
         self.as_py_index().argsort()
     }
 
@@ -11691,9 +11746,9 @@ impl PyCategoricalIndex {
     }
 
     #[pyo3(signature = (keep=None))]
-    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<bool>> {
+    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<BoolArray> {
         let k = parse_duplicate_keep(keep)?;
-        Ok(self.inner.duplicated(k))
+        Ok(self.inner.duplicated(k).into())
     }
 
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
@@ -11748,7 +11803,7 @@ impl PyCategoricalIndex {
         }
     }
 
-    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
         self.as_py_index().isin(values)
     }
 
@@ -18733,18 +18788,39 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (value, side=None))]
+    /// pandas' `searchsorted(value, side='left', sorter=None)`: one position
+    /// for a scalar, an array of them for a list-like (which raised
+    /// TypeError).
+    #[pyo3(signature = (value, side=None, sorter=None))]
     fn searchsorted(
         &self,
         py: Python<'_>,
         value: &Bound<'_, PyAny>,
         side: Option<&str>,
-    ) -> PyResult<usize> {
-        let s = py_to_scalar(py, value)?;
-        let s_side = side.unwrap_or("left");
-        self.inner
-            .searchsorted(&s, s_side)
-            .map_err(frame_error_to_py)
+        sorter: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        unsupported_params(
+            "Series.searchsorted",
+            &[("sorter", sorter.is_none_or(|sorter| sorter.is_none()))],
+        )?;
+        let side = side.unwrap_or("left");
+        let position = |item: &Bound<'_, PyAny>| -> PyResult<usize> {
+            self.inner
+                .searchsorted(&py_to_scalar(py, item)?, side)
+                .map_err(frame_error_to_py)
+        };
+        if !value.is_instance_of::<pyo3::types::PyString>()
+            && let Ok(items) = value.try_iter()
+        {
+            let positions = items
+                .map(|item| position(&item?))
+                .collect::<PyResult<Vec<_>>>()?;
+            return Ok(py
+                .import("numpy")?
+                .call_method1("array", (positions,))?
+                .unbind());
+        }
+        position(value)?.into_py_any(py)
     }
 
     #[pyo3(signature = (index=true))]
@@ -32964,19 +33040,172 @@ impl PySeriesStringAccessor {
     }
 
     /// pandas' `replace(pat, repl, n=-1, case=None, flags=0, regex=False)`.
+    /// A regex replacement that is a callable, or that holds a `\` / `$`, a
+    /// compiled pattern and regex flags run through Python's `re` - pandas'
+    /// own substitution: `\1` and `\g<name>` are groups and `$` is literal
+    /// (the regex engine here read `\2\1` as text and `$1` as a group, and a
+    /// callable raised TypeError).
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (pat, repl, n=-1, case=None, flags=0, regex=false))]
     fn replace(
         &self,
-        pat: &str,
-        repl: &str,
+        py: Python<'_>,
+        pat: &Bound<'_, PyAny>,
+        repl: &Bound<'_, PyAny>,
         n: i64,
         case: Option<bool>,
         flags: i64,
         regex: bool,
     ) -> PyResult<PySeries> {
-        require_no_regex_flags(flags)?;
-        let n = usize::try_from(n).ok();
-        self.wrap(|s| s.replace_with_options(pat, repl, n, case.unwrap_or(true), regex))
+        let re = py.import("re")?;
+        let compiled = pat.is_instance(&re.getattr("Pattern")?)?;
+        let callable = repl.is_callable();
+        if callable && !regex {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot use a callable replacement when regex=False",
+            ));
+        }
+        if !compiled && !callable {
+            let pattern = pat.extract::<String>()?;
+            let replacement = repl.extract::<String>()?;
+            let python_only =
+                regex && (flags != 0 || replacement.contains('\\') || replacement.contains('$'));
+            if !python_only {
+                let n = usize::try_from(n).ok();
+                return self.wrap(|s| {
+                    s.replace_with_options(&pattern, &replacement, n, case.unwrap_or(true), regex)
+                });
+            }
+        }
+        let pattern = if compiled {
+            pat.clone()
+        } else {
+            let mut flags = flags;
+            if case == Some(false) {
+                flags |= re.getattr("IGNORECASE")?.extract::<i64>()?;
+            }
+            let text = if regex {
+                pat.clone()
+            } else {
+                re.call_method1("escape", (pat,))?
+            };
+            re.call_method1("compile", (text, flags))?
+        };
+        let count = n.max(0);
+        let values = self
+            .series
+            .column()
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Utf8(text) => {
+                    py_to_scalar(py, &pattern.call_method1("sub", (repl, text, count))?)
+                }
+                other => Ok(other.clone()),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        Ok(PySeries {
+            inner: Series::new(self.series.name(), self.series.index().clone(), column)
+                .map_err(frame_error_to_py)?,
+        })
+    }
+
+    /// pandas' `str.join(sep)`: each string's characters joined by `sep`
+    /// (it raised AttributeError; list cells need fvsao.33).
+    fn join(&self, sep: &str) -> PyResult<PySeries> {
+        self.map_strings(|text| {
+            Ok(Scalar::Utf8(
+                text.chars().map(String::from).collect::<Vec<_>>().join(sep),
+            ))
+        })
+    }
+
+    /// pandas' `str.translate(table)`: Python's `str.translate` on each
+    /// string (it raised AttributeError).
+    fn translate(&self, py: Python<'_>, table: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        self.map_strings(|text| {
+            let translated =
+                pyo3::types::PyString::new(py, text).call_method1("translate", (table,))?;
+            Ok(Scalar::Utf8(translated.extract()?))
+        })
+    }
+
+    /// pandas' `str.extractall(pat, flags=0)`: a row per match of each
+    /// string, indexed by (the Series' label, match number), a column per
+    /// capture group - named groups by name (it raised AttributeError).
+    #[pyo3(signature = (pat, flags=0))]
+    fn extractall(
+        &self,
+        py: Python<'_>,
+        pat: &Bound<'_, PyAny>,
+        flags: i64,
+    ) -> PyResult<PyDataFrame> {
+        let re = py.import("re")?;
+        let pattern = if pat.is_instance(&re.getattr("Pattern")?)? {
+            pat.clone()
+        } else {
+            re.call_method1("compile", (pat, flags))?
+        };
+        let groups: usize = pattern.getattr("groups")?.extract()?;
+        if groups == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "pattern contains no capture groups",
+            ));
+        }
+        let mut names: Vec<String> = (0..groups).map(|group| group.to_string()).collect();
+        for (name, number) in pattern
+            .getattr("groupindex")?
+            .call_method0("items")?
+            .try_iter()?
+            .map(|item| item.and_then(|item| item.extract::<(String, usize)>()))
+            .collect::<PyResult<Vec<_>>>()?
+        {
+            names[number - 1] = name;
+        }
+        let mut cells: Vec<Vec<Scalar>> = vec![Vec::new(); groups];
+        let mut outer = Vec::new();
+        let mut inner = Vec::new();
+        let labels = self.series.index().labels();
+        for (label, value) in labels.iter().zip(self.series.column().values()) {
+            let Scalar::Utf8(text) = value else {
+                continue;
+            };
+            for (number, found) in pattern
+                .call_method1("finditer", (text,))?
+                .try_iter()?
+                .enumerate()
+            {
+                let found = found?;
+                outer.push(label.clone());
+                inner.push(IndexLabel::Int64(i64::try_from(number).unwrap_or(i64::MAX)));
+                for (group, column) in cells.iter_mut().enumerate() {
+                    let part = found.call_method1("group", (group + 1,))?;
+                    column.push(if part.is_none() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Utf8(part.extract()?)
+                    });
+                }
+            }
+        }
+        let levels = fp_index::MultiIndex::from_arrays(vec![outer, inner])
+            .map_err(index_error_to_py)?
+            .set_names(vec![
+                self.series.index().name().map(str::to_owned),
+                Some("match".to_owned()),
+            ]);
+        let flat = levels.to_flat_index("/");
+        let columns: BTreeMap<String, Column> = names
+            .iter()
+            .cloned()
+            .zip(cells)
+            .map(|(name, values)| Ok((name, Column::from_object_values(values))))
+            .collect::<PyResult<_>>()?;
+        let frame = DataFrame::new_with_column_order(flat, columns, names)
+            .and_then(|frame| frame.with_row_multiindex(levels))
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner: frame })
     }
 
     // The rest of pandas' string methods over fp-frame's StringAccessor; the
@@ -33262,8 +33491,19 @@ impl PySeriesStringAccessor {
         }
         let sep = sep.unwrap_or("");
         let Some(others) = others.filter(|others| !others.is_none()) else {
-            if na_rep.is_some() {
-                return Err(not_implemented("str.cat(na_rep=...) without others"));
+            if let Some(na_rep) = na_rep {
+                // Missing values joined as na_rep (it was refused).
+                let parts: Vec<String> = self
+                    .series
+                    .column()
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Utf8(text) => text.clone(),
+                        _ => na_rep.to_owned(),
+                    })
+                    .collect();
+                return parts.join(sep).into_py_any(py);
             }
             let joined = self.series.str().cat(sep).map_err(frame_error_to_py)?;
             return joined.into_py_any(py);
@@ -33294,6 +33534,25 @@ impl PySeriesStringAccessor {
         op(&self.series.str())
             .map(|inner| PySeries { inner })
             .map_err(frame_error_to_py)
+    }
+
+    /// Each string mapped by `each`, a missing value kept as it is.
+    fn map_strings(&self, each: impl Fn(&str) -> PyResult<Scalar>) -> PyResult<PySeries> {
+        let values = self
+            .series
+            .column()
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Utf8(text) => each(text),
+                other => Ok(other.clone()),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        Ok(PySeries {
+            inner: Series::new(self.series.name(), self.series.index().clone(), column)
+                .map_err(frame_error_to_py)?,
+        })
     }
 
     /// Each string's `method(*args)` computed by Python itself (a list per
@@ -42002,8 +42261,7 @@ fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         return Ok(Py::new(py, res)?.into_any());
     }
     if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        let mask = idx.isna();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
+        return Ok(idx.isna().into_pyobject(py)?.unbind());
     }
     if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
         let mask = dti.isna();
@@ -51226,8 +51484,8 @@ mod tests {
             .inner
             .isin(&[IndexLabel::Int64(2), IndexLabel::Int64(99)]);
         assert_eq!(isin_res, vec![false, true, false]);
-        assert_eq!(sorted_idx.isna(), vec![false, false, false]);
-        assert_eq!(sorted_idx.notna(), vec![true, true, true]);
+        assert_eq!(sorted_idx.isna().0, vec![false, false, false]);
+        assert_eq!(sorted_idx.notna().0, vec![true, true, true]);
 
         let idx_a = PyIndex {
             inner: Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]),
@@ -51300,7 +51558,7 @@ mod tests {
         assert_eq!(dti.nunique(), 2);
         assert_eq!(dti.isna(), vec![false, false]);
         assert_eq!(dti.notna(), vec![true, true]);
-        assert_eq!(dti.isin(vec![nanos1]), vec![true, false]);
+        assert_eq!(dti.isin(vec![nanos1]).0, vec![true, false]);
 
         let shifted = dti.shift(1, "D").expect("shift"); // ubs:ignore — valid freq
         assert_eq!(shifted.len(), 2);
@@ -51554,7 +51812,7 @@ mod tests {
         assert_eq!(ri.max(), Some(8));
         assert_eq!(ri.argmax().unwrap(), 4);
         assert_eq!(ri.argmin().unwrap(), 0);
-        assert_eq!(ri.argsort(), vec![0, 1, 2, 3, 4]);
+        assert_eq!(ri.argsort().0, vec![0, 1, 2, 3, 4]);
         assert!(!ri.all());
         assert!(ri.any());
         assert!(!ri.hasnans());

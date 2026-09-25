@@ -27752,19 +27752,8 @@ impl Series {
         // at least one label parses as a datetime string (the storage
         // format used for datetime indices in this crate).
         require_datetime_index(self.index.labels(), "at_time")?;
-        let labels = self.index.labels();
-        let mut keep = Vec::new();
-
-        for (i, label) in labels.iter().enumerate() {
-            if let IndexLabel::Utf8(s) = label {
-                let time_part = DataFrame::extract_time(s);
-                if let Some(ref t) = time_part
-                    && t.as_str() == time
-                {
-                    keep.push(i);
-                }
-            }
-        }
+        let target = time_argument(time, "at_time")?;
+        let keep = between_time_positions(self.index.labels(), target, target);
 
         // A temporal selector builds a datetime index from string input, so the
         // result renders the parsed Timestamp rather than echoing the caller's
@@ -27783,20 +27772,11 @@ impl Series {
     pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
         // Per br-frankenpandas-g3jqn: see Series::at_time.
         require_datetime_index(self.index.labels(), "between_time")?;
-        let labels = self.index.labels();
-        let mut keep = Vec::new();
-
-        for (i, label) in labels.iter().enumerate() {
-            if let IndexLabel::Utf8(s) = label {
-                let time_part = DataFrame::extract_time(s);
-                if let Some(ref t) = time_part
-                    && t.as_str() >= start
-                    && t.as_str() <= end
-                {
-                    keep.push(i);
-                }
-            }
-        }
+        let keep = between_time_positions(
+            self.index.labels(),
+            time_argument(start, "between_time")?,
+            time_argument(end, "between_time")?,
+        );
 
         // See `Series::at_time` (br-frankenpandas-2und8).
         let mut selected = self.reorder_by_positions(&keep)?;
@@ -58983,6 +58963,97 @@ pub fn to_datetime_values_with_options(
     Ok(converted)
 }
 
+const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+
+/// A time of day as `at_time` / `between_time` take it (`HH:MM`,
+/// `HH:MM:SS`, `HH:MM:SS.fraction`, an hour of one or two digits, an
+/// optional AM / PM), in nanoseconds since midnight.
+fn time_of_day_nanos(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let upper = text.to_ascii_uppercase();
+    let (clock, meridiem) = match upper
+        .strip_suffix("AM")
+        .map(|clock| (clock, Some(false)))
+        .or_else(|| upper.strip_suffix("PM").map(|clock| (clock, Some(true))))
+    {
+        Some((clock, meridiem)) => (clock.trim_end().to_owned(), meridiem),
+        None => (upper.clone(), None),
+    };
+    let parts: Vec<&str> = clock.split(':').collect();
+    let number = |part: &str| -> Option<i64> {
+        (!part.is_empty() && part.len() <= 2 && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    let (hour, minute, second_text) = match parts.as_slice() {
+        [hour, minute] => (number(hour)?, number(minute)?, None),
+        [hour, minute, second] => (number(hour)?, number(minute)?, Some(*second)),
+        _ => return None,
+    };
+    let (second, fraction) = match second_text {
+        None => (0, 0),
+        Some(text) => {
+            let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+            if !frac.bytes().all(|b| b.is_ascii_digit()) || frac.len() > 9 {
+                return None;
+            }
+            let padded = format!("{frac:0<9}");
+            (number(whole)?, padded.parse::<i64>().ok()?)
+        }
+    };
+    let hour = match meridiem {
+        Some(pm) if (1..=12).contains(&hour) => hour % 12 + if pm { 12 } else { 0 },
+        Some(_) => return None,
+        None => hour,
+    };
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some(((hour * 60 + minute) * 60 + second) * 1_000_000_000 + fraction)
+}
+
+/// The time argument of `op`, or pandas' ValueError.
+fn time_argument(text: &str, op: &str) -> Result<i64, FrameError> {
+    time_of_day_nanos(text).ok_or_else(|| {
+        FrameError::CompatibilityRejected(format!("{op}: Cannot convert arg {text:?} to a time"))
+    })
+}
+
+/// A label's time of day in nanoseconds since midnight: an instant's, or
+/// the time part of a datetime text (`at_time` / `between_time` read only
+/// text labels, so a real DatetimeIndex selected nothing).
+fn label_time_of_day(label: &IndexLabel) -> Option<i64> {
+    match label {
+        IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => {
+            Some(nanos.rem_euclid(NANOS_PER_DAY))
+        }
+        IndexLabel::Utf8(text) => DataFrame::extract_time(text)
+            .as_deref()
+            .and_then(time_of_day_nanos),
+        _ => None,
+    }
+}
+
+/// The positions `between_time(start, end)` keeps: start <= t <= end, or,
+/// when start is after end, the times past start or before end (pandas'
+/// wrap past midnight).
+fn between_time_positions(labels: &[IndexLabel], start: i64, end: i64) -> Vec<usize> {
+    labels
+        .iter()
+        .enumerate()
+        .filter(|(_, label)| {
+            label_time_of_day(label).is_some_and(|time| {
+                if start <= end {
+                    start <= time && time <= end
+                } else {
+                    time >= start || time <= end
+                }
+            })
+        })
+        .map(|(position, _)| position)
+        .collect()
+}
+
 /// The strings pandas' `to_datetime` reads as missing rather than as an
 /// unparseable date.
 fn is_datetime_null_token(text: &str) -> bool {
@@ -83207,20 +83278,11 @@ impl DataFrame {
     pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
         // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
         require_datetime_index(self.index.labels(), "between_time")?;
-        let labels = self.index.labels();
-        let mut keep = Vec::new();
-
-        for (i, label) in labels.iter().enumerate() {
-            if let IndexLabel::Utf8(s) = label {
-                let time_part = Self::extract_time(s);
-                if let Some(ref t) = time_part
-                    && t.as_str() >= start
-                    && t.as_str() <= end
-                {
-                    keep.push(i);
-                }
-            }
-        }
+        let keep = between_time_positions(
+            self.index.labels(),
+            time_argument(start, "between_time")?,
+            time_argument(end, "between_time")?,
+        );
 
         let mut selected = self.take_rows_by_positions(&keep)?;
         selected.index = canonicalize_datetime_index_labels(&selected.index);
@@ -83233,19 +83295,8 @@ impl DataFrame {
     pub fn at_time(&self, time: &str) -> Result<Self, FrameError> {
         // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
         require_datetime_index(self.index.labels(), "at_time")?;
-        let labels = self.index.labels();
-        let mut keep = Vec::new();
-
-        for (i, label) in labels.iter().enumerate() {
-            if let IndexLabel::Utf8(s) = label {
-                let time_part = Self::extract_time(s);
-                if let Some(ref t) = time_part
-                    && t.as_str() == time
-                {
-                    keep.push(i);
-                }
-            }
-        }
+        let target = time_argument(time, "at_time")?;
+        let keep = between_time_positions(self.index.labels(), target, target);
 
         let mut selected = self.take_rows_by_positions(&keep)?;
         selected.index = canonicalize_datetime_index_labels(&selected.index);
@@ -116979,6 +117030,34 @@ mod tests {
         assert!(
             (trailing.column("x").unwrap().values()[2].to_f64().unwrap() - 8.0 / 3.0).abs() < 1e-12
         );
+    }
+
+    #[test]
+    fn time_of_day_selection_reads_datetime_labels() {
+        let hour = 3_600_000_000_000_i64;
+        let day = 24 * hour;
+        let labels = vec![
+            IndexLabel::Datetime64(9 * hour),
+            IndexLabel::Datetime64(15 * hour + 30 * 60_000_000_000),
+            IndexLabel::Datetime64(day + 23 * hour),
+            IndexLabel::Datetime64(2 * day + hour),
+        ];
+        let s = Series::from_values("v", labels, (1..=4_i64).map(Scalar::Int64).collect()).unwrap();
+        let kept = |out: Series| -> Vec<Scalar> { out.values().to_vec() };
+        // pandas 2.2.3: between_time('08:00', '16:00') -> the 09:00 and 15:30 rows.
+        assert_eq!(
+            kept(s.between_time("08:00", "16:00").unwrap()),
+            vec![Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        // Start after end wraps past midnight: 23:00 and 01:00.
+        assert_eq!(
+            kept(s.between_time("22:00", "02:00").unwrap()),
+            vec![Scalar::Int64(3), Scalar::Int64(4)]
+        );
+        assert_eq!(kept(s.at_time("11:00PM").unwrap()), vec![Scalar::Int64(3)]);
+        // NEGATIVES: no match is empty; an unreadable time is an error.
+        assert!(kept(s.at_time("12:00").unwrap()).is_empty());
+        assert!(s.at_time("25:99").is_err());
     }
 
     #[test]

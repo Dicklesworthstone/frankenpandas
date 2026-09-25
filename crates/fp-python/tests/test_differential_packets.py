@@ -7296,3 +7296,82 @@ def _dtype_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_DTYPE_CASES))
 def test_dtype_objects_unstack_transpose_and_get_dummies_dtypes_match_pandas(case: str) -> None:
     assert _dtype_outcome(fpd, case) == _dtype_outcome(pd, case), case
+
+
+def _texts(m: Any) -> Any:
+    return m.Series(["Apple pie", "banana", None, "Cherry-tart", "e1f2", "a9b8"], name="t")
+
+
+def _raises_value_error(call: Any) -> bool:
+    try:
+        call()
+    except ValueError:
+        return True
+    return False
+
+
+def _timed(m: Any) -> Any:
+    return m.Series([1, 2, 3, 4], index=m.to_datetime(["2024-01-01 09:00", "2024-01-01 15:30", "2024-01-02 23:00", "2024-01-03 01:00"]))
+
+
+# Silently wrong: Index.drop([label]) dropped nothing (the list was read as
+# one label); between_time / at_time on a real DatetimeIndex selected
+# nothing (only text labels were read); str.replace(regex=True) wrote a
+# `\2\1` backreference as text and read `$1` as a group. Raised or missing:
+# callable str.replace, searchsorted of a list, str.join / translate /
+# extractall, str.cat(na_rep=) without others; Index isin / duplicated /
+# argsort / isna were lists (`.any()` raised AttributeError).
+_TEXT_TIME_CASES = {
+    "index drop list": lambda m: m.Index([3, 1, 2, 1]).drop([1]).tolist(),
+    "index drop label": lambda m: m.Index(["a", "b"]).drop("a").tolist(),
+    "index drop ignore": lambda m: m.Index([3, 1]).drop([9], errors="ignore").tolist(),
+    # NEGATIVE: a label that is not there is pandas' KeyError.
+    "index drop missing raises": lambda m: m.Index([3, 1]).drop([9]),
+    "between_time": lambda m: _shaped(_timed(m).between_time("08:00", "16:00")),
+    "between_time wraps midnight": lambda m: _shaped(_timed(m).between_time("22:00", "02:00")),
+    "between_time seconds": lambda m: _shaped(_timed(m).between_time("09:00:00", "15:30:00")),
+    "at_time": lambda m: _shaped(_timed(m).at_time("15:30")),
+    "frame between_time": lambda m: _shaped(_timed(m).to_frame("v").between_time("00:00", "10:00")),
+    "frame at_time pm": lambda m: _shaped(_timed(m).to_frame("v").at_time("11:00PM")),
+    # NEGATIVES: no match is empty; an unreadable time raises.
+    "at_time no match": lambda m: _shaped(_timed(m).at_time("12:00")),
+    # (pandas raises dateutil's ParserError, a ValueError; compared as one.)
+    "at_time bad time": lambda m: _raises_value_error(lambda: _timed(m).at_time("25:99")),
+    "replace backrefs": lambda m: _shaped(_texts(m).str.replace(r"(\w)(\d)", r"\2\1", regex=True)),
+    "replace named group": lambda m: _shaped(_texts(m).str.replace(r"(?P<l>[a-z])(?P<d>\d)", r"\g<d>", regex=True)),
+    "replace dollar literal": lambda m: _shaped(_texts(m).str.replace(r"(a)", "$1", regex=True)),
+    "replace callable": lambda m: _shaped(_texts(m).str.replace(r"[aeiou]", lambda found: found.group(0).upper(), regex=True)),
+    "replace case insensitive": lambda m: _shaped(_texts(m).str.replace("A", "_", case=False, regex=True)),
+    "replace flags": lambda m: _shaped(_texts(m).str.replace("^a", "_", flags=__import__("re").IGNORECASE, regex=True)),
+    "replace n": lambda m: _shaped(_texts(m).str.replace("a", "_", n=1)),
+    "replace literal backslash": lambda m: _shaped(m.Series(["a.b"]).str.replace(".", r"\\", regex=False)),
+    # NEGATIVE: a callable needs regex=True.
+    "replace callable without regex": lambda m: _texts(m).str.replace("a", lambda found: "x", regex=False),
+    "str join": lambda m: _shaped(_texts(m).str.join("-")),
+    "str translate": lambda m: _shaped(_texts(m).str.translate(str.maketrans("ae", "AE"))),
+    "str extractall": lambda m: _shaped(_texts(m).str.extractall(r"([a-z])(\d)")),
+    "str extractall named": lambda m: _shaped(_texts(m).str.extractall(r"(?P<letter>[a-z])(?P<digit>\d)")),
+    # NEGATIVE: a pattern without groups is pandas' ValueError.
+    "str extractall no groups": lambda m: _texts(m).str.extractall(r"[a-z]\d"),
+    "str cat na_rep": lambda m: _texts(m).str.cat(sep=",", na_rep="?"),
+    "str cat skips missing": lambda m: _texts(m).str.cat(sep=","),
+    "searchsorted list": lambda m: m.Series([1, 3, 5]).searchsorted([2, 5], side="right").tolist(),
+    "searchsorted scalar": lambda m: int(m.Series([1, 3, 5]).searchsorted(4)),
+    "index duplicated any": lambda m: (m.Index([3, 1, 3]).duplicated().any(), m.Index([3, 1, 3]).duplicated().tolist()),
+    "index isin sum": lambda m: (int(m.Index([3, 1, 2]).isin([1, 3]).sum()), m.Index([3, 1, 2]).isin([1, 3]).tolist()),
+    "index argsort": lambda m: m.Index([3, 1, 2]).argsort().tolist(),
+    "index isna any": lambda m: bool(m.Index([1.0, None]).isna().any()),
+}
+
+
+def _text_time_outcome(m: Any, case: str) -> Any:
+    try:
+        return _TEXT_TIME_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TEXT_TIME_CASES))
+def test_index_drop_time_selection_regex_replace_and_text_methods_match_pandas(case: str) -> None:
+    assert _text_time_outcome(fpd, case) == _text_time_outcome(pd, case), case
