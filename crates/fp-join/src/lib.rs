@@ -638,7 +638,11 @@ fn reindex_with_shared_utf8_plan(
     if let Some(column) = plan.and_then(|plan| reindex_eager_utf8_with_plan(column, plan)) {
         return Ok(column);
     }
-    Ok(column.reindex_by_positions(positions)?)
+    // A gap here is one the join invents: NaN, as pandas (it was None;
+    // br-frankenpandas-7u2td).
+    Ok(reindex_non_numeric_join_column_with_invented_gap(
+        column, positions,
+    )?)
 }
 
 fn reindex_outer_with_shared_utf8_plan(
@@ -16444,6 +16448,50 @@ mod tests {
             &[s("a"), s("a"), s("a"), s("a"), s("b"), s("c")]
         );
         assert!(fast.columns.get("w").unwrap().values()[4].is_missing());
+    }
+
+    #[test]
+    fn merge_outer_object_gaps_are_nan_and_supplied_none_stays_7u2td() {
+        // pandas 2.2.3: DataFrame({'k':['a','b'],'s':[None,'y']}).merge(
+        //   DataFrame({'k2':['b','c'],'t':['p','q']}), left_on='k',
+        //   right_on='k2', how='outer')
+        //   -> k [a, b, nan]  s [None, y, nan]  k2 [nan, b, c]  t [nan, p, q]
+        let text = |t: &str| Scalar::Utf8(t.to_owned());
+        let nan = Scalar::Null(NullKind::NaN);
+        let left = DataFrame::from_dict(
+            &["k", "s"],
+            vec![
+                ("k", vec![text("a"), text("b")]),
+                ("s", vec![Scalar::Null(NullKind::Null), text("y")]),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["k2", "t"],
+            vec![
+                ("k2", vec![text("b"), text("c")]),
+                ("t", vec![text("p"), text("q")]),
+            ],
+        )
+        .unwrap();
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["k"],
+            &["k2"],
+            JoinType::Outer,
+            MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        let column = |name: &str| merged.columns.get(name).unwrap().values().to_vec();
+        assert_eq!(column("k"), vec![text("a"), text("b"), nan.clone()]);
+        assert_eq!(column("k2"), vec![nan.clone(), text("b"), text("c")]);
+        assert_eq!(column("t"), vec![nan.clone(), text("p"), text("q")]);
+        // NEGATIVE: the supplied None is kept beside the invented NaN.
+        assert_eq!(
+            column("s"),
+            vec![Scalar::Null(NullKind::Null), text("y"), nan]
+        );
     }
 
     #[test]

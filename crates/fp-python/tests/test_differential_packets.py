@@ -3859,34 +3859,17 @@ _MERGE_GRID = list(
         [None, "1:1"],
     )
 )
-# br-frankenpandas-7u2td: the outer left_on/right_on key columns take a None
-# where pandas mints nan (typed-Utf8 fast gather).
-_MERGE_GRID_MARKER_GAP = {
-    ("outer", None, False, False, "left_right_on", None),
-    ("outer", ("_l", "_r"), False, False, "left_right_on", None),
-}
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_merge_keyword_grid_matches_pandas() -> None:
     bad = []
     for combo in _MERGE_GRID:
-        if combo in _MERGE_GRID_MARKER_GAP:
-            continue
         got = _grid_run(lambda: _merge_grid_case(fpd, *combo))
         want = _grid_run(lambda: _merge_grid_case(pd, *combo))
         if got != ("refused",) and got != want:
             bad.append(combo)
     assert bad == []
-
-
-@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="br-frankenpandas-7u2td: invented gap in an object key column is None, pandas nan")
-def test_merge_outer_left_right_on_gap_marker_matches_pandas() -> None:
-    for combo in sorted(_MERGE_GRID_MARKER_GAP, key=str):
-        assert _grid_run(lambda: _merge_grid_case(fpd, *combo)) == _grid_run(
-            lambda: _merge_grid_case(pd, *combo)
-        )
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -4982,3 +4965,54 @@ def test_frame_writes_match_pandas() -> None:
         with pytest.raises(ValueError, match="Columns must be same length as key"):
             df[["a", "b"]] = df[["a"]]
         assert df["a"].tolist() == [1, 2]
+
+
+_GAP_CSV_LEFT = "k,s\na,x\nb,y\n"
+_GAP_CSV_RIGHT = "k,t\nb,p\nc,q\n"
+
+
+def _gap_frames(m: Any, source: str) -> Any:
+    if source == "csv":
+        return m.read_csv(io.StringIO(_GAP_CSV_LEFT)), m.read_csv(io.StringIO(_GAP_CSV_RIGHT))
+    return (m.DataFrame({"k": ["a", "b"], "s": ["x", "y"]}),
+            m.DataFrame({"k": ["b", "c"], "t": ["p", "q"]}))
+
+
+_GAP_MARKER_CASES = {
+    **{
+        f"merge {how} ({source})": (lambda how, source: lambda m: _gap_frames(m, source)[0].merge(
+            _gap_frames(m, source)[1], on="k", how=how))(how, source)
+        for how in ("left", "right", "outer") for source in ("list", "csv")
+    },
+    **{
+        f"merge outer left_on/right_on ({source})": (lambda source: lambda m: _gap_frames(m, source)[0].merge(
+            _gap_frames(m, source)[1].rename(columns={"k": "k2"}), left_on="k", right_on="k2",
+            how="outer"))(source)
+        for source in ("list", "csv")
+    },
+    "series align": lambda m: m.Series(["a"], index=[0]).align(m.Series(["b"], index=[1]))[0],
+    "series align, other side": lambda m: m.Series(["a"], index=[0]).align(m.Series(["b"], index=[1]))[1],
+    "frame align": lambda m: m.DataFrame({"s": ["a"]}, index=[0]).align(
+        m.DataFrame({"s": ["b"]}, index=[1]))[0],
+    "series reindex": lambda m: m.Series(["a", "b"]).reindex([0, 1, 2]),
+    "series shift": lambda m: m.Series(["a", "b"]).shift(1),
+    "series shift back": lambda m: m.Series(["a", "b"]).shift(-1),
+    "frame shift": lambda m: m.DataFrame({"s": ["a", "b"], "v": [1.0, 2.0]}).shift(1),
+    "concat outer": lambda m: m.concat(list(_gap_frames(m, "list")), ignore_index=True),
+    # NEGATIVE: a supplied None stays None beside the gaps an operation invents.
+    "supplied None through merge": lambda m: m.DataFrame({"k": ["a", "b"], "s": [None, "y"]}).merge(
+        m.DataFrame({"k": ["b", "c"], "t": ["p", "q"]}), on="k", how="outer"),
+    "supplied None through align": lambda m: m.Series([None, "b"]).align(m.Series(["c"], index=[5]))[0],
+    "supplied None through reindex": lambda m: m.Series([None, "b"]).reindex([0, 1, 2]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", sorted(_GAP_MARKER_CASES))
+def test_invented_gap_marker_matches_pandas(case: str) -> None:
+    # br-frankenpandas-7u2td: an object column's gap that merge/align invent is
+    # NaN in pandas (frankenpandas minted None on the typed-Utf8 gathers), an
+    # object shift fills None (frankenpandas filled NaN), and a supplied None
+    # is kept either way.
+    run = _GAP_MARKER_CASES[case]
+    assert _plain(run(fpd)) == _plain(run(pd)), case

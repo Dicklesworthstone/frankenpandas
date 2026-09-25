@@ -11518,7 +11518,19 @@ impl Series {
         // Keep the distinction at this fill site: `Column` cannot know whether
         // a caller's missing position is a pandas-introduced alignment gap.
         let reindex_for_alignment = |column: &Column, positions: &[Option<usize>]| {
-            let reindexed = column.reindex_by_positions(positions)?;
+            // A gap align invents in an object, bool or category lane is NaN,
+            // as pandas; a supplied None stays None (br-frankenpandas-7u2td).
+            let reindexed = if matches!(
+                column.dtype(),
+                DType::Utf8 | DType::Bool | DType::Categorical
+            ) {
+                column.reindex_by_positions_with_absent_scalar(
+                    positions,
+                    Scalar::Null(NullKind::NaN),
+                )?
+            } else {
+                column.reindex_by_positions(positions)?
+            };
             if column.dtype() == DType::Int64
                 && column.validity().all()
                 && positions.iter().any(Option::is_none)
@@ -20188,8 +20200,10 @@ impl Series {
         // A datetime/timedelta column fills the gap with NaT, as pandas (the
         // NaN fill read back as nan;
         // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+        // An object (string) column fills None, as pandas' object shift - it
+        // filled NaN (br-frankenpandas-7u2td).
         let fill = match self.column.dtype() {
-            dtype @ (DType::Datetime64 { .. } | DType::Timedelta64) => {
+            dtype @ (DType::Datetime64 { .. } | DType::Timedelta64 | DType::Utf8) => {
                 Scalar::missing_for_dtype(dtype)
             }
             _ => Scalar::Null(NullKind::NaN),
@@ -93513,6 +93527,14 @@ impl DataFrame {
                 // than mixing it with the scalar `Datetime64(NAT)`/`Timedelta64(NAT)`
                 // sentinel used by all-valid temporal columns.
                 Scalar::Null(NullKind::NaT)
+            } else if matches!(
+                column.dtype(),
+                DType::Utf8 | DType::Bool | DType::Categorical
+            ) {
+                // pandas marks a gap it invents in an object, bool or category
+                // lane NaN - not the None a supplied missing value keeps
+                // (br-frankenpandas-7u2td).
+                Scalar::Null(NullKind::NaN)
             } else {
                 Scalar::missing_for_dtype(column.dtype())
             }
@@ -203305,6 +203327,63 @@ mod tests {
 
     fn text_scalar(text: &str) -> Scalar {
         Scalar::Utf8(text.to_owned())
+    }
+
+    #[test]
+    fn align_gaps_are_nan_and_object_shift_fills_none_7u2td() {
+        // pandas 2.2.3: Series(['a'], index=[0]).align(Series(['b'], index=[1]))
+        // -> (['a', nan], [nan, 'b']); Series([None, 'b']).align(Series(['c'],
+        // index=[5]))[0] -> [None, 'b', nan]; Series(['a','b']).shift(1) ->
+        // [None, 'a'] while a bool shift fills nan.
+        let nan = Scalar::Null(NullKind::NaN);
+        let none = Scalar::Null(NullKind::Null);
+        let strings = |labels: Vec<i64>, values: Vec<Scalar>| {
+            Series::from_values(
+                "s",
+                labels.into_iter().map(IndexLabel::Int64).collect(),
+                values,
+            )
+            .unwrap()
+        };
+        let (left, right) = strings(vec![0], vec![text_scalar("a")])
+            .align(&strings(vec![1], vec![text_scalar("b")]), AlignMode::Outer)
+            .unwrap();
+        assert_eq!(left.values(), [text_scalar("a"), nan.clone()]);
+        assert_eq!(right.values(), [nan.clone(), text_scalar("b")]);
+        // NEGATIVE: a supplied None stays None beside the invented NaN.
+        let (kept, _) = strings(vec![0, 1], vec![none.clone(), text_scalar("b")])
+            .align(&strings(vec![5], vec![text_scalar("c")]), AlignMode::Outer)
+            .unwrap();
+        assert_eq!(
+            kept.values(),
+            [none.clone(), text_scalar("b"), nan.clone()]
+        );
+        let frame = |label: i64, value: &str| {
+            DataFrame::new_with_column_order(
+                Index::new(vec![IndexLabel::Int64(label)]),
+                BTreeMap::from([(
+                    "s".to_owned(),
+                    Column::from_values(vec![text_scalar(value)]).unwrap(),
+                )]),
+                vec!["s".to_owned()],
+            )
+            .unwrap()
+        };
+        let (aligned, _) = frame(0, "a")
+            .align(&frame(1, "b"), AlignMode::Outer)
+            .unwrap();
+        assert_eq!(aligned.columns()["s"].values(), [text_scalar("a"), nan.clone()]);
+        let shifted = strings(vec![0, 1], vec![text_scalar("a"), text_scalar("b")])
+            .shift(1)
+            .unwrap();
+        assert_eq!(shifted.values(), [none, text_scalar("a")]);
+        let flags = Series::from_values(
+            "f",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        assert_eq!(flags.shift(1).unwrap().values()[0], nan);
     }
 
     #[test]

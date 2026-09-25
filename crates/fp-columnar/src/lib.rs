@@ -2921,6 +2921,12 @@ enum ScalarValues {
         bytes: Arc<[u8]>,
         offsets: Arc<[usize]>,
         validity: ValidityMask,
+        /// The marker a missing slot materializes: `Null` (pandas' None - a
+        /// missing value carried over from the source) unless the column
+        /// was built by a gather that INVENTS its gaps from an all-valid
+        /// source (a merge, an align), whose gaps pandas marks NaN
+        /// (br-frankenpandas-7u2td).
+        gap: NullKind,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Deferred null-introducing Utf8 gather (br-frankenpandas-yiqv5): the
@@ -2938,6 +2944,8 @@ enum ScalarValues {
     LazyGatherUtf8 {
         source: Arc<[Scalar]>,
         positions: Arc<[usize]>,
+        /// The marker a missing slot materializes (see `LazyNullableUtf8`).
+        gap: NullKind,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Deferred null-introducing Utf8 contiguous-range gather. This is the
@@ -2952,6 +2960,8 @@ enum ScalarValues {
         source_start: usize,
         source_len: usize,
         null_suffix: usize,
+        /// The marker a missing slot materializes (see `LazyNullableUtf8`).
+        gap: NullKind,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Run-length backing for all-valid Int64 columns whose values arrive as
@@ -3774,7 +3784,12 @@ impl ScalarValues {
         }
     }
 
-    fn lazy_nullable_utf8(bytes: Vec<u8>, offsets: Vec<usize>, validity: ValidityMask) -> Self {
+    fn lazy_nullable_utf8(
+        bytes: Vec<u8>,
+        offsets: Vec<usize>,
+        validity: ValidityMask,
+        gap: NullKind,
+    ) -> Self {
         debug_assert!(!offsets.is_empty(), "offsets must hold n+1 entries");
         debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
         debug_assert_eq!(offsets.len() - 1, validity.len());
@@ -3782,18 +3797,20 @@ impl ScalarValues {
             bytes: Arc::from(bytes),
             offsets: Arc::from(offsets),
             validity,
+            gap,
             values: OnceLock::new(),
         }
     }
 
     /// Build a `LazyGatherUtf8` (br-frankenpandas-yiqv5): a deferred gather of
     /// an all-valid `Eager` Utf8 `source` by `positions` (`usize::MAX` marks a
-    /// missing slot). Shares `source` in O(1); the gathered Scalar view
-    /// materializes once on demand.
-    fn lazy_gather_utf8(source: Arc<[Scalar]>, positions: Arc<[usize]>) -> Self {
+    /// missing slot, which materializes `Null(gap)`). Shares `source` in O(1);
+    /// the gathered Scalar view materializes once on demand.
+    fn lazy_gather_utf8(source: Arc<[Scalar]>, positions: Arc<[usize]>, gap: NullKind) -> Self {
         Self::LazyGatherUtf8 {
             source,
             positions,
+            gap,
             values: OnceLock::new(),
         }
     }
@@ -3804,6 +3821,7 @@ impl ScalarValues {
         source_start: usize,
         source_len: usize,
         null_suffix: usize,
+        gap: NullKind,
     ) -> Self {
         debug_assert!(
             source_start
@@ -3816,6 +3834,7 @@ impl ScalarValues {
             source_start,
             source_len,
             null_suffix,
+            gap,
             values: OnceLock::new(),
         }
     }
@@ -5759,6 +5778,7 @@ impl ScalarValues {
                 bytes,
                 offsets,
                 validity,
+                gap,
                 values,
             } => values
                 .get_or_init(|| {
@@ -5773,7 +5793,7 @@ impl ScalarValues {
                                         .to_owned(),
                                 )
                             } else {
-                                Scalar::Null(NullKind::Null)
+                                Scalar::Null(*gap)
                             }
                         })
                         .collect()
@@ -5782,6 +5802,7 @@ impl ScalarValues {
             Self::LazyGatherUtf8 {
                 source,
                 positions,
+                gap,
                 values,
             } => values
                 .get_or_init(|| {
@@ -5789,11 +5810,12 @@ impl ScalarValues {
                         .iter()
                         .map(|&pos| {
                             if pos == usize::MAX {
-                                // Missing slot == missing_for_dtype(Utf8) ==
-                                // Null(NullKind::Null), matching the eager
-                                // null-introducing gather and the
-                                // LazyNullableUtf8 sibling above.
-                                Scalar::Null(NullKind::Null)
+                                // Missing slot == Null(gap): Null (=
+                                // missing_for_dtype(Utf8)) for a plain
+                                // reindex, NaN for an invented gap, matching
+                                // the eager gather and the LazyNullableUtf8
+                                // sibling above.
+                                Scalar::Null(*gap)
                             } else {
                                 source[pos].clone()
                             }
@@ -5807,6 +5829,7 @@ impl ScalarValues {
                 source_start,
                 source_len,
                 null_suffix,
+                gap,
                 values,
             } => values
                 .get_or_init(|| {
@@ -5816,7 +5839,7 @@ impl ScalarValues {
                             if out_idx < *null_prefix
                                 || out_idx >= null_prefix.saturating_add(*source_len)
                             {
-                                Scalar::Null(NullKind::Null)
+                                Scalar::Null(*gap)
                             } else {
                                 source[source_start + out_idx - null_prefix].clone()
                             }
@@ -6745,22 +6768,28 @@ impl Clone for ScalarValues {
                 bytes,
                 offsets,
                 validity,
+                gap,
                 ..
             } => Self::LazyNullableUtf8 {
                 bytes: Arc::clone(bytes),
                 offsets: Arc::clone(offsets),
                 validity: validity.clone(),
+                gap: *gap,
                 values: OnceLock::new(),
             },
             Self::LazyGatherUtf8 {
-                source, positions, ..
-            } => Self::lazy_gather_utf8(Arc::clone(source), Arc::clone(positions)),
+                source,
+                positions,
+                gap,
+                ..
+            } => Self::lazy_gather_utf8(Arc::clone(source), Arc::clone(positions), *gap),
             Self::LazyNullableUtf8Range {
                 source,
                 null_prefix,
                 source_start,
                 source_len,
                 null_suffix,
+                gap,
                 ..
             } => Self::lazy_nullable_utf8_range(
                 Arc::clone(source),
@@ -6768,6 +6797,7 @@ impl Clone for ScalarValues {
                 *source_start,
                 *source_len,
                 *null_suffix,
+                *gap,
             ),
             Self::LazyNullableInt64 { data, validity, .. } => {
                 Self::lazy_nullable_int64(data.clone(), validity.clone())
@@ -13489,13 +13519,25 @@ impl Column {
         offsets: Vec<usize>,
         validity: ValidityMask,
     ) -> Self {
+        Self::from_utf8_values_with_gap(bytes, offsets, validity, NullKind::Null)
+    }
+
+    /// [`Self::from_utf8_values_with_validity`] whose invalid slots
+    /// materialize `Scalar::Null(gap)`: NaN for the gaps a gather invents
+    /// from an all-valid source, as pandas marks them (br-frankenpandas-7u2td).
+    fn from_utf8_values_with_gap(
+        bytes: Vec<u8>,
+        offsets: Vec<usize>,
+        validity: ValidityMask,
+        gap: NullKind,
+    ) -> Self {
         debug_assert_eq!(offsets.len() - 1, validity.len());
         if validity.all() {
             return Self::from_utf8_contiguous(bytes, offsets);
         }
         Self {
             dtype: DType::Utf8,
-            values: ScalarValues::lazy_nullable_utf8(bytes, offsets, validity.clone()),
+            values: ScalarValues::lazy_nullable_utf8(bytes, offsets, validity.clone(), gap),
             validity,
             data: None,
             categorical: None,
@@ -13513,11 +13555,12 @@ impl Column {
         source: Arc<[Scalar]>,
         positions: Arc<[usize]>,
         validity: ValidityMask,
+        gap: NullKind,
     ) -> Self {
         debug_assert_eq!(positions.len(), validity.len());
         Self {
             dtype: DType::Utf8,
-            values: ScalarValues::lazy_gather_utf8(source, positions),
+            values: ScalarValues::lazy_gather_utf8(source, positions, gap),
             validity,
             data: None,
             categorical: None,
@@ -13528,7 +13571,9 @@ impl Column {
     /// shared position plan. This is the same representation as
     /// [`Self::reindex_by_positions`] uses for all-valid eager Utf8 sources,
     /// but lets join builders compute the nullable plan once and share it
-    /// across many output columns with identical row positions.
+    /// across many output columns with identical row positions. Every gap is
+    /// one the join invents, so it reads as NaN, as pandas' merge marks it
+    /// (br-frankenpandas-7u2td).
     #[doc(hidden)]
     pub fn reindex_eager_utf8_with_shared_plan(
         &self,
@@ -13549,12 +13594,14 @@ impl Column {
             Arc::clone(source),
             positions,
             validity,
+            NullKind::NaN,
         ))
     }
 
     /// Build a deferred nullable Utf8 gather for the ordered-join shape where
     /// valid rows read one contiguous source range and missing rows form only a
-    /// prefix and/or suffix.
+    /// prefix and/or suffix; the join invents those gaps, so they read as NaN
+    /// (br-frankenpandas-7u2td).
     #[doc(hidden)]
     pub fn reindex_eager_utf8_with_nullable_range(
         &self,
@@ -13588,6 +13635,7 @@ impl Column {
                 source_start,
                 source_len,
                 null_suffix,
+                NullKind::NaN,
             ),
             validity: ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), len),
             data: None,
@@ -16791,6 +16839,19 @@ impl Column {
     }
 
     pub fn reindex_by_positions(&self, positions: &[Option<usize>]) -> Result<Self, ColumnError> {
+        self.reindex_by_positions_marking(positions, NullKind::Null)
+    }
+
+    /// [`Self::reindex_by_positions`] whose Utf8 gaps materialize
+    /// `Null(utf8_gap)`: `Null` (= `missing_for_dtype(Utf8)`) for a plain
+    /// reindex, NaN for gaps an operation invents
+    /// ([`Self::reindex_by_positions_with_absent_scalar`] with NaN), so both
+    /// keep the typed Utf8 gathers (br-frankenpandas-7u2td).
+    fn reindex_by_positions_marking(
+        &self,
+        positions: &[Option<usize>],
+        utf8_gap: NullKind,
+    ) -> Result<Self, ColumnError> {
         let mut present_positions = Vec::with_capacity(positions.len());
         let mut all_present = true;
         for position in positions {
@@ -17014,8 +17075,9 @@ impl Column {
         // counted (index/shape consulted) skips the O(output) byte copy
         // entirely. Materialized values are byte-identical to the eager cmxjz
         // path below: present slots clone the source Scalar, missing slots are
-        // Null(NullKind::Null) == missing_for_dtype(Utf8). Gated on an all-valid
-        // Eager source; contiguous or nullable sources keep the eager paths.
+        // Null(utf8_gap) (Null == missing_for_dtype(Utf8) for a plain reindex).
+        // Gated on an all-valid Eager source; contiguous or nullable sources
+        // keep the eager paths.
         if self.dtype == DType::Utf8
             && self.validity.all()
             && let Some(source) = self.values.eager_arc()
@@ -17036,6 +17098,7 @@ impl Column {
                 Arc::clone(source),
                 plan.into(),
                 ValidityMask::from_words(words, n),
+                utf8_gap,
             ));
         }
 
@@ -17044,9 +17107,10 @@ impl Column {
         // spans into one fresh byte buffer + offsets + validity bitset, emitting
         // a nullable-Utf8 backing — no per-row String Scalar clone or Column::new
         // revalidation. Missing slots get an empty span + cleared bit, which
-        // materializes Null(NullKind::Null) (= missing_for_dtype(Utf8)), exactly
-        // the Scalar fallback. Only fires when the source is all-valid (no NaN/
-        // null ambiguity); a source with its own nulls keeps the Scalar path.
+        // materializes Null(utf8_gap) (Null == missing_for_dtype(Utf8) for a
+        // plain reindex), exactly the Scalar fallback. Only fires when the
+        // source is all-valid (no NaN/null ambiguity); a source with its own
+        // nulls keeps the Scalar path.
         if self.dtype == DType::Utf8
             && let Some(strs) = self.as_all_valid_str_vec()
         {
@@ -17063,13 +17127,19 @@ impl Column {
                 }
                 new_offsets.push(new_bytes.len());
             }
-            return Ok(Self::from_utf8_values_with_validity(
+            return Ok(Self::from_utf8_values_with_gap(
                 new_bytes,
                 new_offsets,
                 ValidityMask::from_words(words, n),
+                utf8_gap,
             ));
         }
 
+        let absent = if self.dtype == DType::Utf8 {
+            Scalar::Null(utf8_gap)
+        } else {
+            Scalar::missing_for_dtype(self.dtype.clone())
+        };
         let values = positions
             .iter()
             .map(|slot| match slot {
@@ -17077,8 +17147,8 @@ impl Column {
                     .values
                     .get(*idx)
                     .cloned()
-                    .unwrap_or_else(|| Scalar::missing_for_dtype(self.dtype.clone())),
-                None => Scalar::missing_for_dtype(self.dtype.clone()),
+                    .unwrap_or_else(|| absent.clone()),
+                None => absent.clone(),
             })
             .collect::<Vec<_>>();
 
@@ -17117,6 +17187,14 @@ impl Column {
 
         if absent == Scalar::missing_for_dtype(self.dtype.clone()) {
             return self.reindex_by_positions(positions);
+        }
+        // Every gap of an all-valid Utf8 source is `absent`, so the typed
+        // gathers can mark it (a NaN pandas invents) without a Scalar copy.
+        if self.dtype == DType::Utf8
+            && self.validity.all()
+            && let Scalar::Null(kind) = absent
+        {
+            return self.reindex_by_positions_marking(positions, kind);
         }
 
         let values = positions
@@ -22233,6 +22311,7 @@ impl Column {
             offsets,
             validity,
             values,
+            ..
         } = &self.values
             && values.get().is_none()
         {
@@ -24234,6 +24313,7 @@ impl Column {
             offsets,
             validity,
             values,
+            ..
         } = &self.values
             && values.get().is_none()
         {
@@ -27839,6 +27919,7 @@ impl Column {
             offsets,
             validity,
             values,
+            ..
         } = &self.values
             && values.get().is_none()
         {
@@ -28022,6 +28103,7 @@ impl Column {
                 offsets,
                 validity,
                 values,
+                ..
             } = &self.values
             && values.get().is_none()
         {
@@ -32207,6 +32289,7 @@ impl Column {
             offsets,
             validity,
             values,
+            ..
         } = &self.values
             && values.get().is_none()
         {
@@ -32367,6 +32450,7 @@ impl Column {
             offsets,
             validity,
             values,
+            ..
         } = &self.values
             && values.get().is_none()
         {
@@ -32701,6 +32785,7 @@ impl Column {
                 offsets,
                 validity,
                 values,
+                ..
             } = &self.values
             && values.get().is_none()
         {
@@ -34104,6 +34189,54 @@ mod tests {
                 Scalar::Int64(20),
                 Scalar::Null(NullKind::Null),
                 Scalar::Int64(10)
+            ]
+        );
+    }
+
+    #[test]
+    fn utf8_invented_gaps_read_nan_on_the_typed_gathers_7u2td() {
+        // pandas marks a gap an operation invents in an object column NaN
+        // (merge, align), while a plain reindex here keeps None; both stay on
+        // the typed Utf8 gathers.
+        let text = |t: &str| Scalar::Utf8(t.to_owned());
+        let positions = [Some(1), None, Some(0)];
+        let eager = Column::from_values(vec![text("a"), text("b")]).expect("eager");
+        let contiguous = Column::from_utf8_contiguous(b"ab".to_vec(), vec![0, 1, 2]);
+        for source in [&eager, &contiguous] {
+            let plain = source.reindex_by_positions(&positions).expect("plain");
+            assert_eq!(
+                plain.values(),
+                &[text("b"), Scalar::Null(NullKind::Null), text("a")]
+            );
+            let invented = source
+                .reindex_by_positions_with_absent_scalar(&positions, Scalar::Null(NullKind::NaN))
+                .expect("invented");
+            assert!(matches!(
+                invented.values,
+                ScalarValues::LazyGatherUtf8 { .. } | ScalarValues::LazyNullableUtf8 { .. }
+            ));
+            assert_eq!(
+                invented.values(),
+                &[text("b"), Scalar::Null(NullKind::NaN), text("a")]
+            );
+            // A clone keeps the marker.
+            assert_eq!(invented.clone().values()[1], Scalar::Null(NullKind::NaN));
+        }
+        // NEGATIVE: a supplied None stays None; only the invented gap is NaN.
+        let nullable =
+            Column::from_values(vec![Scalar::Null(NullKind::Null), text("b")]).expect("nullable");
+        let kept = nullable
+            .reindex_by_positions_with_absent_scalar(
+                &[Some(0), None, Some(1)],
+                Scalar::Null(NullKind::NaN),
+            )
+            .expect("kept");
+        assert_eq!(
+            kept.values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+                text("b")
             ]
         );
     }
