@@ -4338,8 +4338,11 @@ def test_everyday_refusals_match_pandas() -> None:
             ~m.Series([1.5])
         with pytest.raises(KeyError):
             m.Series([30, 10, 50], index=[3, 1, 5]).loc[2:]
-    with pytest.raises(NotImplementedError):
-        _dated_sales(fpd).groupby(["k", "p"])["v"].sum().unstack(level=0)
+    # unstack(level=0) was refused here until fvsao.36 implemented it; it is
+    # now compared with pandas.
+    got = _dated_sales(fpd).groupby(["k", "p"])["v"].sum().unstack(level=0).to_dict()
+    want = _dated_sales(pd).groupby(["k", "p"])["v"].sum().unstack(level=0).to_dict()
+    assert got == want
 
 
 JOURNEY_CSV = """date,store,product,units,price,returned
@@ -6303,3 +6306,61 @@ def _time_window_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_TIME_WINDOW_CASES))
 def test_time_windows_groupers_and_to_datetime_errors_match_pandas(case: str) -> None:
     assert _time_window_outcome(fpd, case) == _time_window_outcome(pd, case), case
+
+
+def _mi_df(m: Any) -> Any:
+    return m.DataFrame(
+        {"a": ["x", "x", "y", "y"], "b": [1, 2, 1, 2], "v": [1.0, 2.5, 3.0, 4.0], "w": [4, 5, 6, 7]}
+    ).set_index(["a", "b"])
+
+
+# fvsao.36: a MultiIndex frame / Series kept flat 'x/1' storage labels, so
+# every key that is a level value or a tuple missed (KeyError), level-
+# addressed operations were refused, names were refused where positions
+# worked, and flat labels leaked out of idxmax / T / isin.
+_MULTIINDEX_SELECTION_CASES = {
+    "loc outer label": lambda m: repr(_mi_df(m).loc["x"]),
+    "loc full tuple": lambda m: _mi_df(m).loc[("x", 2)].tolist(),
+    "loc full tuple and column": lambda m: float(_mi_df(m).loc[("x", 2), "v"]),
+    "loc outer and column": lambda m: _mi_df(m).loc["y", "w"].tolist(),
+    "loc list of tuples": lambda m: repr(_mi_df(m).loc[[("x", 1), ("y", 2)]]),
+    "loc outer slice": lambda m: repr(_mi_df(m).loc["x":"y"]),
+    "xs level name": lambda m: repr(_mi_df(m).xs(1, level="b")),
+    "xs level keep": lambda m: repr(_mi_df(m).xs(1, level="b", drop_level=False)),
+    "series loc outer": lambda m: repr(_mi_df(m)["v"].loc["y"]),
+    "series getitem outer": lambda m: repr(_mi_df(m)["v"]["y"]),
+    "series getitem tuple": lambda m: float(_mi_df(m)["v"][("y", 1)]),
+    "reset_index one level": lambda m: repr(_mi_df(m).reset_index(level="b")),
+    "reset_index drop level": lambda m: repr(_mi_df(m).reset_index(level=0, drop=True)),
+    "droplevel name": lambda m: repr(_mi_df(m).droplevel("a")),
+    "series droplevel": lambda m: repr(_mi_df(m)["w"].droplevel(1)),
+    "sort_index level": lambda m: repr(_mi_df(m).sort_index(level="b")),
+    "sort_index descending": lambda m: repr(_mi_df(m).sort_index(ascending=False)),
+    "groupby level name": lambda m: repr(_mi_df(m).groupby(level="a").sum()),
+    "groupby level int": lambda m: repr(_mi_df(m).groupby(level=0)["w"].sum()),
+    "series groupby level": lambda m: repr(_mi_df(m)["w"].groupby(level=1).mean()),
+    "unstack level 0": lambda m: _mi_df(m)["w"].unstack(level=0).to_dict(),
+    "get_level_values name": lambda m: list(_mi_df(m).index.get_level_values("b")),
+    "isin tuples": lambda m: [bool(v) for v in _mi_df(m).index.isin([("x", 1)])],
+    "idxmax tuple": lambda m: tuple(v.item() if hasattr(v, "item") else v for v in _mi_df(m)["w"].idxmax()),
+    "T column MultiIndex": lambda m: [tuple(c) for c in _mi_df(m).T.columns.tolist()],
+    # NEGATIVE: a missing outer key is pandas' KeyError, not an empty frame.
+    "loc missing outer raises": lambda m: _mi_df(m).loc["z"],
+    # NEGATIVE: an unknown level name is pandas' KeyError.
+    "droplevel unknown name raises": lambda m: _mi_df(m).droplevel("zz"),
+    # NEGATIVE: a flat-index frame is unaffected.
+    "flat loc": lambda m: m.DataFrame({"v": [1, 2]}, index=["p", "q"]).loc["q"].tolist(),
+}
+
+
+def _multiindex_selection_outcome(m: Any, case: str) -> Any:
+    try:
+        return _MULTIINDEX_SELECTION_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MULTIINDEX_SELECTION_CASES))
+def test_multiindex_selection_and_level_ops_match_pandas(case: str) -> None:
+    assert _multiindex_selection_outcome(fpd, case) == _multiindex_selection_outcome(pd, case), case
