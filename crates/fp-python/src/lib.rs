@@ -4705,11 +4705,15 @@ impl PyDatetimeIndex {
                 DatetimeIndex::from_index(idx.inner.clone())
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             } else if let Ok(s) = d.extract::<PyRef<'_, PySeries>>() {
+                // pandas raises on a string it cannot parse (it became NaT).
                 let dt_series = fp_frame::to_datetime_with_options(
                     &s.inner,
-                    fp_frame::ToDatetimeOptions::default(),
+                    fp_frame::ToDatetimeOptions {
+                        errors: fp_frame::DatetimeErrors::Raise,
+                        ..Default::default()
+                    },
                 )
-                .map_err(frame_error_to_py)?;
+                .map_err(to_datetime_error)?;
                 let nanos: Vec<i64> = dt_series
                     .values()
                     .iter()
@@ -4734,9 +4738,12 @@ impl PyDatetimeIndex {
                 .map_err(frame_error_to_py)?;
                 let dt_series = fp_frame::to_datetime_with_options(
                     &temp_series,
-                    fp_frame::ToDatetimeOptions::default(),
+                    fp_frame::ToDatetimeOptions {
+                        errors: fp_frame::DatetimeErrors::Raise,
+                        ..Default::default()
+                    },
                 )
-                .map_err(frame_error_to_py)?;
+                .map_err(to_datetime_error)?;
                 let nanos: Vec<i64> = dt_series
                     .values()
                     .iter()
@@ -17185,15 +17192,25 @@ impl PySeries {
         Ok(dict.into_any().unbind())
     }
 
+    /// pandas' `rolling(window, min_periods=, center=)`: `window` a row
+    /// count or a time-based window ('7D', Day(7)) over a datetime index
+    /// (it took only a count: '7D' raised TypeError).
     #[pyo3(signature = (window, min_periods=None, center=false))]
-    fn rolling(&self, window: usize, min_periods: Option<usize>, center: bool) -> PyRolling {
-        PyRolling {
+    fn rolling(
+        &self,
+        window: &Bound<'_, PyAny>,
+        min_periods: Option<usize>,
+        center: bool,
+    ) -> PyResult<PyRolling> {
+        let (window, offset) = rolling_window_arg(window)?;
+        Ok(PyRolling {
             series: Some(self.inner.clone()),
             dataframe: None,
             window,
             min_periods,
             center,
-        }
+            offset,
+        })
     }
 
     #[pyo3(signature = (min_periods=None))]
@@ -17419,7 +17436,7 @@ impl PySeries {
         group_keys: bool,
         observed: Option<bool>,
         dropna: bool,
-    ) -> PyResult<PySeriesGroupBy> {
+    ) -> PyResult<Py<PyAny>> {
         if !as_index {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "as_index=False only valid with DataFrame",
@@ -17435,6 +17452,27 @@ impl PySeries {
             "Series.groupby",
             &[("group_keys", group_keys), ("dropna", dropna)],
         )?;
+        // pd.Grouper(freq=) is pandas' TimeGrouper over the index: the same
+        // bins as resample, empty ones included (it raised).
+        if let Some(Ok(grouper)) = by.map(|by| by.extract::<PyRef<'_, PyGrouper>>()) {
+            return match (&grouper.key, &grouper.level, &grouper.freq) {
+                (None, None, Some(freq)) => {
+                    require_resample_axis(self.inner.index())?;
+                    PyResampler {
+                        target: ResampleTarget::Series(self.inner.clone()),
+                        freq: freq.clone(),
+                        closed: None,
+                        label: None,
+                        origin: None,
+                    }
+                    .into_py_any(py)
+                }
+                (Some(key), _, _) => {
+                    Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone()))
+                }
+                _ => Err(not_implemented("this pd.Grouper form on a Series")),
+            };
+        }
         let sort = sort.unwrap_or(true);
         let by_series = match (by.filter(|b| !b.is_none()), level.filter(|l| !l.is_none())) {
             (Some(by), None) => extract_or_build_series(py, by, &self.inner)?,
@@ -17478,13 +17516,14 @@ impl PySeries {
         } else {
             (self.inner.clone(), by_series)
         };
-        Ok(PySeriesGroupBy {
+        PySeriesGroupBy {
             series,
             by,
             sort,
             as_index: true,
             groups: None,
-        })
+        }
+        .into_py_any(py)
     }
 
     /// pandas' `Series.resample(rule, closed=, label=, origin=)`; `rule` a
@@ -25027,7 +25066,7 @@ impl PyDataFrame {
         group_keys: bool,
         observed: Option<bool>,
         dropna: bool,
-    ) -> PyResult<PyGroupBy> {
+    ) -> PyResult<Py<PyAny>> {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         unsupported_params(
             "DataFrame.groupby",
@@ -25035,6 +25074,55 @@ impl PyDataFrame {
         )?;
         let by = by.filter(|b| !b.is_none());
         let level = level.filter(|l| !l.is_none());
+        // A lone pd.Grouper: with freq= it is pandas' TimeGrouper - the same
+        // bins as resample over `key` (or the index), empty ones included -
+        // and without one it groups by its key or level. It raised KeyError
+        // 'Grouper(...)'.
+        let grouper_key;
+        let grouper_level;
+        let (by, level) = match by.map(|by| by.extract::<PyRef<'_, PyGrouper>>()) {
+            Some(Ok(grouper)) => {
+                if let Some(freq) = &grouper.freq {
+                    if grouper.level.is_some() {
+                        return Err(not_implemented("groupby(Grouper(level=..., freq=...))"));
+                    }
+                    let frame = match &grouper.key {
+                        Some(key) => self.inner.set_index(key, true).map_err(frame_error_to_py)?,
+                        None => self.inner.clone(),
+                    };
+                    require_resample_axis(frame.index())?;
+                    return PyResampler {
+                        target: ResampleTarget::DataFrame(frame),
+                        freq: freq.clone(),
+                        closed: None,
+                        label: None,
+                        origin: None,
+                    }
+                    .into_py_any(py);
+                }
+                match (&grouper.key, &grouper.level) {
+                    (Some(key), None) => {
+                        grouper_key = pyo3::types::PyString::new(py, key);
+                        (Some(grouper_key.as_any()), level)
+                    }
+                    (None, Some(name)) => {
+                        grouper_level = pyo3::types::PyString::new(py, name);
+                        (None, Some(grouper_level.as_any()))
+                    }
+                    _ => return Err(not_implemented("this pd.Grouper form")),
+                }
+            }
+            _ => (by, level),
+        };
+        if let Some(keys) = by.and_then(|by| by.cast::<PyList>().ok())
+            && keys
+                .iter()
+                .any(|key| key.extract::<PyRef<'_, PyGrouper>>().is_ok())
+        {
+            return Err(not_implemented(
+                "groupby with a pd.Grouper among several keys",
+            ));
+        }
         let (df, by, key_names) = match (by, level) {
             (Some(by), None) => resolve_groupby_keys(py, &self.inner, by)?,
             (None, Some(level)) => group_by_index_level(&self.inner, level)?,
@@ -25073,7 +25161,7 @@ impl PyDataFrame {
         };
         gb.grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(gb)
+        gb.into_py_any(py)
     }
 
     /// Export to CSV (pandas `DataFrame.to_csv`). With no `path_or_buf`,
@@ -25824,17 +25912,24 @@ impl PyDataFrame {
     /// (fvsao.5).
     fn rolling(
         &self,
-        window: usize,
+        window: &Bound<'_, PyAny>,
         min_periods: Option<usize>,
         center: bool,
     ) -> PyResult<PyRolling> {
         unsupported_params("DataFrame.rolling", &[("center", !center)])?;
+        let (window, offset) = rolling_window_arg(window)?;
+        if offset.is_some() {
+            return Err(not_implemented(
+                "DataFrame.rolling over a time-based window (Series.rolling takes one)",
+            ));
+        }
         Ok(PyRolling {
             series: None,
             dataframe: Some(self.inner.clone()),
             window,
             min_periods,
             center,
+            offset,
         })
     }
 
@@ -32313,16 +32408,73 @@ pub struct PyRolling {
     window: usize,
     min_periods: Option<usize>,
     center: bool,
+    /// A time-based window ('7D', '2h', or a tick offset's freqstr) in
+    /// place of the row count, over a datetime index.
+    offset: Option<String>,
+}
+
+impl PyRolling {
+    /// The Series window: `(t - offset, t]` over the datetime index for a
+    /// time-based window (min_periods defaulting to 1, as pandas), else
+    /// `window` rows.
+    fn series_window<'a>(&self, s: &'a Series) -> PyResult<fp_frame::Rolling<'a>> {
+        match &self.offset {
+            Some(offset) => {
+                if self.center {
+                    return Err(not_implemented("rolling(<time window>, center=True)"));
+                }
+                // pandas' own error for a time window over a non-datetime index.
+                if !s.index().labels().iter().all(|label| {
+                    matches!(
+                        label,
+                        IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_)
+                    )
+                }) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "window must be an integer 0 or greater",
+                    ));
+                }
+                s.rolling_offset(offset, self.min_periods)
+                    .map_err(frame_error_to_py)
+            }
+            None => Ok(s.rolling_with_center(self.window, self.min_periods, self.center)),
+        }
+    }
+
+    /// Refuses a time-based window where `method` only runs count windows
+    /// (it would have run a 0-row window).
+    fn require_count_window(&self, method: &str) -> PyResult<()> {
+        match self.offset {
+            Some(_) => Err(not_implemented(&format!(
+                "Rolling.{method} over a time-based window"
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A `rolling(window)` argument: a row count, or a time-based window as a
+/// string ('7D') or a fixed offset (Day(7)).
+fn rolling_window_arg(window: &Bound<'_, PyAny>) -> PyResult<(usize, Option<String>)> {
+    if let Ok(count) = window.extract::<usize>() {
+        return Ok((count, None));
+    }
+    if let Ok(offset) = window.extract::<PyRef<'_, PyDateOffset>>() {
+        return Ok((0, Some(offset.freqstr())));
+    }
+    match window.extract::<String>() {
+        Ok(text) => Ok((0, Some(text))),
+        Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "window must be an integer 0 or greater",
+        )),
+    }
 }
 
 #[pymethods]
 impl PyRolling {
     pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .sum()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.sum().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32339,10 +32491,7 @@ impl PyRolling {
 
     pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .mean()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.mean().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32359,10 +32508,7 @@ impl PyRolling {
 
     pub fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .min()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.min().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32379,10 +32525,7 @@ impl PyRolling {
 
     pub fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .max()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.max().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32399,10 +32542,7 @@ impl PyRolling {
 
     pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .std()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.std().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32419,10 +32559,7 @@ impl PyRolling {
 
     pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .var()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.var().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32439,10 +32576,7 @@ impl PyRolling {
 
     pub fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .count()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.count().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32459,10 +32593,7 @@ impl PyRolling {
 
     pub fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .median()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.median().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32496,8 +32627,8 @@ impl PyRolling {
             ],
         )?;
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
+            let res = self
+                .series_window(s)?
                 .quantile(q)
                 .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
@@ -32521,10 +32652,7 @@ impl PyRolling {
 
     pub fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .sem()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.sem().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32541,10 +32669,7 @@ impl PyRolling {
 
     pub fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .skew()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.skew().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32561,10 +32686,7 @@ impl PyRolling {
 
     pub fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .kurt()
-                .map_err(frame_error_to_py)?;
+            let res = self.series_window(s)?.kurt().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
@@ -32591,6 +32713,7 @@ impl PyRolling {
         ascending: Option<bool>,
         na_option: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        self.require_count_window("rank")?;
         let m = method.unwrap_or("average");
         let asc = ascending.unwrap_or(true);
         let na = na_option.unwrap_or("keep");
@@ -32615,6 +32738,7 @@ impl PyRolling {
 
     #[pyo3(signature = (other=None))]
     pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        self.require_count_window("corr")?;
         let window = self.window;
         let min_periods = self.min_periods;
         execute_window_bivariate(
@@ -32631,6 +32755,7 @@ impl PyRolling {
 
     #[pyo3(signature = (other=None))]
     pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        self.require_count_window("cov")?;
         let window = self.window;
         let min_periods = self.min_periods;
         execute_window_bivariate(
@@ -32649,6 +32774,7 @@ impl PyRolling {
     /// aggregation, a `_cython_table` callable its name, any other callable
     /// `apply(func, raw=False)`; callables raised (fvsao.7).
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.require_count_window("agg")?;
         if agg_spec_has_callable(func) {
             return match named_agg_spec(func, "Rolling")? {
                 Some(named) => self.agg(py, &named),
@@ -32733,6 +32859,7 @@ impl PyRolling {
                 ("engine_kwargs", engine_kwargs.is_none()),
             ],
         )?;
+        self.require_count_window("apply")?;
         if func.extract::<String>().is_ok() {
             return self.agg(py, func);
         }
@@ -38303,25 +38430,58 @@ fn datetime_nanos_or_nat(converted: &Series) -> Vec<i64> {
         .collect()
 }
 
-/// Convert argument to datetime (pandas `to_datetime`).
+/// A `to_datetime` failure as pandas' ValueError, its own text (the gate
+/// prefix left off).
+fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
+    match err {
+        fp_frame::FrameError::CompatibilityRejected(message) => {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+        }
+        other => PyErr::new::<pyo3::exceptions::PyValueError, _>(other.to_string()),
+    }
+}
+
+/// Convert argument to datetime (pandas `to_datetime`): `errors='raise'`
+/// (pandas' default) raises on a string it cannot parse or that does not
+/// match the column's one format - those silently became NaT - and
+/// `'coerce'` makes them NaT; `format='mixed'` / `'ISO8601'` parse each
+/// element on its own (they were read as strftime patterns: all NaT).
 #[pyfunction]
-#[pyo3(signature = (arg, format=None, unit=None, utc=false))]
+#[pyo3(signature = (arg, errors="raise", dayfirst=false, yearfirst=false, utc=false, format=None, unit=None))]
+#[allow(clippy::too_many_arguments)]
 fn to_datetime(
     py: Python<'_>,
     arg: &Bound<'_, PyAny>,
+    errors: &str,
+    dayfirst: bool,
+    yearfirst: bool,
+    utc: bool,
     format: Option<&str>,
     unit: Option<&str>,
-    utc: bool,
 ) -> PyResult<Py<PyAny>> {
+    let errors = match errors {
+        "raise" => fp_frame::DatetimeErrors::Raise,
+        "coerce" => fp_frame::DatetimeErrors::Coerce,
+        "ignore" => return Err(not_implemented("to_datetime(errors='ignore')")),
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "errors must be one of 'ignore', 'raise', or 'coerce', got {other:?}"
+            )));
+        }
+    };
+    unsupported_params(
+        "to_datetime",
+        &[("dayfirst", !dayfirst), ("yearfirst", !yearfirst)],
+    )?;
     let opts = fp_frame::ToDatetimeOptions {
         format,
         unit,
         utc,
+        errors,
         ..Default::default()
     };
     if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
-        let res = fp_frame::to_datetime_with_options(&s.inner, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let res = fp_frame::to_datetime_with_options(&s.inner, opts).map_err(to_datetime_error)?;
         return Ok(Py::new(py, PySeries { inner: res })?.into_any());
     }
     if let Ok(dti) = arg.extract::<PyRef<'_, PyDatetimeIndex>>() {
@@ -38348,8 +38508,8 @@ fn to_datetime(
             values,
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let res = fp_frame::to_datetime_with_options(&temp_series, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let res =
+            fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
         return Ok(Py::new(
             py,
             PyDatetimeIndex {
@@ -38371,8 +38531,8 @@ fn to_datetime(
             values,
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let res = fp_frame::to_datetime_with_options(&temp_series, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let res =
+            fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
         return Ok(Py::new(
             py,
             PyDatetimeIndex {
@@ -38384,8 +38544,8 @@ fn to_datetime(
     if let Ok(s) = py_to_scalar(py, arg) {
         let temp_series = Series::from_values("", vec![IndexLabel::Int64(0)], vec![s])
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let res = fp_frame::to_datetime_with_options(&temp_series, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let res =
+            fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
         if let Some(val) = res.values().first() {
             return scalar_to_py(py, val);
         }
@@ -43652,7 +43812,7 @@ fn infer_freq(index: &Bound<'_, PyAny>, warn: bool) -> PyResult<Option<String>> 
         };
     }
     let py = index.py();
-    if let Ok(dt_obj) = to_datetime(py, index, None, None, false) {
+    if let Ok(dt_obj) = to_datetime(py, index, "coerce", false, false, false, None, None) {
         let dt_bound = dt_obj.bind(py);
         if let Ok(dti) = dt_bound.extract::<PyRef<'_, PyDatetimeIndex>>() {
             let nanos: Vec<i64> = dti.inner.values().into_iter().flatten().collect();
@@ -47781,7 +47941,10 @@ mod tests {
         .expect("series"); // ubs:ignore — test fixture
         let mut py_s = PySeries { inner: s };
 
-        let roll = py_s.rolling(2, None, false);
+        pyo3::Python::initialize();
+        let roll =
+            Python::attach(|py| py_s.rolling(pyo3::types::PyInt::new(py, 2).as_any(), None, false))
+                .expect("rolling"); // ubs:ignore — test fixture
         assert_eq!(roll.window, 2);
         assert!(!roll.center);
 
@@ -47860,7 +48023,9 @@ mod tests {
             .expect("df"); // ubs:ignore — test fixture
             let mut py_df = PyDataFrame { inner: df };
 
-            let roll = py_df.rolling(2, None, false).expect("rolling"); // ubs:ignore — test fixture
+            let roll = py_df
+                .rolling(pyo3::types::PyInt::new(py, 2).as_any(), None, false)
+                .expect("rolling"); // ubs:ignore — test fixture
             assert_eq!(roll.window, 2);
             assert!(!roll.center);
 
@@ -48106,7 +48271,10 @@ mod tests {
         let t_df = py_df.T().expect("T"); // ubs:ignore — test fixture
         assert_eq!(t_df.shape(), (2, 2));
 
-        let roll = py_df.rolling(2, None, false).expect("rolling"); // ubs:ignore — test fixture
+        let roll = Python::attach(|py| {
+            py_df.rolling(pyo3::types::PyInt::new(py, 2).as_any(), None, false)
+        })
+        .expect("rolling"); // ubs:ignore — test fixture
         assert_eq!(roll.ndim(), 2);
         let exp = py_df.expanding(None);
         assert_eq!(exp.ndim(), 2);

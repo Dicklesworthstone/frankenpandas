@@ -21471,6 +21471,7 @@ fn live_oracle_series_to_datetime_unit_milliseconds() {
             origin: None,
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
+            errors: fp_frame::DatetimeErrors::Coerce,
         },
     )
     .expect("to_datetime");
@@ -34176,6 +34177,7 @@ fn live_oracle_series_to_datetime_unit_microseconds() {
             origin: None,
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
+            errors: fp_frame::DatetimeErrors::Coerce,
         },
     )
     .expect("to_datetime");
@@ -34231,6 +34233,7 @@ fn live_oracle_series_to_datetime_unit_minutes() {
             origin: None,
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
+            errors: fp_frame::DatetimeErrors::Coerce,
         },
     )
     .expect("to_datetime");

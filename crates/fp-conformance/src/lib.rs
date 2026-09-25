@@ -9936,6 +9936,7 @@ fn run_fixture_operation(
                             origin,
                             infer_mixed_timezone: true,
                             mixed_tz_as_object: false,
+                            errors: fp_frame::DatetimeErrors::Coerce,
                         },
                     )
                     .map_err(|err| err.to_string())
@@ -19504,6 +19505,7 @@ fn execute_and_compare_differential(
                             origin,
                             infer_mixed_timezone: true,
                             mixed_tz_as_object: false,
+                            errors: fp_frame::DatetimeErrors::Coerce,
                         },
                     )
                     .map_err(|err| err.to_string())

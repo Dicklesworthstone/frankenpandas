@@ -35854,7 +35854,16 @@ impl Resample<'_> {
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
                 out_labels.push(resample_bin_label(key));
-                out_f64.push(groups[key].iter().map(|&i| vals[i]).sum::<f64>());
+                // An empty bin sums to pandas' 0.0: Rust's f64 `Sum` starts
+                // from -0.0, which printed '-0.0' for resample('MS').sum()'s
+                // dataless months (fvsao.35). A non-empty bin starts from its
+                // first value, as numpy's reduction does.
+                let mut members = groups[key].iter().map(|&i| vals[i]);
+                out_f64.push(
+                    members
+                        .next()
+                        .map_or(0.0, |first| members.fold(first, |total, v| total + v)),
+                );
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
@@ -42097,9 +42106,42 @@ impl SeriesGroupBy<'_> {
         // Dense single-fold fast path (no per-group Vec<f64> buckets) — see
         // dense_group_fold. Bit-identical to agg_numeric's `nums.iter().sum()`.
         if let Some(r) = self.dense_group_fold(0.0, |a, x| a + x, |a, _| Scalar::Float64(a)) {
-            return r;
+            return r.and_then(|reduced| self.fill_all_missing_groups(reduced, 0.0));
         }
         self.agg_numeric(|nums| nums.iter().sum(), self.series.name())
+            .and_then(|reduced| self.fill_all_missing_groups(reduced, 0.0))
+    }
+
+    /// `reduced` with each all-missing group set to `identity`: pandas' sum
+    /// and prod default to min_count=0, so such a group is 0.0 / 1.0 (the
+    /// reductions emitted NaN for it; min_count>=1 masks it back through
+    /// [`Self::with_min_count`]). A NaN from real values (inf - inf) stays.
+    fn fill_all_missing_groups(
+        &self,
+        reduced: Series,
+        identity: f64,
+    ) -> Result<Series, FrameError> {
+        if !reduced.column().has_any_missing() {
+            return Ok(reduced);
+        }
+        let counts = self.count()?;
+        if counts.index().labels() != reduced.index().labels() {
+            return Ok(reduced);
+        }
+        let values: Vec<Scalar> = reduced
+            .values()
+            .iter()
+            .zip(counts.values())
+            .map(|(value, count)| match count {
+                Scalar::Int64(0) => Scalar::Float64(identity),
+                _ => value.clone(),
+            })
+            .collect();
+        Series::new(
+            reduced.name(),
+            reduced.index().clone(),
+            Column::from_values(values)?,
+        )
     }
 
     /// pandas' error for `func_name` over a string series, if there is one
@@ -44527,9 +44569,10 @@ impl SeriesGroupBy<'_> {
         // identical to `nums.iter().product()`: 1.0 * x0 * x1 * ... folds
         // left-to-right in value order, same as `product()`'s left fold.
         if let Some(r) = self.dense_group_fold(1.0, |a, x| a * x, |a, _| Scalar::Float64(a)) {
-            return r;
+            return r.and_then(|reduced| self.fill_all_missing_groups(reduced, 1.0));
         }
         self.agg_numeric(|nums| nums.iter().product(), self.series.name())
+            .and_then(|reduced| self.fill_all_missing_groups(reduced, 1.0))
     }
 
     /// Assign within-group cumulative count (0-based).
@@ -58412,6 +58455,18 @@ pub struct ToDatetimeOptions<'a> {
     /// (naive `YYYY-MM-DD HH:MM:SS`, aware `... +HH:MM`). Used by CSV
     /// parse_dates (br-frankenpandas-unz0t); off for bare `to_datetime`.
     pub mixed_tz_as_object: bool,
+    /// pandas' `errors=`: a string that does not parse, or does not match
+    /// the column's one inferred format, is NaT (`Coerce`, the default
+    /// here, which `read_csv(parse_dates=)` relies on) or pandas' ValueError
+    /// (`Raise`, what `pd.to_datetime` defaults to).
+    pub errors: DatetimeErrors,
+}
+
+/// pandas' `to_datetime(errors=)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatetimeErrors {
+    Raise,
+    Coerce,
 }
 
 impl Default for ToDatetimeOptions<'_> {
@@ -58423,6 +58478,7 @@ impl Default for ToDatetimeOptions<'_> {
             origin: None,
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
+            errors: DatetimeErrors::Coerce,
         }
     }
 }
@@ -58565,6 +58621,14 @@ pub fn to_datetime_values_with_options(
         ));
     }
     let origin = resolve_datetime_origin(options.origin, parsed_unit)?;
+    // format='mixed' / 'ISO8601' parse every element on its own (no one
+    // column format); they used to be read as strftime patterns that match
+    // nothing, so every value came back NaT.
+    let per_element = matches!(options.format, Some("mixed" | "ISO8601"));
+    let options = ToDatetimeOptions {
+        format: options.format.filter(|_| !per_element),
+        ..options
+    };
     // pandas keeps a mixed tz-naive/tz-aware string column as object rather than
     // coercing to datetime64 (br-frankenpandas-unz0t). Only fires for the
     // string-inference path (no unit/format) and when the caller opts in
@@ -58582,7 +58646,7 @@ pub fn to_datetime_values_with_options(
     // pandas turns into NaT. Only the default string-inference shape takes a
     // lock: an explicit `format=` already pins the format, and `unit=` is not
     // parsing strings at all.
-    let shape_lock = if parsed_unit.is_none() && options.format.is_none() {
+    let shape_lock = if parsed_unit.is_none() && options.format.is_none() && !per_element {
         infer_datetime_shape_lock(values)
     } else {
         None
@@ -58595,7 +58659,21 @@ pub fn to_datetime_values_with_options(
         };
     let mut converted = Vec::with_capacity(values.len());
 
-    for val in values {
+    for (position, val) in values.iter().enumerate() {
+        // errors='raise': a string pandas cannot parse is its ValueError,
+        // not a silent NaT (the column's format mismatch, or no format).
+        if options.errors == DatetimeErrors::Raise
+            && parsed_unit.is_none()
+            && let Scalar::Utf8(text) = val
+            && !is_datetime_null_token(text)
+            && shape_lock
+                .as_deref()
+                .is_some_and(|lock| !datetime_shape_matches(text, lock))
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "time data \"{text}\" doesn't match the format of the first value, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+            )));
+        }
         let result = if let Some(unit) = parsed_unit {
             parse_datetime_scalar_with_unit(val, unit, origin, options.utc)
         } else {
@@ -58659,10 +58737,32 @@ pub fn to_datetime_values_with_options(
                 datetime64_scalar_from_parsed_datetime(parsed)
             }
         };
+        if options.errors == DatetimeErrors::Raise
+            && result.is_missing()
+            && let Scalar::Utf8(text) = val
+            && !is_datetime_null_token(text)
+        {
+            let format = options
+                .format
+                .map_or_else(String::new, |format| format!(" with format \"{format}\""));
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Unknown datetime string format, unable to parse: {text}{format}, at position {position}"
+            )));
+        }
         converted.push(result);
     }
 
     Ok(converted)
+}
+
+/// The strings pandas' `to_datetime` reads as missing rather than as an
+/// unparseable date.
+fn is_datetime_null_token(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.is_empty()
+        || ["nat", "nan", "none", "null"]
+            .iter()
+            .any(|token| trimmed.eq_ignore_ascii_case(token))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59341,7 +59441,15 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
 
     // Text month names (English, matching pandas' default): January 15, 2024 /
     // Jan 15, 2024 / 15-Jan-2024 / 15 January 2024 / 15 Jan 2024.
-    for fmt in ["%B %d, %Y", "%b %d, %Y", "%d-%b-%Y", "%d %B %Y", "%d %b %Y"] {
+    for fmt in [
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%B %d %Y",
+        "%b %d %Y",
+        "%d-%b-%Y",
+        "%d %B %Y",
+        "%d %b %Y",
+    ] {
         if let Ok(d) = NaiveDate::parse_from_str(trimmed, fmt) {
             return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
         }

@@ -6232,3 +6232,74 @@ def _offset_surface_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_OFFSET_SURFACE_CASES))
 def test_offsets_on_series_indexes_and_resample_match_pandas(case: str) -> None:
     assert _offset_surface_outcome(fpd, case) == _offset_surface_outcome(pd, case), case
+
+
+def _timed_series(m: Any) -> Any:
+    idx = m.to_datetime(["2024-01-05 00:00", "2024-01-06 00:00", "2024-01-09 00:00", "2024-02-01 00:00", "2024-02-02 12:00"])
+    return m.Series([10.5, None, 7.25, 3.0, 12.0], index=idx, name="v")
+
+
+def _grouper_frame(m: Any) -> Any:
+    return m.DataFrame({"when": m.to_datetime(["2024-01-05", "2024-01-20", "2024-03-01"]), "city": ["a", "b", "a"], "amount": [1.0, 2.0, 4.0]})
+
+
+# fvsao.35: rolling('7D') raised TypeError; pd.Grouper(key=, freq=) raised
+# KeyError 'Grouper(...)'; resample('MS').sum() printed -0.0 for an empty
+# month (Rust's f64 Sum starts from -0.0); SeriesGroupBy.sum/prod of an
+# all-NaN group was NaN (pandas' min_count=0 gives 0.0 / 1.0); to_datetime
+# turned a string it could not parse into a silent NaT, took no errors=,
+# and read format='mixed' / 'ISO8601' as strftime patterns (all NaT).
+_TIME_WINDOW_CASES = {
+    "rolling 7D sum": lambda m: _timed_series(m).rolling("7D").sum().tolist(),
+    "rolling 2D mean": lambda m: _timed_series(m).rolling("2D").mean().tolist(),
+    "rolling 36h count": lambda m: _timed_series(m).rolling("36h").count().tolist(),
+    "rolling 7D max": lambda m: _timed_series(m).rolling("7D").max().tolist(),
+    "rolling 3D min_periods 2": lambda m: _timed_series(m).rolling("3D", min_periods=2).sum().tolist(),
+    "rolling Day(3) offset": lambda m: _timed_series(m).rolling(m.offsets.Day(3)).sum().tolist(),
+    # NEGATIVE: a time window over an integer index is pandas' ValueError.
+    "rolling time window int index raises": lambda m: m.Series([1.0, 2.0]).rolling("2D").sum(),
+    # NEGATIVE: a row-count window is unchanged.
+    "rolling count window": lambda m: _timed_series(m).rolling(2).sum().tolist(),
+    "Grouper key freq sum": lambda m: _grouper_frame(m).groupby(m.Grouper(key="when", freq="MS"))["amount"].sum().to_dict(),
+    "Grouper key freq size": lambda m: _grouper_frame(m).groupby(m.Grouper(key="when", freq="MS")).size().to_dict(),
+    "Grouper index freq mean": lambda m: _grouper_frame(m).set_index("when").groupby(m.Grouper(freq="MS"))["amount"].mean().to_dict(),
+    "Grouper key only": lambda m: _grouper_frame(m).groupby(m.Grouper(key="city"))["amount"].sum().to_dict(),
+    "Grouper ME count": lambda m: _grouper_frame(m).groupby(m.Grouper(key="when", freq="ME"))["amount"].count().to_dict(),
+    "Series groupby Grouper": lambda m: _grouper_frame(m).set_index("when")["amount"].groupby(m.Grouper(freq="MS")).sum().to_dict(),
+    "resample MS empty month is 0.0": lambda m: [repr(float(v)) for v in m.Series([1.0, 2.0], index=m.to_datetime(["2024-01-05", "2024-03-05"])).resample("MS").sum().tolist()],
+    "groupby sum all-NaN group": lambda m: [repr(float(v)) for v in m.DataFrame({"g": ["a", "b", "b"], "v": [None, 1.0, None]}).groupby("g")["v"].sum().tolist()],
+    "groupby prod all-NaN group": lambda m: [repr(float(v)) for v in m.DataFrame({"g": ["a", "b"], "v": [None, 2.0]}).groupby("g")["v"].prod().tolist()],
+    # NEGATIVE: min_count=1 keeps the all-NaN group NaN.
+    "groupby sum min_count 1": lambda m: [repr(float(v)) for v in m.DataFrame({"g": ["a", "b"], "v": [None, 1.0]}).groupby("g")["v"].sum(min_count=1).tolist()],
+    "to_datetime format mismatch raises": lambda m: m.to_datetime(["2024-01-05", "2024-02-02 12:00"]),
+    "to_datetime unparseable raises": lambda m: m.to_datetime(["2024-01-05", "not a date"]),
+    "to_datetime coerce": lambda m: [str(t) for t in m.to_datetime(["2024-01-05", "not a date"], errors="coerce")],
+    "to_datetime mixed": lambda m: [str(t) for t in m.to_datetime(["2024-01-05", "2024-02-02 12:00"], format="mixed")],
+    "to_datetime ISO8601": lambda m: [str(t) for t in m.to_datetime(["2024-01-05", "2024-02-02T12:00:00"], format="ISO8601")],
+    "to_datetime month names": lambda m: [str(t) for t in m.to_datetime(["Jan 5 2024", "Feb 2 2024"])],
+    # NEGATIVE: null tokens stay NaT under errors='raise'.
+    "to_datetime null tokens": lambda m: [str(t) for t in m.to_datetime(["2024-01-05", None, "NaT", ""])],
+    "DatetimeIndex unparseable raises": lambda m: m.DatetimeIndex(["2024-01-05", "garbage"]),
+}
+
+
+def _time_window_outcome(m: Any, case: str) -> Any:
+    try:
+        r = _TIME_WINDOW_CASES[case](m)
+    except ValueError:
+        # pandas raises its DateParseError subclass for some of these; both
+        # are caught by `except ValueError`, which is the contract.
+        return ("raise", "ValueError")
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+    if isinstance(r, dict):
+        return {str(k): (None if isinstance(v, float) and math.isnan(v) else v) for k, v in r.items()}
+    if isinstance(r, list):
+        return [None if isinstance(v, float) and math.isnan(v) else v for v in r]
+    return r
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TIME_WINDOW_CASES))
+def test_time_windows_groupers_and_to_datetime_errors_match_pandas(case: str) -> None:
+    assert _time_window_outcome(fpd, case) == _time_window_outcome(pd, case), case
