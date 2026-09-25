@@ -3,4 +3,4 @@
 2    (25.0, 50.0]
 3    (50.0, 75.0]
 4    (75.0, 100.0]
-Name: val, Length: 5, dtype: Utf8
+Name: val, Length: 5, dtype: Categorical

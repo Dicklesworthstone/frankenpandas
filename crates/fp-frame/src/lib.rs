@@ -10386,6 +10386,9 @@ impl Series {
         if let Some(strings) = self.utf8_binary(other, op)? {
             return Ok(strings);
         }
+        if let Some(bools) = self.bool_binary(other, op)? {
+            return Ok(bools);
+        }
         // pandas: the result keeps the name only when both operands share it;
         // otherwise it is unnamed (None). This used to concatenate the names
         // ("a+b"), which pandas never produces.
@@ -10674,6 +10677,69 @@ impl Series {
     /// operand (None included) gives NaN, as pandas. `None` for any other
     /// dtype pair. These raised on the numeric kernel
     /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
+    /// pandas' numpy-bool arithmetic between two bool Series on one index:
+    /// `+` is logical or and `*` logical and, both staying bool; `-` is
+    /// numpy's TypeError and `/`, `//`, `**` pandas' NotImplementedError. It
+    /// promoted to int64 (True + True read 2) and computed them all. None
+    /// for anything else (a missing value, another dtype, other labels).
+    fn bool_binary(&self, other: &Self, op: ArithmeticOp) -> Result<Option<Self>, FrameError> {
+        let boolish = |column: &Column| matches!(column.dtype(), DType::Bool | DType::BoolNullable);
+        // A nullable `boolean` side makes the result nullable, NA wherever
+        // either side is missing (pandas' BooleanArray arithmetic).
+        let nullable = self.column.dtype() == DType::BoolNullable
+            || other.column.dtype() == DType::BoolNullable;
+        if !boolish(&self.column)
+            || !boolish(&other.column)
+            || self.index != other.index
+            || (!nullable && (self.column.has_any_missing() || other.column.has_any_missing()))
+        {
+            return Ok(None);
+        }
+        let refused = |name: &str| {
+            FrameError::CompatibilityRejected(format!(
+                "operator '{name}' not implemented for bool dtypes"
+            ))
+        };
+        let combine: fn(bool, bool) -> bool = match op {
+            ArithmeticOp::Add => |a, b| a || b,
+            ArithmeticOp::Mul => |a, b| a && b,
+            ArithmeticOp::Sub => {
+                return Err(FrameError::CompatibilityRejected(
+                    "numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, the `^` operator, or the logical_xor function instead.".to_owned(),
+                ));
+            }
+            ArithmeticOp::Div => return Err(refused("truediv")),
+            ArithmeticOp::FloorDiv => return Err(refused("floordiv")),
+            ArithmeticOp::Pow => return Err(refused("pow")),
+            ArithmeticOp::Mod => return Ok(None),
+        };
+        let values: Vec<Scalar> = self
+            .column
+            .values()
+            .iter()
+            .zip(other.column.values())
+            .map(|(left, right)| match (left, right) {
+                (Scalar::Bool(left), Scalar::Bool(right)) => Scalar::Bool(combine(*left, *right)),
+                _ => Scalar::Null(NullKind::Null),
+            })
+            .collect();
+        let name = if self.name == other.name {
+            self.name.clone()
+        } else {
+            String::new()
+        };
+        let dtype = if nullable {
+            DType::BoolNullable
+        } else {
+            DType::Bool
+        };
+        Ok(Some(Self::new(
+            name,
+            self.index.clone(),
+            Column::new(dtype, values)?,
+        )?))
+    }
+
     fn utf8_binary(&self, other: &Self, op: ArithmeticOp) -> Result<Option<Self>, FrameError> {
         let concat = match (self.column.dtype(), other.column.dtype(), op) {
             (DType::Utf8, DType::Utf8, ArithmeticOp::Add) => true,
@@ -17950,6 +18016,12 @@ impl Series {
     ///
     /// Matches `np.power(s1, s2)` / `s1 ** s2`.
     pub fn power(&self, other: &Self) -> Result<Self, FrameError> {
+        // pandas' NotImplementedError for bool ** bool (it computed floats).
+        if self.column.dtype() == DType::Bool && other.column.dtype() == DType::Bool {
+            return Err(FrameError::CompatibilityRejected(
+                "operator 'pow' not implemented for bool dtypes".to_owned(),
+            ));
+        }
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -60111,6 +60183,32 @@ fn cut_format_edge(x: f64) -> String {
     }
 }
 
+/// A cut/qcut result as pandas returns it: an ordered categorical whose
+/// categories are every bin label in bin order, empty bins included, so sorts,
+/// groupby and value_counts follow the bins rather than the label text
+/// (`"(10, 20]"` sorted before `"(5, 10]"` as a plain string column). The
+/// binned values keep their backing (the contiguous-Utf8 fast paths stay lazy).
+fn binned_categorical(
+    series: &Series,
+    binned: Column,
+    bin_labels: &[String],
+) -> Result<Series, FrameError> {
+    let meta = CategoricalMetadata::new(
+        bin_labels
+            .iter()
+            .map(|label| Scalar::Utf8(label.clone()))
+            .collect(),
+        true,
+    );
+    Series::new(
+        series.name().to_string(),
+        series.index().clone(),
+        binned
+            .with_dtype(DType::Categorical)
+            .with_categorical(Some(meta)),
+    )
+}
+
 /// Reshape a wide DataFrame to long form (`pd.wide_to_long`).
 ///
 /// For each `stub`, the columns `"{stub}{sep}{suffix}"` (where `suffix` is a
@@ -60460,10 +60558,10 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
                     }
                 }
             }
-            return Series::new(
-                series.name().to_string(),
-                series.index().clone(),
+            return binned_categorical(
+                series,
                 Column::from_utf8_contiguous(bytes, offsets),
+                &bin_labels,
             );
         }
     }
@@ -60549,10 +60647,10 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
             bytes.extend_from_slice(bin_labels[bin_idx].as_bytes());
             offsets.push(bytes.len());
         }
-        return Series::new(
-            series.name().to_string(),
-            series.index().clone(),
+        return binned_categorical(
+            series,
             Column::from_utf8_contiguous(bytes, offsets),
+            &bin_labels,
         );
     }
 
@@ -60591,9 +60689,7 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
         .collect();
 
     // Per br-frankenpandas-23d91: pandas pd.cut preserves source axis name.
-    let index = series.index().clone();
-    let column = Column::from_values(labels)?;
-    Series::new(series.name().to_string(), index, column)
+    binned_categorical(series, Column::from_values(labels)?, &bin_labels)
 }
 
 /// Bin values into the explicit intervals defined by `edges`.
@@ -60709,7 +60805,6 @@ pub fn cut_bins(
         })
         .collect();
 
-    let index = series.index().clone();
     // FAST PATH (all in-range): emit bin labels into ONE contiguous buffer (no n
     // Scalar::Utf8 clones), same lever as cut/qcut. Bit-identical; out-of-range/
     // missing values fall through to the Scalar path (exact Null spelling).
@@ -60721,10 +60816,10 @@ pub fn cut_bins(
             bytes.extend_from_slice(labels[idx.expect("all-Some checked")].as_bytes());
             offsets.push(bytes.len());
         }
-        return Series::new(
-            series.name().to_string(),
-            index,
+        return binned_categorical(
+            series,
             Column::from_utf8_contiguous(bytes, offsets),
+            &labels,
         );
     }
     let out: Vec<Scalar> = bin_indices
@@ -60734,8 +60829,7 @@ pub fn cut_bins(
             None => Scalar::Null(NullKind::NaN),
         })
         .collect();
-    let column = Column::from_values(out)?;
-    Series::new(series.name().to_string(), index, column)
+    binned_categorical(series, Column::from_values(out)?, &labels)
 }
 
 /// Quantile-based binning.
@@ -60872,8 +60966,8 @@ pub fn qcut_at_quantiles(
             .collect(),
     };
 
-    // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name.
-    let index = series.index().clone();
+    // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name
+    // (binned_categorical keeps the source index).
 
     // FAST PATH (all-valid): emit bin labels into ONE contiguous buffer (no n
     // Scalar::Utf8 clones), same lever as cut(). Bit-identical (same bin_idx +
@@ -60888,10 +60982,10 @@ pub fn qcut_at_quantiles(
             bytes.extend_from_slice(bin_labels[bin_idx].as_bytes());
             offsets.push(bytes.len());
         }
-        return Series::new(
-            series.name().to_string(),
-            index,
+        return binned_categorical(
+            series,
             Column::from_utf8_contiguous(bytes, offsets),
+            &bin_labels,
         );
     }
 
@@ -60905,8 +60999,7 @@ pub fn qcut_at_quantiles(
             }
         })
         .collect();
-    let column = Column::from_values(labels)?;
-    Series::new(series.name().to_string(), index, column)
+    binned_categorical(series, Column::from_values(labels)?, &bin_labels)
 }
 
 /// Convert an Index to a single-column DataFrame.
@@ -90621,6 +90714,39 @@ impl DataFrame {
         op: ArithmeticOp,
         reflected: bool,
     ) -> Result<Self, FrameError> {
+        // A non-numeric column (text, bool, datetime, timedelta, ...) or a
+        // non-numeric scalar goes column by column through the Series kernel
+        // with the scalar broadcast: `str * 2`, `str + '!'`, `dt + td`,
+        // `bool + True` are pandas' Series arithmetic. The f64 paths below
+        // passed such a column through unchanged (fvsao.35 sweep).
+        let plain_numeric =
+            |dtype: DType| matches!(dtype, DType::Int64 | DType::Float64 | DType::Null);
+        if !matches!(scalar, Scalar::Int64(_) | Scalar::Float64(_))
+            || self
+                .column_order
+                .iter()
+                .any(|name| !plain_numeric(self.columns[name.as_str()].dtype()))
+        {
+            let broadcast = Column::from_values(vec![scalar.clone(); self.len()])?;
+            let mut columns = BTreeMap::new();
+            for name in self.column_order.iter() {
+                let column = &self.columns[name.as_str()];
+                let out = if reflected {
+                    Self::column_pair_arith(&broadcast, column, op)?
+                } else {
+                    Self::column_pair_arith(column, &broadcast, op)?
+                };
+                columns.insert(name.clone(), out);
+            }
+            return Ok(Self {
+                columns: columns.into(),
+                column_order: self.column_order.clone(),
+                index: self.index.clone(),
+                column_multiindex: self.column_multiindex.clone(),
+                row_multiindex: self.row_multiindex.clone(),
+                allows_duplicate_labels: self.allows_duplicate_labels,
+            });
+        }
         let value = scalar.to_f64().map_err(ColumnError::from)?;
         // A bool column computes as 0/1 floats, as in pandas (bool / 2, bool +
         // 1.5); the f64 kernels passed it through unchanged. A bool scalar keeps
@@ -91050,6 +91176,46 @@ impl DataFrame {
     ///
     /// Aligns on index (outer join), operates on shared numeric columns,
     /// fills missing with NaN.
+    /// `left <op> right` for one column pair on the same rows, through the
+    /// Series kernel: string concatenation and repetition, bool or/and,
+    /// datetime and timedelta arithmetic, bool with numbers - pandas'
+    /// DataFrame arithmetic is that Series arithmetic column by column. The
+    /// DataFrame paths passed such a column through as the left operand, so
+    /// `str + str`, `dt - dt`, `bool + bool`, `str * 2` silently returned
+    /// the left frame (fvsao.35 sweep).
+    fn column_pair_arith(
+        left: &Column,
+        right: &Column,
+        op: ArithmeticOp,
+    ) -> Result<Column, FrameError> {
+        let rows = Index::from_range(0, left.len() as i64, 1);
+        let left = Series::new("", rows.clone(), left.clone())?;
+        let right = Series::new("", rows, right.clone())?;
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
+        Ok(left
+            .binary_op_with_policy(&right, op, &RuntimePolicy::strict(), &mut ledger)?
+            .column()
+            .clone())
+    }
+
+    /// The arithmetic op `binary_df_op`'s `name` stands for.
+    fn arithmetic_op_named(name: &str) -> Result<ArithmeticOp, FrameError> {
+        Ok(match name {
+            "add" => ArithmeticOp::Add,
+            "sub" => ArithmeticOp::Sub,
+            "mul" => ArithmeticOp::Mul,
+            "div" => ArithmeticOp::Div,
+            "floordiv" => ArithmeticOp::FloorDiv,
+            "mod" => ArithmeticOp::Mod,
+            "pow" => ArithmeticOp::Pow,
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "unknown arithmetic operation '{other}'"
+                )));
+            }
+        })
+    }
+
     fn binary_df_op<F>(&self, other: &Self, op: F, name: &str) -> Result<Self, FrameError>
     where
         F: Fn(f64, f64) -> f64 + Sync,
@@ -91178,7 +91344,7 @@ impl DataFrame {
                     // would leave untyped (br-frankenpandas-qmru2).
                     Ok(Column::new(DType::Float64, vals)?)
                 } else {
-                    Ok(lc.clone())
+                    Self::column_pair_arith(lc, rc, Self::arithmetic_op_named(name)?)
                 }
             })?;
             let mut result_cols = BTreeMap::new();
@@ -91280,7 +91446,10 @@ impl DataFrame {
                 // Float64 even when every row is NaN (br-frankenpandas-qmru2).
                 result_cols.insert(col_name.clone(), Column::new(DType::Float64, vals)?);
             } else {
-                result_cols.insert(col_name.clone(), lc.clone());
+                result_cols.insert(
+                    col_name.clone(),
+                    Self::column_pair_arith(lc, rc, Self::arithmetic_op_named(name)?)?,
+                );
             }
         }
 
@@ -91500,7 +91669,10 @@ impl DataFrame {
                     .collect();
                 result_cols.insert(col_name.clone(), Column::from_values(vals)?);
             } else {
-                result_cols.insert(col_name.clone(), lc.clone());
+                // It passed the column through as the left operand.
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "DataFrame arithmetic with fill_value over the non-numeric column '{col_name}' is not implemented"
+                )));
             }
         }
         Ok(Self {
@@ -96086,10 +96258,53 @@ impl DataFrameGroupBy<'_> {
         }
 
         if self.sort {
-            group_order.sort_by(|a, b| composite_key_cmp(a, b));
+            self.sort_group_order(&mut group_order);
         }
 
         (group_order, groups)
+    }
+
+    /// Sort groups as pandas does: by key value, except that a categorical
+    /// key sorts by its categories' order (cut/qcut bins as bins, not as
+    /// label text), missing keys last. Only this generic path sees such a
+    /// key: the typed fast paths above are gated on Int64/Utf8/temporal
+    /// dtypes, which a categorical column is not.
+    fn sort_group_order(&self, group_order: &mut [GroupKey<'_>]) {
+        let ranks: Vec<Option<FxHashMap<ScalarKey<'_>, usize>>> = self
+            .by
+            .iter()
+            .map(|name| {
+                self.df.columns[name].categorical().map(|meta| {
+                    meta.categories
+                        .iter()
+                        .enumerate()
+                        .map(|(rank, category)| (scalar_key_allow_missing(category), rank))
+                        .collect()
+                })
+            })
+            .collect();
+        if ranks.iter().all(Option::is_none) {
+            group_order.sort_by(|a, b| composite_key_cmp(a, b));
+            return;
+        }
+        group_order.sort_by(|a, b| {
+            for (level, rank) in ranks.iter().enumerate() {
+                let order = match rank {
+                    Some(rank) => {
+                        let of = |key: &ScalarKey<'_>| rank.get(key).copied().unwrap_or(usize::MAX);
+                        of(&a[level]).cmp(&of(&b[level]))
+                    }
+                    None => composite_key_cmp(
+                        std::slice::from_ref(&a[level]),
+                        std::slice::from_ref(&b[level]),
+                    ),
+                };
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            Ordering::Equal
+        });
     }
 
     /// Internal: extract the group key label for a given row index.
@@ -101720,17 +101935,39 @@ impl DataFrameGroupBy<'_> {
         // making agg(dict)/agg(list) over a Utf8 column ~3x SLOWER than the direct
         // gb.count()/.first()/.max(). Bit-identical: each dense path is proven
         // equal to its aggregate_named_func result; other funcs keep that path.
+        // Each func runs over the keys and only the columns it is asked for:
+        // over the whole frame a mean/median/var/prod refused because of a
+        // string column nobody asked it to reduce.
         let mut by_func: std::collections::HashMap<&str, DataFrame> =
             std::collections::HashMap::new();
         for (_, func) in specs {
             if !by_func.contains_key(func.as_str()) {
+                let columns: Vec<&str> = self
+                    .df
+                    .column_order
+                    .iter()
+                    .filter(|column| {
+                        self.by.contains(column)
+                            || specs.iter().any(|(c, f)| c == *column && f == func)
+                    })
+                    .map(String::as_str)
+                    .collect();
+                let frame = self.df.select_columns(&columns)?;
+                let grouped = DataFrameGroupBy {
+                    df: &frame,
+                    by: self.by.clone(),
+                    key_names: self.key_names.clone(),
+                    as_index: self.as_index,
+                    sort: self.sort,
+                    dropna: self.dropna,
+                };
                 let result = match func.as_str() {
-                    "count" => self.count()?,
-                    "first" => self.first()?,
-                    "last" => self.last()?,
-                    "min" => self.min()?,
-                    "max" => self.max()?,
-                    other => self.aggregate_named_func(other)?,
+                    "count" => grouped.count()?,
+                    "first" => grouped.first()?,
+                    "last" => grouped.last()?,
+                    "min" => grouped.min()?,
+                    "max" => grouped.max()?,
+                    other => grouped.aggregate_named_func(other)?,
                 };
                 by_func.insert(func.as_str(), result);
             }
@@ -165811,8 +166048,17 @@ mod tests {
         )
         .unwrap();
         let result = cut(&s, 2).unwrap();
-        // Bins: (0.0, 5.0] and (5.0, 10.0]
-        assert_eq!(result.column().dtype(), DType::Utf8);
+        // Bins: (0.0, 5.0] and (5.0, 10.0], as pandas' ordered categorical.
+        assert_eq!(result.column().dtype(), DType::Categorical);
+        let meta = result.column().categorical().expect("cut is categorical");
+        assert!(meta.ordered);
+        assert_eq!(
+            meta.categories,
+            vec![
+                Scalar::Utf8("(-0.01, 5.0]".into()),
+                Scalar::Utf8("(5.0, 10.0]".into())
+            ]
+        );
         assert_eq!(result.len(), 4);
         // 0.0 falls in first bin, 5.0 in first bin, 7.5 in second, 10.0 in second
         let v0 = &result.column().values()[0];
@@ -165838,7 +166084,10 @@ mod tests {
         )
         .unwrap();
         let result = qcut(&s, 2).unwrap();
-        assert_eq!(result.column().dtype(), DType::Utf8);
+        assert_eq!(result.column().dtype(), DType::Categorical);
+        let meta = result.column().categorical().expect("qcut is categorical");
+        assert!(meta.ordered);
+        assert_eq!(meta.categories.len(), 2);
         assert_eq!(result.len(), 4);
         // First two values in first quantile, last two in second
         let v0 = &result.column().values()[0];
@@ -165847,6 +166096,81 @@ mod tests {
         assert!(matches!(v3, Scalar::Utf8(_)));
         // The labels should be different for first and last
         assert_ne!(v0, v3);
+    }
+
+    #[test]
+    fn cut_lists_empty_bins_and_groups_sort_by_bin() {
+        // pandas: cut is an ordered categorical of every bin, the empty
+        // (10, 20] included, and a groupby over it orders the groups as
+        // bins - as text "(20, 50]" sorted before "(5, 10]".
+        let ages = Series::from_values(
+            "age",
+            (0..4_i64).map(IndexLabel::from).collect(),
+            vec![
+                Scalar::Int64(25),
+                Scalar::Int64(3),
+                Scalar::Int64(7),
+                Scalar::Int64(30),
+            ],
+        )
+        .unwrap();
+        let edges: Vec<Scalar> = [0, 5, 10, 20, 50].into_iter().map(Scalar::Int64).collect();
+        let bins = super::cut_bins(&ages, &edges, true, None, false).unwrap();
+        let bin_labels = ["(0, 5]", "(5, 10]", "(10, 20]", "(20, 50]"];
+        let meta = bins.column().categorical().expect("cut_bins is categorical");
+        assert!(meta.ordered);
+        assert_eq!(
+            meta.categories,
+            bin_labels
+                .iter()
+                .map(|label| Scalar::Utf8((*label).into()))
+                .collect::<Vec<_>>()
+        );
+        let values = Series::from_values(
+            "v",
+            (0..4_i64).map(IndexLabel::from).collect(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let df = DataFrame::from_series(vec![values])
+            .unwrap()
+            .with_column("bin", bins.column().clone())
+            .unwrap();
+        let sums = df.groupby(&["bin"]).unwrap().sum().unwrap();
+        let keys: Vec<String> = sums
+            .index()
+            .labels()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(keys, ["(0, 5]", "(5, 10]", "(20, 50]"]);
+        assert_eq!(
+            sums.column("v").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(5)]
+        );
+        // NEGATIVE: the same labels as a plain string key sort as text.
+        let text = df
+            .with_column(
+                "bin",
+                Column::from_values(bins.values().to_vec()).unwrap(),
+            )
+            .unwrap();
+        let keys: Vec<String> = text
+            .groupby(&["bin"])
+            .unwrap()
+            .sum()
+            .unwrap()
+            .index()
+            .labels()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(keys, ["(0, 5]", "(20, 50]", "(5, 10]"]);
     }
 
     #[test]

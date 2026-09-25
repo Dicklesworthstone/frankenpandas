@@ -11536,7 +11536,10 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
             // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.23).
             let pandas_verbatim = msg.starts_with("agg function failed [how->")
                 || msg.starts_with("could not convert string to float: ")
-                || msg.contains(" type does not support ");
+                || msg.contains(" type does not support ")
+                || msg.starts_with("numpy boolean subtract")
+                || (msg.starts_with("operator '")
+                    && msg.ends_with("not implemented for bool dtypes"));
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -11565,6 +11568,8 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 // pandas' TypeError for a datetime/timedelta reduction it does
                 // not define (4qg5w.23).
                 || lower.contains("type does not support")
+                // numpy's TypeError for bool - bool.
+                || lower.contains("numpy boolean subtract")
             {
                 (PyErrorKind::Type, text)
             } else {
@@ -15222,7 +15227,11 @@ impl PySeries {
         let lhs = series_operand(py, other, &self.inner)?;
         wrap_series(lhs.power(&self.inner))
     }
+    /// `-s`; pandas negates a bool Series as logical NOT (it raised).
     fn __neg__(&self) -> PyResult<PySeries> {
+        if self.inner.dtype() == DType::Bool {
+            return wrap_series(self.inner.invert());
+        }
         wrap_series(self.inner.neg())
     }
     /// `~s`: logical NOT of a bool Series, bitwise NOT of ints, as pandas.
@@ -17561,7 +17570,10 @@ impl PySeries {
                 ));
             }
         };
-        check_category_key(by_series.column(), observed, sort)?;
+        if by_series.column().categorical().is_some() {
+            let keys = by_series.to_frame(Some("key")).map_err(frame_error_to_py)?;
+            check_category_keys(py, &keys, &["key".to_owned()], observed)?;
+        }
         let (series, by) = if self.inner.index() != by_series.index()
             && !self.inner.index().has_duplicates()
             && !by_series.index().has_duplicates()
@@ -20407,6 +20419,18 @@ impl PyDataFrame {
             None => {}
         }
         if let Some(scalar) = number_scalar(&unwrap_0d(other)?) {
+            return wrap_frame(self.inner.arith_scalar(&scalar, op, reflected));
+        }
+        // A string, Timestamp, Timedelta or datetime scalar broadcasts as
+        // pandas' Series arithmetic does (df + '!', df + Timedelta; they
+        // raised TypeError).
+        if other.is_instance_of::<pyo3::types::PyString>()
+            || other.extract::<PyRef<'_, PyTimestamp>>().is_ok()
+            || other.extract::<PyRef<'_, PyTimedelta>>().is_ok()
+            || other.cast::<PyDateTime>().is_ok()
+            || other.cast::<PyDelta>().is_ok()
+        {
+            let scalar = py_to_scalar(other.py(), other)?;
             return wrap_frame(self.inner.arith_scalar(&scalar, op, reflected));
         }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
@@ -25363,11 +25387,7 @@ impl PyDataFrame {
                 "DataFrame.groupby(as_index=False) over keys that are not columns",
             ));
         }
-        for key in &by {
-            if let Some(column) = df.column(key) {
-                check_category_key(column, observed, sort)?;
-            }
-        }
+        check_category_keys(py, &df, &by, observed)?;
         let gb = PyGroupBy {
             df,
             by,
@@ -32705,34 +32725,79 @@ impl PySeriesCategoricalAccessor {
     }
 }
 
-/// pandas groups a category key by its CATEGORIES: observed=False (the 2.2
-/// default) adds a group for every unused category, and sort=True orders the
-/// groups by category order. The binding groups by value, which gives pandas'
-/// answer only with observed=True and the categories in value order (or
-/// sort=False); anything else raises rather than dropping the unused groups
-/// (br-frankenpandas-hrxn9).
-fn check_category_key(column: &Column, observed: Option<bool>, sort: bool) -> PyResult<()> {
-    let Some(meta) = column.categorical() else {
+/// pandas groups a category key by its CATEGORIES, in category order (which
+/// fp-frame's groupby follows): observed=False (the 2.2 default, which warns
+/// when not passed) adds a group for every unused category - over several
+/// keys, for every combination of the categories with the other keys'
+/// values. The groupby runs over the observed groups, so it answers
+/// observed=False only when no such combination is missing, and raises
+/// rather than dropping them otherwise (br-frankenpandas-hrxn9).
+fn check_category_keys(
+    py: Python<'_>,
+    keys: &DataFrame,
+    by: &[String],
+    observed: Option<bool>,
+) -> PyResult<()> {
+    let columns: Vec<&Column> = by.iter().filter_map(|key| keys.column(key)).collect();
+    if !columns.iter().any(|column| column.categorical().is_some()) {
         return Ok(());
-    };
-    if observed != Some(true) {
+    }
+    if observed.is_none() {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.",
+            1,
+        )?;
+    }
+    if observed == Some(true) {
+        return Ok(());
+    }
+    let mut combinations = 1_usize;
+    for column in &columns {
+        let levels = match column.categorical() {
+            Some(meta) => meta.categories.len(),
+            None => Series::new("", keys.index().clone(), (*column).clone())
+                .map_err(frame_error_to_py)?
+                .nunique(),
+        };
+        combinations = combinations.saturating_mul(levels);
+    }
+    let key_refs: Vec<&str> = by.iter().map(String::as_str).collect();
+    let (_, groups) = keys
+        .groupby_full_options(&key_refs, true, false, true)
+        .and_then(|grouped| grouped.group_codes())
+        .map_err(frame_error_to_py)?;
+    if groups.len() != combinations {
         return Err(not_implemented(
             "groupby over a category key with observed=False (pandas adds the unused categories)",
         ));
     }
-    let in_value_order = meta
-        .categories
-        .windows(2)
-        .all(|pair| match (&pair[0], &pair[1]) {
-            (Scalar::Utf8(a), Scalar::Utf8(b)) => a < b,
-            (a, b) => matches!((a.to_f64(), b.to_f64()), (Ok(a), Ok(b)) if a < b),
-        });
-    if sort && !in_value_order {
-        return Err(not_implemented(
-            "groupby(sort=True) over a category key whose categories are not in value order",
-        ));
-    }
     Ok(())
+}
+
+/// A groupby's `.groups` (with `row_labels`: each group's row labels as an
+/// Index, as pandas gives them; they were positions) or `.indices` (row
+/// positions), keyed in the given group order.
+fn groups_dict(
+    py: Python<'_>,
+    groups: &[(IndexLabel, Vec<usize>)],
+    row_labels: Option<&Index>,
+) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    for (key, positions) in groups {
+        let py_key = index_label_to_py(py, key)?;
+        match row_labels {
+            Some(index) => dict.set_item(
+                py_key,
+                PyIndex {
+                    inner: index.take(positions),
+                },
+            )?,
+            None => dict.set_item(py_key, PyList::new(py, positions)?)?,
+        }
+    }
+    Ok(dict.unbind())
 }
 
 /// Python objects as category values.
@@ -34677,6 +34742,25 @@ impl PyGroupBy {
             .with_key_names(self.key_names.clone())
     }
 
+    /// Every group's label and row positions in pandas' group order (by key,
+    /// a category key by its categories, when `sort`; else first seen).
+    /// fp-frame's `groups()` is a map: `.groups` came out in hash order and
+    /// apply/filter in plain label order whatever `sort` said.
+    fn ordered_groups(&self) -> PyResult<Vec<(IndexLabel, Vec<usize>)>> {
+        let gb = self.grouped().map_err(frame_error_to_py)?;
+        let (_, order) = gb.group_codes().map_err(frame_error_to_py)?;
+        let mut groups = gb.groups();
+        Ok(order
+            .labels()
+            .iter()
+            .filter_map(|label| {
+                groups
+                    .remove(label)
+                    .map(|positions| (label.clone(), positions))
+            })
+            .collect())
+    }
+
     /// This groupby over another frame with the same keys and options.
     fn over(&self, df: DataFrame) -> Self {
         Self {
@@ -35530,21 +35614,16 @@ impl PyGroupBy {
         Ok(PyDataFrame { inner: res })
     }
 
+    /// pandas' `gb.groups`: each group's row labels, in group order.
     #[getter]
     fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let gb = self.grouped().map_err(frame_error_to_py)?;
-        let dict = PyDict::new(py);
-        for (lbl, indices) in gb.groups() {
-            let py_key = index_label_to_py(py, &lbl)?;
-            let py_indices = PyList::new(py, indices)?;
-            dict.set_item(py_key, py_indices)?;
-        }
-        Ok(dict.unbind())
+        groups_dict(py, &self.ordered_groups()?, Some(self.df.index()))
     }
 
+    /// pandas' `gb.indices`: each group's row positions, in group order.
     #[getter]
     fn indices(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        self.groups(py)
+        groups_dict(py, &self.ordered_groups()?, None)
     }
 
     #[getter]
@@ -35574,30 +35653,21 @@ impl PyGroupBy {
     ) -> PyResult<Py<PyAny>> {
         let _ = include_groups;
         let gb = self.grouped().map_err(frame_error_to_py)?;
-        let groups = gb.groups();
-        let mut keys: Vec<_> = groups.keys().cloned().collect();
-        keys.sort();
         let mut out_dfs = Vec::new();
         let mut out_series = Vec::new();
         let mut out_scalars = Vec::new();
-        for k in &keys {
-            let k_str = match k {
-                IndexLabel::Utf8(s) => s.clone(),
-                IndexLabel::Int64(i) => i.to_string(),
-                _ => format!("{k:?}"),
-            };
-            if let Ok(group_df) = gb.get_group(&k_str) {
-                let py_df = PyDataFrame { inner: group_df }.into_bound_py_any(py)?;
-                // pandas calls func(group, *args, **kwargs); both used to be
-                // dropped (fvsao.5).
-                let res = func.call(prepend_arg(py_df, Some(args))?, kwargs)?;
-                if let Ok(df_res) = res.extract::<PyDataFrame>() {
-                    out_dfs.push(df_res.inner);
-                } else if let Ok(s_res) = res.extract::<PySeries>() {
-                    out_series.push(s_res.inner);
-                } else if let Ok(sc) = py_to_scalar(py, &res) {
-                    out_scalars.push((k.clone(), sc));
-                }
+        for (key, positions) in self.ordered_groups()? {
+            let group_df = self.df.take_rows(&positions).map_err(frame_error_to_py)?;
+            let py_df = PyDataFrame { inner: group_df }.into_bound_py_any(py)?;
+            // pandas calls func(group, *args, **kwargs); both used to be
+            // dropped (fvsao.5).
+            let res = func.call(prepend_arg(py_df, Some(args))?, kwargs)?;
+            if let Ok(df_res) = res.extract::<PyDataFrame>() {
+                out_dfs.push(df_res.inner);
+            } else if let Ok(s_res) = res.extract::<PySeries>() {
+                out_series.push(s_res.inner);
+            } else if let Ok(sc) = py_to_scalar(py, &res) {
+                out_scalars.push((key, sc));
             }
         }
         if !out_dfs.is_empty() {
@@ -35739,25 +35809,14 @@ impl PyGroupBy {
             "DataFrameGroupBy.filter",
             &[("dropna", dropna != Some(false))],
         )?;
-        let gb = self.grouped().map_err(frame_error_to_py)?;
-        let groups = gb.groups();
-        let mut keys: Vec<_> = groups.keys().cloned().collect();
-        keys.sort();
         // The kept groups' rows in their original order, as pandas' filter
         // (it concatenated the kept groups in key order; fvsao.30).
         let mut kept: Vec<usize> = Vec::new();
-        for k in &keys {
-            let k_str = match k {
-                IndexLabel::Utf8(s) => s.clone(),
-                IndexLabel::Int64(i) => i.to_string(),
-                _ => format!("{k:?}"),
-            };
-            if let Ok(group_df) = gb.get_group(&k_str) {
-                let py_df = PyDataFrame { inner: group_df };
-                let res = func.call1((py_df,))?;
-                if res.is_truthy()? {
-                    kept.extend(groups[k].iter().copied());
-                }
+        for (_, positions) in self.ordered_groups()? {
+            let group_df = self.df.take_rows(&positions).map_err(frame_error_to_py)?;
+            let res = func.call1((PyDataFrame { inner: group_df },))?;
+            if res.is_truthy()? {
+                kept.extend(positions);
             }
         }
         kept.sort_unstable();
@@ -36045,12 +36104,57 @@ impl PySeriesGroupBy {
     /// (quantile, idxmax, idxmin and is_monotonic_* came back in first-seen
     /// order) - and, over several keys, relabelled from group codes.
     fn per_group(&self, s: Series) -> PyResult<Series> {
-        let s = if self.sort {
-            s.sort_index(true).map_err(frame_error_to_py)?
-        } else {
-            s
+        let s = match (self.sort, self.by.column().categorical()) {
+            (false, _) => s,
+            // A category key sorts by its categories' order (cut/qcut bins
+            // as bins, not as label text).
+            (true, Some(meta)) => {
+                let rank = |label: &IndexLabel| {
+                    let value = index_label_to_scalar(label);
+                    meta.categories
+                        .iter()
+                        .position(|category| *category == value)
+                        .unwrap_or(usize::MAX)
+                };
+                let mut positions: Vec<usize> = (0..s.len()).collect();
+                positions.sort_by_key(|&position| rank(&s.index().labels()[position]));
+                let positions: Vec<i64> = positions.into_iter().map(|p| p as i64).collect();
+                s.take(&positions).map_err(frame_error_to_py)?
+            }
+            (true, None) => s.sort_index(true).map_err(frame_error_to_py)?,
         };
         self.label_groups(s)
+    }
+
+    /// Every group's key and row positions in pandas' group order - by key
+    /// (a category key by its categories) when `sort`, else first seen - as
+    /// `per_group` orders a reduction. fp-frame's `groups()` is a map:
+    /// `.groups` came out in hash order and apply/filter in plain label
+    /// order whatever `sort` said.
+    fn ordered_groups(&self) -> PyResult<Vec<(IndexLabel, Vec<usize>)>> {
+        let gb = self.grouped()?;
+        let mut groups: Vec<(IndexLabel, Vec<usize>)> = gb.groups().into_iter().collect();
+        match (self.sort, self.by.column().categorical()) {
+            (false, _) => groups.sort_by_key(|(_, positions)| positions.first().copied()),
+            (true, Some(meta)) => groups.sort_by_key(|(key, _)| {
+                let value = index_label_to_scalar(key);
+                meta.categories
+                    .iter()
+                    .position(|category| *category == value)
+                    .unwrap_or(usize::MAX)
+            }),
+            (true, None) => groups.sort_by(|a, b| a.0.cmp(&b.0)),
+        }
+        Ok(groups)
+    }
+
+    /// The series' rows at `positions` (one group's values).
+    fn group_rows(&self, positions: &[usize]) -> PyResult<Series> {
+        let at: Vec<i64> = positions
+            .iter()
+            .map(|&position| i64::try_from(position).unwrap_or(i64::MAX))
+            .collect();
+        self.series.take(&at).map_err(frame_error_to_py)
     }
 
     /// A per-group result of a groupby over several keys is indexed by group
@@ -36779,22 +36883,18 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
+    /// pandas' `gb.groups`: each group's row labels, in group order.
     #[getter]
     fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         self.single_key("groups")?;
-        let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
-        let dict = PyDict::new(py);
-        for (lbl, indices) in gb.groups() {
-            let py_key = index_label_to_py(py, &lbl)?;
-            let py_indices = PyList::new(py, indices)?;
-            dict.set_item(py_key, py_indices)?;
-        }
-        Ok(dict.unbind())
+        groups_dict(py, &self.ordered_groups()?, Some(self.series.index()))
     }
 
+    /// pandas' `gb.indices`: each group's row positions, in group order.
     #[getter]
     fn indices(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        self.groups(py)
+        self.single_key("indices")?;
+        groups_dict(py, &self.ordered_groups()?, None)
     }
 
     #[getter]
@@ -36812,27 +36912,18 @@ impl PySeriesGroupBy {
     ) -> PyResult<Py<PyAny>> {
         self.single_key("apply")?;
         let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
-        let groups = gb.groups();
-        let mut keys: Vec<_> = groups.keys().cloned().collect();
-        keys.sort();
         let mut out_series = Vec::new();
         let mut out_scalars = Vec::new();
-        for k in &keys {
-            let k_str = match k {
-                IndexLabel::Utf8(s) => s.clone(),
-                IndexLabel::Int64(i) => i.to_string(),
-                _ => format!("{k:?}"),
-            };
-            if let Ok(group_s) = gb.get_group(&k_str) {
-                let py_s = PySeries { inner: group_s }.into_bound_py_any(py)?;
-                // pandas calls func(group, *args, **kwargs); both used to be
-                // dropped (fvsao.5).
-                let res = func.call(prepend_arg(py_s, Some(args))?, kwargs)?;
-                if let Ok(s_res) = res.extract::<PySeries>() {
-                    out_series.push(s_res.inner);
-                } else if let Ok(sc) = py_to_scalar(py, &res) {
-                    out_scalars.push((k.clone(), sc));
-                }
+        for (key, positions) in self.ordered_groups()? {
+            let group_s = self.group_rows(&positions)?;
+            let py_s = PySeries { inner: group_s }.into_bound_py_any(py)?;
+            // pandas calls func(group, *args, **kwargs); both used to be
+            // dropped (fvsao.5).
+            let res = func.call(prepend_arg(py_s, Some(args))?, kwargs)?;
+            if let Ok(s_res) = res.extract::<PySeries>() {
+                out_series.push(s_res.inner);
+            } else if let Ok(sc) = py_to_scalar(py, &res) {
+                out_scalars.push((key, sc));
             }
         }
         if !out_series.is_empty() {
@@ -36962,29 +37053,19 @@ impl PySeriesGroupBy {
     #[pyo3(signature = (func, dropna=true))]
     fn filter(&self, func: &Bound<'_, PyAny>, dropna: Option<bool>) -> PyResult<PySeries> {
         unsupported_params("SeriesGroupBy.filter", &[("dropna", dropna != Some(false))])?;
-        let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
-        let groups = gb.groups();
-        let mut keys: Vec<_> = groups.keys().cloned().collect();
-        keys.sort();
         // The kept groups' rows in their original order, as pandas' filter
         // (it concatenated the kept groups in key order; fvsao.30).
         let mut kept: Vec<i64> = Vec::new();
-        for k in &keys {
-            let k_str = match k {
-                IndexLabel::Utf8(s) => s.clone(),
-                IndexLabel::Int64(i) => i.to_string(),
-                _ => format!("{k:?}"),
-            };
-            if let Ok(group_s) = gb.get_group(&k_str) {
-                let py_s = PySeries { inner: group_s };
-                let res = func.call1((py_s,))?;
-                if res.is_truthy()? {
-                    kept.extend(
-                        groups[k]
-                            .iter()
-                            .map(|&position| i64::try_from(position).unwrap_or(i64::MAX)),
-                    );
-                }
+        for (_, positions) in self.ordered_groups()? {
+            let res = func.call1((PySeries {
+                inner: self.group_rows(&positions)?,
+            },))?;
+            if res.is_truthy()? {
+                kept.extend(
+                    positions
+                        .iter()
+                        .map(|&position| i64::try_from(position).unwrap_or(i64::MAX)),
+                );
             }
         }
         kept.sort_unstable();
@@ -37276,16 +37357,8 @@ impl PySeriesGroupBy {
         // per-group aggregate for np.mean / a scalar lambda, and Series
         // results in group order, not row order (fvsao.7).
         let mut values = vec![Scalar::Null(NullKind::NaN); self.series.len()];
-        let groups = gb.groups();
-        let mut keys: Vec<&IndexLabel> = groups.keys().collect();
-        keys.sort();
-        for key in keys {
-            let positions = &groups[key];
-            let at: Vec<i64> = positions
-                .iter()
-                .map(|&position| i64::try_from(position).unwrap_or(i64::MAX))
-                .collect();
-            let group = self.series.take(&at).map_err(frame_error_to_py)?;
+        for (_, positions) in &self.ordered_groups()? {
+            let group = self.group_rows(positions)?;
             let group = PySeries { inner: group }.into_bound_py_any(py)?;
             let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
             if let Ok(series) = result.extract::<PyRef<'_, PySeries>>() {
@@ -39988,10 +40061,17 @@ fn cut(
     x: &Bound<'_, PyAny>,
     bins: &Bound<'_, PyAny>,
     right: bool,
-    labels: Option<Vec<String>>,
+    labels: Option<&Bound<'_, PyAny>>,
     precision: usize,
     include_lowest: bool,
 ) -> PyResult<PySeries> {
+    let (labels, codes) = bin_labels_arg(labels)?;
+    if codes {
+        let binned = cut(py, x, bins, right, None, precision, include_lowest)?;
+        return Ok(PySeries {
+            inner: bin_codes(&binned.inner)?,
+        });
+    }
     // precision sets the digits of the interval labels; only pandas'
     // default is produced (it was ignored).
     unsupported_params("cut", &[("precision", precision == 3)])?;
@@ -40083,6 +40163,60 @@ fn cut(
     Ok(PySeries { inner: res })
 }
 
+/// A cut/qcut `labels=` argument: the bin names, or None for pandas'
+/// interval labels; `codes` is set for `labels=False` (pandas' integer bin
+/// codes; the bool raised TypeError before reaching the binning).
+fn bin_labels_arg(labels: Option<&Bound<'_, PyAny>>) -> PyResult<(Option<Vec<String>>, bool)> {
+    match labels.filter(|labels| !labels.is_none()) {
+        None => Ok((None, false)),
+        Some(labels) if labels.is_instance_of::<pyo3::types::PyBool>() => {
+            if labels.is_truthy()? {
+                Ok((None, false))
+            } else {
+                Ok((None, true))
+            }
+        }
+        Some(labels) => Ok((Some(labels.extract()?), false)),
+    }
+}
+
+/// A binned (categorical) Series as pandas' `labels=False` codes: each
+/// value's bin position, int64, or float64 with NaN where a value fell in
+/// no bin.
+fn bin_codes(binned: &Series) -> PyResult<Series> {
+    let categories: Vec<Scalar> = binned
+        .column()
+        .categorical()
+        .map(|meta| meta.categories.clone())
+        .unwrap_or_default();
+    let codes: Vec<Option<i64>> = binned
+        .values()
+        .iter()
+        .map(|value| {
+            if value.is_missing() {
+                None
+            } else {
+                categories
+                    .iter()
+                    .position(|category| category == value)
+                    .map(|position| position as i64)
+            }
+        })
+        .collect();
+    let column = if codes.iter().all(Option::is_some) {
+        Column::from_i64_values_owned(codes.into_iter().flatten().collect())
+    } else {
+        Column::from_values(
+            codes
+                .into_iter()
+                .map(|code| code.map_or(Scalar::Null(NullKind::NaN), |c| Scalar::Float64(c as f64)))
+                .collect(),
+        )
+        .map_err(column_error_to_py)?
+    };
+    Series::new(binned.name(), binned.index().clone(), column).map_err(frame_error_to_py)
+}
+
 /// Discretize variable into equal-sized buckets based on rank or sample quantiles (pandas `qcut`).
 #[pyfunction]
 #[pyo3(signature = (x, q, labels=None, precision=3))]
@@ -40090,9 +40224,16 @@ fn qcut(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     q: &Bound<'_, PyAny>,
-    labels: Option<Vec<String>>,
+    labels: Option<&Bound<'_, PyAny>>,
     precision: usize,
 ) -> PyResult<PySeries> {
+    let (labels, codes) = bin_labels_arg(labels)?;
+    if codes {
+        let binned = qcut(py, x, q, None, precision)?;
+        return Ok(PySeries {
+            inner: bin_codes(&binned.inner)?,
+        });
+    }
     // precision sets the digits of the interval labels; only pandas'
     // default is produced (it was ignored).
     unsupported_params("qcut", &[("precision", precision == 3)])?;

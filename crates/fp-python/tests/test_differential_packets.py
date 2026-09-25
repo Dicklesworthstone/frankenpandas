@@ -6364,3 +6364,150 @@ def _multiindex_selection_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_MULTIINDEX_SELECTION_CASES))
 def test_multiindex_selection_and_level_ops_match_pandas(case: str) -> None:
     assert _multiindex_selection_outcome(fpd, case) == _multiindex_selection_outcome(pd, case), case
+
+
+def _ages(m: Any) -> Any:
+    return m.DataFrame(
+        {"age": [3, 7, 12, 25, 31, 8, 45, 15], "v": [1, 2, 3, 4, 5, 6, 7, 8], "w": [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5], "x": list("abababab")}
+    ).assign(bin=lambda d: m.cut(d["age"], bins=[0, 5, 10, 20, 50]))
+
+
+def _bools(m: Any) -> tuple[Any, Any]:
+    return m.Series([True, False, True]), m.Series([True, True, False])
+
+
+def _frame_pair(m: Any, kind: str) -> tuple[Any, Any]:
+    left, right = {
+        "str": ({"s": ["a", "b"]}, {"s": ["x", "y"]}),
+        "bool": ({"b": [True, False]}, {"b": [True, True]}),
+        "dt": ({"t": m.to_datetime(["2024-01-02", "2024-01-05"])}, {"t": m.to_datetime(["2024-01-01", "2024-01-01"])}),
+        "td": ({"d": m.to_timedelta(["1h", "2h"])}, {"d": m.to_timedelta(["1h", "2h"])}),
+        "mixed": ({"n": [1, 2], "s": ["a", "b"]}, {"n": [10, 20], "s": ["x", "y"]}),
+    }[kind]
+    return m.DataFrame(left), m.DataFrame(right)
+
+
+def _frame_result(r: Any) -> Any:
+    return ([str(d) for d in r.dtypes], {k: [str(v) for v in vs] for k, vs in r.to_dict("list").items()})
+
+
+# The numeric sweep: bool Series arithmetic fell to float math (True + True
+# was 2.0, -s negated to floats, a - b gave numbers where numpy refuses);
+# DataFrame + DataFrame over a str / bool / datetime / timedelta column
+# silently returned the LEFT operand's column; qcut/cut rejected
+# labels=False; cut/qcut returned object strings, so sort_values, groupby
+# and value_counts ordered bins as label text ("(10, 20]" before
+# "(5, 10]"), .cat was refused, and a groupby over the bins raised;
+# gb.groups gave positions (not row labels) in hash order, apply/filter ran
+# groups in plain label order whatever sort= said, and agg({col: 'mean'})
+# refused when an unrelated string column sat in the frame.
+_NUMERIC_SWEEP_CASES = {
+    "bool a+b": lambda m: (lambda a, b: (str((a + b).dtype), (a + b).tolist()))(*_bools(m)),
+    "bool a*b": lambda m: (lambda a, b: (str((a * b).dtype), (a * b).tolist()))(*_bools(m)),
+    "bool a+1": lambda m: (lambda a, b: (str((a + 1).dtype), (a + 1).tolist()))(*_bools(m)),
+    "bool True+a": lambda m: (lambda a, b: (str((True + a).dtype), (True + a).tolist()))(*_bools(m)),
+    "bool neg": lambda m: (lambda a, b: (str((-a).dtype), (-a).tolist()))(*_bools(m)),
+    "bool a+b float": lambda m: (lambda a, b: (str((a + b.astype(float)).dtype), (a + b.astype(float)).tolist()))(*_bools(m)),
+    # NEGATIVE: numpy refuses bool subtraction; pandas refuses / and **.
+    "bool a-b raises": lambda m: (lambda a, b: a - b)(*_bools(m)),
+    "bool a/b raises": lambda m: (lambda a, b: a / b)(*_bools(m)),
+    "bool a**b raises": lambda m: (lambda a, b: a**b)(*_bools(m)),
+    "frame str+str": lambda m: _frame_result(operator_add(*_frame_pair(m, "str"))),
+    "frame bool+bool": lambda m: _frame_result(operator_add(*_frame_pair(m, "bool"))),
+    "frame bool*bool": lambda m: (lambda l, r: _frame_result(l * r))(*_frame_pair(m, "bool")),
+    "frame dt-dt": lambda m: (lambda l, r: _frame_result(l - r))(*_frame_pair(m, "dt")),
+    "frame td+td": lambda m: _frame_result(operator_add(*_frame_pair(m, "td"))),
+    "frame mixed+mixed": lambda m: _frame_result(operator_add(*_frame_pair(m, "mixed"))),
+    "frame str+scalar": lambda m: _frame_result(_frame_pair(m, "str")[0] + "!"),
+    "frame str*2": lambda m: _frame_result(_frame_pair(m, "str")[0] * 2),
+    "frame bool+1": lambda m: _frame_result(_frame_pair(m, "bool")[0] + 1),
+    "frame dt+Timedelta": lambda m: _frame_result(_frame_pair(m, "dt")[0] + m.Timedelta("1D")),
+    # NEGATIVE: the operations pandas refuses still raise TypeError.
+    "frame str*str raises": lambda m: (lambda l, r: l * r)(*_frame_pair(m, "str")),
+    "frame dt+dt raises": lambda m: operator_add(*_frame_pair(m, "dt")),
+    "frame mixed-mixed raises": lambda m: (lambda l, r: l - r)(*_frame_pair(m, "mixed")),
+    "frame bool-bool raises": lambda m: (lambda l, r: l - r)(*_frame_pair(m, "bool")),
+    "qcut labels False": lambda m: (lambda r: (str(r.dtype), r.tolist()))(m.qcut(m.Series([1, 2, 3, 4, 5, 6]), q=3, labels=False)),
+    "qcut labels False NaN": lambda m: (lambda r: (str(r.dtype), r.tolist()))(m.qcut(m.Series([1, None, 3, 4]), q=2, labels=False)),
+    "cut labels False": lambda m: (lambda r: (str(r.dtype), r.tolist()))(m.cut(m.Series([1, 5, 9]), bins=3, labels=False)),
+    "cut labels False out of range": lambda m: m.cut(m.Series([1, 5, 20]), bins=[0, 5, 10], labels=False).tolist(),
+    "cut dtype and codes": lambda m: (lambda b: (str(b.dtype), bool(b.cat.ordered), b.cat.codes.tolist()))(_ages(m)["bin"]),
+    "cut categories": lambda m: [str(c) for c in _ages(m)["bin"].cat.categories],
+    "cut labels categories": lambda m: list(m.cut(m.Series([1, 7, 12]), bins=[0, 5, 10, 20], labels=["lo", "mid", "hi"]).cat.categories),
+    "qcut codes": lambda m: m.qcut(m.Series([1, 2, 3, 4, 5, 6, 7, 8]), 4).cat.codes.tolist(),
+    "cut sort_values in bin order": lambda m: [str(v) for v in _ages(m)["bin"].sort_values().tolist()],
+    "cut value_counts empty bin": lambda m: m.cut(m.Series([1, 2, 25]), bins=[0, 5, 10, 50]).value_counts(sort=False).to_dict(),
+    "groupby bins sum": lambda m: _ages(m).groupby("bin", observed=True)["v"].sum().to_dict(),
+    "groupby bins frame mean": lambda m: _ages(m).groupby("bin", observed=True)[["v", "w"]].mean().to_dict("list"),
+    "groupby bins size": lambda m: _ages(m).groupby("bin", observed=True).size().to_dict(),
+    "groupby bins observed False all seen": lambda m: _ages(m).groupby("bin", observed=False)["v"].sum().to_dict(),
+    "groupby bins agg dict": lambda m: _ages(m).groupby("bin", observed=True).agg({"v": "sum", "w": "mean"}).to_dict("list"),
+    "series groupby bins": lambda m: (lambda d: d["v"].groupby(d["bin"], observed=True).median().to_dict())(_ages(m)),
+    "groupby bins and key": lambda m: _ages(m).groupby(["bin", "x"], observed=True)["v"].sum().to_dict(),
+    "groupby bins sort False": lambda m: [str(k) for k in _ages(m).groupby("bin", observed=True, sort=False)["v"].sum().to_dict()],
+    "groupby qcut": lambda m: (lambda d: d.groupby(m.qcut(d["w"], 3), observed=True)["v"].sum().to_dict())(_ages(m)),
+    "groups keys bin order": lambda m: [str(k) for k in _ages(m).groupby("bin", observed=True).groups],
+    "groups row labels": lambda m: {k: list(v) for k, v in m.DataFrame({"k": list("bacab"), "v": range(5)}, index=[10, 20, 30, 40, 50]).groupby("k").groups.items()},
+    "groups sort False order": lambda m: list(m.DataFrame({"k": list("bacab"), "v": range(5)}).groupby("k", sort=False).groups),
+    "series groups row labels": lambda m: (lambda d: {k: list(v) for k, v in d["v"].groupby(d["k"]).groups.items()})(m.DataFrame({"k": list("bacab"), "v": range(5)}, index=[10, 20, 30, 40, 50])),
+    "indices positions": lambda m: {k: [int(i) for i in v] for k, v in m.DataFrame({"k": list("bacab"), "v": range(5)}, index=[10, 20, 30, 40, 50]).groupby("k").indices.items()},
+    "apply sort False order": lambda m: m.DataFrame({"k": list("bacab"), "v": range(5)}).groupby("k", sort=False)["v"].apply(lambda s: int(s.sum())).to_dict(),
+    "float key agg dict with str column": lambda m: m.DataFrame({"k": [1.5, 1.5, 2.5], "w": [1.5, 2.5, 3.5], "s": list("abc")}).groupby("k").agg({"w": "mean"}).to_dict("list"),
+    # NEGATIVE: a plain string key still groups in label order.
+    "str key order": lambda m: list(m.DataFrame({"k": ["b", "a", "c"], "v": [1, 2, 3]}).groupby("k")["v"].sum().to_dict()),
+}
+
+
+def operator_add(left: Any, right: Any) -> Any:
+    return left + right
+
+
+def _numeric_sweep_outcome(m: Any, case: str) -> Any:
+    try:
+        r = _NUMERIC_SWEEP_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+    return _sweep_plain(r)
+
+
+def _sweep_plain(r: Any) -> Any:
+    """Keys as text (a tuple key's parts each as text: pandas' are Interval
+    objects, frankenpandas' bin labels), NaN as None, recursively."""
+    if isinstance(r, dict):
+        return {
+            str(tuple(map(str, k)) if isinstance(k, tuple) else k): _sweep_plain(v)
+            for k, v in r.items()
+        }
+    if isinstance(r, (list, tuple)):
+        return type(r)(_sweep_plain(v) for v in r)
+    if isinstance(r, float) and math.isnan(r):
+        return None
+    return r
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NUMERIC_SWEEP_CASES))
+def test_bool_frame_arithmetic_and_binned_categoricals_match_pandas(case: str) -> None:
+    assert _numeric_sweep_outcome(fpd, case) == _numeric_sweep_outcome(pd, case), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_category_groupby_default_observed_warns_and_unused_categories_refuse() -> None:
+    for m in (pd, fpd):
+        d = _ages(m)
+        with pytest.warns(FutureWarning, match="default of observed=False is deprecated"):
+            d.groupby("bin")["v"].sum()
+        with pytest.warns(FutureWarning, match="default of observed=False is deprecated"):
+            d["v"].groupby(d["bin"]).sum()
+    # pandas adds a 0 row for the unused (10, 20] bin; frankenpandas does not
+    # model unused categories yet and refuses rather than dropping the row.
+    sparse = {"age": [3, 7, 25], "v": [1, 2, 3]}
+    expected = pd.DataFrame(sparse).assign(bin=lambda d: pd.cut(d["age"], [0, 5, 10, 20, 50])).groupby("bin", observed=False)["v"].sum()
+    assert expected.tolist() == [1, 2, 0, 3]
+    frame = fpd.DataFrame(sparse).assign(bin=lambda d: fpd.cut(d["age"], [0, 5, 10, 20, 50]))
+    with pytest.raises(NotImplementedError):
+        frame.groupby("bin", observed=False)["v"].sum()
+    with pytest.raises(NotImplementedError):
+        frame.groupby(["bin", "age"], observed=False)["v"].sum()
+    # observed=True over the same frame answers.
+    assert frame.groupby("bin", observed=True)["v"].sum().tolist() == [1, 2, 3]
