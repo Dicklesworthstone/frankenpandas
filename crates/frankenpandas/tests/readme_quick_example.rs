@@ -130,6 +130,7 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
         header: true,
         include_index: false,
         index_label: None,
+        ..CsvWriteOptions::default()
     };
     let csv_via_trait = by_ticker.to_csv_string_with_options(&csv_opts)?;
     assert!(csv_via_trait.contains(';'));

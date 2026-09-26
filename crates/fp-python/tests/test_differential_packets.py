@@ -2658,11 +2658,27 @@ def test_implemented_parameter_values_match_pandas(case: Any) -> None:
 def test_to_csv_keywords_and_targets_match_pandas(tmp_path: Path) -> None:
     frame = {"a": [1.5, _NAN, 3.0], "s": ["x,y", 'q"t', "z"]}
     pdf, fdf = pd.DataFrame(frame, index=["r1", "r2", "r3"]), fpd.DataFrame(frame, index=["r1", "r2", "r3"])
-    # float_format moved here from the refusals below when fvsao.31 wrote it.
+    # float_format moved here from the refusals below when fvsao.31 wrote it;
+    # quoting (ALL / NONNUMERIC), quotechar, lineterminator, decimal and a
+    # header list when u6p7i wrote them.
     for kw in ({}, {"sep": ";"}, {"na_rep": "NA"}, {"header": False}, {"index": False},
                {"index_label": "idx"}, {"columns": ["s"]}, {"float_format": "%.1f"},
-               {"float_format": "%.3e", "na_rep": "NA"}):
+               {"float_format": "%.3e", "na_rep": "NA"}, {"quoting": 1}, {"quoting": 2},
+               {"quotechar": "'"}, {"lineterminator": "\r\n"}, {"decimal": ",", "sep": ";"},
+               {"header": ["A", "S"]}, {"header": ["A", "S"], "index": False}):
         assert fdf.to_csv(**kw) == pdf.to_csv(**kw), kw
+    # date_format renders datetime cells and a datetime index (it was refused).
+    dated = {"d": ["2024-01-02 03:04:05", None, "2024-12-31 00:00:00"], "v": [1, 2, 3]}
+    pdd, fdd = pd.DataFrame(dated), fpd.DataFrame(dated)
+    pdd["d"], fdd["d"] = pd.to_datetime(pdd["d"]), fpd.to_datetime(fdd["d"])
+    for kw in ({"date_format": "%d/%m/%Y"}, {"date_format": "%Y %H:%M", "na_rep": "-"}):
+        assert fdd.to_csv(**kw) == pdd.to_csv(**kw), kw
+        assert fdd.iloc[[0, 2]].set_index("d").to_csv(**kw) == pdd.iloc[[0, 2]].set_index("d").to_csv(**kw), kw
+    # NEGATIVE: a header list of the wrong length is pandas' ValueError.
+    with pytest.raises(ValueError):
+        pdf.to_csv(header=["A"])
+    with pytest.raises(ValueError):
+        fdf.to_csv(header=["A"])
     s = [1.5, _NAN]
     assert fpd.Series(s).to_csv(na_rep="-") == pd.Series(s).to_csv(na_rep="-")
     buf_fp, buf_pd = io.StringIO(), io.StringIO()
@@ -2674,8 +2690,10 @@ def test_to_csv_keywords_and_targets_match_pandas(tmp_path: Path) -> None:
     pdf.to_csv(tmp_path / "b.csv")
     pdf.to_csv(tmp_path / "b.csv", mode="a", header=False)
     assert (tmp_path / "a.csv").read_text() == (tmp_path / "b.csv").read_text()
-    # NEGATIVE: keywords the writer cannot honour raise instead of vanishing.
-    for kw in ({"quoting": 1}, {"decimal": ","}):
+    # NEGATIVE: keywords the writer cannot honour raise instead of vanishing
+    # (QUOTE_NONE and doublequote=False / escapechar: Python's csv escaping).
+    for kw in ({"quoting": 3}, {"doublequote": False, "escapechar": "\\"}, {"escapechar": "\\"},
+               {"lineterminator": "||"}):
         with pytest.raises(NotImplementedError):
             fdf.to_csv(**kw)
     with pytest.raises(NotImplementedError, match="compression"):

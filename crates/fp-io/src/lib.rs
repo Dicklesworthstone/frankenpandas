@@ -1842,6 +1842,33 @@ pub struct CsvWriteOptions {
     /// When omitted, a named index uses its name and an unnamed index writes an
     /// empty header cell.
     pub index_label: Option<String>,
+    /// Which fields are quoted. Matches pandas `quoting` (csv.QUOTE_MINIMAL /
+    /// QUOTE_ALL / QUOTE_NONNUMERIC). Default: minimal.
+    pub quoting: CsvQuoting,
+    /// The quote character. Matches pandas `quotechar`. Default: `"`.
+    pub quote: u8,
+    /// The line terminator: one byte or `\r\n`. Matches pandas
+    /// `lineterminator`. Default: `\n`.
+    pub line_terminator: String,
+    /// The decimal separator written in float cells. Matches pandas
+    /// `decimal`. Default: `.`.
+    pub decimal: u8,
+    /// Header names written in place of the column labels, one per column.
+    /// Matches pandas `header=[...]`. Default: none (the labels).
+    pub header_aliases: Option<Vec<String>>,
+}
+
+/// Which fields `to_csv` quotes, as pandas' `quoting` (`csv.QUOTE_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CsvQuoting {
+    /// Only a field that needs it (a delimiter, quote or line break), and an
+    /// empty field alone on its row. `csv.QUOTE_MINIMAL` (0).
+    #[default]
+    Minimal,
+    /// Every field. `csv.QUOTE_ALL` (1).
+    All,
+    /// Every field that is not a number. `csv.QUOTE_NONNUMERIC` (2).
+    NonNumeric,
 }
 
 impl Default for CsvWriteOptions {
@@ -1852,6 +1879,79 @@ impl Default for CsvWriteOptions {
             header: true,
             include_index: true,
             index_label: None,
+            quoting: CsvQuoting::Minimal,
+            quote: b'"',
+            line_terminator: "\n".to_owned(),
+            decimal: b'.',
+            header_aliases: None,
+        }
+    }
+}
+
+impl CsvWriteOptions {
+    /// pandas' default CSV dialect (minimal quoting with `"`, `\n`, `.`
+    /// decimals, the labels as the header): what the typed fast path writes.
+    fn is_default_dialect(&self) -> bool {
+        self.quoting == CsvQuoting::Minimal
+            && self.quote == b'"'
+            && self.line_terminator == "\n"
+            && self.decimal == b'.'
+            && self.header_aliases.is_none()
+    }
+
+    /// The header names for `labels`: the aliases when given (pandas' error
+    /// when their count differs), else the labels.
+    fn header_names(&self, labels: Vec<String>) -> Result<Vec<String>, IoError> {
+        match &self.header_aliases {
+            None => Ok(labels),
+            Some(aliases) if aliases.len() == labels.len() => Ok(aliases.clone()),
+            Some(aliases) => Err(IoError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Writing {} cols but got {} aliases",
+                    labels.len(),
+                    aliases.len()
+                ),
+            ))),
+        }
+    }
+
+    /// A CSV writer in these options' dialect.
+    fn writer(&self) -> Result<csv::Writer<Vec<u8>>, IoError> {
+        let terminator = match self.line_terminator.as_bytes() {
+            b"\r\n" => csv::Terminator::CRLF,
+            [byte] => csv::Terminator::Any(*byte),
+            _ => {
+                return Err(IoError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "lineterminator must be one character or \\r\\n, got {:?}",
+                        self.line_terminator
+                    ),
+                )));
+            }
+        };
+        // doublequote=False / escapechar are not offered: Python's csv writes
+        // an escaped quote unquoted (q\"r) where this writer quotes the field
+        // ("q\"r") - measured, so the binding refuses them.
+        Ok(WriterBuilder::new()
+            .delimiter(self.delimiter)
+            .quote(self.quote)
+            .terminator(terminator)
+            .quote_style(match self.quoting {
+                CsvQuoting::Minimal => csv::QuoteStyle::Necessary,
+                CsvQuoting::All => csv::QuoteStyle::Always,
+                CsvQuoting::NonNumeric => csv::QuoteStyle::NonNumeric,
+            })
+            .from_writer(Vec::new()))
+    }
+
+    /// A float cell's text with pandas' `decimal` separator.
+    fn float_text(&self, text: String) -> String {
+        if self.decimal == b'.' {
+            text
+        } else {
+            text.replace('.', &char::from(self.decimal).to_string())
         }
     }
 }
@@ -2586,7 +2686,20 @@ pub fn write_csv_string_with_options(
         let mut nested_options = options.clone();
         nested_options.include_index = false;
         nested_options.index_label = None;
+        let level_names: Vec<String> = row_multiindex
+            .names()
+            .iter()
+            .map(|name| name.clone().unwrap_or_default())
+            .collect();
+        // The levels head their own columns; aliases name the data columns.
+        let column_names =
+            options.header_names(frame.column_names().into_iter().cloned().collect())?;
         if !options.header || row_multiindex.names().iter().all(Option::is_some) {
+            if options.header_aliases.is_some() {
+                let mut full = level_names;
+                full.extend(column_names);
+                nested_options.header_aliases = Some(full);
+            }
             return write_csv_string_with_options(&materialized, &nested_options);
         }
         // pandas heads an UNNAMED level with a blank cell - MultiIndex
@@ -2594,16 +2707,11 @@ pub fn write_csv_string_with_options(
         // level_{i}. Frame columns cannot all be named "", so write the body
         // headerless and put pandas' header line on top. (4qg5w.1)
         nested_options.header = false;
+        nested_options.header_aliases = None;
         let body = write_csv_string_with_options(&materialized, &nested_options)?;
-        let mut header: Vec<String> = row_multiindex
-            .names()
-            .iter()
-            .map(|name| name.clone().unwrap_or_default())
-            .collect();
-        header.extend(frame.column_names().into_iter().cloned());
-        let mut writer = WriterBuilder::new()
-            .delimiter(options.delimiter)
-            .from_writer(Vec::new());
+        let mut header = level_names;
+        header.extend(column_names);
+        let mut writer = options.writer()?;
         writer.write_record(&header)?;
         let header_line = String::from_utf8(writer.into_inner().map_err(|err| err.into_error())?)?;
         return Ok(header_line + &body);
@@ -2616,14 +2724,16 @@ pub fn write_csv_string_with_options(
     // `csv` record machinery. Byte-for-byte identical to the general writer:
     // floats via write_pandas_float (= scalar_to_csv_with_na), Int64 Display
     // (= scalar_to_csv), Utf8 QUOTE_MINIMAL with doubled quotes, terminator `\n`,
-    // and only taken when header names need no quoting.
-    if let Some(out) = try_write_csv_typed(frame, options) {
+    // and only taken when header names need no quoting - so only in pandas'
+    // default dialect (quoting / quotechar / lineterminator / escaping /
+    // decimal all default).
+    if options.is_default_dialect()
+        && let Some(out) = try_write_csv_typed(frame, options)
+    {
         return Ok(out);
     }
 
-    let mut writer = WriterBuilder::new()
-        .delimiter(options.delimiter)
-        .from_writer(Vec::new());
+    let mut writer = options.writer()?;
 
     let headers = frame
         .column_names()
@@ -2636,7 +2746,7 @@ pub fn write_csv_string_with_options(
         if options.include_index {
             header_row.push(resolve_csv_index_header(frame, options));
         }
-        header_row.extend(headers.iter().cloned());
+        header_row.extend(options.header_names(headers.clone())?);
         writer.write_record(&header_row)?;
     }
 
@@ -2668,6 +2778,10 @@ pub fn write_csv_string_with_options(
         row.extend(headers.iter().enumerate().map(|(col_idx, name)| {
             let value = frame.column(name).and_then(|column| column.value(row_idx));
             match value {
+                // A float cell takes pandas' `decimal` separator.
+                Some(scalar @ Scalar::Float64(v)) if !v.is_nan() => options.float_text(
+                    scalar_to_csv_cell(scalar, &options.na_rep, dt_formats[col_idx]),
+                ),
                 Some(scalar) => scalar_to_csv_cell(scalar, &options.na_rep, dt_formats[col_idx]),
                 None => options.na_rep.clone(),
             }
@@ -18410,6 +18524,94 @@ mod tests {
         assert_eq!(frame.column("a.1").unwrap().values()[0], Scalar::Int64(2));
     }
 
+    #[test]
+    fn csv_writer_dialect_options_match_pandas() {
+        use super::CsvQuoting;
+        // Expected text is pandas 2.2.3's DataFrame({'a': [1.5, None, 3.25],
+        // 'b': ['x', 'y,z', 'q"r']}).to_csv(index=False, ...).
+        let frame = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(3.25),
+                    ],
+                ),
+                (
+                    "b",
+                    ["x", "y,z", "q\"r"]
+                        .map(|text| Scalar::Utf8(text.into()))
+                        .to_vec(),
+                ),
+            ],
+        )
+        .unwrap();
+        let write = |options: CsvWriteOptions| {
+            write_csv_string_with_options(
+                &frame,
+                &CsvWriteOptions {
+                    include_index: false,
+                    ..options
+                },
+            )
+        };
+        let quoting = |quoting| {
+            write(CsvWriteOptions {
+                quoting,
+                ..CsvWriteOptions::default()
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            quoting(CsvQuoting::All),
+            "\"a\",\"b\"\n\"1.5\",\"x\"\n\"\",\"y,z\"\n\"3.25\",\"q\"\"r\"\n"
+        );
+        assert_eq!(
+            quoting(CsvQuoting::NonNumeric),
+            "\"a\",\"b\"\n1.5,\"x\"\n\"\",\"y,z\"\n3.25,\"q\"\"r\"\n"
+        );
+        let quote = write(CsvWriteOptions {
+            quote: b'\'',
+            ..CsvWriteOptions::default()
+        });
+        assert_eq!(quote.unwrap(), "a,b\n1.5,x\n,'y,z'\n3.25,q\"r\n");
+        let decimal = write(CsvWriteOptions {
+            delimiter: b';',
+            decimal: b',',
+            ..CsvWriteOptions::default()
+        });
+        assert_eq!(decimal.unwrap(), "a;b\n1,5;x\n;y,z\n3,25;\"q\"\"r\"\n");
+        let crlf = write_csv_string_with_options(
+            &frame.select_columns(&["a"]).unwrap(),
+            &CsvWriteOptions {
+                include_index: false,
+                line_terminator: "\r\n".to_owned(),
+                ..CsvWriteOptions::default()
+            },
+        );
+        assert_eq!(crlf.unwrap(), "a\r\n1.5\r\n\"\"\r\n3.25\r\n");
+        let aliases = write(CsvWriteOptions {
+            header_aliases: Some(vec!["A".into(), "B".into()]),
+            ..CsvWriteOptions::default()
+        });
+        assert_eq!(aliases.unwrap(), "A,B\n1.5,x\n,\"y,z\"\n3.25,\"q\"\"r\"\n");
+        // NEGATIVE: a wrong alias count is pandas' "Writing 2 cols but got 1
+        // aliases".
+        let short = write(CsvWriteOptions {
+            header_aliases: Some(vec!["A".into()]),
+            ..CsvWriteOptions::default()
+        });
+        assert!(short.is_err());
+        // The default dialect is unchanged.
+        assert_eq!(
+            write(CsvWriteOptions::default()).unwrap(),
+            "a,b\n1.5,x\n,\"y,z\"\n3.25,\"q\"\"r\"\n"
+        );
+    }
+
     /// SUPERSEDES the rejection contract br-frankenpandas-4hpid recorded here.
     /// That bead asserted "pandas-faithful rejection on ragged rows", but the
     /// premise is wrong in the SHORT direction. Measured on live pandas 2.2.3
@@ -24431,6 +24633,7 @@ mod tests {
             header: true,
             include_index: true,
             index_label: Some("row".to_owned()),
+            ..CsvWriteOptions::default()
         };
         assert_eq!(
             frame

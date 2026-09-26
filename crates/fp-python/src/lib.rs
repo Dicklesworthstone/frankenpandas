@@ -49933,13 +49933,20 @@ fn write_csv_py(
     args: &CsvWriteArgs<'_, '_>,
 ) -> PyResult<Option<String>> {
     let compression_is_default = compression_is_plain(args.compression, path_or_buf)?;
+    let one_byte = |text: &str| -> Option<u8> {
+        match text.as_bytes() {
+            [byte] if byte.is_ascii() => Some(*byte),
+            _ => None,
+        }
+    };
+    // header: a bool or pandas' list of aliases (it took only a bool).
+    let aliases: Option<Vec<String>> = match args.header {
+        Some(header) if header.extract::<bool>().is_err() => Some(header.extract()?),
+        _ => None,
+    };
     unsupported_params(
         method,
         &[
-            (
-                "header",
-                args.header.is_none_or(|h| h.extract::<bool>().is_ok()),
-            ),
             (
                 "index_label",
                 args.index_label
@@ -49952,16 +49959,19 @@ fn write_csv_py(
                     .is_none_or(|e| matches!(e.to_ascii_lowercase().as_str(), "utf-8" | "utf8")),
             ),
             ("compression", compression_is_default),
-            ("quoting", matches!(args.quoting, None | Some(0))),
-            ("quotechar", args.quotechar == "\""),
+            // QUOTE_NONE (3) and later need pandas' own escaping rules.
+            ("quoting", matches!(args.quoting, None | Some(0..=2))),
+            ("quotechar", one_byte(args.quotechar).is_some()),
             (
                 "lineterminator",
-                matches!(args.lineterminator, None | Some("\n")),
+                args.lineterminator
+                    .is_none_or(|t| t == "\r\n" || one_byte(t).is_some()),
             ),
-            ("date_format", args.date_format.is_none()),
+            // Python's csv writes an escaped quote unquoted (q\"r); the
+            // writer here would quote the field - measured, so refused.
             ("doublequote", args.doublequote),
             ("escapechar", args.escapechar.is_none()),
-            ("decimal", args.decimal == "."),
+            ("decimal", one_byte(args.decimal).is_some()),
             ("storage_options", args.storage_options.is_none()),
         ],
     )?;
@@ -50022,15 +50032,102 @@ fn write_csv_py(
         }
         None => frame,
     };
+    if let Some(aliases) = &aliases
+        && aliases.len() != frame.num_columns()
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Writing {} cols but got {} aliases",
+            frame.num_columns(),
+            aliases.len()
+        )));
+    }
+    // date_format: every datetime cell (and a datetime index when written)
+    // as its wall clock in that strftime format, a missing one still na_rep
+    // (it was refused).
+    let dated;
+    let frame = match args.date_format {
+        Some(format) => {
+            dated = frame_with_date_format(frame, format, args.index)?;
+            &dated
+        }
+        None => frame,
+    };
     let options = fp_io::CsvWriteOptions {
         delimiter,
         na_rep: args.na_rep.to_owned(),
-        header: args.header.map_or(Ok(true), |h| h.extract::<bool>())?,
+        header: aliases.is_some() || args.header.map_or(Ok(true), |h| h.extract::<bool>())?,
         include_index: args.index,
         index_label: args.index_label.and_then(|l| l.extract::<String>().ok()),
+        quoting: match args.quoting {
+            Some(1) => fp_io::CsvQuoting::All,
+            Some(2) => fp_io::CsvQuoting::NonNumeric,
+            _ => fp_io::CsvQuoting::Minimal,
+        },
+        quote: one_byte(args.quotechar).unwrap_or(b'"'),
+        line_terminator: args.lineterminator.unwrap_or("\n").to_owned(),
+        decimal: one_byte(args.decimal).unwrap_or(b'.'),
+        header_aliases: aliases,
     };
     let text = fp_io::write_csv_string_with_options(frame, &options).map_err(io_error_to_py)?;
     write_text_target(path_or_buf, text, args.mode == "a")
+}
+
+/// `frame` with its datetime columns (and, when `with_index`, a datetime
+/// index) rendered as text in the strftime `format`, each value on its
+/// column's wall clock; a missing value stays missing.
+fn frame_with_date_format(
+    frame: &DataFrame,
+    format: &str,
+    with_index: bool,
+) -> PyResult<DataFrame> {
+    let render = |nanos: i64, zone: Option<&str>| -> String {
+        let offset = zone.map_or(0, |zone| {
+            fp_frame::tz_offset_seconds(zone, nanos).unwrap_or(0)
+        });
+        Timestamp::from_nanos(nanos.saturating_add(i64::from(offset) * 1_000_000_000))
+            .strftime(format)
+    };
+    let mut out = frame.clone();
+    for position in 0..frame.num_columns() {
+        let Some(column) = frame.column_at(position) else {
+            continue;
+        };
+        let DType::Datetime64 { tz } = column.dtype() else {
+            continue;
+        };
+        let values = column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                    Scalar::Utf8(render(*nanos, tz.as_deref()))
+                }
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        out = out.isetitem(position, column).map_err(frame_error_to_py)?;
+    }
+    let labels = frame.index().labels();
+    if with_index
+        && !labels.is_empty()
+        && labels
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+    {
+        let rendered: Vec<IndexLabel> = labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                    IndexLabel::Utf8(render(*nanos, None))
+                }
+                other => other.clone(),
+            })
+            .collect();
+        let index = Index::new(rendered).rename_index(frame.index().name());
+        out = out.with_index(index).map_err(frame_error_to_py)?;
+    }
+    Ok(out)
 }
 
 /// Where pandas' text writers send their output: no target returns the text,
