@@ -6240,6 +6240,27 @@ pub fn datetime_list_label(labels: &[IndexLabel], label: &IndexLabel) -> IndexLa
     }
 }
 
+/// `text` repeated `count` times (pandas' `str * int`), allocated fallibly:
+/// a result too large to allocate is an error - Python's MemoryError - where
+/// `str::repeat` aborted the process.
+fn repeat_text(text: &str, count: usize) -> Result<String, FrameError> {
+    if text.is_empty() || count == 0 {
+        return Ok(String::new());
+    }
+    let too_large = || {
+        FrameError::CompatibilityRejected(format!(
+            "cannot allocate memory for a string repeated {count} times"
+        ))
+    };
+    let bytes = text.len().checked_mul(count).ok_or_else(too_large)?;
+    let mut out = String::new();
+    out.try_reserve_exact(bytes).map_err(|_| too_large())?;
+    for _ in 0..count {
+        out.push_str(text);
+    }
+    Ok(out)
+}
+
 /// The inclusive row positions of `.loc[start:stop]` over `labels`, as pandas
 /// resolves them (`None` for an empty selection): on a datetime index a string
 /// bound names a period at its own resolution, so `"2024-01-05"` as the stop
@@ -11069,15 +11090,16 @@ impl Series {
             .iter()
             .zip(right.values())
             .map(|(a, b)| match (a, b) {
-                (Scalar::Utf8(a), Scalar::Utf8(b)) if concat => Scalar::Utf8(format!("{a}{b}")),
+                (Scalar::Utf8(a), Scalar::Utf8(b)) if concat => Ok(Scalar::Utf8(format!("{a}{b}"))),
                 (Scalar::Utf8(text), count) | (count, Scalar::Utf8(text)) if !concat => {
-                    times(count).map_or(Scalar::Null(NullKind::NaN), |k| {
-                        Scalar::Utf8(text.repeat(k))
-                    })
+                    match times(count) {
+                        Some(k) => repeat_text(text, k).map(Scalar::Utf8),
+                        None => Ok(Scalar::Null(NullKind::NaN)),
+                    }
                 }
-                _ => Scalar::Null(NullKind::NaN),
+                _ => Ok(Scalar::Null(NullKind::NaN)),
             })
-            .collect();
+            .collect::<Result<Vec<_>, FrameError>>()?;
         let name = if self.name == other.name {
             self.name.clone()
         } else {
@@ -25753,7 +25775,7 @@ impl Series {
             for i in 0..len {
                 // Signed offset: positive periods look back, negative look
                 // forward (pandas `pct_change(periods)` == current/shift(periods)-1).
-                let prev_idx = i as i64 - periods;
+                let prev_idx = (i as i64).checked_sub(periods).unwrap_or(-1);
                 if prev_idx < 0 || prev_idx >= len_i {
                     validity.set(i, false);
                     continue;
@@ -25782,7 +25804,7 @@ impl Series {
             let mut out = vec![0.0_f64; len];
             let mut validity = fp_columnar::ValidityMask::all_valid(len);
             for i in 0..len {
-                let prev_idx = i as i64 - periods;
+                let prev_idx = (i as i64).checked_sub(periods).unwrap_or(-1);
                 if prev_idx < 0 || prev_idx >= len_i {
                     validity.set(i, false);
                     continue;
@@ -25801,7 +25823,7 @@ impl Series {
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
-            let prev_idx = i as i64 - periods;
+            let prev_idx = (i as i64).checked_sub(periods).unwrap_or(-1);
             if prev_idx < 0 || prev_idx >= len_i {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
@@ -51783,8 +51805,26 @@ impl StringAccessor<'_> {
         )
     }
 
-    /// Repeat each string n times.
+    /// Repeat each string n times. A result too large to allocate is an
+    /// error (Python's MemoryError); it aborted the process.
     pub fn repeat(&self, n: usize) -> Result<Series, FrameError> {
+        let total = self
+            .series
+            .values()
+            .iter()
+            .try_fold(0_usize, |total, value| match value {
+                Scalar::Utf8(text) => text
+                    .len()
+                    .checked_mul(n)
+                    .and_then(|bytes| total.checked_add(bytes)),
+                _ => Some(total),
+            });
+        let fits = total.is_some_and(|total| Vec::<u8>::new().try_reserve_exact(total).is_ok());
+        if !fits {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot allocate memory for strings repeated {n} times"
+            )));
+        }
         // Contiguous byte-buffer output (apply_str_utf8): append the row's bytes n
         // times to one buffer — no per-row `s.repeat` temp String, no
         // Vec<Scalar::Utf8> boxing. Bit-identical to `Scalar::Utf8(s.repeat(n))`.
@@ -106930,7 +106970,7 @@ impl DataFrameGroupBy<'_> {
             vals.iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    let prev_idx = i as i64 - periods;
+                    let prev_idx = (i as i64).checked_sub(periods).unwrap_or(-1);
                     if prev_idx < 0 || prev_idx >= group_len {
                         return Scalar::Null(NullKind::NaN);
                     }
@@ -125492,6 +125532,40 @@ mod tests {
         assert!(result.values()[1].is_missing());
         let v2 = result.values()[2].to_f64().unwrap();
         assert!((v2 - 0.5).abs() < 1e-10); // (150-100)/100 = 0.5
+    }
+
+    #[test]
+    fn extreme_periods_and_repeats_are_answers_not_panics_4qg5w_13() {
+        // Live pandas 2.2.3 (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.13):
+        // pct_change(periods=-2**63) is all NaN (`i - periods` overflowed).
+        let floats = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let ints = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        for series in [&floats, &ints] {
+            let result = series.pct_change(i64::MIN).unwrap();
+            assert!(result.values().iter().all(Scalar::is_missing));
+        }
+        // A repeat too large to allocate is an error (Python's MemoryError),
+        // not an abort; an empty string repeats to itself at no cost.
+        assert!(super::repeat_text("a", usize::MAX).is_err());
+        assert_eq!(super::repeat_text("", usize::MAX).unwrap(), "");
+        assert_eq!(super::repeat_text("ab", 3).unwrap(), "ababab");
+        let texts =
+            Series::from_values("s", vec!["a".into()], vec![Scalar::Utf8("a".to_owned())]).unwrap();
+        assert!(texts.str().repeat(usize::MAX).is_err());
     }
 
     #[test]

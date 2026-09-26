@@ -6227,6 +6227,56 @@ def test_timestamp_timedelta_and_datetimeindex_scalars_match_pandas(case: str) -
     assert _timestamp_outcome(fpd, case) == _timestamp_outcome(pd, case), case
 
 
+# (4qg5w.13) Extreme arguments reached Rust arithmetic overflow or an
+# infallible allocation: a PanicException (a BaseException that `except
+# Exception` misses) or an aborted interpreter. Each now answers as pandas.
+_EXTREME_ARGUMENT_CASES = {
+    "Timedelta of a huge datetime.timedelta": lambda m: m.Timedelta(datetime.timedelta(days=999999999)),
+    "Timestamp plus a huge datetime.timedelta": lambda m: m.Timestamp("2024-01-01") + datetime.timedelta(days=999999999),
+    "strings times sys.maxsize": lambda m: m.Series(["a"]) * (2**63 - 1),
+    "str.repeat(sys.maxsize)": lambda m: m.Series(["a"]).str.repeat(2**63 - 1),
+    "empty strings times sys.maxsize": lambda m: (m.Series([""]) * (2**63 - 1)).tolist(),
+    "strings times 3": lambda m: [None if v is None or v != v else v for v in (m.Series(["ab", None]) * 3).tolist()],
+    "pct_change of floats by -2**63": lambda m: [None if v != v else v for v in m.Series([1.0, 2.0, 3.0]).pct_change(periods=-(2**63)).tolist()],
+    "pct_change of ints by -2**63": lambda m: [None if v != v else v for v in m.Series([1, 2, 3]).pct_change(periods=-(2**63)).tolist()],
+    "stack(level=sys.maxsize)": lambda m: m.DataFrame({"a": [1]}).stack(level=2**63 - 1),
+    "Index.droplevel(sys.maxsize)": lambda m: m.Index([1, 2]).droplevel(2**63 - 1),
+}
+
+
+def _extreme_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _EXTREME_ARGUMENT_CASES[case](m)
+    except BaseException as e:  # noqa: BLE001 - a panic is a BaseException; its class is the outcome
+        return ("raise", type(e).__name__)
+    return ("value", type(result).__name__, repr(result) if not isinstance(result, list) else result)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EXTREME_ARGUMENT_CASES))
+def test_extreme_arguments_raise_as_pandas_instead_of_panicking(case: str) -> None:
+    assert _extreme_outcome(fpd, case) == _extreme_outcome(pd, case)
+
+
+# pandas 2 keeps year 1 at microsecond resolution; frankenpandas stores
+# nanoseconds only (Timestamp.unit, fvsao.35) and now raises
+# OutOfBoundsDatetime - it PANICKED on the overflow.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="nanosecond-only Timestamp: year 1 is out of bounds (fvsao.35)")
+def test_timestamp_of_year_one_matches_pandas() -> None:
+    assert str(fpd.Timestamp("2024-01-01").replace(year=1)) == str(pd.Timestamp("2024-01-01").replace(year=1))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_timestamp_of_year_one_is_a_typed_refusal_not_a_panic() -> None:
+    with pytest.raises(fpd.errors.OutOfBoundsDatetime if hasattr(fpd, "errors") else ValueError):
+        fpd.Timestamp("2024-01-01").replace(year=1)
+    with pytest.raises(ValueError):
+        fpd.Timestamp(datetime.datetime(1, 1, 1))
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_datetimeindex_tz_methods_do_not_ignore_tz() -> None:
     # tz_localize / tz_convert returned the index unchanged whatever tz was.

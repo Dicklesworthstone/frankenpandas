@@ -1887,7 +1887,7 @@ fn duration_operand(other: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
         return Ok(Some(Timedelta::NAT));
     }
     if let Ok(delta) = other.cast::<PyDelta>() {
-        return Ok(Some(py_delta_nanos(delta)));
+        return Ok(Some(py_delta_nanos(delta)?));
     }
     if other.get_type().name()?.to_cow()? == "timedelta64" {
         let nanos = other
@@ -3421,22 +3421,41 @@ impl PyPeriod {
 /// UTC instant (its wall clock less `utcoffset()`; its zone is
 /// [`py_datetime_zone`]). A tz-aware one was refused.
 fn py_datetime_nanos(dt: &Bound<'_, PyDateTime>) -> PyResult<i64> {
+    // Outside the nanosecond range (years ~1677-2262) is pandas'
+    // OutOfBoundsDatetime (the arithmetic overflowed: a panic, or a wrapped
+    // instant in a release build).
+    let out_of_bounds = || {
+        OutOfBoundsDatetime::new_err(format!(
+            "Out of bounds nanosecond timestamp: {}-{:02}-{:02} {:02}:{:02}:{:02}",
+            dt.get_year(),
+            dt.get_month(),
+            dt.get_day(),
+            dt.get_hour(),
+            dt.get_minute(),
+            dt.get_second()
+        ))
+    };
     let days = days_from_ymd(
         i64::from(dt.get_year()),
         i64::from(dt.get_month()),
         i64::from(dt.get_day()),
     );
-    let wall = days * 86_400_000_000_000
-        + i64::from(dt.get_hour()) * 3_600_000_000_000
+    let clock = i64::from(dt.get_hour()) * 3_600_000_000_000
         + i64::from(dt.get_minute()) * 60_000_000_000
         + i64::from(dt.get_second()) * 1_000_000_000
         + i64::from(dt.get_microsecond()) * 1_000;
+    let wall = days
+        .checked_mul(86_400_000_000_000)
+        .and_then(|nanos| nanos.checked_add(clock))
+        .ok_or_else(out_of_bounds)?;
     if dt.get_tzinfo().is_none() {
         return Ok(wall);
     }
     let offset = dt.call_method0("utcoffset")?;
     match offset.cast::<PyDelta>() {
-        Ok(delta) => Ok(wall - py_delta_nanos(delta)),
+        Ok(delta) => wall
+            .checked_sub(py_delta_nanos(delta)?)
+            .ok_or_else(out_of_bounds),
         Err(_) => Ok(wall),
     }
 }
@@ -3464,7 +3483,7 @@ fn py_datetime_zone(dt: &Bound<'_, PyDateTime>) -> PyResult<Option<String>> {
     let Ok(delta) = offset.cast::<PyDelta>() else {
         return Ok(None);
     };
-    let seconds = py_delta_nanos(delta) / 1_000_000_000;
+    let seconds = py_delta_nanos(delta)? / 1_000_000_000;
     let sign = if seconds < 0 { '-' } else { '+' };
     let minutes = seconds.unsigned_abs() / 60;
     Ok(fp_types::tz_canonical_name(&format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)).ok())
@@ -3522,9 +3541,20 @@ fn with_sequence_zone(series: Series, data: Option<&Bound<'_, PyAny>>) -> PyResu
 }
 
 /// Nanoseconds of a `datetime.timedelta`.
-fn py_delta_nanos(delta: &Bound<'_, PyDelta>) -> i64 {
-    (i64::from(delta.get_days()) * 86_400 + i64::from(delta.get_seconds())) * 1_000_000_000
-        + i64::from(delta.get_microseconds()) * 1_000
+fn py_delta_nanos(delta: &Bound<'_, PyDelta>) -> PyResult<i64> {
+    // A span past ~292 years is pandas' OutOfBoundsTimedelta (the
+    // arithmetic overflowed).
+    (i64::from(delta.get_days()) * 86_400 + i64::from(delta.get_seconds()))
+        .checked_mul(1_000_000_000)
+        .and_then(|nanos| nanos.checked_add(i64::from(delta.get_microseconds()) * 1_000))
+        .ok_or_else(|| {
+            OutOfBoundsTimedelta::new_err(format!(
+                "Cannot cast {} to unit='ns' without overflow.",
+                delta
+                    .str()
+                    .map_or_else(|_| "the timedelta".to_owned(), |text| text.to_string())
+            ))
+        })
 }
 
 /// A numpy datetime64/timedelta64 scalar or array cast to `ns_dtype` and read
@@ -3599,7 +3629,7 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
         return py_datetime_nanos(dt).map(Scalar::Datetime64);
     }
     if let Ok(delta) = obj.cast::<PyDelta>() {
-        return Ok(Scalar::Timedelta64(py_delta_nanos(delta)));
+        return Ok(Scalar::Timedelta64(py_delta_nanos(delta)?));
     }
     if let Ok(p) = obj.extract::<PyRef<'_, PyPeriod>>() {
         return Ok(Scalar::Period(p.inner));
@@ -6288,7 +6318,7 @@ impl PyDatetimeIndex {
             let step = if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
                 td.nanos
             } else if let Ok(delta) = other.cast::<PyDelta>() {
-                py_delta_nanos(delta)
+                py_delta_nanos(delta)?
             } else {
                 return Ok(py.NotImplemented());
             };
@@ -13474,6 +13504,7 @@ enum PyErrorKind {
     Value,
     Key,
     NotImplemented,
+    Memory,
 }
 
 fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
@@ -13503,6 +13534,11 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
             PyErrorKind::Type,
             format!("column dtype mismatch: left={left:?}, right={right:?}"),
         ),
+        // A result too large to allocate is Python's MemoryError (it aborted
+        // the process).
+        FrameError::CompatibilityRejected(msg) if msg.starts_with("cannot allocate memory") => {
+            (PyErrorKind::Memory, msg.clone())
+        }
         FrameError::CompatibilityRejected(msg) => {
             let lower = msg.to_lowercase();
             // pandas' own error texts reach Python verbatim, as pandas raises
@@ -13587,6 +13623,7 @@ fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
         PyErrorKind::NotImplemented => {
             PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(msg)
         }
+        PyErrorKind::Memory => PyErr::new::<pyo3::exceptions::PyMemoryError, _>(msg),
     }
 }
 
@@ -31405,7 +31442,7 @@ impl PyDataFrame {
         if level > 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                 "Too many levels: Index has only 1 level, not {}",
-                level + 1
+                i128::from(level) + 1
             )));
         }
         if level < -1 {
@@ -51699,7 +51736,7 @@ fn flat_level_check(level: usize) -> PyResult<()> {
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
             "Too many levels: Index has only 1 level, not {}",
-            level + 1
+            level.saturating_add(1)
         )))
     }
 }
