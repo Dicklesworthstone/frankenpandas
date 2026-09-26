@@ -18975,9 +18975,10 @@ impl Series {
         // Per br-frankenpandas-a52db: pandas preserves Int64/Bool dtype for
         // sum and matches numpy wrap-on-overflow for Int64 (wrapping_add).
         // Empty Int64/Bool series → Scalar::Int64(0). Float64 path falls
-        // through to the existing f64 accumulator.
+        // through to the existing f64 accumulator. The nullable Int64
+        // extension dtype sums as Int64 too (it came back float).
         match self.column.dtype() {
-            DType::Int64 => {
+            DType::Int64 | DType::Int64Nullable => {
                 // perf (br-frankenpandas-bwgyc): typed fast path (mirror of the
                 // Float64 lei31 path below) — an all-valid Int64 column sums its
                 // contiguous i64 buffer with wrapping_add, skipping the per-element
@@ -19270,9 +19271,10 @@ impl Series {
         }
 
         // Per br-frankenpandas-e7d61: pandas preserves input dtype for
-        // min/max. Branch on column dtype to keep dtype contract.
+        // min/max. Branch on column dtype to keep dtype contract; the
+        // nullable Int64 extension dtype too (it came back float).
         match self.column.dtype() {
-            DType::Int64 => {
+            DType::Int64 | DType::Int64Nullable => {
                 // Concat chunk fast path: min the lazy i64 chunks in place
                 // (order-independent) instead of materializing the buffer.
                 if let Some(m) = self.column.all_valid_i64_chunk_extreme(false) {
@@ -19440,7 +19442,7 @@ impl Series {
 
         // Per br-frankenpandas-e7d61: see min above.
         match self.column.dtype() {
-            DType::Int64 => {
+            DType::Int64 | DType::Int64Nullable => {
                 // Concat chunk fast path: max the lazy i64 chunks in place
                 // (order-independent) instead of materializing the buffer.
                 if let Some(m) = self.column.all_valid_i64_chunk_extreme(true) {
@@ -80897,7 +80899,8 @@ impl DataFrame {
             values.push(value);
         }
 
-        Series::from_values("corrwith".to_string(), labels, values)
+        // Unnamed, as pandas (it was named "corrwith").
+        Series::from_values(String::new(), labels, values)
     }
 
     /// Compute pairwise correlation with another DataFrame along the given axis.
@@ -81002,7 +81005,7 @@ impl DataFrame {
                 // preserves df.index.name on the row-wise correlation result.
                 let index = Index::new(labels).rename_index(self.index.name());
                 let column = Column::from_values(values)?;
-                Series::new("corrwith".to_string(), index, column)
+                Series::new(String::new(), index, column)
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
                 "corrwith: axis must be 0 or 1, got {axis}"
@@ -117482,6 +117485,57 @@ mod tests {
         let unsorted =
             Series::from_values("v", shuffled, (0..6_i64).map(Scalar::Int64).collect()).unwrap();
         assert!(unsorted.truncate(Some(&text("2024-02-01")), None).is_err());
+    }
+
+    #[test]
+    fn nullable_int64_reductions_stay_integer_and_corrwith_is_unnamed() {
+        let labels = || (0..3_i64).map(IndexLabel::from).collect::<Vec<_>>();
+        let values = vec![
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(3),
+        ];
+        let nullable = Series::new(
+            "v",
+            Index::new(labels()),
+            Column::new(DType::Int64Nullable, values).unwrap(),
+        )
+        .unwrap();
+        // pandas 2.2.3: Series([1, None, 3], dtype='Int64') sums to 4, max 3,
+        // min 1 as integers (they came back 4.0 / 3.0 / 1.0); mean is 2.0.
+        assert_eq!(nullable.sum().unwrap(), Scalar::Int64(4));
+        assert_eq!(nullable.max().unwrap(), Scalar::Int64(3));
+        assert_eq!(nullable.min().unwrap(), Scalar::Int64(1));
+        assert_eq!(nullable.mean().unwrap(), Scalar::Float64(2.0));
+        // NEGATIVE: a float column still reduces as float.
+        let floats = Series::from_values(
+            "w",
+            labels(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(floats.sum().unwrap(), Scalar::Float64(7.0));
+
+        // pandas: df.corrwith(other) is unnamed (it was named "corrwith").
+        let frame = DataFrame::from_series(vec![floats]).unwrap();
+        let doubled = Series::from_values(
+            "w",
+            labels(),
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
+        let doubled = DataFrame::from_series(vec![doubled]).unwrap();
+        let result = frame.corrwith(&doubled).unwrap();
+        assert_eq!(result.name(), "");
+        assert_eq!(result.values(), &[Scalar::Float64(1.0)]);
     }
 
     #[test]

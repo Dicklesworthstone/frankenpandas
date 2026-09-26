@@ -7515,3 +7515,74 @@ def _date_text_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_DATE_TEXT_CASES))
 def test_date_text_keys_truncate_and_first_last_on_a_datetime_index_match_pandas(case: str) -> None:
     assert _date_text_outcome(fpd, case) == _date_text_outcome(pd, case), case
+
+
+def _halfdays(m: Any) -> Any:
+    return m.DataFrame({"v": [1.0, 2.0, 3.0, 4.0], "w": [4, 3, 2, 1]}, index=m.date_range("2024-01-01", periods=4, freq="12h"))
+
+
+def _levels_frame(m: Any) -> Any:
+    return m.DataFrame({"v": [1.0, 2.0, 3.0, 4.0]}, index=m.MultiIndex.from_product([["a", "b"], [1, 2]], names=["k", "n"]))
+
+
+def _missing_or(v: Any) -> Any:
+    """A cell with every missing marker (None, NaN, pd.NA) read as None."""
+    return None if pd.isna(v) else v
+
+
+def _frame_facts(r: Any) -> Any:
+    """Column labels, dtypes and cells, by position (a label may repeat)."""
+    return ([str(c) for c in r.columns], [str(d) for d in r.dtypes], [[_missing_or(v) for v in r.iloc[:, i].tolist()] for i in range(r.shape[1])])
+
+
+# Silently wrong: dtypes of a frame with a repeated column label read the
+# first column's dtype (pivot_table(aggfunc=['sum', 'mean']) reported int64
+# for the float means); corrwith named its result 'corrwith';
+# Series(..., dtype='string') / astype('string') wrote None as 'None' (isna
+# False, str.upper 'NONE'); resample().agg([...]) on a frame gave (function,
+# column) columns. Raised: Int64 (nullable) mean; Int64 sum / max came back
+# float; resample().agg(dict); rename_axis with a list / dict / function;
+# Interval.overlaps.
+_REDUCE_RENAME_CASES = {
+    "dtypes repeated label": lambda m: _frame_facts(m.concat([m.DataFrame({"v": [3, 3]}), m.DataFrame({"v": [1.5, 3.0]})], axis=1)),
+    "pivot_table aggfunc list dtypes": lambda m: _frame_facts(m.DataFrame({"g": ["a", "a", "b"], "v": [1, 2, 3]}).pivot_table(index="g", values="v", aggfunc=["sum", "mean"])),
+    "corrwith frame name": lambda m: _five(m).corrwith(_five(m) * 2).name,
+    "corrwith series name": lambda m: _shaped(_five(m).corrwith(_five(m)["a"]), digits=12),
+    "string dtype missing": lambda m: (lambda s: (s.isna().tolist(), [_missing_or(v) for v in s.str.upper().tolist()]))(m.Series(["a", None], dtype="string")),
+    "astype string missing": lambda m: m.Series(["a", None]).astype("string").isna().tolist(),
+    # NEGATIVE: numpy's str still writes the missing value as text.
+    "astype str writes None": lambda m: m.Series(["a", None]).astype(str).tolist(),
+    "Int64 sum": lambda m: _number(m.Series([1, None, 3], dtype="Int64").sum()),
+    "Int64 max min": lambda m: (_number(m.Series([1, None, 3], dtype="Int64").max()), _number(m.Series([1, None, 3], dtype="Int64").min())),
+    "Int64 mean": lambda m: _number(m.Series([1, None, 3], dtype="Int64").mean()),
+    "Int64 all missing": lambda m: (_number(m.Series([None, None], dtype="Int64").sum()), type(m.Series([None, None], dtype="Int64").max()).__name__),
+    "resample agg dict": lambda m: _frame_facts(_halfdays(m).resample("D").agg({"w": "max", "v": "sum"})),
+    "resample agg dict with list": lambda m: _frame_facts(_halfdays(m).resample("D").agg({"v": "sum", "w": ["max", "min"]})),
+    "resample agg list frame": lambda m: _frame_facts(_halfdays(m).resample("D").agg(["sum", "max"])),
+    "series resample agg dict": lambda m: _frame_facts(_halfdays(m)["v"].resample("D").agg({"total": "sum"})),
+    "rename_axis list": lambda m: list(_levels_frame(m).rename_axis(["K", "N"]).index.names),
+    "rename_axis index dict": lambda m: list(_levels_frame(m).rename_axis(index={"k": "KK"}).index.names),
+    "rename_axis index function": lambda m: list(_levels_frame(m).rename_axis(index=str.upper).index.names),
+    "series rename_axis list": lambda m: list(_levels_frame(m)["v"].rename_axis(["K", "N"]).index.names),
+    "rename_axis flat": lambda m: _halfdays(m).rename_axis("when").index.name,
+    "interval overlaps": lambda m: (m.Interval(0, 5).overlaps(m.Interval(4, 6)), m.Interval(0, 5).overlaps(m.Interval(5, 6)), m.Interval(0, 5, closed="both").overlaps(m.Interval(5, 6, closed="left"))),
+    # NEGATIVES: a missing column in the dict is KeyError, a dict mapper or
+    # a wrong-length list is ValueError, overlaps of a non-Interval TypeError.
+    "resample agg dict missing column": lambda m: _halfdays(m).resample("D").agg({"z": "sum"}),
+    "rename_axis mapper dict": lambda m: _levels_frame(m).rename_axis({"k": "KK"}),
+    "rename_axis wrong length": lambda m: _levels_frame(m).rename_axis(["K"]),
+    "interval overlaps number": lambda m: m.Interval(0, 5).overlaps(3),
+}
+
+
+def _reduce_rename_outcome(m: Any, case: str) -> Any:
+    try:
+        return _REDUCE_RENAME_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_REDUCE_RENAME_CASES))
+def test_nullable_reductions_string_dtype_resample_agg_and_rename_axis_match_pandas(case: str) -> None:
+    assert _reduce_rename_outcome(fpd, case) == _reduce_rename_outcome(pd, case), case
