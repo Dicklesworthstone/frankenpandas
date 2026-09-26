@@ -21189,7 +21189,9 @@ impl PySeriesAt {
 }
 
 /// Python wrapper for FrankenPandas DataFrame.
-#[pyclass(name = "DataFrame", module = "frankenpandas", from_py_object)]
+// `dict`: an instance attribute can be set (groupby.apply sets a group's
+// `.name`, as pandas; normal lookup finds it before `__getattr__`'s columns).
+#[pyclass(name = "DataFrame", module = "frankenpandas", from_py_object, dict)]
 #[derive(Clone)]
 pub struct PyDataFrame {
     inner: DataFrame,
@@ -35706,14 +35708,20 @@ impl PyRolling {
         self.kurt(py)
     }
 
-    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    /// pandas' `Rolling.rank(method, ascending, pct, numeric_only)`: `pct`
+    /// divides by the observations in the window (a centred tail can pass
+    /// 1, as pandas); pandas has no `na_option` here (it was accepted, and
+    /// pct refused).
+    #[pyo3(signature = (method=None, ascending=None, pct=false, numeric_only=false))]
     pub fn rank(
         &self,
         py: Python<'_>,
         method: Option<&str>,
         ascending: Option<bool>,
-        na_option: Option<&str>,
+        pct: bool,
+        numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
+        let _ = numeric_only; // the frame's windows already rank numeric columns only
         self.require_count_window("rank")?;
         let m = method.unwrap_or("average");
         // pandas' rolling rank takes only these three (fp-frame also ranks
@@ -35724,19 +35732,22 @@ impl PyRolling {
             )));
         }
         let asc = ascending.unwrap_or(true);
-        let na = na_option.unwrap_or("keep");
         if let Some(ref s) = self.series {
-            let res = s
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .rank(m, asc, na)
-                .map_err(frame_error_to_py)?;
+            let windows = s.rolling_with_center(self.window, self.min_periods, self.center);
+            let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
+            if pct {
+                let count = windows.count().map_err(frame_error_to_py)?;
+                res = res.div(&count).map_err(frame_error_to_py)?;
+            }
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .rank(m, asc, na)
-                .map_err(frame_error_to_py)?;
+            let windows = df.rolling_with_center(self.window, self.min_periods, self.center);
+            let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
+            if pct {
+                let count = windows.count().map_err(frame_error_to_py)?;
+                res = res.div_df(&count).map_err(frame_error_to_py)?;
+            }
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -36183,29 +36194,36 @@ impl PyExpanding {
         self.kurt(py)
     }
 
-    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    /// pandas' `Expanding.rank(method, ascending, pct, numeric_only)`; see
+    /// `PyRolling::rank` (na_option is not pandas', pct was refused).
+    #[pyo3(signature = (method=None, ascending=None, pct=false, numeric_only=false))]
     pub fn rank(
         &self,
         py: Python<'_>,
         method: Option<&str>,
         ascending: Option<bool>,
-        na_option: Option<&str>,
+        pct: bool,
+        numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
+        let _ = numeric_only; // the frame's windows already rank numeric columns only
         let m = method.unwrap_or("average");
         let asc = ascending.unwrap_or(true);
-        let na = na_option.unwrap_or("keep");
         if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .rank(m, asc, na)
-                .map_err(frame_error_to_py)?;
+            let windows = s.expanding(self.min_periods);
+            let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
+            if pct {
+                let count = windows.count().map_err(frame_error_to_py)?;
+                res = res.div(&count).map_err(frame_error_to_py)?;
+            }
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .rank(m, asc, na)
-                .map_err(frame_error_to_py)?;
+            let windows = df.expanding(self.min_periods);
+            let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
+            if pct {
+                let count = windows.count().map_err(frame_error_to_py)?;
+                res = res.div_df(&count).map_err(frame_error_to_py)?;
+            }
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -37031,6 +37049,23 @@ fn lay_out_series(pieces: &[Series], layout: AppliedLayout) -> PyResult<Series> 
             out.take(&order).map_err(frame_error_to_py)
         }
         AppliedLayout::Concatenated => Ok(out),
+    }
+}
+
+/// A group key as pandas gives it (to `for key, group in gb` and as a group's
+/// `.name`): the label itself for one key, a tuple for several.
+fn group_key_object(py: Python<'_>, key: &[IndexLabel]) -> PyResult<Py<PyAny>> {
+    match key {
+        [single] => index_label_to_py(py, single),
+        parts => Ok(pyo3::types::PyTuple::new(
+            py,
+            parts
+                .iter()
+                .map(|part| index_label_to_py(py, part))
+                .collect::<PyResult<Vec<_>>>()?,
+        )?
+        .into_any()
+        .unbind()),
     }
 }
 
@@ -38315,18 +38350,7 @@ impl PyGroupBy {
         let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
         let mut pairs = Vec::with_capacity(groups.len());
         for ((_, positions), key) in groups.iter().zip(&keys) {
-            let key = match key.as_slice() {
-                [single] => index_label_to_py(py, single)?,
-                parts => pyo3::types::PyTuple::new(
-                    py,
-                    parts
-                        .iter()
-                        .map(|part| index_label_to_py(py, part))
-                        .collect::<PyResult<Vec<_>>>()?,
-                )?
-                .into_any()
-                .unbind(),
-            };
+            let key = group_key_object(py, key)?;
             let group = PyDataFrame {
                 inner: frame.take_rows(positions).map_err(frame_error_to_py)?,
             };
@@ -38433,14 +38457,18 @@ impl PyGroupBy {
             .collect();
         let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
         let groups = self.ordered_groups(true)?;
+        let keys = index_rows(&self.group_key_index(&groups)?);
         let mut results = Vec::with_capacity(groups.len());
         // pandas' `not_indexed_same` is false while every result is a frame
         // over its group's rows.
         let mut kept_rows = true;
-        for (_, positions) in &groups {
+        for ((_, positions), key) in groups.iter().zip(&keys) {
             let group = frame.take_rows(positions).map_err(frame_error_to_py)?;
             let rows = group.index().labels().to_vec();
             let group = PyDataFrame { inner: group }.into_bound_py_any(py)?;
+            // pandas sets each group's `.name` to its key (`lambda d:
+            // d.name`); it was missing (AttributeError or a column).
+            group.setattr("name", group_key_object(py, key)?)?;
             let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
             let result = Applied::from_py(py, &result)?;
             kept_rows &= matches!(&result, Applied::Frame(out) if out.index().labels() == rows);
@@ -40147,10 +40175,14 @@ impl PySeriesGroupBy {
         // pandas' `not_indexed_same` is false while every result is a
         // Series over its group's rows.
         let mut kept_rows = true;
-        for (_, positions) in &groups {
+        for (key, positions) in &groups {
             let group = self.group_rows(positions)?;
             let rows = group.index().labels().to_vec();
             let group = PySeries { inner: group }.into_bound_py_any(py)?;
+            // pandas names each group Series after its key (it kept the
+            // column's name); a non-text key is its text here, as Series
+            // names are (fvsao.32).
+            group.setattr("name", index_label_to_py(py, key)?)?;
             // pandas calls func(group, *args, **kwargs); both used to be
             // dropped (fvsao.5).
             let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;

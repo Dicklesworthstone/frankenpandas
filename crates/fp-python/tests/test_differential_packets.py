@@ -7791,3 +7791,47 @@ def _set_index_na_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_SET_INDEX_NA_CASES))
 def test_set_index_keeps_missing_keys_as_missing_labels_like_pandas(case: str) -> None:
     assert _set_index_na_outcome(fpd, case) == _set_index_na_outcome(pd, case), case
+
+
+def _ranked(m: Any) -> Any:
+    return m.Series([3.0, 1.0, _NAN, 4.0, 1.0, 5.0])
+
+
+def _gb_named_frame(m: Any) -> Any:
+    return m.DataFrame({"g": ["a", "b", "a"], "h": [1, 1, 2], "v": [1, 2, 3]})
+
+
+# (fvsao.46) rolling/expanding rank(pct=True) was refused and rank took an
+# na_option pandas' window rank does not have; groupby.apply's group had no
+# `.name` (pandas sets it to the group key) - DataFrame groups raised
+# AttributeError and Series groups kept the column's name.
+_RANK_NAME_CASES = {
+    "rolling pct": lambda m: [_missing_or(v) for v in _ranked(m).rolling(3).rank(pct=True).tolist()],
+    "rolling pct min_periods": lambda m: [_missing_or(v) for v in _ranked(m).rolling(3, min_periods=1).rank(pct=True).tolist()],
+    "rolling pct centered tail": lambda m: [_missing_or(v) for v in _ranked(m).rolling(3, center=True, min_periods=1).rank(pct=True).tolist()],
+    "rolling min pct": lambda m: [_missing_or(v) for v in _ranked(m).rolling(3, min_periods=1).rank(method="min", pct=True).tolist()],
+    "expanding pct": lambda m: [_missing_or(v) for v in _ranked(m).expanding().rank(pct=True).tolist()],
+    "frame rolling pct": lambda m: [_missing_or(v) for v in m.DataFrame({"a": [3.0, 1.0, 2.0], "b": [1.0, 2.0, 3.0]}).rolling(2, min_periods=1).rank(pct=True)["a"].tolist()],
+    "apply group name": lambda m: _shaped(_gb_named_frame(m).groupby("g").apply(lambda d: d.name, include_groups=False)),
+    # The key tuple joined as text: tuple-valued cells are fvsao.33.
+    "apply group name two keys": lambda m: _gb_named_frame(m).groupby(["g", "h"]).apply(lambda d: "|".join(map(str, d.name)), include_groups=False).tolist(),
+    "apply uses the name": lambda m: _shaped(_gb_named_frame(m).groupby("g").apply(lambda d: d["v"].sum() if d.name == "a" else 0, include_groups=False)),
+    "series apply group name": lambda m: _shaped(_gb_named_frame(m).groupby("g")["v"].apply(lambda s: s.name)),
+    # NEGATIVES: pandas' window rank has no na_option; a column called
+    # 'name' is still reached by attribute outside groupby.
+    "na_option rejected": lambda m: _ranked(m).rolling(3).rank(na_option="keep"),
+    "column called name": lambda m: m.DataFrame({"name": [1, 2]}).name.tolist(),
+}
+
+
+def _rank_name_outcome(m: Any, case: str) -> Any:
+    try:
+        return _RANK_NAME_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RANK_NAME_CASES))
+def test_window_rank_pct_and_groupby_apply_group_name_match_pandas(case: str) -> None:
+    assert _rank_name_outcome(fpd, case) == _rank_name_outcome(pd, case), case
