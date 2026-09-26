@@ -1486,8 +1486,6 @@ dependencies = [
 name = "fp-types"
 version = "0.3.0"
 dependencies = [
- "chrono",
- "chrono-tz",
  "rustc-hash",
  "serde",
  "serde_json",
