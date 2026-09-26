@@ -8762,3 +8762,135 @@ def test_series_of_two_zones_is_an_object_column_like_pandas() -> None:
         return str(m.Series([m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-01", tz="Asia/Tokyo")]).dtype)
 
     assert dtype(fpd) == dtype(pd)
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18: a default index
+# is pandas' RangeIndex. Every Series and DataFrame built without an index,
+# reset_index, a concat with ignore_index, a merge and a reader handed back
+# a plain Index of 0..n; RangeIndex itself stood apart from Index, so on it a
+# comparison was one bool, `.values` a list, and arithmetic or a list of
+# positions raised.
+def _range_view(x: Any) -> Any:
+    if type(x).__name__ == "ndarray":
+        return ("ndarray", str(x.dtype), x.tolist())
+    if x is None or isinstance(x, (bool, int, float, str, tuple, list)):
+        return x
+    return (type(x).__name__, repr(x))
+
+
+def _rng_series(m: Any) -> Any:
+    return m.Series([10, 20, 30, 40])
+
+
+def _rng_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2, 3, 4], "b": list("wxyw")})
+
+
+def _rng_named(m: Any) -> Any:
+    return m.Series([1, 2, 3], index=m.RangeIndex(2, 11, 3, name="k")).index
+
+
+def _renamed_owner(m: Any) -> Any:
+    frame = _rng_frame(m)
+    frame.index.name = "id"
+    return list(frame.reset_index().columns)
+
+
+_RANGE_INDEX_CASES = {
+    "Series default": lambda m: _rng_series(m).index,
+    "DataFrame default": lambda m: _rng_frame(m).index,
+    "explicit labels stay an Index": lambda m: m.Series([1, 2], index=[0, 1]).index,
+    "index=RangeIndex keeps its stop": lambda m: _rng_named(m),
+    "index=range": lambda m: m.Series([1, 2], index=range(1, 4, 2)).index,
+    "Series of a Series": lambda m: m.Series(_rng_series(m)).index,
+    "DataFrame of a DataFrame": lambda m: m.DataFrame(_rng_frame(m)).index,
+    "DataFrame of Series": lambda m: m.DataFrame({"a": _rng_series(m), "b": _rng_series(m)}).index,
+    "Series of a dict": lambda m: m.Series({"x": 1, "y": 2}).index,
+    "empty Series": lambda m: m.Series([], dtype="float64").index,
+    **{f"iloc[{text}]": (lambda key: lambda m: _rng_series(m).iloc[key].index)(key)
+       for text, key in [("1:3", slice(1, 3)), ("::2", slice(None, None, 2)), ("1::2", slice(1, None, 2)),
+                         ("::-1", slice(None, None, -1)), ("::-2", slice(None, None, -2)), ("3:1", slice(3, 1)),
+                         ("5:", slice(5, None))]},
+    "slice of a slice": lambda m: _rng_series(m).iloc[1:4].iloc[::2].index,
+    "s[::2]": lambda m: _rng_series(m)[::2].index,
+    "df[::2]": lambda m: _rng_frame(m)[::2].index,
+    "df.iloc[1::2]": lambda m: _rng_frame(m).iloc[1::2].index,
+    "df.iloc[1:3, 0]": lambda m: _rng_frame(m).iloc[1:3, 0].index,
+    "df.iloc[::2, [0]]": lambda m: _rng_frame(m).iloc[::2, [0]].index,
+    "head": lambda m: _rng_series(m).head(2).index,
+    "tail": lambda m: _rng_series(m).tail(2).index,
+    "mask is an Index": lambda m: (lambda s: s[s > 10].index)(_rng_series(m)),
+    "take is an Index": lambda m: _rng_series(m).take([0, 1, 2, 3]).index,
+    "iloc list is an Index": lambda m: _rng_series(m).iloc[[0, 2]].index,
+    "sort_values sorted": lambda m: _rng_series(m).sort_values().index,
+    "sort_values reorders": lambda m: _rng_series(m).sort_values(ascending=False).index,
+    "sort_index": lambda m: _rng_series(m).sort_index().index,
+    "reversed sort_index descending": lambda m: _rng_series(m).iloc[::-1].sort_index(ascending=False).index,
+    "df sort_values by two sorted": lambda m: m.DataFrame({"a": [1, 2], "b": [3, 4]}).sort_values(["a", "b"]).index,
+    "reset_index": lambda m: m.Series([1, 2], index=["a", "b"]).reset_index().index,
+    "concat ignore_index": lambda m: m.concat([_rng_series(m), _rng_series(m)], ignore_index=True).index,
+    "concat frames ignore_index": lambda m: m.concat([_rng_frame(m), _rng_frame(m)], ignore_index=True).index,
+    "merge": lambda m: _rng_frame(m).merge(m.DataFrame({"a": [1, 2, 5], "c": [7, 8, 9]}), on="a").index,
+    "merge left": lambda m: _rng_frame(m).merge(m.DataFrame({"a": [1, 2, 5], "c": [7, 8, 9]}), on="a", how="left").index,
+    "join on the index": lambda m: _rng_frame(m).join(m.DataFrame({"c": [7, 8, 9]})).index,
+    "read_csv": lambda m: m.read_csv(io.StringIO("a,b\n1,2\n3,4\n")).index,
+    "from_records": lambda m: m.DataFrame.from_records([{"a": 1}, {"a": 2}]).index,
+    "groupby as_index=False": lambda m: _rng_frame(m).groupby("b", as_index=False).sum().index,
+    "melt": lambda m: _rng_frame(m).melt(id_vars="b").index,
+    "mode": lambda m: _rng_series(m).mode().index,
+    "arithmetic keeps it": lambda m: (_rng_series(m) + 1).index,
+    "name writes through": _renamed_owner,
+    "isinstance Index": lambda m: isinstance(_rng_series(m).index, m.Index),
+    "values": lambda m: _rng_series(m).index.values,
+    "== scalar": lambda m: _rng_series(m).index == 2,
+    "== list": lambda m: _rng_series(m).index == [0, 5, 2, 3],
+    "< scalar": lambda m: _rng_series(m).index < 2,
+    "+ 1": lambda m: _rng_named(m) + 1,
+    "* 2": lambda m: _rng_named(m) * 2,
+    "1 - range": lambda m: 1 - _rng_named(m),
+    "- range": lambda m: -_rng_named(m),
+    "/ 2": lambda m: _rng_named(m) / 2,
+    "// 2": lambda m: _rng_named(m) // 2,
+    "+ an Index": lambda m: _rng_series(m).index + m.Index([1, 1, 1, 1]),
+    "positions": lambda m: _rng_series(m).index[[0, 2]],
+    "mask": lambda m: (lambda idx: idx[idx > 1])(_rng_series(m).index),
+    "[::-1]": lambda m: _rng_named(m)[::-1],
+    "sort_values descending": lambda m: _rng_named(m).sort_values(ascending=False),
+    "union of ranges": lambda m: m.RangeIndex(4).union(m.RangeIndex(2, 6)),
+    "union with an Index": lambda m: m.RangeIndex(4).union(m.Index([7, 9])),
+    "intersection": lambda m: m.RangeIndex(4).intersection(m.RangeIndex(2, 6)),
+    "append a range": lambda m: m.RangeIndex(4).append(m.RangeIndex(4, 6)),
+    "append an Index": lambda m: m.RangeIndex(4).append(m.Index([9])),
+    "delete first": lambda m: m.RangeIndex(4).delete(0),
+    "delete inside": lambda m: m.RangeIndex(4).delete(1),
+    "insert at the end": lambda m: m.RangeIndex(4).insert(4, 4),
+    "insert inside": lambda m: m.RangeIndex(4).insert(1, 9),
+    "rename": lambda m: m.RangeIndex(3).rename("z"),
+    "identical to its Index": lambda m: m.RangeIndex(4).identical(m.Index([0, 1, 2, 3])),
+    "identical to itself": lambda m: m.RangeIndex(4).identical(m.RangeIndex(4)),
+    "equals its Index": lambda m: m.RangeIndex(4).equals(m.Index([0, 1, 2, 3])),
+    "get_loc missing": lambda m: m.RangeIndex(4).get_loc(9),
+    "Index get_loc missing": lambda m: m.Index([1, 2]).get_loc(9),
+    "reversed": lambda m: [int(v) for v in reversed(_rng_named(m))],
+    "inferred_type": lambda m: _rng_named(m).inferred_type,
+    "2.0 in range": lambda m: 2.0 in m.RangeIndex(4),
+    "droplevel raises": lambda m: m.RangeIndex(4).droplevel(0),
+    "Index droplevel raises": lambda m: m.Index([1, 2]).droplevel(0),
+    "value_counts keeps the name": lambda m: repr(_rng_named(m).value_counts()),
+    "Index of a numpy array": lambda m: m.Index(np.array([1, 2])),
+}
+
+
+def _range_index_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _range_view(_RANGE_INDEX_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__, str(e) if isinstance(e, KeyError) else "")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RANGE_INDEX_CASES))
+def test_default_index_is_a_range_index_like_pandas(case: str) -> None:
+    assert _range_index_outcome(fpd, case) == _range_index_outcome(pd, case), case

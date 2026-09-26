@@ -1752,6 +1752,17 @@ pub struct Index {
     /// ignores it, as pandas' `equals` does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     freq: Option<String>,
+    /// The `range(start, stop, step)` these labels are when they are a
+    /// pandas RangeIndex - a default index (a Series or DataFrame built
+    /// without one, reset_index, a matrix) or a slice of one - rather than
+    /// an Index that happens to hold 0..n. The stop is pandas' own (a
+    /// strided slice of `range(4)` is `range(1, 4, 2)`, an empty one
+    /// `range(3, 1)`). Only the range constructors ([`Self::from_range`],
+    /// [`Self::with_range_span`]) set it; a clone and a
+    /// slice keep it; a take, a mask or any rebuild of the labels drops it,
+    /// as pandas turns those into an Index. Equality ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    range: Option<(i64, i64, i64)>,
 }
 
 /// The derived layout, with the row `MultiIndex` levels listed only when an
@@ -1776,6 +1787,9 @@ impl fmt::Debug for Index {
         }
         if let Some(freq) = &self.freq {
             out.field("freq", freq);
+        }
+        if let Some(range) = &self.range {
+            out.field("range", range);
         }
         out.finish()
     }
@@ -1920,6 +1934,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         }
     }
 
@@ -1979,10 +1994,20 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         };
         let _ = index.duplicate_cache.set(false);
         let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
         index
+    }
+
+    /// pandas' default index over `len` rows: the RangeIndex `range(0, len)`
+    /// a concat with `ignore_index`, a merge or a reader builds (they came
+    /// back as a plain Index of 0..len).
+    #[must_use]
+    pub fn default_range(len: usize) -> Self {
+        let span = i64::try_from(len).ok().map(|stop| (0, stop, 1));
+        Self::new_known_unique_int64_unit_range(0, len).with_range_span(span)
     }
 
     /// Construct an index whose labels are the affine Int64 sequence
@@ -2002,6 +2027,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2025,6 +2051,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         })
     }
 
@@ -2059,6 +2086,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         }
     }
 
@@ -2083,6 +2111,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         })
     }
 
@@ -2104,6 +2133,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         }
     }
 
@@ -2147,6 +2177,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2309,6 +2340,102 @@ impl Index {
     pub fn with_freq(mut self, freq: Option<String>) -> Self {
         self.freq = freq;
         self
+    }
+
+    /// The `range(start, stop, step)` these labels are as a pandas
+    /// RangeIndex (see the field), while the labels still hold exactly that
+    /// range (its length, first and last label).
+    #[must_use]
+    pub fn range_span(&self) -> Option<(i64, i64, i64)> {
+        let (start, stop, step) = self.range?;
+        let len = RangeIndex::new(start, stop, step).ok()?.len();
+        if len != self.len() {
+            return None;
+        }
+        if len == 0 {
+            return Some((start, stop, step));
+        }
+        let last =
+            i64::try_from(i128::from(start) + i128::from(step) * i128::try_from(len - 1).ok()?)
+                .ok()?;
+        let holds = if let Some(affine) = self.labels.int64_affine_range() {
+            affine.start == start && (len == 1 || affine.step == step)
+        } else {
+            let labels = self.labels();
+            labels.first() == Some(&IndexLabel::Int64(start))
+                && labels.last() == Some(&IndexLabel::Int64(last))
+        };
+        holds.then_some((start, stop, step))
+    }
+
+    /// These labels marked as the pandas RangeIndex `span` (or unmarked);
+    /// [`Self::range_span`] answers only while the labels hold it.
+    #[must_use]
+    pub fn with_range_span(mut self, span: Option<(i64, i64, i64)>) -> Self {
+        self.range = span;
+        self
+    }
+
+    /// In place, [`Self::with_range_span`].
+    pub fn set_range_span(&mut self, span: Option<(i64, i64, i64)>) {
+        self.range = span;
+    }
+
+    /// The `range(start, stop, step)` Int64 labels in one constant nonzero
+    /// step (or none) are, the stop one step past the last label.
+    #[must_use]
+    pub fn int64_range_span(&self) -> Option<(i64, i64, i64)> {
+        let (start, step) = self.int64_range_step()?;
+        let stop = step.checked_mul(i64::try_from(self.len()).ok()?)?;
+        Some((start, start.checked_add(stop)?, step))
+    }
+
+    /// The RangeIndex that positions `start..stop` by `step` (as Python's
+    /// `slice.indices(len)` resolves a slice) of this RangeIndex are, as
+    /// Python slices a range: `range(4)[1::2]` is `range(1, 4, 2)`.
+    #[must_use]
+    pub fn sliced_range_span(&self, start: i64, stop: i64, step: i64) -> Option<(i64, i64, i64)> {
+        let (first, _, by) = self.range_span()?;
+        Some((
+            first.checked_add(start.checked_mul(by)?)?,
+            first.checked_add(stop.checked_mul(by)?)?,
+            by.checked_mul(step)?,
+        ))
+    }
+
+    /// The (start, step) of Int64 labels in one constant nonzero step, as a
+    /// RangeIndex holds them ((0, 1) for no labels, the label and 1 for one).
+    #[must_use]
+    pub fn int64_range_step(&self) -> Option<(i64, i64)> {
+        // A lazy affine backing answers without materializing its labels.
+        if let Some(affine) = self.labels.int64_affine_range() {
+            let step = if affine.len > 1 { affine.step } else { 1 };
+            return (step != 0).then_some((affine.start, step));
+        }
+        let labels = self.labels();
+        let value = |label: &IndexLabel| match label {
+            IndexLabel::Int64(value) => Some(*value),
+            _ => None,
+        };
+        let Some(first) = labels.first() else {
+            return Some((0, 1));
+        };
+        let start = value(first)?;
+        let Some(second) = labels.get(1) else {
+            return Some((start, 1));
+        };
+        let step = value(second)?.checked_sub(start)?;
+        if step == 0 {
+            return None;
+        }
+        let mut expected = start;
+        for label in labels {
+            if value(label)? != expected {
+                return None;
+            }
+            expected = expected.checked_add(step).unwrap_or(expected);
+        }
+        Some((start, step))
     }
 
     /// Internal: if both indexes share the same name, return it; otherwise None.
@@ -4297,8 +4424,17 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            range: None,
         });
         sliced.freq.clone_from(&self.freq);
+        // A slice of a RangeIndex is one (pandas).
+        if self.range.is_some() {
+            let first = start.min(self.len());
+            sliced.range = i64::try_from(first).ok().and_then(|first| {
+                let stop = first.checked_add(i64::try_from(sliced.len()).ok()?)?;
+                self.sliced_range_span(first, stop, 1)
+            });
+        }
         let Some(levels) = self.row_multiindex.as_deref() else {
             return sliced;
         };
@@ -4358,8 +4494,10 @@ impl Index {
             Some(0_i128)
         };
         if let Some(len) = len.and_then(|value| usize::try_from(value).ok())
-            && let Some(index) = Self::new_known_unique_int64_affine_range(start, step, len)
+            && let Some(mut index) = Self::new_known_unique_int64_affine_range(start, step, len)
         {
+            // Known to be a range: marked without reading the lazy labels.
+            index.range = (step != 0).then_some((start, stop, step));
             return index;
         }
 
@@ -4376,7 +4514,7 @@ impl Index {
                 val += step;
             }
         }
-        Self::new(labels)
+        Self::new(labels).with_range_span((step != 0).then_some((start, stop, step)))
     }
 
     // ── Pandas Index Model: aggregation ──────────────────────────────
@@ -36326,6 +36464,41 @@ mod tests {
             dt.strftime("%Y-%m-%dT%H:%M:%S%.3f"),
             vec![Some("2024-01-15T12:34:56%.3f".to_owned()), None]
         );
+    }
+
+    #[test]
+    fn range_span_marks_a_range_index_and_slices_like_python_fvsao_18() {
+        // The default index is pandas' RangeIndex, kept by a clone and a
+        // slice; an Index that merely holds 0..n is not one.
+        let default = Index::default_range(4);
+        assert_eq!(default.range_span(), Some((0, 4, 1)));
+        assert_eq!(default.clone().range_span(), Some((0, 4, 1)));
+        assert_eq!(Index::from_i64(vec![0, 1, 2, 3]).range_span(), None);
+        assert_eq!(default.slice(1, 2).range_span(), Some((1, 3, 1)));
+        assert_eq!(default.slice(9, 2).range_span(), Some((4, 4, 1)));
+        // A take, even of every position in order, is a plain Index.
+        assert_eq!(default.take(&[0, 1, 2, 3]).range_span(), None);
+        // Python's range slicing: range(4)[1::2] is range(1, 4, 2), [::-1]
+        // range(3, -1, -1); a range(2, 11, 3) slice scales by its step.
+        assert_eq!(default.sliced_range_span(1, 4, 2), Some((1, 4, 2)));
+        assert_eq!(default.sliced_range_span(3, -1, -1), Some((3, -1, -1)));
+        let stepped = Index::from_range(2, 11, 3);
+        assert_eq!(stepped.range_span(), Some((2, 11, 3)));
+        assert_eq!(stepped.sliced_range_span(2, -1, -1), Some((8, -1, -3)));
+        assert_eq!(Index::from_i64(vec![0, 2]).sliced_range_span(0, 2, 1), None);
+        // A span that no longer describes the labels answers nothing.
+        let stale = Index::from_i64(vec![0, 1, 5]).with_range_span(Some((0, 3, 1)));
+        assert_eq!(stale.range_span(), None);
+        let short = Index::from_i64(vec![0, 1]).with_range_span(Some((0, 3, 1)));
+        assert_eq!(short.range_span(), None);
+        // The labels' own range, the stop one step past the last.
+        assert_eq!(
+            Index::from_i64(vec![8, 5, 2]).int64_range_span(),
+            Some((8, -1, -3))
+        );
+        assert_eq!(Index::from_i64(vec![0, 1, 3]).int64_range_span(), None);
+        // Equality ignores the mark.
+        assert_eq!(default, Index::from_i64(vec![0, 1, 2, 3]));
     }
 
     #[test]

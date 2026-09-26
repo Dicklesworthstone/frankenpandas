@@ -7834,7 +7834,8 @@ fn range_index(len: usize) -> Result<Index, FrameError> {
             "cannot materialize RangeIndex for length {len} on this platform"
         ))
     })?;
-    Ok(Index::new_known_unique_int64_unit_range(0, len))
+    // A default index is pandas' RangeIndex (reset_index, a matrix).
+    Ok(Index::default_range(len))
 }
 
 // Exercised only by the inline test module below.
@@ -10493,6 +10494,14 @@ impl Series {
         &self.index
     }
 
+    /// This Series with its labels marked as the pandas RangeIndex `span`
+    /// (or unmarked), the labels unchanged; see [`Index::range_span`].
+    #[must_use]
+    pub fn with_range_span(mut self, span: Option<(i64, i64, i64)>) -> Self {
+        self.index.set_range_span(span);
+        self
+    }
+
     #[must_use]
     pub fn column(&self) -> &Column {
         &self.column
@@ -12066,6 +12075,19 @@ impl Series {
         })
     }
 
+    /// [`Self::reorder_by_positions`] for a sort: an order that moves nothing
+    /// keeps a RangeIndex, as pandas returns a copy then
+    /// (`s.sort_values().index` of sorted values is still `RangeIndex(0, n)`;
+    /// it became a plain Index).
+    fn sorted_by_positions(&self, order: &[usize]) -> Result<Self, FrameError> {
+        let out = self.reorder_by_positions(order)?;
+        let span = self.index.range_span();
+        if span.is_some() && order.iter().enumerate().all(|(at, &from)| at == from) {
+            return Ok(out.with_range_span(span));
+        }
+        Ok(out)
+    }
+
     fn filter_typed_i64_index_by_bool_slice(
         &self,
         mask: &[bool],
@@ -13574,7 +13596,7 @@ impl Series {
         let na_first = na_position == "first";
         if !na_first && let Some(values) = self.index.int64_label_values() {
             let order = fp_columnar::radix_argsort_i64(&values, ascending);
-            return self.reorder_by_positions(&order);
+            return self.sorted_by_positions(&order);
         }
         let mut order = (0..self.len()).collect::<Vec<_>>();
         let labels = self.index.labels();
@@ -13606,7 +13628,7 @@ impl Series {
                 }
             }
         });
-        self.reorder_by_positions(&order)
+        self.sorted_by_positions(&order)
     }
 
     /// Return a new Series sorted by values.
@@ -13640,7 +13662,7 @@ impl Series {
             && (self.column.as_i64_slice().is_some() || self.column.as_f64_slice().is_some())
         {
             let order = self.column.argsort_with(ascending);
-            return self.reorder_by_positions(&order);
+            return self.sorted_by_positions(&order);
         }
         // Typed NULLABLE Float64 fast path: the all-valid radix path above bails on
         // any missing, so a Float64 column WITH nulls fell to the O(n log n) generic
@@ -13678,7 +13700,7 @@ impl Series {
             if !na_first {
                 order.extend_from_slice(&missing_positions);
             }
-            return self.reorder_by_positions(&order);
+            return self.sorted_by_positions(&order);
         }
         // All-valid Utf8 (any backing): with no missing values, na_position is
         // moot, so the order is a pure stable byte-lexicographic value sort.
@@ -13693,7 +13715,7 @@ impl Series {
             && !self.column.has_nulls()
         {
             let order = self.column.argsort_with(ascending);
-            return self.reorder_by_positions(&order);
+            return self.sorted_by_positions(&order);
         }
         let mut order = (0..self.len()).collect::<Vec<_>>();
         if self.categorical.is_some() {
@@ -13718,7 +13740,7 @@ impl Series {
                 )
             });
         }
-        self.reorder_by_positions(&order)
+        self.sorted_by_positions(&order)
     }
 
     /// Return the first `n` rows.
@@ -62390,8 +62412,8 @@ pub fn concat_series_with_ignore_index(
         // on materialization, with pre-seeded unique + AscendingInt64 caches —
         // skips the Vec<IndexLabel> build/touch/drop tax (16B/label) the eager
         // `(0..total_len).map(IndexLabel::Int64).collect()` paid. No source name
-        // to preserve on the integer-range path.
-        let index = Index::new_known_unique_int64_unit_range(0, total_len);
+        // to preserve on the integer-range path. pandas' RangeIndex.
+        let index = Index::default_range(total_len);
         // perf: typed buffer concat (Int64/Float64) when homogeneous all-valid.
         let column = concat_series_columns(series_list, total_len)?;
         return Series::new(name, index, column);
@@ -62558,8 +62580,9 @@ pub fn concat_dataframes_with_ignore_index(
     // Build index.
     let total_len: usize = frames.iter().map(|f| f.len()).sum();
     let index = if ignore_index {
-        // Lazy unit-range concat output index (br-frankenpandas-arr72).
-        Index::new_known_unique_int64_unit_range(0, total_len)
+        // Lazy unit-range concat output index (br-frankenpandas-arr72), a
+        // RangeIndex.
+        Index::default_range(total_len)
     } else {
         // Per br-frankenpandas-r0igc: pandas preserves index name when all
         // concatenated frames share it; drops to None when names differ.
@@ -70456,8 +70479,9 @@ impl DataFrame {
         }
 
         let n = data[0].1.len();
-        // Lazy unit-range default index (br-frankenpandas-arr72).
-        let index = Index::new_known_unique_int64_unit_range(0, n);
+        // Lazy unit-range default index (br-frankenpandas-arr72), a
+        // RangeIndex.
+        let index = Index::default_range(n);
 
         let mut input_pairs = Vec::with_capacity(data.len());
         let mut input_order = Vec::with_capacity(data.len());
@@ -70586,7 +70610,7 @@ impl DataFrame {
 
         let index = match index_labels {
             Some(labels) => Index::new(labels),
-            None => Index::new_known_unique_int64_unit_range(0, row_count),
+            None => Index::default_range(row_count),
         };
         let cols = ColumnStore::from_pairs(pairs);
         Self::new_with_column_order(index, cols, order)
@@ -71137,8 +71161,9 @@ impl DataFrame {
 
         let index = match index_labels {
             Some(labels) => Index::new(labels),
-            // Lazy unit-range default index (br-frankenpandas-arr72).
-            None => Index::new_known_unique_int64_unit_range(0, row_count),
+            // Lazy unit-range default index (br-frankenpandas-arr72), a
+            // RangeIndex.
+            None => Index::default_range(row_count),
         };
 
         let columns = ColumnStore::from_pairs(pairs);
@@ -71618,6 +71643,15 @@ impl DataFrame {
     #[must_use]
     pub fn index(&self) -> &Index {
         &self.index
+    }
+
+    /// This frame with its row labels marked as the pandas RangeIndex
+    /// `span` (or unmarked), the labels unchanged; see
+    /// [`Index::range_span`].
+    #[must_use]
+    pub fn with_range_span(mut self, span: Option<(i64, i64, i64)>) -> Self {
+        self.index.set_range_span(span);
+        self
     }
 
     /// Return the logical DataFrame row index.
@@ -74017,7 +74051,7 @@ impl DataFrame {
             }
             if let Some(values) = self.index.int64_label_values() {
                 let order = fp_columnar::radix_argsort_i64(&values, ascending);
-                return self.reorder_rows_by_positions_unchecked(&order);
+                return self.sorted_rows_by_positions(order);
             }
         }
         let mut order = (0..self.len()).collect::<Vec<_>>();
@@ -74050,7 +74084,7 @@ impl DataFrame {
                 }
             }
         });
-        self.reorder_rows_by_positions_unchecked(&order)
+        self.sorted_rows_by_positions(order)
     }
 
     /// Sort the DataFrame by column names (axis=1).
@@ -74109,7 +74143,7 @@ impl DataFrame {
         if !na_first && sort_column.dtype() == DType::Utf8 && sort_column.validity().all() {
             let order = typed_slice_sort_order(sort_column, ascending)
                 .unwrap_or_else(|| sort_column.argsort_with(ascending));
-            return self.reorder_rows_by_positions_unchecked(&order);
+            return self.sorted_rows_by_positions(order);
         }
         // br-frankenpandas-uza04: try the column's contiguous typed buffer FIRST,
         // and only fall back to `sort_column.values()` when it has none. On an
@@ -74159,7 +74193,7 @@ impl DataFrame {
         // order is a permutation of 0..len(), always valid. Preserve ownership
         // so large homogeneous Float64 frames can share the tape across lazy
         // payload gathers without copying it into every column operation.
-        self.reorder_rows_by_owned_positions_unchecked(order)
+        self.sorted_rows_by_positions(order)
     }
 
     /// Sort by multiple columns with per-column ascending flags.
@@ -74220,7 +74254,7 @@ impl DataFrame {
             .collect();
         if let Some(keys) = radix_keys {
             let order = fp_columnar::radix_argsort_multi_u64(&keys);
-            return self.reorder_rows_by_owned_positions_unchecked(order);
+            return self.sorted_rows_by_positions(order);
         }
 
         // Per-column typed sort key (br-frankenpandas-1tuf5): an all-valid Int64
@@ -74299,7 +74333,23 @@ impl DataFrame {
         // order is a permutation of 0..len(), always valid. Preserve ownership
         // so the multi-key path shares the same deferred payload-gather tape as
         // the single-key radix path.
-        self.reorder_rows_by_owned_positions_unchecked(order)
+        self.sorted_rows_by_positions(order)
+    }
+
+    /// [`Self::reorder_rows_by_owned_positions_unchecked`] for a sort: an
+    /// order that moves nothing keeps a RangeIndex, as pandas returns a copy
+    /// then (`df.sort_values(['a', 'b']).index` of sorted rows is still
+    /// `RangeIndex(0, n)`; it became a plain Index).
+    fn sorted_rows_by_positions(&self, order: Vec<usize>) -> Result<Self, FrameError> {
+        let unmoved = self
+            .index
+            .range_span()
+            .filter(|_| order.iter().enumerate().all(|(at, &from)| at == from));
+        let out = self.reorder_rows_by_owned_positions_unchecked(order)?;
+        Ok(match unmoved {
+            Some(span) => out.with_range_span(Some(span)),
+            None => out,
+        })
     }
 
     /// Label-based row selection for list-like indexers.
@@ -79160,8 +79210,9 @@ impl DataFrame {
         col_order.push(val_col_name.to_string());
 
         // Build the new index (0..total_rows) as a lazy unit-range Int64 backing
-        // instead of materializing total_rows IndexLabel::Int64 allocations.
-        let new_index = Index::new_known_unique_int64_unit_range(0, total_rows);
+        // instead of materializing total_rows IndexLabel::Int64 allocations;
+        // pandas' RangeIndex.
+        let new_index = Index::default_range(total_rows);
 
         Ok(Self {
             columns: result_cols.into(),
@@ -82125,13 +82176,14 @@ impl DataFrame {
     /// axis name).
     pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
         let mut out = self.set_axis(index.labels().to_vec(), 0)?;
-        // The given index's name, time zone and freq ride along (they were
-        // dropped with the labels).
+        // The given index's name, time zone, freq and RangeIndex origin
+        // ride along (they were dropped with the labels).
         out.index = out
             .index
             .rename_index(index.name())
             .with_tz(index.tz())?
-            .with_freq(index.freq().map(str::to_owned));
+            .with_freq(index.freq().map(str::to_owned))
+            .with_range_span(index.range_span());
         Ok(out)
     }
 
@@ -97769,11 +97821,10 @@ impl DataFrameGroupBy<'_> {
                 full_order.push(col_name);
             }
 
-            let int_labels: Vec<IndexLabel> = (0..n_groups as i64).map(IndexLabel::Int64).collect();
             Ok(DataFrame {
                 columns: full_cols.into(),
                 column_order: full_order.into(),
-                index: Index::new(int_labels),
+                index: Index::default_range(n_groups),
                 column_multiindex: None,
                 row_multiindex: None,
                 allows_duplicate_labels: self.df.allows_duplicate_labels,
@@ -125600,6 +125651,72 @@ mod tests {
         assert!(result.values()[1].is_missing());
         let v2 = result.values()[2].to_f64().unwrap();
         assert!((v2 - 0.5).abs() < 1e-10); // (150-100)/100 = 0.5
+    }
+
+    #[test]
+    fn default_index_is_a_range_through_sorts_slices_and_builders_fvsao_18() {
+        let frame = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(9), Scalar::Int64(8), Scalar::Int64(7)],
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(frame.index().range_span(), Some((0, 3, 1)));
+        let a = frame.get("a").unwrap().unwrap();
+        // A sort that moves nothing keeps the RangeIndex; one that reorders
+        // is a plain Index (pandas).
+        assert_eq!(
+            a.sort_values(true).unwrap().index().range_span(),
+            Some((0, 3, 1))
+        );
+        assert_eq!(a.sort_values(false).unwrap().index().range_span(), None);
+        assert_eq!(
+            a.sort_index(true).unwrap().index().range_span(),
+            Some((0, 3, 1))
+        );
+        assert_eq!(
+            frame
+                .sort_values_multi(&["a", "b"], &[true, true], "last")
+                .unwrap()
+                .index()
+                .range_span(),
+            Some((0, 3, 1))
+        );
+        assert_eq!(
+            frame.sort_values("b", true).unwrap().index().range_span(),
+            None
+        );
+        assert_eq!(
+            frame
+                .sort_index_na(true, "first")
+                .unwrap()
+                .index()
+                .range_span(),
+            Some((0, 3, 1))
+        );
+        // A contiguous slice stays one; a gather does not.
+        assert_eq!(
+            a.iloc_slice(Some(1), None).unwrap().index().range_span(),
+            Some((1, 3, 1))
+        );
+        assert_eq!(a.iloc(&[0, 1, 2]).unwrap().index().range_span(), None);
+        // concat with ignore_index numbers its rows with a RangeIndex; one
+        // keeping the labels does not.
+        let both = crate::concat_series_with_ignore_index(&[&a, &a], true).unwrap();
+        assert_eq!(both.index().range_span(), Some((0, 6, 1)));
+        let kept = crate::concat_series_with_ignore_index(&[&a, &a], false).unwrap();
+        assert_eq!(kept.index().range_span(), None);
+        // A frame built on labels of its own is not one.
+        let labelled = frame.with_index(Index::from_i64(vec![0, 1, 2])).unwrap();
+        assert_eq!(labelled.index().range_span(), None);
     }
 
     #[test]

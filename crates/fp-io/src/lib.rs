@@ -952,7 +952,8 @@ fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8
 
 fn csv_default_unit_range_index(row_count: i64) -> Index {
     let row_len = usize::try_from(row_count).expect("CSV row count must be non-negative");
-    Index::new_known_unique_int64_unit_range(0, row_len)
+    // pandas' default RangeIndex.
+    Index::default_range(row_len)
 }
 
 fn build_typed_numeric_csv_frame(
@@ -3509,7 +3510,7 @@ pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
         out.insert(name.clone(), column);
     }
     Ok(DataFrame::new_with_column_order(
-        Index::from_i64((0..row_count).collect()),
+        Index::from_range(0, row_count, 1),
         out,
         column_order,
     )?)
@@ -3966,7 +3967,7 @@ pub fn read_xml_str_with_options(
             .collect::<Vec<_>>();
         out_columns.insert(name.clone(), Column::from_values(values)?);
     }
-    let index = Index::from_i64((0..rows.len() as i64).collect());
+    let index = Index::default_range(rows.len());
     Ok(DataFrame::new_with_column_order(
         index,
         out_columns,
@@ -4270,7 +4271,7 @@ fn html_rows_to_frame(
         ))
     })?;
     Ok(DataFrame::new_with_column_order(
-        Index::from_i64((0..row_count).collect()),
+        Index::from_range(0, row_count, 1),
         columns,
         column_order,
     )?)
@@ -6580,7 +6581,7 @@ fn sas_rows_to_frame(
         out.insert(name, Column::from_values(values)?);
     }
     Ok(DataFrame::new_with_column_order(
-        Index::from_i64((0..row_count).collect()),
+        Index::from_range(0, row_count, 1),
         out,
         column_order,
     )?)
@@ -7097,7 +7098,7 @@ fn materialize_row_multiindex_columns(
         column_order.push(name.clone());
     }
 
-    let index = Index::from_i64((0..frame.len() as i64).collect());
+    let index = Index::default_range(frame.len());
     DataFrame::new_with_column_order(index, columns, column_order).map_err(IoError::from)
 }
 
@@ -7642,7 +7643,7 @@ fn try_read_json_records_numeric_parallel(input: &str) -> Result<Option<DataFram
         };
         out.insert(name.clone(), column);
     }
-    let index = Index::from_i64((0..rows as i64).collect());
+    let index = Index::default_range(rows);
     let frame = DataFrame::new_with_column_order(index, out, names)?;
     Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
 }
@@ -7908,7 +7909,7 @@ fn try_read_json_records_flat_parallel(input: &str) -> Result<Option<DataFrame>,
     for (name, col) in names.iter().zip(built) {
         out.insert(name.clone(), col?);
     }
-    let index = Index::from_i64((0..total_rows as i64).collect());
+    let index = Index::default_range(total_rows);
     let frame = DataFrame::new_with_column_order(index, out, names)?;
     Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
 }
@@ -8101,7 +8102,7 @@ fn try_read_json_records_flat(input: &str) -> Result<Option<DataFrame>, IoError>
     for (name, vals) in col_names.iter().zip(cols) {
         out.insert(name.clone(), column_from_json_values(vals)?);
     }
-    let index = Index::from_i64((0..row_count).collect());
+    let index = Index::from_range(0, row_count, 1);
     let frame = DataFrame::new_with_column_order(index, out, col_names)?;
     Ok(Some(promote_synthetic_row_multiindex_if_present(&frame)?))
 }
@@ -8179,7 +8180,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             for (name, vals) in columns {
                 out.insert(name, column_from_json_values(vals)?);
             }
-            let index = Index::from_i64((0..row_count).collect());
+            let index = Index::from_range(0, row_count, 1);
             let frame = DataFrame::new_with_column_order(index, out, col_names)?;
             promote_synthetic_row_multiindex_if_present(&frame)
         }
@@ -8369,7 +8370,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                     }
                     Index::new(labels)
                 }
-                None => Index::from_i64((0..row_count).collect()),
+                None => Index::from_range(0, row_count, 1),
             };
             let frame = DataFrame::new_with_column_order(index, out, col_names)?;
             let frame = promote_synthetic_row_multiindex_if_present(&frame)?;
@@ -8426,7 +8427,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             for (name, vals) in columns {
                 out.insert(name, column_from_json_values(vals)?);
             }
-            let index = Index::from_i64((0..rows.len() as i64).collect());
+            let index = Index::default_range(rows.len());
             let frame = DataFrame::new_with_column_order(index, out, column_order)?;
             promote_synthetic_row_multiindex_if_present(&frame)
         }
@@ -9244,7 +9245,7 @@ pub fn json_normalize(
     }
 
     let row_count = records.len() as i64;
-    let index = Index::from_i64((0..row_count).collect());
+    let index = Index::from_range(0, row_count, 1);
     DataFrame::new_with_column_order(index, col_map, all_col_names).map_err(IoError::from)
 }
 
@@ -9586,7 +9587,7 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
         column_order.push(name);
     }
 
-    let index = Index::from_i64((0..all_rows.len() as i64).collect());
+    let index = Index::default_range(all_rows.len());
     Ok(DataFrame::new_with_column_order(
         index,
         out_columns,
@@ -9958,13 +9959,9 @@ fn try_record_batch_to_float64_block(batch: &RecordBatch) -> Result<Option<DataF
         block.extend_from_slice(floats.values());
     }
 
-    DataFrame::from_f64_block_columns(
-        Index::new_known_unique_int64_unit_range(0, rows),
-        names,
-        block,
-    )
-    .map(Some)
-    .map_err(IoError::from)
+    DataFrame::from_f64_block_columns(Index::default_range(rows), names, block)
+        .map(Some)
+        .map_err(IoError::from)
 }
 
 /// Convert an Arrow RecordBatch back into a DataFrame.
@@ -10012,7 +10009,7 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
     // index instead of materializing a Vec<IndexLabel> of n_rows + Index::new
     // (which was ~110ms of a 137ms 1M-row read — the real read_parquet bottleneck,
     // NOT the ~27ms decode). Bit-identical: same integer labels 0..n_rows.
-    let index = Index::new_known_unique_int64_unit_range(0, n_rows);
+    let index = Index::default_range(n_rows);
 
     let frame = DataFrame::new_with_column_order(index, columns, col_order)?;
     let frame = promote_synthetic_row_multiindex_if_present(&frame)?;
@@ -10926,7 +10923,7 @@ fn parse_excel_rows(
             .collect();
         Index::new(idx_labels).set_names(index_name.as_deref())
     } else {
-        Index::from_i64((0..data_rows.len() as i64).collect())
+        Index::default_range(data_rows.len())
     };
 
     Ok(DataFrame::new_with_column_order(
