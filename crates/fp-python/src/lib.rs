@@ -15890,27 +15890,32 @@ impl PySeries {
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         if let Ok(labels) = key.extract::<Vec<String>>() {
-            let idx_labels: Vec<IndexLabel> = labels.into_iter().map(IndexLabel::Utf8).collect();
+            let idx_labels = loc_list_labels(
+                self.inner.index().labels(),
+                labels.into_iter().map(IndexLabel::Utf8).collect(),
+            );
             let s = self
                 .inner
                 .loc(&idx_labels)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
-        let scalar = if let Ok(position) = key.extract::<i64>() {
-            self.inner
+        if let Ok(position) = key.extract::<i64>() {
+            let scalar = self
+                .inner
                 .iat(position)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?
-        } else if let Ok(label) = key.extract::<String>() {
-            self.inner
-                .at(&IndexLabel::Utf8(label.clone()))
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(label))?
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Series index must be an int, str, slice, list, or boolean Series",
-            ));
-        };
-        scalar_to_py(py, &scalar)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            return scalar_to_py(py, &scalar);
+        }
+        // A label (text, a Timestamp): as `.loc` reads it, so date text on a
+        // DatetimeIndex names a period or an instant and a duplicated label
+        // returns every row (a Timestamp raised TypeError).
+        if key.extract::<String>().is_ok() || is_single_loc_label(key) {
+            return series_label_get(py, &self.inner, key);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Series index must be an int, str, slice, list, or boolean Series",
+        ))
     }
 
     // Arithmetic and comparison dunders. `other` may be another Series (index
@@ -20764,21 +20769,10 @@ impl PySeriesLoc {
             );
         }
         if let Some(labels) = loc_label_list(key) {
-            return series(self.inner.loc(&labels?).map_err(loc_key_error)?);
+            let wanted = loc_list_labels(self.inner.index().labels(), labels?);
+            return series(self.inner.loc(&wanted).map_err(loc_key_error)?);
         }
-        let label = py_to_index_label(key)?;
-        match self
-            .inner
-            .index()
-            .labels()
-            .iter()
-            .filter(|l| **l == label)
-            .count()
-        {
-            0 => Err(loc_key_error(format!("{label:?}"))),
-            1 => scalar_to_py(py, &self.inner.at(&label).map_err(loc_key_error)?),
-            _ => series(self.inner.loc(&[label]).map_err(loc_key_error)?),
-        }
+        series_label_get(py, &self.inner, key)
     }
 }
 
@@ -20832,6 +20826,8 @@ impl PySeriesAt {
     ) -> PyResult<()> {
         let label = py_to_index_label(key)?;
         write_series_through(py, &self.parent, &mut self.inner, |series| {
+            // Date text on a DatetimeIndex is its instant.
+            let label = fp_frame::datetime_list_label(series.index().labels(), &label);
             let target = match series
                 .index()
                 .labels()
@@ -20846,7 +20842,9 @@ impl PySeriesAt {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let label = py_to_index_label(key)?;
+        // Date text on a DatetimeIndex is its instant.
+        let label =
+            fp_frame::datetime_list_label(self.inner.index().labels(), &py_to_index_label(key)?);
         let scalar = self
             .inner
             .at(&label)
@@ -31398,6 +31396,84 @@ fn loc_label_list(key: &Bound<'_, PyAny>) -> Option<PyResult<Vec<IndexLabel>>> {
     Some(list.iter().map(|item| py_to_index_label(&item)).collect())
 }
 
+/// One `.loc` / `[]` label as pandas' `get_loc` reads it against `labels`.
+enum LocKey {
+    /// The label itself (date text on a DatetimeIndex: its instant).
+    Label(IndexLabel),
+    /// Date text coarser than the DatetimeIndex's resolution: the rows of the
+    /// period it names (see `fp_frame::datetime_text_key`).
+    Rows(Vec<usize>),
+}
+
+/// `label` read against `labels`: date text on a DatetimeIndex is the rows of
+/// the period it names or its exact instant; it was compared as text, so
+/// `ts.loc['2024-02-01']` / `ts['2024-02']` raised KeyError and
+/// `s['2024-02'] = 0` appended a row. A sorted index wholly outside the
+/// period is pandas' KeyError.
+fn loc_key(labels: &[IndexLabel], label: IndexLabel) -> PyResult<LocKey> {
+    let IndexLabel::Utf8(text) = &label else {
+        return Ok(LocKey::Label(label));
+    };
+    Ok(
+        match fp_frame::datetime_text_key(labels, text).map_err(|_| loc_key_error(text))? {
+            Some(fp_frame::DatetimeTextKey::Rows(rows)) => LocKey::Rows(rows),
+            Some(fp_frame::DatetimeTextKey::Instant(instant)) => LocKey::Label(instant),
+            None => LocKey::Label(label),
+        },
+    )
+}
+
+/// A list key's labels on `labels`: date text on a DatetimeIndex is its
+/// instant (pandas converts the list with `to_datetime`).
+fn loc_list_labels(labels: &[IndexLabel], wanted: Vec<IndexLabel>) -> Vec<IndexLabel> {
+    wanted
+        .iter()
+        .map(|label| fp_frame::datetime_list_label(labels, label))
+        .collect()
+}
+
+/// Row positions as `iloc` takes them.
+fn iloc_positions(rows: &[usize]) -> Vec<i64> {
+    rows.iter()
+        .map(|&row| i64::try_from(row).unwrap_or(i64::MAX))
+        .collect()
+}
+
+/// `s.loc[key]` / `s[key]` for one label: a label held once is its value,
+/// one held several times (or date text naming a period) every row carrying
+/// it; a missing one is pandas' KeyError.
+fn series_label_get(
+    py: Python<'_>,
+    series: &Series,
+    key: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let wrap =
+        |s: Series| -> PyResult<Py<PyAny>> { Ok(Py::new(py, PySeries { inner: s })?.into_any()) };
+    let label = match loc_key(series.index().labels(), py_to_index_label(key)?)? {
+        LocKey::Rows(rows) => {
+            return wrap(
+                series
+                    .iloc(&iloc_positions(&rows))
+                    .map_err(frame_error_to_py)?,
+            );
+        }
+        LocKey::Label(label) => label,
+    };
+    match series
+        .index()
+        .labels()
+        .iter()
+        .filter(|l| **l == label)
+        .count()
+    {
+        0 => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+            key.clone().unbind(),
+        )),
+        1 => scalar_to_py(py, &series.at(&label).map_err(loc_key_error)?),
+        _ => wrap(series.loc(&[label]).map_err(loc_key_error)?),
+    }
+}
+
 /// A `.loc` label slice as the inclusive label window it reads (low bound,
 /// high bound) and its step. pandas reads a negative step from `start` BACK
 /// to `stop`, so that window is `stop..=start` taken in reverse (it raised
@@ -31505,9 +31581,18 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
         }
     }
     if let Some(labels) = loc_label_list(key) {
-        return df.loc(&labels?).map(LocRows::frame).map_err(loc_key_error);
+        let wanted = loc_list_labels(df.index().labels(), labels?);
+        return df.loc(&wanted).map(LocRows::frame).map_err(loc_key_error);
     }
-    let label = py_to_index_label(key)?;
+    let label = match loc_key(df.index().labels(), py_to_index_label(key)?)? {
+        LocKey::Rows(rows) => {
+            return df
+                .iloc(&iloc_positions(&rows))
+                .map(LocRows::frame)
+                .map_err(frame_error_to_py);
+        }
+        LocKey::Label(label) => label,
+    };
     match df.index().labels().iter().filter(|l| **l == label).count() {
         0 => Err(loc_key_error(format!("{label:?}"))),
         1 => Ok(LocRows::Label(label)),
@@ -31592,12 +31677,15 @@ fn resolve_loc_row_positions(
     }
     if let Some(wanted) = loc_label_list(key) {
         let mut positions = Vec::new();
-        for label in wanted? {
+        for label in loc_list_labels(labels, wanted?) {
             positions.extend(positions_of(&label)?);
         }
         return Ok(positions);
     }
-    positions_of(&py_to_index_label(key)?)
+    match loc_key(labels, py_to_index_label(key)?)? {
+        LocKey::Rows(rows) => Ok(rows),
+        LocKey::Label(label) => positions_of(&label),
+    }
 }
 
 /// `df.loc[rows, cols] = value` / `df.loc[rows] = value` as pandas writes it:
@@ -31884,11 +31972,8 @@ fn resolve_iloc_positions(len: usize, key: &Bound<'_, PyAny>) -> PyResult<Vec<us
 /// label list, an inclusive label slice or a boolean mask.
 fn series_loc_target(series: &Series, key: &Bound<'_, PyAny>) -> PyResult<RowTarget> {
     let labels = series.index().labels();
-    if is_single_loc_label(key) {
-        let label = py_to_index_label(key)?;
-        if !labels.contains(&label) {
-            return Ok(RowTarget::Append(label));
-        }
+    if let Some(label) = loc_new_label(labels, key)? {
+        return Ok(RowTarget::Append(label));
     }
     resolve_loc_row_positions(
         labels,
@@ -31953,6 +32038,24 @@ fn series_write(
             Series::new(series.name(), index, column).map_err(frame_error_to_py)
         }
     }
+}
+
+/// The label a one-label `.loc` write appends (setting with enlargement),
+/// None when `key` names rows the index holds. Date text on a DatetimeIndex
+/// is resolved first: a period names its rows, and a missing instant, or a
+/// period wholly outside a sorted index, is that instant (text was appended
+/// as a text label, so `s['2024-02'] = 0` added a row).
+fn loc_new_label(labels: &[IndexLabel], key: &Bound<'_, PyAny>) -> PyResult<Option<IndexLabel>> {
+    if !is_single_loc_label(key) {
+        return Ok(None);
+    }
+    let label = py_to_index_label(key)?;
+    let label = match loc_key(labels, label.clone()) {
+        Ok(LocKey::Rows(_)) => return Ok(None),
+        Ok(LocKey::Label(label)) => label,
+        Err(_) => fp_frame::datetime_list_label(labels, &label),
+    };
+    Ok((!labels.contains(&label)).then_some(label))
 }
 
 /// Whether a `.loc` row indexer is one label (a string, a number, a
@@ -32189,11 +32292,7 @@ fn frame_loc_write(
             frame.column_names().into_iter().cloned().collect(),
         )
     };
-    match is_single_loc_label(&rows)
-        .then(|| py_to_index_label(&rows))
-        .transpose()?
-        .filter(|label| !frame.index().labels().contains(label))
-    {
+    match loc_new_label(frame.index().labels(), &rows)? {
         Some(label) => {
             let whole_row = key.cast::<PyTuple>().is_err();
             loc_enlarge(py, frame, label, &columns, whole_row, value)
@@ -32957,7 +33056,11 @@ impl PyDataFrameAt {
         let row_key = tuple.get_item(0)?;
         let col_key = tuple.get_item(1)?;
         let col_name = col_key.extract::<String>()?;
-        let label = py_to_index_label(&row_key)?;
+        // Date text on a DatetimeIndex is its instant.
+        let label = fp_frame::datetime_list_label(
+            self.inner.index().labels(),
+            &py_to_index_label(&row_key)?,
+        );
         let scalar = self
             .inner
             .at(&label, &col_name)

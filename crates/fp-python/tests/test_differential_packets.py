@@ -7429,3 +7429,89 @@ def _category_group_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_CATEGORY_GROUP_CASES))
 def test_categorical_dtype_order_groupby_iteration_and_named_size_match_pandas(case: str) -> None:
     assert _category_group_outcome(fpd, case) == _category_group_outcome(pd, case), case
+
+
+def _daily(m: Any) -> Any:
+    return m.Series(range(6), index=m.date_range("2024-01-30", periods=6, freq="D"))
+
+
+def _hourly(m: Any) -> Any:
+    return m.Series(range(4), index=m.date_range("2024-01-01 22:00", periods=4, freq="h"))
+
+
+def _daily_frame(m: Any) -> Any:
+    return m.DataFrame({"v": range(6), "w": range(6)}, index=m.date_range("2024-01-30", periods=6, freq="D"))
+
+
+def _written(obj: Any, write: Any) -> Any:
+    write(obj)
+    return _shaped(obj)
+
+
+# Date text on a DatetimeIndex was compared as text: ts.loc['2024-02-01'],
+# ts['2024-02'] (partial-string indexing), df.loc['2024-02', 'w'] and
+# ts.at['2024-02-01'] raised KeyError, s['2024-02'] = 0 appended a row
+# labeled '2024-02', truncate(before='2024-02-01') kept every row (or none),
+# and first('3D') / last('2D') kept one row / every row; ts[Timestamp]
+# raised TypeError.
+_DATE_TEXT_CASES = {
+    "month loc": lambda m: _shaped(_daily(m).loc["2024-02"]),
+    "month getitem": lambda m: _shaped(_daily(m)["2024-02"]),
+    "year": lambda m: _shaped(_daily(m)["2024"]),
+    "day exact": lambda m: _number(_daily(m).loc["2024-02-01"]),
+    "day on hourly": lambda m: _shaped(_hourly(m).loc["2024-01-02"]),
+    "hour on hourly": lambda m: _number(_hourly(m).loc["2024-01-02 00"]),
+    "non-monotonic month": lambda m: _shaped(m.Series([1, 2, 3], index=m.to_datetime(["2024-02-03", "2024-01-05", "2024-02-01"])).loc["2024-02"]),
+    "frame month": lambda m: _shaped(_daily_frame(m).loc["2024-02"]),
+    "frame month column": lambda m: _shaped(_daily_frame(m).loc["2024-02", "w"]),
+    # The row's name is left out: Series names are text in the binding, so
+    # pandas' Timestamp name comes back as text
+    # (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.32).
+    "frame day row": lambda m: (_daily_frame(m).loc["2024-02-01"].tolist(), [str(i) for i in _daily_frame(m).loc["2024-02-01"].index]),
+    "list of dates": lambda m: _shaped(_daily(m).loc[["2024-02-01", "2024-01-30"]]),
+    "timestamp key": lambda m: _number(_daily(m)[m.Timestamp("2024-02-02")]),
+    "at text": lambda m: _number(_daily(m).at["2024-02-01"]),
+    "frame at text": lambda m: _number(_daily_frame(m).at["2024-02-02", "v"]),
+    "set month": lambda m: _written(_daily(m), lambda s: s.__setitem__("2024-02", 0)),
+    "frame loc set month": lambda m: _written(_daily_frame(m), lambda d: d.loc.__setitem__(("2024-02", "v"), 0)),
+    "set out of range month appends": lambda m: _written(_daily(m), lambda s: s.__setitem__("2025-02", 1)),
+    "loc set new day appends": lambda m: _written(_daily(m), lambda s: s.loc.__setitem__("2024-03-01", 9)),
+    "duplicated text label": lambda m: _shaped(m.Series([1, 2, 3], index=["a", "b", "a"])["a"]),
+    "truncate text": lambda m: _shaped(_daily(m).truncate(before="2024-01-31", after="2024-02-02")),
+    "truncate month bound": lambda m: _shaped(_daily(m).truncate(after="2024-01")),
+    "frame truncate": lambda m: _shaped(_daily_frame(m).truncate(before="2024-02-03")),
+    "truncate decreasing": lambda m: _shaped(m.Series(range(3), index=m.to_datetime(["2024-01-03", "2024-01-02", "2024-01-01"])).truncate(before="2024-01-02")),
+    "first 3D": lambda m: _shaped(_daily(m).first("3D")),
+    "first 1M": lambda m: _shaped(_daily(m).first("1M")),
+    "first 36h": lambda m: _shaped(_daily(m).first("36h")),
+    "first ME on anchor": lambda m: _shaped(m.Series(range(4), index=m.date_range("2024-01-31", periods=4, freq="D")).first("1ME")),
+    "first 2h hourly": lambda m: _shaped(_hourly(m).first("2h")),
+    "last 2D": lambda m: _shaped(_daily(m).last("2D")),
+    "last 1M": lambda m: _shaped(_daily(m).last("1M")),
+    "last 1W": lambda m: _shaped(_daily(m).last("1W")),
+    "frame first 2D": lambda m: _shaped(_daily_frame(m).first("2D")),
+    # NEGATIVES: a period wholly outside a sorted index and a missing day are
+    # KeyError; truncate of an unsorted index or with before > after is a
+    # ValueError; a missing text label on a text index stays a KeyError.
+    "missing month": lambda m: _daily(m).loc["2025-02"],
+    "missing day": lambda m: _daily(m).loc["2024-03-01"],
+    "truncate unsorted": lambda m: m.Series(range(3), index=m.to_datetime(["2024-01-03", "2024-01-01", "2024-01-02"])).truncate(before="2024-01-02"),
+    "truncate inverted": lambda m: _daily(m).truncate(before="2024-02-03", after="2024-02-01"),
+    "missing text label": lambda m: m.Series([1, 2], index=["a", "b"])["z"],
+}
+
+
+def _date_text_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            # pandas deprecates first / last (FutureWarning).
+            warnings.simplefilter("ignore", FutureWarning)
+            return _DATE_TEXT_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DATE_TEXT_CASES))
+def test_date_text_keys_truncate_and_first_last_on_a_datetime_index_match_pandas(case: str) -> None:
+    assert _date_text_outcome(fpd, case) == _date_text_outcome(pd, case), case

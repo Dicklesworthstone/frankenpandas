@@ -4700,6 +4700,133 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
     Ok((count, unit.to_ascii_uppercase()))
 }
 
+/// The row window `truncate(before, after)` keeps, as pandas: on a datetime
+/// index a text bound is its instant (`to_datetime`, so "2024-01" is
+/// 2024-01-01; text was compared against the datetimes, keeping every row or
+/// none); the index must be sorted (a decreasing one keeps the same labels in
+/// its own order); and `before` may not come after `after`.
+fn truncate_range(
+    labels: &[IndexLabel],
+    before: Option<&IndexLabel>,
+    after: Option<&IndexLabel>,
+) -> Result<(usize, usize), FrameError> {
+    let before = before.map(|bound| datetime_list_label(labels, bound));
+    let after = after.map(|bound| datetime_list_label(labels, bound));
+    if let (Some(low), Some(high)) = (&before, &after)
+        && low > high
+    {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "Truncate: {high:?} must be after {low:?}"
+        )));
+    }
+    let above_low = |label: &IndexLabel| before.as_ref().is_none_or(|low| label >= low);
+    let below_high = |label: &IndexLabel| after.as_ref().is_none_or(|high| label <= high);
+    let (start, end) = if labels.windows(2).all(|pair| pair[0] <= pair[1]) {
+        (
+            labels.partition_point(|label| !above_low(label)),
+            labels.partition_point(|label| below_high(label)),
+        )
+    } else if labels.windows(2).all(|pair| pair[0] >= pair[1]) {
+        (
+            labels.partition_point(|label| !below_high(label)),
+            labels.partition_point(|label| above_low(label)),
+        )
+    } else {
+        return Err(FrameError::CompatibilityRejected(
+            "truncate requires a sorted index".to_owned(),
+        ));
+    };
+    Ok((start, end.max(start)))
+}
+
+/// An offset as pandas 2.2's `to_offset` reads it for `first` / `last`: the
+/// count, the unit (the deprecated 'M' / 'Q' / 'Y' are the period ends ME /
+/// QE / YE; 'W' ends on Sunday) and, for a fixed span ('D', 'h', 'min',
+/// 's'), its nanoseconds.
+fn datetime_offset(offset: &str) -> Result<(i32, char, Option<i64>), FrameError> {
+    let (count, unit) = parse_offset_str(offset)?;
+    let span = match unit {
+        'D' => Some(NANOS_PER_DAY),
+        'H' => Some(3_600_000_000_000),
+        'T' | 'i' => Some(60_000_000_000),
+        'S' => Some(1_000_000_000),
+        _ => None,
+    };
+    let unit = match unit {
+        'M' => 'e',
+        'Q' => 'q',
+        'Y' | 'A' => 'y',
+        other => other,
+    };
+    Ok((count, unit, span))
+}
+
+/// `ns` moved by `count` of `offset`'s units, keeping its time of day (the
+/// anchored units step the date; see `shift_date_string`).
+fn shift_datetime(ns: i64, count: i32, unit: char, span: Option<i64>) -> Result<i64, FrameError> {
+    let out_of_range =
+        || FrameError::CompatibilityRejected(format!("offset {count}{unit} is out of range"));
+    if let Some(span) = span {
+        return i64::from(count)
+            .checked_mul(span)
+            .and_then(|delta| ns.checked_add(delta))
+            .ok_or_else(out_of_range);
+    }
+    let midnight = ns.div_euclid(NANOS_PER_DAY) * NANOS_PER_DAY;
+    let shifted = shift_date_string(&format_datetime_ns(midnight), count, unit)?;
+    parse_datetime64_nanos(&shifted)?
+        .checked_add(ns - midnight)
+        .ok_or_else(out_of_range)
+}
+
+/// How many leading rows `first(offset)` keeps on a datetime index, as
+/// pandas: a fixed span keeps the labels before `first + span`; an anchored
+/// offset keeps those up to `first + offset` inclusive, counted from the
+/// period's own start when the first label sits on the anchor (`first('1ME')`
+/// from January 31 keeps January 31 only). None for any other index. The
+/// text cutoff was compared against the datetimes, keeping one row.
+fn datetime_first_len(labels: &[IndexLabel], offset: &str) -> Result<Option<usize>, FrameError> {
+    let Some(&IndexLabel::Datetime64(start)) = labels.first() else {
+        return Ok(None);
+    };
+    if !labels
+        .iter()
+        .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+    {
+        return Ok(None);
+    }
+    let (count, unit, span) = datetime_offset(offset)?;
+    if span.is_some() {
+        let end = IndexLabel::Datetime64(shift_datetime(start, count, unit, span)?);
+        return Ok(Some(labels.partition_point(|label| *label < end)));
+    }
+    let back = shift_datetime(start, -1, unit, None)?;
+    let end = if shift_datetime(back, 1, unit, None)? == start {
+        shift_datetime(back, count, unit, None)?
+    } else {
+        shift_datetime(start, count, unit, None)?
+    };
+    let end = IndexLabel::Datetime64(end);
+    Ok(Some(labels.partition_point(|label| *label <= end)))
+}
+
+/// Where `last(offset)` starts on a datetime index, as pandas: the rows
+/// after `last - offset`. None for any other index.
+fn datetime_last_start(labels: &[IndexLabel], offset: &str) -> Result<Option<usize>, FrameError> {
+    let Some(&IndexLabel::Datetime64(end)) = labels.last() else {
+        return Ok(None);
+    };
+    if !labels
+        .iter()
+        .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+    {
+        return Ok(None);
+    }
+    let (count, unit, span) = datetime_offset(offset)?;
+    let start = IndexLabel::Datetime64(shift_datetime(end, -count, unit, span)?);
+    Ok(Some(labels.partition_point(|label| *label <= start)))
+}
+
 /// Add an offset to a date-like IndexLabel, returning the cutoff label.
 fn add_offset_to_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, FrameError> {
     let date_str = match label {
@@ -5959,7 +6086,16 @@ fn partial_date_bounds(text: &str) -> Result<(i64, i64), FrameError> {
         };
         return Ok((first_of(year, month)?, first_of(next_year, next_month)? - 1));
     }
-    let first = parse_datetime64_nanos(text)?;
+    // An hour alone ("2024-01-02 00") names that hour; the parser reads
+    // clock times only.
+    let first = match text.split_once([' ', 'T']) {
+        Some((date, hour))
+            if (1..=2).contains(&hour.len()) && hour.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            parse_datetime64_nanos(&format!("{date} {hour}:00"))?
+        }
+        _ => parse_datetime64_nanos(text)?,
+    };
     let span = match text.split_once([' ', 'T']).map(|(_, time)| time) {
         None => 86_400 * SECOND,
         Some(time) if time.contains('.') => 1,
@@ -5970,6 +6106,95 @@ fn partial_date_bounds(text: &str) -> Result<(i64, i64), FrameError> {
         },
     };
     Ok((first, first + span - 1))
+}
+
+/// How pandas' `.loc` / `[]` reads a text key on a datetime index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatetimeTextKey {
+    /// At or finer than the index's own resolution: that instant, looked up
+    /// exactly ("2024-02-01" on a daily index).
+    Instant(IndexLabel),
+    /// Coarser than the index's resolution: every row inside the period the
+    /// text names, in index order ("2024-02" on a daily index, "2024-01-02"
+    /// on an hourly one) - a Series or frame even when one row matches.
+    Rows(Vec<usize>),
+}
+
+/// `text` against a datetime index as pandas' `DatetimeIndex.get_loc` reads
+/// it (see [`DatetimeTextKey`]); None when `labels` are not all datetimes or
+/// `text` is not a date. The index's resolution is the coarsest unit (a day
+/// at most) every instant is a multiple of. An `Err` is pandas' KeyError: a
+/// sorted index lying wholly before or after the period. Text was compared
+/// as text, so `ts.loc['2024-02-01']` and `ts.loc['2024-02']` raised.
+pub fn datetime_text_key(
+    labels: &[IndexLabel],
+    text: &str,
+) -> Result<Option<DatetimeTextKey>, FrameError> {
+    let Some(nanos) = labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Datetime64(ns) => Some(*ns),
+            _ => None,
+        })
+        .collect::<Option<Vec<i64>>>()
+        .filter(|nanos| !nanos.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Ok((first, last)) = partial_date_bounds(text) else {
+        return Ok(None);
+    };
+    let instants: Vec<i64> = nanos
+        .iter()
+        .copied()
+        .filter(|ns| *ns != Timedelta::NAT)
+        .collect();
+    let resolution = [
+        NANOS_PER_DAY,
+        3_600_000_000_000,
+        60_000_000_000,
+        1_000_000_000,
+        1_000_000,
+        1_000,
+    ]
+    .into_iter()
+    .find(|unit| instants.iter().all(|ns| ns.rem_euclid(*unit) == 0))
+    .unwrap_or(1);
+    if last - first < resolution {
+        let instant = IndexLabel::Datetime64(first);
+        return Ok(Some(DatetimeTextKey::Instant(instant)));
+    }
+    if let (Some(&low), Some(&high)) = (instants.first(), instants.last())
+        && instants.windows(2).all(|pair| pair[0] <= pair[1])
+        && (last < low || first > high)
+    {
+        return Err(FrameError::CompatibilityRejected(format!("'{text}'")));
+    }
+    Ok(Some(DatetimeTextKey::Rows(
+        nanos
+            .iter()
+            .enumerate()
+            .filter(|(_, ns)| (first..=last).contains(*ns))
+            .map(|(position, _)| position)
+            .collect(),
+    )))
+}
+
+/// A label a list key names on a datetime index: date text is its instant
+/// (pandas converts the list with `to_datetime`, so "2024-02" is
+/// 2024-02-01); every other label, or any label on another index, is itself.
+pub fn datetime_list_label(labels: &[IndexLabel], label: &IndexLabel) -> IndexLabel {
+    match label {
+        IndexLabel::Utf8(text)
+            if !labels.is_empty()
+                && labels
+                    .iter()
+                    .all(|have| matches!(have, IndexLabel::Datetime64(_))) =>
+        {
+            parse_datetime64_nanos(text).map_or_else(|_| label.clone(), IndexLabel::Datetime64)
+        }
+        _ => label.clone(),
+    }
 }
 
 /// The inclusive row positions of `.loc[start:stop]` over `labels`, as pandas
@@ -27745,26 +27970,10 @@ impl Series {
         before: Option<&IndexLabel>,
         after: Option<&IndexLabel>,
     ) -> Result<Self, FrameError> {
-        let labels = self.index.labels();
-        let start = match before {
-            Some(b) => labels.iter().position(|l| l >= b).unwrap_or(labels.len()),
-            None => 0,
-        };
-        let end = match after {
-            Some(a) => labels
-                .iter()
-                .rposition(|l| l <= a)
-                .map(|i| i + 1)
-                .unwrap_or(0),
-            None => labels.len(),
-        };
-        // Per br-frankenpandas-5cc2t: preserve index name through truncate.
-        if start >= end {
-            let index = Index::new(Vec::new()).rename_index(self.index.name());
-            let column = Column::from_values(Vec::new())?;
-            return Self::new(self.name.clone(), index, column);
-        }
-        // perf (br-frankenpandas-8dmcl): zero-copy contiguous slice (typed/affine).
+        let (start, end) = truncate_range(self.index.labels(), before, after)?;
+        // perf (br-frankenpandas-8dmcl): zero-copy contiguous slice (typed/affine);
+        // an empty window keeps the dtype and (br-frankenpandas-5cc2t) the
+        // index name.
         let take = end - start;
         let index = self
             .index
@@ -27833,13 +28042,18 @@ impl Series {
                 "first_offset: Series reports non-empty but index has no first label".to_owned(),
             )
         })?;
-        let cutoff = add_offset_to_label(first_label, offset)?;
         let labels = self.index.labels();
-        let end = labels
-            .iter()
-            .rposition(|l| l <= &cutoff)
-            .map(|i| i + 1)
-            .unwrap_or(1);
+        let end = match datetime_first_len(labels, offset)? {
+            Some(end) => end,
+            None => {
+                let cutoff = add_offset_to_label(first_label, offset)?;
+                labels
+                    .iter()
+                    .rposition(|l| l <= &cutoff)
+                    .map(|i| i + 1)
+                    .unwrap_or(1)
+            }
+        };
         // perf (br-frankenpandas-8dmcl): zero-copy contiguous prefix slice.
         let index = self.index.slice(0, end).rename_index(self.index.name());
         let column = self.column.slice(0, end)?;
@@ -27862,12 +28076,17 @@ impl Series {
                 "last_offset: Series reports non-empty but index has no last label".to_owned(),
             )
         })?;
-        let cutoff = sub_offset_from_label(last_label, offset)?;
         let labels = self.index.labels();
-        let start = labels
-            .iter()
-            .position(|l| l >= &cutoff)
-            .unwrap_or(labels.len().saturating_sub(1));
+        let start = match datetime_last_start(labels, offset)? {
+            Some(start) => start,
+            None => {
+                let cutoff = sub_offset_from_label(last_label, offset)?;
+                labels
+                    .iter()
+                    .position(|l| l >= &cutoff)
+                    .unwrap_or(labels.len().saturating_sub(1))
+            }
+        };
         // perf (br-frankenpandas-5ww2v): zero-copy contiguous suffix slice.
         let take = self.len() - start;
         let index = self
@@ -94166,40 +94385,11 @@ impl DataFrame {
         before: Option<&IndexLabel>,
         after: Option<&IndexLabel>,
     ) -> Result<Self, FrameError> {
-        let labels = self.index.labels();
-        let start = match before {
-            Some(b) => labels.iter().position(|l| l >= b).unwrap_or(labels.len()),
-            None => 0,
-        };
-        let end = match after {
-            Some(a) => labels
-                .iter()
-                .rposition(|l| l <= a)
-                .map(|i| i + 1)
-                .unwrap_or(0),
-            None => labels.len(),
-        };
-        if start >= end {
-            let empty_cols: BTreeMap<String, Column> = self
-                .column_order
-                .iter()
-                .map(|name| {
-                    (
-                        name.clone(),
-                        Column::from_values(Vec::new()).expect("empty column"),
-                    )
-                })
-                .collect();
-            // Per br-frankenpandas-oygjj: preserve index name through
-            // DataFrame::truncate (sister to br-5cc2t Series::truncate).
-            return Self::new_with_column_order(
-                Index::new(Vec::new()).rename_index(self.index.name()),
-                empty_cols,
-                self.column_order.clone(),
-            );
-        }
+        let (start, end) = truncate_range(self.index.labels(), before, after)?;
         // perf (br-frankenpandas-5ww2v): zero-copy contiguous slice per column +
-        // index (start..end is a contiguous range over natural index order).
+        // index (start..end is a contiguous range over natural index order); an
+        // empty window keeps the dtypes and (br-frankenpandas-oygjj) the index
+        // name.
         let take = end - start;
         let mut columns = BTreeMap::new();
         for name in &self.column_order {
@@ -94236,14 +94426,19 @@ impl DataFrame {
                 "first_offset: DataFrame reports non-empty but index has no first label".to_owned(),
             )
         })?;
-        let cutoff = add_offset_to_label(first_label, offset)?;
-        // Select rows where label <= cutoff
         let labels = self.index.labels();
-        let end = labels
-            .iter()
-            .rposition(|l| l <= &cutoff)
-            .map(|i| i + 1)
-            .unwrap_or(1); // at least include the first row
+        let end = match datetime_first_len(labels, offset)? {
+            Some(end) => end,
+            None => {
+                // Select rows where label <= cutoff
+                let cutoff = add_offset_to_label(first_label, offset)?;
+                labels
+                    .iter()
+                    .rposition(|l| l <= &cutoff)
+                    .map(|i| i + 1)
+                    .unwrap_or(1) // at least include the first row
+            }
+        };
         self.iloc_rows(0, end)
     }
 
@@ -94274,13 +94469,18 @@ impl DataFrame {
                 "last_offset: DataFrame reports non-empty but index has no last label".to_owned(),
             )
         })?;
-        let cutoff = sub_offset_from_label(last_label, offset)?;
-        // Select rows where label >= cutoff
         let labels = self.index.labels();
-        let start = labels
-            .iter()
-            .position(|l| l >= &cutoff)
-            .unwrap_or(labels.len().saturating_sub(1));
+        let start = match datetime_last_start(labels, offset)? {
+            Some(start) => start,
+            None => {
+                // Select rows where label >= cutoff
+                let cutoff = sub_offset_from_label(last_label, offset)?;
+                labels
+                    .iter()
+                    .position(|l| l >= &cutoff)
+                    .unwrap_or(labels.len().saturating_sub(1))
+            }
+        };
         self.iloc_rows(start, labels.len())
     }
 
@@ -117196,6 +117396,92 @@ mod tests {
             y.rolling(3, None).cov(&x).unwrap().column().dtype(),
             DType::Float64
         );
+    }
+
+    /// 2024-01-30 .. 2024-02-04, one label a day (as nanoseconds).
+    fn daily_labels() -> Vec<IndexLabel> {
+        use crate::NANOS_PER_DAY;
+        (19_752..19_758_i64)
+            .map(|day| IndexLabel::Datetime64(day * NANOS_PER_DAY))
+            .collect()
+    }
+
+    #[test]
+    fn date_text_keys_follow_the_index_resolution() {
+        use crate::{DatetimeTextKey, NANOS_PER_DAY, datetime_list_label, datetime_text_key};
+        let daily = daily_labels();
+        // pandas 2.2.3: ts.loc['2024-02'] -> the four February rows;
+        // ts.loc['2024-02-01'] -> that one instant.
+        assert_eq!(
+            datetime_text_key(&daily, "2024-02").unwrap(),
+            Some(DatetimeTextKey::Rows(vec![2, 3, 4, 5]))
+        );
+        assert_eq!(
+            datetime_text_key(&daily, "2024-02-01").unwrap(),
+            Some(DatetimeTextKey::Instant(daily[2].clone()))
+        );
+        // On an hourly index a day is a period and an hour an instant.
+        let hour = 3_600_000_000_000_i64;
+        let start = 19_723 * NANOS_PER_DAY + 22 * hour;
+        let hourly: Vec<IndexLabel> = (0..4)
+            .map(|step| IndexLabel::Datetime64(start + step * hour))
+            .collect();
+        assert_eq!(
+            datetime_text_key(&hourly, "2024-01-02").unwrap(),
+            Some(DatetimeTextKey::Rows(vec![2, 3]))
+        );
+        assert_eq!(
+            datetime_text_key(&hourly, "2024-01-02 00").unwrap(),
+            Some(DatetimeTextKey::Instant(hourly[2].clone()))
+        );
+        // A list key's text is its instant.
+        assert_eq!(
+            datetime_list_label(&daily, &IndexLabel::Utf8("2024-01-31".into())),
+            daily[1]
+        );
+        // NEGATIVES: a period wholly outside a sorted index is pandas'
+        // KeyError; text that is not a date, or any text on a non-datetime
+        // index, is left alone.
+        assert!(datetime_text_key(&daily, "2025-02").is_err());
+        assert_eq!(datetime_text_key(&daily, "abc").unwrap(), None);
+        let text_index = vec![IndexLabel::Utf8("2024-02".into())];
+        assert_eq!(datetime_text_key(&text_index, "2024-02").unwrap(), None);
+    }
+
+    #[test]
+    fn truncate_first_and_last_read_a_datetime_index() {
+        let s = Series::from_values("v", daily_labels(), (0..6_i64).map(Scalar::Int64).collect())
+            .unwrap();
+        let kept = |out: Series| -> Vec<Scalar> { out.values().to_vec() };
+        let ints =
+            |values: &[i64]| -> Vec<Scalar> { values.iter().copied().map(Scalar::Int64).collect() };
+        // pandas 2.2.3: truncate('2024-01-31', '2024-02-02') -> rows 1..=3.
+        let text = |t: &str| IndexLabel::Utf8(t.into());
+        assert_eq!(
+            kept(
+                s.truncate(Some(&text("2024-01-31")), Some(&text("2024-02-02")))
+                    .unwrap()
+            ),
+            ints(&[1, 2, 3])
+        );
+        // first('3D') -> 3 rows, first('1M') -> through January 31,
+        // last('2D') -> 2 rows, last('1M') -> February.
+        assert_eq!(kept(s.first_offset("3D").unwrap()), ints(&[0, 1, 2]));
+        assert_eq!(kept(s.first_offset("1M").unwrap()), ints(&[0, 1]));
+        assert_eq!(kept(s.last_offset("2D").unwrap()), ints(&[4, 5]));
+        assert_eq!(kept(s.last_offset("1M").unwrap()), ints(&[2, 3, 4, 5]));
+        let frame = DataFrame::from_series(vec![s.clone()]).unwrap();
+        assert_eq!(frame.first_offset("2D").unwrap().len(), 2);
+        // NEGATIVES: before > after, and an unsorted index, are errors.
+        assert!(
+            s.truncate(Some(&text("2024-02-03")), Some(&text("2024-02-01")))
+                .is_err()
+        );
+        let mut shuffled = daily_labels();
+        shuffled.swap(0, 3);
+        let unsorted =
+            Series::from_values("v", shuffled, (0..6_i64).map(Scalar::Int64).collect()).unwrap();
+        assert!(unsorted.truncate(Some(&text("2024-02-01")), None).is_err());
     }
 
     #[test]
