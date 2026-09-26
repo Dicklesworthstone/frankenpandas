@@ -550,11 +550,24 @@ fn arb_truncate_bounds(
 ) -> impl Strategy<Value = (Option<IndexLabel>, Option<IndexLabel>)> {
     let low = min_label.saturating_sub(2);
     let high = max_label.saturating_add(2);
+    // pandas raises "Truncate: {after} must be after {before}" for inverted
+    // bounds (prop_truncate_inverted_bounds_raise checks that), so each
+    // generated pair is ordered.
     (
         proptest::option::of(low..=high),
         proptest::option::of(low..=high),
     )
+        .prop_map(|(before, after)| match (before, after) {
+            (Some(before), Some(after)) if before > after => (Some(after), Some(before)),
+            other => other,
+        })
         .prop_map(|(before, after)| (before.map(IndexLabel::Int64), after.map(IndexLabel::Int64)))
+}
+
+/// Whether merged truncate bounds are inverted - two disjoint windows, whose
+/// direct truncate pandas refuses while the nested one is empty.
+fn truncate_bounds_inverted(before: &Option<IndexLabel>, after: &Option<IndexLabel>) -> bool {
+    matches!((before, after), (Some(before), Some(after)) if before > after)
 }
 
 fn arb_sorted_int_series(name: &'static str, len: usize) -> impl Strategy<Value = Series> {
@@ -5490,6 +5503,16 @@ proptest! {
             .expect("nested Series::truncate() must succeed for sorted int labels");
         let direct_before = merged_truncate_before(&before_a, &before_b);
         let direct_after = merged_truncate_after(&after_a, &after_b);
+        // Disjoint windows: the nested truncate is empty and pandas refuses
+        // the inverted direct bounds.
+        if truncate_bounds_inverted(&direct_before, &direct_after) {
+            prop_assert!(nested.is_empty(), "disjoint nested truncates must be empty");
+            prop_assert!(
+                series.truncate(direct_before.as_ref(), direct_after.as_ref()).is_err(),
+                "inverted truncate bounds must raise, as pandas"
+            );
+            return Ok(());
+        }
         let direct = series
             .truncate(direct_before.as_ref(), direct_after.as_ref())
             .expect("direct composed Series::truncate() must succeed");
@@ -5497,6 +5520,30 @@ proptest! {
             approx_equal_series(&nested, &direct),
             "nested series truncates must equal directly truncating with intersected bounds"
         );
+    }
+
+    /// pandas refuses inverted bounds: "Truncate: {after} must be after
+    /// {before}" (ValueError), whatever the index holds.
+    #[test]
+    fn prop_truncate_inverted_bounds_raise(
+        series in arb_sorted_int_series("truncate", 8),
+        low in -100i64..100,
+        gap in 1i64..20,
+    ) {
+        let before = IndexLabel::Int64(low + gap);
+        let after = IndexLabel::Int64(low);
+        let err = series
+            .truncate(Some(&before), Some(&after))
+            .expect_err("inverted bounds must raise");
+        prop_assert_eq!(
+            err.to_string(),
+            format!(
+                "compatibility gate rejected operation: Truncate: {low} must be after {}",
+                low + gap
+            )
+        );
+        let frame = DataFrame::from_series(vec![series]).expect("frame");
+        prop_assert!(frame.truncate(Some(&before), Some(&after)).is_err());
     }
 
     /// Truncating a DataFrame with open bounds must be identity.
@@ -5542,6 +5589,15 @@ proptest! {
             .expect("nested DataFrame::truncate() must succeed for sorted int labels");
         let direct_before = merged_truncate_before(&before_a, &before_b);
         let direct_after = merged_truncate_after(&after_a, &after_b);
+        // Disjoint windows: see prop_series_truncate_composes.
+        if truncate_bounds_inverted(&direct_before, &direct_after) {
+            prop_assert!(nested.is_empty(), "disjoint nested truncates must be empty");
+            prop_assert!(
+                df.truncate(direct_before.as_ref(), direct_after.as_ref()).is_err(),
+                "inverted truncate bounds must raise, as pandas"
+            );
+            return Ok(());
+        }
         let direct = df
             .truncate(direct_before.as_ref(), direct_after.as_ref())
             .expect("direct composed DataFrame::truncate() must succeed");

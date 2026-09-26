@@ -1737,6 +1737,13 @@ pub struct Index {
         with = "row_multiindex_serde"
     )]
     row_multiindex: Option<Arc<MultiIndex>>,
+    /// The time zone of datetime labels (pandas `DatetimeIndex.tz`): the
+    /// labels stay UTC nanoseconds and the zone is the wall clock they show.
+    /// Only [`Self::with_tz`] attaches it; [`Self::propagate_name`] carries it
+    /// to an index built from these labels while that index still holds
+    /// datetimes (take, slice, sort, unique, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tz: Option<String>,
 }
 
 /// The derived layout, with the row `MultiIndex` levels listed only when an
@@ -1755,6 +1762,9 @@ impl fmt::Debug for Index {
             );
         if let Some(levels) = &self.row_multiindex {
             out.field("row_multiindex", levels);
+        }
+        if let Some(tz) = &self.tz {
+            out.field("tz", tz);
         }
         out.finish()
     }
@@ -1786,9 +1796,11 @@ mod row_multiindex_serde {
     }
 }
 
+/// Equal labels in the same zone: pandas' `equals` is False between an aware
+/// index and a naive one, or two zones, over the same instants.
 impl PartialEq for Index {
     fn eq(&self, other: &Self) -> bool {
-        self.labels_equal(other)
+        self.tz == other.tz && self.labels_equal(other)
     }
 }
 
@@ -1895,6 +1907,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         }
     }
 
@@ -1952,6 +1965,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         };
         let _ = index.duplicate_cache.set(false);
         let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
@@ -1973,6 +1987,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -1994,6 +2009,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         })
     }
 
@@ -2026,6 +2042,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         }
     }
 
@@ -2048,6 +2065,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         })
     }
 
@@ -2067,6 +2085,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         }
     }
 
@@ -2108,6 +2127,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2218,7 +2238,43 @@ impl Index {
     /// Internal: propagate this index's name onto a newly created index.
     fn propagate_name(&self, mut other: Self) -> Self {
         other.name.clone_from(&self.name);
+        if self.tz.is_some() && other.holds_only_datetimes() {
+            other.tz.clone_from(&self.tz);
+        }
         other
+    }
+
+    /// Whether every label is a datetime (NaT included) - what a time zone
+    /// can describe.
+    fn holds_only_datetimes(&self) -> bool {
+        self.labels().iter().all(|label| {
+            matches!(
+                label,
+                IndexLabel::Datetime64(_) | IndexLabel::Null(fp_types::NullKind::NaT)
+            )
+        })
+    }
+
+    /// The time zone of these datetime labels (pandas `DatetimeIndex.tz`),
+    /// None for a naive index.
+    #[must_use]
+    pub fn tz(&self) -> Option<&str> {
+        self.tz.as_deref()
+    }
+
+    /// These labels shown in `tz` (None: naive). The labels are UTC
+    /// nanoseconds either way; a zone attaches only to an index of datetimes.
+    pub fn with_tz(mut self, tz: Option<&str>) -> Result<Self, IndexError> {
+        if let Some(zone) = tz {
+            fp_types::tz_validate(zone)?;
+            if !self.holds_only_datetimes() {
+                return Err(IndexError::InvalidArgument(format!(
+                    "a time zone ('{zone}') describes datetime labels only"
+                )));
+            }
+        }
+        self.tz = tz.map(str::to_owned);
+        Ok(self)
     }
 
     /// Internal: if both indexes share the same name, return it; otherwise None.
@@ -3547,11 +3603,13 @@ impl Index {
         if let Some(labels) = self.sorted_merge_set_op_i64(other, SetMergeKind::Intersection) {
             let mut result = Self::from_i64_values(labels);
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         if let Some(labels) = self.sorted_merge_set_op(other, SetMergeKind::Intersection) {
             let mut result = Self::new(labels);
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         // Typed all-Int64 fast path: inline `i64` membership + dedup instead of
@@ -3562,6 +3620,7 @@ impl Index {
             let mut result =
                 Self::from_i64_values(Self::membership_filter_i64(&a_i64, &b_i64, true));
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         // Datetime64 / Timedelta64 i64-keyed intersection (unsorted temporal
@@ -3576,6 +3635,7 @@ impl Index {
         ) {
             let mut result = Self::from_datetime64(Self::membership_filter_i64(&a_ns, &b_ns, true));
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         if let (Some(a_ns), Some(b_ns)) = (
@@ -3585,6 +3645,7 @@ impl Index {
             let mut result =
                 Self::from_timedelta64(Self::membership_filter_i64(&a_ns, &b_ns, true));
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         // Typed all-Utf8 fast path (Utf8 sibling of membership_filter_i64): both
@@ -3623,6 +3684,7 @@ impl Index {
             }
             let mut result = Self::new(labels);
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         let other_set = other.position_map_first_ref();
@@ -3635,6 +3697,7 @@ impl Index {
             .collect();
         let mut result = Self::new(labels);
         result.name = self.shared_name(other);
+        result.tz = joined_tz(self, other);
         result
     }
 
@@ -3725,6 +3788,7 @@ impl Index {
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
             let mut result = Self::from_i64_values(Self::union_i64(&a_i64, &b_i64));
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         let self_labels = self.labels();
@@ -3753,6 +3817,7 @@ impl Index {
         ) {
             let mut result = Self::from_datetime64(Self::union_i64(&a_ns, &b_ns));
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         if let (Some(a_ns), Some(b_ns)) = (
@@ -3761,6 +3826,7 @@ impl Index {
         ) {
             let mut result = Self::from_timedelta64(Self::union_i64(&a_ns, &b_ns));
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         if other.is_unique() {
@@ -3778,6 +3844,7 @@ impl Index {
             }
             let mut result = Self::new(labels);
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         let mut counts = FxHashMap::<&IndexLabel, (usize, usize)>::default();
@@ -3816,6 +3883,7 @@ impl Index {
         }
         let mut result = Self::new(labels);
         result.name = self.shared_name(other);
+        result.tz = joined_tz(self, other);
         result
     }
 
@@ -3911,6 +3979,7 @@ impl Index {
             labels.extend(Self::membership_filter_i64(&b_i64, &a_i64, false));
             let mut result = Self::from_i64_values(labels);
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         // Datetime64 / Timedelta64 i64-keyed symmetric_difference (unsorted
@@ -3927,6 +3996,7 @@ impl Index {
             labels.extend(Self::membership_filter_i64(&b_ns, &a_ns, false));
             let mut result = Self::from_datetime64(labels);
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         if let (Some(a_ns), Some(b_ns)) = (
@@ -3937,6 +4007,7 @@ impl Index {
             labels.extend(Self::membership_filter_i64(&b_ns, &a_ns, false));
             let mut result = Self::from_timedelta64(labels);
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         // Typed all-Utf8 fast path: the two halves are disjoint, so the shared
@@ -3985,6 +4056,7 @@ impl Index {
             }
             let mut result = Self::new(labels);
             result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
             return result;
         }
         let self_set = self.position_map_first_ref();
@@ -4003,6 +4075,7 @@ impl Index {
         }
         let mut result = Self::new(labels);
         result.name = self.shared_name(other);
+        result.tz = joined_tz(self, other);
         result
     }
 
@@ -4183,6 +4256,7 @@ impl Index {
             sort_order_cache: OnceLock::new(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
+            tz: None,
         });
         let Some(levels) = self.row_multiindex.as_deref() else {
             return sliced;
@@ -4696,20 +4770,22 @@ impl Index {
     /// Equality check against another Index.
     ///
     /// Matches `pd.Index.equals(other)`. Returns true iff `other` has
-    /// the same labels in the same order. Names are ignored (use
-    /// `identical` for a name-sensitive check).
+    /// the same labels in the same order, in the same time zone (pandas:
+    /// the same instants in two zones, or aware against naive, differ in
+    /// dtype and are not equal). Names are ignored (use `identical` for a
+    /// name-sensitive check).
     #[must_use]
     pub fn equals(&self, other: &Self) -> bool {
-        self.labels_equal(other)
+        self == other
     }
 
     /// Strict equality including name.
     ///
     /// Matches `pd.Index.identical(other)`. Requires the same labels in
-    /// the same order AND the same name.
+    /// the same order AND the same name (and zone).
     #[must_use]
     pub fn identical(&self, other: &Self) -> bool {
-        self.labels_equal(other) && self.name == other.name
+        self == other && self.name == other.name
     }
 
     /// Typed `value_counts_raw` over raw `i64` keys: first-seen (value, count)
@@ -5333,7 +5409,7 @@ impl Index {
     ///
     /// Matches `pd.Index.append(other)`. The returned index contains
     /// `self.labels` followed by `other.labels`. Name is preserved from
-    /// `self`.
+    /// `self`; a time zone only when both share it.
     #[must_use]
     pub fn append(&self, other: &Self) -> Self {
         if let (Some(left), Some(right)) = (self.labels.int64_view(), other.labels.int64_view()) {
@@ -5344,7 +5420,11 @@ impl Index {
         }
         let mut labels = self.labels().to_vec();
         labels.extend(other.labels.iter().cloned());
-        self.propagate_name(Self::new(labels))
+        let mut appended = self.propagate_name(Self::new(labels));
+        if self.tz != other.tz {
+            appended.tz = None;
+        }
+        appended
     }
 
     /// Repeat each label `repeats` times.
@@ -7310,8 +7390,7 @@ impl DatetimeIndex {
             IndexError::InvalidArgument(format!("to_period: unsupported frequency '{freq}'"))
         })?;
         let periods = self
-            .index
-            .labels()
+            .wall_labels()
             .iter()
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) => datetime_nanos_to_period(*nanos, period_freq),
@@ -7331,7 +7410,31 @@ impl DatetimeIndex {
     /// `pd.DatetimeIndex.strftime(format)`. NAT propagates as `None`.
     #[must_use]
     pub fn strftime(&self, format: &str) -> Vec<Option<String>> {
-        map_datetime_labels(self.index.labels(), |dt| dt.format(format).to_string())
+        let Some(zone) = self.index.tz() else {
+            return map_datetime_labels(self.index.labels(), |dt| dt.format(format).to_string());
+        };
+        // A tz-aware instant formats on its wall clock with its zone's offset
+        // there (`%z` is -0500 in January New York, not +0000) and `%Z` its
+        // abbreviation then (EST), as pandas.
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) => {
+                    let offset = fp_types::tz_offset_seconds(zone, *nanos).ok()?;
+                    let offset = chrono::FixedOffset::east_opt(offset)?;
+                    let named = if format.contains("%Z") {
+                        let abbreviation = fp_types::tz_abbreviation(zone, *nanos).ok()?;
+                        Cow::Owned(format.replace("%Z", &abbreviation))
+                    } else {
+                        Cow::Borrowed(format)
+                    };
+                    datetime_from_nanos(*nanos)
+                        .map(|dt| dt.with_timezone(&offset).format(&named).to_string())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Position of the maximum label, matching `pd.DatetimeIndex.argmax()`.
@@ -7439,11 +7542,7 @@ impl DatetimeIndex {
                 _ => i64::MIN,
             })
             .collect();
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        Ok(out)
+        Ok(self.with_instants(nanos))
     }
 
     /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
@@ -7457,11 +7556,7 @@ impl DatetimeIndex {
                 }
             }
         }
-        let mut result = Self::new(out);
-        if let Some(name) = self.name() {
-            result = result.set_name(name);
-        }
-        result
+        self.with_instants(out)
     }
 
     /// Per-position membership mask, matching `pd.DatetimeIndex.isin(values)`.
@@ -7502,6 +7597,11 @@ impl DatetimeIndex {
         if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
             out = out.set_name(name);
         }
+        // A zone only when both share it (pandas gives an object Index
+        // of the two zones' Timestamps otherwise).
+        if self.index.tz == other.index.tz {
+            out.index.tz.clone_from(&self.index.tz);
+        }
         out
     }
 
@@ -7535,11 +7635,7 @@ impl DatetimeIndex {
                 _ => i64::MIN,
             })
             .collect();
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        out
+        self.with_instants(nanos)
     }
 
     /// Positional first differences, matching `pd.DatetimeIndex.diff()`.
@@ -7565,11 +7661,12 @@ impl DatetimeIndex {
         )
     }
 
+    /// Rounding reads the wall clock: a tz-aware index rounds its wall
+    /// times and places them back in its zone, as pandas.
     fn round_fixed_freq(&self, freq: &str, mode: TemporalRoundMode) -> Result<Self, IndexError> {
         let unit_nanos = parse_fixed_temporal_freq(freq, "DatetimeIndex rounding")?;
         let nanos: Vec<i64> = self
-            .index
-            .labels()
+            .wall_labels()
             .iter()
             .map(|label| match label {
                 IndexLabel::Datetime64(n) if *n != i64::MIN => {
@@ -7582,7 +7679,7 @@ impl DatetimeIndex {
         if let Some(name) = self.name() {
             out = out.set_name(name);
         }
-        Ok(out)
+        self.rezoned(out)
     }
 
     /// Round timestamps down to a fixed pandas frequency.
@@ -7738,11 +7835,7 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
-            out = out.set_name(name);
-        }
-        out
+        self.with_joined_instants(other, nanos)
     }
 
     /// Labels from self followed by labels from other not already present,
@@ -7763,11 +7856,7 @@ impl DatetimeIndex {
                 nanos.push(*n);
             }
         }
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
-            out = out.set_name(name);
-        }
-        out
+        self.with_joined_instants(other, nanos)
     }
 
     /// Labels in self not in other, matching
@@ -7793,13 +7882,11 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let mut out = Self::new(nanos);
         // Per br-frankenpandas-6r1lq: difference is asymmetric — pandas
         // always preserves self.name (unlike union/intersection which use
         // shared_name).
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
+        let mut out = self.with_instants(nanos);
+        out.index.tz = joined_tz(&self.index, &other.index);
         out
     }
 
@@ -7843,11 +7930,7 @@ impl DatetimeIndex {
                 nanos.push(*n);
             }
         }
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
-            out = out.set_name(name);
-        }
-        out
+        self.with_joined_instants(other, nanos)
     }
 
     /// Sort labels ascending, matching `pd.DatetimeIndex.sort_values()`.
@@ -7865,11 +7948,7 @@ impl DatetimeIndex {
             })
             .collect();
         nanos.sort_unstable();
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        out
+        self.with_instants(nanos)
     }
 
     /// Alias for `sort_values`, matching `pd.DatetimeIndex.sort()`.
@@ -7897,11 +7976,7 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        Ok(out)
+        Ok(self.with_instants(nanos))
     }
 
     /// Replace positions where `cond` is `false` with `other`, matching
@@ -7930,11 +8005,7 @@ impl DatetimeIndex {
                 }
             })
             .collect();
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        Ok(out)
+        Ok(self.with_instants(nanos))
     }
 
     /// Replace positions where `mask` is `true` with `value`, matching
@@ -7962,11 +8033,7 @@ impl DatetimeIndex {
                 }
             })
             .collect();
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        Ok(out)
+        Ok(self.with_instants(nanos))
     }
 
     /// Binary-search insertion position, matching
@@ -8012,24 +8079,30 @@ impl DatetimeIndex {
             })
             .collect();
         nanos.insert(loc, value);
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        Ok(out)
+        Ok(self.with_instants(nanos))
     }
 
     /// Stringify each label, matching `pd.DatetimeIndex.format()`.
-    /// Non-NAT labels render as the chrono RFC3339 timestamp; NAT
-    /// renders as the `NaT` literal pandas uses.
+    /// Non-NAT labels render as the chrono RFC3339 timestamp (a tz-aware
+    /// index's on its wall clock with the zone's offset); NAT renders as
+    /// the `NaT` literal pandas uses.
     #[must_use]
     pub fn format(&self) -> Vec<String> {
+        let zone = self.index.tz();
         self.index
             .labels()
             .iter()
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) => match datetime_from_nanos(*nanos) {
-                    Some(dt) => dt.to_rfc3339(),
+                    Some(dt) => {
+                        let offset = zone
+                            .and_then(|zone| fp_types::tz_offset_seconds(zone, *nanos).ok())
+                            .and_then(chrono::FixedOffset::east_opt);
+                        match offset {
+                            Some(offset) => dt.with_timezone(&offset).to_rfc3339(),
+                            None => dt.to_rfc3339(),
+                        }
+                    }
                     None => "NaT".to_owned(),
                 },
                 _ => "NaT".to_owned(),
@@ -8050,11 +8123,7 @@ impl DatetimeIndex {
                 _ => value,
             })
             .collect();
-        let mut out = Self::new(nanos);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        out
+        self.with_instants(nanos)
     }
 
     /// Alias for [`isna`](Self::isna), matching `pd.DatetimeIndex.isnull()`.
@@ -8072,14 +8141,14 @@ impl DatetimeIndex {
     /// Calendar date part of each label, matching `pd.DatetimeIndex.date`.
     #[must_use]
     pub fn date(&self) -> Vec<Option<chrono::NaiveDate>> {
-        map_datetime_labels(self.index.labels(), |dt| dt.date_naive())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.date_naive())
     }
 
     /// Within-day clock time of each label, matching
     /// `pd.DatetimeIndex.time`.
     #[must_use]
     pub fn time(&self) -> Vec<Option<chrono::NaiveTime>> {
-        map_datetime_labels(self.index.labels(), |dt| dt.time())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.time())
     }
 
     /// Time component preserving timezone semantics, matching
@@ -8111,35 +8180,123 @@ impl DatetimeIndex {
             .collect()
     }
 
-    /// Annotate a tz-naive index with `tz`, matching
-    /// `pd.DatetimeIndex.tz_localize(tz)`. FrankenPandas's storage is
-    /// already UTC-naive so localizing to `"UTC"` is a no-op clone;
-    /// every other timezone rejects until full tz metadata lands.
-    pub fn tz_localize(&self, tz: &str) -> Result<Self, IndexError> {
-        match tz {
-            "UTC" | "utc" => Ok(self.clone()),
-            other => Err(IndexError::InvalidArgument(format!(
-                "tz_localize: only 'UTC' is supported until timezone metadata lands; got {other:?}"
-            ))),
+    /// pandas' `DatetimeIndex.tz_localize(tz)`: a naive index's wall-clock
+    /// times placed in `tz` (a wall time a DST change skips or repeats is an
+    /// error, pandas' default `ambiguous` / `nonexistent='raise'`), or an
+    /// aware index's wall clock kept without its zone (`None`). Localizing
+    /// an aware index to a zone is pandas' TypeError.
+    pub fn tz_localize(&self, tz: Option<&str>) -> Result<Self, IndexError> {
+        match (tz, self.index.tz()) {
+            (Some(_), Some(_)) => Err(IndexError::TimeZoneMismatch(
+                "Already tz-aware, use tz_convert to convert.".to_owned(),
+            )),
+            (None, None) => Ok(self.clone()),
+            (None, Some(_)) => Ok(self.wall_index()),
+            (Some(zone), None) => {
+                let nanos = self
+                    .index
+                    .labels()
+                    .iter()
+                    .map(|label| match label {
+                        IndexLabel::Datetime64(nanos) => {
+                            fp_types::tz_wall_to_utc_nanos(zone, *nanos)
+                        }
+                        _ => Ok(i64::MIN),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let localized = Self::new(nanos).rename_index(self.name());
+                Ok(Self {
+                    index: localized.index.with_tz(Some(zone))?,
+                })
+            }
         }
     }
 
-    /// Convert a tz-aware index from its current zone to `tz`, matching
-    /// `pd.DatetimeIndex.tz_convert(tz)`. FrankenPandas indexes are
-    /// tz-naive (no source timezone) so this always rejects.
-    pub fn tz_convert(&self, _tz: &str) -> Result<Self, IndexError> {
-        Err(IndexError::InvalidArgument(
-            "tz_convert: cannot convert tz-naive timestamps; call tz_localize('UTC') first"
-                .to_owned(),
-        ))
+    /// pandas' `DatetimeIndex.tz_convert(tz)`: the same instants shown in
+    /// `tz` (`None`: UTC, naive). Converting a naive index is pandas'
+    /// TypeError.
+    pub fn tz_convert(&self, tz: Option<&str>) -> Result<Self, IndexError> {
+        if self.index.tz().is_none() {
+            return Err(IndexError::TimeZoneMismatch(
+                "Cannot convert tz-naive timestamps, use tz_localize to localize".to_owned(),
+            ));
+        }
+        Ok(Self {
+            index: self.index.clone().with_tz(tz)?,
+        })
     }
 
-    /// Timezone label, matching `pd.DatetimeIndex.tz`. FrankenPandas
-    /// stores naive UTC nanos so this always returns `None`; a
-    /// follow-up bead will introduce timezone metadata.
+    /// These instants (UTC nanoseconds) shown in `tz` - no conversion: the
+    /// constructor for an aware index from its instants (`tz_localize`
+    /// takes wall times, `tz_convert` changes an aware index's zone).
+    pub fn with_tz(self, tz: Option<&str>) -> Result<Self, IndexError> {
+        Ok(Self {
+            index: self.index.with_tz(tz)?,
+        })
+    }
+
+    /// `nanos` - instants taken, sorted, filtered or moved by a duration from
+    /// this index's - as an index with its name and zone.
+    fn with_instants(&self, nanos: Vec<i64>) -> Self {
+        let mut out = Self::new(nanos).rename_index(self.name());
+        out.index.tz.clone_from(&self.index.tz);
+        out
+    }
+
+    /// `nanos` from a set operation of this index with `other`: pandas keeps
+    /// a shared name and zone (two zones meet in UTC).
+    fn with_joined_instants(&self, other: &Self, nanos: Vec<i64>) -> Self {
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out.index.tz = joined_tz(&self.index, &other.index);
+        out
+    }
+
+    /// The labels as the wall clock shows them: a tz-aware index's UTC
+    /// instants moved into its zone, which every calendar field reads (a
+    /// naive index's labels as they are).
+    fn wall_labels(&self) -> Cow<'_, [IndexLabel]> {
+        let Some(zone) = self.index.tz() else {
+            return Cow::Borrowed(self.index.labels());
+        };
+        Cow::Owned(
+            self.index
+                .labels()
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Datetime64(nanos) => IndexLabel::Datetime64(
+                        fp_types::tz_utc_to_wall_nanos(zone, *nanos).unwrap_or(*nanos),
+                    ),
+                    other => other.clone(),
+                })
+                .collect(),
+        )
+    }
+
+    /// The wall-clock times as a naive index (`tz_localize(None)`), the
+    /// name kept.
+    fn wall_index(&self) -> Self {
+        Self {
+            index: Index::new(self.wall_labels().into_owned()).rename_index(self.name()),
+        }
+    }
+
+    /// Naive wall-clock times computed from this index placed back in its
+    /// zone (a naive index's as they are), as pandas re-localizes a
+    /// rounded or normalized aware index.
+    fn rezoned(&self, wall: Self) -> Result<Self, IndexError> {
+        match self.index.tz() {
+            Some(zone) => wall.tz_localize(Some(zone)),
+            None => Ok(wall),
+        }
+    }
+
+    /// Timezone name, matching `pd.DatetimeIndex.tz` (None when naive).
     #[must_use]
     pub fn tz(&self) -> Option<String> {
-        None
+        self.index.tz().map(str::to_owned)
     }
 
     /// Alias for [`tz`](Self::tz), matching `pd.DatetimeIndex.tzinfo`.
@@ -8480,50 +8637,46 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        let mut filtered = Self::new(surviving);
-        if let Some(name) = self.name() {
-            filtered = filtered.set_name(name);
-        }
-        filtered
+        self.with_instants(surviving)
     }
 
     #[must_use]
     pub fn year(&self) -> Vec<Option<i32>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.year())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.year())
     }
 
     #[must_use]
     pub fn month(&self) -> Vec<Option<u32>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.month())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.month())
     }
 
     #[must_use]
     pub fn day(&self) -> Vec<Option<u32>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.day())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.day())
     }
 
     /// Hour of day per label (0..=23), matching `pd.DatetimeIndex.hour`.
     #[must_use]
     pub fn hour(&self) -> Vec<Option<u32>> {
         use chrono::Timelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.hour())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.hour())
     }
 
     /// Minute of hour per label (0..=59), matching `pd.DatetimeIndex.minute`.
     #[must_use]
     pub fn minute(&self) -> Vec<Option<u32>> {
         use chrono::Timelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.minute())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.minute())
     }
 
     /// Second of minute per label (0..=59), matching `pd.DatetimeIndex.second`.
     #[must_use]
     pub fn second(&self) -> Vec<Option<u32>> {
         use chrono::Timelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.second())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.second())
     }
 
     /// Microsecond component (0..=999_999), matching `pd.DatetimeIndex.microsecond`.
@@ -8531,7 +8684,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn microsecond(&self) -> Vec<Option<u32>> {
         use chrono::Timelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.nanosecond() / 1_000)
+        map_datetime_labels(&self.wall_labels(), |dt| dt.nanosecond() / 1_000)
     }
 
     /// Nanosecond component (0..=999), matching `pd.DatetimeIndex.nanosecond`.
@@ -8539,7 +8692,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn nanosecond(&self) -> Vec<Option<u32>> {
         use chrono::Timelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.nanosecond() % 1_000)
+        map_datetime_labels(&self.wall_labels(), |dt| dt.nanosecond() % 1_000)
     }
 
     /// Integer positions whose clock time equals `time`, matching
@@ -8547,8 +8700,7 @@ impl DatetimeIndex {
     pub fn indexer_at_time(&self, time: &str) -> Result<Vec<usize>, IndexError> {
         let target = parse_time_of_day_nanos(time, "DatetimeIndex.indexer_at_time")?;
         Ok(self
-            .index
-            .labels()
+            .wall_labels()
             .iter()
             .enumerate()
             .filter_map(|(position, label)| {
@@ -8571,8 +8723,7 @@ impl DatetimeIndex {
             parse_time_of_day_nanos(start_time, "DatetimeIndex.indexer_between_time start_time")?;
         let end = parse_time_of_day_nanos(end_time, "DatetimeIndex.indexer_between_time end_time")?;
         Ok(self
-            .index
-            .labels()
+            .wall_labels()
             .iter()
             .enumerate()
             .filter_map(|(position, label)| {
@@ -8598,7 +8749,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn week(&self) -> Vec<Option<u32>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.iso_week().week())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.iso_week().week())
     }
 
     /// ISO calendar `(year, week, weekday)` triples, matching
@@ -8607,7 +8758,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn isocalendar(&self) -> Vec<Option<(i32, u32, u32)>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             let iso = dt.iso_week();
             (iso.year(), iso.week(), dt.weekday().number_from_monday())
         })
@@ -8626,7 +8777,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn dayofyear(&self) -> Vec<Option<u32>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.ordinal())
+        map_datetime_labels(&self.wall_labels(), |dt| dt.ordinal())
     }
 
     /// Alias for [`dayofyear`](Self::dayofyear), matching `pd.DatetimeIndex.day_of_year`.
@@ -8640,7 +8791,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn dayofweek(&self) -> Vec<Option<u32>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             dt.weekday().num_days_from_monday()
         })
     }
@@ -8661,7 +8812,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn quarter(&self) -> Vec<Option<u32>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| (dt.month() - 1) / 3 + 1)
+        map_datetime_labels(&self.wall_labels(), |dt| (dt.month() - 1) / 3 + 1)
     }
 
     /// Whether the year is a leap year, matching
@@ -8669,7 +8820,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn is_leap_year(&self) -> Vec<Option<bool>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             chrono::NaiveDate::from_ymd_opt(dt.year(), 1, 1).is_some_and(|d| d.leap_year())
         })
     }
@@ -8679,7 +8830,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn days_in_month(&self) -> Vec<Option<u32>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             days_in_calendar_month(dt.year(), dt.month())
         })
     }
@@ -8695,7 +8846,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn is_month_start(&self) -> Vec<Option<bool>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.day() == 1)
+        map_datetime_labels(&self.wall_labels(), |dt| dt.day() == 1)
     }
 
     /// Whether the day is the last of the month, matching
@@ -8703,7 +8854,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn is_month_end(&self) -> Vec<Option<bool>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             dt.day() == days_in_calendar_month(dt.year(), dt.month())
         })
     }
@@ -8713,7 +8864,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn is_quarter_start(&self) -> Vec<Option<bool>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             matches!(dt.month(), 1 | 4 | 7 | 10) && dt.day() == 1
         })
     }
@@ -8723,7 +8874,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn is_quarter_end(&self) -> Vec<Option<bool>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             matches!(dt.month(), 3 | 6 | 9 | 12)
                 && dt.day() == days_in_calendar_month(dt.year(), dt.month())
         })
@@ -8734,7 +8885,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn is_year_start(&self) -> Vec<Option<bool>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.month() == 1 && dt.day() == 1)
+        map_datetime_labels(&self.wall_labels(), |dt| dt.month() == 1 && dt.day() == 1)
     }
 
     /// Whether the timestamp is December 31, matching
@@ -8742,14 +8893,14 @@ impl DatetimeIndex {
     #[must_use]
     pub fn is_year_end(&self) -> Vec<Option<bool>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| dt.month() == 12 && dt.day() == 31)
+        map_datetime_labels(&self.wall_labels(), |dt| dt.month() == 12 && dt.day() == 31)
     }
 
     /// Full English month name, matching `pd.DatetimeIndex.month_name()`.
     #[must_use]
     pub fn month_name(&self) -> Vec<Option<String>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             month_name_english(dt.month()).to_owned()
         })
     }
@@ -8758,18 +8909,18 @@ impl DatetimeIndex {
     #[must_use]
     pub fn day_name(&self) -> Vec<Option<String>> {
         use chrono::Datelike;
-        map_datetime_labels(self.index.labels(), |dt| {
+        map_datetime_labels(&self.wall_labels(), |dt| {
             weekday_name_english(dt.weekday()).to_owned()
         })
     }
 
-    /// Truncate every timestamp to midnight UTC, matching
-    /// `pd.DatetimeIndex.normalize()`. NAT labels propagate.
-    #[must_use]
-    pub fn normalize(&self) -> Self {
+    /// Truncate every timestamp to its wall-clock midnight, matching
+    /// `pd.DatetimeIndex.normalize()`: a tz-aware index's midnights are back
+    /// in its zone (a midnight a DST change skips is an error, as pandas).
+    /// NAT labels propagate.
+    pub fn normalize(&self) -> Result<Self, IndexError> {
         let nanos: Vec<i64> = self
-            .index
-            .labels()
+            .wall_labels()
             .iter()
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => {
@@ -8784,15 +8935,15 @@ impl DatetimeIndex {
         if let Some(name) = self.name() {
             normalized = normalized.set_name(name);
         }
-        normalized
+        self.rezoned(normalized)
     }
 
-    /// Whether every label is at midnight UTC (NAT counts as normalized),
-    /// matching `pd.DatetimeIndex.is_normalized`.
+    /// Whether every label is at its wall-clock midnight (NAT counts as
+    /// normalized), matching `pd.DatetimeIndex.is_normalized`.
     #[must_use]
     pub fn is_normalized(&self) -> bool {
         let nanos_per_day: i64 = 86_400 * 1_000_000_000;
-        self.index.labels().iter().all(|label| match label {
+        self.wall_labels().iter().all(|label| match label {
             IndexLabel::Datetime64(nanos) => {
                 *nanos == i64::MIN || nanos.rem_euclid(nanos_per_day) == 0
             }
@@ -16555,6 +16706,14 @@ pub enum IndexError {
     },
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// An unknown zone, or a wall time a DST change skips or repeats.
+    #[error(transparent)]
+    TimeZone(#[from] fp_types::TimeZoneError),
+    /// Mixing tz-aware and tz-naive datetimes where pandas refuses to
+    /// (localizing an aware index, converting a naive one, joining the two):
+    /// pandas' `TypeError`.
+    #[error("{0}")]
+    TimeZoneMismatch(String),
 }
 
 /// Alignment mode for index-level join semantics.
@@ -16666,11 +16825,13 @@ fn align_non_unique(left: &Index, right: &Index, mode: AlignMode) -> AlignmentPl
     match mode {
         AlignMode::Left => {
             union_index.name = left.name.clone();
+            union_index.tz.clone_from(&left.tz);
         }
         AlignMode::Right => {
             union_index.name = right.name.clone();
+            union_index.tz.clone_from(&right.tz);
         }
-        AlignMode::Inner | AlignMode::Outer => {}
+        AlignMode::Inner | AlignMode::Outer => union_index.tz = joined_tz(left, right),
     }
 
     AlignmentPlan {
@@ -16678,6 +16839,36 @@ fn align_non_unique(left: &Index, right: &Index, mode: AlignMode) -> AlignmentPl
         left_positions,
         right_positions,
     }
+}
+
+/// The zone of an index joining two aware indexes, as pandas: a shared zone
+/// is kept and two different zones meet in UTC (the labels are instants
+/// either way). None when either side is naive - joining an aware index with
+/// a naive one is pandas' TypeError, which [`check_tz_compatible`] reports.
+#[must_use]
+pub fn joined_tz(left: &Index, right: &Index) -> Option<String> {
+    match (left.tz(), right.tz()) {
+        (Some(l), Some(r)) if l == r => Some(l.to_owned()),
+        (Some(_), Some(_)) => Some("UTC".to_owned()),
+        _ => None,
+    }
+}
+
+/// pandas refuses to join a tz-aware datetime index with a tz-naive one
+/// ("Cannot join tz-naive with tz-aware DatetimeIndex"); callers that align
+/// two indexes check this first.
+pub fn check_tz_compatible(left: &Index, right: &Index) -> Result<(), IndexError> {
+    if left.tz().is_some() != right.tz().is_some()
+        && left.holds_only_datetimes()
+        && right.holds_only_datetimes()
+        && !left.is_empty()
+        && !right.is_empty()
+    {
+        return Err(IndexError::TimeZoneMismatch(
+            "Cannot join tz-naive with tz-aware DatetimeIndex".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Align two indexes using the specified join mode.
@@ -16771,6 +16962,7 @@ pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
     };
     let mut union_index = Index::new(output_labels);
     union_index.name = shared_name;
+    union_index.tz = joined_tz(left, right);
     AlignmentPlan {
         union_index,
         left_positions,
@@ -16934,6 +17126,7 @@ pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
     };
     let mut union_index = Index::new(union_labels);
     union_index.name = shared_name;
+    union_index.tz = joined_tz(left, right);
     AlignmentPlan {
         union_index,
         left_positions,
@@ -30197,28 +30390,78 @@ mod tests {
 
     #[test]
     fn datetime_index_tz_localize_tz_convert_match_pandas_qm31w() {
+        use fp_types::TimeZoneError;
         const NS: i64 = 1_000_000_000;
-        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS]).set_name("ts");
+        const HOUR: i64 = 3_600 * NS;
+        // Wall 2024-01-01 09:00 and 2024-07-01 09:00 (naive).
+        let jan = 1_704_067_200_i64 * NS + 9 * HOUR;
+        let jul = 1_719_792_000_i64 * NS + 9 * HOUR;
+        let dt = super::DatetimeIndex::new(vec![jan, jul, i64::MIN]).set_name("ts");
+        assert_eq!(dt.tz(), None);
 
-        // UTC is a no-op clone.
-        let utc = dt.tz_localize("UTC").expect("UTC localize");
-        assert!(utc.equals(&dt));
-        assert_eq!(utc.name(), Some("ts"));
+        // pandas: New York is EST (-5h) in January and EDT (-4h) in July;
+        // the labels become UTC instants, the fields keep the wall clock.
+        let ny = dt.tz_localize(Some("US/Eastern")).expect("localize");
+        assert_eq!(ny.tz().as_deref(), Some("US/Eastern"));
+        assert_eq!(ny.name(), Some("ts"));
+        assert_eq!(
+            ny.values(),
+            vec![Some(jan + 5 * HOUR), Some(jul + 4 * HOUR), None]
+        );
+        assert_eq!(ny.hour(), vec![Some(9), Some(9), None]);
+        // pandas' equals: the same instants in another zone (or naive) differ.
+        let same_instants_naive = ny.tz_convert(None).expect("naive UTC");
+        assert!(!ny.equals(&same_instants_naive));
+        assert!(!ny.equals(&ny.tz_convert(Some("UTC")).expect("UTC")));
+        assert!(ny.equals(&ny.clone()));
 
-        // Other timezones reject.
-        let err = dt.tz_localize("US/Eastern").unwrap_err();
+        // tz_convert keeps the instants and moves the wall clock.
+        let tokyo = ny.tz_convert(Some("Asia/Tokyo")).expect("convert");
+        assert_eq!(tokyo.values(), ny.values());
+        assert_eq!(tokyo.hour(), vec![Some(23), Some(22), None]);
+        assert_eq!(tokyo.day(), vec![Some(1), Some(1), None]);
+        // tz_convert(None) is UTC, naive; tz_localize(None) keeps the wall.
+        let utc_naive = ny.tz_convert(None).expect("to naive UTC");
+        assert_eq!(utc_naive.tz(), None);
+        assert_eq!(utc_naive.values(), ny.values());
+        assert!(ny.tz_localize(None).expect("drop zone").equals(&dt));
+        // A take keeps the zone; normalize is the wall-clock midnight.
+        assert_eq!(
+            ny.take(&[1]).expect("take").tz().as_deref(),
+            Some("US/Eastern")
+        );
+        let midnights = ny.normalize().expect("normalize");
+        assert_eq!(midnights.tz().as_deref(), Some("US/Eastern"));
+        assert_eq!(midnights.hour(), vec![Some(0), Some(0), None]);
+        assert_eq!(
+            midnights.values(),
+            vec![
+                Some(jan - 9 * HOUR + 5 * HOUR),
+                Some(jul - 9 * HOUR + 4 * HOUR),
+                None
+            ]
+        );
+
+        // NEGATIVES (pandas' errors): localizing an aware index, converting a
+        // naive one, a wall time a DST change skips, an unknown zone.
         assert!(matches!(
-            err,
-            super::IndexError::InvalidArgument(ref message)
-                if message.contains("tz_localize") && message.contains("UTC")
+            ny.tz_localize(Some("UTC")),
+            Err(super::IndexError::TimeZoneMismatch(ref m)) if m.contains("Already tz-aware")
         ));
-
-        // tz_convert always rejects.
-        let conv_err = dt.tz_convert("UTC").unwrap_err();
         assert!(matches!(
-            conv_err,
-            super::IndexError::InvalidArgument(ref message)
-                if message.contains("tz_convert")
+            dt.tz_convert(Some("UTC")),
+            Err(super::IndexError::TimeZoneMismatch(ref m)) if m.contains("tz-naive")
+        ));
+        let skipped = 1_710_028_800_i64 * NS + 2 * HOUR + 30 * 60 * NS; // 2024-03-10 02:30
+        assert_eq!(
+            super::DatetimeIndex::new(vec![skipped]).tz_localize(Some("US/Eastern")),
+            Err(super::IndexError::TimeZone(TimeZoneError::NonExistent(
+                "2024-03-10 02:30:00".to_owned()
+            )))
+        );
+        assert!(matches!(
+            dt.tz_localize(Some("Mars/Base")),
+            Err(super::IndexError::TimeZone(TimeZoneError::Unknown(_)))
         ));
     }
 
@@ -35841,7 +36084,7 @@ mod tests {
         let nat = i64::MIN;
 
         let dt = super::DatetimeIndex::new(vec![mid_day, midnight, nat]).set_name("when");
-        let normed = dt.normalize();
+        let normed = dt.normalize().expect("a naive index normalizes");
 
         // Each non-NAT entry is now at midnight; NAT stays NAT; name preserved.
         assert_eq!(

@@ -3961,13 +3961,161 @@ impl Timedelta {
     }
 }
 
+// ── Time zones ──────────────────────────────────────────────────────────
+//
+// A tz-aware value is a UTC instant plus a zone name; what the zone adds is
+// the wall clock the instant shows there. These are the conversions every
+// crate shares (Timestamp, DatetimeIndex, datetime columns).
+
+/// Why a time-zone conversion failed, as pandas (pytz) classifies it.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TimeZoneError {
+    /// Neither 'UTC', a fixed offset ('+05:30') nor an IANA name - pandas'
+    /// `UnknownTimeZoneError`, a `KeyError` whose message is the quoted name.
+    #[error("'{0}'")]
+    Unknown(String),
+    /// A wall-clock time a DST change skips - pandas' `NonExistentTimeError`,
+    /// whose message is the wall time.
+    #[error("{0}")]
+    NonExistent(String),
+    /// A wall-clock time a DST change repeats - pandas' `AmbiguousTimeError`.
+    #[error("Cannot infer dst time from {0}, try using the 'ambiguous' argument")]
+    Ambiguous(String),
+}
+
+/// A parsed zone: UTC or a fixed offset, or an IANA zone with DST rules.
+enum Zone {
+    Fixed(chrono::FixedOffset),
+    Named(chrono_tz::Tz),
+}
+
+impl Zone {
+    /// pandas' zone spellings: 'UTC' / 'Z', a `+HH:MM` / `-HH:MM` offset (also
+    /// as `UTC+HH:MM`, how a fixed-offset dtype names its zone), or an IANA
+    /// name ('US/Eastern', 'Asia/Tokyo', 'Etc/GMT+5').
+    fn parse(tz: &str) -> Result<Self, TimeZoneError> {
+        use chrono::Offset;
+        let name = tz.trim();
+        if name == "UTC" || name == "Z" {
+            return Ok(Self::Fixed(chrono::Utc.fix()));
+        }
+        let offset = name
+            .strip_prefix("UTC")
+            .filter(|rest| rest.starts_with(['+', '-']))
+            .unwrap_or(name);
+        let bytes = offset.as_bytes();
+        if bytes.len() == 6
+            && matches!(bytes[0], b'+' | b'-')
+            && bytes[3] == b':'
+            && [1, 2, 4, 5].iter().all(|&i| bytes[i].is_ascii_digit())
+        {
+            let hours: i32 = offset[1..3].parse().unwrap_or(24);
+            let minutes: i32 = offset[4..6].parse().unwrap_or(60);
+            let sign = if bytes[0] == b'-' { -1 } else { 1 };
+            return (hours <= 23 && minutes <= 59)
+                .then(|| chrono::FixedOffset::east_opt(sign * (hours * 3_600 + minutes * 60)))
+                .flatten()
+                .map(Self::Fixed)
+                .ok_or_else(|| TimeZoneError::Unknown(name.to_owned()));
+        }
+        name.parse::<chrono_tz::Tz>()
+            .map(Self::Named)
+            .map_err(|_| TimeZoneError::Unknown(name.to_owned()))
+    }
+
+    /// Seconds east of UTC this zone is at the UTC instant `utc_nanos`.
+    fn offset_seconds(&self, utc_nanos: i64) -> i32 {
+        use chrono::{Offset, TimeZone};
+        match self {
+            Self::Fixed(offset) => offset.local_minus_utc(),
+            Self::Named(zone) => {
+                let utc = chrono::DateTime::from_timestamp_nanos(utc_nanos).naive_utc();
+                zone.offset_from_utc_datetime(&utc).fix().local_minus_utc()
+            }
+        }
+    }
+}
+
+/// Whether `tz` names a zone pandas accepts ('UTC', `+HH:MM`, an IANA name).
+pub fn tz_validate(tz: &str) -> Result<(), TimeZoneError> {
+    Zone::parse(tz).map(|_| ())
+}
+
+/// The name pandas gives the zone `tz`: a fixed offset is `UTC+HH:MM`
+/// ('+05:30' and 'UTC+05:30' alike; a zero offset or 'Z' is 'UTC'), an
+/// IANA name stays as given.
+pub fn tz_canonical_name(tz: &str) -> Result<String, TimeZoneError> {
+    Ok(match Zone::parse(tz)? {
+        Zone::Fixed(offset) if offset.local_minus_utc() == 0 => "UTC".to_owned(),
+        Zone::Fixed(offset) => format!("UTC{offset}"),
+        Zone::Named(_) => tz.trim().to_owned(),
+    })
+}
+
+/// The zone's name at the UTC instant `utc_nanos` as `strftime('%Z')` prints
+/// it: an IANA zone's abbreviation then ('EST' / 'EDT'), a fixed offset's
+/// `UTC+HH:MM` ('UTC' for zero).
+pub fn tz_abbreviation(tz: &str, utc_nanos: i64) -> Result<String, TimeZoneError> {
+    use chrono::TimeZone;
+    match Zone::parse(tz)? {
+        Zone::Named(zone) => {
+            let utc = chrono::DateTime::from_timestamp_nanos(utc_nanos).naive_utc();
+            let offset = zone.offset_from_utc_datetime(&utc);
+            Ok(chrono_tz::OffsetName::abbreviation(&offset)
+                .map_or_else(|| tz.trim().to_owned(), str::to_owned))
+        }
+        Zone::Fixed(_) => tz_canonical_name(tz),
+    }
+}
+
+/// The UTC offset, in seconds east of UTC, that `tz` has at the UTC instant
+/// `utc_nanos` - what a tz-aware timestamp adds to its instant to show its
+/// wall clock.
+pub fn tz_offset_seconds(tz: &str, utc_nanos: i64) -> Result<i32, TimeZoneError> {
+    Ok(Zone::parse(tz)?.offset_seconds(utc_nanos))
+}
+
+/// The wall clock the UTC instant `utc_nanos` shows in `tz`, as naive
+/// nanoseconds (NaT, `i64::MIN`, stays NaT).
+pub fn tz_utc_to_wall_nanos(tz: &str, utc_nanos: i64) -> Result<i64, TimeZoneError> {
+    if utc_nanos == i64::MIN {
+        return Ok(utc_nanos);
+    }
+    let offset = Zone::parse(tz)?.offset_seconds(utc_nanos);
+    Ok(utc_nanos.saturating_add(i64::from(offset) * 1_000_000_000))
+}
+
+/// The UTC instant of the wall-clock time `wall_nanos` in `tz`, as pandas'
+/// `tz_localize` with ambiguous / nonexistent = 'raise': a wall time a DST
+/// change skips is [`TimeZoneError::NonExistent`], one it repeats
+/// [`TimeZoneError::Ambiguous`]. NaT (`i64::MIN`) stays NaT.
+pub fn tz_wall_to_utc_nanos(tz: &str, wall_nanos: i64) -> Result<i64, TimeZoneError> {
+    use chrono::{LocalResult, TimeZone};
+    if wall_nanos == i64::MIN {
+        return Ok(wall_nanos);
+    }
+    let naive = chrono::DateTime::from_timestamp_nanos(wall_nanos).naive_utc();
+    let local = match Zone::parse(tz)? {
+        Zone::Fixed(offset) => offset
+            .from_local_datetime(&naive)
+            .map(|at| at.fixed_offset()),
+        Zone::Named(zone) => zone.from_local_datetime(&naive).map(|at| at.fixed_offset()),
+    };
+    match local {
+        LocalResult::Single(at) => at
+            .timestamp_nanos_opt()
+            .ok_or_else(|| TimeZoneError::NonExistent(naive.to_string())),
+        LocalResult::None => Err(TimeZoneError::NonExistent(naive.to_string())),
+        LocalResult::Ambiguous(..) => Err(TimeZoneError::Ambiguous(naive.to_string())),
+    }
+}
+
 // ── Timestamp types (br-frankenpandas-9p0u — 4r56 Phase 2) ─────────────
 //
-// Nanosecond-precision i64 since Unix epoch + optional IANA tz name.
-// TZ-dependent arithmetic (DST transitions, tz conversion) is deferred
-// to Phase 3 which pulls chrono_tz into fp-types; Phase 2 stores the
-// tz name as opaque metadata and performs arithmetic on the absolute
-// nanos axis only.
+// Nanosecond-precision i64 since Unix epoch + optional IANA tz name. The
+// zone's DST-aware conversions are the time-zone functions above
+// (`tz_offset_seconds`, `tz_wall_to_utc_nanos`); arithmetic here stays on
+// the absolute nanos axis.
 
 /// Number of days in a given month (1-12) of a given year.
 fn days_in_month(year: i64, month: u32) -> Option<u32> {
@@ -16358,6 +16506,78 @@ mod tests {
         assert_eq!(a.partial_cmp(&a), Some(Ordering::Equal));
         assert_eq!(a.partial_cmp(&Timestamp::nat()), None);
         assert_eq!(Timestamp::nat().partial_cmp(&Timestamp::nat()), None);
+    }
+
+    #[test]
+    fn time_zone_offsets_and_wall_clock_conversions_follow_pandas() {
+        use crate::{
+            TimeZoneError, tz_abbreviation, tz_canonical_name, tz_offset_seconds,
+            tz_utc_to_wall_nanos, tz_validate, tz_wall_to_utc_nanos,
+        };
+        let hour = 3_600_000_000_000_i64;
+        // 2024-03-10 14:30 UTC: Tokyo is +9h; New York is on EDT (-4h) after
+        // 07:00 UTC that day and on EST (-5h) the day before.
+        let instant = 1_710_081_000_000_000_000_i64;
+        assert_eq!(tz_offset_seconds("Asia/Tokyo", instant), Ok(9 * 3_600));
+        assert_eq!(tz_offset_seconds("US/Eastern", instant), Ok(-4 * 3_600));
+        assert_eq!(
+            tz_offset_seconds("US/Eastern", instant - 24 * hour),
+            Ok(-5 * 3_600)
+        );
+        assert_eq!(tz_offset_seconds("+05:30", 0), Ok(19_800));
+        assert_eq!(tz_offset_seconds("UTC+05:30", 0), Ok(19_800));
+        assert_eq!(tz_offset_seconds("-03:00", 0), Ok(-10_800));
+        assert_eq!(tz_offset_seconds("UTC", instant), Ok(0));
+        assert_eq!(
+            tz_utc_to_wall_nanos("Asia/Tokyo", instant),
+            Ok(instant + 9 * hour)
+        );
+        // Wall 12:00 in New York on 2024-01-01 is 17:00 UTC, and back.
+        let wall_noon = 19_723 * 24 * hour + 12 * hour;
+        assert_eq!(
+            tz_wall_to_utc_nanos("US/Eastern", wall_noon),
+            Ok(wall_noon + 5 * hour)
+        );
+        assert_eq!(
+            tz_utc_to_wall_nanos("US/Eastern", wall_noon + 5 * hour),
+            Ok(wall_noon)
+        );
+        // NaT passes through both ways.
+        assert_eq!(tz_wall_to_utc_nanos("US/Eastern", i64::MIN), Ok(i64::MIN));
+        assert_eq!(tz_utc_to_wall_nanos("US/Eastern", i64::MIN), Ok(i64::MIN));
+        // NEGATIVES: 02:30 on 2024-03-10 does not exist in New York; 01:30
+        // on 2024-11-03 happens twice; unknown zones and malformed offsets
+        // are pandas' UnknownTimeZoneError.
+        let skipped = 19_792 * 24 * hour + 2 * hour + 30 * 60_000_000_000;
+        assert_eq!(
+            tz_wall_to_utc_nanos("US/Eastern", skipped),
+            Err(TimeZoneError::NonExistent("2024-03-10 02:30:00".to_owned()))
+        );
+        let repeated = 20_030 * 24 * hour + hour + 30 * 60_000_000_000;
+        assert_eq!(
+            tz_wall_to_utc_nanos("US/Eastern", repeated),
+            Err(TimeZoneError::Ambiguous("2024-11-03 01:30:00".to_owned()))
+        );
+        assert_eq!(
+            tz_offset_seconds("Mars/Olympus", 0),
+            Err(TimeZoneError::Unknown("Mars/Olympus".to_owned()))
+        );
+        assert!(tz_validate("+24:00").is_err());
+        assert!(tz_validate("+5:30").is_err());
+        assert!(tz_validate("Europe/Paris").is_ok());
+        // pandas' names: a fixed offset is UTC+HH:MM, a zero one UTC.
+        assert_eq!(tz_canonical_name("+05:30").as_deref(), Ok("UTC+05:30"));
+        assert_eq!(tz_canonical_name("UTC-03:00").as_deref(), Ok("UTC-03:00"));
+        assert_eq!(tz_canonical_name("+00:00").as_deref(), Ok("UTC"));
+        assert_eq!(tz_canonical_name("Z").as_deref(), Ok("UTC"));
+        assert_eq!(tz_canonical_name("US/Eastern").as_deref(), Ok("US/Eastern"));
+        // strftime('%Z'): the abbreviation in force at the instant.
+        assert_eq!(tz_abbreviation("US/Eastern", instant).as_deref(), Ok("EDT"));
+        assert_eq!(
+            tz_abbreviation("US/Eastern", instant - 24 * hour).as_deref(),
+            Ok("EST")
+        );
+        assert_eq!(tz_abbreviation("+05:30", 0).as_deref(), Ok("UTC+05:30"));
     }
 
     #[test]

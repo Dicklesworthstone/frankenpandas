@@ -1431,7 +1431,33 @@ fn canonicalize_datetime_index_labels(index: &Index) -> Index {
             _ => label.clone(),
         })
         .collect();
-    Index::new(labels).rename_index(index.name())
+    let canonical = Index::new(labels).rename_index(index.name());
+    // A tz-aware index keeps its zone (its datetime labels are unchanged).
+    match index.tz() {
+        Some(zone) => canonical.clone().with_tz(Some(zone)).unwrap_or(canonical),
+        None => canonical,
+    }
+}
+
+/// An index's labels as the wall clock shows them: a tz-aware index's UTC
+/// instants moved into its zone, which time-of-day selections read (a
+/// naive index's labels as they are).
+fn wall_clock_labels(index: &Index) -> std::borrow::Cow<'_, [IndexLabel]> {
+    let Some(zone) = index.tz() else {
+        return std::borrow::Cow::Borrowed(index.labels());
+    };
+    std::borrow::Cow::Owned(
+        index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) => IndexLabel::Datetime64(
+                    fp_types::tz_utc_to_wall_nanos(zone, *nanos).unwrap_or(*nanos),
+                ),
+                other => other.clone(),
+            })
+            .collect(),
+    )
 }
 
 fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameError> {
@@ -4733,7 +4759,7 @@ fn truncate_range(
         && low > high
     {
         return Err(FrameError::CompatibilityRejected(format!(
-            "Truncate: {high:?} must be after {low:?}"
+            "Truncate: {high} must be after {low}"
         )));
     }
     let above_low = |label: &IndexLabel| before.as_ref().is_none_or(|low| label >= low);
@@ -9287,6 +9313,12 @@ impl Series {
         values: Vec<Scalar>,
     ) -> Result<Self, FrameError> {
         let index = Index::new(index_labels).rename_index(self.index.name());
+        // The labels are this index's (filtered / reordered): a tz-aware
+        // one keeps its zone while they are all datetimes.
+        let index = match self.index.tz() {
+            Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
+            None => index,
+        };
         let column = Column::from_values(values)?;
         Self::new(self.name.clone(), index, column)
     }
@@ -10666,6 +10698,8 @@ impl Series {
             String::new()
         };
 
+        // pandas: a tz-aware datetime index does not join a naive one.
+        fp_index::check_tz_compatible(&self.index, &other.index)?;
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
         let exact_index_fast_path = self.index == other.index;
 
@@ -10766,6 +10800,11 @@ impl Series {
             let plan = align_union_sorted_unique(&self.index, &other.index);
             validate_alignment_plan(&plan)?;
             (plan.union_index, plan.left_positions, plan.right_positions)
+        };
+        // Two aware indexes meet in their shared zone, or UTC for two zones.
+        let union_index = match fp_index::joined_tz(&self.index, &other.index) {
+            Some(zone) => union_index.with_tz(Some(&zone))?,
+            None => union_index,
         };
 
         record_alignment_semantic_witness(
@@ -20822,7 +20861,7 @@ impl Series {
             _ => Scalar::Null(NullKind::NaN),
         };
         let shifted = self.shift_with_fill_value(periods, fill)?;
-        let column = shifted_column_dtype(&self.column.dtype(), shifted.column)?;
+        let column = shifted_column_dtype(&self.column.dtype(), shifted.column, periods)?;
         Self::new(shifted.name, shifted.index, column)
     }
 
@@ -25538,11 +25577,14 @@ impl Series {
 
         let index_values = index_labels_to_column_scalars(self.index.labels());
 
+        let index_column = Column::from_values(index_values)?;
+        // A tz-aware index comes back as a column of its dtype.
+        let index_column = match self.index.tz() {
+            Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
+            None => index_column,
+        };
         let mut columns = BTreeMap::new();
-        columns.insert(
-            index_column_name.clone(),
-            Column::from_values(index_values)?,
-        );
+        columns.insert(index_column_name.clone(), index_column);
         columns.insert(value_column_name.clone(), self.column.clone());
 
         let frame = DataFrame::new_with_column_order(
@@ -28014,7 +28056,7 @@ impl Series {
         // format used for datetime indices in this crate).
         require_datetime_index(self.index.labels(), "at_time")?;
         let target = time_argument(time, "at_time")?;
-        let keep = between_time_positions(self.index.labels(), target, target);
+        let keep = between_time_positions(&wall_clock_labels(&self.index), target, target);
 
         // A temporal selector builds a datetime index from string input, so the
         // result renders the parsed Timestamp rather than echoing the caller's
@@ -28034,7 +28076,7 @@ impl Series {
         // Per br-frankenpandas-g3jqn: see Series::at_time.
         require_datetime_index(self.index.labels(), "between_time")?;
         let keep = between_time_positions(
-            self.index.labels(),
+            &wall_clock_labels(&self.index),
             time_argument(start, "between_time")?,
             time_argument(end, "between_time")?,
         );
@@ -40059,8 +40101,15 @@ fn dense_groupby_pct_change_f64(
 /// column shifted wholly out is float64 (it came back object), and the
 /// nullable Int64 / Float64 / boolean dtypes keep their dtype with <NA> (they
 /// came back int64 / float64 / object). Anything else is unchanged.
-fn shifted_column_dtype(original: &DType, shifted: Column) -> Result<Column, FrameError> {
-    if !shifted.has_any_missing() {
+fn shifted_column_dtype(
+    original: &DType,
+    shifted: Column,
+    periods: i64,
+) -> Result<Column, FrameError> {
+    // Only a shift that vacates slots introduces NaN: shift(0) keeps the
+    // dtype (it widened an Int64 column that already held a missing value,
+    // so shift(0) was not the identity).
+    if periods == 0 || !shifted.has_any_missing() {
         return Ok(shifted);
     }
     let target = match original {
@@ -45374,7 +45423,7 @@ impl SeriesGroupBy<'_> {
             })?,
         };
         // pandas' dtype for the NaN-filled shift (int64 -> float64, ...).
-        let column = shifted_column_dtype(&self.series.column.dtype(), shifted.column)?;
+        let column = shifted_column_dtype(&self.series.column.dtype(), shifted.column, periods)?;
         Series::new(shifted.name, shifted.index, column)
     }
 
@@ -57208,14 +57257,8 @@ fn parse_tz_spec(tz: &str) -> Result<TimeZoneSpec, FrameError> {
     })
 }
 
-/// The UTC offset, in seconds east of UTC, that `tz` ('UTC', '+05:30',
-/// 'US/Eastern') has at the UTC instant `utc_nanos` - what a tz-aware
-/// timestamp adds to its instant to show its wall clock.
-pub fn tz_offset_seconds(tz: &str, utc_nanos: i64) -> Result<i32, FrameError> {
-    Ok(spec_offset_seconds(&parse_tz_spec(tz)?, utc_nanos))
-}
-
-/// [`tz_offset_seconds`] for an already parsed zone.
+/// The UTC offset, in seconds east of UTC, an already parsed zone has at
+/// the UTC instant `utc_nanos` (by name: [`fp_types::tz_offset_seconds`]).
 fn spec_offset_seconds(spec: &TimeZoneSpec, utc_nanos: i64) -> i32 {
     match spec {
         TimeZoneSpec::Fixed(offset) => offset.local_minus_utc(),
@@ -57224,31 +57267,6 @@ fn spec_offset_seconds(spec: &TimeZoneSpec, utc_nanos: i64) -> i32 {
             zone.offset_from_utc_datetime(&utc).fix().local_minus_utc()
         }
     }
-}
-
-/// The UTC instant of the wall-clock time `wall_nanos` in `tz`, as pandas'
-/// `tz_localize` with ambiguous / nonexistent = 'raise': a wall time a DST
-/// change repeats or skips is an error.
-pub fn tz_wall_to_utc_nanos(tz: &str, wall_nanos: i64) -> Result<i64, FrameError> {
-    let naive = DateTime::from_timestamp_nanos(wall_nanos).naive_utc();
-    let aware = match parse_tz_spec(tz)? {
-        TimeZoneSpec::Fixed(offset) => offset.from_local_datetime(&naive).single(),
-        TimeZoneSpec::Named { zone, name } => resolve_named_local_datetime(
-            naive,
-            zone,
-            &name,
-            ResolvedAmbiguousPolicy::Raise,
-            &TzNonexistentPolicy::Raise,
-        )?,
-    };
-    aware
-        .and_then(|aware| aware.timestamp_nanos_opt())
-        .ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!(
-                "could not localize '{}' to '{tz}'",
-                format_naive_datetime(naive)
-            ))
-        })
 }
 
 fn localize_series_values(
@@ -62020,6 +62038,14 @@ pub fn concat_series_with_ignore_index(
         }
         Index::new(labels).rename_index(shared_name)
     };
+    // One zone shared by every input stays (it was dropped with the labels).
+    let first_zone = series_list[0].index().tz();
+    let index = match first_zone {
+        Some(zone) if series_list.iter().all(|s| s.index().tz() == first_zone) => {
+            index.with_tz(Some(zone))?
+        }
+        _ => index,
+    };
     Series::new(name, index, column)
 }
 
@@ -62176,7 +62202,15 @@ pub fn concat_dataframes_with_ignore_index(
             for frame in frames {
                 labels.extend_from_slice(frame.index().labels());
             }
-            Index::new(labels).rename_index(shared_name)
+            let index = Index::new(labels).rename_index(shared_name);
+            // One zone shared by every input stays.
+            let first_zone = frames[0].index().tz();
+            match first_zone {
+                Some(zone) if frames.iter().all(|f| f.index().tz() == first_zone) => {
+                    index.with_tz(Some(zone))?
+                }
+                _ => index,
+            }
         }
     };
 
@@ -67246,7 +67280,8 @@ impl DataFrame {
             for &pos in positions {
                 labels.push(index_labels[pos].clone());
             }
-            Index::new(labels)
+            // Rows of a tz-aware index keep its zone.
+            Index::new(labels).with_tz(self.index.tz())?
         };
 
         let row_multiindex = self
@@ -67373,7 +67408,8 @@ impl DataFrame {
                     labels.push(label.clone());
                 }
             }
-            Index::new(labels)
+            // Rows of a tz-aware index keep its zone.
+            Index::new(labels).with_tz(self.index.tz())?
         };
 
         let row_multiindex = if let Some(multiindex) = &self.row_multiindex {
@@ -67502,7 +67538,8 @@ impl DataFrame {
             for &pos in positions {
                 labels.push(index_labels[pos].clone());
             }
-            Index::new(labels)
+            // Rows of a tz-aware index keep its zone.
+            Index::new(labels).with_tz(self.index.tz())?
         };
 
         let row_multiindex = self
@@ -67643,7 +67680,8 @@ impl DataFrame {
                     labels.push(index_labels[pos].clone());
                     pos = pos.checked_add(certificate.step)?;
                 }
-                Index::new(labels)
+                // Rows of a tz-aware index keep its zone.
+                Index::new(labels).with_tz(self.index.tz()).ok()?
             }
         };
 
@@ -71479,9 +71517,11 @@ impl DataFrame {
             let columns = ColumnStore::from_pairs(pairs);
 
             // Per br-frankenpandas-z5qu1: pandas preserves the index name
-            // through dropna / boolean-indexing.
+            // through dropna / boolean-indexing (and a tz-aware index's zone).
             let mut out = Self::new_with_axes(
-                Index::new(new_labels).rename_index(self.index.name()),
+                Index::new(new_labels)
+                    .rename_index(self.index.name())
+                    .with_tz(self.index.tz())?,
                 None,
                 columns,
                 order,
@@ -71539,9 +71579,11 @@ impl DataFrame {
         let columns = ColumnStore::from_pairs(pairs);
 
         // Per br-frankenpandas-z5qu1: pandas preserves the index name
-        // through dropna / boolean-indexing.
+        // through dropna / boolean-indexing (and a tz-aware index's zone).
         let mut out = Self::new_with_axes(
-            Index::new(new_labels).rename_index(self.index.name()),
+            Index::new(new_labels)
+                .rename_index(self.index.name())
+                .with_tz(self.index.tz())?,
             None,
             columns,
             order,
@@ -73173,6 +73215,12 @@ impl DataFrame {
                 .collect::<Result<Vec<_>, _>>()?;
             Index::new(labels).rename_index(Some(column))
         };
+        // A tz-aware column's zone rides on the index (pandas: a DatetimeIndex
+        // of that dtype); it became naive UTC labels.
+        let index = match source.dtype() {
+            DType::Datetime64 { tz: Some(zone) } => index.with_tz(Some(&zone))?,
+            _ => index,
+        };
 
         if verify_integrity && index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
@@ -73465,6 +73513,12 @@ impl DataFrame {
         let index_column = match self.index.int64_label_values() {
             Some(view) => Column::from_i64_values_owned(view.as_ref().clone()),
             None => Column::from_values(Self::index_labels_to_scalars(self.index.labels()))?,
+        };
+        // A tz-aware index comes back as a column of its dtype
+        // (datetime64[ns, zone]); it came back naive.
+        let index_column = match self.index.tz() {
+            Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
+            None => index_column,
         };
 
         let mut columns = self.columns.clone();
@@ -74300,8 +74354,11 @@ impl DataFrame {
             }
         };
 
-        // Per br-frankenpandas-4wlg0: pandas df.iloc preserves row index name.
-        let index = Index::new(out_labels).rename_index(self.index.name());
+        // Per br-frankenpandas-4wlg0: pandas df.iloc preserves row index name
+        // (and a tz-aware index's zone).
+        let index = Index::new(out_labels)
+            .rename_index(self.index.name())
+            .with_tz(self.index.tz())?;
         let columns = ColumnStore::from_pairs(pairs);
         if !self.allows_duplicate_labels && (columns.has_duplicates() || index.has_duplicates()) {
             return Err(FrameError::CompatibilityRejected(
@@ -81678,7 +81735,9 @@ impl DataFrame {
     /// axis name).
     pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
         let mut out = self.set_axis(index.labels().to_vec(), 0)?;
-        out.index = out.index.rename_index(index.name());
+        // The given index's name and time zone ride along (the zone was
+        // dropped with the labels).
+        out.index = out.index.rename_index(index.name()).with_tz(index.tz())?;
         Ok(out)
     }
 
@@ -83637,7 +83696,7 @@ impl DataFrame {
         // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
         require_datetime_index(self.index.labels(), "between_time")?;
         let keep = between_time_positions(
-            self.index.labels(),
+            &wall_clock_labels(&self.index),
             time_argument(start, "between_time")?,
             time_argument(end, "between_time")?,
         );
@@ -83654,7 +83713,7 @@ impl DataFrame {
         // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
         require_datetime_index(self.index.labels(), "at_time")?;
         let target = time_argument(time, "at_time")?;
-        let keep = between_time_positions(self.index.labels(), target, target);
+        let keep = between_time_positions(&wall_clock_labels(&self.index), target, target);
 
         let mut selected = self.take_rows_by_positions(&keep)?;
         selected.index = canonicalize_datetime_index_labels(&selected.index);
@@ -106251,7 +106310,7 @@ impl DataFrameGroupBy<'_> {
         let names: Vec<String> = shifted.column_order.to_vec();
         for name in names {
             if let (Some(original), Some(column)) = (self.df.column(&name), shifted.column(&name)) {
-                let fixed = shifted_column_dtype(&original.dtype(), column.clone())?;
+                let fixed = shifted_column_dtype(&original.dtype(), column.clone(), periods)?;
                 if fixed.dtype() != column.dtype() {
                     shifted = shifted.with_column(name, fixed)?;
                 }
@@ -117640,34 +117699,11 @@ mod tests {
 
     #[test]
     fn timezone_offsets_wall_fields_and_utc_parsing_follow_pandas() {
-        use crate::{
-            ToDatetimeOptions, to_datetime_with_options, tz_offset_seconds, tz_wall_to_utc_nanos,
-        };
+        use crate::{ToDatetimeOptions, to_datetime_with_options};
         let hour = 3_600_000_000_000_i64;
-        // 2024-03-10 14:30 UTC: Tokyo is +9h; New York is on EDT (-4h) after
-        // 07:00 UTC that day and on EST (-5h) the day before.
+        // 2024-03-10 14:30 UTC (the zone arithmetic itself is fp-types'
+        // time_zone_offsets_and_wall_clock_conversions_follow_pandas).
         let instant = 1_710_081_000_000_000_000_i64;
-        assert_eq!(tz_offset_seconds("Asia/Tokyo", instant).unwrap(), 9 * 3_600);
-        assert_eq!(
-            tz_offset_seconds("US/Eastern", instant).unwrap(),
-            -4 * 3_600
-        );
-        assert_eq!(
-            tz_offset_seconds("US/Eastern", instant - 24 * hour).unwrap(),
-            -5 * 3_600
-        );
-        assert_eq!(tz_offset_seconds("+05:30", 0).unwrap(), 19_800);
-        // Wall 12:00 in New York on 2024-01-01 is 17:00 UTC.
-        let wall_noon = 19_723 * 24 * hour + 12 * hour;
-        assert_eq!(
-            tz_wall_to_utc_nanos("US/Eastern", wall_noon).unwrap(),
-            wall_noon + 5 * hour
-        );
-        // NEGATIVES: 02:30 on 2024-03-10 does not exist in New York; an
-        // unknown zone is an error.
-        let skipped = 19_792 * 24 * hour + 2 * hour + 30 * 60_000_000_000;
-        assert!(tz_wall_to_utc_nanos("US/Eastern", skipped).is_err());
-        assert!(tz_offset_seconds("Mars/Olympus", 0).is_err());
 
         // pandas: a tz-aware column's dt.hour is its wall clock (Tokyo
         // 23:30, not the UTC 14:30).

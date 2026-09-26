@@ -2469,16 +2469,28 @@ def test_period_index_yields_periods_like_pandas() -> None:
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-def test_tz_methods_refuse_instead_of_returning_the_input() -> None:
-    naive = fpd.Series([1, 2], index=fpd.date_range("2024-01-01", periods=2, freq="D"))
-    with pytest.raises(NotImplementedError, match="tz_localize"):
-        naive.tz_localize("UTC")
-    # pandas raises the same TypeError for a tz-naive index.
+def test_series_tz_methods_localize_and_convert_the_index_like_pandas() -> None:
+    # TEST-CHANGE (fvsao.55): this pinned the refusal of Series.tz_localize
+    # (NotImplementedError) before the index could carry a zone; it now
+    # checks the localized / converted index against pandas.
+    def outcome(m: Any) -> Any:
+        naive = m.Series([1, 2], index=m.date_range("2024-01-01", periods=2, freq="D"))
+        tokyo = naive.tz_localize("Asia/Tokyo")
+        utc = tokyo.tz_convert("UTC")
+        return (
+            [str(t) for t in tokyo.index],
+            str(tokyo.index.tz),
+            [str(t) for t in utc.index],
+            tokyo.tolist(),
+            naive.tz_localize(None).tolist(),
+        )
+
+    assert outcome(fpd) == outcome(pd)
+    # NEGATIVE: pandas raises the same TypeError for a tz-naive index.
     with pytest.raises(TypeError, match="Cannot convert tz-naive timestamps"):
-        naive.tz_convert("UTC")
+        fpd.Series([1, 2], index=fpd.date_range("2024-01-01", periods=2, freq="D")).tz_convert("UTC")
     with pytest.raises(TypeError, match="Cannot convert tz-naive timestamps"):
         pd.Series([1, 2], index=pd.date_range("2024-01-01", periods=2, freq="D")).tz_convert("UTC")
-    assert naive.tz_localize(None).tolist() == [1, 2]
 
 
 # Per-column DataFrame ops on non-numeric columns
@@ -6139,10 +6151,11 @@ def test_timestamp_timedelta_and_datetimeindex_scalars_match_pandas(case: str) -
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_datetimeindex_tz_methods_do_not_ignore_tz() -> None:
     # tz_localize / tz_convert returned the index unchanged whatever tz was.
+    # TEST-CHANGE (fvsao.55): tz_localize was then refused (NotImplementedError);
+    # it now localizes, checked in test_tz_aware_datetime_index_matches_pandas.
     with pytest.raises(TypeError, match="Cannot convert tz-naive timestamps"):
         fpd.DatetimeIndex(["2024-01-05"]).tz_convert("US/Eastern")
-    with pytest.raises(NotImplementedError):
-        fpd.DatetimeIndex(["2024-01-05"]).tz_localize("UTC")
+    assert str(fpd.DatetimeIndex(["2024-01-05"]).tz_localize("UTC").tz) == "UTC"
     # Timestamp(tz=) is implemented: test_timezone_timestamps_series_dt_and_utc_parsing_match_pandas.
 
 
@@ -7332,7 +7345,7 @@ def test_dtype_objects_unstack_transpose_and_get_dummies_dtypes_match_pandas(cas
     assert _dtype_outcome(fpd, case) == _dtype_outcome(pd, case), case
 
 
-def _texts(m: Any) -> Any:
+def _string_series(m: Any) -> Any:
     return m.Series(["Apple pie", "banana", None, "Cherry-tart", "e1f2", "a9b8"], name="t")
 
 
@@ -7371,24 +7384,24 @@ _TEXT_TIME_CASES = {
     "at_time no match": lambda m: _shaped(_timed(m).at_time("12:00")),
     # (pandas raises dateutil's ParserError, a ValueError; compared as one.)
     "at_time bad time": lambda m: _raises_value_error(lambda: _timed(m).at_time("25:99")),
-    "replace backrefs": lambda m: _shaped(_texts(m).str.replace(r"(\w)(\d)", r"\2\1", regex=True)),
-    "replace named group": lambda m: _shaped(_texts(m).str.replace(r"(?P<l>[a-z])(?P<d>\d)", r"\g<d>", regex=True)),
-    "replace dollar literal": lambda m: _shaped(_texts(m).str.replace(r"(a)", "$1", regex=True)),
-    "replace callable": lambda m: _shaped(_texts(m).str.replace(r"[aeiou]", lambda found: found.group(0).upper(), regex=True)),
-    "replace case insensitive": lambda m: _shaped(_texts(m).str.replace("A", "_", case=False, regex=True)),
-    "replace flags": lambda m: _shaped(_texts(m).str.replace("^a", "_", flags=__import__("re").IGNORECASE, regex=True)),
-    "replace n": lambda m: _shaped(_texts(m).str.replace("a", "_", n=1)),
+    "replace backrefs": lambda m: _shaped(_string_series(m).str.replace(r"(\w)(\d)", r"\2\1", regex=True)),
+    "replace named group": lambda m: _shaped(_string_series(m).str.replace(r"(?P<l>[a-z])(?P<d>\d)", r"\g<d>", regex=True)),
+    "replace dollar literal": lambda m: _shaped(_string_series(m).str.replace(r"(a)", "$1", regex=True)),
+    "replace callable": lambda m: _shaped(_string_series(m).str.replace(r"[aeiou]", lambda found: found.group(0).upper(), regex=True)),
+    "replace case insensitive": lambda m: _shaped(_string_series(m).str.replace("A", "_", case=False, regex=True)),
+    "replace flags": lambda m: _shaped(_string_series(m).str.replace("^a", "_", flags=__import__("re").IGNORECASE, regex=True)),
+    "replace n": lambda m: _shaped(_string_series(m).str.replace("a", "_", n=1)),
     "replace literal backslash": lambda m: _shaped(m.Series(["a.b"]).str.replace(".", r"\\", regex=False)),
     # NEGATIVE: a callable needs regex=True.
-    "replace callable without regex": lambda m: _texts(m).str.replace("a", lambda found: "x", regex=False),
-    "str join": lambda m: _shaped(_texts(m).str.join("-")),
-    "str translate": lambda m: _shaped(_texts(m).str.translate(str.maketrans("ae", "AE"))),
-    "str extractall": lambda m: _shaped(_texts(m).str.extractall(r"([a-z])(\d)")),
-    "str extractall named": lambda m: _shaped(_texts(m).str.extractall(r"(?P<letter>[a-z])(?P<digit>\d)")),
+    "replace callable without regex": lambda m: _string_series(m).str.replace("a", lambda found: "x", regex=False),
+    "str join": lambda m: _shaped(_string_series(m).str.join("-")),
+    "str translate": lambda m: _shaped(_string_series(m).str.translate(str.maketrans("ae", "AE"))),
+    "str extractall": lambda m: _shaped(_string_series(m).str.extractall(r"([a-z])(\d)")),
+    "str extractall named": lambda m: _shaped(_string_series(m).str.extractall(r"(?P<letter>[a-z])(?P<digit>\d)")),
     # NEGATIVE: a pattern without groups is pandas' ValueError.
-    "str extractall no groups": lambda m: _texts(m).str.extractall(r"[a-z]\d"),
-    "str cat na_rep": lambda m: _texts(m).str.cat(sep=",", na_rep="?"),
-    "str cat skips missing": lambda m: _texts(m).str.cat(sep=","),
+    "str extractall no groups": lambda m: _string_series(m).str.extractall(r"[a-z]\d"),
+    "str cat na_rep": lambda m: _string_series(m).str.cat(sep=",", na_rep="?"),
+    "str cat skips missing": lambda m: _string_series(m).str.cat(sep=","),
     "searchsorted list": lambda m: m.Series([1, 3, 5]).searchsorted([2, 5], side="right").tolist(),
     "searchsorted scalar": lambda m: int(m.Series([1, 3, 5]).searchsorted(4)),
     "index duplicated any": lambda m: (m.Index([3, 1, 3]).duplicated().any(), m.Index([3, 1, 3]).duplicated().tolist()),
@@ -7959,3 +7972,110 @@ def test_no_test_module_defines_a_top_level_name_twice() -> None:
         if twice:
             repeated[path.name] = twice
     assert repeated == {}, repeated
+
+
+def _texts(r: Any) -> Any:
+    """An index / Series / array as its elements' texts (Timestamps print
+    their zone), or the value's text."""
+    if hasattr(r, "tolist") and not isinstance(r, str):
+        return [str(v) for v in r.tolist()]
+    return str(r)
+
+
+def _eastern_range(m: Any, freq: str = "12h", tz: Any = "US/Eastern") -> Any:
+    return m.date_range("2024-03-09 12:00", periods=3, freq=freq, tz=tz)
+
+
+def _eastern_index(m: Any) -> Any:
+    """Wall times across the 2024-03-10 DST change, localized (no freq)."""
+    return m.DatetimeIndex(["2024-03-09 18:00", "2024-03-10 00:00", "2024-03-10 07:00", "NaT"]).tz_localize("US/Eastern")
+
+
+# (fvsao.55) A DatetimeIndex carried no time zone: date_range(tz=),
+# DatetimeIndex.tz_localize / tz_convert and DatetimeIndex(tz=) were refused,
+# an aware column set as the index became naive UTC labels, and the fields,
+# repr and elements of an index read the UTC clock.
+_TZ_INDEX_CASES = {
+    "date_range 12h across DST": lambda m: _texts(_eastern_range(m)),
+    "date_range tz and dtype": lambda m: (str(_eastern_range(m).tz), str(_eastern_range(m).dtype)),
+    "date_range daily wall clock": lambda m: _texts(_eastern_range(m, "D")),
+    "date_range UTC": lambda m: _texts(_eastern_range(m, "12h", "UTC")),
+    "date_range fixed offset": lambda m: (_texts(_eastern_range(m, "h", "+05:30")), str(_eastern_range(m, "h", "+05:30").tz)),
+    "date_range month end": lambda m: _texts(m.date_range("2024-01-31", periods=3, freq="ME", tz="Europe/Paris")),
+    "date_range aware endpoint": lambda m: _texts(m.date_range(m.Timestamp("2024-01-01", tz="Asia/Tokyo"), periods=2, freq="D")),
+    "localize": lambda m: _texts(_eastern_index(m)),
+    "localize tz": lambda m: str(_eastern_index(m).tz),
+    "convert": lambda m: _texts(_eastern_index(m).tz_convert("Asia/Tokyo")),
+    "convert None": lambda m: _texts(_eastern_index(m).tz_convert(None)),
+    "localize None": lambda m: _texts(_eastern_index(m).tz_localize(None)),
+    "constructor tz": lambda m: _texts(m.DatetimeIndex(["2024-01-01 09:00"], tz="US/Eastern")),
+    "to_datetime utc": lambda m: str(m.to_datetime(["2024-01-01"], utc=True).tz),
+    "repr": lambda m: repr(_eastern_index(m)),
+    "repr named UTC": lambda m: repr(m.DatetimeIndex(["2024-01-01"], name="when").tz_localize("UTC")),
+    "fields read the wall clock": lambda m: (_texts(_eastern_index(m).hour), _texts(_eastern_index(m).day), _texts(_eastern_index(m).dayofweek)),
+    "strftime with offset and name": lambda m: _texts(_eastern_index(m)[:3].strftime("%Y-%m-%d %H:%M %z %Z")),
+    "normalize": lambda m: _texts(_eastern_index(m).normalize()),
+    "floor to the day": lambda m: _texts(_eastern_index(m)[:3].floor("D")),
+    "elements are aware Timestamps": lambda m: [f"{type(v).__name__} {v.tz} {v}" for v in _eastern_index(m)[:3].tolist()],
+    "element, min, max": lambda m: (str(_eastern_index(m)[1]), str(_eastern_index(m).min()), str(_eastern_index(m).max())),
+    "slice keeps the zone": lambda m: str(_eastern_index(m)[1:].tz),
+    "sort_values keeps the zone": lambda m: _texts(_eastern_index(m)[:3][::-1].sort_values()),
+    "equals across zones": lambda m: (_eastern_index(m).equals(_eastern_index(m).tz_convert("UTC")), _eastern_index(m).equals(_eastern_index(m).copy())),
+    "isin an aware Timestamp": lambda m: _texts(_eastern_index(m).isin([m.Timestamp("2024-03-10 00:00", tz="US/Eastern")])),
+    "minus a Timestamp": lambda m: _texts(_eastern_index(m)[:3] - m.Timestamp("2024-03-09 18:00", tz="US/Eastern")),
+    "plus a Timedelta": lambda m: _texts(_eastern_index(m)[:3] + m.Timedelta("6h")),
+    "plus a DateOffset is wall clock": lambda m: _texts(_eastern_index(m)[:2] + m.DateOffset(days=1)),
+    "astype str": lambda m: _texts(_eastern_index(m)[:3].astype(str)),
+    "to_series dtype": lambda m: str(_eastern_index(m).to_series().dtype),
+    "Series of the index": lambda m: (str(m.Series(_eastern_index(m)).dtype), _texts(m.Series(_eastern_index(m)))),
+    "series repr": lambda m: repr(m.Series([1, 2, 3, 4], index=_eastern_index(m))),
+    "frame repr": lambda m: repr(m.DataFrame({"v": [1, 2, 3, 4]}, index=_eastern_index(m))),
+    "series index tz": lambda m: str(m.Series([1, 2, 3, 4], index=_eastern_index(m)).index.tz),
+    "head, sort, filter keep the zone": lambda m: (lambda s: (str(s.head(2).index.tz), str(s.sort_values().index.tz), str(s[s > 1].index.tz)))(m.Series([3, 1, 2, 4], index=_eastern_index(m))),
+    "frame filter keeps the zone": lambda m: (lambda d: str(d[d.v > 2].index.tz))(m.DataFrame({"v": [1, 2, 3, 4]}, index=_eastern_index(m))),
+    "set_index of an aware column": lambda m: (lambda d: (str(d.index.tz), _texts(d.index)))(m.DataFrame({"t": _eastern_index(m)[:3], "v": [1, 2, 3]}).set_index("t")),
+    "reset_index to an aware column": lambda m: (lambda d: (str(d.dtypes.iloc[0]), _texts(d.iloc[:, 0])))(m.DataFrame({"v": [1, 2, 3]}, index=_eastern_index(m)[:3]).reset_index()),
+    "Series.tz_convert": lambda m: _texts(m.Series([1, 2, 3], index=_eastern_index(m)[:3]).tz_convert("UTC").index),
+    "DataFrame.tz_localize": lambda m: _texts(m.DataFrame({"v": [1]}, index=m.DatetimeIndex(["2024-01-01"])).tz_localize("Asia/Tokyo").index),
+    "same zone arithmetic": lambda m: _texts((m.Series([1, 2, 3], index=_eastern_index(m)[:3]) * 2).index),
+    "two zones meet in UTC": lambda m: (lambda s: _texts((s + s.tz_convert("Asia/Tokyo")).index))(m.Series([1, 2, 3], index=_eastern_index(m)[:3])),
+    "between_time reads the wall clock": lambda m: m.Series([1, 2, 3], index=_eastern_index(m)[:3]).between_time("00:00", "07:00").tolist(),
+    "concat keeps a shared zone": lambda m: (lambda s: str(m.concat([s, s]).index.tz))(m.Series([1, 2, 3], index=_eastern_index(m)[:3])),
+    "index setter keeps the zone": lambda m: (lambda d: (setattr(d, "index", _eastern_index(m)[:3]), str(d.index.tz))[1])(m.DataFrame({"v": [1, 2, 3]})),
+    "shift by a fixed freq keeps the zone": lambda m: _texts(m.Series([1, 2, 3], index=_eastern_index(m)[:3]).shift(1, freq="h").index),
+    "unique of an aware column": lambda m: str(m.Series(_eastern_index(m)[:3]).unique()[0]),
+    # NEGATIVES (pandas' errors): localizing an aware index, converting a
+    # naive one, aware against naive, a skipped wall time, an unknown zone.
+    "localize an aware index": lambda m: _eastern_index(m).tz_localize("UTC"),
+    "convert a naive index": lambda m: m.DatetimeIndex(["2024-01-01"]).tz_convert("UTC"),
+    "aware joined with naive": lambda m: (lambda s: s + s.tz_localize(None))(m.Series([1, 2, 3], index=_eastern_index(m)[:3])),
+    "nonexistent wall time": lambda m: m.DatetimeIndex(["2024-03-10 02:30"]).tz_localize("US/Eastern"),
+    "ambiguous wall time": lambda m: m.DatetimeIndex(["2024-11-03 01:30"]).tz_localize("US/Eastern"),
+    "unknown zone": lambda m: m.DatetimeIndex(["2024-01-01"]).tz_localize("Mars/Base"),
+    "minus a naive Timestamp": lambda m: _eastern_index(m) - m.Timestamp("2024-01-01"),
+}
+
+
+def _tz_index_outcome(m: Any, case: str) -> Any:
+    try:
+        return _TZ_INDEX_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TZ_INDEX_CASES))
+def test_tz_aware_datetime_index_matches_pandas(case: str) -> None:
+    assert _tz_index_outcome(fpd, case) == _tz_index_outcome(pd, case), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_resample_of_a_tz_aware_index_is_refused_not_binned_on_utc() -> None:
+    # pandas bins a tz-aware index on its wall clock (days start at local
+    # midnight); the bins here read UTC, so it is refused (fvsao.35) rather
+    # than answered wrong. NEGATIVE: a naive index still resamples.
+    aware = fpd.Series([1, 2, 3], index=_eastern_index(fpd)[:3])
+    with pytest.raises(NotImplementedError, match="tz-aware"):
+        aware.resample("D").sum()
+    naive = fpd.Series([1, 2, 3], index=_eastern_index(fpd)[:3].tz_localize(None))
+    assert naive.resample("D").sum().tolist() == [1, 5]

@@ -12,6 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
 rustc-hash = "2"
 serde = { workspace = true }
 thiserror = { workspace = true }

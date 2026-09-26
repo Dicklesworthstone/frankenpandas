@@ -141,7 +141,11 @@ fn shift_index_by_freq(
             other => Ok(other.clone()),
         })
         .collect::<PyResult<Vec<_>>>()?;
-    Ok(Index::new(moved).set_names(index.name()))
+    // A fixed duration moves the instants; a tz-aware index keeps its zone.
+    Index::new(moved)
+        .set_names(index.name())
+        .with_tz(index.tz())
+        .map_err(index_error_to_py)
 }
 
 /// Map a pandas dtype name to a FrankenPandas `DType` with pandas' meanings:
@@ -343,6 +347,41 @@ fn pandas_datetime_cells(values: &[Option<i64>], index: bool) -> Vec<String> {
         .collect()
 }
 
+/// Instants of a tz-aware column or index as pandas prints them: each one's
+/// wall clock in `zone` as `str(Timestamp)` does - its own fraction (none,
+/// six digits, or nine for nanoseconds), then the `+HH:MM` offset, never a
+/// bare date - and NaT (a non-UTC zone fell back to frankenpandas' own
+/// Display; UTC dropped the fraction).
+fn pandas_aware_datetime_texts(values: &[Option<i64>], zone: &str) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| {
+            let Some(nanos) = *value else {
+                return "NaT".to_owned();
+            };
+            let offset = fp_types::tz_offset_seconds(zone, nanos).unwrap_or(0);
+            let wall = nanos.saturating_add(i64::from(offset) * 1_000_000_000);
+            let text = fp_index::format_datetime_ns(wall);
+            let base = text.get(..19).unwrap_or(&text);
+            let fraction = wall.rem_euclid(1_000_000_000);
+            let fraction = if fraction % 1_000 != 0 {
+                format!(".{fraction:09}")
+            } else if fraction != 0 {
+                format!(".{:06}", fraction / 1_000)
+            } else {
+                String::new()
+            };
+            let sign = if offset < 0 { '-' } else { '+' };
+            let minutes = offset.unsigned_abs() / 60;
+            format!(
+                "{base}{fraction}{sign}{:02}:{:02}",
+                minutes / 60,
+                minutes % 60
+            )
+        })
+        .collect()
+}
+
 /// pandas' `Timedelta._repr_base`: "N days" when `long` is off and the
 /// value is whole days, else "N days HH:MM:SS[.fff[fff[fff]]]".
 fn pandas_timedelta_text(nanos: i64, long: bool) -> String {
@@ -424,19 +463,7 @@ fn pandas_cells(column: &Column) -> Option<Vec<String>> {
                 .collect();
             match tz.as_deref() {
                 None => pandas_datetime_cells(&instants, false),
-                Some("UTC") => instants
-                    .iter()
-                    .map(|nanos| {
-                        nanos.map_or_else(
-                            || "NaT".to_owned(),
-                            |nanos| {
-                                let text = fp_index::format_datetime_ns(nanos);
-                                format!("{}+00:00", text.get(..19).unwrap_or(&text))
-                            },
-                        )
-                    })
-                    .collect(),
-                Some(_) => return None,
+                Some(zone) => pandas_aware_datetime_texts(&instants, zone),
             }
         }
         DType::Timedelta64 => {
@@ -478,7 +505,7 @@ fn pandas_cells(column: &Column) -> Option<Vec<String>> {
 
 /// The texts of index `labels`, as pandas' index formatter prints them
 /// (left-justified by the caller).
-fn pandas_label_texts(labels: &[IndexLabel]) -> Vec<String> {
+fn pandas_label_texts(labels: &[IndexLabel], zone: Option<&str>) -> Vec<String> {
     if !labels.is_empty()
         && labels
             .iter()
@@ -491,7 +518,10 @@ fn pandas_label_texts(labels: &[IndexLabel]) -> Vec<String> {
                 _ => None,
             })
             .collect();
-        return pandas_datetime_cells(&instants, false);
+        return match zone {
+            Some(zone) => pandas_aware_datetime_texts(&instants, zone),
+            None => pandas_datetime_cells(&instants, false),
+        };
     }
     labels
         .iter()
@@ -596,7 +626,7 @@ fn pandas_multiindex_texts(multi: &fp_index::MultiIndex, rows: &[usize]) -> Opti
             .iter()
             .map(|&row| values.labels().get(row).cloned())
             .collect::<Option<_>>()?;
-        levels.push(pandas_label_texts(&shown));
+        levels.push(pandas_label_texts(&shown, None));
     }
     sparsify_level_texts(&mut levels);
     let names = multi.names().iter().any(Option::is_some).then(|| {
@@ -756,7 +786,10 @@ fn pandas_series_text(
                 .iter()
                 .map(|&row| index.labels()[row].clone())
                 .collect();
-            (pandas_label_texts(&shown), index.name().map(str::to_owned))
+            (
+                pandas_label_texts(&shown, index.tz()),
+                index.name().map(str::to_owned),
+            )
         }
     };
     if let Some(at) = dots_at {
@@ -795,7 +828,7 @@ fn pandas_multiindex_tuples(multi: &fp_index::MultiIndex) -> Option<Vec<String>>
             multi
                 .get_level_values(level)
                 .ok()
-                .map(|values| pandas_label_texts(values.labels()))
+                .map(|values| pandas_label_texts(values.labels(), None))
         })
         .collect::<Option<_>>()?;
     Some(
@@ -838,7 +871,7 @@ fn pandas_frame_text(
     if len == 0 || width == 0 {
         let labels = match frame.row_multiindex() {
             Some(multi) => pandas_multiindex_tuples(multi)?,
-            None => pandas_label_texts(frame.index().labels()),
+            None => pandas_label_texts(frame.index().labels(), frame.index().tz()),
         };
         let columns = match column_multi {
             Some(multi) => pandas_multiindex_tuples(multi)?,
@@ -860,7 +893,7 @@ fn pandas_frame_text(
                     multi
                         .get_level_values(level)
                         .ok()
-                        .map(|values| pandas_label_texts(values.labels()))
+                        .map(|values| pandas_label_texts(values.labels(), None))
                 })
                 .collect::<Option<_>>()?;
             if levels.iter().any(|texts| texts.len() != width) {
@@ -913,7 +946,7 @@ fn pandas_frame_text(
                 .map(|&row| frame.index().labels()[row].clone())
                 .collect();
             (
-                vec![pandas_label_texts(&shown)],
+                vec![pandas_label_texts(&shown, frame.index().tz())],
                 frame.index().name().map(|name| vec![name.to_owned()]),
             )
         }
@@ -1584,9 +1617,30 @@ fn tz_name(zone: &Bound<'_, PyAny>) -> PyResult<String> {
         Ok(name) => name,
         Err(_) => zone.str()?.extract::<String>()?,
     };
-    fp_frame::tz_offset_seconds(&name, 0)
-        .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("'{name}'")))?;
-    Ok(name)
+    // pandas' own name for the zone ('+05:30' is UTC+05:30).
+    fp_types::tz_canonical_name(&name).map_err(|err| tz_error_to_py(zone.py(), err))
+}
+
+/// A time-zone failure as pandas raises it: pytz's UnknownTimeZoneError (a
+/// KeyError), NonExistentTimeError or AmbiguousTimeError, the classes
+/// pandas' users catch - KeyError / ValueError when pytz is absent.
+fn tz_error_to_py(py: Python<'_>, err: fp_types::TimeZoneError) -> PyErr {
+    let (class, message) = match &err {
+        fp_types::TimeZoneError::Unknown(name) => ("UnknownTimeZoneError", name.clone()),
+        fp_types::TimeZoneError::NonExistent(_) => ("NonExistentTimeError", err.to_string()),
+        fp_types::TimeZoneError::Ambiguous(_) => ("AmbiguousTimeError", err.to_string()),
+    };
+    match py
+        .import("pytz.exceptions")
+        .and_then(|module| module.getattr(class))
+        .and_then(|class| class.call1((message.clone(),)))
+    {
+        Ok(exception) => PyErr::from_value(exception),
+        Err(_) if matches!(err, fp_types::TimeZoneError::Unknown(_)) => {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(message)
+        }
+        Err(_) => PyErr::new::<pyo3::exceptions::PyValueError, _>(message),
+    }
 }
 
 impl PyTimestamp {
@@ -1595,7 +1649,7 @@ impl PyTimestamp {
     fn utc_offset_seconds(&self) -> i32 {
         match &self.inner.tz {
             Some(tz) if !self.inner.is_nat() => {
-                fp_frame::tz_offset_seconds(tz, self.inner.nanos).unwrap_or(0)
+                fp_types::tz_offset_seconds(tz, self.inner.nanos).unwrap_or(0)
             }
             _ => 0,
         }
@@ -1656,8 +1710,6 @@ impl PyTimestamp {
     /// placed in `tz` (a wall time a DST change repeats or skips is an
     /// error), or a tz-aware one's wall clock kept without its zone (None).
     fn localized(&self, tz: Option<&str>) -> PyResult<Self> {
-        let value_error =
-            |e: FrameError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string());
         match (tz, &self.inner.tz) {
             (Some(_), Some(_)) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Cannot localize tz-aware Timestamp, use tz_convert for conversions",
@@ -1669,8 +1721,8 @@ impl PyTimestamp {
                         inner: self.inner.clone(),
                     });
                 }
-                let nanos =
-                    fp_frame::tz_wall_to_utc_nanos(zone, self.inner.nanos).map_err(value_error)?;
+                let nanos = fp_types::tz_wall_to_utc_nanos(zone, self.inner.nanos)
+                    .map_err(|err| Python::attach(|py| tz_error_to_py(py, err)))?;
                 Ok(Self {
                     inner: Timestamp {
                         nanos,
@@ -3194,7 +3246,11 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
             dti.inner.nanos(),
             Scalar::Datetime64,
         )?;
-        return Ok(Some(column));
+        // A tz-aware index gives a column of its dtype (datetime64[ns, tz]).
+        return Ok(Some(match dti.inner.tz() {
+            Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
+            None => column,
+        }));
     }
     if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
         let column = temporal(DType::Timedelta64, tdi.inner.nanos(), Scalar::Timedelta64)?;
@@ -3272,6 +3328,21 @@ fn refuse_unordered_set(obj: &Bound<'_, PyAny>) -> PyResult<()> {
         ));
     }
     Ok(())
+}
+
+/// The time zone an `index=` argument carries: a tz-aware DatetimeIndex's,
+/// or a tz-aware datetime Series' (its values are the labels).
+fn index_arg_zone(obj: &Bound<'_, PyAny>) -> Option<String> {
+    if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        dti.inner.tz()
+    } else if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
+        match series.inner.dtype() {
+            DType::Datetime64 { tz } => tz,
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
 
 /// The name an Index argument gives the Series built from it, as pandas'
@@ -3450,10 +3521,11 @@ fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> 
 /// else the label itself (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
 fn row_keys_to_py(py: Python<'_>, index: &Index) -> PyResult<Vec<Py<PyAny>>> {
     let Some(levels) = index.row_multiindex() else {
+        // A tz-aware index's keys are Timestamps in its zone.
         return index
             .labels()
             .iter()
-            .map(|label| index_label_to_py(py, label))
+            .map(|label| row_label_to_py(py, index, label))
             .collect();
     };
     (0..levels.len())
@@ -3655,6 +3727,9 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
             "assigning a MultiIndex as the row axis (use set_index with several columns)",
         ));
     }
+    // A tz-aware DatetimeIndex or datetime Series keeps its zone (it was
+    // taken as naive UTC labels).
+    let zone = index_arg_zone(value);
     if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
         let labels = series
             .inner
@@ -3664,14 +3739,20 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
             .map(scalar_to_index_label_converter)
             .collect();
         let name = series.inner.name();
-        return Ok(Index::new(labels).rename_index((!name.is_empty()).then_some(name)));
+        return Index::new(labels)
+            .rename_index((!name.is_empty()).then_some(name))
+            .with_tz(zone.as_deref())
+            .map_err(index_error_to_py);
     }
     let name = value
         .getattr("name")
         .ok()
         .and_then(|name| name.extract::<String>().ok());
     let labels = extract_index_labels(Some(value), 0)?;
-    Ok(Index::new(labels).rename_index(name.as_deref()))
+    Index::new(labels)
+        .rename_index(name.as_deref())
+        .with_tz(zone.as_deref())
+        .map_err(index_error_to_py)
 }
 
 /// Extract column names from an optional Python object (Index, list, tuple, sequence, or None).
@@ -5456,22 +5537,88 @@ pub struct PyDatetimeIndex {
 }
 
 impl PyDatetimeIndex {
-    /// The same index (name kept) over new nanosecond labels.
+    /// The same index (name and time zone kept) over new instants - taken,
+    /// sorted, filtered or moved by a duration from this one's.
     fn with_nanos(&self, nanos: Vec<i64>) -> Self {
-        Self {
-            inner: DatetimeIndex::new(nanos).rename_index(self.inner.name()),
+        let naive = DatetimeIndex::new(nanos).rename_index(self.inner.name());
+        let inner = match self.inner.tz() {
+            // Re-attaching the zone this index carries cannot fail: the
+            // labels are datetimes and the zone was validated when attached.
+            Some(zone) => naive.clone().with_tz(Some(&zone)).unwrap_or(naive),
+            None => naive,
+        };
+        Self { inner }
+    }
+
+    /// The instants as a datetime column of the index's dtype (a tz-aware
+    /// index's zone kept, as `to_series` / `to_frame` / `Series(index)`).
+    fn values_column(&self) -> PyResult<Column> {
+        let column = Column::from_values(
+            self.inner
+                .as_index()
+                .labels()
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
+                    _ => Scalar::Null(NullKind::NaT),
+                })
+                .collect(),
+        )
+        .map_err(column_error_to_py)?;
+        Ok(match self.inner.tz() {
+            Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
+            None => column,
+        })
+    }
+
+    /// One of this index's instants as a Timestamp in its zone (NaT for
+    /// the sentinel); a tz-aware index gave naive UTC Timestamps.
+    fn timestamp_object(&self, py: Python<'_>, nanos: i64) -> PyResult<Py<PyAny>> {
+        if nanos == Timestamp::NAT {
+            return scalar_to_py(py, &Scalar::Datetime64(nanos));
         }
+        PyTimestamp {
+            inner: Timestamp {
+                nanos,
+                tz: self.inner.tz(),
+            },
+        }
+        .into_py_any(py)
+    }
+
+    /// This index moved `times` times by a calendar offset: on its wall
+    /// clock, a tz-aware index's result placed back in its zone (a wall
+    /// time a DST change skips or repeats raises, as pandas).
+    fn offset_applied(&self, py: Python<'_>, offset: &PyDateOffset, times: i64) -> PyResult<Self> {
+        let wall = self
+            .inner
+            .tz_localize(None)
+            .map_err(index_error_to_py)?
+            .asi8()
+            .iter()
+            .map(|&value| {
+                if value == Timestamp::NAT {
+                    Ok(value)
+                } else {
+                    offset.apply(py, value, times)
+                }
+            })
+            .collect::<PyResult<Vec<i64>>>()?;
+        let moved = DatetimeIndex::new(wall).rename_index(self.inner.name());
+        let inner = match self.inner.tz() {
+            Some(zone) => moved.tz_localize(Some(&zone)).map_err(index_error_to_py)?,
+            None => moved,
+        };
+        Ok(Self { inner })
     }
 
     /// This index moved `times` times by an offset, a Timedelta or a
-    /// `datetime.timedelta` (NaT stays NaT); NotImplemented otherwise.
+    /// `datetime.timedelta` (NaT stays NaT); NotImplemented otherwise. A
+    /// duration moves the instants; an offset the wall clock.
     fn shifted(&self, py: Python<'_>, other: &Bound<'_, PyAny>, times: i64) -> PyResult<Py<PyAny>> {
         let nanos = self.inner.asi8();
         let moved: Vec<i64> = if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
-            nanos
-                .iter()
-                .map(|&value| offset.apply(py, value, times))
-                .collect::<PyResult<_>>()?
+            return self.offset_applied(py, &offset, times)?.into_py_any(py);
         } else {
             let step = if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
                 td.nanos
@@ -5512,9 +5659,16 @@ impl PyDatetimeIndex {
 
 #[pymethods]
 impl PyDatetimeIndex {
+    /// pandas' `DatetimeIndex(data, name=, tz=)`: `tz` localizes naive data
+    /// (wall times in that zone) and converts aware data.
     #[new]
-    #[pyo3(signature = (data=None, name=None))]
-    fn new(py: Python<'_>, data: Option<&Bound<'_, PyAny>>, name: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (data=None, name=None, tz=None))]
+    fn new(
+        py: Python<'_>,
+        data: Option<&Bound<'_, PyAny>>,
+        name: Option<&str>,
+        tz: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         let mut inner = if let Some(d) = data {
             if let Ok(dti) = d.extract::<PyRef<'_, PyDatetimeIndex>>() {
                 dti.inner.clone()
@@ -5525,21 +5679,17 @@ impl PyDatetimeIndex {
                 // pandas raises on a string it cannot parse (it became NaT).
                 let dt_series = fp_frame::to_datetime_with_options(
                     &s.inner,
+                    // Each string parsed on its own, as pandas' constructor
+                    // does (a first-value format made the rest raise); a
+                    // zone the strings carry stays.
                     fp_frame::ToDatetimeOptions {
                         errors: fp_frame::DatetimeErrors::Raise,
+                        format: Some("mixed"),
                         ..Default::default()
                     },
                 )
                 .map_err(to_datetime_error)?;
-                let nanos: Vec<i64> = dt_series
-                    .values()
-                    .iter()
-                    .map(|v| match v {
-                        Scalar::Datetime64(n) => *n,
-                        _ => i64::MIN,
-                    })
-                    .collect();
-                DatetimeIndex::new(nanos)
+                converted_datetime_index(&dt_series)?.inner
             } else if let Ok(list) = d.cast::<PyList>() {
                 let values: Vec<Scalar> = list
                     .iter()
@@ -5555,21 +5705,17 @@ impl PyDatetimeIndex {
                 .map_err(frame_error_to_py)?;
                 let dt_series = fp_frame::to_datetime_with_options(
                     &temp_series,
+                    // Each string parsed on its own, as pandas' constructor
+                    // does (a first-value format made the rest raise); a
+                    // zone the strings carry stays.
                     fp_frame::ToDatetimeOptions {
                         errors: fp_frame::DatetimeErrors::Raise,
+                        format: Some("mixed"),
                         ..Default::default()
                     },
                 )
                 .map_err(to_datetime_error)?;
-                let nanos: Vec<i64> = dt_series
-                    .values()
-                    .iter()
-                    .map(|v| match v {
-                        Scalar::Datetime64(n) => *n,
-                        _ => i64::MIN,
-                    })
-                    .collect();
-                DatetimeIndex::new(nanos)
+                converted_datetime_index(&dt_series)?.inner
             } else {
                 return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                     "DatetimeIndex data must be sequence of datetime values",
@@ -5580,6 +5726,15 @@ impl PyDatetimeIndex {
         };
         if let Some(n) = name {
             inner = inner.set_name(n);
+        }
+        if let Some(zone) = tz.filter(|tz| !tz.is_none()) {
+            let zone = tz_name(zone)?;
+            inner = if inner.tz().is_some() {
+                inner.tz_convert(Some(&zone))
+            } else {
+                inner.tz_localize(Some(&zone))
+            }
+            .map_err(index_error_to_py)?;
         }
         Ok(PyDatetimeIndex { inner })
     }
@@ -5594,9 +5749,13 @@ impl PyDatetimeIndex {
         self.inner = self.inner.set_names(name);
     }
 
+    /// `datetime64[ns]`, or `datetime64[ns, zone]` for a tz-aware index.
     #[getter]
-    fn dtype(&self) -> &'static str {
-        "datetime64[ns]"
+    fn dtype(&self) -> String {
+        match self.inner.tz() {
+            Some(zone) => format!("datetime64[ns, {zone}]"),
+            None => "datetime64[ns]".to_owned(),
+        }
     }
 
     #[getter]
@@ -5723,18 +5882,13 @@ impl PyDatetimeIndex {
         datetime_field_index(self.inner.days_in_month())
     }
 
-    /// The instants as Timestamps, NaT kept, as pandas (these were ISO
-    /// strings; fvsao.18).
+    /// The instants as Timestamps in the index's zone, NaT kept, as pandas
+    /// (these were ISO strings; fvsao.18).
     fn to_list(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         self.inner
-            .nanos()
+            .asi8()
             .into_iter()
-            .map(|ns| {
-                scalar_to_py(
-                    py,
-                    &ns.map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64),
-                )
-            })
+            .map(|ns| self.timestamp_object(py, ns))
             .collect()
     }
 
@@ -5780,27 +5934,18 @@ impl PyDatetimeIndex {
         finish_to_numpy(self.values(py)?, None, dtype, None)
     }
 
-    // Timestamps (NaT when there is no instant), as pandas; these were
-    // formatted strings (fvsao.18).
+    // Timestamps in the index's zone (NaT when there is no instant), as
+    // pandas; these were formatted strings (fvsao.18).
     fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        scalar_to_py(
-            py,
-            &Scalar::Datetime64(self.inner.min().unwrap_or(Timestamp::NAT)),
-        )
+        self.timestamp_object(py, self.inner.min().unwrap_or(Timestamp::NAT))
     }
 
     fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        scalar_to_py(
-            py,
-            &Scalar::Datetime64(self.inner.max().unwrap_or(Timestamp::NAT)),
-        )
+        self.timestamp_object(py, self.inner.max().unwrap_or(Timestamp::NAT))
     }
 
     fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        scalar_to_py(
-            py,
-            &Scalar::Datetime64(self.inner.mean().unwrap_or(Timestamp::NAT)),
-        )
+        self.timestamp_object(py, self.inner.mean().unwrap_or(Timestamp::NAT))
     }
 
     fn std(&self) -> Option<f64> {
@@ -5851,8 +5996,23 @@ impl PyDatetimeIndex {
         self.inner.notna()
     }
 
-    fn isin(&self, values: Vec<i64>) -> BoolArray {
-        self.inner.isin(&values).into()
+    /// Membership of each instant in `values` - Timestamps (an aware one by
+    /// its instant), datetimes, date strings or nanosecond ints, as pandas
+    /// (it took only ints, so a Timestamp raised TypeError).
+    fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
+        let mut nanos = Vec::new();
+        for value in values.try_iter()? {
+            match py_to_scalar(py, &value?)? {
+                Scalar::Datetime64(instant) | Scalar::Int64(instant) => nanos.push(instant),
+                Scalar::Utf8(text) => {
+                    if let Ok(ts) = Timestamp::parse(&text) {
+                        nanos.push(ts.nanos);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(self.inner.isin(&nanos).into())
     }
 
     fn intersection(&self, other: &PyDatetimeIndex) -> Self {
@@ -5947,11 +6107,12 @@ impl PyDatetimeIndex {
             .into_iter()
             .map(|nanos| (nanos != i64::MIN).then_some(nanos))
             .collect();
-        let items: Vec<String> = pandas_datetime_cells(&instants, true)
-            .into_iter()
-            .map(|text| format!("'{text}'"))
-            .collect();
-        let mut attrs = vec!["dtype='datetime64[ns]'".to_owned()];
+        let texts = match self.inner.tz() {
+            Some(zone) => pandas_aware_datetime_texts(&instants, &zone),
+            None => pandas_datetime_cells(&instants, true),
+        };
+        let items: Vec<String> = texts.into_iter().map(|text| format!("'{text}'")).collect();
+        let mut attrs = vec![format!("dtype='{}'", self.dtype())];
         attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
         attrs.push("freq=None".to_owned());
         pandas_index_text("DatetimeIndex", &items, true, attrs)
@@ -5969,10 +6130,11 @@ impl PyDatetimeIndex {
                     "index out of bounds",
                 ));
             }
-            // A Timestamp (NaT for the sentinel), as pandas; iteration goes
-            // through here too (it gave the formatted string; fvsao.18).
+            // A Timestamp in the index's zone (NaT for the sentinel), as
+            // pandas; iteration goes through here too (it gave the formatted
+            // string; fvsao.18).
             let nanos = self.inner.asi8()[pos];
-            return scalar_to_py(py, &Scalar::Datetime64(nanos));
+            return self.timestamp_object(py, nanos);
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let s_idx = slice.indices(self.inner.len() as isize)?;
@@ -5990,11 +6152,7 @@ impl PyDatetimeIndex {
                     i += s_idx.step;
                 }
             }
-            let mut out = DatetimeIndex::new(sliced);
-            if let Some(n) = self.inner.name() {
-                out = out.set_name(n);
-            }
-            return Ok(Py::new(py, PyDatetimeIndex { inner: out })?.into_any());
+            return Ok(Py::new(py, self.with_nanos(sliced))?.into_any());
         }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "Index indices must be integers or slices",
@@ -6153,19 +6311,7 @@ impl PyDatetimeIndex {
         } else {
             self.inner.as_index().clone()
         };
-        let col = Column::from_values(
-            self.inner
-                .as_index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
-                    _ => Scalar::Null(NullKind::NaN),
-                })
-                .collect(),
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let s = Series::new(series_name, idx, col).map_err(frame_error_to_py)?;
+        let s = Series::new(series_name, idx, self.values_column()?).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
@@ -6177,20 +6323,8 @@ impl PyDatetimeIndex {
         } else {
             Index::from_range(0, self.inner.len() as i64, 1)
         };
-        let col = Column::from_values(
-            self.inner
-                .as_index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
-                    _ => Scalar::Null(NullKind::NaN),
-                })
-                .collect(),
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let mut col_map = BTreeMap::new();
-        col_map.insert(col_name.to_string(), col);
+        col_map.insert(col_name.to_string(), self.values_column()?);
         let df = DataFrame::new_with_column_order(idx, col_map, vec![col_name.to_string()])
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
@@ -6223,11 +6357,7 @@ impl PyDatetimeIndex {
     #[pyo3(signature = (ascending=true, na_position="last"))]
     fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<Self> {
         let sorted = sort_nanos_na(&self.inner.asi8(), ascending, na_position)?;
-        let mut out = DatetimeIndex::new(sorted);
-        if let Some(n) = self.inner.name() {
-            out = out.set_name(n);
-        }
-        Ok(Self { inner: out })
+        Ok(self.with_nanos(sorted))
     }
 
     fn sort(&self) -> PyResult<Self> {
@@ -6303,20 +6433,27 @@ impl PyDatetimeIndex {
         self.as_py_index().any()
     }
 
+    /// The instants of `others` after these; the zone kept only when every
+    /// piece shares it (pandas gives an object Index otherwise).
     fn append(&self, others: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
         let mut combined = self.inner.asi8();
+        let mut shared_zone = true;
         for other in others {
             if let Ok(dti) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
                 combined.extend(dti.inner.asi8());
+                shared_zone &= dti.inner.tz() == self.inner.tz();
             } else if let Ok(list) = other.extract::<Vec<i64>>() {
                 combined.extend(list);
+                shared_zone &= self.inner.tz().is_none();
             }
         }
-        let mut out = DatetimeIndex::new(combined);
-        if let Some(n) = self.inner.name() {
-            out = out.set_name(n);
+        let out = self.with_nanos(combined);
+        if shared_zone {
+            return Ok(out);
         }
-        Ok(Self { inner: out })
+        Ok(Self {
+            inner: out.inner.with_tz(None).map_err(index_error_to_py)?,
+        })
     }
 
     fn argmax(&self) -> PyResult<usize> {
@@ -6359,6 +6496,23 @@ impl PyDatetimeIndex {
         let index = self.as_py_index();
         if name != "str" {
             return index.astype_name(&name);
+        }
+        // A tz-aware index prints each instant as its Timestamp in the zone
+        // ('2024-03-09 18:00:00-05:00'); it printed the UTC clock.
+        if let Some(zone) = self.inner.tz() {
+            let instants: Vec<Option<i64>> = self
+                .inner
+                .asi8()
+                .into_iter()
+                .map(|nanos| (nanos != Timestamp::NAT).then_some(nanos))
+                .collect();
+            let labels = pandas_aware_datetime_texts(&instants, &zone)
+                .into_iter()
+                .map(IndexLabel::Utf8)
+                .collect();
+            return Ok(PyIndex {
+                inner: Index::new(labels).set_names(index.inner.name()),
+            });
         }
         let values: Vec<Scalar> = index
             .inner
@@ -6429,11 +6583,7 @@ impl PyDatetimeIndex {
                 _ => vals.push(i64::MIN),
             }
         }
-        let mut out = DatetimeIndex::new(vals);
-        if let Some(n) = new_idx.inner.name() {
-            out = out.set_name(n);
-        }
-        Ok(Self { inner: out })
+        Ok(self.with_nanos(vals))
     }
 
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
@@ -6611,10 +6761,11 @@ impl PyDatetimeIndex {
         self.as_py_index().map(py, mapper)
     }
 
-    fn normalize(&self) -> Self {
-        Self {
-            inner: self.inner.normalize(),
-        }
+    /// Midnight of each wall-clock day (a tz-aware index's back in its zone).
+    fn normalize(&self) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.normalize().map_err(index_error_to_py)?,
+        })
     }
 
     fn putmask(&self, mask: Vec<bool>, value: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
@@ -6650,11 +6801,7 @@ impl PyDatetimeIndex {
                 out.push(v);
             }
         }
-        let mut res = DatetimeIndex::new(out);
-        if let Some(n) = self.inner.name() {
-            res = res.set_name(n);
-        }
-        Self { inner: res }
+        self.with_nanos(out)
     }
 
     #[pyo3(signature = (value, side="left", sorter=None))]
@@ -6728,11 +6875,7 @@ impl PyDatetimeIndex {
                 out.push(i64::MIN);
             }
         }
-        let mut res = DatetimeIndex::new(out);
-        if let Some(n) = self.inner.name() {
-            res = res.set_name(n);
-        }
-        Self { inner: res }
+        self.with_nanos(out)
     }
 
     fn time(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -6788,7 +6931,13 @@ impl PyDatetimeIndex {
         let p_freq = PeriodFreq::parse(freq).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid frequency: {freq}"))
         })?;
-        let nanos = self.inner.asi8();
+        // A period is a wall-clock span: a tz-aware index's zone is dropped
+        // (as pandas, which warns), not its UTC clock read.
+        let nanos = self
+            .inner
+            .tz_localize(None)
+            .map_err(index_error_to_py)?
+            .asi8();
         let present: Vec<i64> = nanos.iter().copied().filter(|&ns| ns != i64::MIN).collect();
         let converted = DatetimeIndex::new(present)
             .to_period(freq)
@@ -6848,20 +6997,23 @@ impl PyDatetimeIndex {
         self.clone()
     }
 
+    /// The zone's name (None when naive).
     #[getter]
     fn tz(&self) -> Option<String> {
-        None
+        self.inner.tz()
     }
 
-    /// A frankenpandas DatetimeIndex is always tz-naive, where pandas'
-    /// tz_convert raises this; it returned the index unchanged, silently
-    /// ignoring `tz`.
+    /// pandas' `tz_convert(tz)`: the same instants shown in `tz` (None: UTC,
+    /// naive); a naive index is pandas' TypeError.
     #[pyo3(signature = (tz))]
     fn tz_convert(&self, tz: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let _ = tz;
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Cannot convert tz-naive timestamps, use tz_localize to localize",
-        ))
+        let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
+        Ok(Self {
+            inner: self
+                .inner
+                .tz_convert(zone.as_deref())
+                .map_err(index_error_to_py)?,
+        })
     }
 
     /// `index + offset / Timedelta / datetime.timedelta` (it had no `+`).
@@ -6873,13 +7025,43 @@ impl PyDatetimeIndex {
         self.shifted(py, other, 1)
     }
 
+    /// `index - offset / duration` moves it; `index - Timestamp` is the
+    /// durations since that instant (a TimedeltaIndex; it raised TypeError),
+    /// aware against naive being pandas' TypeError.
     fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            if ts.inner.tz.is_some() != self.inner.tz().is_some() && !ts.inner.is_nat() {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Cannot subtract tz-naive and tz-aware datetime-like objects",
+                ));
+            }
+            let durations = self
+                .inner
+                .asi8()
+                .iter()
+                .map(|&value| {
+                    if value == Timestamp::NAT || ts.inner.is_nat() {
+                        Ok(fp_types::Timedelta::NAT)
+                    } else {
+                        value.checked_sub(ts.inner.nanos).ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timedelta overflow")
+                        })
+                    }
+                })
+                .collect::<PyResult<Vec<i64>>>()?;
+            return PyTimedeltaIndex {
+                inner: TimedeltaIndex::new(durations).rename_index(self.inner.name()),
+            }
+            .into_py_any(py);
+        }
         self.shifted(py, other, -1)
     }
 
-    /// `tz_localize(None)` keeps a tz-naive index as it is, as pandas; a
-    /// zone needs the timezone carrier the index does not have yet, so it
-    /// raises (it returned the index unchanged, silently ignoring `tz`).
+    /// pandas' `tz_localize(tz)`: naive wall times placed in `tz` (a wall
+    /// time a DST change skips or repeats raises pytz's error, pandas'
+    /// default), or an aware index's wall clock without its zone (None);
+    /// localizing an aware index is pandas' TypeError. Only the default
+    /// `ambiguous` / `nonexistent='raise'` is supported.
     #[pyo3(signature = (tz, ambiguous=None, nonexistent=None))]
     fn tz_localize(
         &self,
@@ -6887,16 +7069,30 @@ impl PyDatetimeIndex {
         ambiguous: Option<&Bound<'_, PyAny>>,
         nonexistent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let _ = (ambiguous, nonexistent);
-        if tz.is_some_and(|tz| !tz.is_none()) {
-            return Err(not_implemented("DatetimeIndex.tz_localize to a timezone"));
-        }
-        Ok(self.clone())
+        let is_raise = |arg: Option<&Bound<'_, PyAny>>| {
+            arg.is_none_or(|arg| {
+                arg.is_none() || arg.extract::<String>().is_ok_and(|v| v == "raise")
+            })
+        };
+        unsupported_params(
+            "DatetimeIndex.tz_localize",
+            &[
+                ("ambiguous", is_raise(ambiguous)),
+                ("nonexistent", is_raise(nonexistent)),
+            ],
+        )?;
+        let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
+        Ok(Self {
+            inner: self
+                .inner
+                .tz_localize(zone.as_deref())
+                .map_err(index_error_to_py)?,
+        })
     }
 
     #[getter]
     fn tzinfo(&self) -> Option<String> {
-        None
+        self.inner.tz()
     }
 
     fn view(&self) -> Self {
@@ -12404,6 +12600,14 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
             PyErrorKind::Index,
             format!("position {position} out of bounds for length {length}"),
         ),
+        // pandas: aware against naive is a TypeError; an unknown zone a
+        // KeyError (pytz's UnknownTimeZoneError); a skipped or repeated wall
+        // time a ValueError-like pytz error.
+        FrameError::Index(IndexError::TimeZoneMismatch(msg)) => (PyErrorKind::Type, msg.clone()),
+        FrameError::Index(IndexError::TimeZone(fp_types::TimeZoneError::Unknown(name))) => {
+            (PyErrorKind::Key, name.clone())
+        }
+        FrameError::Index(IndexError::TimeZone(e)) => (PyErrorKind::Value, e.to_string()),
         FrameError::Column(ColumnError::Type(e)) => (PyErrorKind::Type, e.to_string()),
         FrameError::Column(ColumnError::InvalidMaskType { dtype }) => (
             PyErrorKind::Type,
@@ -12476,6 +12680,10 @@ fn index_error_to_py(err: fp_index::IndexError) -> PyErr {
                 "position {position} out of bounds for length {length}"
             ))
         }
+        fp_index::IndexError::TimeZoneMismatch(msg) => {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(msg)
+        }
+        fp_index::IndexError::TimeZone(err) => Python::attach(|py| tz_error_to_py(py, err)),
         other => PyErr::new::<pyo3::exceptions::PyValueError, _>(other.to_string()),
     }
 }
@@ -13014,6 +13222,15 @@ fn unwrap_0d<'py>(other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     Ok(other.clone())
 }
 
+/// `values` over `index` itself: an operand or condition broadcast against
+/// a Series or frame, keeping a tz-aware index's zone (a copy of its labels
+/// made a naive index, which does not join an aware one) and taking the
+/// same-index fast path.
+fn series_over_index(name: &str, index: &Index, values: Vec<Scalar>) -> PyResult<Series> {
+    let column = Column::from_values(values).map_err(column_error_to_py)?;
+    Series::new(name, index.clone(), column).map_err(frame_error_to_py)
+}
+
 fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> PyResult<Series> {
     if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
         return Ok(series.inner.clone());
@@ -13022,12 +13239,7 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
         return Ok(series);
     }
     let scalar = py_to_scalar(py, &unwrap_0d(other)?)?;
-    Series::from_values(
-        like.name(),
-        like.index().labels().to_vec(),
-        vec![scalar; like.len()],
-    )
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    series_over_index(like.name(), like.index(), vec![scalar; like.len()])
 }
 
 /// A comparison operand against a column of `dtype`: a string compared with
@@ -13071,13 +13283,12 @@ fn comparison_operand(
     let Some(scalar) = comparison_scalar(py, &unwrap_0d(other)?, &like.dtype())? else {
         return Ok(None);
     };
-    Series::from_values(
-        like.name(),
-        like.index().labels().to_vec(),
-        vec![scalar; like.len()],
-    )
-    .map(Some)
-    .map_err(frame_error_to_py)
+    // Broadcast over `like`'s own index (a copy of its labels dropped a
+    // tz-aware index's zone, so the comparison realigned and came back naive).
+    let column = Column::from_values(vec![scalar; like.len()]).map_err(column_error_to_py)?;
+    Series::new(like.name(), like.index().clone(), column)
+        .map(Some)
+        .map_err(frame_error_to_py)
 }
 
 /// `side` with `fill` wherever it is missing and `against` is not: pandas'
@@ -15659,13 +15870,7 @@ fn normalize_series_cond(
         return Ok(py_s.inner.clone());
     }
     if let Ok(b) = cond_obj.extract::<bool>() {
-        let s = Series::from_values(
-            "",
-            inner.index().labels().to_vec(),
-            vec![Scalar::Bool(b); inner.len()],
-        )
-        .map_err(frame_error_to_py)?;
-        return Ok(s);
+        return series_over_index("", inner.index(), vec![Scalar::Bool(b); inner.len()]);
     }
     if let Ok(b_vec) = cond_obj.extract::<Vec<bool>>() {
         if b_vec.len() != inner.len() {
@@ -15675,13 +15880,11 @@ fn normalize_series_cond(
                 inner.len()
             )));
         }
-        let s = Series::from_values(
+        return series_over_index(
             "",
-            inner.index().labels().to_vec(),
+            inner.index(),
             b_vec.into_iter().map(Scalar::Bool).collect(),
-        )
-        .map_err(frame_error_to_py)?;
-        return Ok(s);
+        );
     }
     let tolist = if let Ok(tl) = cond_obj.getattr("tolist") {
         tl.call0()?
@@ -15700,9 +15903,7 @@ fn normalize_series_cond(
         for item in py_list.iter() {
             b_vec.push(Scalar::Bool(item.is_truthy()?));
         }
-        let s = Series::from_values("", inner.index().labels().to_vec(), b_vec)
-            .map_err(frame_error_to_py)?;
-        return Ok(s);
+        return series_over_index("", inner.index(), b_vec);
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
         "Cannot use {} as boolean condition for Series",
@@ -15754,8 +15955,7 @@ fn normalize_series_other(
         for item in py_list.iter() {
             scalars.push(py_to_scalar(py, &item)?);
         }
-        let s = Series::from_values("", inner.index().labels().to_vec(), scalars)
-            .map_err(frame_error_to_py)?;
+        let s = series_over_index("", inner.index(), scalars)?;
         return Ok(SeriesOrScalar::Series(s));
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
@@ -16096,6 +16296,19 @@ impl PySeries {
             }
             None => series,
         };
+        // A tz-aware index= keeps its zone (its labels were taken naive).
+        let series = match index.and_then(index_arg_zone) {
+            Some(zone) => {
+                let index = series
+                    .index()
+                    .clone()
+                    .with_tz(Some(&zone))
+                    .map_err(index_error_to_py)?;
+                Series::new(series.name(), index, series.column().clone())
+                    .map_err(frame_error_to_py)?
+            }
+            None => series,
+        };
         let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) else {
             return Ok(PySeries { inner: series });
         };
@@ -16288,6 +16501,12 @@ impl PySeries {
 
     /// `s[i]` (position), `s["label"]` (label), `s[slice]`, `s[mask]`, or `s[list]`.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // pandas applies a callable key to the Series first
+        // (`s[lambda s: s > 1]`); it was looked up as a label (KeyError).
+        if key.is_callable() {
+            let selector = key.call1((self.clone(),))?;
+            return self.__getitem__(py, &selector);
+        }
         // A MultiIndex key (s['y'], s[('y', 1)]; fvsao.36).
         if let Some(selected) = series_multiindex_loc(py, &self.inner, key)? {
             return Ok(selected);
@@ -17295,6 +17514,24 @@ impl PySeries {
     /// array in the column's numpy dtype, as pandas' - it was a Python list
     /// (fvsao.30).
     fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // A tz-aware column's are its Timestamps in the zone (pandas'
+        // DatetimeArray; a DatetimeIndex here) - the numpy array held the
+        // naive UTC clock.
+        if let DType::Datetime64 { tz: Some(zone) } = self.inner.dtype() {
+            let nanos = self
+                .inner
+                .unique()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) => *nanos,
+                    _ => Timestamp::NAT,
+                })
+                .collect();
+            let inner = DatetimeIndex::new(nanos)
+                .with_tz(Some(&zone))
+                .map_err(index_error_to_py)?;
+            return PyDatetimeIndex { inner }.into_py_any(py);
+        }
         let column = Column::from_values(self.inner.unique()).map_err(column_error_to_py)?;
         Ok(column_ndarray(py, &column)?.unbind())
     }
@@ -19506,7 +19743,6 @@ impl PySeries {
     ) -> PyResult<PySeries> {
         unsupported_params("Series.apply", &[("convert_dtype", convert_dtype)])?;
         let vals = self.inner.column().values();
-        let labels = self.inner.index().labels();
         let mut out = Vec::with_capacity(vals.len());
         for v in vals {
             let py_val = scalar_to_py(py, v)?;
@@ -19526,8 +19762,8 @@ impl PySeries {
             };
             out.push(py_to_scalar(py, &res)?);
         }
-        let s = Series::from_values(self.inner.name(), labels.to_vec(), out)
-            .map_err(frame_error_to_py)?;
+        // The same index (its name and a tz-aware zone kept).
+        let s = series_over_index(self.inner.name(), self.inner.index(), out)?;
         Ok(PySeries { inner: s })
     }
 
@@ -19540,7 +19776,8 @@ impl PySeries {
     ) -> PyResult<PySeries> {
         let ignore_na = na_action == Some("ignore");
         let vals = self.inner.column().values();
-        let labels = self.inner.index().labels();
+        // Each result keeps this index (its name and a tz-aware zone).
+        let index = self.inner.index();
         if arg.is_callable() {
             let mut out = Vec::with_capacity(vals.len());
             for v in vals {
@@ -19552,8 +19789,7 @@ impl PySeries {
                 let res = arg.call1((py_val,))?;
                 out.push(py_to_scalar(py, &res)?);
             }
-            let s = Series::from_values(self.inner.name(), labels.to_vec(), out)
-                .map_err(frame_error_to_py)?;
+            let s = series_over_index(self.inner.name(), index, out)?;
             Ok(PySeries { inner: s })
         } else if let Ok(dict) = arg.cast::<PyDict>() {
             let mut out = Vec::with_capacity(vals.len());
@@ -19569,8 +19805,7 @@ impl PySeries {
                     out.push(Scalar::Float64(f64::NAN));
                 }
             }
-            let s = Series::from_values(self.inner.name(), labels.to_vec(), out)
-                .map_err(frame_error_to_py)?;
+            let s = series_over_index(self.inner.name(), index, out)?;
             Ok(PySeries { inner: s })
         } else if let Ok(other_ser) = arg.extract::<PyRef<PySeries>>() {
             let mut out = Vec::with_capacity(vals.len());
@@ -19599,8 +19834,7 @@ impl PySeries {
                 };
                 out.push(col_val);
             }
-            let s = Series::from_values(self.inner.name(), labels.to_vec(), out)
-                .map_err(frame_error_to_py)?;
+            let s = series_over_index(self.inner.name(), index, out)?;
             Ok(PySeries { inner: s })
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -20814,43 +21048,44 @@ impl PySeries {
         Ok(self.clone())
     }
 
-    /// pandas converts the (tz-aware) DatetimeIndex. A FrankenPandas index is
-    /// never tz-aware, which is pandas' tz-naive case, so this raises pandas'
-    /// TypeError instead of returning the Series unchanged (fvsao.4).
+    /// pandas' `Series.tz_convert`: the DatetimeIndex's instants shown in
+    /// `tz` (a naive index is pandas' TypeError; it always raised).
     #[pyo3(signature = (tz, axis=0, level=None, copy=None))]
     fn tz_convert(
         &self,
-        tz: Option<&str>,
+        tz: Option<&Bound<'_, PyAny>>,
         axis: Option<usize>,
         level: Option<usize>,
         copy: Option<bool>,
     ) -> PyResult<PySeries> {
-        let _ = (tz, axis, level, copy);
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Cannot convert tz-naive timestamps, use tz_localize to localize",
-        ))
+        let _ = copy;
+        let index = index_tz_changed(self.inner.index(), tz, IndexTzOp::Convert, axis, level)?;
+        let inner = Series::new(self.inner.name(), index, self.inner.column().clone())
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
-    /// pandas localizes the DatetimeIndex; FrankenPandas' index cannot carry a
-    /// timezone yet, so any tz raises NotImplementedError instead of returning
-    /// the Series unchanged (fvsao.4). tz=None on a naive index is pandas' no-op.
+    /// pandas' `Series.tz_localize`: the DatetimeIndex's wall times placed in
+    /// `tz` (it raised NotImplementedError for any zone).
     #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous="raise", nonexistent="raise"))]
     fn tz_localize(
         &self,
-        tz: Option<&str>,
+        tz: Option<&Bound<'_, PyAny>>,
         axis: Option<usize>,
         level: Option<usize>,
         copy: Option<bool>,
         ambiguous: Option<&str>,
         nonexistent: Option<&str>,
     ) -> PyResult<PySeries> {
-        let _ = (axis, level, copy, ambiguous, nonexistent);
-        match tz {
-            None => Ok(self.clone()),
-            Some(_) => Err(not_implemented(
-                "Series.tz_localize (a tz-aware DatetimeIndex)",
-            )),
-        }
+        let _ = copy;
+        let op = IndexTzOp::Localize {
+            ambiguous,
+            nonexistent,
+        };
+        let index = index_tz_changed(self.inner.index(), tz, op, axis, level)?;
+        let inner = Series::new(self.inner.name(), index, self.inner.column().clone())
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     /// Reinterpreting the bytes as another dtype is not supported; this
@@ -22662,8 +22897,7 @@ fn normalize_df_cond(
             for item in outer_list.iter() {
                 b_vec.push(Scalar::Bool(item.is_truthy()?));
             }
-            let s = Series::from_values("", inner.index().labels().to_vec(), b_vec)
-                .map_err(frame_error_to_py)?;
+            let s = series_over_index("", inner.index(), b_vec)?;
             return Ok(DfCond::Series(s));
         }
     }
@@ -22744,8 +22978,7 @@ fn normalize_df_other(
             for item in outer_list.iter() {
                 scalars.push(py_to_scalar(py, &item)?);
             }
-            let s = Series::from_values("", inner.index().labels().to_vec(), scalars)
-                .map_err(frame_error_to_py)?;
+            let s = series_over_index("", inner.index(), scalars)?;
             return Ok(DfOther::Series(s));
         }
     }
@@ -22779,12 +23012,11 @@ fn execute_df_where(
                         let col_cond = if let Ok(c) = df_col_to_series(cond_df, name) {
                             c
                         } else {
-                            Series::from_values(
+                            series_over_index(
                                 name.as_str(),
-                                df.index().labels().to_vec(),
+                                df.index(),
                                 vec![Scalar::Bool(false); df.len()],
-                            )
-                            .map_err(frame_error_to_py)?
+                            )?
                         };
                         let other_val = other_s
                             .get(&IndexLabel::Utf8(name.clone()))
@@ -22803,12 +23035,11 @@ fn execute_df_where(
                         let col_cond = if let Ok(c) = df_col_to_series(cond_df, name) {
                             c
                         } else {
-                            Series::from_values(
+                            series_over_index(
                                 name.as_str(),
-                                df.index().labels().to_vec(),
+                                df.index(),
                                 vec![Scalar::Bool(false); df.len()],
-                            )
-                            .map_err(frame_error_to_py)?
+                            )?
                         };
                         let new_col = col_s
                             .where_cond_series(&col_cond, other_s)
@@ -22924,12 +23155,11 @@ fn execute_df_mask(
                         let col_cond = if let Ok(c) = df_col_to_series(cond_df, name) {
                             c
                         } else {
-                            Series::from_values(
+                            series_over_index(
                                 name.as_str(),
-                                df.index().labels().to_vec(),
+                                df.index(),
                                 vec![Scalar::Bool(false); df.len()],
-                            )
-                            .map_err(frame_error_to_py)?
+                            )?
                         };
                         let other_val = other_s
                             .get(&IndexLabel::Utf8(name.clone()))
@@ -22948,12 +23178,11 @@ fn execute_df_mask(
                         let col_cond = if let Ok(c) = df_col_to_series(cond_df, name) {
                             c
                         } else {
-                            Series::from_values(
+                            series_over_index(
                                 name.as_str(),
-                                df.index().labels().to_vec(),
+                                df.index(),
                                 vec![Scalar::Bool(false); df.len()],
-                            )
-                            .map_err(frame_error_to_py)?
+                            )?
                         };
                         let not_cond = col_cond.not().map_err(frame_error_to_py)?;
                         let new_col = col_s
@@ -23531,6 +23760,18 @@ impl PyDataFrame {
             Some(multi) => built
                 .with_row_multiindex(multi.inner.clone())
                 .map_err(frame_error_to_py)?,
+            None => built,
+        };
+        // A tz-aware index= keeps its zone (its labels were taken naive).
+        let built = match index.and_then(index_arg_zone) {
+            Some(zone) => {
+                let zoned = built
+                    .index()
+                    .clone()
+                    .with_tz(Some(&zone))
+                    .map_err(index_error_to_py)?;
+                built.with_index(zoned).map_err(frame_error_to_py)?
+            }
             None => built,
         };
         let column_multi = match columns {
@@ -30588,6 +30829,17 @@ impl PyDataFrame {
                 }
             }
         };
+        // A DatetimeIndex (tz-aware ones keep their zone) as the row axis;
+        // it raised TypeError.
+        if let Ok(dti) = labels.extract::<PyRef<'_, PyDatetimeIndex>>()
+            && axis_idx == 0
+        {
+            let inner = self
+                .inner
+                .with_index(dti.inner.as_index().clone())
+                .map_err(axis_length_error_to_py)?;
+            return Ok(PyDataFrame { inner });
+        }
         let lbls = if let Ok(py_idx) = labels.extract::<PyRef<'_, PyIndex>>() {
             py_idx.inner.labels().to_vec()
         } else if let Ok(list) = labels.cast::<PyList>() {
@@ -31636,42 +31888,95 @@ impl PyDataFrame {
         Ok(result)
     }
 
-    /// Same as `Series.tz_convert`: the index is never tz-aware here, which is
-    /// pandas' TypeError case, not a no-op (fvsao.4).
+    /// Same as `Series.tz_convert`, on the row DatetimeIndex.
     #[pyo3(signature = (tz, axis=0, level=None, copy=None))]
     fn tz_convert(
         &self,
-        tz: Option<&str>,
+        tz: Option<&Bound<'_, PyAny>>,
         axis: Option<usize>,
         level: Option<usize>,
         copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (tz, axis, level, copy);
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Cannot convert tz-naive timestamps, use tz_localize to localize",
-        ))
+        let _ = copy;
+        let index = index_tz_changed(self.inner.index(), tz, IndexTzOp::Convert, axis, level)?;
+        Ok(PyDataFrame {
+            inner: self.inner.with_index(index).map_err(frame_error_to_py)?,
+        })
     }
 
-    /// Same as `Series.tz_localize`: a tz needs a tz-aware DatetimeIndex, which
-    /// the binding cannot represent yet (fvsao.4); tz=None is pandas' no-op.
+    /// Same as `Series.tz_localize`, on the row DatetimeIndex.
     #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous="raise", nonexistent="raise"))]
     fn tz_localize(
         &self,
-        tz: Option<&str>,
+        tz: Option<&Bound<'_, PyAny>>,
         axis: Option<usize>,
         level: Option<usize>,
         copy: Option<bool>,
         ambiguous: Option<&str>,
         nonexistent: Option<&str>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (axis, level, copy, ambiguous, nonexistent);
-        if tz.is_some() {
-            return Err(not_implemented(
-                "DataFrame.tz_localize (a tz-aware DatetimeIndex)",
-            ));
-        }
-        Ok(self.clone())
+        let _ = copy;
+        let op = IndexTzOp::Localize {
+            ambiguous,
+            nonexistent,
+        };
+        let index = index_tz_changed(self.inner.index(), tz, op, axis, level)?;
+        Ok(PyDataFrame {
+            inner: self.inner.with_index(index).map_err(frame_error_to_py)?,
+        })
     }
+}
+
+/// Which zone change `index_tz_changed` makes.
+#[derive(Clone, Copy)]
+enum IndexTzOp<'a> {
+    Localize {
+        ambiguous: Option<&'a str>,
+        nonexistent: Option<&'a str>,
+    },
+    Convert,
+}
+
+/// A Series' / DataFrame's row index with its zone changed, as pandas'
+/// `tz_localize` / `tz_convert` do: the index must be a DatetimeIndex
+/// (pandas' TypeError otherwise); the row axis, one level and only the
+/// default `ambiguous` / `nonexistent='raise'` are supported.
+fn index_tz_changed(
+    index: &Index,
+    tz: Option<&Bound<'_, PyAny>>,
+    op: IndexTzOp<'_>,
+    axis: Option<usize>,
+    level: Option<usize>,
+) -> PyResult<Index> {
+    let raise_policy = |value: Option<&str>| value.is_none_or(|value| value == "raise");
+    let (ambiguous_ok, nonexistent_ok) = match op {
+        IndexTzOp::Localize {
+            ambiguous,
+            nonexistent,
+        } => (raise_policy(ambiguous), raise_policy(nonexistent)),
+        IndexTzOp::Convert => (true, true),
+    };
+    unsupported_params(
+        "tz_localize / tz_convert",
+        &[
+            ("axis", axis.is_none_or(|axis| axis == 0)),
+            ("level", level.is_none()),
+            ("ambiguous", ambiguous_ok),
+            ("nonexistent", nonexistent_ok),
+        ],
+    )?;
+    let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
+    let dti = DatetimeIndex::from_index(index.clone()).map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "index is not a valid DatetimeIndex or PeriodIndex",
+        )
+    })?;
+    let changed = match op {
+        IndexTzOp::Localize { .. } => dti.tz_localize(zone.as_deref()),
+        IndexTzOp::Convert => dti.tz_convert(zone.as_deref()),
+    }
+    .map_err(index_error_to_py)?;
+    Ok(changed.into_index())
 }
 
 /// Helper indexer classes for PyDataFrame.
@@ -33272,6 +33577,18 @@ fn row_label_to_py(py: Python<'_>, index: &Index, label: &IndexLabel) -> PyResul
             })
             .collect::<PyResult<Vec<_>>>()?;
         return Ok(PyTuple::new(py, parts)?.into_any().unbind());
+    }
+    // An instant of a tz-aware index is a Timestamp in its zone.
+    if let (Some(zone), IndexLabel::Datetime64(nanos)) = (index.tz(), label)
+        && *nanos != Timestamp::NAT
+    {
+        return PyTimestamp {
+            inner: Timestamp {
+                nanos: *nanos,
+                tz: Some(zone.to_owned()),
+            },
+        }
+        .into_py_any(py);
     }
     index_label_to_py(py, label)
 }
@@ -43127,6 +43444,20 @@ fn datetime_nanos_or_nat(converted: &Series) -> Vec<i64> {
         .collect()
 }
 
+/// A converted datetime Series as a DatetimeIndex of its dtype: the zone of
+/// a tz-aware result (`utc=True`, strings with an offset) kept, where the
+/// index came back naive.
+fn converted_datetime_index(converted: &Series) -> PyResult<PyDatetimeIndex> {
+    let zone = match converted.dtype() {
+        DType::Datetime64 { tz } => tz,
+        _ => None,
+    };
+    let inner = DatetimeIndex::new(datetime_nanos_or_nat(converted))
+        .with_tz(zone.as_deref())
+        .map_err(index_error_to_py)?;
+    Ok(PyDatetimeIndex { inner })
+}
+
 /// A `to_datetime` failure as pandas' ValueError, its own text (the gate
 /// prefix left off).
 fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
@@ -43197,13 +43528,14 @@ fn to_datetime(
         return Ok(Py::new(py, PySeries { inner: res })?.into_any());
     }
     if let Ok(dti) = arg.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        return Ok(Py::new(
-            py,
-            PyDatetimeIndex {
-                inner: dti.inner.clone(),
-            },
-        )?
-        .into_any());
+        // utc=True: an aware index converted to UTC, a naive one read as UTC.
+        let inner = match (utc, dti.inner.tz()) {
+            (false, _) => Ok(dti.inner.clone()),
+            (true, Some(_)) => dti.inner.tz_convert(Some("UTC")),
+            (true, None) => dti.inner.tz_localize(Some("UTC")),
+        }
+        .map_err(index_error_to_py)?;
+        return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
     }
     if let Ok(idx) = arg.extract::<PyRef<'_, PyIndex>>() {
         let values: Vec<Scalar> = idx
@@ -43223,13 +43555,7 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res =
             fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
-        return Ok(Py::new(
-            py,
-            PyDatetimeIndex {
-                inner: DatetimeIndex::new(datetime_nanos_or_nat(&res)),
-            },
-        )?
-        .into_any());
+        return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
     }
     if let Ok(list) = arg.cast::<PyList>() {
         let values: Vec<Scalar> = list
@@ -43247,13 +43573,7 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res =
             fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
-        return Ok(Py::new(
-            py,
-            PyDatetimeIndex {
-                inner: DatetimeIndex::new(datetime_nanos_or_nat(&res)),
-            },
-        )?
-        .into_any());
+        return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
     }
     if let Ok(s) = py_to_scalar(py, arg) {
         warn_order(std::slice::from_ref(&s))?;
@@ -43337,7 +43657,14 @@ fn deprecated_freq_alias(freq: &str) -> Option<(String, String)> {
 /// string, Timestamp, datetime or date endpoints; `start`, `end` and
 /// `periods` without a freq space the points evenly (pandas' linspace).
 /// `inclusive` drops an endpoint the range lands on; `normalize` floors the
-/// endpoints to midnight. A zone (`tz=`) is not supported yet.
+/// endpoints to midnight.
+///
+/// `tz` (or a tz-aware endpoint) makes the range tz-aware, as pandas builds
+/// it: the endpoints are wall times in that zone; a sub-day fixed step
+/// ('h', 'min', ...) and the linspace step through the instants from the
+/// localized start (12:00-05:00 + 12h is 01:00-04:00 across a DST change),
+/// while 'D' and calendar offsets step the wall clock and each point is
+/// localized (a wall time the DST change skips or repeats raises).
 #[pyfunction]
 #[pyo3(signature = (start=None, end=None, periods=None, freq=None, tz=None, normalize=false, name=None, inclusive="both", *, unit=None))]
 #[allow(clippy::too_many_arguments)]
@@ -43354,9 +43681,20 @@ fn date_range(
     unit: Option<&str>,
 ) -> PyResult<PyDatetimeIndex> {
     const DAY: i64 = 86_400_000_000_000;
-    if tz.is_some_and(|tz| !tz.is_none()) {
-        return Err(not_implemented("date_range(tz=...)"));
+    let endpoint_zone = |obj: Option<&Bound<'_, PyAny>>| {
+        obj.and_then(|obj| obj.extract::<PyRef<'_, PyTimestamp>>().ok())
+            .and_then(|ts| ts.inner.tz.clone())
+    };
+    let inferred = endpoint_zone(start).or_else(|| endpoint_zone(end));
+    let passed = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
+    if let (Some(inferred), Some(passed)) = (&inferred, &passed)
+        && inferred != passed
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            "Inferred time zone not equal to passed time zone",
+        ));
     }
+    let zone = passed.or(inferred);
     let freq: Option<String> = freq
         .filter(|freq| !freq.is_none())
         .map(|freq| freq_alias(freq, "date_range"))
@@ -43383,8 +43721,46 @@ fn date_range(
             nanos
         }
     };
-    let start = date_range_endpoint(start)?.map(floor);
-    let end = date_range_endpoint(end)?.map(floor);
+    // An endpoint as its wall clock in the range's zone (an aware
+    // Timestamp's instant moved into it; a naive one is a wall time).
+    let wall = |obj: Option<&Bound<'_, PyAny>>| -> PyResult<Option<i64>> {
+        let nanos = date_range_endpoint(obj)?;
+        Ok(match (nanos, &zone, endpoint_zone(obj)) {
+            (Some(nanos), Some(zone), Some(_)) => Some(
+                fp_types::tz_utc_to_wall_nanos(zone, nanos)
+                    .map_err(|err| tz_error_to_py(py, err))?,
+            ),
+            _ => nanos,
+        })
+    };
+    let start = wall(start)?.map(floor);
+    let end = wall(end)?.map(floor);
+    // A sub-day fixed step (and the linspace) runs on instants: localize
+    // the endpoints first. 'D' and calendar offsets run on the wall clock.
+    let on_instants = zone.is_some()
+        && match freq {
+            None => start.is_some() && end.is_some() && periods.is_some(),
+            Some(freq) => {
+                freq.trim_start_matches(|c: char| c.is_ascii_digit()) != "D"
+                    && parse_freq_to_nanos(freq).is_ok_and(|step| step > 0)
+            }
+        };
+    let localize = |wall: i64| -> PyResult<i64> {
+        match &zone {
+            Some(zone) => {
+                fp_types::tz_wall_to_utc_nanos(zone, wall).map_err(|err| tz_error_to_py(py, err))
+            }
+            None => Ok(wall),
+        }
+    };
+    let (start, end) = if on_instants {
+        (
+            start.map(localize).transpose()?,
+            end.map(localize).transpose()?,
+        )
+    } else {
+        (start, end)
+    };
     let three_of_four = || {
         PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Of the four parameters: start, end, periods, and freq, exactly three must be specified",
@@ -43489,12 +43865,16 @@ fn date_range(
     if !right_inclusive && end.is_some() && nanos.last() == end.as_ref() {
         nanos.pop();
     }
+    if zone.is_some() && !on_instants {
+        nanos = nanos.into_iter().map(localize).collect::<PyResult<_>>()?;
+    }
     let mut index = Index::from_datetime64(nanos);
     if let Some(name) = name {
         index = index.set_name(name);
     }
     let dti = DatetimeIndex::from_index(index)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        .and_then(|dti| dti.with_tz(zone.as_deref()))
+        .map_err(index_error_to_py)?;
     Ok(PyDatetimeIndex { inner: dti })
 }
 
@@ -47674,13 +48054,9 @@ impl PyDateOffset {
             return Ok(Some(PySeries { inner }.into_py_any(py)?));
         }
         if let Ok(index) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
-            let nanos = index
-                .inner
-                .asi8()
-                .iter()
-                .map(|&nanos| self.apply(py, nanos, times))
-                .collect::<PyResult<Vec<i64>>>()?;
-            return Ok(Some(index.with_nanos(nanos).into_py_any(py)?));
+            return Ok(Some(
+                index.offset_applied(py, self, times)?.into_py_any(py)?,
+            ));
         }
         Ok(None)
     }
@@ -47701,6 +48077,14 @@ fn freq_alias(freq: &Bound<'_, PyAny>, what: &str) -> PyResult<String> {
 /// (an integer index binned nothing and returned an empty result, a string
 /// index was read as dates). A TimedeltaIndex is not supported yet.
 fn require_resample_axis(index: &Index) -> PyResult<()> {
+    // pandas bins a tz-aware index on its wall clock (days start at local
+    // midnight); the bins here read the UTC instants and label naive, so
+    // an aware index is refused rather than binned wrong (fvsao.35).
+    if let Some(zone) = index.tz() {
+        return Err(not_implemented(&format!(
+            "resample / Grouper(freq=) of a tz-aware index ({zone})"
+        )));
+    }
     let labels = index.labels();
     if labels
         .iter()
@@ -50378,7 +50762,7 @@ fn frame_with_date_format(
 ) -> PyResult<DataFrame> {
     let render = |nanos: i64, zone: Option<&str>| -> String {
         let offset = zone.map_or(0, |zone| {
-            fp_frame::tz_offset_seconds(zone, nanos).unwrap_or(0)
+            fp_types::tz_offset_seconds(zone, nanos).unwrap_or(0)
         });
         Timestamp::from_nanos(nanos.saturating_add(i64::from(offset) * 1_000_000_000))
             .strftime(format)
@@ -50415,7 +50799,7 @@ fn frame_with_date_format(
             .iter()
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) if *nanos != Timestamp::NAT => {
-                    IndexLabel::Utf8(render(*nanos, None))
+                    IndexLabel::Utf8(render(*nanos, frame.index().tz()))
                 }
                 other => other.clone(),
             })
@@ -52967,7 +53351,12 @@ mod tests {
         assert_eq!(dti.nunique(), 2);
         assert_eq!(dti.isna(), vec![false, false]);
         assert_eq!(dti.notna(), vec![true, true]);
-        assert_eq!(dti.isin(vec![nanos1]).0, vec![true, false]);
+        Python::initialize();
+        Python::attach(|py| {
+            let values = PyList::new(py, [nanos1]).expect("list");
+            let found = dti.isin(py, values.as_any()).expect("isin");
+            assert_eq!(found.0, vec![true, false]);
+        });
 
         let shifted = dti.shift(1, "D").expect("shift"); // ubs:ignore — valid freq
         assert_eq!(shifted.len(), 2);
