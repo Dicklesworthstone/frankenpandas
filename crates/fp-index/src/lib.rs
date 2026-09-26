@@ -7216,6 +7216,28 @@ pub fn scale_freq(freqstr: &str, factor: i64) -> Option<String> {
     Some(freq_with_count(n.checked_mul(factor)?, rule))
 }
 
+/// The freq a `take` of `positions` keeps: pandas reads positions in one
+/// constant nonzero step as a slice (`maybe_indices_to_slice`), so the freq
+/// scales by the step ([0, 2] of 'h' is '2h'); any other take has none.
+fn take_freq(freq: Option<String>, positions: &[usize]) -> Option<String> {
+    let freq = freq?;
+    let step = match positions {
+        [] => return None,
+        [_] => 1,
+        [first, second, ..] => i64::try_from(*second).ok()? - i64::try_from(*first).ok()?,
+    };
+    let steady = positions.windows(2).all(|pair| {
+        i64::try_from(pair[1])
+            .ok()
+            .zip(i64::try_from(pair[0]).ok())
+            .is_some_and(|(next, current)| next - current == step)
+    });
+    if step == 0 || !steady {
+        return None;
+    }
+    scale_freq(&freq, step)
+}
+
 /// pandas' month-position check: whether every date is a calendar ('ce') or
 /// business ('be') month end, a calendar ('cs') or business ('bs') month
 /// start, in that order of preference.
@@ -7830,9 +7852,7 @@ impl DatetimeIndex {
                 _ => i64::MIN,
             })
             .collect();
-        // Consecutive positions are a slice, which keeps the freq.
-        let run = !positions.is_empty() && positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
-        let freq = self.freq().filter(|_| run);
+        let freq = take_freq(self.freq(), positions);
         Ok(self.with_instants(nanos).with_freq(freq))
     }
 
@@ -9920,23 +9940,75 @@ impl TimedeltaIndex {
             .collect()
     }
 
-    /// Frequency string, matching `pd.TimedeltaIndex.freq`. FrankenPandas
-    /// does not infer timedelta frequency yet so this returns `None`.
+    /// The frequency this index was built with, as its freqstr - pandas'
+    /// `TimedeltaIndex.freq` / `freqstr` ('h', '30min', 'D'); None when it
+    /// has none (it was always None).
     #[must_use]
     pub fn freq(&self) -> Option<String> {
-        None
+        self.index.freq().map(str::to_owned)
     }
 
-    /// Frequency alias string, matching `pd.TimedeltaIndex.freqstr`.
+    /// Alias of [`Self::freq`], matching `pd.TimedeltaIndex.freqstr`.
     #[must_use]
     pub fn freqstr(&self) -> Option<String> {
         self.freq()
     }
 
-    /// Inferred frequency, matching `pd.TimedeltaIndex.inferred_freq`.
+    /// This index with `freq` (a freqstr) set or cleared; the caller vouches
+    /// that the labels follow it.
+    #[must_use]
+    pub fn with_freq(self, freq: Option<String>) -> Self {
+        Self {
+            index: self.index.with_freq(freq),
+        }
+    }
+
+    /// pandas' `TimedeltaIndex.inferred_freq`: the tick every step is (a
+    /// count of D / h / min / s / ms / us / ns, negative for a decreasing
+    /// run); None for fewer than three durations, NaT, repeats or an uneven
+    /// step (it was always None).
     #[must_use]
     pub fn inferred_freq(&self) -> Option<String> {
-        None
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(nanos) if *nanos != i64::MIN => Some(*nanos),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        if nanos.len() < 3 {
+            return None;
+        }
+        let steps = freq_unique_deltas(&nanos);
+        let [step] = steps.as_slice() else {
+            return None;
+        };
+        if *step == 0 {
+            return None;
+        }
+        // pandas' daily rule reads a whole-week step as weekly, naming the
+        // weekday the first duration falls on as an instant after the epoch
+        // (7 days -> 1970-01-08, a Thursday: 'W-THU').
+        const WEEK: i64 = 7 * 86_400_000_000_000;
+        if step % WEEK == 0 {
+            let weekday = Timestamp::from_nanos(nanos[0]).dayofweek()?;
+            let code = FREQ_WEEKDAY_CODES.get(usize::try_from(weekday).ok()?)?;
+            return Some(freq_with_count(step / WEEK, &format!("W-{code}")));
+        }
+        [
+            (86_400_000_000_000, "D"),
+            (3_600_000_000_000, "h"),
+            (60_000_000_000, "min"),
+            (1_000_000_000, "s"),
+            (1_000_000, "ms"),
+            (1_000, "us"),
+            (1, "ns"),
+        ]
+        .into_iter()
+        .find(|(unit, _)| step % unit == 0)
+        .map(|(unit, rule)| freq_with_count(step / unit, rule))
     }
 
     /// Cast to a different storage resolution, matching
@@ -10270,7 +10342,7 @@ impl TimedeltaIndex {
         if let Some(name) = self.name() {
             out = out.set_name(name);
         }
-        Ok(out)
+        Ok(out.with_freq(take_freq(self.freq(), positions)))
     }
 
     /// Repeat each label `repeats` times, matching
@@ -36317,10 +36389,13 @@ mod tests {
         let range = DatetimeIndex::new((0..6).map(|day| day * DAY).collect())
             .with_freq(Some("D".to_owned()));
         assert_eq!(range.freq().as_deref(), Some("D"));
-        // A run of positions keeps it; any other take drops it.
+        // pandas' take reads positions in one constant step as a slice: the
+        // freq scales by the step; a gap or a repeat drops it.
         assert_eq!(range.take(&[1, 2, 3]).unwrap().freq().as_deref(), Some("D"));
-        assert_eq!(range.take(&[0, 2]).unwrap().freq(), None);
-        assert_eq!(range.take(&[3, 2]).unwrap().freq(), None);
+        assert_eq!(range.take(&[0, 2]).unwrap().freq().as_deref(), Some("2D"));
+        assert_eq!(range.take(&[3, 2]).unwrap().freq().as_deref(), Some("-1D"));
+        assert_eq!(range.take(&[0, 1, 3]).unwrap().freq(), None);
+        assert_eq!(range.take(&[0, 0]).unwrap().freq(), None);
         assert_eq!(
             range.as_index().slice(2, 3).freq(),
             Some("D"),

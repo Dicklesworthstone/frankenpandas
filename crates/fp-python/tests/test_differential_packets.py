@@ -8391,6 +8391,55 @@ _FREQ_CASES = {
 }
 
 
+def _tdr(m: Any, freq: str = "h") -> Any:
+    return m.timedelta_range("1D", periods=6, freq=freq)
+
+
+# (nfc91) TimedeltaIndex.freq was never set (timedelta_range's too) and a
+# PeriodIndex's freq was its alias text, not pandas' offset. With it:
+# TimedeltaIndex([Timedelta, ...]) raised, freq= was refused, and
+# DatetimeIndex / TimedeltaIndex .take() turned an out-of-range position
+# into NaT and dropped the freq a constant step keeps.
+_TIMEDELTA_FREQ_CASES = {
+    **{f"timedelta_range {alias}": (lambda alias: lambda m: (_freq_of(_tdr(m, alias)), repr(_tdr(m, alias)[:3])))(alias)
+       for alias in ["h", "30min", "D", "2D", "s"]},
+    "slice with a step": lambda m: _freq_of(_tdr(m)[::2]),
+    "slice": lambda m: _freq_of(_tdr(m)[1:]),
+    "Series repr footer": lambda m: repr(m.Series([1, 2], index=m.timedelta_range("1D", periods=2, freq="h"))),
+    "from strings has none": lambda m: _freq_of(m.TimedeltaIndex(["1h", "3h"])),
+    "from Timedeltas": lambda m: [str(t) for t in m.TimedeltaIndex([m.Timedelta("1h"), m.NaT, m.Timedelta("2h")])],
+    "inferred": lambda m: m.TimedeltaIndex(list(_tdr(m, "30min"))).inferred_freq,
+    "inferred uneven": lambda m: m.TimedeltaIndex(["1h", "2h", "4h"]).inferred_freq,
+    "inferred two": lambda m: m.TimedeltaIndex(["1h", "2h"]).inferred_freq,
+    "inferred whole weeks": lambda m: m.TimedeltaIndex(["7D", "14D", "21D"]).inferred_freq,
+    "freq=h": lambda m: _freq_of(m.TimedeltaIndex(["1h", "2h"], freq="h")),
+    "freq=infer": lambda m: _freq_of(m.TimedeltaIndex(["1h", "2h", "3h"], freq="infer")),
+    "a freq the durations do not follow raises": lambda m: m.TimedeltaIndex(["1h", "3h"], freq="h"),
+    **{f"{kind} take {positions}": (lambda kind, positions: lambda m: (_tdr(m) if kind == "tdi" else _six_days(m)).take(positions).freqstr)(kind, positions)
+       for kind in ["dti", "tdi"] for positions in ([0, 2], [3, 2], [0, 1, 3], [5, 3, 1])},
+    "take out of range raises": lambda m: _six_days(m).take([9]),
+    "take negative": lambda m: [str(t) for t in _tdr(m).take([-1, 0])],
+    "take keeps the zone and name": lambda m: repr(m.date_range("2024-01-01", periods=3, tz="UTC", name="n").take([2, 0])),
+    **{f"period_range {freq} freq": (lambda freq: lambda m: (str(m.period_range("2024-01-01", periods=3, freq=freq).freq), m.period_range("2024-01-01", periods=3, freq=freq).freqstr))(freq)
+       for freq in ["M", "D", "Q", "Y", "h", "W", "B", "min"]},
+}
+
+
+def _timedelta_freq_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _TIMEDELTA_FREQ_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TIMEDELTA_FREQ_CASES))
+def test_timedelta_and_period_index_freq_match_pandas(case: str) -> None:
+    assert _timedelta_freq_outcome(fpd, case) == _timedelta_freq_outcome(pd, case)
+
+
 def _freq_step(m: Any, alias: str, zone: Any, step: str) -> Any:
     index = m.date_range("2024-03-08", periods=5, freq=alias, tz=zone)
     if step == "built":

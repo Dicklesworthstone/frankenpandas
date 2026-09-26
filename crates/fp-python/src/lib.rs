@@ -4007,6 +4007,9 @@ fn index_arg_zone(obj: &Bound<'_, PyAny>) -> Option<String> {
 /// built on its labels keep it, as pandas' (`Series(x, index=dr).index.freq`
 /// is `<Day>`; it was dropped).
 fn index_arg_freq(obj: &Bound<'_, PyAny>) -> Option<String> {
+    if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+        return tdi.inner.freq();
+    }
     obj.extract::<PyRef<'_, PyDatetimeIndex>>()
         .ok()
         .and_then(|dti| dti.inner.freq())
@@ -7781,19 +7784,13 @@ impl PyDatetimeIndex {
         }
     }
 
-    fn take(&self, indices: Vec<i64>) -> Self {
-        let vals = self.inner.asi8();
-        let len = vals.len() as i64;
-        let mut out = Vec::with_capacity(indices.len());
-        for idx in indices {
-            let pos = if idx < 0 { len + idx } else { idx };
-            if pos >= 0 && pos < len {
-                out.push(vals[pos as usize]);
-            } else {
-                out.push(i64::MIN);
-            }
-        }
-        self.with_nanos(out)
+    /// pandas' `take(indices)`: positions, negative from the end; one out of
+    /// range is pandas' IndexError (it became NaT). Positions in one constant
+    /// step keep the freq scaled by it, as pandas.
+    fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
+        let positions = take_positions(&indices, self.inner.len())?;
+        let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
     fn time(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -9571,6 +9568,10 @@ impl PyTimedeltaIndex {
                 for item in list {
                     if item.is_none() {
                         nanos.push(Timedelta::NAT);
+                    } else if let Some(duration) = duration_operand(&item)? {
+                        // Timedeltas, datetime.timedeltas, timedelta64s and
+                        // NaT are durations already (they were refused).
+                        nanos.push(duration);
                     } else if let Ok(i) = item.extract::<i64>() {
                         let factor = match unit.unwrap_or("ns") {
                             "s" => Timedelta::NANOS_PER_SEC,
@@ -9614,14 +9615,41 @@ impl PyTimedeltaIndex {
                 }
             }
         }
-        // pandas validates the labels against `freq` and keeps it on the
-        // index; neither is supported, so it no longer passes silently.
-        unsupported_params("TimedeltaIndex", &[("freq", freq.is_none())])?;
-        let mut inner = TimedeltaIndex::new(nanos);
+        let mut inner = TimedeltaIndex::new(nanos.clone());
         if let Some(n) = name {
             inner = inner.set_name(n);
         }
-        Ok(Self { inner })
+        // pandas' freq=: 'infer' takes the inferred tick; a tick the
+        // durations must step by exactly (pandas' ValueError otherwise). It
+        // was refused.
+        let Some(freq) = freq else {
+            return Ok(Self { inner });
+        };
+        let inferred = inner.inferred_freq();
+        let wanted = if freq == "infer" {
+            inferred
+        } else {
+            let canonical = fp_index::canonical_freq(freq).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid frequency: {freq}"
+                ))
+            })?;
+            let step = parse_freq_to_nanos(&canonical)?;
+            let follows = !nanos.contains(&Timedelta::NAT)
+                && nanos
+                    .windows(2)
+                    .all(|pair| pair[1].checked_sub(pair[0]) == Some(step));
+            if !follows {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Inferred frequency {} from passed values does not conform to passed frequency {canonical}",
+                    inferred.as_deref().unwrap_or("None")
+                )));
+            }
+            Some(canonical)
+        };
+        Ok(Self {
+            inner: inner.with_freq(wanted),
+        })
     }
 
     #[getter]
@@ -9869,8 +9897,8 @@ impl PyTimedeltaIndex {
 
     /// pandas' TimedeltaIndex repr: '1 days' when every duration is whole
     /// days, else '1 days 00:00:00' for all, quoted, NaT bare, wrapped /
-    /// truncated as Index's (it printed a Rust debug list of nanoseconds).
-    /// No freq is tracked: freq=None.
+    /// truncated as Index's (it printed a Rust debug list of nanoseconds),
+    /// with its freq (timedelta_range's; it printed freq=None always).
     pub fn __repr__(&self) -> String {
         const DAY: i64 = 86_400_000_000_000;
         let durations: Vec<Option<i64>> = self
@@ -9896,7 +9924,10 @@ impl PyTimedeltaIndex {
             .collect();
         let mut attrs = vec!["dtype='timedelta64[ns]'".to_owned()];
         attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
-        attrs.push("freq=None".to_owned());
+        attrs.push(match self.inner.freq() {
+            Some(freq) => format!("freq='{freq}'"),
+            None => "freq=None".to_owned(),
+        });
         pandas_index_text("TimedeltaIndex", &items, true, attrs)
     }
 
@@ -9937,9 +9968,19 @@ impl PyTimedeltaIndex {
             if let Some(n) = self.inner.name() {
                 out = out.set_name(n);
             }
-            return Py::new(py, PyTimedeltaIndex { inner: out })?
-                .into_any()
-                .into_py_any(py);
+            // A slice keeps the freq scaled by its step, as pandas.
+            let freq = self
+                .inner
+                .freq()
+                .and_then(|freq| fp_index::scale_freq(&freq, i64::try_from(indices.step).ok()?));
+            return Py::new(
+                py,
+                PyTimedeltaIndex {
+                    inner: out.with_freq(freq),
+                },
+            )?
+            .into_any()
+            .into_py_any(py);
         }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "TimedeltaIndex indices must be integers or slices",
@@ -10433,19 +10474,29 @@ impl PyTimedeltaIndex {
         self.as_py_index().format()
     }
 
+    /// pandas' `freq`: the tick offset the index was built with (`<Hour>`,
+    /// `<30 * Minutes>`), None when it has none (it was always None).
     #[getter]
-    fn freq(&self) -> Option<String> {
-        None
+    fn freq(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.inner.freq() {
+            Some(freqstr) => match offset_for_freqstr(&freqstr)? {
+                Some(offset) => offset.into_py_any(py),
+                None => Ok(py.None()),
+            },
+            None => Ok(py.None()),
+        }
     }
 
     #[getter]
     fn freqstr(&self) -> Option<String> {
-        None
+        self.inner.freqstr()
     }
 
+    /// The tick the durations step by ('h', '30min'), None when uneven or
+    /// fewer than three (it was always None).
     #[getter]
     fn inferred_freq(&self) -> Option<String> {
-        None
+        self.inner.inferred_freq()
     }
 
     #[getter]
@@ -10611,23 +10662,13 @@ impl PyTimedeltaIndex {
             .sum()
     }
 
-    fn take(&self, indices: Vec<i64>) -> Self {
-        let vals = self.inner.asi8();
-        let len = vals.len() as i64;
-        let mut out = Vec::with_capacity(indices.len());
-        for idx in indices {
-            let pos = if idx < 0 { len + idx } else { idx };
-            if pos >= 0 && pos < len {
-                out.push(vals[pos as usize]);
-            } else {
-                out.push(Timedelta::NAT);
-            }
-        }
-        let mut res = TimedeltaIndex::new(out);
-        if let Some(n) = self.inner.name() {
-            res = res.set_name(n);
-        }
-        Self { inner: res }
+    /// pandas' `take(indices)`: positions, negative from the end; one out of
+    /// range is pandas' IndexError (it became NaT). Positions in one constant
+    /// step keep the freq scaled by it, as pandas.
+    fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
+        let positions = take_positions(&indices, self.inner.len())?;
+        let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
     fn to_pytimedelta(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -12285,9 +12326,22 @@ impl PyPeriodIndex {
         self.as_py_index().format()
     }
 
+    /// pandas' `freq`: the periods' offset (`<MonthEnd>`, `<Day>`,
+    /// `<QuarterEnd: startingMonth=12>`); it was the alias text.
     #[getter]
-    fn freq(&self) -> Option<String> {
-        self.inner.values().first().map(|p| p.freq.to_string())
+    fn freq(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let offset = self
+            .inner
+            .values()
+            .first()
+            .and_then(|period| fp_index::canonical_freq(period.freq.alias()))
+            .map(|freqstr| offset_for_freqstr(&freqstr))
+            .transpose()?
+            .flatten();
+        match offset {
+            Some(offset) => offset.into_py_any(py),
+            None => Ok(py.None()),
+        }
     }
 
     #[getter]
@@ -45433,8 +45487,10 @@ fn timedelta_range(
 
     let idx = fp_index::timedelta_range(start_ns, end_ns, periods, freq_nanos, name)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    // The range carries its freq, as pandas' (it had none).
     let tdi = TimedeltaIndex::from_index(idx)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        .with_freq(fp_index::canonical_freq(freq));
     Ok(PyTimedeltaIndex { inner: tdi })
 }
 
@@ -51826,6 +51882,26 @@ fn flat_droplevel_error() -> PyErr {
     PyErr::new::<pyo3::exceptions::PyValueError, _>(
         "Cannot remove 1 levels from an index with 1 levels: at least one level must be left.",
     )
+}
+
+/// `take` positions over `len` rows, negative from the end, as numpy reads
+/// them; one out of range is its IndexError.
+fn take_positions(indices: &[i64], len: usize) -> PyResult<Vec<usize>> {
+    let length = i64::try_from(len).unwrap_or(i64::MAX);
+    indices
+        .iter()
+        .map(|&index| {
+            let at = if index < 0 { index + length } else { index };
+            usize::try_from(at)
+                .ok()
+                .filter(|&at| at < len)
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                        "index {index} is out of bounds for axis 0 with size {len}"
+                    ))
+                })
+        })
+        .collect()
 }
 
 /// The count an index of `len` labels is repeated by, as numpy checks it:
