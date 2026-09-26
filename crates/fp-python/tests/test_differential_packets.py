@@ -3976,6 +3976,13 @@ ARRAY_LIKE_COLUMN_VALUES = {
     "list_datetime_none": lambda m: [datetime.datetime(2020, 1, 5), None],
     "list_timedelta": lambda m: [datetime.timedelta(days=1, seconds=2, microseconds=3), datetime.timedelta(hours=-1)],
     "list_np_dt64": lambda m: [np.datetime64("2020-01-05"), np.datetime64("NaT")],
+    # tz-aware values keep their zone on every path (fvsao.15's remainder).
+    "list_aware_datetime": lambda m: [
+        datetime.datetime(2020, 1, 5, 6, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2020, 1, 2, tzinfo=datetime.timezone.utc),
+    ],
+    "list_aware_timestamp": lambda m: [m.Timestamp("2020-01-05", tz="Asia/Tokyo"), m.NaT],
+    "aware_date_range": lambda m: m.date_range("2020-01-01", periods=2, tz="US/Eastern"),
 }
 
 

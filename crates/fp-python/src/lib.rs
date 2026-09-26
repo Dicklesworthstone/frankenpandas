@@ -4119,8 +4119,16 @@ fn py_value_to_column(
                 expected_len
             )));
         }
-        return Column::from_values(scalars)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
+        let column = Column::from_values(scalars)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // Aware datetimes of one zone make an aware column (assign's came
+        // back naive).
+        return Ok(match (sequence_zone(val), column.dtype()) {
+            (Some(zone), DType::Datetime64 { tz: None }) => {
+                column.with_dtype(DType::datetime64_tz(zone))
+            }
+            _ => column,
+        });
     }
     if let Ok(tuple) = val.cast::<pyo3::types::PyTuple>() {
         let scalars: Vec<Scalar> = pandas_promote_int_with_missing(
@@ -25133,7 +25141,13 @@ impl PyDataFrame {
                         column.len()
                     )));
                 }
-                column.values().to_vec()
+                // Installed as built, its dtype kept (an aware DatetimeIndex's
+                // zone was lost rebuilding it from the values).
+                self.inner = self
+                    .inner
+                    .with_column(name, column)
+                    .map_err(frame_error_to_py)?;
+                return Ok(());
             } else if let Ok(list) = value.cast::<PyList>() {
                 let values = list
                     .iter()
