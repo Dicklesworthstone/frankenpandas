@@ -8127,13 +8127,35 @@ impl DatetimeIndex {
                 _ => None,
             })
             .collect();
-        self.with_joined_instants(other, nanos)
+        // pandas infers the freq of the shared labels.
+        let shared = self.with_joined_instants(other, nanos);
+        let freq = shared.inferred_freq();
+        shared.with_freq(freq)
     }
 
-    /// Labels from self followed by labels from other not already present,
-    /// matching `pd.DatetimeIndex.union(other)`.
+    /// `pd.DatetimeIndex.union(other)` (pandas' default `sort=None`); see
+    /// [`Self::union_sorted`].
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
+        self.union_sorted(other, None)
+    }
+
+    /// `pd.DatetimeIndex.union(other, sort=)`: the labels of both, each
+    /// once, sorted (pandas' default `sort=None` returns this index itself
+    /// when `other` is empty or equal, and `other` when this one is empty;
+    /// `sort=False` keeps first-seen order - it never sorted, so
+    /// `[03, 01] | [02]` came back `[03, 01, 02]`). The result carries its
+    /// inferred freq, as pandas'.
+    #[must_use]
+    pub fn union_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        if sort.is_none() {
+            if other.is_empty() || self.index == other.index {
+                return self.clone();
+            }
+            if self.is_empty() {
+                return other.clone();
+            }
+        }
         let mut seen = FxHashSet::<i64>::default();
         let mut nanos: Vec<i64> = Vec::new();
         for label in self
@@ -8148,18 +8170,12 @@ impl DatetimeIndex {
                 nanos.push(*n);
             }
         }
-        let joined = self.with_joined_instants(other, nanos);
-        // Two runs of one freq that meet or overlap union into one run, which
-        // keeps it (pandas' fast union).
-        match (self.freq(), other.freq()) {
-            (Some(freq), Some(other_freq))
-                if freq == other_freq
-                    && joined.inferred_freq().as_deref() == Some(freq.as_str()) =>
-            {
-                joined.with_freq(Some(freq))
-            }
-            _ => joined,
+        if sort != Some(false) {
+            nanos.sort_unstable();
         }
+        let joined = self.with_joined_instants(other, nanos);
+        let freq = joined.inferred_freq();
+        joined.with_freq(freq)
     }
 
     /// Labels in self not in other, matching

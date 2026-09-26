@@ -6748,9 +6748,13 @@ impl PyDatetimeIndex {
         }
     }
 
-    fn union(&self, other: &PyDatetimeIndex) -> Self {
+    /// pandas' `union(other, sort=None)`: sorted (it kept first-seen
+    /// order), `sort=False` first-seen order (see
+    /// [`DatetimeIndex::union_sorted`]).
+    #[pyo3(signature = (other, sort=None))]
+    fn union(&self, other: &PyDatetimeIndex, sort: Option<bool>) -> Self {
         PyDatetimeIndex {
-            inner: self.inner.union(&other.inner),
+            inner: self.inner.union_sorted(&other.inner, sort),
         }
     }
 

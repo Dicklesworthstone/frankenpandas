@@ -8251,6 +8251,14 @@ _FREQ_CASES = {
     "shift without a freq by a given one": lambda m: (lambda r: (r.freqstr, [str(t) for t in r]))(m.DatetimeIndex(["2024-01-01", "2024-01-05"]).shift(1, freq="D")),
     "shift tz-aware by its hours": lambda m: [str(t) for t in m.date_range("2024-03-10 00:00", periods=3, freq="h", tz="US/Eastern").shift(2)],
     "minus a Timedelta from month ends drops it": lambda m: _freq_of(m.date_range("2024-01-31", periods=3, freq="ME") - m.Timedelta("1D")),
+    # union sorts (it kept first-seen order) and infers the freq.
+    "union sorts": lambda m: (lambda r: ([str(t) for t in r], r.freqstr))(m.DatetimeIndex(["2024-01-03", "2024-01-01"]).union(m.DatetimeIndex(["2024-01-02"]))),
+    "union sort=False keeps the order": lambda m: [str(t) for t in m.DatetimeIndex(["2024-01-03", "2024-01-01"]).union(m.DatetimeIndex(["2024-01-02"]), sort=False)],
+    "union with an empty index is itself": lambda m: [str(t) for t in m.DatetimeIndex(["2024-01-03", "2024-01-01"]).union(m.DatetimeIndex([]))],
+    "union of overlapping runs": lambda m: _freq_of(m.date_range("2024-01-01", periods=3).union(m.date_range("2024-01-02", periods=4))),
+    "union of runs with a gap": lambda m: _freq_of(m.date_range("2024-01-01", periods=3).union(m.date_range("2024-01-05", periods=2))),
+    "intersection of runs": lambda m: _freq_of(m.date_range("2024-01-01", periods=5).intersection(m.date_range("2024-01-03", periods=5))),
+    "intersection with a gap": lambda m: _freq_of(m.date_range("2024-01-01", periods=5).intersection(m.DatetimeIndex(["2024-01-01", "2024-01-03", "2024-01-04"]))),
     # The bead's probe matrix: each freq naive and tz-aware, as built and
     # after [::2], [1:], take, sort, shift(1) (the index's own freq) and
     # + a Timedelta.
