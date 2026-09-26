@@ -2700,6 +2700,21 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
         return Ok(Scalar::Timedelta64(td.nanos));
     }
+    // An Interval cell (Series([Interval(0, 1), ...]) raised "Cannot convert
+    // Interval to Scalar").
+    if let Ok(interval) = obj.extract::<PyRef<'_, PyInterval>>() {
+        let closed = match interval.closed.as_str() {
+            "left" => fp_types::IntervalClosed::Left,
+            "both" => fp_types::IntervalClosed::Both,
+            "neither" => fp_types::IntervalClosed::Neither,
+            _ => fp_types::IntervalClosed::Right,
+        };
+        return Ok(Scalar::Interval(fp_types::Interval {
+            left: interval.left,
+            right: interval.right,
+            closed,
+        }));
+    }
     if let Ok(type_name) = obj.get_type().name() {
         if type_name == "Timedelta"
             && let Ok(val) = obj.getattr("value")
@@ -2802,7 +2817,13 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
             }
         }
         Scalar::Period(p) => PyPeriod { inner: *p }.into_py_any(py),
-        Scalar::Interval(_) => Ok(py.None()),
+        // An Interval cell is an Interval (it came back None).
+        Scalar::Interval(interval) => PyInterval {
+            left: interval.left,
+            right: interval.right,
+            closed: interval.closed.to_string(),
+        }
+        .into_py_any(py),
     }
 }
 
@@ -7479,7 +7500,7 @@ impl PyMultiIndex {
                         Scalar::Datetime64(d) => IndexLabel::Datetime64(*d),
                         Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
                         Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
-                        Scalar::Interval(inv) => IndexLabel::Utf8(format!("{inv:?}")),
+                        Scalar::Interval(inv) => IndexLabel::Utf8(inv.to_string()),
                         Scalar::Null(k) => IndexLabel::Null(*k),
                     })
                     .collect();
@@ -29890,9 +29911,48 @@ impl PyDataFrame {
         Ok(PySeries { inner: out })
     }
 
-    fn unstack(&self) -> PyResult<PyDataFrame> {
-        let df = self.inner.unstack().map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+    /// pandas' `DataFrame.unstack(level=-1, fill_value=None, sort=True)`
+    /// over a row MultiIndex: each column unstacked as a Series (see
+    /// `PySeries::unstack`), side by side under its label - pandas'
+    /// (column, value) columns. It took no arguments and refused more than
+    /// one column.
+    #[pyo3(signature = (level=None, fill_value=None, sort=true))]
+    fn unstack(
+        &self,
+        py: Python<'_>,
+        level: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        sort: bool,
+    ) -> PyResult<Py<PyAny>> {
+        if self.inner.row_multiindex().is_none() {
+            unsupported_params(
+                "DataFrame.unstack",
+                &[
+                    ("level", level.is_none_or(|level| level.is_none())),
+                    ("fill_value", fill_value.is_none()),
+                    ("sort", sort),
+                ],
+            )?;
+            let df = self.inner.unstack().map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
+        }
+        let index = self.inner.series_index();
+        let mut names = Vec::with_capacity(self.inner.num_columns());
+        let mut frames = Vec::with_capacity(self.inner.num_columns());
+        for position in 0..self.inner.num_columns() {
+            let name = self.inner.column_name_at(position).unwrap_or_default();
+            let column = self.inner.column_at(position).cloned().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "column position {position} is out of range"
+                ))
+            })?;
+            let series =
+                Series::new(name.clone(), index.clone(), column).map_err(frame_error_to_py)?;
+            let unstacked = PySeries { inner: series }.unstack(py, level, fill_value, sort)?;
+            frames.push(Py::new(py, unstacked)?.into_bound(py).into_any());
+            names.push(name);
+        }
+        concat_side_by_side(py, frames, names).map(Bound::unbind)
     }
 
     /// `level` a position or a level name (a name raised TypeError).
@@ -32790,6 +32850,31 @@ fn series_multiindex_loc(
     let Some(multi) = series.index().row_multiindex() else {
         return Ok(None);
     };
+    // A per-level key (s.loc[pd.IndexSlice[:, 2]]): a Series drops the
+    // levels a label keyed, as pandas' get_loc_level (a frame's .loc keeps
+    // them).
+    if let Some(rows) = multiindex_level_key_rows(multi, key)?
+        && let Ok(parts) = key.cast::<PyTuple>()
+    {
+        let keep: Vec<usize> = (0..multi.nlevels())
+            .filter(|&level| {
+                parts.get_item(level).map_or(true, |part| {
+                    part.cast::<pyo3::types::PySlice>().is_ok() || part.cast::<PyList>().is_ok()
+                })
+            })
+            .collect();
+        let taken = series
+            .take(&iloc_positions(&rows))
+            .map_err(frame_error_to_py)?;
+        let (index, rest) = multiindex_levels_index(multi, &rows, &keep)?;
+        let index = match rest {
+            Some(rest) => index.with_row_multiindex(rest).map_err(index_error_to_py)?,
+            None => index,
+        };
+        let out =
+            Series::new(series.name(), index, taken.column().clone()).map_err(frame_error_to_py)?;
+        return Ok(Some(Py::new(py, PySeries { inner: out })?.into_any()));
+    }
     let Some(labels) = multiindex_key(key, multi.nlevels())? else {
         return Ok(None);
     };
@@ -32878,6 +32963,98 @@ fn frame_rows_keeping_multiindex(
         .map_err(frame_error_to_py)
 }
 
+/// One level's part of a per-level MultiIndex key.
+enum LevelKey {
+    Label(IndexLabel),
+    /// An inclusive label range; None is open.
+    Range(Option<IndexLabel>, Option<IndexLabel>),
+    AnyOf(Vec<IndexLabel>),
+}
+
+/// The rows a per-level MultiIndex key selects (`pd.IndexSlice['x', :]`,
+/// `(slice(None), 2)`): one part per leading level - a label matches that
+/// level's value, a slice its label range (both ends inclusive, None open),
+/// a list any of its labels; the rows keep every level, as pandas'. None
+/// unless `key` is a tuple of at most `nlevels` parts holding a slice or a
+/// list (and no nested tuple). A label its level lacks is pandas'
+/// KeyError. These keys were read as one text label and raised KeyError.
+fn multiindex_level_key_rows(
+    multi: &fp_index::MultiIndex,
+    key: &Bound<'_, PyAny>,
+) -> PyResult<Option<Vec<usize>>> {
+    let Ok(tuple) = key.cast::<PyTuple>() else {
+        return Ok(None);
+    };
+    let parts: Vec<Bound<'_, PyAny>> = tuple.iter().collect();
+    let sliced = |part: &Bound<'_, PyAny>| {
+        part.cast::<pyo3::types::PySlice>().is_ok() || part.cast::<PyList>().is_ok()
+    };
+    if parts.len() > multi.nlevels()
+        || !parts.iter().any(sliced)
+        || parts.iter().any(|part| part.cast::<PyTuple>().is_ok())
+    {
+        return Ok(None);
+    }
+    let bound =
+        |slice: &Bound<'_, pyo3::types::PySlice>, name: &str| -> PyResult<Option<IndexLabel>> {
+            let value = slice.getattr(name)?;
+            if value.is_none() {
+                Ok(None)
+            } else {
+                py_to_index_label(&value).map(Some)
+            }
+        };
+    let mut keys = Vec::with_capacity(parts.len());
+    let mut levels = Vec::with_capacity(parts.len());
+    for (level, part) in parts.iter().enumerate() {
+        let values = multi
+            .get_level_values(level)
+            .map_err(index_error_to_py)?
+            .labels()
+            .to_vec();
+        let key = if let Ok(slice) = part.cast::<pyo3::types::PySlice>() {
+            if !slice.getattr("step")?.is_none() {
+                return Err(not_implemented("MultiIndex level slices with a step"));
+            }
+            LevelKey::Range(bound(slice, "start")?, bound(slice, "stop")?)
+        } else if let Ok(list) = part.cast::<PyList>() {
+            LevelKey::AnyOf(
+                list.iter()
+                    .map(|item| py_to_index_label(&item))
+                    .collect::<PyResult<_>>()?,
+            )
+        } else {
+            let label = py_to_index_label(part)?;
+            if !values.contains(&label) {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    part.clone().unbind(),
+                ));
+            }
+            LevelKey::Label(label)
+        };
+        keys.push(key);
+        levels.push(values);
+    }
+    let rows = levels.first().map_or(0, Vec::len);
+    Ok(Some(
+        (0..rows)
+            .filter(|&row| {
+                keys.iter().zip(&levels).all(|(key, values)| {
+                    let value = &values[row];
+                    match key {
+                        LevelKey::Label(label) => value == label,
+                        LevelKey::Range(low, high) => {
+                            low.as_ref().is_none_or(|low| value >= low)
+                                && high.as_ref().is_none_or(|high| value <= high)
+                        }
+                        LevelKey::AnyOf(labels) => labels.contains(value),
+                    }
+                })
+            })
+            .collect(),
+    ))
+}
+
 /// The rows a list of MultiIndex keys (`[('x', 1), ('y', 2)]`, `['x',
 /// 'y']`) or an outer-level label slice (`'x':'y'`, inclusive) selects, in
 /// order; None for any other key.
@@ -32938,14 +33115,28 @@ fn multiindex_rows_for(
 /// `df.loc[key]` over a row MultiIndex, `key` an outer label or a tuple
 /// prefix: the matching rows with the keyed levels dropped, or a full key's
 /// single row as a Series; a list of keys or an outer-label slice keeps
-/// the whole MultiIndex. None when `frame` has no row MultiIndex, `key` is
-/// not such a key, or nothing matches (the caller then reads it otherwise,
-/// or raises).
-fn frame_multiindex_loc(frame: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Option<MultiLoc>> {
+/// the whole MultiIndex. `row_part` marks the row half of a `(rows, cols)`
+/// key, where a per-level key (`pd.IndexSlice['x', :]`, see
+/// [`multiindex_level_key_rows`]) selects rows too; a whole `.loc` key's
+/// 2-tuple is (rows, cols) first, as pandas reads `df.loc['x', :]`. None
+/// when `frame` has no row MultiIndex, `key` is not such a key, or nothing
+/// matches (the caller then reads it otherwise, or raises).
+fn frame_multiindex_loc(
+    frame: &DataFrame,
+    key: &Bound<'_, PyAny>,
+    row_part: bool,
+) -> PyResult<Option<MultiLoc>> {
     let Some(multi) = frame.row_multiindex() else {
         return Ok(None);
     };
-    if let Some(positions) = multiindex_rows_for(multi, key)? {
+    let level_rows = if row_part {
+        multiindex_level_key_rows(multi, key)?
+    } else {
+        None
+    };
+    if let Some(positions) =
+        level_rows.map_or_else(|| multiindex_rows_for(multi, key), |rows| Ok(Some(rows)))?
+    {
         return frame_rows_keeping_multiindex(frame, multi, &positions)
             .map(|rows| Some(MultiLoc::Rows(rows)));
     }
@@ -33005,7 +33196,7 @@ impl PyDataFrameLoc {
         // tried first as pandas does (df.loc['x'], df.loc[('x', 2)]); a
         // 2-tuple that matches nothing is then (rows, cols) below. They raised
         // KeyError on the flat 'x/2' labels (fvsao.36).
-        match frame_multiindex_loc(&self.inner, key)? {
+        match frame_multiindex_loc(&self.inner, key, false)? {
             Some(MultiLoc::Row(row)) => return Ok(Py::new(py, PySeries { inner: row })?.into_any()),
             Some(MultiLoc::Rows(rows)) => {
                 return Ok(Py::new(py, PyDataFrame { inner: rows })?.into_any());
@@ -33021,7 +33212,7 @@ impl PyDataFrameLoc {
             }
             // The row part keyed through a row MultiIndex (df.loc['x', 'v'],
             // df.loc[('x', 2), 'v']).
-            if let Some(selected) = frame_multiindex_loc(&self.inner, &tuple.get_item(0)?)? {
+            if let Some(selected) = frame_multiindex_loc(&self.inner, &tuple.get_item(0)?, true)? {
                 let col_key = tuple.get_item(1)?;
                 return match selected {
                     MultiLoc::Row(row) => {
@@ -33049,7 +33240,8 @@ impl PyDataFrameLoc {
                                 .map_err(frame_error_to_py)?;
                             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
                         }
-                        let names: Vec<String> = col_key.extract()?;
+                        // A list or a label slice (':' is every column).
+                        let names = resolve_loc_columns(&rows, &col_key)?.unwrap_or_default();
                         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
                         let sub = rows.select_columns(&refs).map_err(loc_key_error)?;
                         Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any())
@@ -44491,7 +44683,7 @@ fn scalar_to_index_label_converter(s: &Scalar) -> IndexLabel {
         Scalar::Datetime64(d) => IndexLabel::Datetime64(*d),
         Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
         Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
-        Scalar::Interval(inv) => IndexLabel::Utf8(format!("{inv:?}")),
+        Scalar::Interval(inv) => IndexLabel::Utf8(inv.to_string()),
         Scalar::Null(k) => IndexLabel::Null(*k),
     }
 }
@@ -46198,6 +46390,23 @@ impl PyInterval {
             self.right,
             other.closed_left() && self.closed_right(),
         ))
+    }
+
+    /// Equal ends and closed side, as pandas' Interval (it compared by
+    /// identity).
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other.extract::<PyRef<'_, Self>>().is_ok_and(|other| {
+            other.left == self.left && other.right == self.right && other.closed == self.closed
+        })
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.left.to_bits().hash(&mut hasher);
+        self.right.to_bits().hash(&mut hasher);
+        self.closed.hash(&mut hasher);
+        hasher.finish()
     }
 
     fn __contains__(&self, val: f64) -> bool {

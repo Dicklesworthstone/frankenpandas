@@ -7586,3 +7586,58 @@ def _reduce_rename_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_REDUCE_RENAME_CASES))
 def test_nullable_reductions_string_dtype_resample_agg_and_rename_axis_match_pandas(case: str) -> None:
     assert _reduce_rename_outcome(fpd, case) == _reduce_rename_outcome(pd, case), case
+
+
+def _two_level(m: Any) -> Any:
+    return m.DataFrame({"v": [1.0, 2.0, 3.0, 4.0], "w": [10, 20, 30, 40]}, index=m.MultiIndex.from_product([["a", "b"], [1, 2]], names=["k", "n"]))
+
+
+def _unstacked(r: Any) -> Any:
+    """An unstacked frame: its index, its (column, value) labels as text -
+    column labels are text in the binding
+    (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.32) - dtypes
+    and cells by position."""
+    return ([str(i) for i in r.index], [tuple(str(part) for part in c) for c in r.columns], [str(d) for d in r.dtypes], [[_missing_or(v) for v in r.iloc[:, i].tolist()] for i in range(r.shape[1])])
+
+
+# Raised: per-level MultiIndex keys - df.loc[pd.IndexSlice['a', :], :],
+# df.loc[(slice(None), 1), :], s.loc[pd.IndexSlice[:, 2]] (read as one text
+# label: KeyError); DataFrame.unstack() of several columns (refused) and
+# unstack(level) / unstack(fill_value=) (no arguments); Series([Interval,
+# ...]) ('Cannot convert Interval to Scalar'). Silently wrong: an Interval
+# cell came back None, Interval labels printed as Rust debug text, and
+# Interval(0, 3) == Interval(0, 3) was False (identity).
+_LEVEL_KEY_CASES = {
+    "indexslice outer": lambda m: _shaped(_two_level(m).loc[m.IndexSlice["a", :], :]),
+    "indexslice inner column": lambda m: _shaped(_two_level(m).loc[m.IndexSlice[:, 2], "v"]),
+    "indexslice list": lambda m: _shaped(_two_level(m).loc[m.IndexSlice[["a", "b"], 1], ["w"]]),
+    "indexslice range": lambda m: _shaped(_two_level(m).loc[m.IndexSlice["a":"b", 2:2], :]),
+    "slice none tuple": lambda m: _shaped(_two_level(m).loc[(slice(None), 1), :]),
+    # (rows, cols), not a per-level key: the outer label drops its level.
+    "outer label all columns": lambda m: _shaped(_two_level(m).loc["a", :]),
+    "series indexslice": lambda m: _shaped(_two_level(m)["v"].loc[m.IndexSlice[:, 2]]),
+    "series tuple slice": lambda m: _shaped(_two_level(m)["v"].loc[("a", slice(None))]),
+    "unstack two columns": lambda m: _unstacked(_two_level(m).unstack()),
+    "unstack level 0": lambda m: _unstacked(_two_level(m).unstack(0)),
+    "unstack level name": lambda m: _unstacked(_two_level(m).unstack("k")),
+    "unstack one column": lambda m: _unstacked(_two_level(m)[["v"]].unstack()),
+    "unstack fill_value": lambda m: _unstacked(_two_level(m).iloc[:3].unstack(fill_value=0)),
+    "unstack missing": lambda m: _unstacked(_two_level(m).iloc[:3].unstack()),
+    "interval cells": lambda m: [(type(v).__name__, v.left, v.right, v.closed) for v in m.Series([m.Interval(0, 1), m.Interval(1, 2, closed="left")]).tolist()],
+    "interval equality": lambda m: (m.Interval(0, 3) == m.Interval(0, 3), m.Interval(0, 3) == m.Interval(0, 3, closed="left"), len({m.Interval(0, 3), m.Interval(0, 3)})),
+    # NEGATIVE: a level label the index lacks is KeyError.
+    "indexslice missing label": lambda m: _two_level(m).loc[m.IndexSlice["z", :], :],
+}
+
+
+def _level_key_outcome(m: Any, case: str) -> Any:
+    try:
+        return _LEVEL_KEY_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LEVEL_KEY_CASES))
+def test_multiindex_level_keys_unstack_columns_and_interval_cells_match_pandas(case: str) -> None:
+    assert _level_key_outcome(fpd, case) == _level_key_outcome(pd, case), case
