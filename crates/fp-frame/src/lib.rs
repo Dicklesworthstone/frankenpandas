@@ -53751,13 +53751,14 @@ impl DatetimeAccessor<'_> {
     where
         F: Fn(&fp_types::Timestamp) -> Option<i64>,
     {
+        let wall = self.wall_clock();
         self.series
             .column()
             .values()
             .iter()
             .map(|v| match v {
                 Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT => {
-                    match ts_fn(&fp_types::Timestamp::from_nanos(*ns)) {
+                    match ts_fn(&fp_types::Timestamp::from_nanos(wall(*ns))) {
                         Some(x) => Scalar::Int64(x),
                         None => Scalar::Null(NullKind::NaN),
                     }
@@ -53790,6 +53791,7 @@ impl DatetimeAccessor<'_> {
     where
         F: Fn(&fp_types::Timestamp) -> Option<bool>,
     {
+        let wall = self.wall_clock();
         let out: Vec<Scalar> = self
             .series
             .column()
@@ -53797,7 +53799,7 @@ impl DatetimeAccessor<'_> {
             .iter()
             .map(|v| match v {
                 Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT => {
-                    match ts_fn(&fp_types::Timestamp::from_nanos(*ns)) {
+                    match ts_fn(&fp_types::Timestamp::from_nanos(wall(*ns))) {
                         Some(b) => Scalar::Bool(b),
                         // br-frankenpandas-dt-is-family-nat-false-boqep: see
                         // below — the result dtype is non-nullable `bool`, so
@@ -53838,6 +53840,7 @@ impl DatetimeAccessor<'_> {
     where
         F: Fn(&fp_types::Timestamp) -> String,
     {
+        let wall = self.wall_clock();
         let out: Vec<Scalar> = self
             .series
             .column()
@@ -53845,7 +53848,7 @@ impl DatetimeAccessor<'_> {
             .iter()
             .map(|v| match v {
                 Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT => {
-                    Scalar::Utf8(ts_fn(&fp_types::Timestamp::from_nanos(*ns)))
+                    Scalar::Utf8(ts_fn(&fp_types::Timestamp::from_nanos(wall(*ns))))
                 }
                 _ => Scalar::Null(NullKind::NaN),
             })
@@ -53921,7 +53924,7 @@ impl DatetimeAccessor<'_> {
     }
 
     fn typed_datetime_year_all_valid(&self, name: &str) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
             return None;
         }
@@ -53983,7 +53986,7 @@ impl DatetimeAccessor<'_> {
     /// (y, m, d). Bit-identical to the chrono path (which calls that very method);
     /// `None` (caller falls back) on non-dense / any NaT.
     fn typed_datetime_dayofyear_all_valid(&self, name: &str) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
             return None;
         }
@@ -54031,7 +54034,7 @@ impl DatetimeAccessor<'_> {
         &self,
         name: &str,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
             return None;
         }
@@ -54074,7 +54077,7 @@ impl DatetimeAccessor<'_> {
         component: fn((i64, i64, i64)) -> i64,
         name: &str,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
             return None;
         }
@@ -54099,7 +54102,7 @@ impl DatetimeAccessor<'_> {
         component: fn((i64, i64, i64)) -> bool,
         name: &str,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
             return None;
         }
@@ -54126,7 +54129,7 @@ impl DatetimeAccessor<'_> {
         component: fn((i64, i64, i64)) -> &'static str,
         name: &str,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         // Write each static name's bytes DIRECTLY into a contiguous output buffer
         // (the dt write! vein) — avoids the per-row `.to_string()` allocation of
         // the &'static str + the Vec<Scalar> + from_values. Bit-identical:
@@ -54159,7 +54162,7 @@ impl DatetimeAccessor<'_> {
         component: fn(i64) -> &'static str,
         name: &str,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         // Contiguous static-name buffer (see civil_str sibling) — skips the
         // per-row .to_string() + Vec<Scalar> + from_values; bit-identical.
         let mut bytes: Vec<u8> = Vec::with_capacity(nanos.len() * 9);
@@ -54189,7 +54192,7 @@ impl DatetimeAccessor<'_> {
         component: fn((i64, i64, i64)) -> String,
         name: &str,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         // Build the output Utf8 column into ONE contiguous byte buffer + offsets
         // (explode/stack output pattern), instead of a Vec<Scalar::Utf8> +
         // from_values. Bit-identical: from_utf8_contiguous yields the same strings
@@ -54222,7 +54225,7 @@ impl DatetimeAccessor<'_> {
         component: fn(i64) -> String,
         name: &str,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         // Contiguous output buffer (see civil_string sibling) — skips the
         // Vec<Scalar::Utf8> + from_values; bit-identical for all-valid input.
         let mut bytes: Vec<u8> = Vec::with_capacity(nanos.len() * 8);
@@ -54256,7 +54259,7 @@ impl DatetimeAccessor<'_> {
     where
         F: Fn(i64, i64, i64, i64, i64, i64) -> String,
     {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         // Contiguous output buffer (see civil_string sibling) — skips the
         // Vec<Scalar::Utf8> + from_values; bit-identical for all-valid input.
         let mut bytes: Vec<u8> = Vec::with_capacity(nanos.len() * 16);
@@ -54288,7 +54291,7 @@ impl DatetimeAccessor<'_> {
         component: fn(i64) -> i64,
         name: &str,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.series.column().as_datetime64_slice()?;
+        let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
             return None;
         }
@@ -54304,6 +54307,33 @@ impl DatetimeAccessor<'_> {
     /// True when the underlying column is a typed `Datetime64` backing.
     fn is_typed_datetime(&self) -> bool {
         self.series.column().dtype().is_datetime()
+    }
+
+    /// The column's raw datetime nanos when it is tz-naive; None for a
+    /// tz-aware column, whose fields read its zone's wall clock (see
+    /// [`Self::wall_clock`]) - the all-valid fast paths read the UTC instant,
+    /// so a Tokyo 10:00 said hour 1.
+    fn naive_datetime_slice(&self) -> Option<&[i64]> {
+        if self.series.column().timezone().is_some() {
+            return None;
+        }
+        self.series.column().as_datetime64_slice()
+    }
+
+    /// Maps a UTC instant to the wall clock of the column's zone (the
+    /// identity for a naive column), the zone parsed once.
+    fn wall_clock(&self) -> impl Fn(i64) -> i64 + use<> {
+        let spec = self
+            .series
+            .column()
+            .timezone()
+            .and_then(|zone| parse_tz_spec(zone).ok());
+        move |ns: i64| match &spec {
+            Some(spec) => {
+                ns.saturating_add(i64::from(spec_offset_seconds(spec, ns)) * 1_000_000_000)
+            }
+            None => ns,
+        }
     }
 
     /// Extract year component.
@@ -57161,6 +57191,49 @@ fn parse_tz_spec(tz: &str) -> Result<TimeZoneSpec, FrameError> {
     })
 }
 
+/// The UTC offset, in seconds east of UTC, that `tz` ('UTC', '+05:30',
+/// 'US/Eastern') has at the UTC instant `utc_nanos` - what a tz-aware
+/// timestamp adds to its instant to show its wall clock.
+pub fn tz_offset_seconds(tz: &str, utc_nanos: i64) -> Result<i32, FrameError> {
+    Ok(spec_offset_seconds(&parse_tz_spec(tz)?, utc_nanos))
+}
+
+/// [`tz_offset_seconds`] for an already parsed zone.
+fn spec_offset_seconds(spec: &TimeZoneSpec, utc_nanos: i64) -> i32 {
+    match spec {
+        TimeZoneSpec::Fixed(offset) => offset.local_minus_utc(),
+        TimeZoneSpec::Named { zone, .. } => {
+            let utc = DateTime::from_timestamp_nanos(utc_nanos).naive_utc();
+            zone.offset_from_utc_datetime(&utc).fix().local_minus_utc()
+        }
+    }
+}
+
+/// The UTC instant of the wall-clock time `wall_nanos` in `tz`, as pandas'
+/// `tz_localize` with ambiguous / nonexistent = 'raise': a wall time a DST
+/// change repeats or skips is an error.
+pub fn tz_wall_to_utc_nanos(tz: &str, wall_nanos: i64) -> Result<i64, FrameError> {
+    let naive = DateTime::from_timestamp_nanos(wall_nanos).naive_utc();
+    let aware = match parse_tz_spec(tz)? {
+        TimeZoneSpec::Fixed(offset) => offset.from_local_datetime(&naive).single(),
+        TimeZoneSpec::Named { zone, name } => resolve_named_local_datetime(
+            naive,
+            zone,
+            &name,
+            ResolvedAmbiguousPolicy::Raise,
+            &TzNonexistentPolicy::Raise,
+        )?,
+    };
+    aware
+        .and_then(|aware| aware.timestamp_nanos_opt())
+        .ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "could not localize '{}' to '{tz}'",
+                format_naive_datetime(naive)
+            ))
+        })
+}
+
 fn localize_series_values(
     values: &[Scalar],
     tz_spec: &TimeZoneSpec,
@@ -58366,7 +58439,14 @@ fn parse_fixed_offset_datetime(s: &str) -> Option<DateTime<FixedOffset>> {
     } else {
         trimmed.to_owned()
     };
-    for fmt in ["%Y-%m-%d %H:%M:%S%.f%:z", "%Y-%m-%dT%H:%M:%S%.f%:z"] {
+    // The clock may stop at minutes ('2024-01-01 00:00+05:00'), as pandas
+    // reads it (that raised "Unknown datetime string format").
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%.f%:z",
+        "%Y-%m-%dT%H:%M:%S%.f%:z",
+        "%Y-%m-%d %H:%M%:z",
+        "%Y-%m-%dT%H:%M%:z",
+    ] {
         if let Ok(value) = DateTime::parse_from_str(&normalized, fmt) {
             return Some(value);
         }
@@ -59041,11 +59121,17 @@ pub fn to_datetime_with_options(
         return Series::new(series.name().to_owned(), index, column);
     }
 
+    let utc = options.utc;
     let converted = to_datetime_values_with_options(series.values(), options)?;
 
     // Per br-frankenpandas-iy82u: pandas pd.to_datetime preserves source axis name.
     let index = series.index().clone();
-    let column = Column::from_values(converted)?;
+    let mut column = Column::from_values(converted)?;
+    // utc=True is pandas' datetime64[ns, UTC]: the values are already UTC
+    // instants; the dtype said naive.
+    if utc && matches!(column.dtype(), DType::Datetime64 { .. }) {
+        column = column.with_dtype(DType::datetime64_tz("UTC"));
+    }
     Series::new(series.name().to_owned(), index, column)
 }
 
@@ -117536,6 +117622,77 @@ mod tests {
         let result = frame.corrwith(&doubled).unwrap();
         assert_eq!(result.name(), "");
         assert_eq!(result.values(), &[Scalar::Float64(1.0)]);
+    }
+
+    #[test]
+    fn timezone_offsets_wall_fields_and_utc_parsing_follow_pandas() {
+        use crate::{
+            ToDatetimeOptions, to_datetime_with_options, tz_offset_seconds, tz_wall_to_utc_nanos,
+        };
+        let hour = 3_600_000_000_000_i64;
+        // 2024-03-10 14:30 UTC: Tokyo is +9h; New York is on EDT (-4h) after
+        // 07:00 UTC that day and on EST (-5h) the day before.
+        let instant = 1_710_081_000_000_000_000_i64;
+        assert_eq!(tz_offset_seconds("Asia/Tokyo", instant).unwrap(), 9 * 3_600);
+        assert_eq!(
+            tz_offset_seconds("US/Eastern", instant).unwrap(),
+            -4 * 3_600
+        );
+        assert_eq!(
+            tz_offset_seconds("US/Eastern", instant - 24 * hour).unwrap(),
+            -5 * 3_600
+        );
+        assert_eq!(tz_offset_seconds("+05:30", 0).unwrap(), 19_800);
+        // Wall 12:00 in New York on 2024-01-01 is 17:00 UTC.
+        let wall_noon = 19_723 * 24 * hour + 12 * hour;
+        assert_eq!(
+            tz_wall_to_utc_nanos("US/Eastern", wall_noon).unwrap(),
+            wall_noon + 5 * hour
+        );
+        // NEGATIVES: 02:30 on 2024-03-10 does not exist in New York; an
+        // unknown zone is an error.
+        let skipped = 19_792 * 24 * hour + 2 * hour + 30 * 60_000_000_000;
+        assert!(tz_wall_to_utc_nanos("US/Eastern", skipped).is_err());
+        assert!(tz_offset_seconds("Mars/Olympus", 0).is_err());
+
+        // pandas: a tz-aware column's dt.hour is its wall clock (Tokyo
+        // 23:30, not the UTC 14:30).
+        let aware = Series::new(
+            "t",
+            Index::new(vec![IndexLabel::from(0_i64)]),
+            Column::from_datetime64_values_with_timezone(vec![instant], "Asia/Tokyo".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(aware.dt().hour().unwrap().values(), &[Scalar::Int64(23)]);
+        let naive = Series::new(
+            "t",
+            Index::new(vec![IndexLabel::from(0_i64)]),
+            Column::from_datetime64_values(vec![instant]),
+        )
+        .unwrap();
+        assert_eq!(naive.dt().hour().unwrap().values(), &[Scalar::Int64(14)]);
+
+        // to_datetime(utc=True) is datetime64[ns, UTC]; an offset clock may
+        // stop at minutes.
+        let texts = Series::from_values(
+            "s",
+            vec![IndexLabel::from(0_i64)],
+            vec![Scalar::Utf8("2024-01-01 00:00+05:00".into())],
+        )
+        .unwrap();
+        let utc = to_datetime_with_options(
+            &texts,
+            ToDatetimeOptions {
+                utc: true,
+                ..ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(utc.column().dtype(), DType::datetime64_tz("UTC"));
+        assert_eq!(
+            utc.values(),
+            &[Scalar::Datetime64(19_723 * 24 * hour - 5 * hour)]
+        );
     }
 
     #[test]
@@ -221946,9 +222103,11 @@ mod tz_aware_datetime_guard_00ze3 {
             },
         )
         .expect("to_datetime utc");
+        // pandas 2.2.3: to_datetime(..., utc=True).dtype is datetime64[ns, UTC]
+        // (this said naive datetime64; fvsao.35).
         assert_eq!(
             out.dtype(),
-            DType::datetime64_naive(),
+            DType::datetime64_tz("UTC"),
             "with utc=true the zone is applied and the result is genuinely UTC, so \
              Datetime64 is correct here. If this regresses to Utf8, the guard above \
              would still pass while tz support got strictly worse."
@@ -222256,7 +222415,8 @@ mod to_datetime_mixed_offsets_00ze3 {
             },
         )
         .expect("to_datetime utc");
-        assert_eq!(out.dtype(), DType::datetime64_naive());
+        // pandas' dtype for utc=True is datetime64[ns, UTC] (fvsao.35).
+        assert_eq!(out.dtype(), DType::datetime64_tz("UTC"));
         assert_eq!(
             out.values(),
             vec![

@@ -1564,18 +1564,140 @@ pub struct PyTimestamp {
     pub(crate) inner: Timestamp,
 }
 
+/// A time zone argument as its name: a string as given, a tzinfo object
+/// (`datetime.timezone.utc`, a `zoneinfo.ZoneInfo`, a pytz zone) by its
+/// `str`. A zone neither the IANA database nor a fixed offset names is
+/// pandas' (pytz) UnknownTimeZoneError, a KeyError.
+fn tz_name(zone: &Bound<'_, PyAny>) -> PyResult<String> {
+    let name = match zone.extract::<String>() {
+        Ok(name) => name,
+        Err(_) => zone.str()?.extract::<String>()?,
+    };
+    fp_frame::tz_offset_seconds(&name, 0)
+        .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("'{name}'")))?;
+    Ok(name)
+}
+
 impl PyTimestamp {
+    /// The UTC offset, in seconds, of a tz-aware Timestamp's zone at its
+    /// instant; 0 for a naive one or NaT.
+    fn utc_offset_seconds(&self) -> i32 {
+        match &self.inner.tz {
+            Some(tz) if !self.inner.is_nat() => {
+                fp_frame::tz_offset_seconds(tz, self.inner.nanos).unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
+    /// The wall clock this Timestamp shows, as a naive Timestamp: a tz-aware
+    /// one's instant moved by its zone's offset (the fields read the UTC
+    /// instant, so a Tokyo 23:30 said 14:30).
+    fn wall(&self) -> Timestamp {
+        if self.inner.tz.is_none() || self.inner.is_nat() {
+            return Timestamp::from_nanos(self.inner.nanos);
+        }
+        Timestamp::from_nanos(
+            self.inner
+                .nanos
+                .saturating_add(i64::from(self.utc_offset_seconds()) * 1_000_000_000),
+        )
+    }
+
+    /// `self` moved by a DateOffset (`sign` 1 or -1) on its wall clock; a
+    /// tz-aware result is back in its zone (it dropped the zone).
+    fn offset_shift(&self, py: Python<'_>, offset: &PyDateOffset, sign: i64) -> PyResult<Self> {
+        let shifted = Self {
+            inner: Timestamp::from_nanos(offset.apply(py, self.wall().nanos, sign)?),
+        };
+        match &self.inner.tz {
+            Some(zone) if !self.inner.is_nat() => shifted.localized(Some(zone)),
+            _ => Ok(shifted),
+        }
+    }
+
+    /// `op` applied to the wall clock; a tz-aware result is that wall time
+    /// back in its zone.
+    fn on_wall(&self, op: impl FnOnce(&Timestamp) -> Timestamp) -> PyResult<Self> {
+        let wall = Self {
+            inner: op(&self.wall()),
+        };
+        match &self.inner.tz {
+            Some(zone) if !self.inner.is_nat() => wall.localized(Some(zone)),
+            _ => Ok(wall),
+        }
+    }
+
+    /// pandas' `+HH:MM` for a tz-aware Timestamp's offset (`colon`) or its
+    /// `+HHMM` repr spelling; empty for a naive one.
+    fn offset_text(&self, colon: bool) -> String {
+        if self.inner.tz.is_none() || self.inner.is_nat() {
+            return String::new();
+        }
+        let offset = self.utc_offset_seconds();
+        let sign = if offset < 0 { '-' } else { '+' };
+        let minutes = offset.unsigned_abs() / 60;
+        let separator = if colon { ":" } else { "" };
+        format!("{sign}{:02}{separator}{:02}", minutes / 60, minutes % 60)
+    }
+
+    /// pandas' `Timestamp.tz_localize`: a naive Timestamp's wall clock
+    /// placed in `tz` (a wall time a DST change repeats or skips is an
+    /// error), or a tz-aware one's wall clock kept without its zone (None).
+    fn localized(&self, tz: Option<&str>) -> PyResult<Self> {
+        let value_error =
+            |e: FrameError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string());
+        match (tz, &self.inner.tz) {
+            (Some(_), Some(_)) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot localize tz-aware Timestamp, use tz_convert for conversions",
+            )),
+            (None, _) => Ok(Self { inner: self.wall() }),
+            (Some(zone), None) => {
+                if self.inner.is_nat() {
+                    return Ok(Self {
+                        inner: self.inner.clone(),
+                    });
+                }
+                let nanos =
+                    fp_frame::tz_wall_to_utc_nanos(zone, self.inner.nanos).map_err(value_error)?;
+                Ok(Self {
+                    inner: Timestamp {
+                        nanos,
+                        tz: Some(zone.to_owned()),
+                    },
+                })
+            }
+        }
+    }
+
+    /// pandas' `Timestamp.tz_convert`: the same instant shown in `tz` (None:
+    /// UTC, naive). A naive Timestamp raises.
+    fn converted(&self, tz: Option<&str>) -> PyResult<Self> {
+        if self.inner.tz.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot convert tz-naive Timestamp, use tz_localize to localize",
+            ));
+        }
+        Ok(Self {
+            inner: Timestamp {
+                nanos: self.inner.nanos,
+                tz: tz.map(str::to_owned),
+            },
+        })
+    }
+
     /// The fields Python's datetime takes (microseconds, the nanoseconds
-    /// dropped); None for NaT.
+    /// dropped), on the wall clock; None for NaT.
     fn civil_fields(&self) -> Option<(i32, u8, u8, u8, u8, u8, u32)> {
+        let wall = self.wall();
         Some((
-            i32::try_from(self.inner.year()?).ok()?,
-            u8::try_from(self.inner.month()?).ok()?,
-            u8::try_from(self.inner.day()?).ok()?,
-            u8::try_from(self.inner.hour()?).ok()?,
-            u8::try_from(self.inner.minute()?).ok()?,
-            u8::try_from(self.inner.second()?).ok()?,
-            u32::try_from(self.inner.microsecond()?).ok()?,
+            i32::try_from(wall.year()?).ok()?,
+            u8::try_from(wall.month()?).ok()?,
+            u8::try_from(wall.day()?).ok()?,
+            u8::try_from(wall.hour()?).ok()?,
+            u8::try_from(wall.minute()?).ok()?,
+            u8::try_from(wall.second()?).ok()?,
+            u32::try_from(wall.microsecond()?).ok()?,
         ))
     }
 
@@ -1593,139 +1715,42 @@ impl PyTimestamp {
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        // A zone needs the timezone carrier Timestamp does not interpret yet;
-        // tz= was dropped without a word.
+        // tz= / tzinfo= localizes the wall time the other arguments give
+        // (it was refused).
+        let mut zone = None;
         if let Some(kw) = kwargs {
             for key in ["tz", "tzinfo"] {
-                if kw.get_item(key)?.is_some_and(|value| !value.is_none()) {
-                    return Err(not_implemented("Timestamp(tz=...)"));
+                if let Some(value) = kw.get_item(key)?.filter(|value| !value.is_none()) {
+                    zone = Some(tz_name(&value)?);
                 }
             }
         }
-        if args.len() >= 3 {
-            let year = args.get_item(0)?.extract::<i64>()?;
-            let month = args.get_item(1)?.extract::<i64>()?;
-            let day = args.get_item(2)?.extract::<i64>()?;
-            let hour = if args.len() > 3 {
-                args.get_item(3)?.extract::<i64>()?
-            } else {
-                0
-            };
-            let minute = if args.len() > 4 {
-                args.get_item(4)?.extract::<i64>()?
-            } else {
-                0
-            };
-            let second = if args.len() > 5 {
-                args.get_item(5)?.extract::<i64>()?
-            } else {
-                0
-            };
-            let us = if args.len() > 6 {
-                args.get_item(6)?.extract::<i64>()?
-            } else {
-                0
-            };
-            let days = days_from_ymd(year, month, day);
-            let nanos = days * 86_400_000_000_000
-                + hour * 3_600_000_000_000
-                + minute * 60_000_000_000
-                + second * 1_000_000_000
-                + us * 1_000;
-            return Ok(PyTimestamp {
-                inner: Timestamp::from_nanos(nanos),
-            });
-        }
-        if args.len() == 1 {
-            let arg = args.get_item(0)?;
-            if let Ok(ts) = arg.extract::<PyRef<'_, PyTimestamp>>() {
-                return Ok(PyTimestamp {
-                    inner: ts.inner.clone(),
-                });
-            }
-            // datetime, date and numpy datetime64 inputs (each fell through
-            // to Timestamp.now(), a silently wrong value; fvsao.35).
-            if let Ok(dt) = arg.cast::<PyDateTime>() {
-                return Ok(PyTimestamp {
-                    inner: Timestamp::from_nanos(py_datetime_nanos(dt)?),
-                });
-            }
-            if let Ok(date) = arg.cast::<pyo3::types::PyDate>() {
-                let days = days_from_ymd(
-                    i64::from(date.get_year()),
-                    i64::from(date.get_month()),
-                    i64::from(date.get_day()),
-                );
-                return Ok(PyTimestamp {
-                    inner: Timestamp::from_nanos(days * 86_400_000_000_000),
-                });
-            }
-            if arg.get_type().name()?.to_str()? == "datetime64" {
-                let nanos = numpy_temporal_nanos(&arg, "datetime64[ns]")?.unwrap_or(Timestamp::NAT);
-                return Ok(PyTimestamp {
-                    inner: Timestamp::from_nanos(nanos),
-                });
-            }
-            if let Ok(s) = arg.extract::<String>() {
-                if s == "now" {
-                    return Ok(PyTimestamp {
-                        inner: Timestamp::now(),
-                    });
-                }
-                if s == "today" {
-                    return Ok(PyTimestamp {
-                        inner: Timestamp::today(),
-                    });
-                }
-                let ts = Timestamp::parse(&s)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyTimestamp { inner: ts });
-            }
-            if let Ok(val) = arg.extract::<i64>() {
-                let unit = kwargs
-                    .and_then(|kw| kw.get_item("unit").ok().flatten())
-                    .and_then(|u| u.extract::<String>().ok());
-                let nanos = match unit.as_deref() {
-                    Some("s" | "second" | "seconds") => val * 1_000_000_000,
-                    Some("ms" | "millisecond" | "milliseconds") => val * 1_000_000,
-                    Some("us" | "microsecond" | "microseconds") => val * 1_000,
-                    Some("ns" | "nanosecond" | "nanoseconds") => val,
-                    _ => {
-                        if val < 100_000_000_000 {
-                            val * 1_000_000_000
-                        } else {
-                            val
-                        }
-                    }
+        // The naive Timestamp the arguments describe.
+        let naive = (|| -> PyResult<Self> {
+            if args.len() >= 3 {
+                let year = args.get_item(0)?.extract::<i64>()?;
+                let month = args.get_item(1)?.extract::<i64>()?;
+                let day = args.get_item(2)?.extract::<i64>()?;
+                let hour = if args.len() > 3 {
+                    args.get_item(3)?.extract::<i64>()?
+                } else {
+                    0
                 };
-                return Ok(PyTimestamp {
-                    inner: Timestamp::from_nanos(nanos),
-                });
-            }
-        }
-        if let Some(kw) = kwargs {
-            if let Some(ts_val) = kw.get_item("ts_input")?.or(kw.get_item("value")?) {
-                let s = ts_val.extract::<String>()?;
-                let ts = Timestamp::parse(&s)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyTimestamp { inner: ts });
-            }
-            if let Some(y) = kw.get_item("year")? {
-                let year = y.extract::<i64>()?;
-                let month = kw
-                    .get_item("month")?
-                    .map_or(Ok(1), |v| v.extract::<i64>())?;
-                let day = kw.get_item("day")?.map_or(Ok(1), |v| v.extract::<i64>())?;
-                let hour = kw.get_item("hour")?.map_or(Ok(0), |v| v.extract::<i64>())?;
-                let minute = kw
-                    .get_item("minute")?
-                    .map_or(Ok(0), |v| v.extract::<i64>())?;
-                let second = kw
-                    .get_item("second")?
-                    .map_or(Ok(0), |v| v.extract::<i64>())?;
-                let us = kw
-                    .get_item("microsecond")?
-                    .map_or(Ok(0), |v| v.extract::<i64>())?;
+                let minute = if args.len() > 4 {
+                    args.get_item(4)?.extract::<i64>()?
+                } else {
+                    0
+                };
+                let second = if args.len() > 5 {
+                    args.get_item(5)?.extract::<i64>()?
+                } else {
+                    0
+                };
+                let us = if args.len() > 6 {
+                    args.get_item(6)?.extract::<i64>()?
+                } else {
+                    0
+                };
                 let days = days_from_ymd(year, month, day);
                 let nanos = days * 86_400_000_000_000
                     + hour * 3_600_000_000_000
@@ -1736,18 +1761,128 @@ impl PyTimestamp {
                     inner: Timestamp::from_nanos(nanos),
                 });
             }
-        }
-        // Anything else was Timestamp.now() - no argument, a list, an
-        // unknown type - where pandas raises (fvsao.35).
-        match args.iter().next() {
-            Some(arg) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                "Cannot convert input [{}] of type {} to Timestamp",
-                arg.repr()?,
-                arg.get_type().repr()?
-            ))),
-            None => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "function missing required argument 'year' (pos 1)",
-            )),
+            if args.len() == 1 {
+                let arg = args.get_item(0)?;
+                if let Ok(ts) = arg.extract::<PyRef<'_, PyTimestamp>>() {
+                    return Ok(PyTimestamp {
+                        inner: ts.inner.clone(),
+                    });
+                }
+                // datetime, date and numpy datetime64 inputs (each fell through
+                // to Timestamp.now(), a silently wrong value; fvsao.35).
+                if let Ok(dt) = arg.cast::<PyDateTime>() {
+                    return Ok(PyTimestamp {
+                        inner: Timestamp::from_nanos(py_datetime_nanos(dt)?),
+                    });
+                }
+                if let Ok(date) = arg.cast::<pyo3::types::PyDate>() {
+                    let days = days_from_ymd(
+                        i64::from(date.get_year()),
+                        i64::from(date.get_month()),
+                        i64::from(date.get_day()),
+                    );
+                    return Ok(PyTimestamp {
+                        inner: Timestamp::from_nanos(days * 86_400_000_000_000),
+                    });
+                }
+                if arg.get_type().name()?.to_str()? == "datetime64" {
+                    let nanos =
+                        numpy_temporal_nanos(&arg, "datetime64[ns]")?.unwrap_or(Timestamp::NAT);
+                    return Ok(PyTimestamp {
+                        inner: Timestamp::from_nanos(nanos),
+                    });
+                }
+                if let Ok(s) = arg.extract::<String>() {
+                    if s == "now" {
+                        return Ok(PyTimestamp {
+                            inner: Timestamp::now(),
+                        });
+                    }
+                    if s == "today" {
+                        return Ok(PyTimestamp {
+                            inner: Timestamp::today(),
+                        });
+                    }
+                    let ts = Timestamp::parse(&s).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    return Ok(PyTimestamp { inner: ts });
+                }
+                if let Ok(val) = arg.extract::<i64>() {
+                    let unit = kwargs
+                        .and_then(|kw| kw.get_item("unit").ok().flatten())
+                        .and_then(|u| u.extract::<String>().ok());
+                    let nanos = match unit.as_deref() {
+                        Some("s" | "second" | "seconds") => val * 1_000_000_000,
+                        Some("ms" | "millisecond" | "milliseconds") => val * 1_000_000,
+                        Some("us" | "microsecond" | "microseconds") => val * 1_000,
+                        Some("ns" | "nanosecond" | "nanoseconds") => val,
+                        _ => {
+                            if val < 100_000_000_000 {
+                                val * 1_000_000_000
+                            } else {
+                                val
+                            }
+                        }
+                    };
+                    return Ok(PyTimestamp {
+                        inner: Timestamp::from_nanos(nanos),
+                    });
+                }
+            }
+            if let Some(kw) = kwargs {
+                if let Some(ts_val) = kw.get_item("ts_input")?.or(kw.get_item("value")?) {
+                    let s = ts_val.extract::<String>()?;
+                    let ts = Timestamp::parse(&s).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    return Ok(PyTimestamp { inner: ts });
+                }
+                if let Some(y) = kw.get_item("year")? {
+                    let year = y.extract::<i64>()?;
+                    let month = kw
+                        .get_item("month")?
+                        .map_or(Ok(1), |v| v.extract::<i64>())?;
+                    let day = kw.get_item("day")?.map_or(Ok(1), |v| v.extract::<i64>())?;
+                    let hour = kw.get_item("hour")?.map_or(Ok(0), |v| v.extract::<i64>())?;
+                    let minute = kw
+                        .get_item("minute")?
+                        .map_or(Ok(0), |v| v.extract::<i64>())?;
+                    let second = kw
+                        .get_item("second")?
+                        .map_or(Ok(0), |v| v.extract::<i64>())?;
+                    let us = kw
+                        .get_item("microsecond")?
+                        .map_or(Ok(0), |v| v.extract::<i64>())?;
+                    let days = days_from_ymd(year, month, day);
+                    let nanos = days * 86_400_000_000_000
+                        + hour * 3_600_000_000_000
+                        + minute * 60_000_000_000
+                        + second * 1_000_000_000
+                        + us * 1_000;
+                    return Ok(PyTimestamp {
+                        inner: Timestamp::from_nanos(nanos),
+                    });
+                }
+            }
+            // Anything else was Timestamp.now() - no argument, a list, an
+            // unknown type - where pandas raises (fvsao.35).
+            match args.iter().next() {
+                Some(arg) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "Cannot convert input [{}] of type {} to Timestamp",
+                    arg.repr()?,
+                    arg.get_type().repr()?
+                ))),
+                None => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "function missing required argument 'year' (pos 1)",
+                )),
+            }
+        })()?;
+        match zone {
+            None => Ok(naive),
+            // A tz-aware input is converted to the zone, a naive one localized.
+            Some(zone) if naive.inner.tz.is_some() => naive.converted(Some(zone.as_str())),
+            Some(zone) => naive.localized(Some(zone.as_str())),
         }
     }
 
@@ -1756,65 +1891,66 @@ impl PyTimestamp {
         self.inner.value()
     }
 
+    // The calendar and clock fields read the wall clock (see `wall`).
     #[getter]
     fn year(&self) -> Option<i64> {
-        self.inner.year()
+        self.wall().year()
     }
 
     #[getter]
     fn month(&self) -> Option<i64> {
-        self.inner.month()
+        self.wall().month()
     }
 
     #[getter]
     fn day(&self) -> Option<i64> {
-        self.inner.day()
+        self.wall().day()
     }
 
     #[getter]
     fn hour(&self) -> Option<i64> {
-        self.inner.hour()
+        self.wall().hour()
     }
 
     #[getter]
     fn minute(&self) -> Option<i64> {
-        self.inner.minute()
+        self.wall().minute()
     }
 
     #[getter]
     fn second(&self) -> Option<i64> {
-        self.inner.second()
+        self.wall().second()
     }
 
     #[getter]
     fn microsecond(&self) -> Option<i64> {
-        self.inner.microsecond()
+        self.wall().microsecond()
     }
 
     #[getter]
     fn nanosecond(&self) -> Option<i64> {
-        self.inner.nanosecond()
+        self.wall().nanosecond()
     }
 
     #[getter]
     fn dayofweek(&self) -> Option<i64> {
-        self.inner.dayofweek()
+        self.wall().dayofweek()
     }
 
     #[getter]
     fn day_of_week(&self) -> Option<i64> {
-        self.inner.day_of_week()
+        self.wall().day_of_week()
     }
 
     /// pandas' `Timestamp.weekday()` is a method (Monday 0); it was a
     /// property, so the call raised "'int' object is not callable".
     fn weekday(&self) -> Option<i64> {
-        self.inner.weekday()
+        self.wall().weekday()
     }
 
     /// Monday 1 .. Sunday 7.
     fn isoweekday(&self) -> Option<i64> {
-        self.inner.day_of_week().map(|day| day + 1)
+        self.wall().day_of_week().map(|day| day + 1)
     }
 
     /// `datetime.date(...).isocalendar()`: (ISO year, week, weekday).
@@ -1911,9 +2047,15 @@ impl PyTimestamp {
                 "nanosecond must be in 0..999",
             ));
         }
-        Ok(PyTimestamp {
+        let wall = PyTimestamp {
             inner: Timestamp::from_nanos(py_datetime_nanos(&dt)? + nanosecond),
-        })
+        };
+        // A tz-aware Timestamp's fields are its wall clock; the result keeps
+        // the zone.
+        match &self.inner.tz {
+            Some(zone) => wall.localized(Some(zone)),
+            None => Ok(wall),
+        }
     }
 
     /// The Period of `freq` holding this instant.
@@ -1924,7 +2066,7 @@ impl PyTimestamp {
                 "Must supply freq for datetime value",
             ));
         };
-        let periods = DatetimeIndex::new(vec![self.inner.nanos])
+        let periods = DatetimeIndex::new(vec![self.wall().nanos])
             .to_period(freq)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let inner = periods.values().first().cloned().ok_or_else(|| {
@@ -1935,62 +2077,66 @@ impl PyTimestamp {
 
     #[getter]
     fn is_month_start(&self) -> Option<bool> {
-        Some(self.inner.day()? == 1)
+        Some(self.wall().day()? == 1)
     }
 
     #[getter]
     fn is_month_end(&self) -> Option<bool> {
-        Some(self.inner.day()? == self.inner.days_in_month()?)
+        let wall = self.wall();
+        Some(wall.day()? == wall.days_in_month()?)
     }
 
     #[getter]
     fn is_quarter_start(&self) -> Option<bool> {
-        Some(self.inner.day()? == 1 && self.inner.month()? % 3 == 1)
+        let wall = self.wall();
+        Some(wall.day()? == 1 && wall.month()? % 3 == 1)
     }
 
     #[getter]
     fn is_quarter_end(&self) -> Option<bool> {
-        Some(self.inner.month()? % 3 == 0 && self.is_month_end()?)
+        Some(self.wall().month()? % 3 == 0 && self.is_month_end()?)
     }
 
     #[getter]
     fn is_year_start(&self) -> Option<bool> {
-        Some(self.inner.month()? == 1 && self.inner.day()? == 1)
+        let wall = self.wall();
+        Some(wall.month()? == 1 && wall.day()? == 1)
     }
 
     #[getter]
     fn is_year_end(&self) -> Option<bool> {
-        Some(self.inner.month()? == 12 && self.inner.day()? == 31)
+        let wall = self.wall();
+        Some(wall.month()? == 12 && wall.day()? == 31)
     }
 
     #[getter]
     fn dayofyear(&self) -> Option<i64> {
-        self.inner.dayofyear()
+        self.wall().dayofyear()
     }
 
     #[getter]
     fn day_of_year(&self) -> Option<i64> {
-        self.inner.day_of_year()
+        self.wall().day_of_year()
     }
 
     #[getter]
     fn quarter(&self) -> Option<i64> {
-        self.inner.quarter()
+        self.wall().quarter()
     }
 
     #[getter]
     fn is_leap_year(&self) -> Option<bool> {
-        self.inner.is_leap_year()
+        self.wall().is_leap_year()
     }
 
     #[getter]
     fn days_in_month(&self) -> Option<i64> {
-        self.inner.days_in_month()
+        self.wall().days_in_month()
     }
 
     #[getter]
     fn daysinmonth(&self) -> Option<i64> {
-        self.inner.daysinmonth()
+        self.wall().daysinmonth()
     }
 
     #[getter]
@@ -2038,12 +2184,40 @@ impl PyTimestamp {
         }
     }
 
+    /// The wall clock, with a tz-aware Timestamp's offset ('+09:00').
     fn isoformat(&self) -> String {
-        self.inner.isoformat()
+        format!("{}{}", self.wall().isoformat(), self.offset_text(true))
     }
 
     fn strftime(&self, fmt: &str) -> String {
-        self.inner.strftime(fmt)
+        self.wall().strftime(fmt)
+    }
+
+    /// pandas' `Timestamp.tz_localize(tz, ambiguous='raise',
+    /// nonexistent='raise')` (it was missing): see [`Self::localized`].
+    #[pyo3(signature = (tz, ambiguous="raise", nonexistent="raise"))]
+    fn tz_localize(
+        &self,
+        tz: Option<&Bound<'_, PyAny>>,
+        ambiguous: &str,
+        nonexistent: &str,
+    ) -> PyResult<Self> {
+        unsupported_params(
+            "Timestamp.tz_localize",
+            &[
+                ("ambiguous", ambiguous == "raise"),
+                ("nonexistent", nonexistent == "raise"),
+            ],
+        )?;
+        let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
+        self.localized(zone.as_deref())
+    }
+
+    /// pandas' `Timestamp.tz_convert(tz)` (it was missing): see
+    /// [`Self::converted`].
+    fn tz_convert(&self, tz: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
+        self.converted(zone.as_deref())
     }
 
     fn day_name(&self) -> Option<&'static str> {
@@ -2083,35 +2257,37 @@ impl PyTimestamp {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
-    fn floor(&self, freq: &str) -> Self {
-        PyTimestamp {
-            inner: self.inner.floor_to_unit(freq),
-        }
+    // floor / ceil / round / normalize work on the wall clock; a tz-aware
+    // result is that wall time back in its zone.
+    fn floor(&self, freq: &str) -> PyResult<Self> {
+        self.on_wall(|wall| wall.floor_to_unit(freq))
     }
 
-    fn ceil(&self, freq: &str) -> Self {
-        PyTimestamp {
-            inner: self.inner.ceil_to_unit(freq),
-        }
+    fn ceil(&self, freq: &str) -> PyResult<Self> {
+        self.on_wall(|wall| wall.ceil_to_unit(freq))
     }
 
-    fn round(&self, freq: &str) -> Self {
-        PyTimestamp {
-            inner: self.inner.round_to_unit(freq),
-        }
+    fn round(&self, freq: &str) -> PyResult<Self> {
+        self.on_wall(|wall| wall.round_to_unit(freq))
     }
 
-    fn normalize(&self) -> Self {
-        PyTimestamp {
-            inner: self.inner.normalize(),
-        }
+    fn normalize(&self) -> PyResult<Self> {
+        self.on_wall(Timestamp::normalize)
     }
 
+    /// pandas' repr: a tz-aware Timestamp shows its wall clock, its '+HHMM'
+    /// offset and its zone.
     fn __repr__(&self) -> String {
         if self.inner.is_nat() {
-            "NaT".to_string()
-        } else {
-            format!("Timestamp('{}')", self.inner.isoformat().replace('T', " "))
+            return "NaT".to_string();
+        }
+        let wall = self.wall().isoformat().replace('T', " ");
+        match &self.inner.tz {
+            Some(zone) => format!(
+                "Timestamp('{wall}{}', tz='{zone}')",
+                self.offset_text(false)
+            ),
+            None => format!("Timestamp('{wall}')"),
         }
     }
 
@@ -2119,15 +2295,19 @@ impl PyTimestamp {
         if self.inner.is_nat() {
             "NaT".to_string()
         } else {
-            self.inner.isoformat().replace('T', " ")
+            self.isoformat().replace('T', " ")
         }
     }
 
     /// pandas hashes a Timestamp without nanoseconds as the equal
-    /// `datetime`, so either finds the other in a dict or set.
+    /// `datetime`, so either finds the other in a dict or set; a tz-aware
+    /// one as its UTC instant, as Python hashes an aware datetime.
     fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        let utc = PyTimestamp {
+            inner: Timestamp::from_nanos(self.inner.nanos),
+        };
         if self.inner.nanos.rem_euclid(1_000) == 0
-            && let Some(dt) = self.datetime_object(py)?
+            && let Some(dt) = utc.datetime_object(py)?
         {
             return dt.hash();
         }
@@ -2201,8 +2381,7 @@ impl PyTimestamp {
             let res = self.inner.add_timedelta(td.nanos);
             PyTimestamp { inner: res }.into_py_any(py)
         } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
-            let res = Timestamp::from_nanos(offset.apply(py, self.inner.nanos, 1)?);
-            PyTimestamp { inner: res }.into_py_any(py)
+            self.offset_shift(py, &offset, 1)?.into_py_any(py)
         } else if let Ok(delta) = other.cast::<PyDelta>() {
             let res = self.inner.add_timedelta(py_delta_nanos(delta));
             PyTimestamp { inner: res }.into_py_any(py)
@@ -2230,8 +2409,7 @@ impl PyTimestamp {
             let res = self.inner.sub_timedelta(td.nanos);
             PyTimestamp { inner: res }.into_py_any(py)
         } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
-            let res = Timestamp::from_nanos(offset.apply(py, self.inner.nanos, -1)?);
-            PyTimestamp { inner: res }.into_py_any(py)
+            self.offset_shift(py, &offset, -1)?.into_py_any(py)
         } else if let Ok(other_ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
             let diff_nanos = self.inner.sub_timestamp(&other_ts.inner);
             PyTimedelta { nanos: diff_nanos }.into_py_any(py)
@@ -2776,6 +2954,24 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 }
 
 /// Convert a FrankenPandas Scalar to a Python object.
+/// A cell of `column` as Python: a tz-aware datetime column's instant is a
+/// Timestamp in that zone (it came back naive, showing the UTC wall clock).
+fn cell_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<PyAny>> {
+    if let (DType::Datetime64 { tz: Some(zone) }, Scalar::Datetime64(nanos)) =
+        (column.dtype(), value)
+        && *nanos != Timestamp::NAT
+    {
+        return PyTimestamp {
+            inner: Timestamp {
+                nanos: *nanos,
+                tz: Some(zone),
+            },
+        }
+        .into_py_any(py);
+    }
+    scalar_to_py(py, value)
+}
+
 /// A reduction of `series` as pandas returns it: a missing result of a
 /// nullable extension dtype (Int64 / Float64 / boolean) is `pd.NA`, not NaN.
 fn reduction_to_py(py: Python<'_>, series: &Series, result: &Scalar) -> PyResult<Py<PyAny>> {
@@ -12136,6 +12332,10 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || lower.contains("categorical is not ordered for operation")
                 || lower.contains("unordered categoricals can only compare")
                 || lower.contains("cannot compare a categorical")
+                // pandas' TypeErrors for localizing an aware column and
+                // converting a naive one.
+                || lower.contains("already tz-aware")
+                || lower.contains("cannot convert tz-naive")
                 // pandas' TypeError for a datetime/timedelta reduction it does
                 // not define (4qg5w.23).
                 || lower.contains("type does not support")
@@ -16033,7 +16233,7 @@ impl PySeries {
                 .inner
                 .iat(position)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-            return scalar_to_py(py, &scalar);
+            return cell_to_py(py, self.inner.column(), &scalar);
         }
         // A label (text, a Timestamp): as `.loc` reads it, so date text on a
         // DatetimeIndex names a period or an instant and a duplicated label
@@ -16712,12 +16912,11 @@ impl PySeries {
 
     /// Return values as a Python list.
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let values: Vec<Py<PyAny>> = self
-            .inner
-            .column()
+        let column = self.inner.column();
+        let values: Vec<Py<PyAny>> = column
             .values()
             .iter()
-            .map(|s| scalar_to_py(py, s))
+            .map(|s| cell_to_py(py, column, s))
             .collect::<PyResult<Vec<Py<PyAny>>>>()?;
         Ok(PyList::new(py, values)?.into_any().unbind())
     }
@@ -20815,7 +21014,7 @@ impl PySeriesILoc {
                 .inner
                 .iat(pos)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-            return scalar_to_py(py, &scalar);
+            return cell_to_py(py, self.inner.column(), &scalar);
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let s = match slice_rows(slice, self.inner.len())? {
@@ -20940,7 +21139,7 @@ impl PySeriesIAt {
             .inner
             .iat(key)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-        scalar_to_py(py, &scalar)
+        cell_to_py(py, self.inner.column(), &scalar)
     }
 }
 
@@ -20985,7 +21184,7 @@ impl PySeriesAt {
             .inner
             .at(&label)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-        scalar_to_py(py, &scalar)
+        cell_to_py(py, self.inner.column(), &scalar)
     }
 }
 
@@ -31661,7 +31860,11 @@ fn series_label_get(
         0 => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
             key.clone().unbind(),
         )),
-        1 => scalar_to_py(py, &series.at(&label).map_err(loc_key_error)?),
+        1 => cell_to_py(
+            py,
+            series.column(),
+            &series.at(&label).map_err(loc_key_error)?,
+        ),
         _ => wrap(series.loc(&[label]).map_err(loc_key_error)?),
     }
 }
@@ -34462,6 +34665,41 @@ impl PySeriesDatetimeAccessor {
     }
     fn normalize(&self) -> PyResult<PySeries> {
         self.wrap(|dt| dt.normalize())
+    }
+    /// pandas' `Series.dt.tz_localize(tz)`: naive wall times placed in `tz`
+    /// (datetime64[ns, tz]; a DST-repeated or skipped wall time raises), or a
+    /// zone dropped keeping the wall clock (None). fp-frame had it; the
+    /// accessor did not (AttributeError).
+    #[pyo3(signature = (tz, ambiguous="raise", nonexistent="raise"))]
+    fn tz_localize(
+        &self,
+        tz: Option<&Bound<'_, PyAny>>,
+        ambiguous: &str,
+        nonexistent: &str,
+    ) -> PyResult<PySeries> {
+        unsupported_params(
+            "Series.dt.tz_localize",
+            &[
+                ("ambiguous", ambiguous == "raise"),
+                ("nonexistent", nonexistent == "raise"),
+            ],
+        )?;
+        let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
+        self.wrap(|dt| dt.tz_localize(zone.as_deref()))
+    }
+    /// pandas' `Series.dt.tz_convert(tz)`: the same instants in `tz` (None:
+    /// UTC, naive); a naive column raises.
+    fn tz_convert(&self, tz: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
+        self.wrap(|dt| dt.tz_convert(zone.as_deref()))
+    }
+    /// The column's zone name; None for a naive column.
+    #[getter]
+    fn tz(&self) -> Option<String> {
+        match self.series.column().dtype() {
+            DType::Datetime64 { tz } => tz,
+            _ => None,
+        }
     }
     #[pyo3(signature = (freq=None))]
     fn to_period(&self, freq: Option<&str>) -> PyResult<PySeries> {

@@ -6123,8 +6123,7 @@ def test_datetimeindex_tz_methods_do_not_ignore_tz() -> None:
         fpd.DatetimeIndex(["2024-01-05"]).tz_convert("US/Eastern")
     with pytest.raises(NotImplementedError):
         fpd.DatetimeIndex(["2024-01-05"]).tz_localize("UTC")
-    with pytest.raises(NotImplementedError):
-        fpd.Timestamp("2024-01-05", tz="UTC")
+    # Timestamp(tz=) is implemented: test_timezone_timestamps_series_dt_and_utc_parsing_match_pandas.
 
 
 _OFFSET_TIMESTAMPS = ["2024-01-15 10:00", "2024-01-31 10:00", "2024-02-01", "2024-03-29", "2024-01-13", "2024-12-31 23:00"]
@@ -7641,3 +7640,84 @@ def _level_key_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_LEVEL_KEY_CASES))
 def test_multiindex_level_keys_unstack_columns_and_interval_cells_match_pandas(case: str) -> None:
     assert _level_key_outcome(fpd, case) == _level_key_outcome(pd, case), case
+
+
+def _tokyo(m: Any) -> Any:
+    return m.Timestamp("2024-03-10 14:30:15").tz_localize("UTC").tz_convert("Asia/Tokyo")
+
+
+def _naive_times(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-03-10 01:30", "2024-06-01 12:00", None]))
+
+
+def _texts_of(r: Any) -> Any:
+    """A Series as its dtype and each cell's text (pandas' Timestamp str)."""
+    return (str(r.dtype), [str(v) for v in r.tolist()])
+
+
+# Timezones (fvsao.35): Timestamp.tz_localize / tz_convert and
+# Timestamp(..., tz=) were missing or refused; Series.dt.tz_localize /
+# tz_convert / .tz raised AttributeError although fp-frame implements them;
+# to_datetime(utc=True) returned a naive column; an offset with no seconds
+# ('2024-01-01 00:00+05:00') did not parse. Silently wrong once wired: a
+# tz-aware column's cells came back naive UTC wall times and dt.hour / day
+# read the UTC clock.
+_TZ_CASES = {
+    "localize repr": lambda m: repr(m.Timestamp("2024-03-10 14:30:15").tz_localize("US/Eastern")),
+    "convert str repr": lambda m: (str(_tokyo(m)), repr(_tokyo(m))),
+    "wall fields": lambda m: (lambda t: (t.year, t.month, t.day, t.hour, t.minute, t.dayofweek, t.day_name(), t.is_month_start))(_tokyo(m)),
+    "value and tz": lambda m: (_tokyo(m).value, str(_tokyo(m).tz)),
+    "isoformat strftime": lambda m: (_tokyo(m).isoformat(), _tokyo(m).strftime("%Y-%m-%d %H:%M")),
+    "drop zone": lambda m: (str(_tokyo(m).tz_localize(None)), str(_tokyo(m).tz_convert(None))),
+    "same instant equal": lambda m: (_tokyo(m) == m.Timestamp("2024-03-10 14:30:15", tz="UTC"), hash(_tokyo(m)) == hash(m.Timestamp("2024-03-10 14:30:15", tz="UTC"))),
+    "floor normalize replace": lambda m: (str(_tokyo(m).floor("D")), str(_tokyo(m).normalize()), str(_tokyo(m).replace(hour=1))),
+    "timedelta and offset": lambda m: (str(_tokyo(m) + m.Timedelta(hours=12)), str(m.Timestamp("2024-03-09 12:00", tz="US/Eastern") + m.DateOffset(days=1))),
+    "aware difference across dst": lambda m: str(m.Timestamp("2024-11-03 12:00", tz="US/Eastern") - m.Timestamp("2024-11-02 12:00", tz="US/Eastern")),
+    "constructor tz": lambda m: (str(m.Timestamp("2024-01-01 12:00", tz="US/Eastern")), m.Timestamp("2024-07-01 12:00", tz="US/Eastern").value),
+    "series localize": lambda m: _texts_of(_naive_times(m).dt.tz_localize("US/Eastern")),
+    "series convert": lambda m: _texts_of(_naive_times(m).dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")),
+    "series tz attr": lambda m: (str(_naive_times(m).dt.tz_localize("UTC").dt.tz), _naive_times(m).dt.tz),
+    "series drop zone": lambda m: (_texts_of(_naive_times(m).dt.tz_localize("Asia/Tokyo").dt.tz_localize(None)), _texts_of(_naive_times(m).dt.tz_localize("Asia/Tokyo").dt.tz_convert(None))),
+    "series wall fields": lambda m: (lambda s: ([_missing_or(v) for v in s.dt.hour.tolist()], [_missing_or(v) for v in s.dt.day.tolist()], [_missing_or(v) for v in s.dt.day_name().tolist()]))(_naive_times(m).dt.tz_localize("UTC").dt.tz_convert("US/Eastern")),
+    "series cells": lambda m: (lambda s: (str(s[1]), str(s.iloc[0]), str(s.iat[1])))(_naive_times(m).dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")),
+    "to_datetime utc": lambda m: _texts_of(m.to_datetime(m.Series(["2024-01-01 00:00", "2024-01-02 06:00"]), utc=True)),
+    "to_datetime utc offsets": lambda m: _texts_of(m.to_datetime(m.Series(["2024-01-01 00:00+05:00", "2024-01-02 06:00-02:00"]), utc=True)),
+    # NEGATIVES: localizing an aware value / converting a naive one are
+    # TypeError; an unknown zone is pytz's KeyError subclass; a wall time the
+    # DST change skips raises.
+    "localize aware": lambda m: _tokyo(m).tz_localize("UTC"),
+    "convert naive": lambda m: m.Timestamp("2024-03-10").tz_convert("UTC"),
+    "series localize aware": lambda m: _naive_times(m).dt.tz_localize("UTC").dt.tz_localize("UTC"),
+    "series convert naive": lambda m: _naive_times(m).dt.tz_convert("UTC"),
+    "unknown zone is a KeyError": lambda m: _raises_key_error(lambda: m.Timestamp("2024-03-10").tz_localize("Mars/Olympus")),
+    "skipped wall time raises": lambda m: _raises(lambda: m.Timestamp("2024-03-10 02:30").tz_localize("US/Eastern")),
+}
+
+
+def _raises_key_error(f: Any) -> Any:
+    try:
+        f()
+    except KeyError:
+        return "KeyError"
+    return "no error"
+
+
+def _raises(f: Any) -> Any:
+    try:
+        f()
+    except Exception:  # noqa: BLE001 - pytz's NonExistentTimeError is not a ValueError
+        return "raised"
+    return "no error"
+
+
+def _tz_outcome(m: Any, case: str) -> Any:
+    try:
+        return _TZ_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TZ_CASES))
+def test_timezone_timestamps_series_dt_and_utc_parsing_match_pandas(case: str) -> None:
+    assert _tz_outcome(fpd, case) == _tz_outcome(pd, case), case
