@@ -1163,7 +1163,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = monthly.bfill(None)?;
     let _ = monthly.fillna(&Scalar::Float64(0.0))?;
     let _ = monthly.interpolate()?;
-    let _ = monthly.nearest()?;
+    let _ = monthly.nearest(None)?;
     let _ = monthly.quantile(0.5)?;
     let _ = monthly.sem()?;
     let _ = monthly.size()?;
@@ -1283,7 +1283,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = drs.bfill(None)?;
     let _ = drs.fillna(&Scalar::Float64(0.0))?;
     let _ = drs.interpolate()?;
-    let _ = drs.nearest()?;
+    let _ = drs.nearest(None)?;
     let _ = drs.quantile(0.5)?;
     let _ = drs.sem()?;
     let _ = drs.size()?;

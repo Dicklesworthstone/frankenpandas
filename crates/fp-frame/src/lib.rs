@@ -13463,11 +13463,15 @@ impl Series {
             // Empty result when start is after stop.
             return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
         };
-
-        let out_labels: Vec<_> = labels[start_pos..=end_pos].to_vec();
-        let out_values: Vec<_> = self.column.values()[start_pos..=end_pos].to_vec();
-
-        self.with_labels_and_values_preserving_name(out_labels, out_values)
+        // The labels between are a run of positions: slice them, which keeps
+        // the index's name, zone and freq (the rebuilt labels dropped the
+        // freq).
+        let (Ok(first), Ok(stop)) = (i64::try_from(start_pos), i64::try_from(end_pos + 1)) else {
+            return Err(FrameError::CompatibilityRejected(
+                "loc slice: position out of range".to_owned(),
+            ));
+        };
+        self.iloc_slice(Some(first), Some(stop))
     }
 
     /// Position-based slice selection (exclusive end, like Python range).
@@ -82016,9 +82020,13 @@ impl DataFrame {
     /// axis name).
     pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
         let mut out = self.set_axis(index.labels().to_vec(), 0)?;
-        // The given index's name and time zone ride along (the zone was
+        // The given index's name, time zone and freq ride along (they were
         // dropped with the labels).
-        out.index = out.index.rename_index(index.name()).with_tz(index.tz())?;
+        out.index = out
+            .index
+            .rename_index(index.name())
+            .with_tz(index.tz())?
+            .with_freq(index.freq().map(str::to_owned));
         Ok(out)
     }
 
@@ -83938,7 +83946,12 @@ impl DataFrame {
             result = result.fillna(&fill_value)?;
             result = result.restore_dtypes_after_gapless_fill(self)?;
         }
-        result.index = result.index.set_names(self.index.name());
+        // The regular run carries its freq, as pandas' (`asfreq('D').index
+        // .freq` is <Day>; it had none).
+        result.index = result
+            .index
+            .set_names(self.index.name())
+            .with_freq(fp_index::canonical_freq(freq));
         Ok(result)
     }
 

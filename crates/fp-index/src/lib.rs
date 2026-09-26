@@ -89,7 +89,7 @@ use std::{
 use chrono::Datelike;
 use fp_types::{
     Interval, IntervalClosed, Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents,
-    interval_range,
+    Timestamp, interval_range,
 };
 // Dedup / set-op seen-sets key on &IndexLabel and read output order from the
 // INPUT scan (first-seen filter / positional bool), never from map iteration —
@@ -1744,6 +1744,14 @@ pub struct Index {
     /// datetimes (take, slice, sort, unique, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tz: Option<String>,
+    /// pandas' `DatetimeIndex.freq` as its freqstr ('D', '2D', 'W-SUN',
+    /// 'ME', '-1D'). Only [`Self::with_freq`] sets it; it survives a clone,
+    /// [`Self::slice`] and a [`Self::take`] of consecutive ascending
+    /// positions (pandas keeps it through a slice and a mask that selects a
+    /// run), and every other operation that builds labels drops it. Equality
+    /// ignores it, as pandas' `equals` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    freq: Option<String>,
 }
 
 /// The derived layout, with the row `MultiIndex` levels listed only when an
@@ -1765,6 +1773,9 @@ impl fmt::Debug for Index {
         }
         if let Some(tz) = &self.tz {
             out.field("tz", tz);
+        }
+        if let Some(freq) = &self.freq {
+            out.field("freq", freq);
         }
         out.finish()
     }
@@ -1908,6 +1919,7 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         }
     }
 
@@ -1966,6 +1978,7 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         };
         let _ = index.duplicate_cache.set(false);
         let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
@@ -1988,6 +2001,7 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2010,6 +2024,7 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         })
     }
 
@@ -2043,6 +2058,7 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         }
     }
 
@@ -2066,6 +2082,7 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         })
     }
 
@@ -2086,6 +2103,7 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         }
     }
 
@@ -2128,6 +2146,7 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2275,6 +2294,21 @@ impl Index {
         }
         self.tz = tz.map(str::to_owned);
         Ok(self)
+    }
+
+    /// pandas' `DatetimeIndex.freq` of these labels as its freqstr, None
+    /// when none is set (see the field).
+    #[must_use]
+    pub fn freq(&self) -> Option<&str> {
+        self.freq.as_deref()
+    }
+
+    /// These labels with `freq` (a pandas freqstr) set or cleared. The
+    /// caller vouches that the labels follow it.
+    #[must_use]
+    pub fn with_freq(mut self, freq: Option<String>) -> Self {
+        self.freq = freq;
+        self
     }
 
     /// Internal: if both indexes share the same name, return it; otherwise None.
@@ -4150,7 +4184,12 @@ impl Index {
     /// the same positions) when the index has them.
     #[must_use]
     pub fn take(&self, indices: &[usize]) -> Self {
-        let taken = self.take_labels(indices);
+        let mut taken = self.take_labels(indices);
+        // A run of consecutive positions is a slice: it keeps the freq, as
+        // pandas' getitem keeps it for a slice or a mask selecting a run.
+        if !indices.is_empty() && indices.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+            taken.freq.clone_from(&self.freq);
+        }
         match self
             .row_multiindex
             .as_deref()
@@ -4248,7 +4287,7 @@ impl Index {
 
     #[must_use]
     pub fn slice(&self, start: usize, len: usize) -> Self {
-        let sliced = self.propagate_name(Self {
+        let mut sliced = self.propagate_name(Self {
             labels: self.labels.slice(start, len),
             name: None,
             label_identity: next_index_label_identity(),
@@ -4257,7 +4296,9 @@ impl Index {
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
+            freq: None,
         });
+        sliced.freq.clone_from(&self.freq);
         let Some(levels) = self.row_multiindex.as_deref() else {
             return sliced;
         };
@@ -7078,6 +7119,261 @@ fn ensure_index_kind(
     }
 }
 
+const FREQ_MONTH_CODES: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+const FREQ_WEEKDAY_CODES: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
+/// A freqstr from a count and a rule code, as pandas writes it: the count
+/// only when it is not 1 ('D', '2D', '-1D').
+fn freq_with_count(n: i64, rule: &str) -> String {
+    if n == 1 {
+        rule.to_owned()
+    } else {
+        format!("{n}{rule}")
+    }
+}
+
+/// A freqstr's count and rule code ('2D' -> (2, "D"), '-1D' -> (-1, "D"),
+/// 'W-SUN' -> (1, "W-SUN")).
+#[must_use]
+pub fn split_freq_count(freqstr: &str) -> Option<(i64, &str)> {
+    let body = freqstr
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || (i == 0 && matches!(c, '-' | '+'))))
+        .map_or(freqstr.len(), |(i, _)| i);
+    let (count, rule) = freqstr.split_at(body);
+    let n = match count {
+        "" | "+" => 1,
+        "-" => -1,
+        digits => digits.parse().ok()?,
+    };
+    (!rule.is_empty()).then_some((n, rule))
+}
+
+/// pandas' freqstr for a frequency alias - what `date_range(freq=alias)
+/// .freqstr` reports ('W' -> 'W-SUN', '12H' -> '12h', 'M' -> 'ME', 'Q' ->
+/// 'QE-DEC', 'T' -> 'min', '1D' -> 'D') - or None for an alias this does
+/// not know.
+#[must_use]
+pub fn canonical_freq(alias: &str) -> Option<String> {
+    let (n, rule) = split_freq_count(alias.trim())?;
+    let (base, suffix) = match rule.split_once('-') {
+        Some((base, suffix)) => (base, Some(suffix.to_ascii_uppercase())),
+        None => (rule, None),
+    };
+    let month = |default: &str| -> Option<String> {
+        let code = suffix.clone().unwrap_or_else(|| default.to_owned());
+        FREQ_MONTH_CODES.contains(&code.as_str()).then_some(code)
+    };
+    let semimonth_day = || -> Option<i64> {
+        let day = suffix
+            .as_deref()
+            .map_or(Some(15), |text| text.parse().ok())?;
+        (2..=27).contains(&day).then_some(day)
+    };
+    let plain = |code: &str| suffix.is_none().then(|| code.to_owned());
+    let canonical = match base {
+        "D" | "d" => plain("D")?,
+        "h" | "H" => plain("h")?,
+        "min" | "T" => plain("min")?,
+        "s" | "S" => plain("s")?,
+        "ms" | "L" => plain("ms")?,
+        "us" | "U" => plain("us")?,
+        "ns" | "N" => plain("ns")?,
+        "B" => plain("B")?,
+        "M" | "ME" => plain("ME")?,
+        "MS" => plain("MS")?,
+        "BM" | "BME" => plain("BME")?,
+        "BMS" => plain("BMS")?,
+        "W" => {
+            let day = suffix.clone().unwrap_or_else(|| "SUN".to_owned());
+            if !FREQ_WEEKDAY_CODES.contains(&day.as_str()) {
+                return None;
+            }
+            format!("W-{day}")
+        }
+        "SM" | "SME" => format!("SME-{}", semimonth_day()?),
+        "SMS" => format!("SMS-{}", semimonth_day()?),
+        "Q" | "QE" => format!("QE-{}", month("DEC")?),
+        "QS" => format!("QS-{}", month("JAN")?),
+        "Y" | "A" | "YE" => format!("YE-{}", month("DEC")?),
+        "YS" | "AS" => format!("YS-{}", month("JAN")?),
+        _ => return None,
+    };
+    Some(freq_with_count(n, &canonical))
+}
+
+/// A freqstr with its count multiplied by `factor` - the freq of a slice
+/// with that step ('D' x 2 -> '2D', 'D' x -1 -> '-1D'); None for a zero
+/// factor.
+#[must_use]
+pub fn scale_freq(freqstr: &str, factor: i64) -> Option<String> {
+    if factor == 0 {
+        return None;
+    }
+    let (n, rule) = split_freq_count(freqstr)?;
+    Some(freq_with_count(n.checked_mul(factor)?, rule))
+}
+
+/// pandas' month-position check: whether every date is a calendar ('ce') or
+/// business ('be') month end, a calendar ('cs') or business ('bs') month
+/// start, in that order of preference.
+fn freq_month_position(stamps: &[Timestamp]) -> Option<&'static str> {
+    let (mut calendar_end, mut business_end) = (true, true);
+    let (mut calendar_start, mut business_start) = (true, true);
+    for stamp in stamps {
+        let day = stamp.day()?;
+        let weekday = stamp.dayofweek()?;
+        let month_days = stamp.days_in_month()?;
+        calendar_start &= day == 1;
+        business_start &= day == 1 || (day <= 3 && weekday == 0);
+        let at_end = day == month_days;
+        calendar_end &= at_end;
+        business_end &= at_end || (month_days - day < 3 && weekday == 4);
+    }
+    if calendar_end {
+        Some("ce")
+    } else if business_end {
+        Some("be")
+    } else if calendar_start {
+        Some("cs")
+    } else if business_start {
+        Some("bs")
+    } else {
+        None
+    }
+}
+
+/// The sorted distinct consecutive differences of `values`.
+fn freq_unique_deltas(values: &[i64]) -> Vec<i64> {
+    let mut deltas: Vec<i64> = values.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    deltas.sort_unstable();
+    deltas.dedup();
+    deltas
+}
+
+/// pandas' frequency inference (`inferred_freq`): `wall` is each label's
+/// wall clock (a calendar rule reads it) and `instants` the UTC instants (a
+/// sub-day step reads them, as a DST change moves the wall clock). Needs
+/// three or more strictly monotonic labels. A day multiple tries the annual,
+/// quarterly and monthly rules (the dates' month position: YS / YE / QS /
+/// QE / MS / ME and their business forms), then 'D' or 'W-<day>' for a
+/// single step, then business days ('B'); a sub-day step is its tick
+/// ('h', 'min', 's', 'ms', 'us', 'ns') with a count. None otherwise.
+#[must_use]
+pub fn infer_datetime_freq(wall: &[i64], instants: &[i64]) -> Option<String> {
+    const DAY: i64 = 86_400_000_000_000;
+    if wall.len() < 3 || wall.len() != instants.len() {
+        return None;
+    }
+    let increasing = wall.windows(2).all(|pair| pair[1] > pair[0]);
+    let decreasing = wall.windows(2).all(|pair| pair[1] < pair[0]);
+    if !(increasing || decreasing) {
+        return None;
+    }
+    let deltas = freq_unique_deltas(wall);
+    if deltas[0] % DAY == 0 {
+        let stamps: Vec<Timestamp> = wall
+            .iter()
+            .map(|&nanos| Timestamp::from_nanos(nanos))
+            .collect();
+        let years: Vec<i64> = stamps.iter().map(Timestamp::year).collect::<Option<_>>()?;
+        let months: Vec<i64> = stamps.iter().map(Timestamp::month).collect::<Option<_>>()?;
+        let month_ordinals: Vec<i64> = years
+            .iter()
+            .zip(&months)
+            .map(|(year, month)| year * 12 + month)
+            .collect();
+        let ydiffs = freq_unique_deltas(&years);
+        let mdiffs = freq_unique_deltas(&month_ordinals);
+        let position = freq_month_position(&stamps);
+        let first_month = usize::try_from(months[0] - 1).ok()?;
+        if ydiffs.len() == 1 && months.iter().all(|&month| month == months[0]) {
+            let rule = match position {
+                Some("cs") => Some("YS"),
+                Some("bs") => Some("BYS"),
+                Some("ce") => Some("YE"),
+                Some("be") => Some("BYE"),
+                _ => None,
+            };
+            if let Some(rule) = rule {
+                let code = FREQ_MONTH_CODES.get(first_month)?;
+                return Some(freq_with_count(ydiffs[0], &format!("{rule}-{code}")));
+            }
+        }
+        if mdiffs.len() == 1 && mdiffs[0] % 3 == 0 {
+            let rule = match position {
+                Some("cs") => Some("QS"),
+                Some("bs") => Some("BQS"),
+                Some("ce") => Some("QE"),
+                Some("be") => Some("BQE"),
+                _ => None,
+            };
+            if let Some(rule) = rule {
+                // pandas names the quarter by (month % 3): 0 -> DEC, 2 -> NOV,
+                // 1 -> OCT (so a January-April-July run is 'QS-OCT').
+                let code = match months[0] % 3 {
+                    0 => "DEC",
+                    2 => "NOV",
+                    _ => "OCT",
+                };
+                return Some(freq_with_count(mdiffs[0] / 3, &format!("{rule}-{code}")));
+            }
+        }
+        if mdiffs.len() == 1 {
+            let rule = match position {
+                Some("cs") => Some("MS"),
+                Some("bs") => Some("BMS"),
+                Some("ce") => Some("ME"),
+                Some("be") => Some("BME"),
+                _ => None,
+            };
+            if let Some(rule) = rule {
+                return Some(freq_with_count(mdiffs[0], rule));
+            }
+        }
+        if deltas.len() == 1 {
+            let days = deltas[0] / DAY;
+            if days % 7 == 0 {
+                let weekday = usize::try_from(stamps[0].dayofweek()?).ok()?;
+                let code = FREQ_WEEKDAY_CODES.get(weekday)?;
+                return Some(freq_with_count(days / 7, &format!("W-{code}")));
+            }
+            return Some(freq_with_count(days, "D"));
+        }
+        // Business days: one-day steps, and three-day ones only from a
+        // Friday to a Monday.
+        if deltas == [DAY, 3 * DAY] {
+            let mut weekday = stamps[0].dayofweek()?;
+            let business = wall.windows(2).all(|pair| {
+                let shift = (pair[1] - pair[0]) / DAY;
+                weekday = (weekday + shift).rem_euclid(7);
+                (weekday == 0 && shift == 3) || ((1..=4).contains(&weekday) && shift == 1)
+            });
+            if business {
+                return Some("B".to_owned());
+            }
+        }
+        return None;
+    }
+    let steps = freq_unique_deltas(instants);
+    let [step] = steps.as_slice() else {
+        return None;
+    };
+    [
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "min"),
+        (1_000_000_000, "s"),
+        (1_000_000, "ms"),
+        (1_000, "us"),
+        (1, "ns"),
+    ]
+    .into_iter()
+    .find(|(unit, _)| step % unit == 0)
+    .map(|(unit, rule)| freq_with_count(step / unit, rule))
+}
+
 /// Public pandas-style datetime index wrapper.
 ///
 /// The canonical storage remains [`Index`] with `Datetime64` labels so existing
@@ -7483,8 +7779,11 @@ impl DatetimeIndex {
     }
 
     /// First-seen unique labels, matching `pd.DatetimeIndex.unique()`.
-    /// Returns a new DatetimeIndex.
+    /// Returns a new DatetimeIndex; one with no repeats is itself, freq kept.
     pub fn unique(&self) -> Result<Self, IndexError> {
+        if !self.index.has_duplicates() {
+            return Ok(self.clone());
+        }
         Self::from_index(self.index.unique())
     }
 
@@ -7531,7 +7830,10 @@ impl DatetimeIndex {
                 _ => i64::MIN,
             })
             .collect();
-        Ok(self.with_instants(nanos))
+        // Consecutive positions are a slice, which keeps the freq.
+        let run = !positions.is_empty() && positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
+        let freq = self.freq().filter(|_| run);
+        Ok(self.with_instants(nanos).with_freq(freq))
     }
 
     /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
@@ -7624,7 +7926,8 @@ impl DatetimeIndex {
                 _ => i64::MIN,
             })
             .collect();
-        self.with_instants(nanos)
+        // Every label moves by the same span, so the freq holds (pandas).
+        self.with_instants(nanos).with_freq(self.freq())
     }
 
     /// Positional first differences, matching `pd.DatetimeIndex.diff()`.
@@ -7845,7 +8148,18 @@ impl DatetimeIndex {
                 nanos.push(*n);
             }
         }
-        self.with_joined_instants(other, nanos)
+        let joined = self.with_joined_instants(other, nanos);
+        // Two runs of one freq that meet or overlap union into one run, which
+        // keeps it (pandas' fast union).
+        match (self.freq(), other.freq()) {
+            (Some(freq), Some(other_freq))
+                if freq == other_freq
+                    && joined.inferred_freq().as_deref() == Some(freq.as_str()) =>
+            {
+                joined.with_freq(Some(freq))
+            }
+            _ => joined,
+        }
     }
 
     /// Labels in self not in other, matching
@@ -8194,8 +8508,10 @@ impl DatetimeIndex {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let localized = Self::new(nanos).rename_index(self.name());
+                // pandas keeps the freq only for UTC, where no wall time moves.
+                let freq = self.index.freq.clone().filter(|_| zone == "UTC");
                 Ok(Self {
-                    index: localized.index.with_tz(Some(zone))?,
+                    index: localized.index.with_tz(Some(zone))?.with_freq(freq),
                 })
             }
         }
@@ -8294,23 +8610,52 @@ impl DatetimeIndex {
         self.tz()
     }
 
-    /// Frequency string, matching `pd.DatetimeIndex.freq`. FrankenPandas
-    /// does not infer datetime frequency yet so this returns `None`.
+    /// The frequency this index was built with, as its freqstr - pandas'
+    /// `DatetimeIndex.freq` / `freqstr` ('D', '12h', 'W-SUN', 'ME'); None
+    /// when it has none (it was always None).
     #[must_use]
     pub fn freq(&self) -> Option<String> {
-        None
+        self.index.freq().map(str::to_owned)
     }
 
-    /// Frequency alias string, matching `pd.DatetimeIndex.freqstr`.
+    /// Alias of [`Self::freq`], matching `pd.DatetimeIndex.freqstr`.
     #[must_use]
     pub fn freqstr(&self) -> Option<String> {
         self.freq()
     }
 
-    /// Inferred frequency, matching `pd.DatetimeIndex.inferred_freq`.
+    /// This index with `freq` (a freqstr) set or cleared; the caller vouches
+    /// that the labels follow it.
+    #[must_use]
+    pub fn with_freq(self, freq: Option<String>) -> Self {
+        Self {
+            index: self.index.with_freq(freq),
+        }
+    }
+
+    /// pandas' `DatetimeIndex.inferred_freq`: the frequency the labels
+    /// follow, read from their wall clock (see [`infer_datetime_freq`]);
+    /// None for fewer than three labels, NaT, repeats or an irregular run
+    /// (it was always None).
     #[must_use]
     pub fn inferred_freq(&self) -> Option<String> {
-        None
+        let mut wall = Vec::with_capacity(self.len());
+        for label in self.wall_labels().iter() {
+            match label {
+                IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => wall.push(*nanos),
+                _ => return None,
+            }
+        }
+        let instants: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(nanos) => Some(*nanos),
+                _ => None,
+            })
+            .collect();
+        infer_datetime_freq(&wall, &instants)
     }
 
     /// Cast to a different storage resolution, matching
@@ -8924,7 +9269,10 @@ impl DatetimeIndex {
         if let Some(name) = self.name() {
             normalized = normalized.set_name(name);
         }
-        self.rezoned(normalized)
+        // pandas infers the freq of the midnights (then localizes, which
+        // keeps it only in UTC).
+        let freq = normalized.inferred_freq();
+        self.rezoned(normalized.with_freq(freq))
     }
 
     /// Whether every label is at its wall-clock midnight (NAT counts as
@@ -35889,6 +36237,95 @@ mod tests {
         assert_eq!(
             dt.strftime("%Y-%m-%dT%H:%M:%S%.3f"),
             vec![Some("2024-01-15T12:34:56%.3f".to_owned()), None]
+        );
+    }
+
+    #[test]
+    fn datetime_index_freq_is_carried_and_inferred_like_pandas_fvsao_61() {
+        // Live pandas 2.2.3 (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.61).
+        const DAY: i64 = 86_400_000_000_000;
+        let canonical = |alias: &str| super::canonical_freq(alias);
+        assert_eq!(canonical("W").as_deref(), Some("W-SUN"));
+        assert_eq!(canonical("12H").as_deref(), Some("12h"));
+        assert_eq!(canonical("M").as_deref(), Some("ME"));
+        assert_eq!(canonical("Q").as_deref(), Some("QE-DEC"));
+        assert_eq!(canonical("QS").as_deref(), Some("QS-JAN"));
+        assert_eq!(canonical("SME").as_deref(), Some("SME-15"));
+        assert_eq!(canonical("T").as_deref(), Some("min"));
+        assert_eq!(canonical("1D").as_deref(), Some("D"));
+        assert_eq!(canonical("D1"), None);
+        assert_eq!(super::scale_freq("D", 2).as_deref(), Some("2D"));
+        assert_eq!(super::scale_freq("D", -1).as_deref(), Some("-1D"));
+
+        let days = |values: &[&str]| {
+            let nanos: Vec<i64> = values
+                .iter()
+                .map(|text| fp_types::Timestamp::parse(text).unwrap().nanos)
+                .collect();
+            DatetimeIndex::new(nanos)
+        };
+        let infer = |values: &[&str]| days(values).inferred_freq();
+        assert_eq!(
+            infer(&["2024-01-01", "2024-01-02", "2024-01-03"]).as_deref(),
+            Some("D")
+        );
+        assert_eq!(
+            infer(&["2024-01-01", "2024-02-01", "2024-03-01"]).as_deref(),
+            Some("MS")
+        );
+        assert_eq!(
+            infer(&["2024-01-31", "2024-02-29", "2024-03-31"]).as_deref(),
+            Some("ME")
+        );
+        // pandas' quarter naming quirk: a January-April-July run is QS-OCT.
+        assert_eq!(
+            infer(&["2024-01-01", "2024-04-01", "2024-07-01"]).as_deref(),
+            Some("QS-OCT")
+        );
+        assert_eq!(
+            infer(&["2024-01-07", "2024-01-14", "2024-01-21"]).as_deref(),
+            Some("W-SUN")
+        );
+        assert_eq!(
+            infer(&["2024-01-04", "2024-01-05", "2024-01-08", "2024-01-09"]).as_deref(),
+            Some("B")
+        );
+        assert_eq!(
+            infer(&["2024-01-03", "2024-01-02", "2024-01-01"]).as_deref(),
+            Some("-1D")
+        );
+        // NEGATIVES: an irregular run and fewer than three labels have none.
+        assert_eq!(infer(&["2024-01-01", "2024-01-02", "2024-01-04"]), None);
+        assert_eq!(infer(&["2024-01-01", "2024-01-02"]), None);
+
+        let range = DatetimeIndex::new((0..6).map(|day| day * DAY).collect())
+            .with_freq(Some("D".to_owned()));
+        assert_eq!(range.freq().as_deref(), Some("D"));
+        // A run of positions keeps it; any other take drops it.
+        assert_eq!(range.take(&[1, 2, 3]).unwrap().freq().as_deref(), Some("D"));
+        assert_eq!(range.take(&[0, 2]).unwrap().freq(), None);
+        assert_eq!(range.take(&[3, 2]).unwrap().freq(), None);
+        assert_eq!(
+            range.as_index().slice(2, 3).freq(),
+            Some("D"),
+            "a slice keeps the freq"
+        );
+        assert_eq!(range.shift(1, DAY).freq().as_deref(), Some("D"));
+        // pandas keeps it through tz_localize only for UTC.
+        assert_eq!(
+            range.tz_localize(Some("UTC")).unwrap().freq().as_deref(),
+            Some("D")
+        );
+        assert_eq!(range.tz_localize(Some("US/Eastern")).unwrap().freq(), None);
+        // Adjacent runs union into one run; equality ignores the freq.
+        let (head, tail) = (
+            range.take(&[0, 1, 2]).unwrap(),
+            range.take(&[3, 4, 5]).unwrap(),
+        );
+        assert_eq!(head.union(&tail).freq().as_deref(), Some("D"));
+        assert_eq!(
+            range,
+            DatetimeIndex::new((0..6).map(|day| day * DAY).collect())
         );
     }
 

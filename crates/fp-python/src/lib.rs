@@ -694,6 +694,11 @@ fn pandas_series_text(
     let column = series.column();
     let (rows, dots_at) = limits.shown(series.len());
     let mut footer = Vec::new();
+    // An index with a freq leads the footer, whatever parts are asked for
+    // (pandas' 'Freq: D', to_string's too).
+    if let Some(freq) = index.freq() {
+        footer.push(format!("Freq: {freq}"));
+    }
     if parts.name && !series.name().is_empty() {
         footer.push(format!("Name: {}", series.name()));
     }
@@ -3968,6 +3973,15 @@ fn index_arg_zone(obj: &Bound<'_, PyAny>) -> Option<String> {
     }
 }
 
+/// The freq an `index=` DatetimeIndex carries (a date_range's): the rows
+/// built on its labels keep it, as pandas' (`Series(x, index=dr).index.freq`
+/// is `<Day>`; it was dropped).
+fn index_arg_freq(obj: &Bound<'_, PyAny>) -> Option<String> {
+    obj.extract::<PyRef<'_, PyDatetimeIndex>>()
+        .ok()
+        .and_then(|dti| dti.inner.freq())
+}
+
 /// The name an Index argument gives the Series built from it, as pandas'
 /// `Series(Index([1, 2], name='a')).name == 'a'`.
 fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<String> {
@@ -6159,6 +6173,34 @@ pub struct PyDatetimeIndex {
     pub(crate) inner: DatetimeIndex,
 }
 
+/// Whether the index's wall clock is the run `freqstr` generates from its
+/// first label (pandas' `_validate_frequency`); an empty index follows any.
+fn datetime_labels_follow(index: &DatetimeIndex, freqstr: &str) -> PyResult<bool> {
+    let wall = index.tz_localize(None).map_err(index_error_to_py)?.asi8();
+    let Some(&first) = wall.first() else {
+        return Ok(true);
+    };
+    if wall.contains(&Timestamp::NAT) {
+        return Ok(false);
+    }
+    let generated: Vec<i64> = match parse_freq_to_nanos(freqstr) {
+        Ok(step) if step > 0 => (0..wall.len())
+            .map(|i| {
+                i64::try_from(i)
+                    .ok()
+                    .and_then(|i| i.checked_mul(step))
+                    .and_then(|offset| first.checked_add(offset))
+                    .unwrap_or(Timestamp::NAT)
+            })
+            .collect(),
+        _ => match fp_frame::calendar_date_range(Some(first), None, Some(wall.len()), freqstr) {
+            Ok(Some(generated)) => generated,
+            _ => return Ok(false),
+        },
+    };
+    Ok(generated == wall)
+}
+
 impl PyDatetimeIndex {
     /// The same index (name and time zone kept) over new instants - taken,
     /// sorted, filtered or moved by a duration from this one's.
@@ -6266,7 +6308,9 @@ impl PyDatetimeIndex {
                 })
                 .collect::<PyResult<_>>()?
         };
-        self.with_nanos(moved).into_py_any(py)
+        // A duration moves every label alike: the freq holds (pandas).
+        let inner = self.with_nanos(moved).inner.with_freq(self.inner.freq());
+        Self { inner }.into_py_any(py)
     }
 
     /// The nanoseconds a `fillna` value stands for.
@@ -6282,15 +6326,20 @@ impl PyDatetimeIndex {
 
 #[pymethods]
 impl PyDatetimeIndex {
-    /// pandas' `DatetimeIndex(data, name=, tz=)`: `tz` localizes naive data
-    /// (wall times in that zone) and converts aware data.
+    /// pandas' `DatetimeIndex(data, freq=, tz=, name=)`: `tz` localizes
+    /// naive data (wall times in that zone) and converts aware data;
+    /// `freq` is 'infer' (the labels' inferred frequency) or a frequency the
+    /// labels must follow (pandas' ValueError otherwise). Its second
+    /// positional argument was `name`; pandas' is `freq`. A list of
+    /// Timestamps / datetimes became all NaT.
     #[new]
-    #[pyo3(signature = (data=None, name=None, tz=None))]
+    #[pyo3(signature = (data=None, freq=None, tz=None, name=None))]
     fn new(
         py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        freq: Option<&Bound<'_, PyAny>>,
         tz: Option<&Bound<'_, PyAny>>,
+        name: Option<&str>,
     ) -> PyResult<Self> {
         let mut inner = if let Some(d) = data {
             if let Ok(dti) = d.extract::<PyRef<'_, PyDatetimeIndex>>() {
@@ -6318,6 +6367,30 @@ impl PyDatetimeIndex {
                     .iter()
                     .map(|v| py_to_scalar(py, &v))
                     .collect::<PyResult<Vec<_>>>()?;
+                // Timestamps / datetimes are the instants already (with their
+                // shared zone); parsing them as text made every one NaT.
+                let instants: Option<Vec<i64>> = values
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Datetime64(nanos) => Some(*nanos),
+                        Scalar::Null(_) => Some(Timestamp::NAT),
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(instants) = instants.filter(|instants| !instants.is_empty()) {
+                    let index = DatetimeIndex::new(instants);
+                    let index = match sequence_zone(d) {
+                        Some(zone) => index.with_tz(Some(&zone)).map_err(index_error_to_py)?,
+                        None => index,
+                    };
+                    return Self::new(
+                        py,
+                        Some(&PyDatetimeIndex { inner: index }.into_bound_py_any(py)?),
+                        freq,
+                        tz,
+                        name,
+                    );
+                }
                 let temp_series = Series::from_values(
                     "",
                     (0..values.len())
@@ -6359,7 +6432,32 @@ impl PyDatetimeIndex {
             }
             .map_err(index_error_to_py)?;
         }
-        Ok(PyDatetimeIndex { inner })
+        let Some(freq) = freq.filter(|freq| !freq.is_none()) else {
+            return Ok(PyDatetimeIndex { inner });
+        };
+        let freq = freq_alias(freq, "DatetimeIndex")?;
+        let inferred = inner.inferred_freq();
+        let wanted = if freq == "infer" {
+            inferred
+        } else {
+            let canonical = fp_index::canonical_freq(&freq).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid frequency: {freq}"
+                ))
+            })?;
+            if inferred.as_deref() != Some(canonical.as_str())
+                && !datetime_labels_follow(&inner, &canonical)?
+            {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Inferred frequency {} from passed values does not conform to passed frequency {canonical}",
+                    inferred.as_deref().unwrap_or("None")
+                )));
+            }
+            Some(canonical)
+        };
+        Ok(PyDatetimeIndex {
+            inner: inner.with_freq(wanted),
+        })
     }
 
     #[getter]
@@ -6718,11 +6816,50 @@ impl PyDatetimeIndex {
         self.inner.equals(&other.inner)
     }
 
+    /// `index > x` (and the other comparisons) compare every label as a
+    /// datetime column does - a date string read in the index's zone, a
+    /// Timestamp / datetime, a same-length array-like; NaT false - giving a
+    /// numpy bool array, as pandas. They raised TypeError, so
+    /// `df[df.index > '2024-01-01']` failed.
+    fn __richcmp__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+        op: pyo3::class::basic::CompareOp,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::class::basic::CompareOp;
+        let method = match op {
+            CompareOp::Lt => "__lt__",
+            CompareOp::Le => "__le__",
+            CompareOp::Eq => "__eq__",
+            CompareOp::Ne => "__ne__",
+            CompareOp::Gt => "__gt__",
+            CompareOp::Ge => "__ge__",
+        };
+        let rows = |len: usize| Index::from_range(0, i64::try_from(len).unwrap_or(i64::MAX), 1);
+        let values = Series::new("", rows(self.inner.len()), self.values_column()?)
+            .map_err(frame_error_to_py)?;
+        // Another DatetimeIndex compares position by position, as a list of
+        // its Timestamps (whose length must match, pandas' ValueError).
+        let other = if other.extract::<PyRef<'_, PyDatetimeIndex>>().is_ok() {
+            other.call_method0("tolist")?
+        } else {
+            other.clone()
+        };
+        let compared = PySeries { inner: values }
+            .into_bound_py_any(py)?
+            .call_method1(method, (other,))?;
+        if compared.is(py.NotImplemented()) {
+            return Ok(compared);
+        }
+        compared.call_method0("to_numpy")
+    }
+
     /// pandas' DatetimeIndex repr: dates alone when every instant is a
     /// midnight, else times with 6 or 9 fraction digits when needed, quoted
     /// ('NaT' too), wrapped / truncated as Index's (it printed ISO strings
-    /// with '+00:00' on one line). No freq is tracked, so freq=None - right
-    /// for an index built from data, not for date_range's (fvsao.35).
+    /// with '+00:00' on one line), with its freq ('D' for date_range's; it
+    /// printed freq=None for every index).
     fn __repr__(&self) -> String {
         let instants: Vec<Option<i64>> = self
             .inner
@@ -6737,7 +6874,10 @@ impl PyDatetimeIndex {
         let items: Vec<String> = texts.into_iter().map(|text| format!("'{text}'")).collect();
         let mut attrs = vec![format!("dtype='{}'", self.dtype())];
         attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
-        attrs.push("freq=None".to_owned());
+        attrs.push(match self.inner.freq() {
+            Some(freq) => format!("freq='{freq}'"),
+            None => "freq=None".to_owned(),
+        });
         pandas_index_text("DatetimeIndex", &items, true, attrs)
     }
 
@@ -6775,11 +6915,60 @@ impl PyDatetimeIndex {
                     i += s_idx.step;
                 }
             }
-            return Ok(Py::new(py, self.with_nanos(sliced))?.into_any());
+            // A slice keeps the freq, scaled by its step ('D'[::2] is '2D',
+            // [::-1] '-1D'), as pandas.
+            let freq = self
+                .inner
+                .freq()
+                .and_then(|freq| fp_index::scale_freq(&freq, i64::try_from(s_idx.step).ok()?));
+            let inner = self.with_nanos(sliced).inner.with_freq(freq);
+            return Ok(Py::new(py, Self { inner })?.into_any());
         }
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Index indices must be integers or slices",
-        ))
+        // A boolean mask keeps the freq when it selects a run (pandas turns
+        // it into a slice); integer positions drop it. Both raised TypeError.
+        let asi8 = self.inner.asi8();
+        let (positions, run) = if let Ok(mask) = key.extract::<Vec<bool>>() {
+            if mask.len() != asi8.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "boolean index did not match indexed array along axis 0; size of axis is {} but size of corresponding boolean axis is {}",
+                    asi8.len(),
+                    mask.len()
+                )));
+            }
+            let positions: Vec<usize> = (0..mask.len()).filter(|&i| mask[i]).collect();
+            let run = positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
+            (positions, run)
+        } else if let Ok(requested) = key.extract::<Vec<i64>>() {
+            let length = i64::try_from(asi8.len()).unwrap_or(i64::MAX);
+            let resolve = |position: i64| -> PyResult<usize> {
+                let at = if position < 0 {
+                    position + length
+                } else {
+                    position
+                };
+                usize::try_from(at)
+                    .ok()
+                    .filter(|&at| at < asi8.len())
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                            "index {position} is out of bounds for axis 0 with size {length}"
+                        ))
+                    })
+            };
+            let positions = requested
+                .into_iter()
+                .map(resolve)
+                .collect::<PyResult<Vec<usize>>>()?;
+            (positions, false)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Index indices must be integers, slices, boolean masks or integer arrays",
+            ));
+        };
+        let picked: Vec<i64> = positions.iter().map(|&position| asi8[position]).collect();
+        let freq = self.inner.freq().filter(|_| run);
+        let inner = self.with_nanos(picked).inner.with_freq(freq);
+        Ok(Py::new(py, Self { inner })?.into_any())
     }
 
     #[getter]
@@ -7218,19 +7407,30 @@ impl PyDatetimeIndex {
         self.as_py_index().format()
     }
 
+    /// pandas' `freq`: the offset the index was built with (`<Day>`,
+    /// `<12 * Hours>`, `<Week: weekday=6>`), None when it has none (it was
+    /// always None).
     #[getter]
-    fn freq(&self) -> Option<String> {
-        None
+    fn freq(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.inner.freq() {
+            Some(freqstr) => match offset_for_freqstr(&freqstr)? {
+                Some(offset) => offset.into_py_any(py),
+                None => Ok(py.None()),
+            },
+            None => Ok(py.None()),
+        }
     }
 
     #[getter]
     fn freqstr(&self) -> Option<String> {
-        None
+        self.inner.freqstr()
     }
 
+    /// The frequency the labels follow ('D', 'h', 'MS', 'W-SUN'), None
+    /// when irregular or fewer than three (it was always None).
     #[getter]
     fn inferred_freq(&self) -> Option<String> {
-        None
+        self.inner.inferred_freq()
     }
 
     #[getter]
@@ -13910,6 +14110,16 @@ fn comparison_operand(
     let Some(mut scalar) = comparison_scalar(py, &operand, &like.dtype())? else {
         return Ok(None);
     };
+    // A number against datetimes or durations is pandas' invalid comparison
+    // too (== all False; it raised a numeric-dtype TypeError).
+    if matches!(like.dtype(), DType::Datetime64 { .. } | DType::Timedelta64)
+        && matches!(
+            scalar,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)
+        )
+    {
+        return Ok(None);
+    }
     // A datetime column meets an instant of its own kind: a tz-aware column
     // an aware Timestamp / datetime (compared by instant) or a date string
     // (a wall time in the column's zone, as pandas parses it); aware against
@@ -16969,6 +17179,15 @@ impl PySeries {
                     .clone()
                     .with_tz(Some(&zone))
                     .map_err(index_error_to_py)?;
+                Series::new(series.name(), index, series.column().clone())
+                    .map_err(frame_error_to_py)?
+            }
+            None => series,
+        };
+        // ... and its freq (the rows are its labels, in its order).
+        let series = match index.and_then(index_arg_freq) {
+            Some(freq) => {
+                let index = series.index().clone().with_freq(Some(freq));
                 Series::new(series.name(), index, series.column().clone())
                     .map_err(frame_error_to_py)?
             }
@@ -24453,6 +24672,14 @@ impl PyDataFrame {
             }
             None => built,
         };
+        // ... and its freq (the rows are its labels, in its order).
+        let built = match index.and_then(index_arg_freq) {
+            Some(freq) => {
+                let index = built.index().clone().with_freq(Some(freq));
+                built.with_index(index).map_err(frame_error_to_py)?
+            }
+            None => built,
+        };
         let column_multi = match columns {
             Some(columns) => columns
                 .extract::<PyRef<'_, PyMultiIndex>>()
@@ -24811,6 +25038,16 @@ impl PyDataFrame {
     /// pandas; the infallible `get_column` used here before fabricated an
     /// all-NaN column instead of raising.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // `df[lambda d: d.a > 1]`: a callable is called with the frame and
+        // its result is the key, as pandas (it raised TypeError).
+        if key.is_callable() && !key.is_instance_of::<pyo3::types::PyType>() {
+            let frame = PyDataFrame {
+                inner: self.inner.clone(),
+            }
+            .into_bound_py_any(py)?;
+            let resolved = key.call1((frame,))?;
+            return self.__getitem__(py, &resolved);
+        }
         // `df[("x", "sum")]` / `df["x"]` on a two-level column axis
         if let Some((depth, positions)) = self.multi_column_selection(key)? {
             return self.multi_column_item(py, key, depth, &positions);
@@ -42001,21 +42238,30 @@ impl PyResampler {
             })
     }
 
-    /// A bin-level Series result in the source's zone (see [`Self::zoned_index`]).
+    /// A bin-level result's index: in the source's zone (see
+    /// [`Self::zoned_index`]) and carrying the rule as its freq, as pandas'
+    /// bins do (`resample('2D').sum().index.freq` is `<2 * Days>`; it had
+    /// none).
+    fn bin_index(&self, index: &Index) -> PyResult<Index> {
+        let index = self.zoned_index(index)?;
+        let freq = fp_index::canonical_freq(&self.freq).filter(|_| {
+            index
+                .labels()
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+        });
+        Ok(index.with_freq(freq))
+    }
+
+    /// A bin-level Series result (see [`Self::bin_index`]).
     fn zoned_series(&self, series: Series) -> PyResult<Series> {
-        if self.zone.is_none() {
-            return Ok(series);
-        }
-        let index = self.zoned_index(series.index())?;
+        let index = self.bin_index(series.index())?;
         Series::new(series.name(), index, series.column().clone()).map_err(frame_error_to_py)
     }
 
-    /// A bin-level DataFrame result in the source's zone.
+    /// A bin-level DataFrame result (see [`Self::bin_index`]).
     fn zoned_frame(&self, frame: DataFrame) -> PyResult<DataFrame> {
-        if self.zone.is_none() {
-            return Ok(frame);
-        }
-        let index = self.zoned_index(frame.index())?;
+        let index = self.bin_index(frame.index())?;
         frame.with_index(index).map_err(frame_error_to_py)
     }
 
@@ -44764,9 +45010,16 @@ fn date_range(
     if let Some(name) = name {
         index = index.set_name(name);
     }
+    // The range carries its freq, as pandas' (`freq='D'` in the repr,
+    // `.freq` <Day>); the linspace form has none.
+    let range_freq = match (given, freq) {
+        ((true, true, true), None) => None,
+        (_, freq) => fp_index::canonical_freq(freq.unwrap_or("D")),
+    };
     let dti = DatetimeIndex::from_index(index)
         .and_then(|dti| dti.with_tz(zone.as_deref()))
-        .map_err(index_error_to_py)?;
+        .map_err(index_error_to_py)?
+        .with_freq(range_freq);
     Ok(PyDatetimeIndex { inner: dti })
 }
 
@@ -49150,6 +49403,12 @@ impl PyDateOffset {
             .ok_or_else(|| not_implemented("DateOffset.rule_code"))
     }
 
+    /// pandas' `name`: the rule code ('D', 'h', 'W-SUN'; it was missing).
+    #[getter]
+    fn name(&self) -> PyResult<String> {
+        self.rule_code()
+    }
+
     /// The Timestamp itself when it is on this offset, else the next one.
     fn rollforward(&self, dt: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
         let nanos = Self::instant(dt)?.ok_or_else(|| {
@@ -49264,10 +49523,16 @@ impl PyDateOffset {
         op: pyo3::class::basic::CompareOp,
     ) -> PyResult<Py<PyAny>> {
         use pyo3::class::basic::CompareOp;
-        let Ok(other) = other.extract::<PyRef<'_, PyDateOffset>>() else {
+        // A frequency string compares as the offset it names (pandas'
+        // `to_offset`): `date_range(freq='D').freq == 'D'` is True.
+        let same = if let Ok(text) = other.extract::<String>() {
+            self.rule_code.is_some()
+                && fp_index::canonical_freq(&text).as_deref() == Some(self.freqstr().as_str())
+        } else if let Ok(other) = other.extract::<PyRef<'_, PyDateOffset>>() {
+            *self == *other
+        } else {
             return Ok(py.NotImplemented());
         };
-        let same = *self == *other;
         match op {
             CompareOp::Eq => Ok(pyo3::types::PyBool::new(py, same)
                 .to_owned()
@@ -49581,6 +49846,73 @@ fn offset_business_year_begin(n: i64, normalize: bool, month: i64) -> PyResult<P
 #[pyo3(signature = (n=1, normalize=false))]
 fn offset_business_day(n: i64, normalize: bool) -> PyDateOffset {
     PyDateOffset::anchored("BusinessDay", "B".to_owned(), n, normalize, None)
+}
+
+/// The pandas offset a freqstr names ('D' -> `<Day>`, '12h' -> `<12 *
+/// Hours>`, 'W-SUN' -> `<Week: weekday=6>`, 'QE-DEC' -> `<QuarterEnd:
+/// startingMonth=12>`) - what `DatetimeIndex.freq` returns; None for a
+/// freqstr it does not know.
+fn offset_for_freqstr(freqstr: &str) -> PyResult<Option<PyDateOffset>> {
+    let Some((n, rule)) = fp_index::split_freq_count(freqstr) else {
+        return Ok(None);
+    };
+    let (base, suffix) = match rule.split_once('-') {
+        Some((base, suffix)) => (base, Some(suffix)),
+        None => (rule, None),
+    };
+    let month = || -> Option<i64> {
+        const MONTHS: [&str; 12] = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+        ];
+        let position = MONTHS.iter().position(|code| Some(*code) == suffix)?;
+        i64::try_from(position + 1).ok()
+    };
+    let offset = match (base, suffix) {
+        ("D", None) => offset_day(n),
+        ("h", None) => offset_hour(n),
+        ("min", None) => offset_minute(n),
+        ("s", None) => offset_second(n),
+        ("ms", None) => offset_milli(n),
+        ("us", None) => offset_micro(n),
+        ("ns", None) => offset_nano(n),
+        ("B", None) => offset_business_day(n, false),
+        ("ME", None) => offset_month_end(n, false),
+        ("MS", None) => offset_month_begin(n, false),
+        ("BME", None) => offset_business_month_end(n, false),
+        ("BMS", None) => offset_business_month_begin(n, false),
+        ("W", Some(day)) => {
+            const DAYS: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+            let Some(weekday) = DAYS.iter().position(|code| *code == day) else {
+                return Ok(None);
+            };
+            offset_week(n, false, i64::try_from(weekday).ok())?
+        }
+        ("SME", Some(day)) => match day.parse() {
+            Ok(day) => offset_semi_month_end(n, false, day)?,
+            Err(_) => return Ok(None),
+        },
+        ("SMS", Some(day)) => match day.parse() {
+            Ok(day) => offset_semi_month_begin(n, false, day)?,
+            Err(_) => return Ok(None),
+        },
+        (anchor @ ("QE" | "QS" | "BQE" | "BQS" | "YE" | "YS" | "BYE" | "BYS"), Some(_)) => {
+            let Some(month) = month() else {
+                return Ok(None);
+            };
+            match anchor {
+                "QE" => offset_quarter_end(n, false, month)?,
+                "QS" => offset_quarter_begin(n, false, month)?,
+                "BQE" => offset_business_quarter_end(n, false, month)?,
+                "BQS" => offset_business_quarter_begin(n, false, month)?,
+                "YE" => offset_year_end(n, false, month)?,
+                "YS" => offset_year_begin(n, false, month)?,
+                "BYE" => offset_business_year_end(n, false, month)?,
+                _ => offset_business_year_begin(n, false, month)?,
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(offset))
 }
 
 // 4. Top-level functions

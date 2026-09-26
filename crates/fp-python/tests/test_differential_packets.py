@@ -8149,6 +8149,118 @@ def test_tz_aware_datetime_index_matches_pandas(case: str) -> None:
     assert _tz_index_outcome(fpd, case) == _tz_index_outcome(pd, case), case
 
 
+def _six_days(m: Any) -> Any:
+    return m.date_range("2024-01-01", periods=6, freq="D")
+
+
+def _freq_of(index: Any) -> Any:
+    """An index's freqstr and its offset's repr."""
+    return (index.freqstr, str(index.freq))
+
+
+# (fvsao.61) DatetimeIndex.freq was never tracked: date_range(...).freq /
+# freqstr / inferred_freq were None, the repr printed freq=None, a Series
+# repr had no 'Freq: ...' line, and DatetimeIndex(freq=) was refused (its
+# second positional argument was name). With it: a list of Timestamps built
+# an all-NaT DatetimeIndex, a DatetimeIndex could not be compared (so
+# df[df.index > '2024-01-01'] raised) or indexed by a mask, df[callable]
+# raised, and a number against a datetime column raised instead of pandas'
+# invalid comparison.
+_FREQ_CASES = {
+    **{f"date_range freq {alias}": (lambda alias: lambda m: _freq_of(m.date_range("2024-01-01", periods=3, freq=alias)))(alias)
+       for alias in ["D", "2D", "h", "12h", "12H", "min", "30s", "ms", "W", "W-MON", "MS", "ME", "QS", "QE", "YS", "YE", "B", "SME", "BME", "BMS", "M", "T", "1D"]},
+    "an invalid alias raises": lambda m: m.date_range("2024-01-01", periods=3, freq="D1"),
+    "repr": lambda m: repr(_six_days(m)),
+    "repr 12h": lambda m: repr(m.date_range("2024-01-01", periods=2, freq="12h")),
+    "repr tz-aware": lambda m: repr(m.date_range("2024-01-01", periods=2, freq="h", tz="UTC")),
+    "Series repr footer": lambda m: repr(m.Series([1, 2, 3], index=m.date_range("2024-01-01", periods=3, freq="12h"))),
+    "Series repr footer with a name": lambda m: repr(m.Series([1.5, 2.5], index=m.date_range("2024-01-01", periods=2, freq="W"), name="x")),
+    "Series to_string footer": lambda m: m.Series([1, 2], index=m.date_range("2024-01-01", periods=2), name="x").to_string(),
+    "DataFrame index": lambda m: _freq_of(m.DataFrame({"a": range(6)}, index=_six_days(m)).index),
+    "Series index": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).index),
+    "slice": lambda m: _freq_of(_six_days(m)[1:]),
+    "slice with a step": lambda m: _freq_of(_six_days(m)[::2]),
+    "reversed": lambda m: _freq_of(_six_days(m)[::-1]),
+    "integer positions drop it": lambda m: _freq_of(_six_days(m)[[0, 2]]),
+    "a mask selecting a run keeps it": lambda m: _freq_of(_six_days(m)[_six_days(m) > "2024-01-02"]),
+    "a gapped mask drops it": lambda m: _freq_of(_six_days(m)[np.array([True, False, True, False, False, False])]),
+    "head": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).head(2).index),
+    "tail": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).tail(2).index),
+    "iloc slice": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).iloc[1:4].index),
+    "loc slice": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).loc["2024-01-02":"2024-01-04"].index),
+    "sort_values drops it": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).sort_values(ascending=False).index),
+    "sort_index keeps it": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).sort_index().index),
+    "arithmetic keeps it": lambda m: _freq_of((m.Series(range(6), index=_six_days(m)) + 1).index),
+    "shift": lambda m: _freq_of(_six_days(m).shift(1, freq="D")),
+    "plus a Timedelta": lambda m: _freq_of(_six_days(m) + m.Timedelta("1h")),
+    "plus a DateOffset drops it": lambda m: _freq_of(_six_days(m) + m.DateOffset(days=1)),
+    "tz_localize UTC": lambda m: _freq_of(_six_days(m).tz_localize("UTC")),
+    "tz_convert": lambda m: _freq_of(_six_days(m).tz_localize("UTC").tz_convert("US/Eastern")),
+    "normalize": lambda m: _freq_of(m.date_range("2024-01-01 10:00", periods=3, freq="D").normalize()),
+    "rename and copy": lambda m: (_freq_of(_six_days(m).rename("t")), _freq_of(_six_days(m).copy())),
+    "unique": lambda m: _freq_of(_six_days(m).unique()),
+    "append drops it": lambda m: _freq_of(_six_days(m).append(_six_days(m))),
+    "union of adjacent runs": lambda m: _freq_of(_six_days(m)[:3].union(_six_days(m)[3:])),
+    "from strings": lambda m: _freq_of(m.DatetimeIndex(["2024-01-01", "2024-01-02"])),
+    "freq=D": lambda m: _freq_of(m.DatetimeIndex(["2024-01-01", "2024-01-02"], freq="D")),
+    "freq=infer": lambda m: _freq_of(m.DatetimeIndex(["2024-01-01", "2024-01-02", "2024-01-03"], freq="infer")),
+    "a freq the labels do not follow raises": lambda m: m.DatetimeIndex(["2024-01-01", "2024-01-03"], freq="D"),
+    "from Timestamps": lambda m: [str(t) for t in m.DatetimeIndex([m.Timestamp("2024-01-01"), m.Timestamp("2024-01-02")])],
+    "from aware Timestamps": lambda m: repr(m.DatetimeIndex([m.Timestamp("2024-01-01", tz="UTC"), m.NaT])),
+    **{f"inferred_freq {label}": (lambda dates: lambda m: m.DatetimeIndex(dates).inferred_freq)(dates) for label, dates in [
+        ("D", ["2024-01-01", "2024-01-02", "2024-01-03"]),
+        ("h", ["2024-01-01 00:00", "2024-01-01 01:00", "2024-01-01 02:00"]),
+        ("15min", ["2024-01-01 00:00", "2024-01-01 00:15", "2024-01-01 00:30"]),
+        ("MS", ["2024-01-01", "2024-02-01", "2024-03-01"]),
+        ("ME", ["2024-01-31", "2024-02-29", "2024-03-31"]),
+        ("QS", ["2024-01-01", "2024-04-01", "2024-07-01"]),
+        ("QE", ["2024-03-31", "2024-06-30", "2024-09-30"]),
+        ("YE", ["2021-12-31", "2022-12-31", "2023-12-31"]),
+        ("W", ["2024-01-07", "2024-01-14", "2024-01-21"]),
+        ("B", ["2024-01-04", "2024-01-05", "2024-01-08", "2024-01-09"]),
+        ("-1D", ["2024-01-03", "2024-01-02", "2024-01-01"]),
+        ("irregular", ["2024-01-01", "2024-01-02", "2024-01-04"]),
+        ("two labels", ["2024-01-01", "2024-01-02"]),
+    ]},
+    "resample index": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).resample("2D").sum().index),
+    "resample ME index": lambda m: _freq_of(m.Series(range(6), index=_six_days(m)).resample("ME").sum().index),
+    "asfreq": lambda m: _freq_of(m.Series([1, 2], index=m.DatetimeIndex(["2024-01-01", "2024-01-03"])).asfreq("D").index),
+    "set_index of a column has none": lambda m: _freq_of(m.DataFrame({"t": _six_days(m), "v": range(6)}).set_index("t").index),
+    "freq equals its alias": lambda m: (_six_days(m).freq == "D", _six_days(m).freq == "h"),
+    "freq n and name": lambda m: (m.date_range("2024-01-01", periods=3, freq="12h").freq.n, m.date_range("2024-01-01", periods=3, freq="12h").freq.name),
+    "equals ignores freq": lambda m: _six_days(m).equals(m.DatetimeIndex(list(_six_days(m)))),
+    "compare with a date string": lambda m: (_six_days(m) > "2024-01-02").tolist(),
+    "compare with a Timestamp": lambda m: (_six_days(m) <= m.Timestamp("2024-01-02")).tolist(),
+    "compare with a datetime": lambda m: (_six_days(m) == datetime.datetime(2024, 1, 3)).tolist(),
+    "compare with NaT labels": lambda m: (m.DatetimeIndex(["2024-01-01", None]) != m.Timestamp("2024-01-01")).tolist(),
+    "compare two indexes": lambda m: (_six_days(m)[:2] == m.DatetimeIndex(["2024-01-01", "2024-01-05"])).tolist(),
+    "compare tz-aware with a string": lambda m: (m.date_range("2024-01-01", periods=3, tz="US/Eastern") > "2024-01-02").tolist(),
+    "order tz-aware against naive raises": lambda m: m.date_range("2024-01-01", periods=3, tz="US/Eastern") > m.Timestamp("2024-01-02"),
+    "order against a number raises": lambda m: _six_days(m) > 5,
+    "equal to a number is all False": lambda m: (_six_days(m) == 5).tolist(),
+    "datetime column equal to a number": lambda m: (m.Series(_six_days(m)) != 5).tolist(),
+    "compare lengths must match": lambda m: _six_days(m) == m.DatetimeIndex(["2024-01-01"]),
+    "filter a frame by its index": lambda m: (lambda d: d[d.index >= "2024-01-04"]["v"].tolist())(m.DataFrame({"v": range(6)}, index=_six_days(m))),
+    "filter with a callable": lambda m: m.DataFrame({"v": range(6)}, index=_six_days(m))[lambda d: d.index > "2024-01-04"]["v"].tolist(),
+}
+
+
+def _freq_case_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _FREQ_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+    return result
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FREQ_CASES))
+def test_datetime_index_freq_and_comparisons_match_pandas(case: str) -> None:
+    assert _freq_case_outcome(fpd, case) == _freq_case_outcome(pd, case)
+
+
 def _resample_facts(r: Any) -> Any:
     """A resample result: its index's zone and labels, then its cells."""
     index = (str(getattr(r.index, "tz", None)), [str(v) for v in r.index.tolist()])
