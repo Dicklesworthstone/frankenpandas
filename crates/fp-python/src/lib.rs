@@ -4165,6 +4165,17 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
         return Ok(IndexLabel::Timedelta64(td.nanos));
     }
+    // A naive datetime.datetime / a datetime.timedelta is the instant /
+    // duration it names, as a Timestamp is (they became their text, so
+    // Index([datetime(2024, 1, 1)]) was an object Index of strings).
+    if let Ok(instant) = obj.cast::<PyDateTime>()
+        && instant.get_tzinfo().is_none()
+    {
+        return Ok(IndexLabel::Datetime64(py_datetime_nanos(instant)?));
+    }
+    if let Ok(delta) = obj.cast::<PyDelta>() {
+        return Ok(IndexLabel::Timedelta64(py_delta_nanos(delta)?));
+    }
     if let Ok(b) = obj.extract::<bool>() {
         Ok(IndexLabel::Bool(b))
     } else if let Ok(i) = obj.extract::<i64>() {
@@ -5151,23 +5162,35 @@ impl PyIndex {
 impl PyIndex {
     /// pandas' `Index(data=None, dtype=None, copy=False, name=None,
     /// tupleize_cols=True)`; it took `(data, name)`, so a positional dtype
-    /// was read as the name and `dtype=` raised TypeError.
+    /// was read as the name and `dtype=` raised TypeError. With no dtype,
+    /// the labels pick the class as pandas' do: a `range` (or a RangeIndex)
+    /// is a RangeIndex, instants a DatetimeIndex, durations a
+    /// TimedeltaIndex (every one was a plain Index).
     #[new]
     #[pyo3(signature = (data=None, dtype=None, copy=false, name=None, tupleize_cols=true))]
     fn py_new(
+        py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         dtype: Option<&Bound<'_, PyAny>>,
         copy: bool,
         name: Option<&str>,
         tupleize_cols: bool,
-    ) -> PyResult<Self> {
+    ) -> PyResult<Py<PyAny>> {
         let _ = copy; // pandas' copy= does not change the labels
         unsupported_params("Index", &[("tupleize_cols", tupleize_cols)])?;
-        let index = Self::new(data, name)?;
-        match dtype.filter(|dtype| !dtype.is_none()) {
-            Some(dtype) => index.astype(dtype, true),
-            None => Ok(index),
+        if let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) {
+            return Ok(Py::new(py, Self::new(data, name)?.astype(dtype, true)?)?.into_any());
         }
+        if let Some(range) = data.and_then(|data| data.cast::<pyo3::types::PyRange>().ok()) {
+            let part = |attr: &str| range.getattr(attr).and_then(|value| value.extract::<i64>());
+            return PyRangeIndex::object(py, (part("start")?, part("stop")?, part("step")?), name);
+        }
+        // Aware datetimes of one zone are that zone's DatetimeIndex.
+        if let Some(data) = data.filter(|data| sequence_zone(data).is_some()) {
+            let index = PyDatetimeIndex::new(py, Some(data), None, None, name)?;
+            return Ok(Py::new(py, index)?.into_any());
+        }
+        row_index_to_py(py, &Self::new(data, name)?.inner)
     }
 
     #[getter]
@@ -25130,6 +25153,20 @@ impl PyDataFrame {
                 .inner
                 .assign_column(&name, pandas_promote_int_with_missing(values))
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            // A list of aware datetimes of one zone makes an aware column
+            // (it came back naive).
+            let zoned = sequence_zone(value).and_then(|zone| {
+                self.inner
+                    .column(&name)
+                    .filter(|column| column.dtype() == DType::Datetime64 { tz: None })
+                    .map(|column| column.with_dtype(DType::datetime64_tz(zone)))
+            });
+            if let Some(zoned) = zoned {
+                self.inner = self
+                    .inner
+                    .with_column(name, zoned)
+                    .map_err(frame_error_to_py)?;
+            }
             return Ok(());
         }
         if let Ok(mask) = key.extract::<PyRef<'_, PyDataFrame>>() {
@@ -44665,9 +44702,17 @@ fn to_datetime(
         return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
     }
     if let Ok(list) = arg.cast::<PyList>() {
+        // A date is its midnight (pandas; a list holding one raised).
         let values: Vec<Scalar> = list
             .iter()
-            .map(|v| py_to_scalar(py, &v))
+            .map(|v| {
+                if v.cast::<pyo3::types::PyDate>().is_ok() && v.cast::<PyDateTime>().is_err() {
+                    let stamp = py.get_type::<PyTimestamp>().call1((&v,))?;
+                    py_to_scalar(py, &stamp)
+                } else {
+                    py_to_scalar(py, &v)
+                }
+            })
             .collect::<PyResult<Vec<_>>>()?;
         warn_order(&values)?;
         let temp_series = Series::from_values(
@@ -44680,7 +44725,22 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res =
             fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
+        // Aware datetimes of one zone stay in it (they came back naive).
+        let res = with_sequence_zone(res, Some(arg))?;
         return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
+    }
+    // A Timestamp, datetime or date is that instant as a Timestamp, its zone
+    // kept (an aware one came back naive, a date raised); utc=True converts
+    // it (or reads a naive one as UTC).
+    if arg.extract::<PyRef<'_, PyTimestamp>>().is_ok() || arg.cast::<pyo3::types::PyDate>().is_ok()
+    {
+        let stamp = py.get_type::<PyTimestamp>().call1((arg,))?;
+        if !utc {
+            return Ok(stamp.unbind());
+        }
+        let aware = !stamp.getattr("tz")?.is_none();
+        let method = if aware { "tz_convert" } else { "tz_localize" };
+        return Ok(stamp.call_method1(method, ("UTC",))?.unbind());
     }
     if let Ok(s) = py_to_scalar(py, arg) {
         warn_order(std::slice::from_ref(&s))?;

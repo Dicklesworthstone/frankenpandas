@@ -8897,3 +8897,71 @@ def _range_index_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_RANGE_INDEX_CASES))
 def test_default_index_is_a_range_index_like_pandas(case: str) -> None:
     assert _range_index_outcome(fpd, case) == _range_index_outcome(pd, case), case
+
+
+# fvsao.15: to_datetime of values that are already instants made every one
+# NaT - pd.to_datetime(df['date']) on a converted column, a list of
+# Timestamps or datetimes - an aware scalar lost its zone and a date raised.
+# Index(data) picks its class from the labels as pandas' does (a range is a
+# RangeIndex, instants a DatetimeIndex, aware ones in their zone); it was
+# always a plain Index.
+def _todt_naive(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-01-01 00:00", "2024-01-02 06:00", None]))
+
+
+def _todt_aware(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-01-01", "2024-01-02"]).tz_localize("US/Eastern"))
+
+
+_UTC = datetime.timezone.utc
+
+_TO_DATETIME_INSTANT_CASES = {
+    "datetime Series": lambda m: m.to_datetime(_todt_naive(m)),
+    "aware Series": lambda m: m.to_datetime(_todt_aware(m)),
+    "aware Series utc": lambda m: m.to_datetime(_todt_aware(m), utc=True),
+    "naive Series utc": lambda m: m.to_datetime(_todt_naive(m), utc=True),
+    "datetime Series with a format": lambda m: m.to_datetime(_todt_naive(m), format="%Y-%m-%d"),
+    "list of Timestamps": lambda m: m.to_datetime([m.Timestamp("2024-01-01"), m.Timestamp("2024-01-02 03:00")]),
+    "list of datetimes": lambda m: m.to_datetime([datetime.datetime(2024, 1, 1, 12)]),
+    "list of aware datetimes": lambda m: m.to_datetime([datetime.datetime(2024, 1, 1, 12, tzinfo=_UTC)]),
+    "list of aware Timestamps": lambda m: m.to_datetime([m.Timestamp("2024-01-01", tz="Asia/Tokyo")]),
+    "list with None": lambda m: m.to_datetime([m.Timestamp("2024-01-01"), None]),
+    "strings and a Timestamp": lambda m: m.to_datetime(["2024-01-01", m.Timestamp("2024-01-02")]),
+    "list of dates": lambda m: m.to_datetime([datetime.date(2024, 1, 1), datetime.date(2024, 1, 3)]),
+    "Timestamp": lambda m: m.to_datetime(m.Timestamp("2024-01-01 05:00")),
+    "aware Timestamp": lambda m: m.to_datetime(m.Timestamp("2024-01-01", tz="UTC")),
+    "aware Timestamp utc": lambda m: m.to_datetime(m.Timestamp("2024-01-01 09:00", tz="Asia/Tokyo"), utc=True),
+    "naive Timestamp utc": lambda m: m.to_datetime(m.Timestamp("2024-01-01 09:00"), utc=True),
+    "aware datetime": lambda m: m.to_datetime(datetime.datetime(2024, 1, 1, 12, tzinfo=_UTC)),
+    "date": lambda m: m.to_datetime(datetime.date(2024, 1, 1)),
+    "strings still parse": lambda m: m.to_datetime(["2024-01-05", "2024-02-06"]),
+    "a bad string still raises": lambda m: m.to_datetime(["2024-01-05", "not a date"]),
+    "Index(range)": lambda m: m.Index(range(1, 7, 2), name="r"),
+    "Index(RangeIndex)": lambda m: m.Index(m.RangeIndex(4)),
+    "Index of ints stays an Index": lambda m: m.Index([0, 1, 2]),
+    "Index(datetimes)": lambda m: m.Index([datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 2)]),
+    "Index(Timestamps)": lambda m: m.Index([m.Timestamp("2024-01-01"), m.Timestamp("2024-01-03")]),
+    "Index(Timedeltas)": lambda m: m.Index([m.Timedelta("1D"), m.Timedelta("2h")]),
+    "Index(aware datetimes)": lambda m: m.Index([datetime.datetime(2024, 1, 1, 12, tzinfo=_UTC)]),
+    "Index(strings) stays an Index": lambda m: m.Index(["2024-01-01", "b"]),
+    "Index(range, dtype=float)": lambda m: m.Index(range(3), dtype=float),
+    "setitem aware datetimes": lambda m: (lambda df: (df.__setitem__("t", [datetime.datetime(2024, 1, 1, tzinfo=_UTC)] * 2), str(df["t"].dtype), str(df["t"][0]))[1:])(m.DataFrame({"a": [1, 2]})),
+}
+
+
+def _to_datetime_instant_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _TO_DATETIME_INSTANT_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+    if isinstance(result, tuple):
+        return result
+    return (type(result).__name__, repr(result))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TO_DATETIME_INSTANT_CASES))
+def test_to_datetime_of_instants_and_index_classes_match_pandas(case: str) -> None:
+    assert _to_datetime_instant_outcome(fpd, case) == _to_datetime_instant_outcome(pd, case), case

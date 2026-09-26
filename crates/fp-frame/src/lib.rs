@@ -59492,6 +59492,20 @@ pub fn to_datetime_with_options(
     series: &Series,
     options: ToDatetimeOptions<'_>,
 ) -> Result<Series, FrameError> {
+    // A datetime column is itself, its zone kept (pandas' to_datetime of an
+    // already-converted column, the everyday `pd.to_datetime(df['date'])`);
+    // every value became NaT. utc=True reads naive instants as UTC and
+    // converts aware ones, both already UTC nanoseconds.
+    if options.unit.is_none()
+        && let DType::Datetime64 { .. } = series.column().dtype()
+    {
+        let column = if options.utc {
+            series.column().with_dtype(DType::datetime64_tz("UTC"))
+        } else {
+            series.column().clone()
+        };
+        return Series::new(series.name().to_owned(), series.index().clone(), column);
+    }
     // Typed contiguous-Utf8 fast path (br-frankenpandas-j5150): for the default
     // string-inference shape (no unit/format/origin, !utc), read the column's
     // byte spans directly and fast-parse each plain ISO date/datetime to
@@ -59725,6 +59739,9 @@ pub fn to_datetime_values_with_options(
                     DatetimeOrigin::unix(),
                     options.utc,
                 ),
+                // An instant is itself (Timestamps and datetimes all became
+                // NaT).
+                Scalar::Datetime64(nanos) => Scalar::Datetime64(*nanos),
                 _ => Scalar::Null(NullKind::NaT),
             };
             if options.utc {
@@ -125651,6 +125668,65 @@ mod tests {
         assert!(result.values()[1].is_missing());
         let v2 = result.values()[2].to_f64().unwrap();
         assert!((v2 - 0.5).abs() < 1e-10); // (150-100)/100 = 0.5
+    }
+
+    #[test]
+    fn to_datetime_of_instants_is_themselves_fvsao_15() {
+        use crate::{
+            DatetimeErrors, ToDatetimeOptions, to_datetime_values_with_options,
+            to_datetime_with_options,
+        };
+        // A datetime column (and Datetime64 values) came back all NaT.
+        let instants = vec![1_704_067_200_000_000_000, 1_704_153_600_000_000_000];
+        let column = Column::from_datetime64_values(instants.clone());
+        let series = Series::new("d", Index::default_range(2), column).unwrap();
+        let same = to_datetime_with_options(&series, ToDatetimeOptions::default()).unwrap();
+        assert_eq!(same.column().dtype(), DType::Datetime64 { tz: None });
+        assert_eq!(
+            same.values(),
+            &[
+                Scalar::Datetime64(instants[0]),
+                Scalar::Datetime64(instants[1])
+            ]
+        );
+        let utc = to_datetime_with_options(
+            &series,
+            ToDatetimeOptions {
+                utc: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(utc.column().dtype(), DType::datetime64_tz("UTC"));
+        assert_eq!(utc.values(), same.values());
+        // An aware column keeps its zone.
+        let aware = Series::new(
+            "d",
+            Index::default_range(2),
+            Column::from_datetime64_values(instants.clone())
+                .with_dtype(DType::datetime64_tz("US/Eastern")),
+        )
+        .unwrap();
+        let kept = to_datetime_with_options(&aware, ToDatetimeOptions::default()).unwrap();
+        assert_eq!(kept.column().dtype(), DType::datetime64_tz("US/Eastern"));
+        // Instants among other values pass through; a string still parses
+        // and an unparsable one is still NaT under errors='coerce'.
+        let values = to_datetime_values_with_options(
+            &[
+                Scalar::Datetime64(instants[0]),
+                Scalar::Utf8("2024-01-02".to_owned()),
+                Scalar::Utf8("nope".to_owned()),
+            ],
+            ToDatetimeOptions {
+                errors: DatetimeErrors::Coerce,
+                format: Some("mixed"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(values[0], Scalar::Datetime64(instants[0]));
+        assert_eq!(values[1], Scalar::Datetime64(instants[1]));
+        assert!(values[2].is_missing());
     }
 
     #[test]
