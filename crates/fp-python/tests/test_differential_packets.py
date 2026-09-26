@@ -8997,3 +8997,67 @@ def _to_datetime_instant_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_TO_DATETIME_INSTANT_CASES))
 def test_to_datetime_of_instants_and_index_classes_match_pandas(case: str) -> None:
     assert _to_datetime_instant_outcome(fpd, case) == _to_datetime_instant_outcome(pd, case), case
+
+
+# fvsao.35 remainders: a missing Timestamp / Timedelta ('NaT', None, NaN, '')
+# is pandas' one NaT (it was a NaT-holding object, or raised, and every NaT
+# the binding handed out was a new object, so `x is pd.NaT` was False);
+# Timestamp read only ISO strings; Timestamp(int) guessed seconds below 1e11
+# where pandas reads nanoseconds; fields were not range-checked; an offset
+# string was read as UTC wall time; to_datetime of an aware string lost its
+# zone and to_datetime(None) was NaT.
+def _ts_view(x: Any) -> Any:
+    if isinstance(x, (bool, str, int, float)) or x is None:
+        return x
+    return (type(x).__name__, repr(x))
+
+
+_TS_CTOR_CASES = {
+    **{f"Timestamp({text!r})": (lambda text: lambda m: m.Timestamp(text))(text)
+       for text in ["2024-01", "2024", "Jan 5 2024", "2024/01/05", "5 January 2024 10:00", "20240105",
+                    "2024-01-05T10:00:00Z", "NaT", "nat", "", "nan", "foo"]},
+    **{f"to_datetime({text!r})": (lambda text: lambda m: m.to_datetime(text))(text)
+       for text in ["2024", "5 January 2024 10:00", "2024-01-05T10:00:00Z", "foo"]},
+    "offset string instant": lambda m: m.Timestamp("2024-01-05 10:00:00+09:00").value,
+    "offset string wall": lambda m: str(m.Timestamp("2024-01-05 10:00:00+09:00")),
+    "Timestamp(None) is NaT": lambda m: m.Timestamp(None) is m.NaT,
+    "Timestamp(nan) is NaT": lambda m: m.Timestamp(float("nan")) is m.NaT,
+    "Timestamp(NaT) is NaT": lambda m: m.Timestamp(m.NaT) is m.NaT,
+    "Timestamp('NaT') is NaT": lambda m: m.Timestamp("NaT") is m.NaT,
+    "Timedelta('NaT') is NaT": lambda m: m.Timedelta("NaT") is m.NaT,
+    "Timedelta(None) is NaT": lambda m: m.Timedelta(None) is m.NaT,
+    "Timedelta(nan) is NaT": lambda m: m.Timedelta(float("nan")) is m.NaT,
+    "NaT cell is NaT": lambda m: m.Series(m.to_datetime(["2024-01-01", None]))[1] is m.NaT,
+    "NaT duration cell is NaT": lambda m: m.Series(m.to_timedelta(["1D", None]))[1] is m.NaT,
+    "type(NaT)() is not NaT": lambda m: type(m.NaT)() is m.NaT,
+    "to_datetime(None)": lambda m: m.to_datetime(None),
+    "Timestamp(1_700_000_000)": lambda m: m.Timestamp(1_700_000_000),
+    "Timestamp(1_700_000_000, unit='s')": lambda m: m.Timestamp(1_700_000_000, unit="s"),
+    "Timestamp(1.5e9, unit='s')": lambda m: m.Timestamp(1.5e9, unit="s"),
+    "Timestamp(1, unit='D')": lambda m: m.Timestamp(1, unit="D"),
+    "Timestamp(True)": lambda m: m.Timestamp(True),
+    "Timestamp(2024, 13, 1)": lambda m: m.Timestamp(2024, 13, 1),
+    "Timestamp(2024, 2, 30)": lambda m: m.Timestamp(2024, 2, 30),
+    "Timestamp(2024, 1, 1, 25)": lambda m: m.Timestamp(2024, 1, 1, 25),
+    "Timestamp(2024, 1, 2, 3, 4, 5, 6)": lambda m: m.Timestamp(2024, 1, 2, 3, 4, 5, 6),
+    "Timestamp(..., nanosecond=5)": lambda m: m.Timestamp(2024, 1, 1, nanosecond=5).value,
+    "Timestamp(year=, month=, day=, hour=)": lambda m: m.Timestamp(year=2024, month=3, day=4, hour=5),
+    "Timestamp(year=, month=0)": lambda m: m.Timestamp(year=2024, month=0, day=4),
+    "Timestamp(text, tz=)": lambda m: m.Timestamp("Jan 5 2024", tz="US/Eastern"),
+    "Timedelta.unit": lambda m: m.Timedelta("1D").unit,
+}
+
+
+def _ts_ctor_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _ts_view(_TS_CTOR_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TS_CTOR_CASES))
+def test_timestamp_and_timedelta_constructors_and_nat_match_pandas(case: str) -> None:
+    assert _ts_ctor_outcome(fpd, case) == _ts_ctor_outcome(pd, case), case

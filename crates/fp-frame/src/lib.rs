@@ -60691,6 +60691,31 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
         }
     }
 
+    // A text-month date with a clock time, as pandas reads one (5 January
+    // 2024 10:00 / Jan 5, 2024 10:00:30); these were NaT.
+    for date in [
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d %Y",
+        "%b %d %Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+    ] {
+        for time in ["%H:%M", "%H:%M:%S"] {
+            if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, &format!("{date} {time}")) {
+                return Scalar::Utf8(format_naive_datetime(dt));
+            }
+        }
+    }
+
+    // A bare year is its first instant: 2024 -> 2024-01-01 (pandas; NaT).
+    if trimmed.len() == 4
+        && trimmed.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(d) = NaiveDate::parse_from_str(&format!("{trimmed}-01-01"), "%Y-%m-%d")
+    {
+        return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
+    }
+
     // Year-month only: 2024-05 -> 2024-05-01 (pandas fills the first of month).
     // Guarded to the exact YYYY-MM shape so it cannot catch times like "10:30".
     if trimmed.len() == 7
@@ -125668,6 +125693,31 @@ mod tests {
         assert!(result.values()[1].is_missing());
         let v2 = result.values()[2].to_f64().unwrap();
         assert!((v2 - 0.5).abs() < 1e-10); // (150-100)/100 = 0.5
+    }
+
+    #[test]
+    fn to_datetime_reads_a_bare_year_and_text_month_times_fvsao_35() {
+        use crate::{DatetimeErrors, ToDatetimeOptions, to_datetime_values_with_options};
+        use fp_types::Timestamp;
+        let read = |text: &str| {
+            to_datetime_values_with_options(
+                &[Scalar::Utf8(text.to_owned())],
+                ToDatetimeOptions {
+                    errors: DatetimeErrors::Coerce,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .remove(0)
+        };
+        let at = |text: &str| Scalar::Datetime64(Timestamp::parse(text).unwrap().nanos);
+        assert_eq!(read("2024"), at("2024-01-01"));
+        assert_eq!(read("5 January 2024 10:00"), at("2024-01-05 10:00:00"));
+        assert_eq!(read("Jan 5, 2024 10:00:30"), at("2024-01-05 10:00:30"));
+        // Not every 4 or text-month form is a date.
+        assert!(read("12345").is_missing());
+        assert!(read("5 Foo 2024 10:00").is_missing());
+        assert!(read("5 January 2024 25:00").is_missing());
     }
 
     #[test]

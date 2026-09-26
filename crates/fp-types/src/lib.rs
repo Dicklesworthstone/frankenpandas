@@ -5629,7 +5629,21 @@ impl Timestamp {
 
         // br-frankenpandas-94o1u: an unrepresentable instant is a parse
         // failure, not a wrapped value.
-        let total_nanos = Self::ymd_hms_to_nanos(year, month, day, hour, minute, second, nanos)
+        let wall_nanos = Self::ymd_hms_to_nanos(year, month, day, hour, minute, second, nanos)
+            .ok_or_else(|| TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Timestamp".to_string(),
+            })?;
+        // The digits are the wall clock at the offset; the instant is that
+        // wall time less the offset ('10:00+09:00' is 01:00 UTC - it was
+        // read as 10:00 UTC, so it showed as 19:00+09:00).
+        let offset = tz
+            .as_deref()
+            .and_then(Self::fixed_utc_offset_seconds)
+            .unwrap_or(0);
+        let total_nanos = offset
+            .checked_mul(1_000_000_000)
+            .and_then(|offset| wall_nanos.checked_sub(offset))
             .ok_or_else(|| TypeError::ValueNotParseable {
                 value: s.to_string(),
                 target: "Timestamp".to_string(),
@@ -18093,9 +18107,19 @@ mod tests {
     fn timestamp_parse_offset_timezone() {
         let ts = Timestamp::parse("2024-01-15T10:30:45+05:30").unwrap();
         assert_eq!(ts.tz, Some("+05:30".to_string()));
+        // The instant is the wall time less the offset (it was the wall
+        // time read as UTC).
+        let utc = |text: &str| Timestamp::parse(text).unwrap().nanos;
+        assert_eq!(ts.nanos, utc("2024-01-15T05:00:45"));
 
         let ts = Timestamp::parse("2024-01-15T10:30:45-05:30").unwrap();
         assert_eq!(ts.tz, Some("-05:30".to_string()));
+        assert_eq!(ts.nanos, utc("2024-01-15T16:00:45"));
+        // 'Z' is UTC itself.
+        assert_eq!(
+            Timestamp::parse("2024-01-15T10:30:45Z").unwrap().nanos,
+            utc("2024-01-15T10:30:45")
+        );
     }
 
     #[test]
