@@ -15328,10 +15328,15 @@ impl Series {
             // Bool joins them per br-frankenpandas-oracle-bool-label-stale-6bqfr:
             // pandas' bool value_counts index holds real `True`/`False`, not
             // their string renderings. Same containment argument as above.
+            // Datetimes / durations label the counts as instants / durations
+            // (pandas' DatetimeIndex / TimedeltaIndex), not their texts - the
+            // same containment.
             labels.push(match &value {
                 Scalar::Null(kind) => IndexLabel::Null(*kind),
                 Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
                 Scalar::Bool(v) => IndexLabel::Bool(*v),
+                Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+                Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
                 other => scalar_to_value_counts_index_label(other),
             });
             if normalize {
@@ -15348,6 +15353,12 @@ impl Series {
             Some(self.name.as_str())
         };
         let index = Index::new(labels).rename_index(index_name);
+        // A tz-aware column's values label the counts in its zone (a NaN
+        // bucket leaves them naive).
+        let index = match self.column.timezone() {
+            Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
+            None => index,
+        };
         let column = Column::from_values(values)?;
         // pandas names a normalized count 'proportion' (fvsao.30).
         let name = if normalize { "proportion" } else { "count" };
@@ -55590,9 +55601,32 @@ impl DatetimeAccessor<'_> {
 
     /// Format datetime using strftime-like directives.
     ///
-    /// Matches `pd.Series.dt.strftime(format)`. Supports: %Y, %m, %d, %H, %M, %S.
+    /// Matches `pd.Series.dt.strftime(format)`: Python's directives, see
+    /// [`fp_types::strftime_python`] (only %Y %m %d %H %M %S were known; the
+    /// rest printed literally, so '%B %d' gave '%B 05'); a tz-aware column
+    /// formats its wall clock with the zone's offset / abbreviation (it
+    /// formatted the UTC clock). NaT is missing.
     pub fn strftime(&self, format: &str) -> Result<Series, FrameError> {
         let fmt = format.to_owned();
+        let zone = self.series.column().timezone().map(str::to_owned);
+        if self.is_typed_datetime() && (zone.is_some() || !six_directive_format(&fmt)) {
+            let values = self
+                .series
+                .column()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) if *nanos != fp_types::Timestamp::NAT => {
+                        Scalar::Utf8(fp_types::strftime_in_zone(*nanos, &fmt, zone.as_deref()))
+                    }
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect();
+            let column = Column::from_values(values)?;
+            return Series::new(self.series.name(), self.series.index().clone(), column);
+        }
+        // Below: a naive column and a format of %Y %m %d %H %M %S only, which
+        // the tuned paths render exactly as Python does.
         if self.is_typed_datetime() {
             // Fastest path: pre-parse the format into literal/directive tokens
             // ONCE, then `write!` each token DIRECTLY into the output byte buffer
@@ -56335,6 +56369,11 @@ impl DatetimeAccessor<'_> {
     /// documents — canonical period strings until a dedicated Period value variant
     /// lands.
     pub fn to_period(&self, freq: &str) -> Result<Series, FrameError> {
+        // A period is a wall-clock span: a tz-aware column's zone is dropped
+        // (as pandas, which warns), not its UTC clock read.
+        if self.series.column().timezone().is_some() {
+            return self.tz_localize(None)?.dt().to_period(freq);
+        }
         let values = self.series.column().values();
         let mut labels: Vec<IndexLabel> = Vec::with_capacity(values.len());
         for value in values {
@@ -56781,6 +56820,14 @@ impl DatetimeAccessor<'_> {
     /// ties at any frequency. Per br-frankenpandas-cm5fy.
     fn round_to_freq(&self, freq: &str, mode: DtRoundMode) -> Result<Series, FrameError> {
         use fp_types::{Timedelta, Timestamp};
+        // A tz-aware column rounds its wall clock and the result goes back
+        // into the zone, as pandas (it rounded the UTC clock and dropped the
+        // zone).
+        if let Some(zone) = self.series.column().timezone().map(str::to_owned) {
+            let wall = self.tz_localize(None)?;
+            let rounded = wall.dt().round_to_freq(freq, mode)?;
+            return rounded.dt().tz_localize(Some(&zone));
+        }
         let freq_ns = resolve_timedelta_unit(Some(freq))?;
         if self.is_typed_datetime() {
             // Typed all-valid fast path (br-frankenpandas-j5150): read the nanos
@@ -57557,6 +57604,20 @@ fn push_4d(buf: &mut String, n: i64) {
 fn push_2d(buf: &mut String, n: i64) {
     buf.push((b'0' + (n / 10 % 10) as u8) as char);
     buf.push((b'0' + (n % 10) as u8) as char);
+}
+
+/// Whether every directive of a strftime `format` is one of %Y %m %d %H %M
+/// %S - the formats `DatetimeAccessor::strftime`'s tuned paths render; any
+/// other directive (%B, %f, %%, ...) takes Python's full formatter.
+fn six_directive_format(format: &str) -> bool {
+    let bytes = format.as_bytes();
+    bytes.iter().enumerate().all(|(i, &byte)| {
+        byte != b'%'
+            || matches!(
+                bytes.get(i + 1),
+                Some(b'Y' | b'm' | b'd' | b'H' | b'M' | b'S')
+            )
+    })
 }
 
 /// `push_4d` for a raw `Vec<u8>` byte buffer (strftime writes into bytes).

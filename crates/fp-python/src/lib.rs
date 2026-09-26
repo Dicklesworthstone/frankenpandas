@@ -355,29 +355,9 @@ fn pandas_datetime_cells(values: &[Option<i64>], index: bool) -> Vec<String> {
 fn pandas_aware_datetime_texts(values: &[Option<i64>], zone: &str) -> Vec<String> {
     values
         .iter()
-        .map(|value| {
-            let Some(nanos) = *value else {
-                return "NaT".to_owned();
-            };
-            let offset = fp_types::tz_offset_seconds(zone, nanos).unwrap_or(0);
-            let wall = nanos.saturating_add(i64::from(offset) * 1_000_000_000);
-            let text = fp_index::format_datetime_ns(wall);
-            let base = text.get(..19).unwrap_or(&text);
-            let fraction = wall.rem_euclid(1_000_000_000);
-            let fraction = if fraction % 1_000 != 0 {
-                format!(".{fraction:09}")
-            } else if fraction != 0 {
-                format!(".{:06}", fraction / 1_000)
-            } else {
-                String::new()
-            };
-            let sign = if offset < 0 { '-' } else { '+' };
-            let minutes = offset.unsigned_abs() / 60;
-            format!(
-                "{base}{fraction}{sign}{:02}:{:02}",
-                minutes / 60,
-                minutes % 60
-            )
+        .map(|value| match *value {
+            Some(nanos) => fp_types::timestamp_text_in_zone(nanos, zone),
+            None => "NaT".to_owned(),
         })
         .collect()
 }
@@ -1834,8 +1814,12 @@ impl PyTimestamp {
                 // datetime, date and numpy datetime64 inputs (each fell through
                 // to Timestamp.now(), a silently wrong value; fvsao.35).
                 if let Ok(dt) = arg.cast::<PyDateTime>() {
+                    // A tz-aware datetime keeps its instant and zone.
                     return Ok(PyTimestamp {
-                        inner: Timestamp::from_nanos(py_datetime_nanos(dt)?),
+                        inner: Timestamp {
+                            nanos: py_datetime_nanos(dt)?,
+                            tz: py_datetime_zone(dt)?,
+                        },
                     });
                 }
                 if let Ok(date) = arg.cast::<pyo3::types::PyDate>() {
@@ -2252,8 +2236,10 @@ impl PyTimestamp {
         format!("{}{}", self.wall().isoformat(), self.offset_text(true))
     }
 
+    /// Python's strftime on the wall clock; a tz-aware Timestamp's `%z` /
+    /// `%Z` are its offset and abbreviation (they printed empty).
     fn strftime(&self, fmt: &str) -> String {
-        self.wall().strftime(fmt)
+        self.inner.strftime(fmt)
     }
 
     /// pandas' `Timestamp.tz_localize(tz, ambiguous='raise',
@@ -2884,27 +2870,109 @@ impl PyPeriod {
     }
 }
 
-/// Nanoseconds since the epoch of a naive `datetime.datetime`, as pandas
-/// reads one into a datetime64[ns] column. A tz-aware one is refused: the
-/// columns built here are tz-naive, and dropping its zone would shift what
-/// the value means.
+/// Nanoseconds since the epoch of a `datetime.datetime`, as pandas reads one
+/// into a datetime64[ns] column: a naive one's wall clock, a tz-aware one's
+/// UTC instant (its wall clock less `utcoffset()`; its zone is
+/// [`py_datetime_zone`]). A tz-aware one was refused.
 fn py_datetime_nanos(dt: &Bound<'_, PyDateTime>) -> PyResult<i64> {
-    if dt.get_tzinfo().is_some() {
-        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "tz-aware datetime values are not supported yet; frankenpandas datetime columns \
-             built from Python objects are tz-naive",
-        ));
-    }
     let days = days_from_ymd(
         i64::from(dt.get_year()),
         i64::from(dt.get_month()),
         i64::from(dt.get_day()),
     );
-    Ok(days * 86_400_000_000_000
+    let wall = days * 86_400_000_000_000
         + i64::from(dt.get_hour()) * 3_600_000_000_000
         + i64::from(dt.get_minute()) * 60_000_000_000
         + i64::from(dt.get_second()) * 1_000_000_000
-        + i64::from(dt.get_microsecond()) * 1_000)
+        + i64::from(dt.get_microsecond()) * 1_000;
+    if dt.get_tzinfo().is_none() {
+        return Ok(wall);
+    }
+    let offset = dt.call_method0("utcoffset")?;
+    match offset.cast::<PyDelta>() {
+        Ok(delta) => Ok(wall - py_delta_nanos(delta)),
+        Err(_) => Ok(wall),
+    }
+}
+
+/// The zone of a tz-aware `datetime.datetime` as pandas names it: an IANA
+/// key (`zoneinfo.ZoneInfo`, pytz), `datetime.timezone`'s own name ('UTC',
+/// 'UTC+05:30'), else its fixed offset at that value; None for a naive one.
+fn py_datetime_zone(dt: &Bound<'_, PyDateTime>) -> PyResult<Option<String>> {
+    let Some(tzinfo) = dt.get_tzinfo() else {
+        return Ok(None);
+    };
+    for attr in ["key", "zone"] {
+        if let Ok(name) = tzinfo
+            .getattr(attr)
+            .and_then(|name| name.extract::<String>())
+            && let Ok(name) = fp_types::tz_canonical_name(&name)
+        {
+            return Ok(Some(name));
+        }
+    }
+    if let Ok(name) = fp_types::tz_canonical_name(&tzinfo.str()?.extract::<String>()?) {
+        return Ok(Some(name));
+    }
+    let offset = dt.call_method0("utcoffset")?;
+    let Ok(delta) = offset.cast::<PyDelta>() else {
+        return Ok(None);
+    };
+    let seconds = py_delta_nanos(delta) / 1_000_000_000;
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let minutes = seconds.unsigned_abs() / 60;
+    Ok(fp_types::tz_canonical_name(&format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)).ok())
+}
+
+/// The one time zone every datetime in a list or tuple carries - tz-aware
+/// Timestamps or `datetime.datetime`s, NaT and None allowed - which the
+/// column built from it keeps (pandas' datetime64[ns, tz]; it came back
+/// naive). None when any value is naive or the zones differ (pandas makes
+/// an object column).
+fn sequence_zone(data: &Bound<'_, PyAny>) -> Option<String> {
+    if !(data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()) {
+        return None;
+    }
+    // Every value's zone must equal the first one's (owned once).
+    let mut zone: Option<String> = None;
+    let mut agrees = |this: &str| match &zone {
+        Some(seen) => seen == this,
+        None => {
+            zone = Some(this.to_owned());
+            true
+        }
+    };
+    for item in data.try_iter().ok()? {
+        let item = item.ok()?;
+        let same = if item.is_none() || item.is_instance_of::<PyNaTType>() {
+            continue;
+        } else if let Ok(ts) = item.extract::<PyRef<'_, PyTimestamp>>() {
+            if ts.inner.is_nat() {
+                continue;
+            }
+            agrees(ts.inner.tz.as_deref()?)
+        } else if let Ok(dt) = item.cast::<PyDateTime>() {
+            agrees(&py_datetime_zone(dt).ok()??)
+        } else {
+            return None;
+        };
+        if !same {
+            return None;
+        }
+    }
+    zone
+}
+
+/// `series` with the zone its source list carried (see [`sequence_zone`]):
+/// a naive datetime column's instants shown in it.
+fn with_sequence_zone(series: Series, data: Option<&Bound<'_, PyAny>>) -> PyResult<Series> {
+    match (data.and_then(sequence_zone), series.dtype()) {
+        (Some(zone), DType::Datetime64 { tz: None }) => {
+            let column = series.column().with_dtype(DType::datetime64_tz(zone));
+            Series::new(series.name(), series.index().clone(), column).map_err(frame_error_to_py)
+        }
+        _ => Ok(series),
+    }
 }
 
 /// Nanoseconds of a `datetime.timedelta`.
@@ -3144,6 +3212,20 @@ fn reduction_to_py(
 ) -> PyResult<Py<PyAny>> {
     if result.is_missing() && is_nullable_extension(&series.dtype()) {
         return na_object(py);
+    }
+    // A tz-aware column's instant is a Timestamp in its zone (min / max /
+    // median / quantile came back naive UTC).
+    if let (DType::Datetime64 { tz: Some(zone) }, Scalar::Datetime64(nanos)) =
+        (series.dtype(), result)
+        && *nanos != Timestamp::NAT
+    {
+        return PyTimestamp {
+            inner: Timestamp {
+                nanos: *nanos,
+                tz: Some(zone),
+            },
+        }
+        .into_py_any(py);
     }
     let nan = matches!(result, Scalar::Float64(v) if v.is_nan())
         || matches!(result, Scalar::Null(NullKind::NaN));
@@ -13280,12 +13362,45 @@ fn comparison_operand(
     if let Some(series) = listlike_series_operand(py, other, like, true)? {
         return Ok(Some(series));
     }
-    let Some(scalar) = comparison_scalar(py, &unwrap_0d(other)?, &like.dtype())? else {
+    let operand = unwrap_0d(other)?;
+    let Some(mut scalar) = comparison_scalar(py, &operand, &like.dtype())? else {
         return Ok(None);
     };
+    // A datetime column meets an instant of its own kind: a tz-aware column
+    // an aware Timestamp / datetime (compared by instant) or a date string
+    // (a wall time in the column's zone, as pandas parses it); aware against
+    // naive either way is pandas' invalid comparison (== all False, != all
+    // True, ordering TypeError) - it compared the raw nanos or raised a
+    // dtype mismatch.
+    let mut zone_dtype = None;
+    if let (DType::Datetime64 { tz }, Scalar::Datetime64(nanos)) = (like.dtype(), &scalar) {
+        let operand_zone = if let Ok(ts) = operand.extract::<PyRef<'_, PyTimestamp>>() {
+            Some(ts.inner.tz.clone())
+        } else if let Ok(dt) = operand.cast::<PyDateTime>() {
+            Some(py_datetime_zone(dt)?)
+        } else {
+            None // text: read in the column's zone
+        };
+        match (&tz, operand_zone) {
+            (Some(_), Some(None)) | (None, Some(Some(_))) => return Ok(None),
+            (Some(zone), None) if *nanos != Timestamp::NAT => {
+                scalar = Scalar::Datetime64(
+                    fp_types::tz_wall_to_utc_nanos(zone, *nanos)
+                        .map_err(|err| tz_error_to_py(py, err))?,
+                );
+                zone_dtype = Some(zone.clone());
+            }
+            (Some(zone), _) => zone_dtype = Some(zone.clone()),
+            (None, _) => {}
+        }
+    }
     // Broadcast over `like`'s own index (a copy of its labels dropped a
     // tz-aware index's zone, so the comparison realigned and came back naive).
     let column = Column::from_values(vec![scalar; like.len()]).map_err(column_error_to_py)?;
+    let column = match zone_dtype {
+        Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
+        None => column,
+    };
     Series::new(like.name(), like.index().clone(), column)
         .map(Some)
         .map_err(frame_error_to_py)
@@ -15784,9 +15899,13 @@ impl PySeries {
     fn ordering_operand(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Series> {
         check_comparable(&self.inner, other)?;
         comparison_operand(py, other, &self.inner)?.ok_or_else(|| {
+            let kind = other
+                .get_type()
+                .name()
+                .map_or_else(|_| "str".to_owned(), |name| name.to_string());
             PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                "Invalid comparison between dtype={} and str",
-                pandas_dtype_name(&self.inner.dtype())
+                "Invalid comparison between dtype={} and {kind}",
+                column_pandas_dtype_name(self.inner.column())
             ))
         })
     }
@@ -16272,6 +16391,8 @@ impl PySeries {
                 _ => Self::from_data(py, data, index, name)?.inner,
             }
         };
+        // A list of tz-aware datetimes sharing a zone builds an aware column.
+        let series = with_sequence_zone(series, data)?;
         // An Index given as index= keeps its name, as pandas (it was dropped).
         let series = match index.and_then(py_index_arg_name) {
             Some(index_name) => Series::new(
@@ -23762,6 +23883,24 @@ impl PyDataFrame {
                 .map_err(frame_error_to_py)?,
             None => built,
         };
+        // A dict value listing tz-aware datetimes of one zone builds an aware
+        // column (it came back naive).
+        let mut built = built;
+        if let Some(dict) = data.and_then(|data| data.cast::<PyDict>().ok()) {
+            for (key, value) in dict.iter() {
+                let Some(zone) = sequence_zone(&value) else {
+                    continue;
+                };
+                let name = key.str()?.extract::<String>()?;
+                if let Some(column) = built
+                    .column(&name)
+                    .filter(|column| column.dtype() == DType::Datetime64 { tz: None })
+                {
+                    let zoned = column.with_dtype(DType::datetime64_tz(zone));
+                    built = built.with_column(name, zoned).map_err(frame_error_to_py)?;
+                }
+            }
+        }
         // A tz-aware index= keeps its zone (its labels were taken naive).
         let built = match index.and_then(index_arg_zone) {
             Some(zone) => {
@@ -43681,9 +43820,13 @@ fn date_range(
     unit: Option<&str>,
 ) -> PyResult<PyDatetimeIndex> {
     const DAY: i64 = 86_400_000_000_000;
+    // An aware Timestamp's or datetime's zone.
     let endpoint_zone = |obj: Option<&Bound<'_, PyAny>>| {
-        obj.and_then(|obj| obj.extract::<PyRef<'_, PyTimestamp>>().ok())
-            .and_then(|ts| ts.inner.tz.clone())
+        let obj = obj?;
+        match obj.extract::<PyRef<'_, PyTimestamp>>() {
+            Ok(ts) => ts.inner.tz.clone(),
+            Err(_) => py_datetime_zone(obj.cast::<PyDateTime>().ok()?).ok()?,
+        }
     };
     let inferred = endpoint_zone(start).or_else(|| endpoint_zone(end));
     let passed = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
@@ -50761,11 +50904,7 @@ fn frame_with_date_format(
     with_index: bool,
 ) -> PyResult<DataFrame> {
     let render = |nanos: i64, zone: Option<&str>| -> String {
-        let offset = zone.map_or(0, |zone| {
-            fp_types::tz_offset_seconds(zone, nanos).unwrap_or(0)
-        });
-        Timestamp::from_nanos(nanos.saturating_add(i64::from(offset) * 1_000_000_000))
-            .strftime(format)
+        fp_types::strftime_in_zone(nanos, format, zone)
     };
     let mut out = frame.clone();
     for position in 0..frame.num_columns() {

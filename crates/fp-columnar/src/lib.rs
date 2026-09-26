@@ -26518,6 +26518,25 @@ impl Column {
             }
             return Ok(Self::from_utf8_contiguous(bytes, offsets));
         }
+        // A tz-aware Datetime64 column prints each value as its own
+        // str(Timestamp) - the wall clock, its fraction and the zone's offset -
+        // with no column-wide rung (pandas' format_array_from_datetime with a
+        // tz); it printed the naive UTC clock.
+        if target == DType::Utf8
+            && let DType::Datetime64 { tz: Some(zone) } = &self.dtype
+        {
+            let texts: Vec<Scalar> = self
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                        Scalar::Utf8(fp_types::timestamp_text_in_zone(*nanos, zone))
+                    }
+                    _ => Scalar::Utf8("NaT".to_owned()),
+                })
+                .collect();
+            return Self::new(DType::Utf8, texts);
+        }
         // Datetime64 -> Utf8: THE WIDTH IS A PROPERTY OF THE COLUMN, so this
         // cannot go through the per-scalar `cast_scalar` tail below — that arm
         // has no column to look at and rendered the placeholder

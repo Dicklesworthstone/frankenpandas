@@ -4027,13 +4027,13 @@ def test_array_like_column_refusals_match_pandas() -> None:
             m.DataFrame({"x": [1, 2]}).__setitem__("c", np.array([1, 2, 3]))
         with pytest.raises(ValueError):
             m.DataFrame({"c": np.array([1, 2]), "d": [1, 2, 3]})
-    # pandas builds a datetime64[ns, UTC] column from tz-aware datetimes; the
-    # binding's columns built from Python objects are tz-naive, so it refuses
-    # instead of dropping the zone.
+    # pandas builds a datetime64[ns, UTC] column from tz-aware datetimes.
+    # TEST-CHANGE (fvsao.35): the binding refused them (NotImplementedError)
+    # while its columns could not carry a zone; it now builds the aware
+    # column (test_tz_aware_columns_follow_their_wall_clock_like_pandas).
     aware = [datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)]
     assert str(pd.Series(aware).dtype) == "datetime64[ns, UTC]"
-    with pytest.raises(NotImplementedError, match="tz-aware"):
-        fpd.Series(aware)
+    assert str(fpd.Series(aware).dtype) == "datetime64[ns, UTC]"
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -8079,3 +8079,110 @@ def test_resample_of_a_tz_aware_index_is_refused_not_binned_on_utc() -> None:
         aware.resample("D").sum()
     naive = fpd.Series([1, 2, 3], index=_eastern_index(fpd)[:3].tz_localize(None))
     assert naive.resample("D").sum().tolist() == [1, 5]
+
+
+_STRFTIME_FORMATS = [
+    "%B %d, %Y",
+    "%a %b %e %H:%M",
+    "%A %j %U %W %w",
+    "%I:%M %p",
+    "%y-%m-%d %f",
+    "%c",
+    "%x %X",
+    "%G-W%V-%u",
+    "100%% %Y",
+    "%Q %Y",
+    "%Y-%m-%dT%H:%M:%S%z|%Z",
+    "%-d/%-m %^a",
+]
+
+
+def _strftime_series(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-03-05 14:07:09.123456", "2023-12-31 00:00:00", None], format="ISO8601"))
+
+
+def _strftime_outcome(m: Any, target: str, fmt: str) -> Any:
+    try:
+        if target == "Timestamp":
+            return m.Timestamp("2024-03-05 14:07:09.123456").strftime(fmt)
+        if target == "aware Timestamp":
+            return m.Timestamp("2024-03-05 14:07:09.123456", tz="US/Eastern").strftime(fmt)
+        if target == "Series.dt":
+            return [_missing_or(v) for v in _strftime_series(m).dt.strftime(fmt).tolist()]
+        if target == "DatetimeIndex":
+            return m.DatetimeIndex(["2024-03-05 14:07:09.123456", "2023-01-01 00:00:00"]).strftime(fmt).tolist()
+        if target == "aware Series.dt":
+            return [_missing_or(v) for v in _strftime_series(m).dt.tz_localize("US/Eastern").dt.strftime(fmt).tolist()]
+        raise AssertionError(target)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+# (strftime) Series.dt.strftime and Timestamp.strftime knew only %Y %m %d
+# %H %M %S (%f): '%B %d' printed '%B 05', %% printed '%%' and a tz-aware
+# column formatted the UTC clock; DatetimeIndex.strftime (chrono) printed %f
+# with nine digits and PANICKED on an unknown directive such as %Q.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("target", ["Timestamp", "aware Timestamp", "Series.dt", "DatetimeIndex", "aware Series.dt"])
+@pytest.mark.parametrize("fmt", _STRFTIME_FORMATS)
+def test_strftime_follows_python_directives_everywhere(target: str, fmt: str) -> None:
+    assert _strftime_outcome(fpd, target, fmt) == _strftime_outcome(pd, target, fmt)
+
+
+def _aware_column(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-03-09 23:30", "2024-03-10 12:15"])).dt.tz_localize("US/Eastern")
+
+
+# (fvsao.35) A tz-aware COLUMN read its UTC clock in round / floor /
+# normalize / to_period, a Series of aware Timestamps (or aware datetimes,
+# refused) was naive, min / max / astype(str) / value_counts came back naive,
+# comparing with an aware Timestamp raised a dtype mismatch, and fillna with
+# an aware Timestamp was an invalid cast; value_counts labelled datetimes and
+# durations with their text.
+_AWARE_COLUMN_CASES = {
+    "dt.round": lambda m: _texts_of(_aware_column(m).dt.round("h")),
+    "dt.floor to the day": lambda m: _texts_of(_aware_column(m).dt.floor("D")),
+    "dt.normalize": lambda m: _texts_of(_aware_column(m).dt.normalize()),
+    # The periods' values (the wall-clock days); their period[D] dtype is a
+    # separate gap for naive columns too (fvsao.62).
+    "dt.to_period": lambda m: [str(v) for v in _aware_column(m).dt.to_period("D").tolist()],
+    "dt.day_name": lambda m: _aware_column(m).dt.day_name().tolist(),
+    "min and max": lambda m: (str(_aware_column(m).min()), str(_aware_column(m).max())),
+    "astype str": lambda m: _aware_column(m).astype(str).tolist(),
+    "sort descending": lambda m: _texts_of(_aware_column(m).sort_values(ascending=False)),
+    "compare with an aware Timestamp": lambda m: (_aware_column(m) > m.Timestamp("2024-03-10", tz="US/Eastern")).tolist(),
+    "compare with a date string": lambda m: (_aware_column(m) > "2024-03-10").tolist(),
+    "equal to a naive Timestamp": lambda m: (_aware_column(m) == m.Timestamp("2024-03-10 12:15")).tolist(),
+    "order against a naive Timestamp": lambda m: (_aware_column(m) > m.Timestamp("2024-03-10")).tolist(),
+    "Series of aware Timestamps": lambda m: (lambda s: (str(s.dtype), _texts_of(s)))(m.Series([m.Timestamp("2024-01-01", tz="US/Eastern"), m.NaT, m.Timestamp("2024-07-01", tz="US/Eastern")])),
+    "Series of aware datetimes": lambda m: (lambda s: (str(s.dtype), _texts_of(s)))(m.Series([datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)])),
+    "DataFrame of aware Timestamps": lambda m: str(m.DataFrame({"t": [m.Timestamp("2024-01-01", tz="Asia/Tokyo")]})["t"].dtype),
+    "Timestamp of an aware datetime": lambda m: (lambda ts: (str(ts), str(ts.tz)))(m.Timestamp(datetime.datetime(2024, 1, 1, 9, tzinfo=datetime.timezone.utc))),
+    "fillna with an aware Timestamp": lambda m: (lambda s: _texts_of(s.fillna(m.Timestamp("2024-02-01", tz="US/Eastern"))))(m.Series([m.Timestamp("2024-01-01", tz="US/Eastern"), m.NaT])),
+    "value_counts of an aware column": lambda m: _texts_of(_aware_column(m).value_counts().index),
+    "value_counts of datetimes": lambda m: (lambda r: (type(r.index).__name__, _texts_of(r.index), r.tolist()))(m.Series(m.to_datetime(["2024-01-02", "2024-01-01", "2024-01-02"])).value_counts()),
+    "value_counts of durations": lambda m: (lambda r: (type(r.index).__name__, _texts_of(r.index)))(m.Series(m.to_timedelta(["1D", "2h", "1D"])).value_counts()),
+    "value_counts repr": lambda m: repr(m.Series(m.to_datetime(["2024-01-02", "2024-01-01", "2024-01-02"])).value_counts()),
+}
+
+
+def _aware_column_outcome(m: Any, case: str) -> Any:
+    try:
+        return _AWARE_COLUMN_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_AWARE_COLUMN_CASES))
+def test_tz_aware_columns_follow_their_wall_clock_like_pandas(case: str) -> None:
+    assert _aware_column_outcome(fpd, case) == _aware_column_outcome(pd, case), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="fvsao.60: Timestamps of two zones make pandas an object column of each Timestamp; fp keeps naive UTC instants (no object-Timestamp cells)")
+def test_series_of_two_zones_is_an_object_column_like_pandas() -> None:
+    def dtype(m: Any) -> str:
+        return str(m.Series([m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-01", tz="Asia/Tokyo")]).dtype)
+
+    assert dtype(fpd) == dtype(pd)

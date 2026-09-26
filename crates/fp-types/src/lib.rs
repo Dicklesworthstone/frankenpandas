@@ -2033,6 +2033,12 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     {
         return Ok(value);
     }
+    // A datetime scalar is an instant and a zone is its column's metadata, so
+    // it takes any datetime64 dtype as it is (a fill or set value on a
+    // tz-aware column was refused as an invalid cast).
+    if from.is_datetime() && target.is_datetime() {
+        return Ok(value);
+    }
     if target == DType::Utf8 {
         return Ok(Scalar::Utf8(scalar_to_string_for_astype(value)));
     }
@@ -4110,6 +4116,221 @@ pub fn tz_wall_to_utc_nanos(tz: &str, wall_nanos: i64) -> Result<i64, TimeZoneEr
     }
 }
 
+/// `wall_nanos` formatted as Python's (glibc's) `strftime` does - what
+/// pandas' `Timestamp.strftime` / `Series.dt.strftime` / `to_csv(date_format=)`
+/// run per value: the C-locale directives (`%a %A %b %B %c %d %e %f %H %I
+/// %j %m %M %p %S %U %w %W %x %X %y %Y %z %Z %%`), glibc's (`%C %D %F %g %G
+/// %h %k %l %n %P %r %R %t %T %u %V`) and its `-` (no padding), `_` (space
+/// padding), `0` and `^` (upper case) flags. An unknown directive is echoed
+/// as written, as glibc does. `zone` is a tz-aware value's UTC offset (in
+/// seconds) and abbreviation at that instant, which `%z` / `%Z` print (empty
+/// for a naive value).
+#[must_use]
+pub fn strftime_python(wall_nanos: i64, format: &str, zone: Option<(i32, &str)>) -> String {
+    const DAYS: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    // Floor both boundaries so a pre-epoch instant keeps a consistent date
+    // and time (1969-12-31 23:59:59.999999 for -1 ns).
+    let total_secs = wall_nanos.div_euclid(1_000_000_000);
+    let sub_nanos = wall_nanos.rem_euclid(1_000_000_000);
+    let days = total_secs.div_euclid(86_400);
+    let secs_of_day = total_secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (
+        secs_of_day / 3_600,
+        (secs_of_day % 3_600) / 60,
+        secs_of_day % 60,
+    );
+    let hour12 = if hour % 12 == 0 { 12 } else { hour % 12 };
+    let weekday = (days + 4).rem_euclid(7); // 0 = Sunday
+    let yday = days - days_from_civil(year, 1, 1); // 0-based
+    let iso_weekday = if weekday == 0 { 7 } else { weekday };
+    let (iso_year, iso_week) = {
+        let week = (yday + 1 - iso_weekday + 10).div_euclid(7);
+        if week < 1 {
+            (year - 1, iso_weeks_in_year(year - 1))
+        } else if week > iso_weeks_in_year(year) {
+            (year + 1, 1)
+        } else {
+            (year, week)
+        }
+    };
+    let month_name = MONTHS[(month as usize).saturating_sub(1) % 12];
+    let day_name = DAYS[weekday as usize];
+
+    let mut out = String::with_capacity(format.len().saturating_add(16));
+    let mut chars = format.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        let flag = chars.next_if(|c| matches!(c, '-' | '_' | '0' | '^'));
+        let Some(conversion) = chars.next() else {
+            out.push('%');
+            if let Some(flag) = flag {
+                out.push(flag);
+            }
+            break;
+        };
+        // A number `width` wide, padded with `pad` unless a flag says
+        // otherwise.
+        let number = |value: i64, width: usize, pad: char| -> String {
+            match flag.unwrap_or(pad) {
+                '-' => value.to_string(),
+                '_' | ' ' => format!("{value:>width$}"),
+                _ => format!("{value:0width$}"),
+            }
+        };
+        let text = |value: &str| -> String {
+            if flag == Some('^') {
+                value.to_uppercase()
+            } else {
+                value.to_owned()
+            }
+        };
+        let piece = match conversion {
+            'a' => text(&day_name[..3]),
+            'A' => text(day_name),
+            'b' | 'h' => text(&month_name[..3]),
+            'B' => text(month_name),
+            'c' => text(&strftime_python(wall_nanos, "%a %b %e %H:%M:%S %Y", zone)),
+            'C' => number(year.div_euclid(100), 2, '0'),
+            'd' => number(i64::from(day), 2, '0'),
+            'D' | 'x' => strftime_python(wall_nanos, "%m/%d/%y", zone),
+            'e' => number(i64::from(day), 2, ' '),
+            'f' => number(sub_nanos / 1_000, 6, '0'),
+            'F' => strftime_python(wall_nanos, "%Y-%m-%d", zone),
+            'g' => number(iso_year.rem_euclid(100), 2, '0'),
+            'G' => number(iso_year, 1, '0'),
+            'H' => number(hour, 2, '0'),
+            'I' => number(hour12, 2, '0'),
+            'j' => number(yday + 1, 3, '0'),
+            'k' => number(hour, 2, ' '),
+            'l' => number(hour12, 2, ' '),
+            'm' => number(i64::from(month), 2, '0'),
+            'M' => number(minute, 2, '0'),
+            'n' => "\n".to_owned(),
+            'p' => text(if hour < 12 { "AM" } else { "PM" }),
+            'P' => (if hour < 12 { "am" } else { "pm" }).to_owned(),
+            'r' => strftime_python(wall_nanos, "%I:%M:%S %p", zone),
+            'R' => strftime_python(wall_nanos, "%H:%M", zone),
+            'S' => number(second, 2, '0'),
+            't' => "\t".to_owned(),
+            'T' | 'X' => strftime_python(wall_nanos, "%H:%M:%S", zone),
+            'u' => number(iso_weekday, 1, '0'),
+            'U' => number((yday + 7 - weekday).div_euclid(7), 2, '0'),
+            'V' => number(iso_week, 2, '0'),
+            'w' => number(weekday, 1, '0'),
+            'W' => number(
+                (yday + 7 - (weekday + 6).rem_euclid(7)).div_euclid(7),
+                2,
+                '0',
+            ),
+            'y' => number(year.rem_euclid(100), 2, '0'),
+            'Y' => number(year, 1, '0'),
+            'z' => zone.map_or_else(String::new, |(offset, _)| {
+                let sign = if offset < 0 { '-' } else { '+' };
+                let offset = offset.unsigned_abs();
+                let (h, m, s) = (offset / 3_600, (offset % 3_600) / 60, offset % 60);
+                if s == 0 {
+                    format!("{sign}{h:02}{m:02}")
+                } else {
+                    format!("{sign}{h:02}{m:02}{s:02}")
+                }
+            }),
+            'Z' => zone.map_or_else(String::new, |(_, name)| text(name)),
+            '%' => "%".to_owned(),
+            other => {
+                // glibc echoes a conversion it does not know.
+                out.push('%');
+                if let Some(flag) = flag {
+                    out.push(flag);
+                }
+                out.push(other);
+                continue;
+            }
+        };
+        out.push_str(&piece);
+    }
+    out
+}
+
+/// The instant `nanos` formatted by [`strftime_python`]: a naive value as
+/// it is; in `tz` (a tz-aware value, `nanos` its UTC instant) on the zone's
+/// wall clock with the offset and abbreviation of that instant.
+#[must_use]
+pub fn strftime_in_zone(nanos: i64, format: &str, tz: Option<&str>) -> String {
+    let aware = tz.and_then(|zone| {
+        let offset = tz_offset_seconds(zone, nanos).ok()?;
+        let name = tz_abbreviation(zone, nanos).ok()?;
+        Some((offset, name))
+    });
+    match aware {
+        Some((offset, name)) => strftime_python(
+            nanos.saturating_add(i64::from(offset) * 1_000_000_000),
+            format,
+            Some((offset, &name)),
+        ),
+        None => strftime_python(nanos, format, None),
+    }
+}
+
+/// `str(Timestamp)` of the instant `nanos` in `tz`, as pandas prints a
+/// tz-aware value (repr cells, `astype(str)`): its wall clock
+/// 'YYYY-MM-DD HH:MM:SS', its own fraction when it has one (six digits, nine
+/// for nanoseconds), and the zone's `+HH:MM` offset then.
+#[must_use]
+pub fn timestamp_text_in_zone(nanos: i64, tz: &str) -> String {
+    let offset = tz_offset_seconds(tz, nanos).unwrap_or(0);
+    let wall = nanos.saturating_add(i64::from(offset) * 1_000_000_000);
+    let mut text = strftime_python(wall, "%Y-%m-%d %H:%M:%S", None);
+    let fraction = wall.rem_euclid(1_000_000_000);
+    if fraction % 1_000 != 0 {
+        text.push_str(&format!(".{fraction:09}"));
+    } else if fraction != 0 {
+        text.push_str(&format!(".{:06}", fraction / 1_000));
+    }
+    let sign = if offset < 0 { '-' } else { '+' };
+    let minutes = offset.unsigned_abs() / 60;
+    text.push_str(&format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60));
+    text
+}
+
+/// Days since 1970-01-01 of the proleptic-Gregorian date `(year, month,
+/// day)` (Howard Hinnant's days-from-civil; the inverse of
+/// `civil_from_days`).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let (month, day) = (i64::from(month), i64::from(day));
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 // ── Timestamp types (br-frankenpandas-9p0u — 4r56 Phase 2) ─────────────
 //
 // Nanosecond-precision i64 since Unix epoch + optional IANA tz name. The
@@ -5584,84 +5805,16 @@ impl Timestamp {
 
     /// Format timestamp using strftime directives.
     ///
-    /// Matches `pd.Timestamp.strftime(format)`. Supports: %Y (year), %m (month),
-    /// %d (day), %H (hour), %M (minute), %S (second), %f (microsecond).
-    /// NaT returns "NaT".
+    /// Matches `pd.Timestamp.strftime(format)`: Python's (glibc's) directive
+    /// set, see [`strftime_python`] (it knew only %Y %m %d %H %M %S %f and
+    /// printed `%%Y` as `%2024`). A tz-aware Timestamp formats its wall clock,
+    /// `%z` / `%Z` its zone's offset and abbreviation then. NaT returns "NaT".
     #[must_use]
     pub fn strftime(&self, format: &str) -> String {
-        use std::fmt::Write as _;
-
         if self.is_nat() {
             return "NaT".to_string();
         }
-        // Floor both boundaries for pre-epoch instants. Truncating division
-        // produces an internally inconsistent date/time pair for every negative
-        // non-midnight timestamp (and is especially visible at -1 ns):
-        // 1970-01-01 00:00:00.999999 instead of
-        // 1969-12-31 23:59:59.999999.
-        let total_secs = self.nanos.div_euclid(Timedelta::NANOS_PER_SEC);
-        // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
-        // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
-        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
-
-        let days_since_epoch = total_secs.div_euclid(86400);
-        let secs_of_day = total_secs.rem_euclid(86400);
-
-        let days = days_since_epoch + 719_468;
-        let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-        let doe = days - era * 146_097;
-        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-        let y = yoe + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = doy - (153 * mp + 2) / 5 + 1;
-        let m = if mp < 10 { mp + 3 } else { mp - 9 };
-        let year = if m <= 2 { y + 1 } else { y };
-
-        let hour = secs_of_day / 3600;
-        let minute = (secs_of_day % 3600) / 60;
-        let second = secs_of_day % 60;
-        let micros = sub_nanos / 1000;
-
-        // Write recognized directives directly into the returned allocation.
-        // The former seven-step replacement chain copied the whole format once
-        // per directive and allocated a temporary string for every component.
-        let mut result = String::with_capacity(format.len().saturating_add(32));
-        let mut rest = format;
-        while let Some(percent) = rest.find('%') {
-            result.push_str(&rest[..percent]);
-            let directive = &rest[percent..];
-            rest = if let Some(next) = directive.strip_prefix("%Y") {
-                let _ = write!(result, "{year:04}");
-                next
-            } else if let Some(next) = directive.strip_prefix("%m") {
-                let _ = write!(result, "{m:02}");
-                next
-            } else if let Some(next) = directive.strip_prefix("%d") {
-                let _ = write!(result, "{d:02}");
-                next
-            } else if let Some(next) = directive.strip_prefix("%H") {
-                let _ = write!(result, "{hour:02}");
-                next
-            } else if let Some(next) = directive.strip_prefix("%M") {
-                let _ = write!(result, "{minute:02}");
-                next
-            } else if let Some(next) = directive.strip_prefix("%S") {
-                let _ = write!(result, "{second:02}");
-                next
-            } else if let Some(next) = directive.strip_prefix("%f") {
-                let _ = write!(result, "{micros:06}");
-                next
-            } else {
-                // Preserve the chained `replace` behavior for unknown, escaped,
-                // and trailing percent signs; the following byte may still begin
-                // a recognized directive (for example, `%%Y` -> `%2024`).
-                result.push('%');
-                &directive[1..]
-            };
-        }
-        result.push_str(rest);
-        result
+        strftime_in_zone(self.nanos, format, self.tz.as_deref())
     }
 
     /// Return the day of the week as a string (e.g., "Monday").
@@ -17240,8 +17393,45 @@ mod tests {
         assert_eq!(ts.strftime("%Y-%m-%d"), "1971-01-01");
         assert_eq!(ts.strftime("%H:%M:%S"), "09:15:00");
         assert_eq!(ts.strftime("%Y/%m/%d %H:%M"), "1971/01/01 09:15");
-        assert_eq!(ts.strftime("%%Y|%%%m|%Q|%|λ"), "%1971|%%01|%Q|%|λ");
+        // TEST-CHANGE: this pinned `%%Y` -> `%1971`; Python (CPython 3.13,
+        // measured) prints `%%` as a literal `%` and echoes unknown `%Q`.
+        assert_eq!(ts.strftime("%%Y|%%%m|%Q|%|λ"), "%Y|%01|%Q|%|λ");
         assert_eq!(Timestamp::nat().strftime("%Y-%m-%d"), "NaT");
+    }
+
+    #[test]
+    fn strftime_follows_python_directives_and_zones() {
+        // 1971-01-01 09:15 (a Friday; ISO week 53 of 1970). Expected texts
+        // are CPython 3.13's datetime.strftime on Linux.
+        let ts = Timestamp::from_nanos(
+            Timedelta::NANOS_PER_DAY * 365
+                + Timedelta::NANOS_PER_HOUR * 9
+                + Timedelta::NANOS_PER_MIN * 15,
+        );
+        assert_eq!(
+            ts.strftime("%-d %_m %^a %e %k %l %P %C %g %D %F %T %R %r %h %n %t|"),
+            "1  1 FRI  1  9  9 am 19 70 01/01/71 1971-01-01 09:15:00 09:15 09:15:00 AM Jan \n \t|"
+        );
+        assert_eq!(
+            ts.strftime("%a %A %b %B %c|%x %X|%I %p %j %U %W %w %y"),
+            "Fri Friday Jan January Fri Jan  1 09:15:00 1971|01/01/71 09:15:00|09 AM 001 00 00 5 71"
+        );
+        // 2021-01-03: a Sunday, ISO 2020-W53-7.
+        let sunday = Timestamp::parse("2021-01-03").expect("date");
+        assert_eq!(sunday.strftime("%G-%V-%u %U %W %j"), "2020-53-7 01 00 003");
+        // Microseconds only; a trailing lone percent stays; naive %z / %Z empty.
+        let fraction = Timestamp::parse("2024-03-05 14:07:09.123456789").expect("ts");
+        assert_eq!(fraction.strftime("%f|%z|%Z|abc%"), "123456|||abc%");
+        // A tz-aware Timestamp prints its wall clock and zone.
+        let eastern = Timestamp::from_nanos_tz(fraction.nanos, "US/Eastern");
+        assert_eq!(
+            eastern.strftime("%Y-%m-%d %H:%M %z %Z"),
+            "2024-03-05 09:07 -0500 EST"
+        );
+        assert_eq!(
+            crate::strftime_in_zone(fraction.nanos, "%H:%M %z", Some("+05:30")),
+            "19:37 +0530"
+        );
     }
 
     #[test]

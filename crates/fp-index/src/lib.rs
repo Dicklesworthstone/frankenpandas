@@ -7406,31 +7406,20 @@ impl DatetimeIndex {
         Ok(out)
     }
 
-    /// Format each timestamp using a chrono format string, matching
-    /// `pd.DatetimeIndex.strftime(format)`. NAT propagates as `None`.
+    /// Format each timestamp as Python's strftime does, matching
+    /// `pd.DatetimeIndex.strftime(format)` (see [`fp_types::strftime_python`];
+    /// chrono's formatter printed `%f` with nine digits and panicked on an
+    /// unknown directive). A tz-aware instant formats its wall clock, `%z` /
+    /// `%Z` its zone's offset and abbreviation then. NAT propagates as `None`.
     #[must_use]
     pub fn strftime(&self, format: &str) -> Vec<Option<String>> {
-        let Some(zone) = self.index.tz() else {
-            return map_datetime_labels(self.index.labels(), |dt| dt.format(format).to_string());
-        };
-        // A tz-aware instant formats on its wall clock with its zone's offset
-        // there (`%z` is -0500 in January New York, not +0000) and `%Z` its
-        // abbreviation then (EST), as pandas.
+        let zone = self.index.tz();
         self.index
             .labels()
             .iter()
             .map(|label| match label {
-                IndexLabel::Datetime64(nanos) => {
-                    let offset = fp_types::tz_offset_seconds(zone, *nanos).ok()?;
-                    let offset = chrono::FixedOffset::east_opt(offset)?;
-                    let named = if format.contains("%Z") {
-                        let abbreviation = fp_types::tz_abbreviation(zone, *nanos).ok()?;
-                        Cow::Owned(format.replace("%Z", &abbreviation))
-                    } else {
-                        Cow::Borrowed(format)
-                    };
-                    datetime_from_nanos(*nanos)
-                        .map(|dt| dt.with_timezone(&offset).format(&named).to_string())
+                IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => {
+                    Some(fp_types::strftime_in_zone(*nanos, format, zone))
                 }
                 _ => None,
             })
@@ -35890,10 +35879,16 @@ mod tests {
         //   * 1e9 + 789_000_000 ns
         let with_ms: i64 = 1_705_322_096_i64 * NS + 789_000_000;
         let dt = super::DatetimeIndex::new(vec![with_ms, i64::MIN]);
-        let formatted = dt.strftime("%Y-%m-%dT%H:%M:%S%.3f");
+        // TEST-CHANGE: this used chrono's `%.3f`, which pandas (Python's
+        // strftime) does not know - it prints '%.3f' as written (measured,
+        // pandas 2.2.3); Python's `%f` is six-digit microseconds.
         assert_eq!(
-            formatted,
-            vec![Some("2024-01-15T12:34:56.789".to_owned()), None]
+            dt.strftime("%Y-%m-%dT%H:%M:%S.%f"),
+            vec![Some("2024-01-15T12:34:56.789000".to_owned()), None]
+        );
+        assert_eq!(
+            dt.strftime("%Y-%m-%dT%H:%M:%S%.3f"),
+            vec![Some("2024-01-15T12:34:56%.3f".to_owned()), None]
         );
     }
 
