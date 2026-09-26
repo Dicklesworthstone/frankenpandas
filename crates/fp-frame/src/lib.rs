@@ -1738,6 +1738,23 @@ fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
     }
 }
 
+/// A cell of a `dtype` column as `set_index` makes it a label: a missing
+/// value is a missing label, as pandas - NaT on a datetime / timedelta column
+/// (so the index stays a DatetimeIndex / TimedeltaIndex), NaN on a float one,
+/// None (or NaN) on an object one. It raised "set_index does not support
+/// missing label values".
+fn set_index_label(dtype: &DType, value: &Scalar) -> Result<IndexLabel, FrameError> {
+    if !value.is_missing() {
+        return scalar_to_index_label(value);
+    }
+    Ok(match (dtype, value) {
+        (DType::Datetime64 { .. }, _) => IndexLabel::Datetime64(fp_types::Timestamp::NAT),
+        (DType::Timedelta64, _) => IndexLabel::Timedelta64(Timedelta::NAT),
+        (_, Scalar::Null(kind)) => IndexLabel::Null(*kind),
+        _ => IndexLabel::Null(NullKind::NaN),
+    })
+}
+
 /// Extract `chars[start:stop:step]` using CPython slice semantics (negative
 /// indices resolve from the end; a negative step walks backwards). Mirrors
 /// CPython's `PySlice_AdjustIndices`. `step` must be non-zero (callers reject 0).
@@ -73128,14 +73145,11 @@ impl DataFrame {
                 .expect("all-valid Utf8 column yields a contiguous buffer");
             Index::from_utf8_contiguous(std::sync::Arc::from(bytes), std::sync::Arc::from(offsets))
                 .rename_index(Some(column))
-        } else if let Some(data) = source.as_datetime64_slice()
-            && !data.contains(&fp_types::Timestamp::NAT)
-        {
-            // Typed all-valid Datetime64 (no NaT) -> Datetime64 labels directly
-            // (the common `df.set_index('datetime_col')` time-series path),
-            // skipping the `.values()` Scalar Vec. Bit-identical:
-            // `scalar_to_index_label(Datetime64(v)) = IndexLabel::Datetime64(v)`.
-            // The NaT guard preserves the generic path's missing-label rejection.
+        } else if let Some(data) = source.as_datetime64_slice() {
+            // Typed Datetime64 -> Datetime64 labels directly (the common
+            // `df.set_index('datetime_col')` time-series path), skipping the
+            // `.values()` Scalar Vec. Bit-identical to `set_index_label`, which
+            // makes a NaT the NaT label too (it was rejected).
             let labels: Vec<IndexLabel> = data.iter().map(|&v| IndexLabel::Datetime64(v)).collect();
             Index::new(labels).rename_index(Some(column))
         } else if let Some(data) = source.as_bool_slice() {
@@ -73144,21 +73158,18 @@ impl DataFrame {
             // `scalar_to_index_label(Bool(b)) = IndexLabel::Bool(b)`.
             let labels: Vec<IndexLabel> = data.iter().map(|&b| IndexLabel::Bool(b)).collect();
             Index::new(labels).rename_index(Some(column))
-        } else if let Some(data) = source.as_timedelta64_slice()
-            && !data.contains(&fp_types::Timedelta::NAT)
-        {
-            // Typed all-valid Timedelta64 (no NaT) -> Timedelta64 labels directly.
-            // Bit-identical: `scalar_to_index_label(Timedelta64(v)) =
-            // IndexLabel::Timedelta64(v)`; the NaT guard preserves the generic
-            // path's missing-label rejection.
+        } else if let Some(data) = source.as_timedelta64_slice() {
+            // Typed Timedelta64 -> Timedelta64 labels directly, a NaT the NaT
+            // label (bit-identical to `set_index_label`).
             let labels: Vec<IndexLabel> =
                 data.iter().map(|&v| IndexLabel::Timedelta64(v)).collect();
             Index::new(labels).rename_index(Some(column))
         } else {
+            let dtype = source.dtype();
             let labels = source
                 .values()
                 .iter()
-                .map(scalar_to_index_label)
+                .map(|value| set_index_label(&dtype, value))
                 .collect::<Result<Vec<_>, _>>()?;
             Index::new(labels).rename_index(Some(column))
         };
@@ -73373,15 +73384,18 @@ impl DataFrame {
                                 // These two arms used to stringify to "1.5" and
                                 // "True"/"False".
                                 //
-                                // ⚠️ ONLY these two arms move. The `Null` arm below
-                                // maps to an EMPTY STRING, where the shared
-                                // `scalar_to_typed_index_label` would give a typed
-                                // null — a different question with its own blast
-                                // radius, so this is not routed through that mapper
-                                // wholesale.
+                                // ⚠️ ONLY these two arms move (not routed through
+                                // `scalar_to_typed_index_label` wholesale).
+                                Scalar::Float64(v) if v.is_nan() => IndexLabel::Null(NullKind::NaN),
                                 Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
                                 Scalar::Bool(b) => IndexLabel::Bool(*b),
-                                Scalar::Null(_) => IndexLabel::Utf8(String::new()),
+                                // pandas' MultiIndex level holds a missing key as
+                                // NaN - set_index(['k', 'j']) gives (nan, 2) - and
+                                // a datetime level NaT; this was the EMPTY STRING
+                                // ('', 2). to_multi_index serves only set_index /
+                                // set_index(append=True).
+                                Scalar::Null(NullKind::NaT) => IndexLabel::Utf8("NaT".to_owned()),
+                                Scalar::Null(_) => IndexLabel::Null(NullKind::NaN),
                                 Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
                                 Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
                                 Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
@@ -122477,6 +122491,8 @@ mod tests {
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("set_index currently supports"))
         );
 
+        // A missing key is a missing label, as pandas' set_index (it was
+        // rejected with "missing label values").
         let df_null = DataFrame::from_dict(
             &["id", "v"],
             vec![
@@ -122485,10 +122501,9 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = df_null.set_index("id", true).unwrap_err();
-        assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("missing label values"))
-        );
+        let indexed = df_null.set_index("id", true).unwrap();
+        assert!(indexed.index().labels()[0].is_missing());
+        assert_eq!(indexed.index().labels()[1], IndexLabel::Int64(2));
     }
 
     #[test]
@@ -137644,13 +137659,14 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_set_index_rejects_null_labels_oeirt() {
-        // br-frankenpandas-oeirt (corrected by the verify gauntlet): a Scalar::Null label
-        // is rejected (scalar_to_index_label), but a Float64 NaN is a VALID Float64Index
-        // label — pandas accepts NaN index labels (verified vs pandas 2.2.3:
-        // pd.DataFrame({'k':[1.0,nan,3.0]}).set_index('k') succeeds), and fp's i10en
-        // Float64Index path matches. The original assertion conflated NaN with null. No mocks.
-        // 1. A genuine Null label IS rejected.
+    fn dataframe_set_index_keeps_null_labels_oeirt() {
+        // br-frankenpandas-oeirt (corrected by the verify gauntlet): a Float64 NaN is a
+        // VALID Float64Index label — pandas accepts NaN index labels (verified vs pandas
+        // 2.2.3: pd.DataFrame({'k':[1.0,nan,3.0]}).set_index('k') succeeds). So is a
+        // genuine null: pandas' set_index keeps None / NaN / NaT keys as missing labels
+        // (measured: DataFrame({'k': ['a', None]}).set_index('k').index -> ['a', None]).
+        // This used to assert the null was rejected. No mocks.
+        // 1. A genuine Null key is a missing label.
         let df_null = DataFrame::from_series(vec![
             Series::from_values(
                 "k",
@@ -137666,10 +137682,8 @@ mod tests {
             .unwrap(),
         ])
         .unwrap();
-        assert!(
-            df_null.set_index("k", true).is_err(),
-            "set_index on a Null label must error"
-        );
+        let kept = df_null.set_index("k", true).unwrap();
+        assert!(kept.index().labels()[1].is_missing());
         // 2. A Float64 NaN label is ACCEPTED (pandas parity — NaN is a valid Float64Index label).
         let df_nan = DataFrame::from_series(vec![
             Series::from_values(

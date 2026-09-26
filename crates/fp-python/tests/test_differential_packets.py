@@ -7743,3 +7743,38 @@ def _tz_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_TZ_CASES))
 def test_timezone_timestamps_series_dt_and_utc_parsing_match_pandas(case: str) -> None:
     assert _tz_outcome(fpd, case) == _tz_outcome(pd, case), case
+
+
+def _keyed(m: Any, keys: Any) -> Any:
+    return m.DataFrame({"k": keys, "j": [1, 2, 3], "v": [10, 20, 30]})
+
+
+# set_index with a missing key raised "set_index does not support missing
+# label values" (pandas keeps None / NaN / NaT as missing labels), and a
+# two-key set_index silently wrote the missing key as '' where pandas' level
+# holds NaN.
+_SET_INDEX_NA_CASES = {
+    "object key": lambda m: _shaped(_keyed(m, ["a", None, "c"]).set_index("k")),
+    "float key": lambda m: _shaped(_keyed(m, [1.5, None, 3.5]).set_index("k")),
+    "datetime key": lambda m: _shaped(_keyed(m, m.to_datetime(["2024-01-01", None, "2024-01-03"])).set_index("k")),
+    "two keys": lambda m: _shaped(_keyed(m, ["a", None, "c"]).set_index(["k", "j"])),
+    "append": lambda m: _shaped(_keyed(m, ["a", None, "c"]).set_index("k", append=True)),
+    "index isna": lambda m: _keyed(m, ["a", None, "c"]).set_index("k").index.isna().tolist(),
+    "groupby drops the missing key": lambda m: _shaped(_keyed(m, ["a", None, "a"]).set_index("k").groupby(level=0)["v"].sum()),
+    "reset_index round trip": lambda m: _shaped(_keyed(m, [1.5, None, 3.5]).set_index("k").reset_index()),
+    # NEGATIVE: a column that does not exist is still a KeyError.
+    "missing column": lambda m: _keyed(m, ["a", None, "c"]).set_index("zz"),
+}
+
+
+def _set_index_na_outcome(m: Any, case: str) -> Any:
+    try:
+        return _SET_INDEX_NA_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SET_INDEX_NA_CASES))
+def test_set_index_keeps_missing_keys_as_missing_labels_like_pandas(case: str) -> None:
+    assert _set_index_na_outcome(fpd, case) == _set_index_na_outcome(pd, case), case
