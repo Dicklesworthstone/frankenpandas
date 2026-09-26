@@ -7573,8 +7573,9 @@ def _levels_frame(m: Any) -> Any:
 
 
 def _missing_or(v: Any) -> Any:
-    """A cell with every missing marker (None, NaN, pd.NA) read as None."""
-    return None if pd.isna(v) else v
+    """A cell with every missing marker (None, NaN, pd.NA, frankenpandas'
+    NA, which pd.isna does not know) read as None."""
+    return None if v is getattr(fpd, "NA", None) or pd.isna(v) else v
 
 
 def _frame_facts(r: Any) -> Any:
@@ -8069,16 +8070,111 @@ def test_tz_aware_datetime_index_matches_pandas(case: str) -> None:
     assert _tz_index_outcome(fpd, case) == _tz_index_outcome(pd, case), case
 
 
+def _resample_facts(r: Any) -> Any:
+    """A resample result: its index's zone and labels, then its cells."""
+    index = (str(getattr(r.index, "tz", None)), [str(v) for v in r.index.tolist()])
+    if hasattr(r, "columns"):
+        return (index, _frame_facts(r))
+    return (index, str(r.dtype), [_missing_or(v) for v in r.tolist()])
+
+
+def _spring(m: Any) -> Any:
+    """3-hourly readings across the 2024-03-10 spring-forward change."""
+    return m.Series(range(8), index=m.date_range("2024-03-09 18:00", periods=8, freq="3h", tz="US/Eastern"))
+
+
+def _fall(m: Any) -> Any:
+    """3-hourly readings across the 2024-11-03 fall-back change."""
+    return m.Series(range(8), index=m.date_range("2024-11-02 18:00", periods=8, freq="3h", tz="US/Eastern"))
+
+
+def _uneven(m: Any, dtype: Any = None) -> Any:
+    """Naive readings in days of 1, 4, 0 and 2 rows."""
+    index = m.DatetimeIndex(["2024-01-01 01:00", "2024-01-02 03:00", "2024-01-02 05:00", "2024-01-02 09:00", "2024-01-02 23:00", "2024-01-04 02:00", "2024-01-04 04:00"])
+    return m.Series([1, 2, 3, 4, 5, 6, 7], index=index, name="x", dtype=dtype)
+
+
+def _paris(m: Any) -> Any:
+    return m.Series(range(4), index=m.date_range("2024-01-15", periods=4, freq="20D", tz="Europe/Paris"))
+
+
+# (fvsao.35) Resampling a tz-aware index was refused (the bins read UTC):
+# pandas bins days and calendar rules on the wall clock and sub-day steps
+# from the first local midnight, labelled in the zone. With it:
+# origin='end' / 'end_day' closed and labelled on the left (pandas: right)
+# and end_day was the next midnight even at midnight (pandas: last.ceil);
+# get_group sliced every bin as if equally long (an uneven bin's rows were
+# wrong, an empty bin returned a neighbour's); transform raised on a name and
+# ran a callable on each VALUE (a frame's name reduced whole columns); ohlc
+# was always float64 (int / bool / nullable dtypes are kept, ints past 2**53
+# rounded).
+_RESAMPLE_CASES = {
+    "D across spring forward": lambda m: _spring(m).resample("D").sum(),
+    "D across fall back": lambda m: _fall(m).resample("D").sum(),
+    "D count": lambda m: _spring(m).resample("D").count(),
+    "12h from local midnight": lambda m: _spring(m).resample("12h").sum(),
+    "6h across fall back": lambda m: _fall(m).resample("6h").sum(),
+    "6h origin epoch": lambda m: _spring(m).resample("6h", origin="epoch").sum(),
+    "6h origin start": lambda m: _spring(m).resample("6h", origin="start").sum(),
+    "5h origin end_day": lambda m: _spring(m).resample("5h", origin="end_day").sum(),
+    "6h label right": lambda m: _spring(m).resample("6h", label="right").sum(),
+    "6h closed right": lambda m: _spring(m).resample("6h", closed="right").sum(),
+    "h first": lambda m: _spring(m).resample("h").first().head(4),
+    "2D mean": lambda m: _spring(m).resample("2D").mean(),
+    "MS in Paris": lambda m: _paris(m).resample("MS").sum(),
+    "ME in Paris": lambda m: _paris(m).resample("ME").sum(),
+    "W": lambda m: _spring(m).resample("W").sum(),
+    "DataFrame D": lambda m: m.DataFrame({"v": range(8), "w": [1.5] * 8}, index=_spring(m).index).resample("D").sum(),
+    "DataFrame 6h mean": lambda m: m.DataFrame({"v": range(8), "w": [1.5] * 8}, index=_spring(m).index).resample("6h").mean(),
+    "aware ohlc": lambda m: _spring(m).resample("D").ohlc(),
+    "aware asfreq": lambda m: _spring(m).resample("6h").asfreq(),
+    "aware apply": lambda m: _spring(m).resample("D").apply(lambda w: w.max() - w.min()),
+    "aware agg list": lambda m: _spring(m).resample("D").agg(["sum", "max"]),
+    "Grouper freq": lambda m: _spring(m).groupby(m.Grouper(freq="D")).sum(),
+    "UTC D": lambda m: m.Series(range(4), index=m.date_range("2024-01-01 20:00", periods=4, freq="3h", tz="UTC")).resample("D").sum(),
+    "fixed offset D": lambda m: m.Series(range(4), index=m.date_range("2024-01-01 20:00", periods=4, freq="3h", tz="+05:30")).resample("D").sum(),
+    "aware get_group": lambda m: _fall(m).resample("D").get_group(m.Timestamp("2024-11-03", tz="US/Eastern")),
+    "aware 6h get_group": lambda m: _fall(m).resample("6h").get_group(m.Timestamp("2024-11-03 00:00", tz="US/Eastern")),
+    "aware transform": lambda m: _fall(m).resample("D").transform("sum"),
+    "aware 6h transform": lambda m: _fall(m).resample("6h").transform("max"),
+    "origin end": lambda m: _uneven(m).resample("10h", origin="end").sum(),
+    "origin end_day": lambda m: _uneven(m).resample("10h", origin="end_day").sum(),
+    "get_group of an uneven bin": lambda m: _uneven(m).resample("D").get_group(m.Timestamp("2024-01-02")),
+    "get_group by string": lambda m: _uneven(m).resample("D").get_group("2024-01-04"),
+    "get_group of an empty bin": lambda m: _uneven(m).resample("D").get_group(m.Timestamp("2024-01-03")),
+    "get_group of no bin": lambda m: _uneven(m).resample("D").get_group(m.Timestamp("2024-01-09")),
+    "DataFrame get_group": lambda m: _uneven(m).to_frame().assign(y=1.5).resample("D").get_group(m.Timestamp("2024-01-02")),
+    "transform sum": lambda m: _uneven(m).resample("D").transform("sum"),
+    "transform max beside an empty bin": lambda m: _uneven(m).resample("D").transform("max"),
+    "transform count": lambda m: _uneven(m).resample("D").transform("count"),
+    "transform 12h mean": lambda m: _uneven(m).resample("12h").transform("mean"),
+    "transform callable to a scalar": lambda m: _uneven(m).resample("D").transform(lambda w: w.max() - w.min()),
+    "transform callable to a Series": lambda m: _uneven(m).resample("D").transform(lambda w: w - w.mean()),
+    "transform cumsum": lambda m: _uneven(m).resample("D").transform("cumsum"),
+    "DataFrame transform sum": lambda m: _uneven(m).to_frame().assign(y=1.5).resample("D").transform("sum"),
+    "DataFrame transform callable": lambda m: _uneven(m).to_frame().assign(y=1.5).resample("D").transform(lambda w: w - w.min()),
+    "ohlc of ints": lambda m: _uneven(m).resample("2D").ohlc(),
+    "ohlc of ints beside an empty bin": lambda m: _uneven(m).resample("D").ohlc(),
+    "ohlc of Int64": lambda m: _uneven(m, "Int64").resample("D").ohlc(),
+    "ohlc of bools": lambda m: (_uneven(m) > 3).resample("2D").ohlc(),
+    "ohlc of big ints": lambda m: (_uneven(m) + 2**60).resample("2D").ohlc(),
+    "DataFrame ohlc": lambda m: _uneven(m).to_frame().assign(y=1.5).resample("2D").ohlc(),
+}
+
+
+def _resample_case_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _resample_facts(_RESAMPLE_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-def test_resample_of_a_tz_aware_index_is_refused_not_binned_on_utc() -> None:
-    # pandas bins a tz-aware index on its wall clock (days start at local
-    # midnight); the bins here read UTC, so it is refused (fvsao.35) rather
-    # than answered wrong. NEGATIVE: a naive index still resamples.
-    aware = fpd.Series([1, 2, 3], index=_eastern_index(fpd)[:3])
-    with pytest.raises(NotImplementedError, match="tz-aware"):
-        aware.resample("D").sum()
-    naive = fpd.Series([1, 2, 3], index=_eastern_index(fpd)[:3].tz_localize(None))
-    assert naive.resample("D").sum().tolist() == [1, 5]
+@pytest.mark.parametrize("case", list(_RESAMPLE_CASES))
+def test_resample_bins_rows_and_prices_like_pandas(case: str) -> None:
+    assert _resample_case_outcome(fpd, case) == _resample_case_outcome(pd, case)
 
 
 _STRFTIME_FORMATS = [

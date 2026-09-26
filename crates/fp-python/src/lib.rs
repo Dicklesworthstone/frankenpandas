@@ -19139,17 +19139,14 @@ impl PySeries {
         // bins as resample, empty ones included (it raised).
         if let Some(Ok(grouper)) = by.map(|by| by.extract::<PyRef<'_, PyGrouper>>()) {
             return match (&grouper.key, &grouper.level, &grouper.freq) {
-                (None, None, Some(freq)) => {
-                    require_resample_axis(self.inner.index())?;
-                    PyResampler {
-                        target: ResampleTarget::Series(self.inner.clone()),
-                        freq: freq.clone(),
-                        closed: None,
-                        label: None,
-                        origin: None,
-                    }
-                    .into_py_any(py)
-                }
+                (None, None, Some(freq)) => PyResampler::new(
+                    ResampleTarget::Series(self.inner.clone()),
+                    freq.clone(),
+                    None,
+                    None,
+                    None,
+                )?
+                .into_py_any(py),
                 (Some(key), _, _) => {
                     Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone()))
                 }
@@ -19258,14 +19255,13 @@ impl PySeries {
         label: Option<&str>,
         origin: Option<&str>,
     ) -> PyResult<PyResampler> {
-        require_resample_axis(self.inner.index())?;
-        Ok(PyResampler {
-            target: ResampleTarget::Series(self.inner.clone()),
-            freq: freq_alias(freq, "resample")?,
-            closed: closed.map(str::to_string),
-            label: label.map(str::to_string),
-            origin: origin.map(str::to_string),
-        })
+        PyResampler::new(
+            ResampleTarget::Series(self.inner.clone()),
+            freq_alias(freq, "resample")?,
+            closed.map(str::to_string),
+            label.map(str::to_string),
+            origin.map(str::to_string),
+        )
     }
 
     #[pyo3(signature = (freq, method=None))]
@@ -27035,14 +27031,13 @@ impl PyDataFrame {
                         Some(key) => self.inner.set_index(key, true).map_err(frame_error_to_py)?,
                         None => self.inner.clone(),
                     };
-                    require_resample_axis(frame.index())?;
-                    return PyResampler {
-                        target: ResampleTarget::DataFrame(frame),
-                        freq: freq.clone(),
-                        closed: None,
-                        label: None,
-                        origin: None,
-                    }
+                    return PyResampler::new(
+                        ResampleTarget::DataFrame(frame),
+                        freq.clone(),
+                        None,
+                        None,
+                        None,
+                    )?
                     .into_py_any(py);
                 }
                 match (&grouper.key, &grouper.level) {
@@ -28520,14 +28515,13 @@ impl PyDataFrame {
             Some(on) => self.inner.set_index(on, true).map_err(frame_error_to_py)?,
             None => self.inner.clone(),
         };
-        require_resample_axis(frame.index())?;
-        Ok(PyResampler {
-            target: ResampleTarget::DataFrame(frame),
-            freq: freq_alias(freq, "resample")?,
-            closed: closed.map(str::to_string),
-            label: label.map(str::to_string),
-            origin: origin.map(str::to_string),
-        })
+        PyResampler::new(
+            ResampleTarget::DataFrame(frame),
+            freq_alias(freq, "resample")?,
+            closed.map(str::to_string),
+            label.map(str::to_string),
+            origin.map(str::to_string),
+        )
     }
 
     #[pyo3(signature = (freq, method=None))]
@@ -41343,6 +41337,19 @@ enum ResampleTarget {
     DataFrame(DataFrame),
 }
 
+/// How a resampler over a tz-aware index puts its bins back in the zone
+/// (see [`PyResampler::new`]).
+#[derive(Clone)]
+struct ResampleZone {
+    zone: String,
+    /// The bins were computed on the wall clock ('D' and calendar rules), so
+    /// their labels are wall times to localize; else on the instants
+    /// (sub-day steps), labels to show in the zone.
+    wall: bool,
+    /// The source's own row labels, for row-level results.
+    rows: Index,
+}
+
 /// Python wrapper for FrankenPandas Resampler.
 #[pyclass(name = "Resampler", module = "frankenpandas", from_py_object)]
 #[derive(Clone)]
@@ -41352,9 +41359,169 @@ pub struct PyResampler {
     closed: Option<String>,
     label: Option<String>,
     origin: Option<String>,
+    zone: Option<ResampleZone>,
 }
 
 impl PyResampler {
+    /// A resampler over `target`'s datetime index. A tz-aware index bins as
+    /// pandas bins it: 'D' and calendar rules on the local calendar (its
+    /// wall clock), sub-day steps in absolute time from the first day's
+    /// local midnight (the default `origin`); the bins are labelled in the
+    /// zone. The bins read the UTC clock before (and were then refused).
+    fn new(
+        target: ResampleTarget,
+        freq: String,
+        closed: Option<String>,
+        label: Option<String>,
+        origin: Option<String>,
+    ) -> PyResult<Self> {
+        let index = match &target {
+            ResampleTarget::Series(series) => series.index().clone(),
+            ResampleTarget::DataFrame(frame) => frame.index().clone(),
+        };
+        require_resample_axis(&index)?;
+        let Some(zone) = index.tz().map(str::to_owned) else {
+            return Ok(Self {
+                target,
+                freq,
+                closed,
+                label,
+                origin,
+                zone: None,
+            });
+        };
+        let unit = freq.trim_start_matches(|c: char| c.is_ascii_digit());
+        let sub_day = unit != "D" && parse_freq_to_nanos(&freq).is_ok_and(|step| step > 0);
+        // An end-anchored origin closes and labels on the right by default
+        // (pandas); stated here because 'end_day' becomes an explicit origin.
+        let end_origin = matches!(origin.as_deref(), Some("end" | "end_day"));
+        let closed = closed.or_else(|| end_origin.then(|| "right".to_owned()));
+        let label = label.or_else(|| end_origin.then(|| "right".to_owned()));
+        let (naive, origin) = if sub_day {
+            let origin = zoned_resample_origin(&index, &zone, origin.as_deref())?;
+            (
+                index.clone().with_tz(None).map_err(index_error_to_py)?,
+                origin,
+            )
+        } else {
+            let wall = DatetimeIndex::from_index(index.clone())
+                .and_then(|index| index.tz_localize(None))
+                .map_err(index_error_to_py)?;
+            (wall.into_index(), origin)
+        };
+        let target = match target {
+            ResampleTarget::Series(series) => ResampleTarget::Series(
+                Series::new(series.name(), naive, series.column().clone())
+                    .map_err(frame_error_to_py)?,
+            ),
+            ResampleTarget::DataFrame(frame) => {
+                ResampleTarget::DataFrame(frame.with_index(naive).map_err(frame_error_to_py)?)
+            }
+        };
+        Ok(Self {
+            target,
+            freq,
+            closed,
+            label,
+            origin,
+            zone: Some(ResampleZone {
+                zone,
+                wall: !sub_day,
+                rows: index,
+            }),
+        })
+    }
+
+    /// A bin-level result's index back in the zone of a tz-aware source
+    /// (as it is for a naive one): wall-clock bin labels localized, instant
+    /// labels shown in the zone. A bin edge on a wall time a DST change
+    /// skips or repeats is refused (pandas shifts it forward / takes DST).
+    fn zoned_index(&self, index: &Index) -> PyResult<Index> {
+        let Some(rz) = &self.zone else {
+            return Ok(index.clone());
+        };
+        if !rz.wall {
+            return index
+                .clone()
+                .with_tz(Some(&rz.zone))
+                .map_err(index_error_to_py);
+        }
+        DatetimeIndex::from_index(index.clone())
+            .and_then(|wall| wall.tz_localize(Some(&rz.zone)))
+            .map(DatetimeIndex::into_index)
+            .map_err(|err| match err {
+                fp_index::IndexError::TimeZone(_) => not_implemented(
+                    "a tz-aware resample bin edge on a wall time a DST change skips or repeats",
+                ),
+                other => index_error_to_py(other),
+            })
+    }
+
+    /// A bin-level Series result in the source's zone (see [`Self::zoned_index`]).
+    fn zoned_series(&self, series: Series) -> PyResult<Series> {
+        if self.zone.is_none() {
+            return Ok(series);
+        }
+        let index = self.zoned_index(series.index())?;
+        Series::new(series.name(), index, series.column().clone()).map_err(frame_error_to_py)
+    }
+
+    /// A bin-level DataFrame result in the source's zone.
+    fn zoned_frame(&self, frame: DataFrame) -> PyResult<DataFrame> {
+        if self.zone.is_none() {
+            return Ok(frame);
+        }
+        let index = self.zoned_index(frame.index())?;
+        frame.with_index(index).map_err(frame_error_to_py)
+    }
+
+    /// The target Series under the source's own row labels (a tz-aware
+    /// source's instants, not the naive clock its bins read), for
+    /// row-level results.
+    fn source_rows_series(&self, series: &Series) -> PyResult<Series> {
+        match &self.zone {
+            Some(rz) => Series::new(series.name(), rz.rows.clone(), series.column().clone())
+                .map_err(frame_error_to_py),
+            None => Ok(series.clone()),
+        }
+    }
+
+    /// The target frame under the source's own row labels.
+    fn source_rows_frame(&self, frame: &DataFrame) -> PyResult<DataFrame> {
+        match &self.zone {
+            Some(rz) => frame.with_index(rz.rows.clone()).map_err(frame_error_to_py),
+            None => Ok(frame.clone()),
+        }
+    }
+
+    /// Every bin in order - labelled as the reductions label them - with its
+    /// source row positions (none for an empty bin).
+    fn bins(&self) -> PyResult<(Index, Vec<Vec<usize>>)> {
+        let (closed, label, origin) = (
+            self.closed.as_deref(),
+            self.label.as_deref(),
+            self.origin.as_deref(),
+        );
+        let (sizes, mut rows) = match &self.target {
+            ResampleTarget::Series(s) => {
+                let resampler = s.resample_ext(&self.freq, closed, label, origin);
+                (resampler.size(), resampler.indices())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let resampler = df.resample_ext(&self.freq, closed, label, origin);
+                (resampler.size(), resampler.indices())
+            }
+        };
+        let sizes = sizes.map_err(frame_error_to_py)?;
+        let positions = sizes
+            .index()
+            .labels()
+            .iter()
+            .map(|bin| rows.remove(bin).unwrap_or_default())
+            .collect();
+        Ok((self.zoned_index(sizes.index())?, positions))
+    }
+
     /// The same resampling over `series`.
     fn over(&self, series: Series) -> Self {
         Self {
@@ -41363,6 +41530,7 @@ impl PyResampler {
             closed: self.closed.clone(),
             label: self.label.clone(),
             origin: self.origin.clone(),
+            zone: self.zone.clone(),
         }
     }
 
@@ -41509,7 +41677,7 @@ impl PyResampler {
                     self.label.as_deref(),
                     self.origin.as_deref(),
                 );
-                let res = series_op(&resampler).map_err(to_py)?;
+                let res = self.zoned_series(series_op(&resampler).map_err(to_py)?)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -41521,7 +41689,7 @@ impl PyResampler {
                         self.origin.as_deref(),
                     )
                     .numeric_only(numeric_only);
-                let res = frame_op(&resampler).map_err(to_py)?;
+                let res = self.zoned_frame(frame_op(&resampler).map_err(to_py)?)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -41562,6 +41730,7 @@ impl PyResampler {
             closed: self.closed.clone(),
             label: self.label.clone(),
             origin: self.origin.clone(),
+            zone: self.zone.clone(),
         })
     }
 
@@ -41599,6 +41768,7 @@ impl PyResampler {
                     )
                     .count()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -41611,6 +41781,7 @@ impl PyResampler {
                     )
                     .count()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -41658,6 +41829,7 @@ impl PyResampler {
                     )
                     .size()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -41670,6 +41842,7 @@ impl PyResampler {
                     )
                     .size()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
         }
@@ -41687,6 +41860,7 @@ impl PyResampler {
                     )
                     .ohlc()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -41699,6 +41873,7 @@ impl PyResampler {
                     )
                     .ohlc()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -41725,6 +41900,7 @@ impl PyResampler {
                     )
                     .quantile(q)
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -41737,6 +41913,7 @@ impl PyResampler {
                     )
                     .quantile(q)
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -41759,6 +41936,7 @@ impl PyResampler {
                     )
                     .skew()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -41771,6 +41949,7 @@ impl PyResampler {
                     )
                     .skew()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -41788,6 +41967,7 @@ impl PyResampler {
                     )
                     .kurt()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -41800,6 +41980,7 @@ impl PyResampler {
                     )
                     .kurt()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -41821,6 +42002,7 @@ impl PyResampler {
                     )
                     .nearest()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -41833,6 +42015,7 @@ impl PyResampler {
                     )
                     .nearest()
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -41907,12 +42090,14 @@ impl PyResampler {
                 let res = s
                     .asfreq_with_options(&self.freq, None, fv)
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
                 let res = df
                     .asfreq_with_options(&self.freq, None, fv)
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -42094,63 +42279,43 @@ impl PyResampler {
         Ok(dict)
     }
 
+    /// pandas' `get_group`: the rows of the bin labelled `name`, under the
+    /// source's own labels; an empty or unknown bin is a KeyError of `name`.
+    /// It sliced the rows as if every bin held as many, so an uneven bin
+    /// returned the wrong rows and an empty bin a neighbour's.
     fn get_group(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let (labels, bins) = self.bins()?;
+        let labels = row_index_to_py(py, &labels)?.into_bound(py);
+        let mut rows = None;
+        for (position, bin_rows) in bins.iter().enumerate() {
+            if labels.get_item(position)?.eq(name)? {
+                rows = Some(bin_rows);
+                break;
+            }
+        }
+        let Some(rows) = rows.filter(|rows| !rows.is_empty()) else {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                name.clone().unbind(),
+            ));
+        };
         match &self.target {
             ResampleTarget::Series(s) => {
-                let first_val = self.first(py, false)?;
-                let first_bound = first_val.bind(py);
-                let idx = first_bound.getattr("index")?;
-                let mut found_pos = None;
-                for i in 0..idx.len()? {
-                    let item = idx.get_item(i)?;
-                    if item.eq(name)? {
-                        found_pos = Some(i);
-                        break;
-                    }
-                }
-                let pos = found_pos.ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
-                        name.str().map(|s| s.to_string()).unwrap_or_default(),
-                    )
-                })?;
-                let start = pos * s.len() / idx.len()?.max(1);
-                let end = if pos + 1 == idx.len()? {
-                    s.len()
-                } else {
-                    (pos + 1) * s.len() / idx.len()?.max(1)
-                };
-                let sliced = s
-                    .iloc_slice(Some(start as i64), Some(end as i64))
+                let at: Vec<i64> = rows
+                    .iter()
+                    .map(|&row| i64::try_from(row).unwrap_or(i64::MAX))
+                    .collect();
+                let rows = self
+                    .source_rows_series(s)?
+                    .take(&at)
                     .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PySeries { inner: sliced })?.into_any())
+                Ok(Py::new(py, PySeries { inner: rows })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
-                let first_val = self.first(py, false)?;
-                let first_bound = first_val.bind(py);
-                let idx = first_bound.getattr("index")?;
-                let mut found_pos = None;
-                for i in 0..idx.len()? {
-                    let item = idx.get_item(i)?;
-                    if item.eq(name)? {
-                        found_pos = Some(i);
-                        break;
-                    }
-                }
-                let pos = found_pos.ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
-                        name.str().map(|s| s.to_string()).unwrap_or_default(),
-                    )
-                })?;
-                let start = pos * df.len() / idx.len()?.max(1);
-                let end = if pos + 1 == idx.len()? {
-                    df.len()
-                } else {
-                    (pos + 1) * df.len() / idx.len()?.max(1)
-                };
-                let sliced = df
-                    .iloc_slice(Some(start as i64), Some(end as i64))
+                let rows = self
+                    .source_rows_frame(df)?
+                    .take_rows(rows)
                     .map_err(frame_error_to_py)?;
-                Ok(Py::new(py, PyDataFrame { inner: sliced })?.into_any())
+                Ok(Py::new(py, PyDataFrame { inner: rows })?.into_any())
             }
         }
     }
@@ -42221,6 +42386,7 @@ impl PyResampler {
                 let column = Column::from_values(values).map_err(column_error_to_py)?;
                 let res = Series::new(s.name(), bins.index().clone(), column)
                     .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -42232,13 +42398,7 @@ impl PyResampler {
                     };
                     let series = Series::new(name.as_str(), df.index().clone(), column.clone())
                         .map_err(frame_error_to_py)?;
-                    let per_column = PyResampler {
-                        target: ResampleTarget::Series(series),
-                        freq: self.freq.clone(),
-                        closed: self.closed.clone(),
-                        label: self.label.clone(),
-                        origin: self.origin.clone(),
-                    };
+                    let per_column = self.over(series);
                     results.push(per_column.apply(py, func, args, kwargs)?.into_bound(py));
                     keys.push(name.clone());
                 }
@@ -42247,6 +42407,14 @@ impl PyResampler {
         }
     }
 
+    /// pandas' `transform`: every row gets its bin's result, under the
+    /// source's own labels. A reduction named by `arg` is broadcast over its
+    /// bin (with the reduction's dtype, empty bins included: an int `max`
+    /// beside an empty bin is float, as pandas'); any other method name or
+    /// callable runs on each non-empty bin's rows, a scalar broadcast and a
+    /// Series taken in row order. A frame goes column by column. A name
+    /// raised TypeError and a callable ran on each VALUE; a frame's name
+    /// reduced whole columns.
     #[pyo3(signature = (arg, *args, **kwargs))]
     fn transform(
         &self,
@@ -42255,20 +42423,100 @@ impl PyResampler {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = args;
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let py_s = PySeries { inner: s.clone() }.into_bound_py_any(py)?;
-                py_s.call_method("apply", (arg,), kwargs)
-                    .map(|b| b.unbind())
-            }
+        let source = match &self.target {
+            ResampleTarget::Series(s) => self.source_rows_series(s)?,
             ResampleTarget::DataFrame(df) => {
-                let py_df = PyDataFrame { inner: df.clone() }.into_bound_py_any(py)?;
-                py_df
-                    .call_method("apply", (arg,), kwargs)
-                    .map(|b| b.unbind())
+                if df.num_columns() == 0 {
+                    let rows = self.source_rows_frame(df)?;
+                    return Ok(Py::new(py, PyDataFrame { inner: rows })?.into_any());
+                }
+                let mut results = Vec::with_capacity(df.num_columns());
+                let mut keys = Vec::with_capacity(df.num_columns());
+                for position in 0..df.num_columns() {
+                    let (name, per_column) = self.column_resampler(df, position)?;
+                    results.push(per_column.transform(py, arg, args, kwargs)?.into_bound(py));
+                    keys.push(name);
+                }
+                return Ok(concat_side_by_side(py, results, keys)?.unbind());
+            }
+        };
+        let (_, bins) = self.bins()?;
+        let method = arg.extract::<String>().ok();
+        if let Some(name) = method.as_deref().filter(|name| {
+            matches!(
+                *name,
+                "sum"
+                    | "mean"
+                    | "min"
+                    | "max"
+                    | "count"
+                    | "first"
+                    | "last"
+                    | "std"
+                    | "var"
+                    | "median"
+                    | "prod"
+                    | "size"
+                    | "sem"
+            )
+        }) {
+            let reduced = self.agg_name(py, name)?;
+            let reduced = reduced
+                .bind(py)
+                .extract::<PyRef<'_, PySeries>>()?
+                .inner
+                .clone();
+            let mut bin_of_row = vec![None; source.len()];
+            for (bin, rows) in bins.iter().enumerate() {
+                for &row in rows {
+                    bin_of_row[row] = i64::try_from(bin).ok();
+                }
+            }
+            let at = bin_of_row
+                .into_iter()
+                .collect::<Option<Vec<i64>>>()
+                .ok_or_else(|| not_implemented("Resampler.transform of a row outside every bin"))?;
+            let taken = reduced.take(&at).map_err(frame_error_to_py)?;
+            let res = Series::new(
+                source.name(),
+                source.index().clone(),
+                taken.column().clone(),
+            )
+            .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        let mut values = vec![Scalar::Null(NullKind::NaN); source.len()];
+        for rows in bins.iter().filter(|rows| !rows.is_empty()) {
+            let at: Vec<i64> = rows
+                .iter()
+                .map(|&row| i64::try_from(row).unwrap_or(i64::MAX))
+                .collect();
+            let window = source.take(&at).map_err(frame_error_to_py)?;
+            let window = PySeries { inner: window }.into_bound_py_any(py)?;
+            let result = match &method {
+                Some(name) => window.call_method(name.as_str(), args, kwargs)?,
+                None => arg.call(prepend_arg(window, Some(args))?, kwargs)?,
+            };
+            if let Ok(series) = result.extract::<PyRef<'_, PySeries>>() {
+                if series.inner.len() != rows.len() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "transform must return a scalar value for each group or a Series of the group's length",
+                    ));
+                }
+                for (value, &row) in series.inner.column().values().iter().zip(rows) {
+                    values[row] = value.clone();
+                }
+            } else {
+                let value = py_to_scalar(py, &result)?;
+                for &row in rows {
+                    values[row] = value.clone();
+                }
             }
         }
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        let res = Series::new(source.name(), source.index().clone(), column)
+            .map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PySeries { inner: res })?.into_any())
     }
 }
 
@@ -48219,15 +48467,56 @@ fn freq_alias(freq: &Bound<'_, PyAny>, what: &str) -> PyResult<String> {
 /// pandas resamples only a datetime axis: any other raises its TypeError
 /// (an integer index binned nothing and returned an empty result, a string
 /// index was read as dates). A TimedeltaIndex is not supported yet.
-fn require_resample_axis(index: &Index) -> PyResult<()> {
-    // pandas bins a tz-aware index on its wall clock (days start at local
-    // midnight); the bins here read the UTC instants and label naive, so
-    // an aware index is refused rather than binned wrong (fvsao.35).
-    if let Some(zone) = index.tz() {
-        return Err(not_implemented(&format!(
-            "resample / Grouper(freq=) of a tz-aware index ({zone})"
-        )));
+/// The `origin` sub-day bins of a tz-aware index are anchored at, as an
+/// instant the naive (UTC) binning takes: pandas' 'start_day' / 'end_day' /
+/// 'epoch' are local midnights (the first day's, the day after the last's,
+/// 1970-01-01 in the zone) and a timestamp text is a wall time in the zone;
+/// 'start' / 'end' are instants already.
+fn zoned_resample_origin(
+    index: &Index,
+    zone: &str,
+    origin: Option<&str>,
+) -> PyResult<Option<String>> {
+    const DAY: i64 = 86_400_000_000_000;
+    let instants = || {
+        index.labels().iter().filter_map(|label| match label {
+            IndexLabel::Datetime64(nanos) if *nanos != Timestamp::NAT => Some(*nanos),
+            _ => None,
+        })
+    };
+    let wall = |nanos: i64| fp_types::tz_utc_to_wall_nanos(zone, nanos);
+    let local_midnight = match origin {
+        Some("start" | "end") => return Ok(origin.map(str::to_owned)),
+        None | Some("start_day") => match instants().min() {
+            Some(first) => wall(first).map(|w| w.div_euclid(DAY) * DAY),
+            None => return Ok(origin.map(str::to_owned)),
+        },
+        // pandas' last.ceil('D') on the local calendar.
+        Some("end_day") => match instants().max() {
+            Some(last) => wall(last).map(|w| {
+                let midnight = w.div_euclid(DAY) * DAY;
+                if midnight == w { w } else { midnight + DAY }
+            }),
+            None => return Ok(origin.map(str::to_owned)),
+        },
+        Some("epoch") => Ok(0),
+        Some(text) => match Timestamp::parse(text) {
+            Ok(ts) => Ok(ts.nanos),
+            Err(_) => return Ok(origin.map(str::to_owned)),
+        },
     }
+    .map_err(tz_error_to_py_any)?;
+    let instant =
+        fp_types::tz_wall_to_utc_nanos(zone, local_midnight).map_err(tz_error_to_py_any)?;
+    Ok(Some(fp_index::format_datetime_ns(instant)))
+}
+
+/// [`tz_error_to_py`] where no `Python` token is at hand.
+fn tz_error_to_py_any(err: fp_types::TimeZoneError) -> PyErr {
+    Python::attach(|py| tz_error_to_py(py, err))
+}
+
+fn require_resample_axis(index: &Index) -> PyResult<()> {
     let labels = index.labels();
     if labels
         .iter()

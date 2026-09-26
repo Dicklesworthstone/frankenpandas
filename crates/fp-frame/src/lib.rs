@@ -35773,12 +35773,19 @@ fn resample_build_groups_with_options(
             None => return ResampleGrouping::empty(),
         };
 
+        // pandas' TimeGrouper closes and labels an end-anchored origin on the
+        // right unless told otherwise (they defaulted to the left).
+        let end_origin = matches!(origin_opt, Some("end" | "end_day"));
         let closed = match closed_opt {
             Some("right") => ResampleClosed::Right,
+            Some("left") => ResampleClosed::Left,
+            _ if end_origin => ResampleClosed::Right,
             _ => ResampleClosed::Left,
         };
         let label = match label_opt {
             Some("right") => ResampleLabel::Right,
+            Some("left") => ResampleLabel::Left,
+            _ if end_origin => ResampleLabel::Right,
             _ => ResampleLabel::Left,
         };
 
@@ -35795,8 +35802,14 @@ fn resample_build_groups_with_options(
                 last - sub * step_ns
             }
             Some("end_day") => {
-                let last_day =
-                    (last.div_euclid(Timedelta::NANOS_PER_DAY) + 1) * Timedelta::NANOS_PER_DAY;
+                // pandas' last.ceil('D'): a last value at midnight is its own
+                // end of day (it went a day further).
+                let midnight = last.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY;
+                let last_day = if midnight == last {
+                    last
+                } else {
+                    midnight + Timedelta::NANOS_PER_DAY
+                };
                 let sub_freq_times = (last_day - first).div_euclid(step_ns);
                 let sub = if closed == ResampleClosed::Left {
                     sub_freq_times + 1
@@ -37855,6 +37868,89 @@ impl Resample<'_> {
         let mut highs = Vec::with_capacity(order.len());
         let mut lows = Vec::with_capacity(order.len());
         let mut closes = Vec::with_capacity(order.len());
+
+        // pandas' prices keep the column's dtype: int64 / bool while every
+        // bucket holds a value (float64 with NaN once one is empty), the
+        // nullable dtypes with <NA>. They were always float64, which also
+        // rounded ints past 2**53.
+        let dtype = self.series.dtype();
+        if matches!(
+            dtype,
+            DType::Int64
+                | DType::Int64Nullable
+                | DType::Bool
+                | DType::BoolNullable
+                | DType::Float64Nullable
+        ) {
+            let order_of = |a: &Scalar, b: &Scalar| match (a, b) {
+                (Scalar::Int64(a), Scalar::Int64(b)) => a.cmp(b),
+                (Scalar::Bool(a), Scalar::Bool(b)) => a.cmp(b),
+                _ => a
+                    .to_f64()
+                    .unwrap_or(f64::NAN)
+                    .total_cmp(&b.to_f64().unwrap_or(f64::NAN)),
+            };
+            let mut empty_bucket = false;
+            for key in &order {
+                labels.push(resample_bin_label(key));
+                let present: Vec<&Scalar> = groups[key]
+                    .iter()
+                    .map(|&idx| &vals[idx])
+                    .filter(|value| !value.is_missing())
+                    .collect();
+                if let (Some(&open), Some(&close)) = (present.first(), present.last()) {
+                    let mut high = open;
+                    let mut low = open;
+                    for &value in &present {
+                        if order_of(value, high).is_gt() {
+                            high = value;
+                        }
+                        if order_of(value, low).is_lt() {
+                            low = value;
+                        }
+                    }
+                    opens.push(open.clone());
+                    highs.push(high.clone());
+                    lows.push(low.clone());
+                    closes.push(close.clone());
+                } else {
+                    empty_bucket = true;
+                    for prices in [&mut opens, &mut highs, &mut lows, &mut closes] {
+                        prices.push(Scalar::Null(NullKind::Null));
+                    }
+                }
+            }
+            let prices = |values: Vec<Scalar>| -> Result<Column, FrameError> {
+                if !empty_bucket || !matches!(dtype, DType::Int64 | DType::Bool) {
+                    return Ok(Column::new(dtype.clone(), values)?);
+                }
+                let floats = values
+                    .into_iter()
+                    .map(|value| match value.to_f64() {
+                        Ok(value) if !value.is_nan() => Scalar::Float64(value),
+                        _ => Scalar::Null(NullKind::NaN),
+                    })
+                    .collect();
+                Ok(Column::new(DType::Float64, floats)?)
+            };
+            let columns = BTreeMap::from([
+                ("open".to_owned(), prices(opens)?),
+                ("high".to_owned(), prices(highs)?),
+                ("low".to_owned(), prices(lows)?),
+                ("close".to_owned(), prices(closes)?),
+            ]);
+            let index = Index::new(labels).rename_index(self.series.index().name());
+            return DataFrame::new_with_column_order(
+                index,
+                columns,
+                vec![
+                    "open".to_owned(),
+                    "high".to_owned(),
+                    "low".to_owned(),
+                    "close".to_owned(),
+                ],
+            );
+        }
 
         for key in &order {
             labels.push(resample_bin_label(key));
