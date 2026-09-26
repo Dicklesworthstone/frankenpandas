@@ -25381,9 +25381,22 @@ impl Series {
             )));
         }
 
-        let total_len = repeats.iter().sum();
-        let mut labels = Vec::with_capacity(total_len);
-        let mut values = Vec::with_capacity(total_len);
+        // A result too large to allocate is numpy's ValueError, as pandas
+        // raises it (the unchecked sum overflowed or the capacity panicked).
+        let too_big = || {
+            FrameError::CompatibilityRejected(
+                "array is too big; `arr.size * arr.dtype.itemsize` is larger than the maximum possible size."
+                    .to_owned(),
+            )
+        };
+        let total_len = repeats
+            .iter()
+            .try_fold(0_usize, |total, &count| total.checked_add(count))
+            .ok_or_else(too_big)?;
+        let mut labels: Vec<IndexLabel> = Vec::new();
+        let mut values: Vec<Scalar> = Vec::new();
+        labels.try_reserve_exact(total_len).map_err(|_| too_big())?;
+        values.try_reserve_exact(total_len).map_err(|_| too_big())?;
         for ((label, value), &count) in self
             .index
             .labels()
@@ -125623,6 +125636,10 @@ mod tests {
         assert!(texts.str().repeat(usize::MAX).is_err());
         assert!(texts.str().center(usize::MAX, ' ').is_err());
         assert!(texts.str().zfill(usize::MAX).is_err());
+        // Series.repeat past the address space is numpy's ValueError (the
+        // unchecked sum of counts overflowed).
+        assert!(floats.repeat(usize::MAX).is_err());
+        assert_eq!(floats.repeat(2).unwrap().len(), 6);
         // A window quantile outside [0, 1] is pandas' ValueError (q=1.5 read
         // a wrong row; a huge q indexed past the window).
         assert!(floats.rolling(2, None).quantile(1.5).is_err());

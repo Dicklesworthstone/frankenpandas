@@ -6254,6 +6254,19 @@ _EXTREME_ARGUMENT_CASES = {
        for kind in ["rolling", "expanding"] for q in [1.5, -0.5, float("inf"), 2**63 - 1]},
     **{f"str.{method}(sys.maxsize)": (lambda method: lambda m: getattr(m.Series(["ab", None]).str, method)(2**63 - 1))(method)
        for method in ["center", "ljust", "rjust", "zfill", "pad"]},
+    # Keyword sweep: repeat(huge) overflowed `len * repeats` or the
+    # capacity; value_counts(bins=huge) aborted the interpreter; a negative
+    # repeat / bins raised the wrong class.
+    **{f"{kind}.repeat({n})": (lambda kind, n: lambda m: {
+        "Series": lambda: m.Series([1.5, 2.0]),
+        "Index": lambda: m.Index([3, 1]),
+        "DatetimeIndex": lambda: m.date_range("2024-01-01", periods=2),
+    }[kind]().repeat(n))(kind, n)
+       for kind in ["Series", "Index", "DatetimeIndex"] for n in [10**18, -1]},
+    "value_counts(bins=10**18)": lambda m: m.Series([3, 1, 2, 1]).value_counts(bins=10**18),
+    "value_counts(bins=0)": lambda m: m.Series([3, 1, 2, 1]).value_counts(bins=0),
+    "value_counts(bins=-1)": lambda m: m.Series([3, 1, 2, 1]).value_counts(bins=-1),
+    "cut(bins=10**18)": lambda m: m.cut(m.Series([3, 1, 2, 1]), bins=10**18),
 }
 
 

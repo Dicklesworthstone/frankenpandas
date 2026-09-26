@@ -5533,7 +5533,8 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    fn repeat(&self, repeats: usize) -> Self {
+    fn repeat(&self, repeats: i64) -> PyResult<Self> {
+        let repeats = repeat_count(self.inner.len(), repeats)?;
         let labels = self.inner.labels();
         let mut out = Vec::with_capacity(labels.len() * repeats);
         for l in labels {
@@ -5545,7 +5546,7 @@ impl PyIndex {
         if let Some(n) = self.inner.name() {
             res = res.rename_index(Some(n));
         }
-        PyIndex { inner: res }
+        Ok(PyIndex { inner: res })
     }
 
     fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
@@ -7710,14 +7711,15 @@ impl PyDatetimeIndex {
             .reindex(target, method, level, limit, tolerance)
     }
 
-    fn repeat(&self, repeats: usize) -> Self {
+    fn repeat(&self, repeats: i64) -> PyResult<Self> {
+        let repeats = repeat_count(self.inner.len(), repeats)?;
         let mut out = Vec::with_capacity(self.inner.len() * repeats);
         for &v in &self.inner.asi8() {
             for _ in 0..repeats {
                 out.push(v);
             }
         }
-        self.with_nanos(out)
+        Ok(self.with_nanos(out))
     }
 
     #[pyo3(signature = (value, side="left", sorter=None))]
@@ -9297,7 +9299,8 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
-    fn repeat(&self, repeats: usize) -> PyResult<Self> {
+    fn repeat(&self, repeats: i64) -> PyResult<Self> {
+        let repeats = repeat_count(self.inner.len(), repeats)?;
         let positions: Vec<usize> = (0..self.inner.len())
             .flat_map(|i| std::iter::repeat_n(i, repeats))
             .collect();
@@ -10540,7 +10543,8 @@ impl PyTimedeltaIndex {
             .reindex(target, method, level, limit, tolerance)
     }
 
-    fn repeat(&self, repeats: usize) -> Self {
+    fn repeat(&self, repeats: i64) -> PyResult<Self> {
+        let repeats = repeat_count(self.inner.len(), repeats)?;
         let mut out = Vec::with_capacity(self.inner.len() * repeats);
         for &v in &self.inner.asi8() {
             for _ in 0..repeats {
@@ -10551,7 +10555,7 @@ impl PyTimedeltaIndex {
         if let Some(n) = self.inner.name() {
             res = res.set_name(n);
         }
-        Self { inner: res }
+        Ok(Self { inner: res })
     }
 
     #[pyo3(signature = (value, side="left", sorter=None))]
@@ -11482,10 +11486,12 @@ impl PyRangeIndex {
         py_idx.reindex(target, method, level, limit, tolerance)
     }
 
-    fn repeat(&self, repeats: usize) -> PyIndex {
-        PyIndex {
-            inner: self.inner.to_index().repeat(repeats),
-        }
+    fn repeat(&self, repeats: i64) -> PyResult<PyIndex> {
+        let index = self.inner.to_index();
+        let repeats = repeat_count(index.len(), repeats)?;
+        Ok(PyIndex {
+            inner: index.repeat(repeats),
+        })
     }
 
     /// Integer labels (a RangeIndex) are unchanged by rounding to decimals
@@ -12473,10 +12479,12 @@ impl PyPeriodIndex {
             .reindex(target, method, level, limit, tolerance)
     }
 
-    fn repeat(&self, repeats: usize) -> PyIndex {
-        PyIndex {
-            inner: self.inner.to_index().repeat(repeats),
-        }
+    fn repeat(&self, repeats: i64) -> PyResult<PyIndex> {
+        let index = self.inner.to_index();
+        let repeats = repeat_count(index.len(), repeats)?;
+        Ok(PyIndex {
+            inner: index.repeat(repeats),
+        })
     }
 
     #[getter]
@@ -13366,10 +13374,12 @@ impl PyCategoricalIndex {
             .map_err(index_error_to_py)
     }
 
-    fn repeat(&self, repeats: usize) -> PyIndex {
-        PyIndex {
-            inner: self.inner.to_index().repeat(repeats),
-        }
+    fn repeat(&self, repeats: i64) -> PyResult<PyIndex> {
+        let index = self.inner.to_index();
+        let repeats = repeat_count(index.len(), repeats)?;
+        Ok(PyIndex {
+            inner: index.repeat(repeats),
+        })
     }
 
     /// Integer labels (a RangeIndex) are unchanged by rounding to decimals
@@ -13549,6 +13559,7 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg.contains(" type does not support ")
                 || msg.starts_with("numpy boolean subtract")
                 || msg == "cannot reindex on an axis with duplicate labels"
+                || msg.starts_with("array is too big; ")
                 || msg == "Limit must be greater than 0"
                 || msg.starts_with("Invalid fill method. ")
                 || (msg.starts_with("operator '")
@@ -20481,12 +20492,13 @@ impl PySeries {
     /// pandas' `Series.repeat(repeats, axis=None)`; `np.repeat(s, 2)` passes
     /// `axis=None` (it raised), any other axis is pandas' ValueError.
     #[pyo3(signature = (repeats, axis=None))]
-    fn repeat(&self, repeats: usize, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+    fn repeat(&self, repeats: i64, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
         if axis.is_some_and(|axis| !axis.is_none()) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "the 'axis' parameter is not supported in the pandas implementation of repeat()",
             ));
         }
+        let repeats = repeat_count(self.inner.len(), repeats)?;
         let res = self.inner.repeat(repeats).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
@@ -45665,7 +45677,28 @@ fn cut(
         Some(label_strings.iter().map(String::as_str).collect())
     };
 
+    if bins.extract::<i64>().is_ok_and(|n_bins| n_bins < 0) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "`bins` should be a positive integer.",
+        ));
+    }
     let res = if let Ok(n_bins) = bins.extract::<usize>() {
+        // pandas: a positive count, and no more edges than memory holds
+        // (numpy's MemoryError; the edges aborted the process).
+        if n_bins == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "`bins` should be a positive integer.",
+            ));
+        }
+        if n_bins
+            .checked_add(1)
+            .is_none_or(|edges| Vec::<f64>::new().try_reserve_exact(edges).is_err())
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyMemoryError, _>(format!(
+                "Unable to allocate an array with shape ({},) and data type float64",
+                i128::try_from(n_bins).unwrap_or(i128::MAX) + 1
+            )));
+        }
         if label_refs.is_some() || !right || include_lowest {
             let mut min_v = f64::INFINITY;
             let mut max_v = f64::NEG_INFINITY;
@@ -51795,6 +51828,28 @@ fn flat_droplevel_error() -> PyErr {
     )
 }
 
+/// The count an index of `len` labels is repeated by, as numpy checks it:
+/// a negative one is its ValueError ('negative dimensions are not
+/// allowed'; it was PyO3's OverflowError), and so is a result too large to
+/// allocate (the unchecked `len * repeats` overflowed or the capacity
+/// panicked).
+fn repeat_count(len: usize, repeats: i64) -> PyResult<usize> {
+    let Ok(repeats) = usize::try_from(repeats) else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "negative dimensions are not allowed",
+        ));
+    };
+    let fits = len
+        .checked_mul(repeats)
+        .is_some_and(|total| Vec::<IndexLabel>::new().try_reserve_exact(total).is_ok());
+    if fits {
+        return Ok(repeats);
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        "array is too big; `arr.size * arr.dtype.itemsize` is larger than the maximum possible size.",
+    ))
+}
+
 /// pandas' groupby shift / diff / pct_change read `periods` as a C int:
 /// beyond it is pandas' OverflowError (it panicked sizing a buffer).
 fn require_c_int_periods(periods: i128) -> PyResult<()> {
@@ -55485,7 +55540,7 @@ mod tests {
         assert_eq!(dropped.inner.len(), 2);
         let deleted = idx.delete(0).expect("delete"); // ubs:ignore — test fixture
         assert_eq!(deleted.inner.len(), 2);
-        let repeated = idx.repeat(2);
+        let repeated = idx.repeat(2).expect("repeat"); // ubs:ignore — test fixture
         assert_eq!(repeated.inner.len(), 6);
         let taken = idx.take(vec![1, 0]).expect("take"); // ubs:ignore — test fixture
         assert_eq!(taken.inner.len(), 2);
