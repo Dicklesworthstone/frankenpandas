@@ -42237,6 +42237,11 @@ fn read_csv_impl(
             _ => return Err(not_implemented("read_csv(on_bad_lines=<callable>)")),
         }),
     };
+    // converters={column: func} (it was refused): see `apply_csv_converters`.
+    let converters = take("converters")?;
+    if converters.is_some() && args.names.is_some() {
+        return Err(not_implemented("read_csv(converters=...) with names="));
+    }
     reject_unsupported_kwargs(
         "read_csv",
         args.kwargs,
@@ -42322,11 +42327,11 @@ fn read_csv_impl(
             frame_dtype = Some(py_dtype_arg(dtype)?);
         }
     }
+    // parse_dates=True parses the index (index_col); see `datetime_index_if_parsed`.
+    let mut parse_index_dates = false;
     if let Some(dates) = args.parse_dates.filter(|d| !d.is_none()) {
         if let Ok(flag) = dates.extract::<bool>() {
-            if flag {
-                return Err(not_implemented("read_csv(parse_dates=True)"));
-            }
+            parse_index_dates = flag;
         } else {
             opts.parse_dates = Some(dates.extract::<Vec<String>>()?);
         }
@@ -42342,6 +42347,9 @@ fn read_csv_impl(
     }
 
     let mut frame = fp_io::read_csv_with_options(&text, &opts).map_err(io_error_to_py)?;
+    if let Some(converters) = &converters {
+        frame = apply_csv_converters(py, frame, &text, &opts, converters)?;
+    }
 
     if let Some(names) = &args.names {
         let current: Vec<String> = frame.column_names().iter().map(|n| n.to_string()).collect();
@@ -42396,7 +42404,112 @@ fn read_csv_impl(
             _ => return Err(not_implemented("read_csv(index_col=<several columns>)")),
         }
     }
+    if parse_index_dates && let Some(index) = datetime_index_if_parsed(frame.index())? {
+        frame = frame.with_index(index).map_err(frame_error_to_py)?;
+    }
     Ok(PyDataFrame { inner: frame })
+}
+
+/// pandas' `read_csv(parse_dates=True)`: the index as datetimes when every
+/// present label reads as one (name kept); None - the index stays - when a
+/// label does not, or the index is not text (a default range). It was
+/// refused.
+fn datetime_index_if_parsed(index: &Index) -> PyResult<Option<Index>> {
+    let labels = index.labels();
+    if labels.is_empty()
+        || !labels
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Utf8(_)) || label.is_missing())
+    {
+        return Ok(None);
+    }
+    let values: Vec<Scalar> = labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Utf8(text) => Scalar::Utf8(text.clone()),
+            _ => Scalar::Null(NullKind::NaN),
+        })
+        .collect();
+    let series = Series::from_values("", labels.to_vec(), values).map_err(frame_error_to_py)?;
+    let options = fp_frame::ToDatetimeOptions {
+        errors: fp_frame::DatetimeErrors::Coerce,
+        ..Default::default()
+    };
+    let Ok(parsed) = fp_frame::to_datetime_with_options(&series, options) else {
+        return Ok(None);
+    };
+    let mut out = Vec::with_capacity(labels.len());
+    for (label, value) in labels.iter().zip(parsed.values()) {
+        match value {
+            Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                out.push(IndexLabel::Datetime64(*nanos));
+            }
+            // A text label that did not parse keeps the index as it is.
+            _ if !label.is_missing() => return Ok(None),
+            _ => out.push(IndexLabel::Datetime64(Timestamp::NAT)),
+        }
+    }
+    Ok(Some(Index::new(out).rename_index(index.name())))
+}
+
+/// pandas' `read_csv(converters={column: func})`: each named (or positional)
+/// column is the function applied to its RAW text - every cell, the empty
+/// and 'NA' ones included, before NA detection - with the dtype inferred
+/// from the results. The raw text comes from a second read of the same
+/// options with those columns as text and NA detection off.
+fn apply_csv_converters(
+    py: Python<'_>,
+    frame: DataFrame,
+    text: &str,
+    opts: &fp_io::CsvReadOptions,
+    converters: &Bound<'_, PyAny>,
+) -> PyResult<DataFrame> {
+    let converters = converters.cast::<PyDict>().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>("Type converters must be a dict or subclass")
+    })?;
+    let mut plan = Vec::with_capacity(converters.len());
+    for (key, func) in converters.iter() {
+        // pandas ignores a converter for a column the file does not have.
+        let Ok(name) = csv_column_ref(&frame, &key) else {
+            continue;
+        };
+        if frame.column(&name).is_some() {
+            plan.push((name, func));
+        }
+    }
+    let mut raw_opts = opts.clone();
+    raw_opts.na_filter = false;
+    let mut dtypes = raw_opts.dtype.take().unwrap_or_default();
+    for (name, _) in &plan {
+        dtypes.insert(name.clone(), DType::Utf8);
+    }
+    raw_opts.dtype = Some(dtypes);
+    let raw = fp_io::read_csv_with_options(text, &raw_opts).map_err(io_error_to_py)?;
+    let series_type = py.import("frankenpandas")?.getattr("Series")?;
+    let mut out = frame;
+    for (name, func) in plan {
+        let column = raw.column(&name).ok_or_else(|| loc_key_error(&name))?;
+        let results = column
+            .values()
+            .iter()
+            .map(|cell| {
+                let cell = match cell {
+                    Scalar::Utf8(text) => text.clone(),
+                    _ => String::new(),
+                };
+                func.call1((cell,))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let converted = series_type.call1((PyList::new(py, results)?,))?;
+        let converted = converted.extract::<PyRef<'_, PySeries>>()?;
+        let position = (0..out.num_columns())
+            .find(|&position| out.column_name_at(position).as_deref() == Some(&name))
+            .ok_or_else(|| loc_key_error(&name))?;
+        out = out
+            .isetitem(position, converted.inner.column().clone())
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(out)
 }
 
 /// Read a CSV into a DataFrame (pandas `read_csv`; see `read_csv_impl`).

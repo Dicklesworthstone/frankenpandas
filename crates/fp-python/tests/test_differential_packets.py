@@ -2235,8 +2235,10 @@ def test_read_excel_blank_cells_match_pandas(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_read_csv_unsupported_keyword_is_not_silently_ignored() -> None:
-    with pytest.raises(NotImplementedError, match="converters"):
-        fpd.read_csv(io.StringIO(_CSV), converters={"a": str})
+    # (converters= was the example until it was implemented; see
+    # test_read_csv_parser_options_and_groupby_nth_match_pandas.)
+    with pytest.raises(NotImplementedError, match="chunksize"):
+        fpd.read_csv(io.StringIO(_CSV), chunksize=10)
     with pytest.raises(ValueError, match="only specify one"):
         fpd.read_csv(io.StringIO(_CSV), sep=",", delimiter=",")
 
@@ -6899,6 +6901,17 @@ _READ_CSV_NTH_CASES = {
     # header already holds (the read raised DuplicateColumnName; 4qg5w.21).
     "duplicate headers": lambda m: _csv_frame(m.read_csv(io.StringIO("a,a,a.1,,b,b\n1,2,3,4,5,6\n"))),
     "repeated columns round trip": lambda m: _csv_frame(m.read_csv(io.StringIO(pd.DataFrame([[1, 2, 3]], columns=["x", "x", "y"]).to_csv(index=False)))),
+    # converters= (it was refused): the function gets each cell's RAW text,
+    # empty and 'NA' included; the dtype is inferred from its results.
+    "converters raw text": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,\n2,y\n3,NA\n"), converters={"b": str.upper})),
+    "converters typed result": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,5\n2,7\n"), converters={"b": lambda s: int(s) * 10})),
+    "converters positional key": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,5\n2,7\n"), converters={1: lambda s: float(s) / 2})),
+    "converters keep leading zeros": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n01,5\n"), converters={"a": str})),
+    "converters unknown column ignored": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,5\n"), converters={"z": str})),
+    # parse_dates=True parses the index (it was refused); a text index that
+    # does not read as dates stays as it is.
+    "parse_dates index": lambda m: (lambda r: ([str(i) for i in r.index], str(r.index.dtype), _csv_frame(r)))(m.read_csv(io.StringIO("k,v\n2024-01-02,1\n2024-01-03,2\n"), index_col=0, parse_dates=True)),
+    "parse_dates text index stays": lambda m: (lambda r: ([str(i) for i in r.index], _csv_frame(r)))(m.read_csv(io.StringIO("k,v\nx,1\ny,2\n"), index_col=0, parse_dates=True)),
     "nth first": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth(0)),
     "nth last": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth(-1)),
     "nth list": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth([0, 1])),
