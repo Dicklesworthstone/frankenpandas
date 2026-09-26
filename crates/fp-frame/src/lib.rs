@@ -6240,6 +6240,26 @@ pub fn datetime_list_label(labels: &[IndexLabel], label: &IndexLabel) -> IndexLa
     }
 }
 
+/// `periods` clamped to +/-`len`: a shift that far already leaves every row
+/// missing, so larger ones answer the same - and no longer size a per-group
+/// buffer by `periods` ('capacity overflow' panics) or overflow `i - periods`.
+fn clamp_periods(periods: i64, len: usize) -> i64 {
+    let bound = i64::try_from(len).unwrap_or(i64::MAX);
+    periods.clamp(-bound, bound)
+}
+
+/// pandas' check on a rolling / expanding quantile: `q` in [0, 1] (NaN
+/// passes, as pandas lets it). Out of range it indexed past the window (a
+/// panic) or read a wrong row (q=1.5 gave the maximum).
+fn require_window_quantile(q: f64) -> Result<(), FrameError> {
+    if q.is_nan() || (0.0..=1.0).contains(&q) {
+        return Ok(());
+    }
+    Err(FrameError::CompatibilityRejected(format!(
+        "quantile value {q} not in [0, 1]"
+    )))
+}
+
 /// `text` repeated `count` times (pandas' `str * int`), allocated fallibly:
 /// a result too large to allocate is an error - Python's MemoryError - where
 /// `str::repeat` aborted the process.
@@ -31720,6 +31740,7 @@ impl Rolling<'_> {
     /// Matches `series.rolling(window).quantile(q)`.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
         self.validate()?;
+        require_window_quantile(q)?;
         if self.window >= ROLLING_ORDER_STAT_MIN_WINDOW {
             return self.rolling_order_stat(RollingOrderStat::Quantile(q));
         }
@@ -33331,6 +33352,7 @@ impl Expanding<'_> {
     ///
     /// Matches `series.expanding().quantile(q)`.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        require_window_quantile(q)?;
         if self.series.column().len() >= ROLLING_ORDER_STAT_MIN_WINDOW {
             return self.expanding_order_stat(RollingOrderStat::Quantile(q));
         }
@@ -45616,6 +45638,7 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy shift within each group.
     pub fn shift(&self, periods: i64) -> Result<Series, FrameError> {
+        let periods = clamp_periods(periods, self.series.len());
         if periods > 0
             && let Some(data) = self.series.column.as_f64_slice()
             && !data.iter().any(|x| x.is_nan())
@@ -45732,6 +45755,7 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy difference within each group.
     pub fn diff(&self, periods: usize) -> Result<Series, FrameError> {
+        let periods = periods.min(self.series.len());
         if periods >= 1
             && !self.column_is_timedelta()
             && let Some(data) = self.series.column.as_f64_slice()
@@ -45878,6 +45902,7 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy percentage change within each group.
     pub fn pct_change(&self, periods: i64) -> Result<Series, FrameError> {
+        let periods = clamp_periods(periods, self.series.len());
         // Dense typed fast path (sister to grouped diff): an all-valid no-NaN
         // Float64 value column + a dense key computes `(v - prev)/prev` within
         // each group in one sequential pass over the raw &[f64], skipping the
@@ -51852,6 +51877,7 @@ impl StringAccessor<'_> {
                 )));
             }
         }
+        self.require_padding_fits(width, fillchar.len_utf8())?;
         let side_owned = side.to_string();
         // Contiguous byte-buffer output (apply_str_utf8): write the fill chars + the
         // row's bytes straight into one buffer — no per-row temp String, no
@@ -52375,6 +52401,7 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.zfill(width)`.
     pub fn zfill(&self, width: usize) -> Result<Series, FrameError> {
+        self.require_padding_fits(width, 1)?;
         // Contiguous byte-buffer output (apply_str_utf8): write sign + zeros + rest
         // straight into the buffer — no per-row temp String, no Vec<Scalar::Utf8>.
         // Bit-identical to str_zfill (sign first, then zeros, then the rest).
@@ -52403,6 +52430,31 @@ impl StringAccessor<'_> {
             |s| Scalar::Utf8(str_zfill(s, width)),
             self.series.name(),
         )
+    }
+
+    /// The strings padded to `width` characters of `fill_bytes` each must be
+    /// allocatable: a width too large is an error (Python's MemoryError), where
+    /// the padding aborted the process.
+    fn require_padding_fits(&self, width: usize, fill_bytes: usize) -> Result<(), FrameError> {
+        let total = self
+            .series
+            .values()
+            .iter()
+            .try_fold(0_usize, |total, value| match value {
+                Scalar::Utf8(text) => width
+                    .saturating_sub(text.chars().count())
+                    .checked_mul(fill_bytes)
+                    .and_then(|fill| fill.checked_add(text.len()))
+                    .and_then(|bytes| total.checked_add(bytes)),
+                _ => Some(total),
+            });
+        let fits = total.is_some_and(|total| Vec::<u8>::new().try_reserve_exact(total).is_ok());
+        if fits {
+            return Ok(());
+        }
+        Err(FrameError::CompatibilityRejected(format!(
+            "cannot allocate memory for strings padded to width {width}"
+        )))
     }
 
     /// Center-align strings within specified width.
@@ -106621,6 +106673,7 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `df.groupby(col).shift(periods)`.
     pub fn shift(&self, periods: i64) -> Result<DataFrame, FrameError> {
+        let periods = clamp_periods(periods, self.df.len());
         let dense = if periods > 0 {
             self.try_shift_dense(periods as usize)
         } else {
@@ -106657,6 +106710,7 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `df.groupby(col).diff(periods)`.
     pub fn diff(&self, periods: usize) -> Result<DataFrame, FrameError> {
+        let periods = periods.min(self.df.len());
         if let Some(df) = self.try_diff_dense(periods) {
             return Ok(df);
         }
@@ -106954,6 +107008,7 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `df.groupby(col).pct_change()`.
     pub fn pct_change(&self, periods: i64) -> Result<DataFrame, FrameError> {
+        let periods = clamp_periods(periods, self.df.len());
         // Dense fast path (br-frankenpandas-gv108): all-valid no-NaN Float64
         // value columns keyed by a dense grouping skip build_groups + the
         // per-group Vec<Scalar> gather entirely — reusing the proven
@@ -125566,6 +125621,24 @@ mod tests {
         let texts =
             Series::from_values("s", vec!["a".into()], vec![Scalar::Utf8("a".to_owned())]).unwrap();
         assert!(texts.str().repeat(usize::MAX).is_err());
+        assert!(texts.str().center(usize::MAX, ' ').is_err());
+        assert!(texts.str().zfill(usize::MAX).is_err());
+        // A window quantile outside [0, 1] is pandas' ValueError (q=1.5 read
+        // a wrong row; a huge q indexed past the window).
+        assert!(floats.rolling(2, None).quantile(1.5).is_err());
+        assert!(floats.expanding(None).quantile(-0.5).is_err());
+        assert!(floats.rolling(2, None).quantile(0.5).is_ok());
+        // A grouped shift / diff past every group is all missing (it sized
+        // a per-group buffer by `periods`: 'capacity overflow').
+        let grouped = floats.groupby(&ints).unwrap();
+        for result in [
+            grouped.shift(i64::MAX).unwrap(),
+            grouped.shift(i64::MIN).unwrap(),
+            grouped.diff(usize::MAX).unwrap(),
+            grouped.pct_change(i64::MAX).unwrap(),
+        ] {
+            assert!(result.values().iter().all(Scalar::is_missing));
+        }
     }
 
     #[test]

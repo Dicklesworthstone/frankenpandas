@@ -39400,6 +39400,7 @@ impl PyGroupBy {
 
     #[pyo3(signature = (periods=1))]
     fn diff(&self, periods: usize) -> PyResult<PyDataFrame> {
+        require_c_int_periods(i128::try_from(periods).unwrap_or(i128::MAX))?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -39410,6 +39411,7 @@ impl PyGroupBy {
 
     #[pyo3(signature = (periods=1))]
     fn pct_change(&self, periods: i64) -> PyResult<PyDataFrame> {
+        require_c_int_periods(i128::from(periods))?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -40396,6 +40398,7 @@ impl PyGroupBy {
                 ("suffix", suffix.is_none()),
             ],
         )?;
+        require_c_int_periods(i128::from(periods.unwrap_or(1)))?;
         let res = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -41313,6 +41316,7 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (periods=1))]
     fn diff(&self, periods: usize) -> PyResult<PySeries> {
+        require_c_int_periods(i128::try_from(periods).unwrap_or(i128::MAX))?;
         let res = self
             .series
             .groupby(&self.by)
@@ -41324,6 +41328,7 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (periods=1))]
     fn shift(&self, periods: i64) -> PyResult<PySeries> {
+        require_c_int_periods(i128::from(periods))?;
         let res = self
             .series
             .groupby(&self.by)
@@ -42048,6 +42053,7 @@ impl PySeriesGroupBy {
                 ("freq", freq.is_none()),
             ],
         )?;
+        require_c_int_periods(i128::from(periods.unwrap_or(1)))?;
         let res = self
             .series
             .groupby(&self.by)
@@ -50385,36 +50391,96 @@ pub fn array(
     }
 }
 
+/// pandas' `interval_range(start, end, periods, freq, name, closed)`:
+/// exactly three of start / end / periods / freq (freq is 1 when only two
+/// of the others are given); the breaks are `start + i * freq` (or back
+/// from `end`), or `periods` equal parts of [start, end]. freq=0 is
+/// ZeroDivisionError, a negative freq or an end before the start is empty.
+/// It took only (start, periods) and (start, end), accumulated `cur += freq`,
+/// accepted all four, and looped forever for freq=0 or a negative freq
+/// (pushing intervals until memory ran out); a count too large to allocate
+/// is pandas' ValueError, where it aborted the process.
 #[pyfunction]
-#[pyo3(signature = (start=None, end=None, periods=None, freq=None, closed="right", name=None))]
+#[pyo3(signature = (start=None, end=None, periods=None, freq=None, name=None, closed="right"))]
 pub fn interval_range(
     start: Option<f64>,
     end: Option<f64>,
     periods: Option<usize>,
     freq: Option<f64>,
-    closed: Option<&str>,
     name: Option<&str>,
+    closed: Option<&str>,
 ) -> PyResult<PyIntervalIndex> {
-    let closed_str = closed.unwrap_or("right");
-    let step = freq.unwrap_or(1.0);
-    let mut intervals = Vec::new();
-
-    if let (Some(s), Some(p)) = (start, periods) {
-        let mut cur = s;
-        for _ in 0..p {
-            intervals.push(PyInterval::new(cur, cur + step, Some(closed_str))?);
-            cur += step;
-        }
-    } else if let (Some(s), Some(e)) = (start, end) {
-        let mut cur = s;
-        while cur + step <= e + 1e-9 {
-            intervals.push(PyInterval::new(cur, cur + step, Some(closed_str))?);
-            cur += step;
-        }
-    } else {
+    let closed = closed.unwrap_or("right");
+    if !matches!(closed, "right" | "left" | "both" | "neither") {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Must specify either (start, periods) or (start, end)",
+            "closed must be one of 'right', 'left', 'both', 'neither'",
         ));
+    }
+    let freq = match freq {
+        None if start.is_none() || end.is_none() || periods.is_none() => Some(1.0),
+        freq => freq,
+    };
+    let given = [
+        start.is_some(),
+        end.is_some(),
+        periods.is_some(),
+        freq.is_some(),
+    ]
+    .into_iter()
+    .filter(|&given| given)
+    .count();
+    if given != 3 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Of the four parameters: start, end, periods, and freq, exactly three must be specified",
+        ));
+    }
+    if freq == Some(0.0) {
+        return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+            "float division by zero",
+        ));
+    }
+    // The breaks: `count + 1` edges from `first`, `step` apart (the last
+    // pinned to `end` for equal parts).
+    let (first, step, count, last) = match (start, end, periods, freq) {
+        (Some(start), Some(end), Some(periods), None) => {
+            let step = if periods == 0 {
+                0.0
+            } else {
+                (end - start) / periods as f64
+            };
+            (start, step, periods, Some(end))
+        }
+        (Some(start), Some(end), None, Some(freq)) => {
+            let count = ((end - start) / freq + 0.1).floor();
+            let count = if count.is_finite() && count > 0.0 {
+                count as usize
+            } else {
+                0
+            };
+            (start, freq, count, None)
+        }
+        (Some(start), None, Some(periods), Some(freq)) => (start, freq, periods, None),
+        (None, Some(end), Some(periods), Some(freq)) => {
+            (end - freq * periods as f64, freq, periods, Some(end))
+        }
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Of the four parameters: start, end, periods, and freq, exactly three must be specified",
+            ));
+        }
+    };
+    let mut intervals = Vec::new();
+    if intervals.try_reserve_exact(count).is_err() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "array is too big; `arr.size * arr.dtype.itemsize` is larger than the maximum possible size.",
+        ));
+    }
+    let edge = |i: usize| match last {
+        Some(last) if i == count => last,
+        _ => first + step * i as f64,
+    };
+    for i in 0..count {
+        intervals.push(PyInterval::new(edge(i), edge(i + 1), Some(closed))?);
     }
     Ok(PyIntervalIndex {
         intervals,
@@ -51727,6 +51793,17 @@ fn flat_droplevel_error() -> PyErr {
     PyErr::new::<pyo3::exceptions::PyValueError, _>(
         "Cannot remove 1 levels from an index with 1 levels: at least one level must be left.",
     )
+}
+
+/// pandas' groupby shift / diff / pct_change read `periods` as a C int:
+/// beyond it is pandas' OverflowError (it panicked sizing a buffer).
+fn require_c_int_periods(periods: i128) -> PyResult<()> {
+    if i32::try_from(periods).is_ok() {
+        return Ok(());
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+        "Python int too large to convert to C int",
+    ))
 }
 
 /// A flat index has only level 0.

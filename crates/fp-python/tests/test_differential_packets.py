@@ -6241,7 +6241,24 @@ _EXTREME_ARGUMENT_CASES = {
     "pct_change of ints by -2**63": lambda m: [None if v != v else v for v in m.Series([1, 2, 3]).pct_change(periods=-(2**63)).tolist()],
     "stack(level=sys.maxsize)": lambda m: m.DataFrame({"a": [1]}).stack(level=2**63 - 1),
     "Index.droplevel(sys.maxsize)": lambda m: m.Index([1, 2]).droplevel(2**63 - 1),
+    # Second sweep: groupby periods sized a per-group buffer ('capacity
+    # overflow'); a window quantile out of [0, 1] indexed past the window (a
+    # panic) or, at 1.5 / -0.5, read a wrong row silently; a huge pad width
+    # aborted the interpreter.
+    **{f"SeriesGroupBy.{op}({n})": (lambda op, n: lambda m: getattr(_keyed_frame(m).groupby("k")["v"], op)(n))(op, n)
+       for op in ["shift", "diff", "pct_change"] for n in [2**63 - 1, 10**18, 2**31]},
+    **{f"DataFrameGroupBy.{op}({n})": (lambda op, n: lambda m: getattr(_keyed_frame(m).groupby("k"), op)(n))(op, n)
+       for op in ["shift", "diff"] for n in [2**63 - 1, 2**31]},
+    "Series.shift(sys.maxsize)": lambda m: [_missing_or(v) for v in m.Series([1.0, 2.0]).shift(2**63 - 1).tolist()],
+    **{f"{kind} quantile({q})": (lambda kind, q: lambda m: getattr(m.Series([1.5, None, 3.0, 4.0]), kind)(*([2] if kind == "rolling" else [])).quantile(q))(kind, q)
+       for kind in ["rolling", "expanding"] for q in [1.5, -0.5, float("inf"), 2**63 - 1]},
+    **{f"str.{method}(sys.maxsize)": (lambda method: lambda m: getattr(m.Series(["ab", None]).str, method)(2**63 - 1))(method)
+       for method in ["center", "ljust", "rjust", "zfill", "pad"]},
 }
+
+
+def _keyed_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "b", "a", "b"], "v": [1, 2, 3, 4]})
 
 
 def _extreme_outcome(m: Any, case: str) -> Any:
@@ -6267,6 +6284,48 @@ def test_extreme_arguments_raise_as_pandas_instead_of_panicking(case: str) -> No
 @pytest.mark.xfail(strict=True, reason="nanosecond-only Timestamp: year 1 is out of bounds (fvsao.35)")
 def test_timestamp_of_year_one_matches_pandas() -> None:
     assert str(fpd.Timestamp("2024-01-01").replace(year=1)) == str(pd.Timestamp("2024-01-01").replace(year=1))
+
+
+def _interval_breaks(index: Any) -> Any:
+    """An IntervalIndex as its edges (floats), side and name - the int64
+    subtype and the edge text are IntervalIndex parity (4qg5w.7)."""
+    return ([(float(i.left), float(i.right)) for i in index], index.closed, index.name)
+
+
+# (4qg5w.13) interval_range took only (start, periods) and (start, end),
+# accumulated `cur += freq`, accepted all four parameters, and looped
+# forever for freq=0 or a negative freq (memory exhausted); a huge count
+# aborted the interpreter.
+_INTERVAL_RANGE_CASES = {
+    "start end": lambda m: _interval_breaks(m.interval_range(0, 5)),
+    "start end freq": lambda m: _interval_breaks(m.interval_range(0, 5, freq=2)),
+    "start end float freq": lambda m: _interval_breaks(m.interval_range(0.0, 1.0, freq=0.25)),
+    "start periods freq": lambda m: _interval_breaks(m.interval_range(start=1, periods=3, freq=2)),
+    "end periods": lambda m: _interval_breaks(m.interval_range(end=10, periods=3)),
+    "end periods freq": lambda m: _interval_breaks(m.interval_range(end=10, periods=3, freq=2.5)),
+    "start end periods": lambda m: _interval_breaks(m.interval_range(0, 1, periods=4)),
+    "closed and name": lambda m: _interval_breaks(m.interval_range(0, 3, closed="left", name="k")),
+    "a negative freq is empty": lambda m: _interval_breaks(m.interval_range(0, 5, freq=-1)),
+    "an end before the start is empty": lambda m: _interval_breaks(m.interval_range(5, 0)),
+    "freq zero raises": lambda m: m.interval_range(0, 5, freq=0),
+    "four parameters raise": lambda m: m.interval_range(0, 5, periods=5, freq=1),
+    "one parameter raises": lambda m: m.interval_range(start=0),
+    "an unknown closed raises": lambda m: m.interval_range(0, 3, closed="bad"),
+    "too many periods raise": lambda m: m.interval_range(start=0, periods=2**62),
+}
+
+
+def _interval_range_outcome(m: Any, case: str) -> Any:
+    try:
+        return _INTERVAL_RANGE_CASES[case](m)
+    except BaseException as e:  # noqa: BLE001 - a panic is a BaseException; its class is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_INTERVAL_RANGE_CASES))
+def test_interval_range_breaks_match_pandas(case: str) -> None:
+    assert _interval_range_outcome(fpd, case) == _interval_range_outcome(pd, case)
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
