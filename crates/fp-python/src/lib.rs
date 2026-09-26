@@ -6308,8 +6308,14 @@ impl PyDatetimeIndex {
                 })
                 .collect::<PyResult<_>>()?
         };
-        // A duration moves every label alike: the freq holds (pandas).
-        let inner = self.with_nanos(moved).inner.with_freq(self.inner.freq());
+        // A duration moves every label alike: a tick freq holds; a calendar
+        // one (ME, W, B) no longer describes the labels (pandas).
+        let freq = self.inner.freq().filter(|freq| {
+            fp_index::split_freq_count(freq).is_some_and(|(_, rule)| {
+                matches!(rule, "D" | "h" | "min" | "s" | "ms" | "us" | "ns")
+            })
+        });
+        let inner = self.with_nanos(moved).inner.with_freq(freq);
         Self { inner }.into_py_any(py)
     }
 
@@ -6778,11 +6784,50 @@ impl PyDatetimeIndex {
         Ok(PyDatetimeIndex { inner: r })
     }
 
-    #[pyo3(signature = (periods=1, freq="D"))]
-    fn shift(&self, periods: i64, freq: &str) -> PyResult<Self> {
-        let freq_nanos = parse_freq_to_nanos(freq)?;
-        let r = self.inner.shift(periods, freq_nanos);
-        Ok(PyDatetimeIndex { inner: r })
+    /// pandas' `shift(periods=1, freq=None)`: every label moved `periods`
+    /// times by `freq`, by default the index's own (pandas'
+    /// NullFrequencyError without one; it shifted by a day whatever the
+    /// index's freq). A tick moves the instants, keeping the index's freq;
+    /// the index's own 'D' on a tz-aware index and a calendar offset move
+    /// the wall clock (a given calendar offset leaves no freq).
+    #[pyo3(signature = (periods=1, freq=None))]
+    fn shift(
+        &self,
+        py: Python<'_>,
+        periods: i64,
+        freq: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let invalid = |freq: &str| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid frequency: {freq}"))
+        };
+        let given = match freq.filter(|freq| !freq.is_none()) {
+            Some(freq) => {
+                let alias = freq_alias(freq, "DatetimeIndex.shift")?;
+                Some(fp_index::canonical_freq(&alias).ok_or_else(|| invalid(&alias))?)
+            }
+            None => None,
+        };
+        let own = given.is_none();
+        let freqstr = match given {
+            Some(freqstr) => freqstr,
+            None => self
+                .inner
+                .freq()
+                .ok_or_else(|| NullFrequencyError::new_err("Cannot shift with no freq"))?,
+        };
+        let (_, rule) = fp_index::split_freq_count(&freqstr).ok_or_else(|| invalid(&freqstr))?;
+        let tick = matches!(rule, "D" | "h" | "min" | "s" | "ms" | "us" | "ns");
+        let absolute = tick && !(own && rule == "D" && self.inner.tz().is_some());
+        let moved = if absolute {
+            self.inner.shift(periods, parse_freq_to_nanos(&freqstr)?)
+        } else {
+            let offset = offset_for_freqstr(&freqstr)?.ok_or_else(|| invalid(&freqstr))?;
+            self.offset_applied(py, &offset, periods)?.inner
+        };
+        let freq = if own || tick { self.inner.freq() } else { None };
+        Ok(PyDatetimeIndex {
+            inner: moved.with_freq(freq),
+        })
     }
 
     #[pyo3(signature = (periods=1))]
@@ -7166,10 +7211,24 @@ impl PyDatetimeIndex {
         Ok(PySeries { inner: s })
     }
 
+    /// Sorted labels; an order already sorted keeps the freq and an exact
+    /// reversal negates it ('-1D'), as pandas (it was dropped).
     #[pyo3(signature = (ascending=true, na_position="last"))]
     fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<Self> {
-        let sorted = sort_nanos_na(&self.inner.asi8(), ascending, na_position)?;
-        Ok(self.with_nanos(sorted))
+        let original = self.inner.asi8();
+        let sorted = sort_nanos_na(&original, ascending, na_position)?;
+        let freq = self.inner.freq().and_then(|freq| {
+            if sorted == original {
+                Some(freq)
+            } else if sorted.iter().eq(original.iter().rev()) {
+                fp_index::scale_freq(&freq, -1)
+            } else {
+                None
+            }
+        });
+        Ok(Self {
+            inner: self.with_nanos(sorted).inner.with_freq(freq),
+        })
     }
 
     fn sort(&self) -> PyResult<Self> {
@@ -54618,7 +54677,10 @@ mod tests {
             assert_eq!(found.0, vec![true, false]);
         });
 
-        let shifted = dti.shift(1, "D").expect("shift"); // ubs:ignore — valid freq
+        let shifted = Python::attach(|py| {
+            let freq = pyo3::types::PyString::new(py, "D");
+            dti.shift(py, 1, Some(freq.as_any())).expect("shift") // ubs:ignore — valid freq
+        });
         assert_eq!(shifted.len(), 2);
         assert_eq!(shifted.asi8()[0], nanos2);
 

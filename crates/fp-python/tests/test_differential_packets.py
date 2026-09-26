@@ -8242,7 +8242,38 @@ _FREQ_CASES = {
     "compare lengths must match": lambda m: _six_days(m) == m.DatetimeIndex(["2024-01-01"]),
     "filter a frame by its index": lambda m: (lambda d: d[d.index >= "2024-01-04"]["v"].tolist())(m.DataFrame({"v": range(6)}, index=_six_days(m))),
     "filter with a callable": lambda m: m.DataFrame({"v": range(6)}, index=_six_days(m))[lambda d: d.index > "2024-01-04"]["v"].tolist(),
+    # shift (it moved every index by a day whatever its freq).
+    "shift by a given tick keeps the freq": lambda m: (lambda r: (r.freqstr, [str(t) for t in r]))(_six_days(m)[:3].shift(1, freq="h")),
+    "shift by a given calendar offset drops it": lambda m: (lambda r: (r.freqstr, [str(t) for t in r]))(_six_days(m)[:3].shift(1, freq="ME")),
+    "shift backwards": lambda m: (lambda r: (r.freqstr, [str(t) for t in r]))(_six_days(m)[:3].shift(-2)),
+    "shift an hourly index by its freq": lambda m: (lambda r: (r.freqstr, [str(t) for t in r]))(m.date_range("2024-03-08", periods=3, freq="h").shift(1)),
+    "shift without a freq raises": lambda m: m.DatetimeIndex(["2024-01-01", "2024-01-05"]).shift(1),
+    "shift without a freq by a given one": lambda m: (lambda r: (r.freqstr, [str(t) for t in r]))(m.DatetimeIndex(["2024-01-01", "2024-01-05"]).shift(1, freq="D")),
+    "shift tz-aware by its hours": lambda m: [str(t) for t in m.date_range("2024-03-10 00:00", periods=3, freq="h", tz="US/Eastern").shift(2)],
+    "minus a Timedelta from month ends drops it": lambda m: _freq_of(m.date_range("2024-01-31", periods=3, freq="ME") - m.Timedelta("1D")),
+    # The bead's probe matrix: each freq naive and tz-aware, as built and
+    # after [::2], [1:], take, sort, shift(1) (the index's own freq) and
+    # + a Timedelta.
+    **{f"{alias} {zone or 'naive'} {step}": (lambda alias, zone, step: lambda m: _freq_step(m, alias, zone, step))(alias, zone, step)
+       for alias in ["h", "12h", "D", "ME", "W-SUN", "B"]
+       for zone in [None, "US/Eastern"]
+       for step in ["built", "[::2]", "[1:]", "take", "sort", "shift(1)", "+ Timedelta"]},
 }
+
+
+def _freq_step(m: Any, alias: str, zone: Any, step: str) -> Any:
+    index = m.date_range("2024-03-08", periods=5, freq=alias, tz=zone)
+    if step == "built":
+        return (_freq_of(index), index.inferred_freq, repr(index))
+    moved = {
+        "[::2]": lambda: index[::2],
+        "[1:]": lambda: index[1:],
+        "take": lambda: index.take([0, 2, 3]),
+        "sort": lambda: index.sort_values(ascending=False),
+        "shift(1)": lambda: index.shift(1),
+        "+ Timedelta": lambda: index + m.Timedelta("1h"),
+    }[step]()
+    return (_freq_of(moved), [str(t) for t in moved])
 
 
 def _freq_case_outcome(m: Any, case: str) -> Any:
