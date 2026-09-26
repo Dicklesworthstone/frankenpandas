@@ -4018,6 +4018,31 @@ def test_array_like_column_values_match_pandas(path: str) -> None:
         assert [str(v) for v in got.index] == [str(v) for v in want.index], name
 
 
+# fvsao.15's probe (probe_dt_ctor.py) cases the path x value matrix above
+# does not reach.
+def _dt_column_converted_in_place(m: Any) -> Any:
+    df = m.DataFrame({"s": ["2020-01-05", "2020-01-02"]})
+    df["d"] = m.to_datetime(df["s"])
+    return df["d"]
+
+
+_DT_COLUMN_EXTRA = {
+    "Series([Timestamp])": lambda m: m.Series([m.Timestamp("2020-01-05"), m.Timestamp("2020-01-02")]),
+    "Series(str, dtype=M8)": lambda m: m.Series(["2020-01-05", "2020-01-02"], dtype="datetime64[ns]"),
+    "to_datetime(Series)": lambda m: m.to_datetime(m.Series(["2020-01-05", "2020-01-02"])),
+    "df[col]=to_datetime(Series)": _dt_column_converted_in_place,
+    "int list stays int64": lambda m: m.Series([1, 2]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", sorted(_DT_COLUMN_EXTRA))
+def test_datetime_column_constructors_match_pandas(case: str) -> None:
+    got, want = (_DT_COLUMN_EXTRA[case](m) for m in (fpd, pd))
+    assert str(got.dtype) == str(want.dtype), case
+    assert [str(v) for v in got.tolist()] == [str(v) for v in want.tolist()], case
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_array_like_column_refusals_match_pandas() -> None:
     # fvsao.15 negatives: what pandas refuses stays refused, and a list of
