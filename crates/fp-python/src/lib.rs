@@ -1279,69 +1279,105 @@ pub struct PyTimedelta {
 
 #[pymethods]
 impl PyTimedelta {
+    /// pandas' `Timedelta(value, unit=, **components)`: a string, int or
+    /// float (in `unit`, rounded to whole nanoseconds; NaN is NaT), another
+    /// Timedelta, a `datetime.timedelta` or numpy timedelta64, or the
+    /// weeks..nanoseconds keywords (floats allowed). A `datetime.timedelta`
+    /// and a float became 0 days; any other value now raises, as pandas.
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        if args.len() == 1 {
-            let arg = args.get_item(0)?;
-            if let Ok(td) = arg.extract::<PyRef<'_, PyTimedelta>>() {
-                return Ok(PyTimedelta { nanos: td.nanos });
+        let mut value = args.iter().next();
+        let mut unit = None;
+        let mut components = Vec::new();
+        for (key, item) in kwargs.into_iter().flat_map(|kwargs| kwargs.iter()) {
+            match key.extract::<String>()?.as_str() {
+                "value" => value = Some(item),
+                "unit" => unit = Some(item.extract::<String>()?),
+                name => {
+                    let scale = match name {
+                        "weeks" => 7 * 86_400_000_000_000_i64,
+                        "days" => 86_400_000_000_000,
+                        "hours" => 3_600_000_000_000,
+                        "minutes" => 60_000_000_000,
+                        "seconds" => 1_000_000_000,
+                        "milliseconds" => 1_000_000,
+                        "microseconds" => 1_000,
+                        "nanoseconds" => 1,
+                        _ => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "cannot construct a Timedelta from the passed arguments, allowed keywords are [weeks, days, hours, minutes, seconds, milliseconds, microseconds, nanoseconds]",
+                            ));
+                        }
+                    };
+                    components.push((item, scale));
+                }
             }
-            if let Ok(s) = arg.extract::<String>() {
-                let nanos = Timedelta::parse(&s)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyTimedelta { nanos });
-            }
-            if let Ok(val) = arg.extract::<i64>() {
-                let unit = kwargs
-                    .and_then(|kw| kw.get_item("unit").ok().flatten())
-                    .and_then(|u| u.extract::<String>().ok());
-                let mult = match unit.as_deref() {
-                    Some("D" | "d" | "days" | "day") => 86_400_000_000_000_i64,
-                    Some("h" | "H" | "hours" | "hour") => 3_600_000_000_000_i64,
-                    Some("m" | "min" | "minutes" | "minute") => 60_000_000_000_i64,
-                    Some("s" | "S" | "seconds" | "second") => 1_000_000_000_i64,
-                    Some("ms" | "L" | "milliseconds" | "millisecond") => 1_000_000_i64,
-                    Some("us" | "U" | "microseconds" | "microsecond") => 1_000_i64,
-                    Some("ns" | "N" | "nanoseconds" | "nanosecond") | None => 1_i64,
-                    Some(other) => {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Invalid unit: {other}"
+        }
+        let Some(value) = value else {
+            let mut total = 0_i64;
+            for (item, scale) in components {
+                let nanos = match number_operand(&item) {
+                    Some(Number::Int(count)) => {
+                        count.checked_mul(scale).ok_or_else(duration_overflow)?
+                    }
+                    Some(Number::Float(count)) => float_nanos((count * scale as f64).round())?,
+                    None => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "unsupported type for timedelta component: {}",
+                            item.get_type().name()?
                         )));
                     }
                 };
-                return Ok(PyTimedelta { nanos: val * mult });
+                total = duration_sum(total, nanos)?;
             }
+            return Ok(PyTimedelta { nanos: total });
+        };
+        if value.is_none() {
+            return Ok(PyTimedelta {
+                nanos: Timedelta::NAT,
+            });
         }
-        if let Some(kw) = kwargs {
-            let mut total_nanos = 0_i64;
-            if let Some(v) = kw.get_item("days")? {
-                total_nanos += v.extract::<i64>()? * 86_400_000_000_000;
+        if let Ok(text) = value.extract::<String>() {
+            if unit.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "unit must not be specified if the value is a str",
+                ));
             }
-            if let Some(v) = kw.get_item("weeks")? {
-                total_nanos += v.extract::<i64>()? * 7 * 86_400_000_000_000;
-            }
-            if let Some(v) = kw.get_item("hours")? {
-                total_nanos += v.extract::<i64>()? * 3_600_000_000_000;
-            }
-            if let Some(v) = kw.get_item("minutes")? {
-                total_nanos += v.extract::<i64>()? * 60_000_000_000;
-            }
-            if let Some(v) = kw.get_item("seconds")? {
-                total_nanos += v.extract::<i64>()? * 1_000_000_000;
-            }
-            if let Some(v) = kw.get_item("milliseconds")? {
-                total_nanos += v.extract::<i64>()? * 1_000_000;
-            }
-            if let Some(v) = kw.get_item("microseconds")? {
-                total_nanos += v.extract::<i64>()? * 1_000;
-            }
-            if let Some(v) = kw.get_item("nanoseconds")? {
-                total_nanos += v.extract::<i64>()?;
-            }
-            return Ok(PyTimedelta { nanos: total_nanos });
+            let nanos = Timedelta::parse(&text)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            return Ok(PyTimedelta { nanos });
         }
-        Ok(PyTimedelta { nanos: 0 })
+        if let Some(nanos) = duration_operand(&value)? {
+            return Ok(PyTimedelta { nanos });
+        }
+        let scale = match unit.as_deref() {
+            Some("W" | "w" | "weeks" | "week") => 7 * 86_400_000_000_000_i64,
+            Some("D" | "d" | "days" | "day") => 86_400_000_000_000_i64,
+            Some("h" | "H" | "hours" | "hour" | "hr") => 3_600_000_000_000_i64,
+            Some("m" | "min" | "minutes" | "minute" | "T") => 60_000_000_000_i64,
+            Some("s" | "S" | "seconds" | "second" | "sec") => 1_000_000_000_i64,
+            Some("ms" | "L" | "milliseconds" | "millisecond" | "milli" | "millis") => 1_000_000_i64,
+            Some("us" | "U" | "microseconds" | "microsecond" | "micro" | "micros") => 1_000_i64,
+            Some("ns" | "N" | "nanoseconds" | "nanosecond" | "nano" | "nanos") | None => 1_i64,
+            Some(other) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "invalid unit abbreviation: {other}"
+                )));
+            }
+        };
+        match number_operand(&value) {
+            Some(Number::Int(count)) => Ok(PyTimedelta {
+                nanos: count.checked_mul(scale).ok_or_else(duration_overflow)?,
+            }),
+            Some(Number::Float(count)) => Ok(PyTimedelta {
+                nanos: float_nanos((count * scale as f64).round())?,
+            }),
+            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Value must be Timedelta, string, integer, float, timedelta or convertible, not {}",
+                value.get_type().name()?
+            ))),
+        }
     }
 
     #[getter]
@@ -1389,12 +1425,19 @@ impl PyTimedelta {
         self.nanos as f64 / 1_000_000_000.0
     }
 
+    /// pandas' ISO 8601 duration from the components ('P1DT2H3M4.5S',
+    /// 'P-1DT23H0M0S'; it printed the repr text).
     fn isoformat(&self) -> String {
         if self.nanos == Timedelta::NAT {
-            "NaT".to_string()
-        } else {
-            Timedelta::format(self.nanos)
+            return "NaT".to_string();
         }
+        let c = Timedelta::components(self.nanos);
+        let seconds = format!(
+            "{}.{:03}{:03}{:03}",
+            c.seconds, c.milliseconds, c.microseconds, c.nanoseconds
+        );
+        let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
+        format!("P{}DT{}H{}M{seconds}S", c.days, c.hours, c.minutes)
     }
 
     #[classattr]
@@ -1425,8 +1468,14 @@ impl PyTimedelta {
         }
     }
 
-    fn __hash__(&self) -> isize {
-        self.nanos as isize
+    /// pandas' hash: the equal `datetime.timedelta`'s when the duration is
+    /// whole microseconds (so either finds the other in a dict), else the
+    /// nanoseconds'.
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        if self.nanos != Timedelta::NAT && self.nanos.rem_euclid(1_000) == 0 {
+            return py_delta_of_micros(py, self.nanos / 1_000)?.hash();
+        }
+        self.nanos.into_pyobject(py)?.hash()
     }
 
     fn __richcmp__(
@@ -1514,71 +1563,459 @@ impl PyTimedelta {
         }
     }
 
+    /// `+` a duration (Timedelta, `datetime.timedelta`, numpy timedelta64,
+    /// NaT), a Timestamp or a `datetime.datetime` (a Timestamp, its zone
+    /// kept). Anything else is NotImplemented (Python's TypeError). A
+    /// `datetime.timedelta` / datetime was refused.
     fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
-            PyTimedelta {
-                nanos: self.nanos.saturating_add(td.nanos),
+        if let Some(nanos) = duration_operand(other)? {
+            return duration_object(py, duration_sum(self.nanos, nanos)?);
+        }
+        let instant = if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            ts.inner.clone()
+        } else if let Ok(dt) = other.cast::<PyDateTime>() {
+            Timestamp {
+                nanos: py_datetime_nanos(dt)?,
+                tz: py_datetime_zone(dt)?,
             }
-            .into_py_any(py)
-        } else if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
-            let res = ts.inner.add_timedelta(self.nanos);
-            PyTimestamp { inner: res }.into_py_any(py)
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Can only add Timedelta or Timestamp to Timedelta",
-            ))
+            return Ok(py.NotImplemented());
+        };
+        if self.nanos == Timedelta::NAT || instant.is_nat() {
+            return Ok(Py::new(py, PyNaTType)?.into_any());
+        }
+        PyTimestamp {
+            inner: instant.add_timedelta(self.nanos),
+        }
+        .into_py_any(py)
+    }
+
+    /// `duration + Timedelta`, and `datetime.datetime + Timedelta`, which
+    /// is a `datetime.datetime` as pandas' (the nanoseconds dropped).
+    fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Some(nanos) = duration_operand(other)? {
+            return duration_object(py, duration_sum(nanos, self.nanos)?);
+        }
+        match other.cast::<PyDateTime>() {
+            Ok(dt) => self.shift_datetime(py, dt, 1),
+            Err(_) => Ok(py.NotImplemented()),
         }
     }
 
     fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
-            PyTimedelta {
-                nanos: self.nanos.saturating_sub(td.nanos),
-            }
-            .into_py_any(py)
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Can only subtract Timedelta from Timedelta",
-            ))
+        match duration_operand(other)? {
+            Some(nanos) => duration_object(py, duration_sum(self.nanos, duration_neg(nanos)?)?),
+            None => Ok(py.NotImplemented()),
         }
     }
 
-    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTimedelta> {
-        if let Ok(i) = other.extract::<i64>() {
-            Ok(PyTimedelta {
-                nanos: self.nanos.saturating_mul(i),
-            })
-        } else if let Ok(f) = other.extract::<f64>() {
-            Ok(PyTimedelta {
-                nanos: (self.nanos as f64 * f) as i64,
-            })
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Cannot multiply Timedelta by non-numeric",
-            ))
+    /// `duration - Timedelta`, and `datetime.datetime - Timedelta` (a
+    /// `datetime.datetime`, as pandas').
+    fn __rsub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Some(nanos) = duration_operand(other)? {
+            return duration_object(py, duration_sum(nanos, duration_neg(self.nanos)?)?);
+        }
+        match other.cast::<PyDateTime>() {
+            Ok(dt) => self.shift_datetime(py, dt, -1),
+            Err(_) => Ok(py.NotImplemented()),
         }
     }
 
+    /// `*` an int or float (truncated to whole nanoseconds, as pandas; NaN
+    /// is NaT); a bool or anything else is NotImplemented.
+    fn __mul__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        let Some(factor) = number_operand(other) else {
+            return Ok(py.NotImplemented());
+        };
+        if self.nanos == Timedelta::NAT {
+            return duration_object(py, Timedelta::NAT);
+        }
+        let nanos = match factor {
+            Number::Int(factor) => self
+                .nanos
+                .checked_mul(factor)
+                .ok_or_else(duration_overflow)?,
+            Number::Float(factor) => float_nanos(self.nanos as f64 * factor)?,
+        };
+        duration_object(py, nanos)
+    }
+
+    fn __rmul__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        self.__mul__(py, other)
+    }
+
+    /// `/` a duration (a float; NaN when either is NaT) or a number (a
+    /// Timedelta truncated to whole nanoseconds, NaN divisor NaT). Dividing
+    /// by zero is ZeroDivisionError (an int zero PANICKED).
     fn __truediv__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
-            let ratio = self.nanos as f64 / td.nanos as f64;
-            ratio.into_py_any(py)
-        } else if let Ok(i) = other.extract::<i64>() {
-            PyTimedelta {
-                nanos: self.nanos / i,
-            }
-            .into_py_any(py)
-        } else if let Ok(f) = other.extract::<f64>() {
-            PyTimedelta {
-                nanos: (self.nanos as f64 / f) as i64,
-            }
-            .into_py_any(py)
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Cannot divide Timedelta by non-numeric/non-timedelta",
-            ))
+        if let Some(nanos) = duration_operand(other)? {
+            return duration_ratio(self.nanos, nanos)?.into_py_any(py);
+        }
+        let Some(divisor) = number_operand(other) else {
+            return Ok(py.NotImplemented());
+        };
+        if divisor.is_zero() {
+            return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                "division by zero",
+            ));
+        }
+        if self.nanos == Timedelta::NAT {
+            return duration_object(py, Timedelta::NAT);
+        }
+        duration_object(py, float_nanos(self.nanos as f64 / divisor.as_f64())?)
+    }
+
+    fn __rtruediv__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        match duration_operand(other)? {
+            Some(nanos) => duration_ratio(nanos, self.nanos)?.into_py_any(py),
+            None => Ok(py.NotImplemented()),
         }
     }
+
+    /// `//` a duration (the floored int count; NaN with NaT) or a number
+    /// (a floored Timedelta). Dividing by zero is ZeroDivisionError. It was
+    /// missing.
+    fn __floordiv__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Some(nanos) = duration_operand(other)? {
+            return match duration_floor_div(self.nanos, nanos)? {
+                Some(count) => count.into_py_any(py),
+                None => f64::NAN.into_py_any(py),
+            };
+        }
+        let Some(divisor) = number_operand(other) else {
+            return Ok(py.NotImplemented());
+        };
+        if divisor.is_zero() {
+            return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                "integer division or modulo by zero",
+            ));
+        }
+        if self.nanos == Timedelta::NAT {
+            return duration_object(py, Timedelta::NAT);
+        }
+        let nanos = match divisor {
+            Number::Int(divisor) => floor_div(self.nanos, divisor),
+            Number::Float(divisor) => float_nanos((self.nanos as f64 / divisor).floor())?,
+        };
+        duration_object(py, nanos)
+    }
+
+    fn __rfloordiv__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(nanos) = duration_operand(other)? else {
+            return Ok(py.NotImplemented());
+        };
+        match duration_floor_div(nanos, self.nanos)? {
+            Some(count) => count.into_py_any(py),
+            None => f64::NAN.into_py_any(py),
+        }
+    }
+
+    /// `%` a duration or an int: Python's floored remainder, as a
+    /// Timedelta. It was missing.
+    fn __mod__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        let divisor = match duration_operand(other)? {
+            Some(nanos) => nanos,
+            None => match number_operand(other) {
+                Some(Number::Int(divisor)) => divisor,
+                _ => return Ok(py.NotImplemented()),
+            },
+        };
+        if divisor == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                "integer division or modulo by zero",
+            ));
+        }
+        if self.nanos == Timedelta::NAT || divisor == Timedelta::NAT {
+            return duration_object(py, Timedelta::NAT);
+        }
+        duration_object(py, self.nanos - floor_div(self.nanos, divisor) * divisor)
+    }
+
+    /// `divmod(Timedelta, duration)`: the floored count and the remainder.
+    fn __divmod__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if duration_operand(other)?.is_none() {
+            return Ok(py.NotImplemented());
+        }
+        let quotient = self.__floordiv__(py, other)?;
+        let remainder = self.__mod__(py, other)?;
+        Ok(PyTuple::new(py, [quotient, remainder])?.into_any().unbind())
+    }
+
+    fn __neg__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        duration_object(py, duration_neg(self.nanos)?)
+    }
+
+    fn __pos__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        duration_object(py, self.nanos)
+    }
+
+    fn __abs__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.nanos < 0 {
+            return duration_object(py, duration_neg(self.nanos)?);
+        }
+        duration_object(py, self.nanos)
+    }
+
+    fn __bool__(&self) -> bool {
+        self.nanos != 0
+    }
+
+    /// The `datetime.timedelta` of this duration (Python's microseconds,
+    /// the nanoseconds rounded half to even as pandas'); NaT for NaT. It
+    /// was missing.
+    fn to_pytimedelta(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.nanos == Timedelta::NAT {
+            return Ok(Py::new(py, PyNaTType)?.into_any());
+        }
+        let (whole, rest) = (self.nanos.div_euclid(1_000), self.nanos.rem_euclid(1_000));
+        let micros = if rest > 500 || (rest == 500 && whole % 2 != 0) {
+            whole + 1
+        } else {
+            whole
+        };
+        py_delta_of_micros(py, micros).map(|delta| delta.into_any().unbind())
+    }
+
+    /// numpy's `timedelta64[ns]` of this duration (it was missing).
+    fn to_timedelta64(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        if self.nanos == Timedelta::NAT {
+            return Ok(numpy.call_method1("timedelta64", ("NaT", "ns"))?.unbind());
+        }
+        Ok(numpy
+            .call_method1("timedelta64", (self.nanos, "ns"))?
+            .unbind())
+    }
+
+    fn to_numpy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.to_timedelta64(py)
+    }
+
+    /// The nearest multiple of the fixed `freq` (ties to even, as pandas);
+    /// a calendar frequency is pandas' ValueError. round / floor / ceil
+    /// were missing.
+    fn round(&self, py: Python<'_>, freq: &str) -> PyResult<Py<PyAny>> {
+        let step = duration_step(freq)?;
+        if self.nanos == Timedelta::NAT {
+            return duration_object(py, Timedelta::NAT);
+        }
+        let low = floor_div(self.nanos, step);
+        let rest = self.nanos - low * step;
+        let up = match (rest * 2).cmp(&step) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => low % 2 != 0,
+            std::cmp::Ordering::Less => false,
+        };
+        let multiple = if up { low + 1 } else { low };
+        duration_object(
+            py,
+            multiple.checked_mul(step).ok_or_else(duration_overflow)?,
+        )
+    }
+
+    fn floor(&self, py: Python<'_>, freq: &str) -> PyResult<Py<PyAny>> {
+        let step = duration_step(freq)?;
+        if self.nanos == Timedelta::NAT {
+            return duration_object(py, Timedelta::NAT);
+        }
+        duration_object(py, floor_div(self.nanos, step) * step)
+    }
+
+    fn ceil(&self, py: Python<'_>, freq: &str) -> PyResult<Py<PyAny>> {
+        let step = duration_step(freq)?;
+        if self.nanos == Timedelta::NAT {
+            return duration_object(py, Timedelta::NAT);
+        }
+        let multiple = -floor_div(-self.nanos, step);
+        duration_object(
+            py,
+            multiple.checked_mul(step).ok_or_else(duration_overflow)?,
+        )
+    }
+}
+
+/// A fixed frequency's length for Timedelta rounding: a calendar one is
+/// pandas' ValueError, a zero one ZeroDivisionError.
+fn duration_step(freq: &str) -> PyResult<i64> {
+    let step = parse_freq_to_nanos(freq).map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{freq} is a non-fixed frequency"))
+    })?;
+    if step == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+            "integer division or modulo by zero",
+        ));
+    }
+    Ok(step)
+}
+
+impl PyTimedelta {
+    /// `dt` moved by this duration (`sign` 1 or -1) as Python's datetime
+    /// arithmetic moves it (whole microseconds, its tzinfo kept); NaT for
+    /// NaT.
+    fn shift_datetime(
+        &self,
+        py: Python<'_>,
+        dt: &Bound<'_, PyDateTime>,
+        sign: i64,
+    ) -> PyResult<Py<PyAny>> {
+        if self.nanos == Timedelta::NAT {
+            return Ok(Py::new(py, PyNaTType)?.into_any());
+        }
+        let delta = py_delta_of_micros(py, self.nanos.div_euclid(1_000))?;
+        let method = if sign < 0 { "__sub__" } else { "__add__" };
+        Ok(dt.call_method1(method, (delta,))?.unbind())
+    }
+}
+
+/// A duration operand as pandas' Timedelta arithmetic takes it - a
+/// Timedelta, a `datetime.timedelta`, a numpy timedelta64 or NaT (as
+/// `Timedelta::NAT`); None for anything else.
+fn duration_operand(other: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
+    if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+        return Ok(Some(td.nanos));
+    }
+    if other.is_instance_of::<PyNaTType>() {
+        return Ok(Some(Timedelta::NAT));
+    }
+    if let Ok(delta) = other.cast::<PyDelta>() {
+        return Ok(Some(py_delta_nanos(delta)));
+    }
+    if other.get_type().name()?.to_cow()? == "timedelta64" {
+        let nanos = other
+            .call_method1("astype", ("timedelta64[ns]",))?
+            .call_method1("astype", ("int64",))?
+            .extract::<i64>()?;
+        return Ok(Some(nanos));
+    }
+    Ok(None)
+}
+
+/// A number operand of Timedelta `*` / `/` / `//` (a bool is not one, as
+/// pandas).
+enum Number {
+    Int(i64),
+    Float(f64),
+}
+
+impl Number {
+    fn is_zero(&self) -> bool {
+        match self {
+            Self::Int(value) => *value == 0,
+            Self::Float(value) => value.classify() == std::num::FpCategory::Zero,
+        }
+    }
+
+    fn as_f64(&self) -> f64 {
+        match self {
+            Self::Int(value) => *value as f64,
+            Self::Float(value) => *value,
+        }
+    }
+}
+
+fn number_operand(other: &Bound<'_, PyAny>) -> Option<Number> {
+    if other.is_instance_of::<pyo3::types::PyBool>() {
+        return None;
+    }
+    if let Ok(value) = other.extract::<i64>() {
+        return Some(Number::Int(value));
+    }
+    other.extract::<f64>().ok().map(Number::Float)
+}
+
+/// A duration result as pandas returns it: NaT for a missing one.
+fn duration_object(py: Python<'_>, nanos: i64) -> PyResult<Py<PyAny>> {
+    if nanos == Timedelta::NAT {
+        return Ok(Py::new(py, PyNaTType)?.into_any());
+    }
+    PyTimedelta { nanos }.into_py_any(py)
+}
+
+fn duration_overflow() -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Python int too large to convert to C long")
+}
+
+/// `a + b` for durations: NaT when either is, OverflowError past the
+/// nanosecond range (it saturated).
+fn duration_sum(a: i64, b: i64) -> PyResult<i64> {
+    if a == Timedelta::NAT || b == Timedelta::NAT {
+        return Ok(Timedelta::NAT);
+    }
+    match a.checked_add(b) {
+        Some(Timedelta::NAT) | None => Err(duration_overflow()),
+        Some(sum) => Ok(sum),
+    }
+}
+
+fn duration_neg(nanos: i64) -> PyResult<i64> {
+    if nanos == Timedelta::NAT {
+        return Ok(Timedelta::NAT);
+    }
+    nanos.checked_neg().ok_or_else(duration_overflow)
+}
+
+/// A float count of nanoseconds truncated as pandas truncates it; NaN is
+/// NaT.
+fn float_nanos(value: f64) -> PyResult<i64> {
+    if value.is_nan() {
+        return Ok(Timedelta::NAT);
+    }
+    if !(value > i64::MIN as f64 && value < i64::MAX as f64) {
+        return Err(duration_overflow());
+    }
+    Ok(value as i64)
+}
+
+/// `a / b` for durations: NaN when either is NaT; a zero divisor is
+/// ZeroDivisionError.
+fn duration_ratio(a: i64, b: i64) -> PyResult<f64> {
+    if a == Timedelta::NAT || b == Timedelta::NAT {
+        return Ok(f64::NAN);
+    }
+    if b == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+            "float division by zero",
+        ));
+    }
+    Ok(a as f64 / b as f64)
+}
+
+/// `a // b` for durations (floored, as Python's); None when either is NaT;
+/// a zero divisor is ZeroDivisionError.
+fn duration_floor_div(a: i64, b: i64) -> PyResult<Option<i64>> {
+    if a == Timedelta::NAT || b == Timedelta::NAT {
+        return Ok(None);
+    }
+    if b == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+            "integer division or modulo by zero",
+        ));
+    }
+    Ok(Some(floor_div(a, b)))
+}
+
+/// Python's floored integer division (`b` nonzero).
+fn floor_div(a: i64, b: i64) -> i64 {
+    let quotient = a.wrapping_div(b);
+    if a.wrapping_rem(b) != 0 && ((a < 0) != (b < 0)) {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+/// A `datetime.timedelta` of `micros` microseconds.
+fn py_delta_of_micros(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyDelta>> {
+    const DAY: i64 = 86_400_000_000;
+    let days = i32::try_from(micros.div_euclid(DAY)).map_err(|_| duration_overflow())?;
+    let rest = micros.rem_euclid(DAY);
+    let seconds = i32::try_from(rest / 1_000_000).unwrap_or(0);
+    let micros = i32::try_from(rest % 1_000_000).unwrap_or(0);
+    PyDelta::new(py, days, seconds, micros, true)
 }
 
 /// Instant representation (pandas `pd.Timestamp`).
@@ -1623,7 +2060,73 @@ fn tz_error_to_py(py: Python<'_>, err: fp_types::TimeZoneError) -> PyErr {
     }
 }
 
+/// The tzinfo pandas 2.2 gives a zone: `datetime.timezone.utc` for UTC, a
+/// fixed `datetime.timezone` for an offset, else pytz's zone (zoneinfo's
+/// when pytz is absent).
+fn zone_tzinfo<'py>(py: Python<'py>, zone: &str) -> PyResult<Bound<'py, PyAny>> {
+    let timezone = py.import("datetime")?.getattr("timezone")?;
+    if zone == "UTC" {
+        return timezone.getattr("utc");
+    }
+    if zone.starts_with("UTC+") || zone.starts_with("UTC-") {
+        let seconds =
+            fp_types::tz_offset_seconds(zone, 0).map_err(|err| tz_error_to_py(py, err))?;
+        return timezone.call1((PyDelta::new(py, 0, seconds, 0, true)?,));
+    }
+    match py.import("pytz") {
+        Ok(pytz) => pytz.call_method1("timezone", (zone,)),
+        Err(_) => py.import("zoneinfo")?.call_method1("ZoneInfo", (zone,)),
+    }
+}
+
 impl PyTimestamp {
+    /// This instant as a `datetime.datetime` - a tz-aware one's in its zone
+    /// with the tzinfo pandas gives it (see [`zone_tzinfo`]); None for NaT.
+    fn py_datetime<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let Some(zone) = &self.inner.tz else {
+            return Ok(self.datetime_object(py)?.map(Bound::into_any));
+        };
+        let utc = PyTimestamp {
+            inner: Timestamp::from_nanos(self.inner.nanos),
+        };
+        let Some((year, month, day, hour, minute, second, micro)) = utc.civil_fields() else {
+            return Ok(None);
+        };
+        let datetime = py.import("datetime")?;
+        let utc_zone = datetime.getattr("timezone")?.getattr("utc")?;
+        let instant = datetime
+            .getattr("datetime")?
+            .call1((year, month, day, hour, minute, second, micro, utc_zone))?;
+        instant
+            .call_method1("astimezone", (zone_tzinfo(py, zone)?,))
+            .map(Some)
+    }
+
+    /// This instant moved by `nanos` (its zone kept); NaT when either is,
+    /// pandas' OutOfBoundsDatetime past the nanosecond range (it was a
+    /// silent NaT).
+    fn shifted(&self, py: Python<'_>, nanos: i64) -> PyResult<Py<PyAny>> {
+        if nanos == Timedelta::NAT || self.inner.is_nat() {
+            return Ok(Py::new(py, PyNaTType)?.into_any());
+        }
+        let inner = self.inner.try_add_timedelta(nanos).map_err(|_| {
+            OutOfBoundsDatetime::new_err(format!(
+                "Out of bounds nanosecond timestamp: {}",
+                i128::from(self.inner.nanos) + i128::from(nanos)
+            ))
+        })?;
+        PyTimestamp { inner }.into_py_any(py)
+    }
+
+    /// pandas' refusal to mix tz-naive and tz-aware instants in `-`.
+    fn require_same_awareness(&self, other_zone: Option<&str>, other_nat: bool) -> PyResult<()> {
+        if self.inner.is_nat() || other_nat || self.inner.tz.is_some() == other_zone.is_some() {
+            return Ok(());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Cannot subtract tz-naive and tz-aware datetime-like objects.",
+        ))
+    }
     /// The UTC offset, in seconds, of a tz-aware Timestamp's zone at its
     /// instant; 0 for a naive one or NaT.
     fn utc_offset_seconds(&self) -> i32 {
@@ -2032,8 +2535,18 @@ impl PyTimestamp {
         )
     }
 
-    /// A `datetime.datetime`, warning as pandas when nonzero nanoseconds
-    /// are dropped; NaT for NaT.
+    /// The wall-clock time with the zone's tzinfo (`time()` for a naive
+    /// Timestamp); NaT for NaT. It was missing.
+    fn timetz(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.py_datetime(py)? {
+            Some(dt) => Ok(dt.call_method0("timetz")?.unbind()),
+            None => Ok(Py::new(py, PyNaTType)?.into_any()),
+        }
+    }
+
+    /// A `datetime.datetime` - a tz-aware one in its zone (it dropped the
+    /// zone) - warning as pandas when nonzero nanoseconds are dropped; NaT
+    /// for NaT.
     #[pyo3(signature = (warn=true))]
     fn to_pydatetime(&self, py: Python<'_>, warn: bool) -> PyResult<Py<PyAny>> {
         if warn && self.civil_fields().is_some() && self.inner.nanos.rem_euclid(1_000) != 0 {
@@ -2044,18 +2557,41 @@ impl PyTimestamp {
                 1,
             )?;
         }
-        match self.datetime_object(py)? {
-            Some(dt) => Ok(dt.into_any().unbind()),
+        match self.py_datetime(py)? {
+            Some(dt) => Ok(dt.unbind()),
             None => Ok(Py::new(py, PyNaTType)?.into_any()),
+        }
+    }
+
+    /// numpy's `datetime64[ns]` of the instant (UTC for a tz-aware one, as
+    /// numpy has no zones). It was missing.
+    fn to_datetime64(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        if self.inner.is_nat() {
+            return Ok(numpy.call_method1("datetime64", ("NaT", "ns"))?.unbind());
+        }
+        Ok(numpy
+            .call_method1("datetime64", (self.inner.nanos, "ns"))?
+            .unbind())
+    }
+
+    /// Python's `ctime` of the wall clock (it was missing).
+    fn ctime(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.datetime_object(py)? {
+            Some(dt) => Ok(dt.call_method0("ctime")?.unbind()),
+            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "NaTType does not support ctime",
+            )),
         }
     }
 
     /// pandas' `Timestamp.replace`: the given fields replaced, each checked
     /// by Python's datetime (pandas' own messages, "month must be in
-    /// 1..12"); `nanosecond` replaces the sub-microsecond part. A zone
-    /// (`tzinfo=`) is not supported yet.
+    /// 1..12"); `nanosecond` replaces the sub-microsecond part. The fields
+    /// are the wall clock; `tzinfo=` puts that wall clock in another zone
+    /// (None: naive), as pandas (it was refused).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (year=None, month=None, day=None, hour=None, minute=None, second=None, microsecond=None, nanosecond=None, tzinfo=None, fold=None))]
+    #[pyo3(signature = (year=None, month=None, day=None, hour=None, minute=None, second=None, microsecond=None, nanosecond=None, **kwargs))]
     fn replace(
         &self,
         py: Python<'_>,
@@ -2067,13 +2603,23 @@ impl PyTimestamp {
         second: Option<u8>,
         microsecond: Option<u32>,
         nanosecond: Option<i64>,
-        tzinfo: Option<&Bound<'_, PyAny>>,
-        fold: Option<i64>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        if tzinfo.is_some_and(|tz| !tz.is_none()) {
-            return Err(not_implemented("Timestamp.replace(tzinfo=...)"));
+        // `tzinfo=None` removes the zone, so a given None differs from an
+        // absent tzinfo; `fold` only disambiguates a repeated wall time.
+        let mut zone = self.inner.tz.clone();
+        for (key, value) in kwargs.into_iter().flat_map(|kwargs| kwargs.iter()) {
+            match key.extract::<String>()?.as_str() {
+                "tzinfo" if value.is_none() => zone = None,
+                "tzinfo" => zone = Some(tz_name(&value)?),
+                "fold" => {}
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "replace() got an unexpected keyword argument '{other}'"
+                    )));
+                }
+            }
         }
-        let _ = fold; // only disambiguates a zone's repeated wall time
         let Some((y, mo, d, h, mi, s, us)) = self.civil_fields() else {
             return Ok(self.clone());
         };
@@ -2098,8 +2644,8 @@ impl PyTimestamp {
             inner: Timestamp::from_nanos(py_datetime_nanos(&dt)? + nanosecond),
         };
         // A tz-aware Timestamp's fields are its wall clock; the result keeps
-        // the zone.
-        match &self.inner.tz {
+        // the zone (or takes tzinfo=).
+        match &zone {
             Some(zone) => wall.localized(Some(zone)),
             None => Ok(wall),
         }
@@ -2426,51 +2972,45 @@ impl PyTimestamp {
     /// is NotImplemented, so the other operand's reflected op runs (it
     /// raised before `Series.__radd__` could).
     fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
-            let res = self.inner.add_timedelta(td.nanos);
-            PyTimestamp { inner: res }.into_py_any(py)
-        } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
-            self.offset_shift(py, &offset, 1)?.into_py_any(py)
-        } else if let Ok(delta) = other.cast::<PyDelta>() {
-            let res = self.inner.add_timedelta(py_delta_nanos(delta));
-            PyTimestamp { inner: res }.into_py_any(py)
-        } else {
-            Ok(py.NotImplemented())
+        if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
+            return self.offset_shift(py, &offset, 1)?.into_py_any(py);
+        }
+        match duration_operand(other)? {
+            Some(nanos) => self.shifted(py, nanos),
+            None => Ok(py.NotImplemented()),
         }
     }
 
-    /// `datetime.timedelta + Timestamp`.
+    /// `duration + Timestamp`.
     fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        match other.cast::<PyDelta>() {
-            Ok(delta) => PyTimestamp {
-                inner: self.inner.add_timedelta(py_delta_nanos(delta)),
-            }
-            .into_py_any(py),
-            Err(_) => Ok(py.NotImplemented()),
+        match duration_operand(other)? {
+            Some(nanos) => self.shifted(py, nanos),
+            None => Ok(py.NotImplemented()),
         }
     }
 
-    /// `-` a Timedelta, a DateOffset, a `datetime.timedelta` (a Timestamp),
-    /// or a Timestamp / `datetime` (a Timedelta); anything else is
-    /// NotImplemented.
+    /// `-` a duration or a DateOffset (a Timestamp), or a Timestamp /
+    /// `datetime` (a Timedelta); anything else is NotImplemented. NaT on
+    /// either side is NaT (a NaT duration moved the instant by i64::MIN).
     fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
-            let res = self.inner.sub_timedelta(td.nanos);
-            PyTimestamp { inner: res }.into_py_any(py)
-        } else if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
+        if let Some(nanos) = duration_operand(other)? {
+            return self.shifted(py, duration_neg(nanos)?);
+        }
+        if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
             self.offset_shift(py, &offset, -1)?.into_py_any(py)
         } else if let Ok(other_ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            // Tz-naive against tz-aware is pandas' TypeError (it subtracted
+            // the wall clock from the instant).
+            self.require_same_awareness(other_ts.inner.tz.as_deref(), other_ts.inner.is_nat())?;
+            if self.inner.is_nat() || other_ts.inner.is_nat() {
+                return duration_object(py, Timedelta::NAT);
+            }
             let diff_nanos = self.inner.sub_timestamp(&other_ts.inner);
             PyTimedelta { nanos: diff_nanos }.into_py_any(py)
         } else if let Ok(dt) = other.cast::<PyDateTime>() {
+            self.require_same_awareness(py_datetime_zone(dt)?.as_deref(), false)?;
             let other = Timestamp::from_nanos(py_datetime_nanos(dt)?);
-            PyTimedelta {
-                nanos: self.inner.sub_timestamp(&other),
-            }
-            .into_py_any(py)
-        } else if let Ok(delta) = other.cast::<PyDelta>() {
-            let res = self.inner.sub_timedelta(py_delta_nanos(delta));
-            PyTimestamp { inner: res }.into_py_any(py)
+            duration_object(py, self.inner.sub_timestamp(&other))
         } else {
             Ok(py.NotImplemented())
         }
@@ -2480,6 +3020,7 @@ impl PyTimestamp {
     fn __rsub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         match other.cast::<PyDateTime>() {
             Ok(dt) => {
+                self.require_same_awareness(py_datetime_zone(dt)?.as_deref(), false)?;
                 let other = Timestamp::from_nanos(py_datetime_nanos(dt)?);
                 PyTimedelta {
                     nanos: other.sub_timestamp(&self.inner),
@@ -48386,7 +48927,6 @@ impl PyDateOffset {
                         .map(|micro| u32::try_from(micro).map_err(|_| overflow()))
                         .transpose()?,
                     nano,
-                    None,
                     None,
                 )?
                 .inner
