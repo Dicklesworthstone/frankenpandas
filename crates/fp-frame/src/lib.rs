@@ -35404,6 +35404,84 @@ impl ResampleGrouping {
     }
 }
 
+/// How an upsampled bin edge picks its row (pandas' reindex `method`).
+#[derive(Clone, Copy)]
+enum UpsampleMethod {
+    Exact,
+    Pad,
+    Backfill,
+    Nearest,
+}
+
+/// pandas' pad indexer: for each ascending target, the last of the
+/// ascending `times` at or before it; an exact match always, an inexact one
+/// only for the first `limit` targets after that row.
+fn upsample_pad_indexer(
+    times: &[i64],
+    targets: &[i64],
+    limit: Option<usize>,
+) -> Vec<Option<usize>> {
+    let max = limit.unwrap_or(usize::MAX);
+    let mut seen = 0usize;
+    let mut current = None;
+    let mut fills = 0usize;
+    targets
+        .iter()
+        .map(|&t| {
+            while seen < times.len() && times[seen] <= t {
+                seen += 1;
+            }
+            let at = seen.checked_sub(1);
+            if at != current {
+                current = at;
+                fills = 0;
+            }
+            match at {
+                Some(row) if times[row] == t => Some(row),
+                Some(row) if fills < max => {
+                    fills += 1;
+                    Some(row)
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// pandas' backfill indexer: the mirror of [`upsample_pad_indexer`] (the
+/// first row at or after each target; `limit` counts the inexact targets
+/// before that row).
+fn upsample_backfill_indexer(
+    times: &[i64],
+    targets: &[i64],
+    limit: Option<usize>,
+) -> Vec<Option<usize>> {
+    let max = limit.unwrap_or(usize::MAX);
+    let mut out = vec![None; targets.len()];
+    let mut first_after = times.len();
+    let mut current = None;
+    let mut fills = 0usize;
+    for (slot, &t) in targets.iter().enumerate().rev() {
+        while first_after > 0 && times[first_after - 1] >= t {
+            first_after -= 1;
+        }
+        let at = (first_after < times.len()).then_some(first_after);
+        if at != current {
+            current = at;
+            fills = 0;
+        }
+        out[slot] = match at {
+            Some(row) if times[row] == t => Some(row),
+            Some(row) if fills < max => {
+                fills += 1;
+                Some(row)
+            }
+            _ => None,
+        };
+    }
+    out
+}
+
 fn resample_build_groups_with_options(
     labels: &[IndexLabel],
     freq: &str,
@@ -35925,11 +36003,15 @@ fn resample_build_groups_with_options(
             groups.insert(key, std::mem::take(&mut dense[b]));
         }
 
+        // The upsample edges are the bins' closed side, whatever the label
+        // (pandas' _adjust_binner_for_upsample), as the calendar lattices
+        // above; they followed the label, so label='right' shifted asfreq /
+        // ffill / bfill one bin and closed='right' started a bin early.
         let mut lattice = Vec::with_capacity(num_bins);
         for b in 0..num_bins {
-            let (k, ns) = match label {
-                ResampleLabel::Left => (edge_keys[b].clone(), fresult + (b as i64) * step_ns),
-                ResampleLabel::Right => (
+            let (k, ns) = match closed {
+                ResampleClosed::Left => (edge_keys[b].clone(), fresult + (b as i64) * step_ns),
+                ResampleClosed::Right => (
                     edge_keys[b + 1].clone(),
                     fresult + ((b + 1) as i64) * step_ns,
                 ),
@@ -37341,7 +37423,7 @@ impl Resample<'_> {
             // `ohlc` is left out HERE only: Resample::ohlc returns a DataFrame while
             // these arms yield a Series. It IS routed on the DataFrame side below.
             "asfreq" => self.asfreq(),
-            "nearest" => self.nearest(),
+            "nearest" => self.nearest(None),
             "quantile" => self.quantile(0.5),
             other => Err(FrameError::CompatibilityRejected(format!(
                 "resample agg: unsupported function '{other}'"
@@ -37566,120 +37648,148 @@ impl Resample<'_> {
         Series::new(self.series.name(), index, column)
     }
 
-    /// VALID source observations as (timestamp ns, value) pairs sorted
-    /// ascending, filtered to timestamped labels; fill methods propagate over
-    /// missing values exactly like pandas reindex, so NaN rows are excluded.
-    fn observations_sorted(&self) -> Vec<(i64, Scalar)> {
+    /// pandas' upsampling (`Resampler._upsample`): `method` 'asfreq',
+    /// 'ffill' / 'pad', 'bfill' / 'backfill' or 'nearest' is
+    /// `series.reindex(edges, method, limit, fill_value)` onto the bin edges
+    /// on the closed side (whatever the label). Every timestamped row takes
+    /// part, a NaN-valued one included: a fill carries its NaN (they were
+    /// skipped, so ffill ran past a NaN row). `fill_value` fills only the
+    /// edges no row matched, not a row's own NaN. A repeated timestamp is
+    /// pandas' ValueError; `limit` bounds the inexact matches per source row
+    /// and must be positive. A nullable column keeps its dtype (<NA> where
+    /// nothing matched); an int one becomes float only when an edge is left
+    /// missing.
+    pub fn upsample(
+        &self,
+        method: &str,
+        limit: Option<usize>,
+        fill_value: Option<&Scalar>,
+    ) -> Result<Series, FrameError> {
+        let method = match method {
+            "asfreq" => UpsampleMethod::Exact,
+            "ffill" | "pad" => UpsampleMethod::Pad,
+            "bfill" | "backfill" => UpsampleMethod::Backfill,
+            "nearest" => UpsampleMethod::Nearest,
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "Invalid fill method. Expecting pad (ffill), backfill (bfill) or nearest. Got {other}"
+                )));
+            }
+        };
+        if limit == Some(0) {
+            return Err(FrameError::CompatibilityRejected(
+                "Limit must be greater than 0".to_owned(),
+            ));
+        }
+        let lattice = self.bin_lattice()?;
         let labels = self.series.index().labels();
         let vals = self.series.column().values();
-        let mut obs: Vec<(i64, Scalar)> = labels
+        let mut rows: Vec<(i64, usize)> = labels
             .iter()
-            .zip(vals.iter())
-            .filter_map(|(label, value)| {
-                if value.is_missing() {
-                    return None;
-                }
-                resample_label_to_ns(label).map(|ns| (ns, value.clone()))
+            .enumerate()
+            .filter_map(|(row, label)| resample_label_to_ns(label).map(|ns| (ns, row)))
+            .collect();
+        rows.sort_by_key(|&(ns, _)| ns);
+        if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(FrameError::CompatibilityRejected(
+                "cannot reindex on an axis with duplicate labels".to_owned(),
+            ));
+        }
+        let times: Vec<i64> = rows.iter().map(|&(ns, _)| ns).collect();
+        let targets: Vec<i64> = lattice.iter().map(|&(_, ns)| ns).collect();
+        let pad = || upsample_pad_indexer(&times, &targets, limit);
+        let backfill = || upsample_backfill_indexer(&times, &targets, limit);
+        let matches: Vec<Option<usize>> = match method {
+            UpsampleMethod::Exact => targets
+                .iter()
+                .map(|t| times.binary_search(t).ok())
+                .collect(),
+            UpsampleMethod::Pad => pad(),
+            UpsampleMethod::Backfill => backfill(),
+            // The nearer of the pad and backfill matches, a tie going to the
+            // later one (pandas' get_indexer(method='nearest')).
+            UpsampleMethod::Nearest => pad()
+                .into_iter()
+                .zip(backfill())
+                .zip(&targets)
+                .map(|((before, after), &t)| match (before, after) {
+                    (Some(before), Some(after)) if t - times[before] < times[after] - t => {
+                        Some(before)
+                    }
+                    (_, Some(after)) => Some(after),
+                    (before, None) => before,
+                })
+                .collect(),
+        };
+        let dtype = self.series.column().dtype();
+        let nullable = matches!(
+            dtype,
+            DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable
+        );
+        let missing = match fill_value {
+            Some(fill) => fill.clone(),
+            None if nullable => Scalar::Null(NullKind::Null),
+            None => Scalar::Null(NullKind::NaN),
+        };
+        let unmatched = fill_value.is_none() && matches.iter().any(Option::is_none);
+        let out_vals: Vec<Scalar> = matches
+            .iter()
+            .map(|found| match found {
+                // An int column with a hole is float64, as pandas' reindex.
+                Some(position) => match &vals[rows[*position].1] {
+                    Scalar::Int64(value) if unmatched && dtype == DType::Int64 => {
+                        Scalar::Float64(*value as f64)
+                    }
+                    value => value.clone(),
+                },
+                None => missing.clone(),
             })
             .collect();
-        obs.sort_by_key(|(ns, _)| *ns);
-        obs
+        let keys: Vec<String> = lattice.into_iter().map(|(k, _)| k).collect();
+        // Stated, not inferred: a numeric column with holes is float64 even
+        // when every edge is missing (inference made that object).
+        let column_dtype = if nullable {
+            Some(dtype)
+        } else if unmatched && matches!(dtype, DType::Int64 | DType::Float64) {
+            Some(DType::Float64)
+        } else {
+            None
+        };
+        let Some(column_dtype) = column_dtype else {
+            return self.finish_bucket_series(&keys, out_vals);
+        };
+        let out_labels: Vec<IndexLabel> = keys.iter().map(|k| resample_bin_label(k)).collect();
+        let index = Index::new(out_labels).rename_index(self.series.index().name());
+        Series::new(
+            self.series.name(),
+            index,
+            Column::new(column_dtype, out_vals)?,
+        )
     }
 
-    /// Resample to bucket frequency without reduction.
-    ///
-    /// pandas `resample(freq).asfreq()` reindexes on the full bin lattice
-    /// taking the value AT each bin start exactly; a bin whose start has no
-    /// observed timestamp becomes NaN — a value LATER in the same bucket is
-    /// not picked up. One row per bin, empty bins included
-    /// (br-frankenpandas-kmy0b, probed live pandas 2.2.3).
+    /// Resample to bucket frequency without reduction: each bin edge takes
+    /// the value AT it exactly, else NaN - a value later in the same bucket
+    /// is not picked up (br-frankenpandas-kmy0b, probed live pandas 2.2.3).
+    /// See [`Self::upsample`].
     pub fn asfreq(&self) -> Result<Series, FrameError> {
-        let lattice = self.bin_lattice()?;
-        let obs = self.observations_sorted();
-        let mut out_vals = Vec::with_capacity(lattice.len());
-        for &(_, t) in &lattice {
-            out_vals.push(match obs.binary_search_by_key(&t, |(ns, _)| *ns) {
-                Ok(i) => obs[i].1.clone(),
-                Err(_) => Scalar::Null(NullKind::NaN),
-            });
-        }
-        let keys: Vec<String> = lattice.into_iter().map(|(k, _)| k).collect();
-        self.finish_bucket_series(&keys, out_vals)
+        self.upsample("asfreq", None, None)
     }
 
-    /// Forward-fill the bin lattice from the ORIGINAL observations.
-    ///
-    /// Equivalent to `series.reindex(bin_starts, method="ffill", limit)`:
-    /// each bin start takes the latest observation at-or-before it; an exact
-    /// match resets the run, and `limit` counts CONSECUTIVE filled labels
-    /// since the last observation, not buckets-with-data. Probed live
-    /// pandas 2.2.3 (br-frankenpandas-kmy0b): obs at 01T00=1, 01T06=2,
-    /// 03T12=3 with freq D gives ffill -> [1, 2, 2] and ffill(limit=1) ->
-    /// [1, 2, NaN] — the bin-03 row is two filled labels past the 01T06
-    /// observation even though a value exists later inside that bucket.
+    /// Forward-fill onto the bin edges from the ORIGINAL rows:
+    /// `series.reindex(edges, method="ffill", limit)`. Each edge takes the
+    /// latest row at-or-before it; `limit` counts consecutive filled edges
+    /// past a row, not buckets-with-data. Probed live pandas 2.2.3
+    /// (br-frankenpandas-kmy0b): obs at 01T00=1, 01T06=2, 03T12=3 with freq
+    /// D gives ffill -> [1, 2, 2] and ffill(limit=1) -> [1, 2, NaN].
     pub fn ffill(&self, limit: Option<usize>) -> Result<Series, FrameError> {
-        let lattice = self.bin_lattice()?;
-        let obs = self.observations_sorted();
-        let max = limit.unwrap_or(usize::MAX);
-        let mut oi = 0usize;
-        let mut fills = 0usize;
-        let mut last: Option<Scalar> = None;
-        let mut out_vals = Vec::with_capacity(lattice.len());
-        for &(_, t) in &lattice {
-            let mut exact = false;
-            while oi < obs.len() && obs[oi].0 <= t {
-                last = Some(obs[oi].1.clone());
-                fills = 0;
-                exact = obs[oi].0 == t;
-                oi += 1;
-            }
-            match (&last, exact) {
-                (Some(v), true) => out_vals.push(v.clone()),
-                (Some(v), false) if fills < max => {
-                    out_vals.push(v.clone());
-                    fills += 1;
-                }
-                _ => out_vals.push(Scalar::Null(NullKind::NaN)),
-            }
-        }
-        let keys: Vec<String> = lattice.into_iter().map(|(k, _)| k).collect();
-        self.finish_bucket_series(&keys, out_vals)
+        self.upsample("ffill", limit, None)
     }
 
-    /// Backward-fill the bin lattice from the ORIGINAL observations: the
-    /// mirror of [`Self::ffill`] (each bin start takes the earliest
-    /// observation at-or-after it; `limit` counts consecutive filled labels
-    /// backward). Probed live pandas 2.2.3 (br-frankenpandas-kmy0b):
-    /// bfill -> [1, 3, 3], bfill(limit=1) -> [1, NaN, 3].
+    /// Backward-fill onto the bin edges: the mirror of [`Self::ffill`].
+    /// Probed live pandas 2.2.3 (br-frankenpandas-kmy0b): bfill -> [1, 3, 3],
+    /// bfill(limit=1) -> [1, NaN, 3].
     pub fn bfill(&self, limit: Option<usize>) -> Result<Series, FrameError> {
-        let lattice = self.bin_lattice()?;
-        let mut obs = self.observations_sorted();
-        obs.reverse();
-        let max = limit.unwrap_or(usize::MAX);
-        let mut oi = 0usize;
-        let mut fills = 0usize;
-        let mut next: Option<Scalar> = None;
-        let mut out_vals = Vec::with_capacity(lattice.len());
-        for &(_, t) in lattice.iter().rev() {
-            let mut exact = false;
-            while oi < obs.len() && obs[oi].0 >= t {
-                next = Some(obs[oi].1.clone());
-                fills = 0;
-                exact = obs[oi].0 == t;
-                oi += 1;
-            }
-            match (&next, exact) {
-                (Some(v), true) => out_vals.push(v.clone()),
-                (Some(v), false) if fills < max => {
-                    out_vals.push(v.clone());
-                    fills += 1;
-                }
-                _ => out_vals.push(Scalar::Null(NullKind::NaN)),
-            }
-        }
-        out_vals.reverse();
-        let keys: Vec<String> = lattice.into_iter().map(|(k, _)| k).collect();
-        self.finish_bucket_series(&keys, out_vals)
+        self.upsample("bfill", limit, None)
     }
 
     /// Fill missing resampled values with a scalar.
@@ -37692,9 +37802,13 @@ impl Resample<'_> {
         self.mean()?.interpolate()
     }
 
-    /// Select nearest observed value for each current non-empty bucket.
-    pub fn nearest(&self) -> Result<Series, FrameError> {
-        self.first()
+    /// pandas' `Resampler.nearest(limit)`: each bin edge takes the row
+    /// nearest to it (a tie to the later one), `limit` bounding the inexact
+    /// matches on each side (see [`Self::upsample`]). It returned first() -
+    /// NaN at every edge without a row in its bin
+    /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.4).
+    pub fn nearest(&self, limit: Option<usize>) -> Result<Series, FrameError> {
+        self.upsample("nearest", limit, None)
     }
 
     /// Resample quantile using linear interpolation inside each bucket.
@@ -39220,7 +39334,7 @@ impl<'a> DataFrameResample<'a> {
                     // accumulate-into-one-frame loop has no way to express.
                     // Left refused rather than reshaped on a guess.
                     "asfreq" => resample.asfreq()?,
-                    "nearest" => resample.nearest()?,
+                    "nearest" => resample.nearest(None)?,
                     "quantile" => resample.quantile(0.5)?,
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
@@ -39321,6 +39435,16 @@ impl<'a> DataFrameResample<'a> {
         self.apply_resample_all_columns(|r| r.asfreq())
     }
 
+    /// pandas' upsampling of every column (see [`Resample::upsample`]).
+    pub fn upsample(
+        &self,
+        method: &str,
+        limit: Option<usize>,
+        fill_value: Option<&Scalar>,
+    ) -> Result<DataFrame, FrameError> {
+        self.apply_resample_all_columns(|r| r.upsample(method, limit, fill_value))
+    }
+
     /// Forward-fill each resample bucket.
     pub fn ffill(&self, limit: Option<usize>) -> Result<DataFrame, FrameError> {
         self.apply_resample_all_columns(|r| r.ffill(limit))
@@ -39341,9 +39465,9 @@ impl<'a> DataFrameResample<'a> {
         self.apply_resample(|r| r.interpolate())
     }
 
-    /// Select nearest observed value for each current non-empty bucket.
-    pub fn nearest(&self) -> Result<DataFrame, FrameError> {
-        self.apply_resample_all_columns(|r| r.nearest())
+    /// pandas' `Resampler.nearest(limit)` per column (see [`Resample::nearest`]).
+    pub fn nearest(&self, limit: Option<usize>) -> Result<DataFrame, FrameError> {
+        self.apply_resample_all_columns(|r| r.nearest(limit))
     }
 
     /// Resample quantile across numeric columns.
@@ -158715,6 +158839,88 @@ mod tests {
     }
 
     #[test]
+    fn resample_nearest_and_fills_reindex_every_row_like_pandas_4qg5w_4() {
+        // Live pandas 2.2.3 (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.4).
+        let days = |values: Vec<Scalar>| {
+            Series::from_values(
+                "v",
+                vec![
+                    "2024-01-01 00:00:00".into(),
+                    "2024-01-02 00:00:00".into(),
+                    "2024-01-03 00:00:00".into(),
+                ],
+                values,
+            )
+            .unwrap()
+        };
+        let ints = days(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]);
+        let int = |v: i64| Scalar::Int64(v);
+        let float = |v: f64| Scalar::Float64(v);
+        let nan = Scalar::Null(NullKind::NaN);
+
+        // Each 12h edge takes the nearest day; a tie goes to the LATER one.
+        // NEGATIVE: first() - what nearest() returned - is NaN at 12:00.
+        let got = ints.resample("12h").nearest(None).unwrap();
+        assert_eq!(got.values(), &[int(1), int(2), int(2), int(3), int(3)]);
+
+        // limit bounds the inexact matches on each side; a hole makes it float.
+        let got = ints.resample("6h").nearest(Some(1)).unwrap();
+        assert_eq!(
+            got.values(),
+            &[
+                float(1.0),
+                float(1.0),
+                nan.clone(),
+                float(2.0),
+                float(2.0),
+                float(2.0),
+                nan.clone(),
+                float(3.0),
+                float(3.0),
+            ]
+        );
+        assert!(ints.resample("6h").nearest(Some(0)).is_err());
+
+        // A NaN-valued row takes part: the fills carry it (it was skipped).
+        let with_nan = days(vec![float(1.5), nan.clone(), float(3.5)]);
+        let got = with_nan.resample("12h").ffill(None).unwrap();
+        assert_eq!(
+            got.values(),
+            &[float(1.5), float(1.5), nan.clone(), nan.clone(), float(3.5)]
+        );
+        let got = with_nan.resample("12h").nearest(None).unwrap();
+        assert_eq!(
+            got.values(),
+            &[float(1.5), nan.clone(), nan.clone(), float(3.5), float(3.5)]
+        );
+
+        // The upsample edges ignore the label (they followed it).
+        let got = ints
+            .resample_ext("8h", None, Some("right"), None)
+            .ffill(None)
+            .unwrap();
+        assert_eq!(got.len(), 7);
+        assert_eq!(got.values()[0], int(1));
+        assert_eq!(
+            got.index().labels()[0],
+            ints.resample("8h").ffill(None).unwrap().index().labels()[0]
+        );
+
+        // A repeated timestamp cannot be reindexed.
+        let repeated = Series::from_values(
+            "v",
+            vec![
+                "2024-01-01 00:00:00".into(),
+                "2024-01-01 00:00:00".into(),
+                "2024-01-02 00:00:00".into(),
+            ],
+            vec![int(1), int(2), int(3)],
+        )
+        .unwrap();
+        assert!(repeated.resample("12h").nearest(None).is_err());
+    }
+
+    #[test]
     fn resample_yearly_mean() {
         let s = Series::from_values(
             "val",
@@ -158971,9 +159177,11 @@ mod tests {
             resample.asfreq().unwrap().values(),
             &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
         );
+        // 01-31 backfills from the 02-01 row, whose value is NaN (live pandas
+        // 2.2.3: [nan, nan]); skipping NaN rows gave 5.0 (4qg5w.4).
         assert_eq!(
             resample.bfill(None).unwrap().values(),
-            &[Scalar::Float64(5.0), Scalar::Null(NullKind::NaN)]
+            &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
         );
     }
 

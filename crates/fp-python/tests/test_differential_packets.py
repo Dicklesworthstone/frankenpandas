@@ -8256,6 +8256,85 @@ def test_resample_bins_rows_and_prices_like_pandas(case: str) -> None:
     assert _resample_case_outcome(fpd, case) == _resample_case_outcome(pd, case)
 
 
+def _three_days(m: Any, values: Any = (1, 2, 3), dtype: Any = None) -> Any:
+    return m.Series(list(values), index=m.date_range("2024-01-01", periods=len(values), freq="D"), dtype=dtype)
+
+
+def _off_grid(m: Any) -> Any:
+    return m.Series([1, 2, 3], index=m.DatetimeIndex(["2024-01-01 01:30", "2024-01-01 03:10", "2024-01-01 05:00"]))
+
+
+def _sparse(m: Any) -> Any:
+    return m.Series([1, 2, 3], index=m.DatetimeIndex(["2024-01-01 00:00", "2024-01-01 06:00", "2024-01-03 12:00"]))
+
+
+# (4qg5w.4) Upsampling is pandas' reindex onto the bin edges. nearest()
+# returned first() (NaN at every edge without a row in its bin) and took no
+# limit; ffill / bfill filled first() (a downsample took each bin's FIRST
+# row), skipped NaN rows and followed the label; asfreq took Series.asfreq's
+# grid from the first timestamp (off the edges, ignoring origin) and filled
+# the rows' own NaNs with fill_value; fillna('ffill') raised a cast error.
+_UPSAMPLE_CASES = {
+    "nearest D to 6h": lambda m: _three_days(m).resample("6h").nearest(),
+    "nearest D to 8h": lambda m: _three_days(m).resample("8h").nearest(),
+    "nearest tie takes the later row": lambda m: _three_days(m).resample("12h").nearest(),
+    "nearest limit 1": lambda m: _three_days(m).resample("6h").nearest(limit=1),
+    "nearest limit 2": lambda m: _three_days(m).resample("4h").nearest(limit=2),
+    "nearest over a NaN row": lambda m: _three_days(m, (1.5, None, 3.5)).resample("12h").nearest(),
+    "nearest off-grid": lambda m: _off_grid(m).resample("h").nearest(),
+    "nearest downsample": lambda m: m.Series(range(10), index=m.date_range("2024-01-01", periods=10, freq="h")).resample("3h").nearest(),
+    "nearest unsorted": lambda m: m.Series([3, 1, 2], index=m.DatetimeIndex(["2024-01-03", "2024-01-01", "2024-01-02"])).resample("12h").nearest(),
+    "nearest label right": lambda m: _three_days(m).resample("8h", label="right").nearest(),
+    "nearest closed right": lambda m: _three_days(m).resample("8h", closed="right").nearest(),
+    "nearest Int64": lambda m: _three_days(m, (1, None, 3), "Int64").resample("12h").nearest(),
+    "nearest strings": lambda m: _three_days(m, ("a", "b", "c")).resample("12h").nearest(),
+    "nearest frame with a limit": lambda m: m.DataFrame({"a": [1, 2, 3], "b": [1.5, 2.5, 3.5]}, index=_three_days(m).index).resample("6h").nearest(limit=1),
+    "nearest month ends": lambda m: m.Series([1, 2], index=m.DatetimeIndex(["2024-01-31", "2024-03-31"])).resample("ME").nearest(),
+    "nearest tz-aware": lambda m: m.Series([1, 2, 3], index=m.date_range("2024-03-09", periods=3, freq="D", tz="US/Eastern")).resample("8h").nearest(),
+    "agg nearest": lambda m: _three_days(m).resample("6h").agg("nearest"),
+    "nearest limit 0 raises": lambda m: _three_days(m).resample("6h").nearest(limit=0),
+    "nearest over a repeated timestamp raises": lambda m: m.Series([1, 2, 3], index=m.DatetimeIndex(["2024-01-01", "2024-01-01", "2024-01-02"])).resample("12h").nearest(),
+    "ffill over a NaN row": lambda m: _three_days(m, (1.5, None, 3.5)).resample("12h").ffill(),
+    "bfill over a NaN row": lambda m: _three_days(m, (1.5, None, 3.5)).resample("12h").bfill(),
+    "ffill limit over a NaN row": lambda m: _three_days(m, (1.5, None, 3.5)).resample("6h").ffill(limit=1),
+    "ffill downsample": lambda m: _sparse(m).resample("D").ffill(),
+    "ffill downsample limit": lambda m: _sparse(m).resample("D").ffill(limit=1),
+    "bfill downsample": lambda m: _sparse(m).resample("D").bfill(),
+    "ffill off-grid": lambda m: _off_grid(m).resample("h").ffill(),
+    "bfill off-grid": lambda m: _off_grid(m).resample("h").bfill(),
+    "ffill label right": lambda m: _three_days(m).resample("8h", label="right").ffill(),
+    "bfill closed right": lambda m: _three_days(m).resample("8h", closed="right").bfill(),
+    "ffill weekly": lambda m: m.Series([1, 2], index=m.DatetimeIndex(["2024-01-07", "2024-01-21"])).resample("W").ffill(),
+    "ffill Int64 with a limit": lambda m: m.Series([1, 2], index=m.DatetimeIndex(["2024-01-01", "2024-01-04"]), dtype="Int64").resample("D").ffill(limit=1),
+    "ffill frame": lambda m: m.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]}, index=_off_grid(m).index).resample("h").ffill(),
+    "ffill tz-aware": lambda m: m.Series([1, 2, 3], index=m.date_range("2024-03-09 22:00", periods=3, freq="3h", tz="US/Eastern")).resample("h").ffill(),
+    "ffill limit 0 raises": lambda m: _three_days(m).resample("6h").ffill(limit=0),
+    "asfreq off-grid": lambda m: _off_grid(m).resample("h").asfreq(),
+    "asfreq origin epoch": lambda m: _off_grid(m).resample("7h", origin="epoch").asfreq(),
+    "asfreq label right": lambda m: _three_days(m).resample("8h", label="right").asfreq(),
+    "asfreq fill_value keeps a row's NaN": lambda m: _three_days(m, (1.0, None, 3.0)).resample("12h").asfreq(fill_value=0),
+    "asfreq fill_value keeps ints": lambda m: m.Series([1, 2], index=m.DatetimeIndex(["2024-01-01", "2024-01-03"])).resample("D").asfreq(fill_value=0),
+    "fillna ffill": lambda m: _three_days(m, (1.0, None, 3.0)).resample("12h").fillna("ffill"),
+    "fillna nearest": lambda m: _three_days(m, (1.0, None, 3.0)).resample("12h").fillna("nearest"),
+    "fillna an unknown method raises": lambda m: _three_days(m).resample("12h").fillna("foo"),
+}
+
+
+def _upsample_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _resample_facts(_UPSAMPLE_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_UPSAMPLE_CASES))
+def test_resample_upsampling_reindexes_onto_the_bin_edges_like_pandas(case: str) -> None:
+    assert _upsample_outcome(fpd, case) == _upsample_outcome(pd, case)
+
+
 _STRFTIME_FORMATS = [
     "%B %d, %Y",
     "%a %b %e %H:%M",

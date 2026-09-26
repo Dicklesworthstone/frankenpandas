@@ -13249,6 +13249,9 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg.starts_with("could not convert string to float: ")
                 || msg.contains(" type does not support ")
                 || msg.starts_with("numpy boolean subtract")
+                || msg == "cannot reindex on an axis with duplicate labels"
+                || msg == "Limit must be greater than 0"
+                || msg.starts_with("Invalid fill method. ")
                 || (msg.starts_with("operator '")
                     && msg.ends_with("not implemented for bool dtypes"));
             let text = if pandas_verbatim {
@@ -42063,6 +42066,40 @@ impl PyResampler {
         Ok((self.zoned_index(sizes.index())?, positions))
     }
 
+    /// pandas' upsampling by `method` onto the bin edges, back in a tz-aware
+    /// source's zone (see [`fp_frame::Resample::upsample`]).
+    fn upsampled(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        limit: Option<usize>,
+        fill_value: Option<&Scalar>,
+    ) -> PyResult<Py<PyAny>> {
+        let (closed, label, origin) = (
+            self.closed.as_deref(),
+            self.label.as_deref(),
+            self.origin.as_deref(),
+        );
+        match &self.target {
+            ResampleTarget::Series(s) => {
+                let res = s
+                    .resample_ext(&self.freq, closed, label, origin)
+                    .upsample(method, limit, fill_value)
+                    .map_err(frame_error_to_py)?;
+                let res = self.zoned_series(res)?;
+                Ok(Py::new(py, PySeries { inner: res })?.into_any())
+            }
+            ResampleTarget::DataFrame(df) => {
+                let res = df
+                    .resample_ext(&self.freq, closed, label, origin)
+                    .upsample(method, limit, fill_value)
+                    .map_err(frame_error_to_py)?;
+                let res = self.zoned_frame(res)?;
+                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+            }
+        }
+    }
+
     /// The same resampling over `series`.
     fn over(&self, series: Series) -> Self {
         Self {
@@ -42166,7 +42203,7 @@ impl PyResampler {
             "sem" => self.sem(py, false),
             "skew" => self.skew(py),
             "kurt" | "kurtosis" => self.kurt(py),
-            "nearest" => self.nearest(py),
+            "nearest" => self.nearest(py, None),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "unsupported resampler aggregation '{name}'"
             ))),
@@ -42531,35 +42568,11 @@ impl PyResampler {
         self.kurt(py)
     }
 
-    fn nearest(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .nearest()
-                    .map_err(frame_error_to_py)?;
-                let res = self.zoned_series(res)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .resample_ext(
-                        &self.freq,
-                        self.closed.as_deref(),
-                        self.label.as_deref(),
-                        self.origin.as_deref(),
-                    )
-                    .nearest()
-                    .map_err(frame_error_to_py)?;
-                let res = self.zoned_frame(res)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+    /// pandas' `nearest(limit=None)`: each bin edge takes the nearest row,
+    /// a tie the later one (it took no limit and returned first()).
+    #[pyo3(signature = (limit=None))]
+    fn nearest(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<Py<PyAny>> {
+        self.upsampled(py, "nearest", limit, None)
     }
 
     /// pandas' `Resampler.agg(func, *args, **kwargs)`: a name is that
@@ -42620,92 +42633,39 @@ impl PyResampler {
         self.agg(py, func, args, kwargs)
     }
 
+    /// pandas' `asfreq(fill_value=None)`: the value at each bin edge,
+    /// `fill_value` only where no row sits (see [`Self::upsampled`]). It
+    /// took `Series.asfreq`'s grid from the first timestamp (off the bin
+    /// edges, ignoring origin) and filled the rows' own NaNs too.
     #[pyo3(signature = (fill_value=None))]
     fn asfreq(&self, py: Python<'_>, fill_value: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        let fv = match fill_value {
-            Some(v) => Some(py_to_scalar(py, v)?),
-            None => None,
+        let fill_value = match fill_value {
+            Some(value) if !value.is_none() => Some(py_to_scalar(py, value)?),
+            _ => None,
         };
-        match &self.target {
-            ResampleTarget::Series(s) => {
-                let res = s
-                    .asfreq_with_options(&self.freq, None, fv)
-                    .map_err(frame_error_to_py)?;
-                let res = self.zoned_series(res)?;
-                Ok(Py::new(py, PySeries { inner: res })?.into_any())
-            }
-            ResampleTarget::DataFrame(df) => {
-                let res = df
-                    .asfreq_with_options(&self.freq, None, fv)
-                    .map_err(frame_error_to_py)?;
-                let res = self.zoned_frame(res)?;
-                Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
-            }
-        }
+        self.upsampled(py, "asfreq", None, fill_value.as_ref())
     }
 
+    /// pandas' `ffill(limit=None)`: each bin edge takes the last row at or
+    /// before it. It forward-filled first(), so a downsample took each
+    /// bin's FIRST row and a NaN row was skipped.
     #[pyo3(signature = (limit=None))]
     fn ffill(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<Py<PyAny>> {
-        let first_val = self.first(py, false)?;
-        let bound = first_val.bind(py);
-        let kwargs = PyDict::new(py);
-        if let Some(l) = limit {
-            kwargs.set_item("limit", l)?;
-        }
-        bound
-            .call_method("ffill", (), Some(&kwargs))
-            .map(|b| b.unbind())
+        self.upsampled(py, "ffill", limit, None)
     }
 
+    /// pandas' `bfill(limit=None)`: the mirror of [`Self::ffill`].
     #[pyo3(signature = (limit=None))]
     fn bfill(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<Py<PyAny>> {
-        let first_val = self.first(py, false)?;
-        let bound = first_val.bind(py);
-        let kwargs = PyDict::new(py);
-        if let Some(l) = limit {
-            kwargs.set_item("limit", l)?;
-        }
-        bound
-            .call_method("bfill", (), Some(&kwargs))
-            .map(|b| b.unbind())
+        self.upsampled(py, "bfill", limit, None)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (value=None, method=None, axis=0, inplace=false, limit=None, downcast=None))]
-    fn fillna(
-        &self,
-        py: Python<'_>,
-        value: Option<&Bound<'_, PyAny>>,
-        method: Option<&str>,
-        axis: Option<i64>,
-        inplace: Option<bool>,
-        limit: Option<usize>,
-        downcast: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let asf = self.asfreq(py, None)?;
-        let bound = asf.bind(py);
-        let kwargs = PyDict::new(py);
-        if let Some(v) = value {
-            kwargs.set_item("value", v)?;
-        }
-        if let Some(m) = method {
-            kwargs.set_item("method", m)?;
-        }
-        if let Some(a) = axis {
-            kwargs.set_item("axis", a)?;
-        }
-        if let Some(i) = inplace {
-            kwargs.set_item("inplace", i)?;
-        }
-        if let Some(l) = limit {
-            kwargs.set_item("limit", l)?;
-        }
-        if let Some(d) = downcast {
-            kwargs.set_item("downcast", d)?;
-        }
-        bound
-            .call_method("fillna", (), Some(&kwargs))
-            .map(|b| b.unbind())
+    /// pandas 2.2's `fillna(method, limit=None)`: `method` is 'ffill' /
+    /// 'pad', 'bfill' / 'backfill', 'nearest' or 'asfreq' (it took an
+    /// invented `value=` first, so `fillna('ffill')` raised a cast error).
+    #[pyo3(signature = (method, limit=None))]
+    fn fillna(&self, py: Python<'_>, method: &str, limit: Option<usize>) -> PyResult<Py<PyAny>> {
+        self.upsampled(py, method, limit, None)
     }
 
     #[pyo3(signature = (method="linear", *args, **kwargs))]
