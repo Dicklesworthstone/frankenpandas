@@ -50,16 +50,19 @@ fn fuzz_csv_parse_bytes_accepts_quoted_newline_seed_fixture() {
     fuzz_csv_parse_bytes(seed).expect("quoted newline csv fuzz seed should parse");
 }
 
+/// The seed is named `..._invalid_` from when a repeated header was rejected;
+/// pandas reads `dup,dup` as columns ['dup', 'dup.1'] (measured, 2.2.3), and
+/// so does fp-io now (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.21),
+/// so the seed parses and survives the write / re-read round trip.
 #[test]
-fn fuzz_csv_parse_bytes_reports_duplicate_headers() {
+fn fuzz_csv_parse_bytes_renames_duplicate_headers() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/csv_parse/duplicate_headers_invalid_seed.csv"
     );
-    let err = fuzz_csv_parse_bytes(seed).expect_err("duplicate csv headers should error");
-    assert!(
-        matches!(err, fp_io::IoError::DuplicateColumnName(_)),
-        "expected duplicate header error, got {err:?}"
-    );
+    fuzz_csv_parse_bytes(seed).expect("repeated csv headers are renamed, as pandas");
+    let frame = fp_io::read_csv_str(&String::from_utf8_lossy(seed)).expect("read");
+    let names: Vec<&String> = frame.column_names();
+    assert_eq!(names, ["dup", "dup.1"]);
 }
 
 #[test]

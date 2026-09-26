@@ -5412,12 +5412,16 @@ fn readme_ioerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
         Err(IoError::MissingIndexColumn(ref name)) if name == "absent"
     ));
 
-    // ── DuplicateColumnName: repeated header ────────────────────
-    let dup = read_csv_str("a,a,b\n1,2,3\n4,5,6");
+    // ── DuplicateColumnName: repeated split-JSON column ─────────
+    // (A repeated CSV header is not an error: pandas renames it 'a.1', and
+    // so does read_csv; 4qg5w.21.)
+    let dup = read_json_str(r#"{"columns":[1,"1"],"data":[[10,20]]}"#, JsonOrient::Split);
     assert!(matches!(
         dup,
-        Err(IoError::DuplicateColumnName(ref name)) if name == "a"
+        Err(IoError::DuplicateColumnName(ref name)) if name == "1"
     ));
+    let renamed = read_csv_str("a,a,b\n1,2,3\n4,5,6")?;
+    assert_eq!(renamed.column_names(), ["a", "a.1", "b"]);
 
     // ── MissingUsecols: usecols references absent column ────────
     let missing_use_opts = CsvReadOptions {

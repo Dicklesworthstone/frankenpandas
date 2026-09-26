@@ -4719,7 +4719,7 @@ fn parse_scalar_with_options(
 /// pandas 2.2.3: `read_csv(",a,\n1,2,3")` -> ['Unnamed: 0', 'a', 'Unnamed: 2'].
 /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.19)
 fn pandas_header_names<'a>(cells: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    cells
+    let mut headers: Vec<String> = cells
         .into_iter()
         .enumerate()
         .map(|(position, cell)| {
@@ -4729,7 +4729,37 @@ fn pandas_header_names<'a>(cells: impl IntoIterator<Item = &'a str>) -> Vec<Stri
                 cell.to_owned()
             }
         })
-        .collect()
+        .collect();
+    mangle_duplicate_headers(&mut headers);
+    headers
+}
+
+/// pandas' C parser renames a repeated header name `name.1`, `name.2`, ...:
+/// a repeat takes the first suffix that is neither in the header row (as
+/// renamed so far) nor already taken. MEASURED, pandas 2.2.3: 'a,a,a' ->
+/// [a, a.1, a.2]; 'a,a,a.1' -> [a, a.2, a.1]; 'a.1,a,a' -> [a.1, a, a.2];
+/// blank cells are named first, so 'Unnamed: 1,,x' -> [Unnamed: 1,
+/// Unnamed: 1.1, x]. The readers rejected such a file (DuplicateColumnName),
+/// so a frame with repeated columns written by to_csv / to_excel could not
+/// be read back. (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.21)
+fn mangle_duplicate_headers(headers: &mut [String]) {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for position in 0..headers.len() {
+        let original = headers[position].clone();
+        let mut count = counts.get(&original).copied().unwrap_or(0);
+        let mut name = original.clone();
+        while count > 0 {
+            counts.insert(original.clone(), count + 1);
+            name = format!("{original}.{count}");
+            if headers.contains(&name) {
+                count += 1;
+            } else {
+                count = counts.get(&name).copied().unwrap_or(0);
+            }
+        }
+        headers[position] = name.clone();
+        counts.insert(name, count + 1);
+    }
 }
 
 fn reject_duplicate_headers(headers: &[String]) -> Result<(), IoError> {
@@ -10666,7 +10696,11 @@ fn parse_excel_rows(
                 .enumerate()
                 .map(|(i, cell)| excel_header_name(cell, i))
                 .collect();
-            header_pairs.into_iter().unzip()
+            let (mut headers, generated): (Vec<String>, Vec<bool>) =
+                header_pairs.into_iter().unzip();
+            // Repeated names are renamed as pandas' readers do (4qg5w.21).
+            mangle_duplicate_headers(&mut headers);
+            (headers, generated)
         };
         (headers, header_generated, &rows[1..])
     } else {
@@ -18349,10 +18383,31 @@ mod tests {
     }
 
     #[test]
-    fn csv_duplicate_headers_error() {
-        let input = "a,a\n1,2\n";
-        let err = read_csv_str(input).expect_err("duplicate header");
-        assert!(matches!(err, IoError::DuplicateColumnName(name) if name == "a"));
+    fn csv_duplicate_headers_are_renamed_like_pandas() {
+        // pandas 2.2.3 read_csv: a repeat takes the first free '.n' suffix;
+        // a suffix already in the header row is skipped (it was rejected
+        // with DuplicateColumnName; 4qg5w.21).
+        let names = |input: &str| -> Vec<String> {
+            read_csv_str(input)
+                .expect("read")
+                .column_names()
+                .into_iter()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(names("a,a,a\n1,2,3\n"), ["a", "a.1", "a.2"]);
+        assert_eq!(names("a,a,a.1\n1,2,3\n"), ["a", "a.2", "a.1"]);
+        assert_eq!(names("a.1,a,a\n1,2,3\n"), ["a.1", "a", "a.2"]);
+        assert_eq!(names("a,,a\n1,2,3\n"), ["a", "Unnamed: 1", "a.1"]);
+        assert_eq!(
+            names("Unnamed: 1,,x\n1,2,3\n"),
+            ["Unnamed: 1", "Unnamed: 1.1", "x"]
+        );
+        // NEGATIVE: names that differ only in case or spacing are distinct.
+        assert_eq!(names("a,A, a\n1,2,3\n"), ["a", "A", " a"]);
+        // The values stay with their renamed columns.
+        let frame = read_csv_str("a,a\n1,2\n").expect("read");
+        assert_eq!(frame.column("a.1").unwrap().values()[0], Scalar::Int64(2));
     }
 
     /// SUPERSEDES the rejection contract br-frankenpandas-4hpid recorded here.
@@ -25825,18 +25880,27 @@ mod tests {
     }
 
     #[test]
-    fn excel_duplicate_headers_error() {
+    fn excel_duplicate_headers_are_renamed_like_pandas() {
+        // pandas' read_excel renames a repeated header as read_csv does
+        // (it was rejected with DuplicateColumnName; 4qg5w.21).
         let rows = vec![
             vec![
                 calamine::Data::String("dup".to_owned()),
                 calamine::Data::String("dup".to_owned()),
+                calamine::Data::String("dup.1".to_owned()),
             ],
-            vec![calamine::Data::Int(1), calamine::Data::Int(2)],
+            vec![
+                calamine::Data::Int(1),
+                calamine::Data::Int(2),
+                calamine::Data::Int(3),
+            ],
         ];
 
-        let err = super::parse_excel_rows(rows, &super::ExcelReadOptions::default())
-            .expect_err("duplicate headers should error");
-        assert!(matches!(err, IoError::DuplicateColumnName(_)));
+        let frame = super::parse_excel_rows(rows, &super::ExcelReadOptions::default())
+            .expect("duplicate headers are renamed");
+        let names: Vec<&String> = frame.column_names();
+        assert_eq!(names, ["dup", "dup.2", "dup.1"]);
+        assert_eq!(frame.column("dup.2").unwrap().values()[0], Scalar::Int64(2));
     }
 
     // ── SQL I/O tests ──────────────────────────────────────────────

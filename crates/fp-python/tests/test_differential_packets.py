@@ -6877,6 +6877,10 @@ _READ_CSV_NTH_CASES = {
     "unterminated quote": lambda m: m.read_csv(io.StringIO('a,b\n"x,2\n')),
     "thousands two chars": lambda m: m.read_csv(io.StringIO("a\n1\n"), thousands=",,"),
     "no options": lambda m: _csv_frame(m.read_csv(io.StringIO("a,b\n1,x\n"))),
+    # Repeated header names are renamed a, a.1, ... skipping a suffix the
+    # header already holds (the read raised DuplicateColumnName; 4qg5w.21).
+    "duplicate headers": lambda m: _csv_frame(m.read_csv(io.StringIO("a,a,a.1,,b,b\n1,2,3,4,5,6\n"))),
+    "repeated columns round trip": lambda m: _csv_frame(m.read_csv(io.StringIO(pd.DataFrame([[1, 2, 3]], columns=["x", "x", "y"]).to_csv(index=False)))),
     "nth first": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth(0)),
     "nth last": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth(-1)),
     "nth list": lambda m: (lambda r: (list(r.columns), list(r.index), r.values.tolist()))(_nth_frame(m).groupby("g").nth([0, 1])),
