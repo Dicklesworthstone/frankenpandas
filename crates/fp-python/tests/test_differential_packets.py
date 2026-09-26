@@ -5309,7 +5309,7 @@ def _logical_outcome(m: Any, case: str) -> Any:
     import warnings
 
     def cell(v: Any) -> Any:
-        return None if v is pd.NA or (isinstance(v, float) and math.isnan(v)) else v
+        return None if v is m.NA or (isinstance(v, float) and math.isnan(v)) else v
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -5367,7 +5367,7 @@ _OBJECT_DTYPE_CASES = {
 
 def _object_outcome(m: Any, case: str) -> Any:
     def cell(v: Any) -> Any:
-        if v is None or v is pd.NA or (isinstance(v, float) and math.isnan(v)):
+        if v is None or v is m.NA or (isinstance(v, float) and math.isnan(v)):
             return ("missing", type(v).__name__)
         return (type(v).__name__, str(v))
 
@@ -5479,7 +5479,7 @@ _NUMPY_INTEROP_CASES = {
 
 def _numpy_outcome(m: Any, case: str) -> Any:
     def cell(v: Any) -> Any:
-        return None if v is pd.NA or (isinstance(v, float) and math.isnan(v)) else v
+        return None if v is m.NA or (isinstance(v, float) and math.isnan(v)) else v
 
     def shape(r: Any) -> Any:
         if isinstance(r, tuple):
@@ -7189,7 +7189,7 @@ def _records() -> Any:
 # aggfunc / margins / names / normalize='index', json_normalize
 # record_path / meta, merge_asof suffixes, groupby quantile interpolation,
 # pivot_table sort=False, sample weights.
-_EVERYDAY_CASES = {
+_VALUE_COUNTS_CASES = {
     # (Series names are text here - fvsao.32 - so the q name compares as str.)
     "frame quantile nearest": lambda m: _q_named(_ab(m)[["v", "w"]].quantile(0.3, interpolation="nearest")),
     "frame quantile lower int": lambda m: _q_named(_ab(m)[["v"]].quantile(0.3, interpolation="lower")),
@@ -7260,17 +7260,17 @@ _EVERYDAY_CASES = {
 }
 
 
-def _everyday_outcome(m: Any, case: str) -> Any:
+def _value_counts_outcome(m: Any, case: str) -> Any:
     try:
-        return _EVERYDAY_CASES[case](m)
+        return _VALUE_COUNTS_CASES[case](m)
     except Exception as e:  # noqa: BLE001 - the exception type is the outcome
         return ("raise", type(e).__name__)
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize("case", list(_EVERYDAY_CASES))
+@pytest.mark.parametrize("case", list(_VALUE_COUNTS_CASES))
 def test_value_counts_crosstab_quantile_json_normalize_and_sample_match_pandas(case: str) -> None:
-    assert _everyday_outcome(fpd, case) == _everyday_outcome(pd, case), case
+    assert _value_counts_outcome(fpd, case) == _value_counts_outcome(pd, case), case
 
 
 def _dtype_facts(dtype: Any) -> Any:
@@ -7835,3 +7835,127 @@ def _rank_name_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_RANK_NAME_CASES))
 def test_window_rank_pct_and_groupby_apply_group_name_match_pandas(case: str) -> None:
     assert _rank_name_outcome(fpd, case) == _rank_name_outcome(pd, case), case
+
+
+def _scalar_kind(x: Any) -> Any:
+    """A value's kind and text: a numpy scalar as `numpy.<type>`, anything
+    else by its type's name (fp's classes live in their own module)."""
+    kind = ("numpy." if isinstance(x, np.generic) else "") + type(x).__name__
+    return (kind, x if isinstance(x, (bool, str)) else str(x))
+
+
+def _nullable_ints(m: Any) -> Any:
+    return m.Series([1, None], dtype="Int64")
+
+
+# (fvsao.25) Reductions and element access returned Python scalars where
+# pandas returns numpy scalars (repr np.float64(5.0), isinstance(x, int) is
+# False, json.dumps raises); iterating a nullable Series gave Python scalars
+# where pandas iterates the masked array (numpy scalars, pd.NA); items() /
+# iterrows() / itertuples() were lists, so next(...) raised.
+_SCALAR_TYPE_CASES = {
+    "s[i] int": lambda m: _scalar_kind(m.Series([1, 2])[0]),
+    "s[i] float": lambda m: _scalar_kind(m.Series([1.5, 2.0])[0]),
+    "s[i] nan": lambda m: _scalar_kind(m.Series([_NAN, 2.0])[0]),
+    "s[i] bool": lambda m: _scalar_kind(m.Series([True])[0]),
+    "iloc": lambda m: _scalar_kind(m.Series([1, 2]).iloc[1]),
+    "at": lambda m: _scalar_kind(m.Series([1, 2]).at[0]),
+    "loc label": lambda m: _scalar_kind(m.Series([1.5], index=["a"]).loc["a"]),
+    "df iloc": lambda m: _scalar_kind(m.DataFrame({"a": [1]}).iloc[0, 0]),
+    "df iat last column": lambda m: _scalar_kind(m.DataFrame({"a": [1], "b": [2.5]}).iat[0, -1]),
+    "df at": lambda m: _scalar_kind(m.DataFrame({"a": [1.5]}).at[0, "a"]),
+    "df loc": lambda m: _scalar_kind(m.DataFrame({"a": [True]}).loc[0, "a"]),
+    "Int64 element": lambda m: _scalar_kind(_nullable_ints(m)[0]),
+    "boolean element": lambda m: _scalar_kind(m.Series([True, None], dtype="boolean")[0]),
+    "sum int": lambda m: _scalar_kind(m.Series([1, 2]).sum()),
+    "sum float": lambda m: _scalar_kind(m.Series([1.5]).sum()),
+    "sum bool": lambda m: _scalar_kind(m.Series([True, True]).sum()),
+    "sum empty": lambda m: _scalar_kind(m.Series([], dtype="int64").sum()),
+    "mean": lambda m: _scalar_kind(m.Series([1, 2]).mean()),
+    "mean of NaN": lambda m: _scalar_kind(m.Series([_NAN]).mean()),
+    "min": lambda m: _scalar_kind(m.Series([1, 2]).min()),
+    "max float": lambda m: _scalar_kind(m.Series([1.5]).max()),
+    "min of NaN": lambda m: _scalar_kind(m.Series([_NAN]).min()),
+    "min empty": lambda m: _scalar_kind(m.Series([], dtype=float).min()),
+    "std": lambda m: _scalar_kind(m.Series([1, 2]).std()),
+    "var": lambda m: _scalar_kind(m.Series([1, 2]).var()),
+    "median": lambda m: _scalar_kind(m.Series([1, 2, 3]).median()),
+    "prod": lambda m: _scalar_kind(m.Series([1, 2]).prod()),
+    "count": lambda m: _scalar_kind(m.Series([1, 2]).count()),
+    "any": lambda m: _scalar_kind(m.Series([1, 0]).any()),
+    "all": lambda m: _scalar_kind(m.Series([True]).all()),
+    "quantile": lambda m: _scalar_kind(m.Series([1, 2]).quantile(0.5)),
+    "sem": lambda m: _scalar_kind(m.Series([1, 2]).sem()),
+    "Int64 sum": lambda m: _scalar_kind(_nullable_ints(m).sum()),
+    "Int64 mean": lambda m: _scalar_kind(m.Series([1, 2, None], dtype="Int64").mean()),
+    "Int64 count": lambda m: _scalar_kind(m.Series([1, 2, None], dtype="Int64").count()),
+    "frame sum element": lambda m: _scalar_kind(m.DataFrame({"a": [1, 2]}).sum()["a"]),
+    "np.sum delegates": lambda m: _scalar_kind(np.sum(m.Series([1, 2]))),
+    "np.max delegates": lambda m: _scalar_kind(np.max(m.Series([1.5, 2.5]))),
+    "repr of sum": lambda m: repr(m.Series([1.0, 4.0]).sum()),
+    "repr of any": lambda m: repr((m.Series([1, 2]) > 1).any()),
+    "isinstance int": lambda m: isinstance(m.Series([1, 2])[0], int),
+    "item of sum": lambda m: _scalar_kind(m.Series([1, 2]).sum().item()),
+    "iterate Int64": lambda m: [_scalar_kind(v) for v in _nullable_ints(m)],
+    "iterate Float64": lambda m: [_scalar_kind(v) for v in m.Series([1.5, None], dtype="Float64")],
+    "items Int64": lambda m: [_scalar_kind(v) for _, v in _nullable_ints(m).items()],
+    "Int64 missing element is NA": lambda m: _nullable_ints(m)[1] is m.NA,
+    "Int64 missing max is NA": lambda m: m.Series([None, None], dtype="Int64").max() is m.NA,
+    "iterated missing is NA": lambda m: list(_nullable_ints(m))[1] is m.NA,
+    "next iterrows": lambda m: [_scalar_kind(v) for v in next(m.DataFrame({"a": [1], "b": [1.5]}).iterrows())[1]],
+    "next itertuples": lambda m: [_scalar_kind(v) for v in next(m.DataFrame({"a": [1], "b": [1.5]}).itertuples(index=False))],
+    "next items": lambda m: next(m.Series([5], index=["k"]).items()),
+    # NEGATIVES: tolist / iteration / to_dict / item / nunique of a numpy
+    # dtype stay Python scalars, a nullable tolist too; object cells stay
+    # themselves; json.dumps refuses a numpy integer but takes tolist().
+    "tolist int": lambda m: [_scalar_kind(v) for v in m.Series([1, 2]).tolist()],
+    "tolist Int64": lambda m: [_scalar_kind(v) for v in _nullable_ints(m).tolist()],
+    "iterate int": lambda m: [_scalar_kind(v) for v in m.Series([1, 2])],
+    "iterate float": lambda m: [_scalar_kind(v) for v in m.Series([1.5, _NAN])],
+    "items int": lambda m: [_scalar_kind(v) for _, v in m.Series([1, 2]).items()],
+    "to_dict": lambda m: [_scalar_kind(v) for v in m.Series([1, 2]).to_dict().values()],
+    "item": lambda m: _scalar_kind(m.Series([1]).item()),
+    "nunique": lambda m: _scalar_kind(m.Series([1]).nunique()),
+    "object element": lambda m: _scalar_kind(m.Series(["a", None])[1]),
+    "max of text": lambda m: _scalar_kind(m.Series(["a", "b"]).max()),
+    "json of sum": lambda m: json.dumps(m.Series([1, 2]).sum()),
+    "json of tolist": lambda m: json.dumps(m.Series([1, 2]).tolist()),
+}
+
+
+def _scalar_type_outcome(m: Any, case: str) -> Any:
+    try:
+        return _SCALAR_TYPE_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SCALAR_TYPE_CASES))
+def test_reductions_and_elements_return_numpy_scalars_like_pandas(case: str) -> None:
+    assert _scalar_type_outcome(fpd, case) == _scalar_type_outcome(pd, case), case
+
+
+def test_no_test_module_defines_a_top_level_name_twice() -> None:
+    """A second top-level `_X_CASES = {...}` or `def _helper` silently
+    replaces the first: the earlier group's parametrize list is fixed at
+    import, but its outcome function reads the later table, so each case
+    raised KeyError in both arms and passed. fvsao.30's 17 everyday-idiom
+    cases were vacuous that way from 31cf429d6 until 2026-09-25, and two
+    shadowed helpers (_gb_frame, _typed) broke other groups."""
+    import ast
+
+    repeated = {}
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        names = []
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.append(node.name)
+            elif isinstance(node, ast.Assign):
+                names.extend(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names.append(node.target.id)
+        twice = sorted({n for n in names if names.count(n) > 1})
+        if twice:
+            repeated[path.name] = twice
+    assert repeated == {}, repeated

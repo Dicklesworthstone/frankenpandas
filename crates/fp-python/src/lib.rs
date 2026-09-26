@@ -1022,6 +1022,17 @@ fn days_from_ymd(year: i64, month: i64, day: i64) -> i64 {
 #[derive(Clone, Debug)]
 pub struct PyNAType;
 
+static NA_OBJECT: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+
+/// pandas' `pd.NA` is one object, so `x is pd.NA` holds for every missing
+/// cell; every NA the binding hands out is this one (each was a new
+/// object, so `x is fpd.NA` was False).
+fn na_object(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    NA_OBJECT
+        .get_or_try_init(py, || Py::new(py, PyNAType).map(Py::into_any))
+        .map(|na| na.clone_ref(py))
+}
+
 #[pymethods]
 impl PyNAType {
     #[new]
@@ -1053,7 +1064,7 @@ impl PyNAType {
         _other: &Bound<'py, PyAny>,
         _op: pyo3::class::basic::CompareOp,
     ) -> PyResult<Py<PyAny>> {
-        PyNAType.into_py_any(py)
+        na_object(py)
     }
 }
 
@@ -2954,8 +2965,10 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 }
 
 /// Convert a FrankenPandas Scalar to a Python object.
-/// A cell of `column` as Python: a tz-aware datetime column's instant is a
-/// Timestamp in that zone (it came back naive, showing the UTC wall clock).
+/// A cell of `column` as Python, as `tolist()` / iteration give it: a
+/// tz-aware datetime column's instant is a Timestamp in that zone (it came
+/// back naive, showing the UTC wall clock), and a nullable extension
+/// column's missing cell is `pd.NA` (it was None).
 fn cell_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<PyAny>> {
     if let (DType::Datetime64 { tz: Some(zone) }, Scalar::Datetime64(nanos)) =
         (column.dtype(), value)
@@ -2969,21 +2982,126 @@ fn cell_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<Py
         }
         .into_py_any(py);
     }
+    if value.is_missing() && is_nullable_extension(&column.dtype()) {
+        return na_object(py);
+    }
     scalar_to_py(py, value)
+}
+
+/// Whether `dtype` is one of pandas' nullable extension dtypes (Int64 /
+/// Float64 / boolean), whose missing value is `pd.NA`.
+fn is_nullable_extension(dtype: &DType) -> bool {
+    matches!(
+        dtype,
+        DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable
+    )
+}
+
+/// A number as pandas returns it from a reduction or a scalar element: a
+/// numpy scalar (np.int64 / np.float64 / np.bool_) - they came back as
+/// Python int / float / bool; anything else as `scalar_to_py`.
+fn numpy_scalar(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
+    let (name, value) = match scalar {
+        Scalar::Int64(v) => ("int64", v.into_py_any(py)?),
+        Scalar::Float64(v) => ("float64", v.into_py_any(py)?),
+        Scalar::Null(NullKind::NaN) => ("float64", f64::NAN.into_py_any(py)?),
+        Scalar::Bool(b) => ("bool_", b.into_py_any(py)?),
+        _ => return scalar_to_py(py, scalar),
+    };
+    Ok(py.import("numpy")?.getattr(name)?.call1((value,))?.unbind())
+}
+
+/// A frame's cell in the column at `position` (negative from the end) as
+/// an element (see [`element_to_py`]).
+fn frame_element_at(
+    py: Python<'_>,
+    frame: &DataFrame,
+    position: i64,
+    value: &Scalar,
+) -> PyResult<Py<PyAny>> {
+    let columns = i64::try_from(frame.num_columns()).unwrap_or(i64::MAX);
+    let position = if position < 0 {
+        position + columns
+    } else {
+        position
+    };
+    match usize::try_from(position)
+        .ok()
+        .and_then(|position| frame.column_at(position))
+    {
+        Some(column) => element_to_py(py, column, value),
+        None => scalar_to_py(py, value),
+    }
+}
+
+/// A frame's cell in the column `name` as an element (see [`element_to_py`]).
+fn frame_element_named(
+    py: Python<'_>,
+    frame: &DataFrame,
+    name: &str,
+    value: &Scalar,
+) -> PyResult<Py<PyAny>> {
+    match frame.column(name) {
+        Some(column) => element_to_py(py, column, value),
+        None => scalar_to_py(py, value),
+    }
+}
+
+/// One element of `column` as pandas' `s[i]` / `.iloc` / `.at` /
+/// `df.iat[r, c]` give it: a numeric column's value is a numpy scalar (a
+/// missing float NaN too), a nullable column's missing value `pd.NA`, and
+/// any other column's cell as `cell_to_py` (text, None, a Timestamp).
+fn element_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<PyAny>> {
+    match column.dtype() {
+        DType::Int64 | DType::Float64 if value.is_missing() => {
+            numpy_scalar(py, &Scalar::Float64(f64::NAN))
+        }
+        DType::Int64 | DType::Float64 => numpy_scalar(py, value),
+        DType::Bool if !value.is_missing() => numpy_scalar(py, value),
+        dtype if is_nullable_extension(&dtype) && !value.is_missing() => numpy_scalar(py, value),
+        _ => cell_to_py(py, column, value),
+    }
+}
+
+/// One value of `column` as iterating a Series (`for v in s`, `s.items()`)
+/// yields it: a numpy dtype's value as the Python scalar `tolist()` gives,
+/// a nullable extension dtype's as its element - np.int64 / np.float64 /
+/// np.bool_, or `pd.NA` - since pandas iterates the masked array itself
+/// (measured, pandas 2.2.3).
+fn iterated_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<PyAny>> {
+    if is_nullable_extension(&column.dtype()) {
+        element_to_py(py, column, value)
+    } else {
+        cell_to_py(py, column, value)
+    }
 }
 
 /// A reduction of `series` as pandas returns it: a missing result of a
 /// nullable extension dtype (Int64 / Float64 / boolean) is `pd.NA`, not NaN.
-fn reduction_to_py(py: Python<'_>, series: &Series, result: &Scalar) -> PyResult<Py<PyAny>> {
-    if result.is_missing()
-        && matches!(
-            series.dtype(),
-            DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable
-        )
-    {
-        return PyNAType.into_py_any(py);
+///
+/// A number is a numpy scalar (np.int64 / np.float64 / np.bool_), as
+/// pandas' reductions return (they were Python scalars; fvsao.25) - except a
+/// NaN that pandas' nanops hands back as the Python float: `mean` of no
+/// values, and `min` / `max` / `std` / `var` / `median` of an empty Series
+/// (measured, pandas 2.2.3). `op` is the reduction's name.
+fn reduction_to_py(
+    py: Python<'_>,
+    series: &Series,
+    op: &str,
+    result: &Scalar,
+) -> PyResult<Py<PyAny>> {
+    if result.is_missing() && is_nullable_extension(&series.dtype()) {
+        return na_object(py);
     }
-    scalar_to_py(py, result)
+    let nan = matches!(result, Scalar::Float64(v) if v.is_nan())
+        || matches!(result, Scalar::Null(NullKind::NaN));
+    if nan
+        && (op == "mean"
+            || (series.is_empty() && matches!(op, "min" | "max" | "std" | "var" | "median")))
+    {
+        return f64::NAN.into_py_any(py);
+    }
+    numpy_scalar(py, result)
 }
 
 fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
@@ -15690,7 +15808,7 @@ impl PySeries {
             "max" => scalar(self.max(None, true, false, None)),
             "std" => scalar(self.std(None, true, None, false, None)),
             "var" => scalar(self.var(None, true, None, false, None)),
-            "count" => Ok(Some(self.count().into_pyobject(py)?.into_any().unbind())),
+            "count" => Ok(Some(self.count(py)?)),
             "median" => scalar(self.median(None, true, false, None)),
             "prod" | "product" => scalar(self.prod(None, true, false, None, None)),
             "sem" => Ok(Some(
@@ -16233,7 +16351,7 @@ impl PySeries {
                 .inner
                 .iat(position)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-            return cell_to_py(py, self.inner.column(), &scalar);
+            return element_to_py(py, self.inner.column(), &scalar);
         }
         // A label (text, a Timestamp): as `.loc` reads it, so date text on a
         // DatetimeIndex names a period or an instant and a duplicated label
@@ -16777,7 +16895,7 @@ impl PySeries {
         }
         Python::attach(|py| {
             if self.inner.count() < min_count {
-                return scalar_to_py(py, &Scalar::Null(NullKind::NaN));
+                return reduction_to_py(py, &self.inner, "sum", &Scalar::Null(NullKind::NaN));
             }
             let result = if !skipna {
                 self.inner.sum_skipna(false)
@@ -16785,7 +16903,7 @@ impl PySeries {
                 self.inner.sum()
             }
             .map_err(frame_error_to_py)?;
-            scalar_to_py(py, &result)
+            reduction_to_py(py, &self.inner, "sum", &result)
         })
     }
 
@@ -16812,7 +16930,7 @@ impl PySeries {
                 self.inner.mean()
             }
             .map_err(frame_error_to_py)?;
-            reduction_to_py(py, &self.inner, &result)
+            reduction_to_py(py, &self.inner, "mean", &result)
         })
     }
 
@@ -16837,7 +16955,7 @@ impl PySeries {
                 self.inner.min()
             }
             .map_err(frame_error_to_py)?;
-            reduction_to_py(py, &self.inner, &result)
+            reduction_to_py(py, &self.inner, "min", &result)
         })
     }
 
@@ -16862,7 +16980,7 @@ impl PySeries {
                 self.inner.max()
             }
             .map_err(frame_error_to_py)?;
-            reduction_to_py(py, &self.inner, &result)
+            reduction_to_py(py, &self.inner, "max", &result)
         })
     }
 
@@ -16885,7 +17003,7 @@ impl PySeries {
         }
         let ddof_val = ddof.unwrap_or(1);
         let result = self.inner.column().std_skipna(ddof_val, skipna);
-        Python::attach(|py| scalar_to_py(py, &result))
+        Python::attach(|py| reduction_to_py(py, &self.inner, "std", &result))
     }
 
     /// Return the first n elements. pandas slices `iloc[:n]`, so `n=None`
@@ -16921,6 +17039,18 @@ impl PySeries {
         Ok(PyList::new(py, values)?.into_any().unbind())
     }
 
+    /// `for v in s` yields each value as [`iterated_to_py`]; iteration fell
+    /// back to `s[i]`, whose elements are numpy scalars.
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let column = self.inner.column();
+        let values = column
+            .values()
+            .iter()
+            .map(|value| iterated_to_py(py, column, value))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, values)?.try_iter()?.into_any().unbind())
+    }
+
     /// Return the median value.
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
     fn median(
@@ -16944,7 +17074,7 @@ impl PySeries {
                 self.inner.median()
             }
             .map_err(frame_error_to_py)?;
-            scalar_to_py(py, &r)
+            reduction_to_py(py, &self.inner, "median", &r)
         })
     }
 
@@ -16967,7 +17097,7 @@ impl PySeries {
         }
         let ddof_val = ddof.unwrap_or(1);
         let result = self.inner.column().var_skipna(ddof_val, skipna);
-        Python::attach(|py| scalar_to_py(py, &result))
+        Python::attach(|py| reduction_to_py(py, &self.inner, "var", &result))
     }
 
     /// Return the product of the values.
@@ -16989,7 +17119,7 @@ impl PySeries {
         }
         Python::attach(|py| {
             if self.inner.count() < min_count.unwrap_or(0) {
-                return scalar_to_py(py, &Scalar::Null(NullKind::NaN));
+                return reduction_to_py(py, &self.inner, "prod", &Scalar::Null(NullKind::NaN));
             }
             let r = if !skipna {
                 self.inner.prod_skipna(false)
@@ -16997,7 +17127,7 @@ impl PySeries {
                 self.inner.prod()
             }
             .map_err(frame_error_to_py)?;
-            scalar_to_py(py, &r)
+            reduction_to_py(py, &self.inner, "prod", &r)
         })
     }
 
@@ -17015,7 +17145,7 @@ impl PySeries {
                     .inner
                     .quantile_with_interpolation(f, interpolation)
                     .map_err(frame_error_to_py)?;
-                scalar_to_py(py, &r)
+                reduction_to_py(py, &self.inner, "quantile", &r)
             } else if let Ok(it) = q_obj.try_iter() {
                 let mut qs = Vec::new();
                 for item in it {
@@ -17037,13 +17167,17 @@ impl PySeries {
                 .inner
                 .quantile_with_interpolation(0.5, interpolation)
                 .map_err(frame_error_to_py)?;
-            scalar_to_py(py, &r)
+            reduction_to_py(py, &self.inner, "quantile", &r)
         }
     }
 
-    /// Return the number of non-missing values.
-    fn count(&self) -> usize {
-        self.inner.count()
+    /// Return the number of non-missing values, pandas' np.int64 (it was a
+    /// Python int).
+    fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        numpy_scalar(
+            py,
+            &Scalar::Int64(i64::try_from(self.inner.count()).unwrap_or(i64::MAX)),
+        )
     }
 
     /// Return the number of distinct non-missing values.
@@ -18820,17 +18954,21 @@ impl PySeries {
     #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
     fn any(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
         bool_only: bool,
         skipna: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<bool> {
+    ) -> PyResult<Py<PyAny>> {
         let _ = bool_only;
         self.check_logical_reduction("any", axis, kwargs)?;
-        if skipna || !self.inner.column().has_nulls() {
-            return self.inner.any().map_err(frame_error_to_py);
-        }
-        Ok(self.inner.column().values().iter().any(missing_as_truthy))
+        let result = if skipna || !self.inner.column().has_nulls() {
+            self.inner.any().map_err(frame_error_to_py)?
+        } else {
+            self.inner.column().values().iter().any(missing_as_truthy)
+        };
+        // pandas' np.bool_ (it was a Python bool).
+        numpy_scalar(py, &Scalar::Bool(result))
     }
 
     /// pandas' `Series.all(axis=0, bool_only=False, skipna=True, **kwargs)`
@@ -18838,17 +18976,20 @@ impl PySeries {
     #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
     fn all(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
         bool_only: bool,
         skipna: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<bool> {
+    ) -> PyResult<Py<PyAny>> {
         let _ = bool_only;
         self.check_logical_reduction("all", axis, kwargs)?;
-        if skipna || !self.inner.column().has_nulls() {
-            return self.inner.all().map_err(frame_error_to_py);
-        }
-        Ok(self.inner.column().values().iter().all(missing_as_truthy))
+        let result = if skipna || !self.inner.column().has_nulls() {
+            self.inner.all().map_err(frame_error_to_py)?
+        } else {
+            self.inner.column().values().iter().all(missing_as_truthy)
+        };
+        numpy_scalar(py, &Scalar::Bool(result))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false))]
@@ -18867,7 +19008,7 @@ impl PySeries {
         }
         let ddof_val = ddof.unwrap_or(1);
         let result = self.inner.column().sem_skipna(ddof_val, skipna);
-        Python::attach(|py| scalar_to_py(py, &result))
+        Python::attach(|py| reduction_to_py(py, &self.inner, "sem", &result))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
@@ -19054,15 +19195,18 @@ impl PySeries {
         }
     }
 
+    /// pandas' `Series.items()`: an iterator of (label, value) pairs, each
+    /// value as iteration yields it (it was a list, so `next(s.items())`
+    /// raised, and a nullable dtype's missing value came back None).
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let keys = row_keys_to_py(py, self.inner.index())?;
-        let values = self.inner.column().values();
+        let column = self.inner.column();
         let mut list = Vec::with_capacity(keys.len());
-        for (py_l, v) in keys.into_iter().zip(values.iter()) {
-            let py_v = scalar_to_py(py, v)?;
+        for (py_l, v) in keys.into_iter().zip(column.values().iter()) {
+            let py_v = iterated_to_py(py, column, v)?;
             list.push(pyo3::types::PyTuple::new(py, &[py_l, py_v])?);
         }
-        Ok(PyList::new(py, list)?.into_any().unbind())
+        Ok(PyList::new(py, list)?.try_iter()?.into_any().unbind())
     }
 
     fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -21014,7 +21158,7 @@ impl PySeriesILoc {
                 .inner
                 .iat(pos)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-            return cell_to_py(py, self.inner.column(), &scalar);
+            return element_to_py(py, self.inner.column(), &scalar);
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let s = match slice_rows(slice, self.inner.len())? {
@@ -21139,7 +21283,7 @@ impl PySeriesIAt {
             .inner
             .iat(key)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-        cell_to_py(py, self.inner.column(), &scalar)
+        element_to_py(py, self.inner.column(), &scalar)
     }
 }
 
@@ -21184,7 +21328,7 @@ impl PySeriesAt {
             .inner
             .at(&label)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-        cell_to_py(py, self.inner.column(), &scalar)
+        element_to_py(py, self.inner.column(), &scalar)
     }
 }
 
@@ -28623,6 +28767,8 @@ impl PyDataFrame {
         self.columns(py)
     }
 
+    /// pandas' `DataFrame.items()` / `iterrows()` / `itertuples()` are
+    /// iterators (they were lists, so `next(df.iterrows())` raised).
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let mut list = Vec::with_capacity(self.inner.column_names().len());
         for col_name in self.inner.column_names() {
@@ -28630,7 +28776,7 @@ impl PyDataFrame {
             let py_s = Py::new(py, s)?;
             list.push((col_name.as_str(), py_s).into_pyobject(py)?);
         }
-        Ok(PyList::new(py, list)?.into_any().unbind())
+        Ok(PyList::new(py, list)?.try_iter()?.into_any().unbind())
     }
 
     fn iterrows(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -28649,7 +28795,7 @@ impl PyDataFrame {
             let py_s = Py::new(py, PySeries { inner: s })?;
             list.push(pyo3::types::PyTuple::new(py, &[py_label, py_s.into_any()])?);
         }
-        Ok(PyList::new(py, list)?.into_any().unbind())
+        Ok(PyList::new(py, list)?.try_iter()?.into_any().unbind())
     }
 
     #[pyo3(signature = (index=true, name="Pandas"))]
@@ -28688,8 +28834,13 @@ impl PyDataFrame {
             if index {
                 py_vals.push(index_label_to_py(py, &label)?);
             }
-            for v in &vals {
-                py_vals.push(scalar_to_py(py, v)?);
+            // Each column's value as iterating that column yields it (a
+            // tz-aware Timestamp, a nullable dtype's numpy scalar / pd.NA).
+            for (position, v) in vals.iter().enumerate() {
+                py_vals.push(match self.inner.column_at(position) {
+                    Some(column) => iterated_to_py(py, column, v)?,
+                    None => scalar_to_py(py, v)?,
+                });
             }
             let row_obj = if let Some(ref nt) = named_type {
                 let tup = pyo3::types::PyTuple::new(py, &py_vals)?;
@@ -28703,7 +28854,7 @@ impl PyDataFrame {
             };
             list.push(row_obj);
         }
-        Ok(PyList::new(py, list)?.into_any().unbind())
+        Ok(PyList::new(py, list)?.try_iter()?.into_any().unbind())
     }
 
     #[pyo3(signature = (axis=None, inplace=false, limit=None, downcast=None))]
@@ -31563,7 +31714,7 @@ impl PyDataFrameILoc {
                     .inner
                     .iat(r, c)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-                return scalar_to_py(py, &scalar);
+                return frame_element_at(py, &self.inner, c, &scalar);
             }
 
             // Row is integer, col is slice or list: df.iloc[r, :] or df.iloc[r, [0, 1]]
@@ -31862,7 +32013,7 @@ fn series_label_get(
         0 => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
             key.clone().unbind(),
         )),
-        1 => cell_to_py(
+        1 => element_to_py(
             py,
             series.column(),
             &series.at(&label).map_err(loc_key_error)?,
@@ -33430,7 +33581,7 @@ impl PyDataFrameLoc {
                                 .first()
                                 .cloned()
                                 .ok_or_else(|| loc_key_error(&name))?;
-                            return scalar_to_py(py, &value);
+                            return frame_element_named(py, &self.inner, &name, &value);
                         }
                         let names: Vec<String> = col_key.extract()?;
                         let labels: Vec<IndexLabel> =
@@ -33461,7 +33612,7 @@ impl PyDataFrameLoc {
                 (LocRows::Label(label), None) => {
                     let col_name = col_key.extract::<String>()?;
                     let scalar = self.inner.at(&label, &col_name).map_err(loc_key_error)?;
-                    scalar_to_py(py, &scalar)
+                    frame_element_named(py, &self.inner, &col_name, &scalar)
                 }
                 // df.loc[rows, 'c'] -> Series named 'c' over the selected rows
                 (LocRows::Frame(sub), None) => {
@@ -33542,7 +33693,7 @@ impl PyDataFrameIAt {
             .inner
             .iat(r, c)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-        scalar_to_py(py, &scalar)
+        frame_element_at(py, &self.inner, c, &scalar)
     }
 }
 
@@ -33594,7 +33745,7 @@ impl PyDataFrameAt {
             .inner
             .at(&label, &col_name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
-        scalar_to_py(py, &scalar)
+        frame_element_named(py, &self.inner, &col_name, &scalar)
     }
 }
 
@@ -51808,7 +51959,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPeriod>()?;
     m.add_class::<PyNAType>()?;
     m.add_class::<PyNaTType>()?;
-    m.add("NA", PyNAType)?;
+    m.add("NA", na_object(m.py())?)?;
     m.add("NaT", PyNaTType)?;
     m.add_class::<PyBooleanDtype>()?;
     m.add_class::<PyInt8Dtype>()?;
