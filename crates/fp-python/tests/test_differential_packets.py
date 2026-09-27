@@ -10141,6 +10141,13 @@ _RANK_CASES = {
     "cumcount, a missing key": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k")["v"].cumcount(),
     "cumcount descending, a missing key": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k").cumcount(ascending=False),
     "cumcount, every key present": lambda m: m.DataFrame({"k": ["x", "y", "x"], "v": [1, 2, 3]}).groupby("k").cumcount(),
+    "number keys, a missing one": lambda m: m.DataFrame({"k": [1.0, 2.0, 1.0, None], "v": [3, 1, 2, 5]}).groupby("k")["v"].rank(method="dense", pct=True),
+    "frame number keys, a missing one": lambda m: m.DataFrame({"k": [1.0, 2.0, 1.0, None], "v": [3, 1, 2, 5]}).groupby("k").rank(method="max"),
+    # NEGATIVES: dropna=False keeps the missing key as a group of its own,
+    # ranked and counted like any other.
+    "dropna=False ranks the missing key's group": lambda m: m.DataFrame({"k": ["x", None, "x", None], "v": [3, 1, 2, 5]}).groupby("k", dropna=False)["v"].rank(),
+    "frame dropna=False": lambda m: m.DataFrame({"k": ["x", None, "x", None], "v": [3.5, 1.0, 2.0, 5.0], "t": ["b", "a", "a", "c"]}).groupby("k", dropna=False).rank(),
+    "cumcount dropna=False stays int": lambda m: m.DataFrame({"k": ["x", None, "x", None], "v": [3, 1, 2, 5]}).groupby("k", dropna=False).cumcount(),
     "ascending=None ranks descending": lambda m: m.Series([1, 3, 2]).rank(ascending=None),
     "groupby ascending=None ranks descending": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k")["v"].rank(ascending=None),
     "pct=1 scales": lambda m: m.DataFrame({"v": [1, 3, 2]}).rank(pct=1),
