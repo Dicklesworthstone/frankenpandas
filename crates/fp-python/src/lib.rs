@@ -412,12 +412,12 @@ fn pandas_object_text(value: &Scalar) -> String {
 
 /// The cells pandas' formatter makes for `column` (before justification):
 /// numbers, bools and objects take a leading space, datetimes and
-/// timedeltas do not. None for a column this layout does not render (a
-/// timezone other than UTC).
+/// timedeltas do not; a tz-aware column shows its wall clock and offset in
+/// any zone.
 #[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
-fn pandas_cells(column: &Column) -> Option<Vec<String>> {
+fn pandas_cells(column: &Column) -> Vec<String> {
     let values = column.values();
-    Some(match column.dtype() {
+    match column.dtype() {
         DType::Int64 if column.validity().all() => values
             .iter()
             .map(|value| match value {
@@ -483,7 +483,7 @@ fn pandas_cells(column: &Column) -> Option<Vec<String>> {
             .iter()
             .map(|value| format!(" {}", pandas_object_text(value)))
             .collect(),
-    })
+    }
 }
 
 /// The texts of index `labels`, as pandas' index formatter prints them
@@ -671,10 +671,8 @@ impl SeriesFooter {
     };
 }
 
-/// pandas' `repr(series)` (see [`pandas_series_text`]); None where the
-/// layout does not render the Series, which keeps frankenpandas' own
-/// Display.
-fn pandas_series_repr(series: &Series) -> Option<String> {
+/// pandas' `repr(series)` (see [`pandas_series_text`]).
+fn pandas_series_repr(series: &Series) -> String {
     pandas_series_text(series, RowLimits::REPR, true, true, SeriesFooter::REPR)
 }
 
@@ -684,15 +682,15 @@ fn pandas_series_repr(series: &Series) -> Option<String> {
 /// line of the level names when any is named (`show_header`; printed even
 /// without the index, as pandas does), `limits` rows, the chosen footer
 /// parts. Without the index the values lose their sign space, as pandas'
-/// `leading_space=index`. None for a column the layout does not render (a
-/// non-UTC timezone).
+/// `leading_space=index`. Every Series prints this way (a Series it could
+/// not lay out printed frankenpandas' own Display; fvsao.34).
 fn pandas_series_text(
     series: &Series,
     limits: RowLimits,
     show_index: bool,
     show_header: bool,
     parts: SeriesFooter,
-) -> Option<String> {
+) -> String {
     let index = series.index();
     let column = series.column();
     let (rows, dots_at) = limits.shown(series.len());
@@ -739,9 +737,9 @@ fn pandas_series_text(
         ));
     }
     if series.is_empty() {
-        return Some(format!("Series([], {footer})"));
+        return format!("Series([], {footer})");
     }
-    let mut cells = pandas_cells(&column.take_positions(&rows))?;
+    let mut cells = pandas_cells(&column.take_positions(&rows));
     if !show_index {
         cells = cells.into_iter().map(without_leading_space).collect();
     }
@@ -751,9 +749,11 @@ fn pandas_series_text(
     }
     // The header line: a flat index's name as is, or a MultiIndex's level
     // names laid out over its level columns (which the names widen).
-    let (mut labels, header) = match index.row_multiindex() {
-        Some(multi) => {
-            let (levels, names) = pandas_multiindex_texts(multi, &rows)?;
+    let multi_texts = index
+        .row_multiindex()
+        .and_then(|multi| pandas_multiindex_texts(multi, &rows));
+    let (mut labels, header) = match multi_texts {
+        Some((levels, names)) => {
             let lists: Vec<Vec<String>> = levels
                 .into_iter()
                 .enumerate()
@@ -805,7 +805,7 @@ fn pandas_series_text(
         text.push('\n');
         text.push_str(&footer);
     }
-    Some(text)
+    text
 }
 
 /// The texts of a MultiIndex's entries as pandas lists them in an empty
@@ -829,10 +829,44 @@ fn pandas_multiindex_tuples(multi: &fp_index::MultiIndex) -> Option<Vec<String>>
     )
 }
 
-/// pandas' `repr(df)` (see [`pandas_frame_text`]); None where the layout
-/// does not render the frame, which keeps frankenpandas' own Display.
-fn pandas_frame_repr(frame: &DataFrame) -> Option<String> {
+/// pandas' `repr(df)` (see [`pandas_frame_text`]).
+fn pandas_frame_repr(frame: &DataFrame) -> String {
     pandas_frame_text(frame, RowLimits::REPR, true, None)
+}
+
+/// The header texts of a column MultiIndex over `width` columns, one per
+/// level for each column, sparsified across the columns, and the corner
+/// beside them (the column-axis level names, blank when none is named);
+/// None when its levels do not cover the columns.
+fn column_multiindex_headers(
+    multi: &fp_index::MultiIndex,
+    width: usize,
+) -> Option<(Vec<Vec<String>>, Vec<String>)> {
+    let mut levels: Vec<Vec<String>> = (0..multi.nlevels())
+        .map(|level| {
+            multi
+                .get_level_values(level)
+                .ok()
+                .map(|values| pandas_label_texts(values.labels(), None))
+        })
+        .collect::<Option<_>>()?;
+    if levels.iter().any(|texts| texts.len() != width) {
+        return None;
+    }
+    sparsify_level_texts(&mut levels);
+    let headers = (0..width)
+        .map(|column| levels.iter().map(|texts| texts[column].clone()).collect())
+        .collect();
+    let corner = if multi.names().iter().any(Option::is_some) {
+        multi
+            .names()
+            .iter()
+            .map(|name| name.clone().unwrap_or_default())
+            .collect()
+    } else {
+        vec![String::new(); multi.nlevels()]
+    };
+    Some((headers, corner))
 }
 
 /// pandas' DataFrame text layout (`DataFrameFormatter`), shared by the repr
@@ -842,70 +876,45 @@ fn pandas_frame_repr(frame: &DataFrame) -> Option<String> {
 /// across the columns, with the column-axis level names at the left when
 /// any is named. `limits` rows; the "[n rows x m columns]" line when
 /// `show_dimensions` (None: when truncated, as the repr). Without the index
-/// the cells lose their sign space, as pandas' `leading_space=index`. None
-/// for a column the layout does not render (a non-UTC timezone). More than
-/// 20 columns are all shown (pandas truncates them to the display width).
+/// the cells lose their sign space, as pandas' `leading_space=index`. More
+/// than 20 columns are all shown (pandas truncates them to the display
+/// width). Every frame prints this way (a frame it could not lay out
+/// printed frankenpandas' own Display; fvsao.34).
 fn pandas_frame_text(
     frame: &DataFrame,
     limits: RowLimits,
     show_index: bool,
     show_dimensions: Option<bool>,
-) -> Option<String> {
+) -> String {
     let (len, width) = frame.shape();
-    let names: Vec<String> = (0..width)
-        .filter_map(|position| frame.column_name_at(position))
+    let columns: Vec<(String, &Column)> = (0..width)
+        .filter_map(|position| Some((frame.column_name_at(position)?, frame.column_at(position)?)))
         .collect();
     let column_multi = frame.columns_multiindex();
     if len == 0 || width == 0 {
-        let labels = match frame.row_multiindex() {
-            Some(multi) => pandas_multiindex_tuples(multi)?,
-            None => pandas_label_texts(frame.index().labels(), frame.index().tz()),
-        };
-        let columns = match column_multi {
-            Some(multi) => pandas_multiindex_tuples(multi)?,
-            None => names.clone(),
-        };
-        return Some(format!(
+        let labels = frame
+            .row_multiindex()
+            .and_then(pandas_multiindex_tuples)
+            .unwrap_or_else(|| pandas_label_texts(frame.index().labels(), frame.index().tz()));
+        let names = column_multi
+            .and_then(pandas_multiindex_tuples)
+            .unwrap_or_else(|| columns.iter().map(|(name, _)| name.clone()).collect());
+        return format!(
             "Empty DataFrame\nColumns: [{}]\nIndex: [{}]",
-            columns.join(", "),
+            names.join(", "),
             labels.join(", ")
-        ));
+        );
     }
     let (rows, dots_at) = limits.shown(len);
     // The column headers, one text per column-axis level for each column,
     // and what the index column shows beside them.
-    let (headers, corner): (Vec<Vec<String>>, Vec<String>) = match column_multi {
-        Some(multi) => {
-            let mut levels: Vec<Vec<String>> = (0..multi.nlevels())
-                .map(|level| {
-                    multi
-                        .get_level_values(level)
-                        .ok()
-                        .map(|values| pandas_label_texts(values.labels(), None))
-                })
-                .collect::<Option<_>>()?;
-            if levels.iter().any(|texts| texts.len() != width) {
-                return None;
-            }
-            sparsify_level_texts(&mut levels);
-            let headers = (0..width)
-                .map(|column| levels.iter().map(|texts| texts[column].clone()).collect())
-                .collect();
-            let corner = if multi.names().iter().any(Option::is_some) {
-                multi
-                    .names()
-                    .iter()
-                    .map(|name| name.clone().unwrap_or_default())
-                    .collect()
-            } else {
-                vec![String::new(); multi.nlevels()]
-            };
-            (headers, corner)
-        }
+    let multi_headers =
+        column_multi.and_then(|multi| column_multiindex_headers(multi, columns.len()));
+    let (headers, corner): (Vec<Vec<String>>, Vec<String>) = match multi_headers {
+        Some(multi_headers) => multi_headers,
         None => {
-            let mut headers = Vec::with_capacity(width);
-            for (position, name) in names.iter().enumerate() {
-                let column = frame.column_at(position)?;
+            let mut headers = Vec::with_capacity(columns.len());
+            for (name, column) in &columns {
                 let dtype = column.dtype();
                 let numeric = matches!(
                     dtype,
@@ -922,12 +931,20 @@ fn pandas_frame_text(
                     name.clone()
                 }]);
             }
-            (headers, vec![String::new()])
+            // The column axis's name heads the index column, as pandas
+            // prints it (pivot's 'c'; it was blank).
+            (
+                headers,
+                vec![frame.columns_name().unwrap_or_default().to_owned()],
+            )
         }
     };
     let header_rows = corner.len();
-    let (index_levels, row_names) = match frame.row_multiindex() {
-        Some(multi) => pandas_multiindex_texts(multi, &rows)?,
+    let multi_texts = frame
+        .row_multiindex()
+        .and_then(|multi| pandas_multiindex_texts(multi, &rows));
+    let (index_levels, row_names) = match multi_texts {
+        Some(texts) => texts,
         None => {
             let shown: Vec<IndexLabel> = rows
                 .iter()
@@ -968,9 +985,8 @@ fn pandas_frame_text(
         }
         strcols.push(index_col);
     }
-    for (position, header) in headers.iter().enumerate() {
-        let column = frame.column_at(position)?;
-        let mut cells = pandas_cells(&column.take_positions(&rows))?;
+    for ((_, column), header) in columns.iter().zip(&headers) {
+        let mut cells = pandas_cells(&column.take_positions(&rows));
         if !show_index {
             cells = cells.into_iter().map(without_leading_space).collect();
         }
@@ -1014,7 +1030,7 @@ fn pandas_frame_text(
     if show_dimensions.unwrap_or(dots_at.is_some()) {
         text.push_str(&format!("\n\n[{len} rows x {width} columns]"));
     }
-    Some(text)
+    text
 }
 
 /// Convert a Python dict `{old: new}` into FrankenPandas `(Scalar, Scalar)` pairs.
@@ -18635,10 +18651,9 @@ impl PySeries {
         self.inner.len()
     }
 
-    /// pandas' repr layout (see [`pandas_series_repr`]); frankenpandas'
-    /// own Display where that layout does not apply.
+    /// pandas' repr layout (see [`pandas_series_repr`]).
     fn __repr__(&self) -> String {
-        pandas_series_repr(&self.inner).unwrap_or_else(|| format!("{}", self.inner))
+        pandas_series_repr(&self.inner)
     }
 
     fn __reduce__<'py>(
@@ -23309,8 +23324,7 @@ impl PySeries {
                 dtype,
                 length: Some(length),
             },
-        )
-        .unwrap_or_else(|| self.inner.to_string());
+        );
         write_text_target(buf, text, false)
     }
 
@@ -26669,10 +26683,9 @@ impl PyDataFrame {
         self.inner.len()
     }
 
-    /// pandas' repr layout (see [`pandas_frame_repr`]); frankenpandas' own
-    /// Display where that layout does not apply.
+    /// pandas' repr layout (see [`pandas_frame_repr`]).
     fn __repr__(&self) -> String {
-        pandas_frame_repr(&self.inner).unwrap_or_else(|| format!("{}", self.inner))
+        pandas_frame_repr(&self.inner)
     }
 
     fn __reduce__<'py>(
@@ -29975,8 +29988,7 @@ impl PyDataFrame {
             RowLimits { max_rows, min_rows },
             index,
             show_dimensions,
-        )
-        .unwrap_or_else(|| frame.to_string_table(index));
+        );
         write_text_target(buf, text, false)
     }
 

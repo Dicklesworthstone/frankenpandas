@@ -6668,6 +6668,21 @@ _MULTIINDEX_TEXT_CASES = {
     "series to_string footer": lambda m: m.Series([1.5, 2.0], index=["a", "b"], name="v").to_string(name=True, dtype=True, length=True),
     "series to_string index False": lambda m: m.Series([1.5, -2.0], name="v").to_string(index=False),
     "series to_string MultiIndex": lambda m: _mi_frame(m).groupby(["a", "b"])["w"].sum().to_string(),
+    # A tz-aware column in a zone other than UTC - the case the layout once
+    # handed back to frankenpandas' Display - prints pandas' wall clock and
+    # offset, under a MultiIndex, in to_string and beside NaT.
+    "series in US/Eastern across DST": lambda m: repr(m.Series(m.date_range("2024-03-09 12:00", periods=3, freq="12h", tz="US/Eastern"))),
+    "frame in US/Eastern": lambda m: repr(m.DataFrame({"t": m.date_range("2024-01-01", periods=2, tz="US/Eastern"), "v": [1, 2]})),
+    "frame of an offset zone": lambda m: repr(m.DataFrame({"t": m.to_datetime(["2024-01-05 10:00+09:00", "2024-01-06 11:30+09:00"])})),
+    "converted column": lambda m: repr(m.Series(m.to_datetime(["2024-01-05 10:00"])).dt.tz_localize("UTC").dt.tz_convert("Europe/Paris")),
+    "MultiIndex frame in US/Eastern": lambda m: repr(m.DataFrame({"t": m.date_range("2024-01-01", periods=2, tz="US/Eastern"), "v": [1, 2]}, index=m.MultiIndex.from_tuples([("a", 1), ("a", 2)]))),
+    "to_string in US/Eastern": lambda m: m.DataFrame({"t": m.date_range("2024-01-01", periods=2, tz="US/Eastern")}).to_string(),
+    "US/Eastern beside NaT": lambda m: repr(m.Series(m.to_datetime(["2024-01-05 10:00", None])).dt.tz_localize("US/Eastern")),
+    # The column axis's name heads the index column (it was blank).
+    "pivot's column-axis name": lambda m: repr(m.DataFrame({"k": ["x", "y"], "c": ["p", "q"], "v": [1, 2]}).pivot(index="k", columns="c", values="v")),
+    "unstack's column-axis name": lambda m: repr(_mi_frame(m).set_index(["a", "b"])["w"].unstack()),
+    "an assigned column-axis name": lambda m: (lambda d: (setattr(d.columns, "name", "z"), repr(d))[1])(m.DataFrame({"v": [1, 2]})),
+    "column-axis name in to_string": lambda m: (lambda d: (setattr(d.columns, "name", "z"), d.to_string())[1])(m.DataFrame({"v": [1, 2]}, index=m.Index(["a", "b"], name="i"))),
 }
 
 
