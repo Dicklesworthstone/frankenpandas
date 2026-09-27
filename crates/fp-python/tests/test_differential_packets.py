@@ -5068,6 +5068,77 @@ def test_frame_apply_object_results_match_pandas(case: str) -> None:
     assert _apply_object_outcome(fpd, case) == _apply_object_outcome(pd, case), case
 
 
+# r0hk0: a Python label that is no scalar became its str(): a tuple label was
+# the text "(1, 2)", truncate(after=object()) compared that text and kept
+# every row. Only pd.Index([tuples]) is a MultiIndex; index=, set_axis and
+# the setters keep a flat Index of tuple labels, as pandas.
+_JUNK = object()
+
+
+def _label_view(x: Any) -> Any:
+    def one(v: Any) -> Any:
+        return "nan" if isinstance(v, float) and v != v else (type(v).__name__, repr(v))
+
+    if isinstance(x, np.generic):
+        return one(x.item())
+    if hasattr(x, "columns"):
+        return ("frame", type(x.index).__name__, [one(v) for v in x.index], [one(c) for c in x.columns])
+    if hasattr(x, "dtype") and hasattr(x, "index"):
+        return ("series", type(x.index).__name__, [one(v) for v in x.index], [one(v) for v in x.tolist()])
+    if hasattr(x, "tolist"):
+        return ("index", type(x).__name__, [one(v) for v in x.tolist()])
+    return one(x)
+
+
+def _tuple_setter(m: Any) -> Any:
+    s = m.Series([1, 2])
+    s.index = [(1, 2), (3, 4)]
+    return s
+
+
+def _multi_setter(m: Any) -> Any:
+    s = m.Series([1, 2])
+    s.index = m.MultiIndex.from_tuples([("a", 1), ("b", 2)])
+    return s
+
+
+_LABEL_OBJECT_CASES = {
+    "Index of tuples is a MultiIndex": lambda m: m.Index([(1, 2), (3, 4)]),
+    "Series index= tuples stays flat": lambda m: m.Series([1, 2], index=[(1, 2), (3, 4)]),
+    "DataFrame index= tuples stays flat": lambda m: m.DataFrame({"v": [1, 2]}, index=[(1, 2), (3, 4)]),
+    "set_axis tuples stays flat": lambda m: m.Series([1, 2]).set_axis([(1, 2), (3, 4)]),
+    "index setter tuples stays flat": _tuple_setter,
+    "a tuple key names a tuple label": lambda m: m.Series([1, 2], index=[(1, 2), (3, 4)])[(1, 2)],
+    "set_axis a MultiIndex keeps it": lambda m: m.Series([1, 2]).set_axis(m.MultiIndex.from_tuples([("a", 1), ("b", 2)])),
+    "index setter a MultiIndex keeps it": _multi_setter,
+    "Index of dates": lambda m: m.Index([datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)]),
+    "loc a date": lambda m: m.Series([1, 2], index=[datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)]).loc[datetime.date(2020, 1, 1)],
+    "truncate dates": lambda m: m.Series([1, 2, 3], index=[datetime.date(2020, 1, d) for d in (1, 2, 3)]).truncate(after=datetime.date(2020, 1, 2)),
+    "drop a date": lambda m: m.Series([1, 2], index=[datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)]).drop(datetime.date(2020, 1, 1)),
+    "reindex with an object": lambda m: m.Series([1, 2], index=["a", "b"]).reindex(["a", _JUNK]).tolist()[1],
+    # NEGATIVES: an object that is no label of the index is refused.
+    "truncate after an object raises": lambda m: m.Series([1, 2, 3]).truncate(after=_JUNK),
+    "frame truncate after an object raises": lambda m: m.DataFrame({"v": [1, 2, 3]}).truncate(after=_JUNK),
+    "loc an object raises": lambda m: m.Series([1, 2, 3]).loc[_JUNK],
+    "drop an object raises": lambda m: m.Series([1, 2, 3]).drop(_JUNK),
+}
+
+
+def _label_object_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _label_view(_LABEL_OBJECT_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LABEL_OBJECT_CASES))
+def test_python_objects_as_labels_match_pandas(case: str) -> None:
+    assert _label_object_outcome(fpd, case) == _label_object_outcome(pd, case), case
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_string_arithmetic_matches_pandas() -> None:
     # fvsao.13: s + t concatenated nothing - "value 'a' has non-numeric dtype".

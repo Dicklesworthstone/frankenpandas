@@ -4895,6 +4895,55 @@ fn series_name_to_py(py: Python<'_>, name: &SeriesName) -> PyResult<Option<Py<Py
     index_label_to_py(py, &name.label()).map(Some)
 }
 
+/// The MultiIndex `pd.Index([(1, 2), (3, 4)])` builds from a list (or
+/// tuple) of tuples - only the Index constructor does; `index=`, `set_axis`
+/// and the setters keep tuple labels (r0hk0). None for anything else.
+fn tuple_labels_multiindex(obj: &Bound<'_, PyAny>) -> PyResult<Option<MultiIndex>> {
+    let items: Vec<Bound<'_, PyAny>> = if let Ok(list) = obj.cast::<PyList>() {
+        list.iter().collect()
+    } else if let Ok(tuple) = obj.cast::<PyTuple>() {
+        tuple.iter().collect()
+    } else {
+        return Ok(None);
+    };
+    if items.is_empty() || !items.iter().all(|item| item.is_instance_of::<PyTuple>()) {
+        return Ok(None);
+    }
+    let tuples = items
+        .iter()
+        .map(|item| {
+            item.try_iter()?
+                .map(|label| py_to_index_label(&label?))
+                .collect()
+        })
+        .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
+    MultiIndex::from_tuples(tuples)
+        .map(Some)
+        .map_err(index_error_to_py)
+}
+
+/// pandas' TypeError for a label bound (truncate's before / after) that
+/// cannot be ordered against `index`'s labels: an object against
+/// non-objects, or objects Python cannot order. truncate(after=object())
+/// compared nothing and kept every row (r0hk0).
+fn require_orderable_bound(index: &Index, bound: &IndexLabel) -> PyResult<()> {
+    let Some(first) = index.labels().iter().find(|label| !label.is_missing()) else {
+        return Ok(());
+    };
+    let orderable = match (first, bound) {
+        (IndexLabel::Object(label), IndexLabel::Object(bound)) => label.python_cmp(bound).is_some(),
+        (IndexLabel::Object(_), _) | (_, IndexLabel::Object(_)) => false,
+        _ => true,
+    };
+    if orderable {
+        Ok(())
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "'<' not supported between the index labels and {bound}"
+        )))
+    }
+}
+
 /// Convert a Python value to an IndexLabel.
 fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     if obj.is_none() {
@@ -4944,14 +4993,11 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
                 obj.get_type().name()?
             )))
         }
-    } else if obj.is_instance_of::<pyo3::types::PyTuple>() {
-        // A tuple keys a MultiIndex in pandas; as a flat label it stays its
-        // text.
-        Ok(IndexLabel::Utf8(obj.str()?.to_str()?.to_string()))
     } else {
-        // Any other object (a datetime.date) is its own label, as pandas'
-        // object Index holds it; it became its text, so Index([date(...)])
-        // held strings and .loc[date(...)] missed (fvsao.66).
+        // Any other object (a datetime.date, a tuple) is its own label, as
+        // pandas' object Index holds it; it became its text, so
+        // Index([date(...)]) held strings, .loc[date(...)] missed (fvsao.66)
+        // and a tuple label was the string "(1, 2)" (r0hk0).
         match py_to_cell(obj.py(), obj)? {
             Scalar::Object(object) => Ok(IndexLabel::Object(object)),
             scalar => Ok(scalar_to_index_label_converter(&scalar)),
@@ -5207,10 +5253,15 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
             value.repr()?
         )));
     }
-    if value.extract::<PyRef<'_, PyMultiIndex>>().is_ok() {
-        return Err(not_implemented(
-            "assigning a MultiIndex as the row axis (use set_index with several columns)",
-        ));
+    // A MultiIndex stays one: its flat labels with the levels attached, as
+    // the constructors keep one (it was refused; r0hk0). A list of tuples is
+    // a flat Index of tuple labels, as pandas' (not a MultiIndex).
+    if let Ok(multi) = value.extract::<PyRef<'_, PyMultiIndex>>() {
+        return multi
+            .inner
+            .to_flat_index(", ")
+            .with_row_multiindex(multi.inner.clone())
+            .map_err(index_error_to_py);
     }
     // A tz-aware DatetimeIndex or datetime Series keeps its zone (it was
     // taken as naive UTC labels).
@@ -5976,6 +6027,10 @@ impl PyIndex {
         if let Some(data) = data.filter(|data| sequence_zone(data).is_some()) {
             let index = PyDatetimeIndex::new(py, Some(data), None, None, name)?;
             return Ok(Py::new(py, index)?.into_any());
+        }
+        // Tuples are pandas' MultiIndex (they became their text; r0hk0).
+        if let Some(multi) = data.map(tuple_labels_multiindex).transpose()?.flatten() {
+            return Ok(Py::new(py, PyMultiIndex { inner: multi })?.into_any());
         }
         row_index_to_py(py, &Self::new(data, name)?.inner)
     }
@@ -18170,6 +18225,17 @@ impl PySeries {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
+        // A tuple naming a tuple label is that label: pandas looks a hashable
+        // key up first (it was read as positions; r0hk0).
+        if key.is_instance_of::<PyTuple>()
+            && self
+                .inner
+                .index()
+                .labels()
+                .contains(&py_to_index_label(key)?)
+        {
+            return series_label_get(py, &self.inner, key);
+        }
         if let Ok(positions) = key.extract::<Vec<i64>>() {
             let s = self
                 .inner
@@ -21007,6 +21073,9 @@ impl PySeries {
             Some(obj) => Some(py_to_index_label(obj)?),
             None => None,
         };
+        for bound in b.iter().chain(a.iter()) {
+            require_orderable_bound(self.inner.index(), bound)?;
+        }
         if let (Some(b_lbl), Some(a_lbl)) = (&b, &a) {
             if self.inner.index().is_monotonic_increasing() && b_lbl > a_lbl {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -22138,6 +22207,20 @@ impl PySeries {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {ax} for object type Series"
             )));
+        }
+        // A MultiIndex stays one (its flat labels were kept alone; r0hk0).
+        if labels.extract::<PyRef<'_, PyMultiIndex>>().is_ok() {
+            let index = index_from_axis_value(labels)?;
+            if index.len() != self.inner.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length mismatch: Expected axis has {} elements, new values have {} elements",
+                    self.inner.len(),
+                    index.len()
+                )));
+            }
+            let s = Series::new(self.inner.name(), index, self.inner.column().clone())
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: s });
         }
         let lbls = if let Ok(py_idx) = labels.extract::<PyRef<'_, PyIndex>>() {
             py_idx.inner.labels().to_vec()
@@ -30882,6 +30965,9 @@ impl PyDataFrame {
                 Some(obj) => Some(py_to_index_label(obj)?),
                 None => None,
             };
+            for bound in b.iter().chain(a.iter()) {
+                require_orderable_bound(self.inner.index(), bound)?;
+            }
             if let (Some(b_lbl), Some(a_lbl)) = (&b, &a) {
                 if self.inner.index().is_monotonic_increasing() && b_lbl > a_lbl {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -33104,6 +33190,17 @@ impl PyDataFrame {
                 .with_index(dti.inner.as_index().clone())
                 .map_err(axis_length_error_to_py)?;
             return Ok(PyDataFrame { inner });
+        }
+        // A MultiIndex stays one, as the index / columns setters keep it
+        // (only its flat labels were kept; r0hk0).
+        if labels.extract::<PyRef<'_, PyMultiIndex>>().is_ok() {
+            let mut out = self.clone();
+            if axis_idx == 0 {
+                out.assign_index(labels)?;
+            } else {
+                out.assign_columns(labels)?;
+            }
+            return Ok(out);
         }
         let lbls = if let Ok(py_idx) = labels.extract::<PyRef<'_, PyIndex>>() {
             py_idx.inner.labels().to_vec()
