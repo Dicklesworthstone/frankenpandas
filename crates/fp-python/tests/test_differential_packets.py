@@ -12678,3 +12678,39 @@ def _cross_divmod_outcome(m: Any, run: Any) -> Any:
 def test_cross_merge_and_divmod_like_pandas(case: str) -> None:
     run = _CROSS_DIVMOD_CASES[case]
     assert _cross_divmod_outcome(fpd, run) == _cross_divmod_outcome(pd, run), case
+
+
+# br-frankenpandas-98f6w: a MultiIndex's levels / codes kept first-seen order;
+# pandas factorizes each level sorted (numbers before strings), which
+# set_codes / set_levels / equal_levels read the same way.
+def _lv_mi(m: Any) -> Any:
+    return m.MultiIndex.from_tuples([("s", "b"), ("n", 2), ("s", 1), ("w", 2)], names=["x", "y"])
+
+
+_MI_LEVELS_CASES = {
+    "levels": lambda m: repr(_lv_mi(m).levels),
+    "codes": lambda m: repr(_lv_mi(m).codes),
+    "levshape": lambda m: _lv_mi(m).levshape,
+    "set_codes round trip": lambda m: list(_lv_mi(m).set_codes(_lv_mi(m).codes)),
+    "set_levels": lambda m: list(_lv_mi(m).set_levels([["N", "S", "W"], [1, 2, "b"]])),
+    "equal_levels of reversed rows": lambda m: _lv_mi(m).equal_levels(_lv_mi(m)[::-1]),
+    "from_arrays levels": lambda m: repr(m.MultiIndex.from_arrays([[3, 1, 2], ["c", "a", "b"]]).levels),
+    "float levels": lambda m: repr(m.MultiIndex.from_arrays([[2.5, 1.5], ["a", "b"]]).levels),
+    "set_index levels": lambda m: repr(m.DataFrame({"k": ["z", "a"], "j": [2, 1], "v": [1, 2]}).set_index(["k", "j"]).index.levels),
+    # NEGATIVE: an already sorted MultiIndex as before.
+    "sorted codes": lambda m: repr(m.MultiIndex.from_tuples([("a", 1), ("b", 2)]).codes),
+}
+
+
+def _mi_levels_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MI_LEVELS_CASES))
+def test_multiindex_levels_sorted_like_pandas(case: str) -> None:
+    run = _MI_LEVELS_CASES[case]
+    assert _mi_levels_outcome(fpd, run) == _mi_levels_outcome(pd, run), case

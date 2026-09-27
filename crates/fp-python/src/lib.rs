@@ -11881,9 +11881,10 @@ impl PyMultiIndex {
         frozen_list(py, codes)
     }
 
+    /// pandas' tuple of each level's size (it was a list; 98f6w).
     #[getter]
-    fn levshape(&self) -> Vec<usize> {
-        self.inner.levshape()
+    fn levshape<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.inner.levshape())
     }
 
     /// pandas' property (it was a method).

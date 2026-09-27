@@ -19282,7 +19282,44 @@ impl MultiIndex {
         Ok(Self::from_tuples(tuples)?.set_names(names))
     }
 
-    /// Unique labels for each level, preserving first-seen order.
+    /// A level's catalog as pandas factorizes it (sorted, its `safe_sort`):
+    /// the distinct non-missing labels, numbers (bools, ints, floats) by
+    /// value first, then strings, then any other kind in its own order.
+    fn level_catalog(level: &[IndexLabel]) -> Vec<IndexLabel> {
+        fn number(label: &IndexLabel) -> Option<f64> {
+            match label {
+                IndexLabel::Bool(value) => Some(f64::from(u8::from(*value))),
+                #[allow(clippy::cast_precision_loss)] // only ordering int vs float
+                IndexLabel::Int64(value) => Some(*value as f64),
+                IndexLabel::Float64(value) => Some(value.0),
+                _ => None,
+            }
+        }
+        fn kind(label: &IndexLabel) -> u8 {
+            match label {
+                IndexLabel::Bool(_) | IndexLabel::Int64(_) | IndexLabel::Float64(_) => 0,
+                IndexLabel::Utf8(_) => 1,
+                _ => 2,
+            }
+        }
+        let mut seen = FxHashMap::<&IndexLabel, ()>::default();
+        let mut catalog: Vec<IndexLabel> = level
+            .iter()
+            .filter(|label| !label.is_missing() && seen.insert(label, ()).is_none())
+            .cloned()
+            .collect();
+        catalog.sort_by(|a, b| match (a, b) {
+            (IndexLabel::Int64(x), IndexLabel::Int64(y)) => x.cmp(y),
+            _ => match (number(a), number(b)) {
+                (Some(x), Some(y)) => x.total_cmp(&y).then_with(|| a.cmp(b)),
+                _ => kind(a).cmp(&kind(b)).then_with(|| a.cmp(b)),
+            },
+        });
+        catalog
+    }
+
+    /// Unique labels for each level, sorted as pandas factorizes them
+    /// (br-frankenpandas-98f6w: they kept first-seen order).
     ///
     /// Matches `pd.MultiIndex.levels`. Missing labels are excluded from the
     /// level catalog and receive `-1` in `codes()`.
@@ -19292,13 +19329,7 @@ impl MultiIndex {
             .iter()
             .enumerate()
             .map(|(level_idx, level)| {
-                let mut seen = FxHashMap::<&IndexLabel, ()>::default();
-                let labels = level
-                    .iter()
-                    .filter(|label| !label.is_missing() && seen.insert(label, ()).is_none())
-                    .cloned()
-                    .collect();
-                let mut index = Index::new(labels);
+                let mut index = Index::new(Self::level_catalog(level));
                 if let Some(name) = self.names.get(level_idx).and_then(|name| name.as_ref()) {
                     index = index.set_name(name);
                 }
@@ -19310,26 +19341,24 @@ impl MultiIndex {
     /// Integer level codes for each row, matching `pd.MultiIndex.codes`.
     ///
     /// Missing labels receive code `-1`; all other labels are encoded by their
-    /// first-seen position in the corresponding `levels()` entry.
+    /// position in the corresponding (sorted) `levels()` entry.
     #[must_use]
     pub fn codes(&self) -> Vec<Vec<isize>> {
         self.levels
             .iter()
             .map(|level| {
-                let mut positions = FxHashMap::<IndexLabel, isize>::default();
-                let mut next_code = 0_isize;
+                let positions: FxHashMap<IndexLabel, isize> = Self::level_catalog(level)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(code, label)| (label, isize::try_from(code).unwrap_or(isize::MAX)))
+                    .collect();
                 level
                     .iter()
                     .map(|label| {
                         if label.is_missing() {
                             -1
-                        } else if let Some(code) = positions.get(label) {
-                            *code
                         } else {
-                            let code = next_code;
-                            positions.insert(label.clone(), code);
-                            next_code += 1;
-                            code
+                            positions.get(label).copied().unwrap_or(-1)
                         }
                     })
                     .collect()
@@ -28997,6 +29026,51 @@ mod tests {
         assert_eq!(mi.nbytes(), mi.memory_usage(false));
     }
 
+    /// levels / codes are pandas' sorted catalog - numbers by value before
+    /// strings - whatever order the labels first appear in, and set_codes /
+    /// set_levels read them the same way (98f6w: first-seen order).
+    #[test]
+    fn multi_index_levels_are_sorted_as_pandas_factorizes_98f6w() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["s".into(), "b".into()],
+            vec!["n".into(), 2_i64.into()],
+            vec!["s".into(), 1_i64.into()],
+            vec![IndexLabel::Null(fp_types::NullKind::NaN), 1_i64.into()],
+        ])
+        .unwrap();
+        let levels = mi.levels();
+        assert_eq!(
+            levels[0].labels(),
+            &["n".into(), "s".into()] as &[IndexLabel]
+        );
+        assert_eq!(
+            levels[1].labels(),
+            &[1_i64.into(), 2_i64.into(), "b".into()] as &[IndexLabel]
+        );
+        assert_eq!(mi.codes(), vec![vec![1, 0, 1, -1], vec![2, 1, 0, 0]]);
+        // The codes read against the levels give back every tuple.
+        let again = mi.set_codes(mi.codes()).unwrap();
+        for row in 0..mi.len() {
+            assert_eq!(again.get_tuple(row), mi.get_tuple(row));
+        }
+        // set_levels replaces the sorted catalog: 'n' -> 'N', 's' -> 'S'.
+        let relabelled = mi
+            .set_levels(vec![
+                vec!["N".into(), "S".into()],
+                vec![1_i64.into(), 2_i64.into(), "b".into()],
+            ])
+            .unwrap();
+        assert_eq!(relabelled.get_tuple(0).unwrap()[0], &IndexLabel::from("S"));
+        assert_eq!(relabelled.get_tuple(1).unwrap()[0], &IndexLabel::from("N"));
+        // NEGATIVE: an already sorted level keeps its order and codes.
+        let sorted = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap();
+        assert_eq!(sorted.codes(), vec![vec![0, 1], vec![0, 1]]);
+    }
+
     #[test]
     fn multi_index_memory_usage_saturates_code_bytes_uza04178() {
         assert_eq!(
@@ -29230,7 +29304,18 @@ mod tests {
         assert!(!left.identical(&renamed));
         assert!(left.equal_levels(&renamed));
         assert!(!left.equals(&reordered));
-        assert!(!left.equal_levels(&reordered));
+        // TEST-CHANGE (98f6w): this asserted the reordered rows' levels
+        // differ; pandas 2.2.3 sorts each level, so they are equal
+        // (pd.MultiIndex.from_tuples([('a', 1), ('b', 2)]).equal_levels(
+        // pd.MultiIndex.from_tuples([('b', 2), ('a', 1)])) is True).
+        assert!(left.equal_levels(&reordered));
+        // NEGATIVE: a level holding another value differs.
+        let other_value = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["c".into(), 2_i64.into()],
+        ])
+        .unwrap();
+        assert!(!left.equal_levels(&other_value));
     }
 
     #[test]
