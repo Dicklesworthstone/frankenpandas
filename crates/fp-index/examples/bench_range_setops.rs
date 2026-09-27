@@ -363,6 +363,12 @@ fn index_label_digest(digest: usize, label: &IndexLabel) -> usize {
             .rotate_left(1)
             .wrapping_mul(131)
             .wrapping_add(6 + usize::from(*value)),
+        IndexLabel::Object(value) => value
+            .repr()
+            .bytes()
+            .fold(digest.rotate_left(1).wrapping_add(7), |acc, byte| {
+                acc.wrapping_mul(131).wrapping_add(usize::from(byte))
+            }),
         IndexLabel::Null(_) => digest.rotate_left(1).wrapping_mul(131).wrapping_add(8),
     }
 }

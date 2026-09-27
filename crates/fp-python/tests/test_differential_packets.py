@@ -4160,10 +4160,9 @@ def test_temporal_column_refusals_match_pandas() -> None:
             d > "not a date"
         with pytest.raises(TypeError):
             t * t
-    # pandas' .dt.date is datetime.date objects; the binding would give
-    # strings, so it is not exposed rather than silently mistyped.
-    with pytest.raises(AttributeError):
-        _dt_column(fpd).dt.date
+    # TEST-CHANGE (fvsao.17): .dt.date was pinned as unexposed (AttributeError)
+    # while the binding could only give strings; with object cells it gives
+    # pandas' datetime.date objects (test_dt_date_and_time_objects_match_pandas).
     # NEGATIVE: a numeric column's sort/rank/min are unchanged.
     for m in (pd, fpd):
         s = m.Series([3.0, 1.0, float("nan"), 2.0])
@@ -4688,6 +4687,118 @@ def _object_cell_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_OBJECT_CELL_CASES))
 def test_object_cells_match_pandas(case: str) -> None:
     assert _object_cell_outcome(fpd, case) == _object_cell_outcome(pd, case), case
+
+
+# fvsao.17 / fvsao.66: .dt.date / .dt.time hand out datetime.date / time
+# objects, and object cells are index labels. Labels were their TEXT
+# ('Object(datetime.date(2020, 1, 5))' after groupby(s.dt.date)), a column of
+# dates grouped into nothing (the text fast paths read each date as ""), and
+# dates sorted by repr ('2020-01-15' before '2020-01-2').
+def _typed_view(x: Any) -> Any:
+    def one(v: Any) -> Any:
+        return "nan" if isinstance(v, float) and v != v else (type(v).__name__, repr(v))
+
+    if hasattr(x, "columns"):
+        return ("frame", [one(c) for c in x.columns], [one(v) for v in x.index], [[one(v) for v in row] for row in x.values.tolist()])
+    if hasattr(x, "dtype") and hasattr(x, "index"):
+        return ("series", str(x.dtype), [one(v) for v in x.index], [one(v) for v in x.tolist()], x.name)
+    if isinstance(x, list):
+        return [one(v) for v in x]
+    return one(x)
+
+
+def _stamps(m: Any) -> Any:
+    return m.Series(
+        m.to_datetime(["2020-01-05 03:04:05.123456789", None, "2021-12-31 23:59:59.000000001"]),
+        name="d",
+        index=[5, 6, 7],
+    )
+
+
+def _stamped_frame(m: Any) -> Any:
+    ts = m.to_datetime(["2020-01-05 03:00", "2020-01-05 09:00", "2020-01-06 01:00", None])
+    return m.DataFrame({"ts": ts, "v": [1, 2, 3, 4], "k": ["a", "b", "a", "b"]})
+
+
+def _days(m: Any) -> Any:
+    d = datetime.date
+    return m.Series([d(2020, 1, 15), d(2020, 1, 2), d(2020, 1, 15), d(2019, 12, 31)], name="d")
+
+
+def _day_frame(m: Any) -> Any:
+    return m.DataFrame({"d": _days(m), "v": [1, 2, 3, 4]})
+
+
+_OBJECT_LABEL_CASES = {
+    "dt.date": lambda m: _stamps(m).dt.date,
+    "dt.time": lambda m: _stamps(m).dt.time,
+    "dt.timetz naive": lambda m: _stamps(m).dt.timetz,
+    "dt.date of a zoned column": lambda m: _stamps(m).dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo").dt.date,
+    "dt.time of a zoned column": lambda m: _stamps(m).dt.tz_localize("US/Eastern").dt.time,
+    "dt.timetz of a zoned column": lambda m: [str(v.tzinfo) for v in _stamps(m).dt.tz_localize("UTC").dt.timetz.dropna()],
+    "dt.date all NaT": lambda m: m.Series(m.to_datetime([None, None])).dt.date,
+    "dt.time empty": lambda m: m.Series(m.to_datetime([])).dt.time,
+    "groupby dt.date": lambda m: _stamped_frame(m).groupby(_stamped_frame(m)["ts"].dt.date)["v"].sum(),
+    "groupby a date column": lambda m: _stamped_frame(m).assign(day=lambda f: f["ts"].dt.date).groupby("day")["v"].sum(),
+    "groupby dates and text": lambda m: _stamped_frame(m).assign(day=lambda f: f["ts"].dt.date).groupby(["k", "day"])["v"].sum(),
+    "groupby dt.date agg": lambda m: _stamped_frame(m).groupby(_stamped_frame(m)["ts"].dt.date)["v"].agg(["sum", "count"]),
+    "groupby dt.date size": lambda m: _stamped_frame(m).groupby(_stamped_frame(m)["ts"].dt.date).size(),
+    "groupby dt.date reset_index": lambda m: _stamped_frame(m).groupby(_stamped_frame(m)["ts"].dt.date)["v"].sum().reset_index(),
+    "loc by a date label": lambda m: _stamped_frame(m).groupby(_stamped_frame(m)["ts"].dt.date)["v"].sum().loc[datetime.date(2020, 1, 6)],
+    "date in the index": lambda m: datetime.date(2020, 1, 6) in _stamped_frame(m).groupby(_stamped_frame(m)["ts"].dt.date)["v"].sum().index,
+    "value_counts of dt.date": lambda m: _stamped_frame(m)["ts"].dt.date.value_counts(),
+    "value_counts of dt.time": lambda m: _stamped_frame(m)["ts"].dt.time.value_counts(),
+    "pivot_table by date": lambda m: _stamped_frame(m).assign(day=lambda f: f["ts"].dt.date).pivot_table(index="day", values="v", aggfunc="sum"),
+    "set_index a date Series": lambda m: _stamped_frame(m).set_index(_stamped_frame(m)["ts"].dt.date)["v"],
+    "set_index an int Series": lambda m: m.DataFrame({"a": [1, 2]}).set_index(m.Series([5, 6]))["a"],
+    "Index of dates": lambda m: repr(m.Index([datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)]).sort_values()),
+    "Series with a date index": lambda m: m.Series([1, 2], index=[datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)]).sort_index(),
+    "dates sort": lambda m: _days(m).sort_values(),
+    "dates sort descending": lambda m: _days(m).sort_values(ascending=False),
+    "dates value_counts": lambda m: _days(m).value_counts(),
+    "dates unique": lambda m: list(_days(m).unique()),
+    "dates nunique": lambda m: _days(m).nunique(),
+    "dates duplicated": lambda m: _days(m).duplicated(),
+    "dates drop_duplicates": lambda m: _days(m).drop_duplicates(),
+    "Series groupby dates": lambda m: m.Series([1, 2, 3, 4]).groupby(_days(m)).sum(),
+    "groupby a column of dates": lambda m: _day_frame(m).groupby("d")["v"].sum(),
+    "groupby dates sort=False": lambda m: _day_frame(m).groupby("d", sort=False)["v"].sum(),
+    "groupby dates frame sum": lambda m: _day_frame(m).groupby("d").sum(),
+    "groupby dates first": lambda m: _day_frame(m).groupby("d")["v"].first(),
+    "groupby dates transform": lambda m: _day_frame(m).groupby("d")["v"].transform("sum"),
+    "groupby dates cumsum": lambda m: _day_frame(m).groupby("d")["v"].cumsum(),
+    "frame sort by dates": lambda m: _day_frame(m).sort_values("d"),
+    "set_index a date column": lambda m: _day_frame(m).set_index("d")["v"],
+    "crosstab by dates": lambda m: m.crosstab(_days(m), m.Series(["a", "b", "a", "b"])),
+    "map dates by a dict": lambda m: _days(m).map({datetime.date(2020, 1, 2): "x"}),
+    "mixed object groupby": lambda m: m.Series([1, 2, 3, 4]).groupby(m.Series([1, "a", 1, "a"], dtype=object)).sum(),
+    "mixed object nunique": lambda m: m.Series([1, "a", 1, "a"], dtype=object).nunique(),
+    "nunique dropna=False": lambda m: m.Series([True, 1, None], dtype=object).nunique(dropna=False),
+    # NEGATIVES: a list is no group key, a duration has no .dt.date, only a
+    # datetime-like column has .dt at all, and text dates stay text.
+    "groupby a list column raises": lambda m: m.DataFrame({"l": [[1], [2]], "v": [1, 2]}).groupby("l")["v"].sum(),
+    "Series groupby lists raises": lambda m: m.Series([1, 2]).groupby(m.Series([[1], [2]])).sum(),
+    "timedelta .dt.date raises": lambda m: m.Series(m.to_timedelta(["1D"])).dt.date,
+    "int .dt raises": lambda m: m.Series([1, 2]).dt,
+    "text .dt raises": lambda m: m.Series(["2020-01-01"]).dt.year,
+    "no .dt on ints": lambda m: hasattr(m.Series([1]), "dt"),
+    "text dates stay text": lambda m: m.DataFrame({"d": ["2020-01-05", "2020-01-05"], "v": [1, 2]}).groupby("d")["v"].sum(),
+}
+
+
+def _object_label_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _typed_view(_OBJECT_LABEL_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OBJECT_LABEL_CASES))
+def test_dt_date_and_object_labels_match_pandas(case: str) -> None:
+    assert _object_label_outcome(fpd, case) == _object_label_outcome(pd, case), case
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")

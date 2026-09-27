@@ -8389,6 +8389,9 @@ fn compare_scalars_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> st
                 // column a no-op that returned positional, not value, order.
                 (Scalar::Datetime64(a), Scalar::Datetime64(b)) => a.cmp(b),
                 (Scalar::Period(a), Scalar::Period(b)) => a.ordinal.cmp(&b.ordinal),
+                // Object cells (dates from s.dt.date) in Python's order; they
+                // compared Equal, so sorting them was a no-op (fvsao.66).
+                (Scalar::Object(a), Scalar::Object(b)) => a.cmp(b),
                 (a, b) => match (a.to_f64(), b.to_f64()) {
                     (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(Ordering::Equal),
                     _ => Ordering::Equal,
@@ -26310,6 +26313,20 @@ impl Column {
         Ok((counts, bin_edges))
     }
 
+    /// Whether this object (Utf8) column holds a present value that is not
+    /// a string - an int of a mixed column, a list or host cell (fvsao.33).
+    /// A text fast path that reads the column as `&str`s must decline such a
+    /// column: it would read those cells as "" (fvsao.66).
+    #[must_use]
+    pub fn holds_non_text(&self) -> bool {
+        if self.dtype != DType::Utf8 || self.as_utf8_contiguous().is_some() {
+            return false;
+        }
+        self.values()
+            .iter()
+            .any(|value| !value.is_missing() && !matches!(value, Scalar::Utf8(_)))
+    }
+
     /// Cast the column to a target dtype.
     ///
     /// Matches `pd.Series.astype(dtype)`. Each value is routed through
@@ -26319,17 +26336,6 @@ impl Column {
     /// the underlying TypeError so the caller can attribute the
     /// failing conversion. Missing values pass through as the
     /// target dtype's canonical missing representation.
-    /// Whether this object (Utf8) column holds a present value that is not
-    /// a string - an int of a mixed column, a list or host cell (fvsao.33).
-    fn holds_non_text(&self) -> bool {
-        if self.dtype != DType::Utf8 || self.as_utf8_contiguous().is_some() {
-            return false;
-        }
-        self.values()
-            .iter()
-            .any(|value| !value.is_missing() && !matches!(value, Scalar::Utf8(_)))
-    }
-
     pub fn astype(&self, target: DType) -> Result<Self, ColumnError> {
         if self.dtype == target {
             // ⚠️ EXCEPT Utf8 CARRYING A MISSING VALUE. Casting to string does not

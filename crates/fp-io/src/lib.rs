@@ -3042,6 +3042,7 @@ fn html_index_label_string(
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
         f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     };
     Ok(html_text(&raw, escape))
@@ -5613,7 +5614,7 @@ fn csv_index_label_from_scalar(value: Scalar) -> IndexLabel {
             }
         }
         Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
-        Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
+        Scalar::Object(object) => IndexLabel::Object(object),
     }
 }
 
@@ -6155,7 +6156,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                     }
                 }
                 Scalar::Interval(iv) => fp_index::IndexLabel::Utf8(format!("{iv}")),
-                Scalar::Object(object) => fp_index::IndexLabel::Utf8(object.to_string()),
+                Scalar::Object(object) => fp_index::IndexLabel::Object(object),
             })
             .collect();
         // Per br-frankenpandas-l0vbr: pandas pd.read_csv(index_col='col')
@@ -7026,6 +7027,7 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
                 serde_json::json!(*ns / 1_000_000)
             }
         }
+        IndexLabel::Object(object) => scalar_to_json(&Scalar::Object(object.clone())),
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => serde_json::Value::Null,
     }
@@ -7065,6 +7067,7 @@ fn index_label_to_scalar_value(label: &IndexLabel) -> Scalar {
         // DatetimeIndex's epoch-ms ints) and bypassed to_csv's column-uniform
         // datetime format. (br-frankenpandas-mdt64)
         IndexLabel::Datetime64(v) => Scalar::Datetime64(*v),
+        IndexLabel::Object(object) => Scalar::Object(object.clone()),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
     }
@@ -11362,6 +11365,11 @@ fn write_excel_index_label(
                 .write_boolean(excel_row, excel_col, *b)
                 .map_err(|e| IoError::Excel(format!("write index bool: {e}")))?;
         }
+        IndexLabel::Object(object) => {
+            worksheet
+                .write_string(excel_row, excel_col, object.to_string())
+                .map_err(|e| IoError::Excel(format!("write index object: {e}")))?;
+        }
         IndexLabel::Null(_) => {}
     }
     Ok(())
@@ -12814,6 +12822,7 @@ fn scalar_from_index_label(label: &IndexLabel) -> Scalar {
         IndexLabel::Float64(v) => Scalar::Float64(v.0),
         IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+        IndexLabel::Object(object) => Scalar::Object(object.clone()),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
         IndexLabel::Timedelta64(v) => {

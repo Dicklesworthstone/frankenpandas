@@ -1025,6 +1025,7 @@ impl Ord for JoinKeyComponent {
             // by value, cross-variant by a stable variant rank).
             (Present(IndexLabel::Float64(a)), Present(IndexLabel::Float64(b))) => a.cmp(b),
             (Present(IndexLabel::Bool(a)), Present(IndexLabel::Bool(b))) => a.cmp(b),
+            (Present(IndexLabel::Object(a)), Present(IndexLabel::Object(b))) => a.cmp(b),
             (a, b) => join_component_rank(a).cmp(&join_component_rank(b)),
         }
     }
@@ -1041,9 +1042,10 @@ fn join_component_rank(c: &JoinKeyComponent) -> u8 {
         Present(IndexLabel::Utf8(_)) => 3,
         Present(IndexLabel::Timedelta64(_)) => 4,
         Present(IndexLabel::Datetime64(_)) => 5,
-        Present(IndexLabel::Null(_)) => 6,
-        FloatBits(_) => 7,
-        Missing => 8,
+        Present(IndexLabel::Object(_)) => 6,
+        Present(IndexLabel::Null(_)) => 7,
+        FloatBits(_) => 8,
+        Missing => 9,
     }
 }
 

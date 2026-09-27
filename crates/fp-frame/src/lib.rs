@@ -1278,6 +1278,7 @@ pub(crate) fn format_plot_index_label(l: &IndexLabel) -> String {
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
         f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => l.to_string(),
     }
 }
@@ -1732,6 +1733,7 @@ fn index_label_memory_usage_bytes_with_deep(label: &IndexLabel, deep: bool) -> u
         | IndexLabel::Float64(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => 8,
         IndexLabel::Bool(_) => 1,
         IndexLabel::Utf8(text) if deep => text.len(),
@@ -1893,6 +1895,8 @@ fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
             Ok(IndexLabel::Float64(fp_index::OrderedF64(v)))
         }
         Scalar::Bool(b) => Ok(IndexLabel::Bool(*b)),
+        // An object cell (a datetime.date) is its own label (fvsao.66).
+        Scalar::Object(object) => Ok(IndexLabel::Object(object.clone())),
         Scalar::Null(_) => Err(FrameError::CompatibilityRejected(
             "set_index does not support missing label values".to_owned(),
         )),
@@ -2001,7 +2005,8 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
         Scalar::Period(ordinal) => IndexLabel::Utf8(ordinal.calendar_string()),
         Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
-        Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
+        // An object cell labels as itself (value_counts of s.dt.date; fvsao.66).
+        Scalar::Object(object) => IndexLabel::Object(object.clone()),
         // Typed null labels (br-frankenpandas-8m6ay): pandas keeps real
         // null index labels (pivot rows, categorical value_counts buckets)
         // and renders them None/NaN/NaT — the '<null>' string collided with
@@ -2458,6 +2463,7 @@ fn pivot_label_to_column_name(label: &IndexLabel) -> String {
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
         f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     }
 }
@@ -2581,6 +2587,15 @@ fn pivot_table_counts_rows(aggfunc: &str) -> bool {
 /// typed dense-Utf8 `pivot_table` fast path. Caller guarantees `col` is
 /// all-valid `Utf8` with `col.len() == n` (non-Utf8 slots map to `""`, which
 /// the gate makes unreachable).
+/// Whether `col` can key a text fast path: an all-valid object column whose
+/// every cell is a string. [`pivot_utf8_key_strs`] reads any other cell as "",
+/// so an object column of dates (`s.dt.date`) or of mixed ints and strings
+/// grouped into one "" key (fvsao.66).
+fn is_text_key_column(col: &Column) -> bool {
+    col.dtype() == DType::Utf8 && col.validity().all() && !col.holds_non_text()
+}
+
+/// The key strings of a column that [`is_text_key_column`] admits.
 fn pivot_utf8_key_strs(col: &Column, n: usize) -> Vec<&str> {
     if let Some((bytes, offsets)) = col.as_utf8_contiguous() {
         // VALIDATE THE WHOLE BUFFER ONCE, then slice it (br-frankenpandas-uza04).
@@ -2622,7 +2637,7 @@ fn pivot_utf8_key_strs(col: &Column, n: usize) -> Vec<&str> {
 /// Scalar-backed key otherwise falls to (Vec<ScalarKey> alloc + SipHash map +
 /// wrapper sort). Returns `None` for a non-Utf8 / nullable column.
 fn utf8_key_owned_contiguous(col: &Column) -> Option<(Vec<u8>, Vec<usize>)> {
-    if col.dtype() != DType::Utf8 || !col.validity().all() {
+    if !is_text_key_column(col) {
         return None;
     }
     let n = col.len();
@@ -2710,7 +2725,7 @@ fn pivot_axis_dense_codes(col: &Column) -> Option<(Vec<u32>, Vec<IndexLabel>, Ve
         let names = keys.iter().map(|&ns| format_datetime_ns(ns)).collect();
         return Some((codes, labels, names));
     }
-    if col.dtype() == DType::Utf8 && col.validity().all() {
+    if is_text_key_column(col) {
         let (codes, sorted) = pivot_factorize_utf8_sorted(&pivot_utf8_key_strs(col, col.len()));
         let labels = sorted
             .iter()
@@ -4102,10 +4117,10 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
                 ord
             }
         }
-        // Object cells sort after every other kind, among themselves by
-        // their repr (Python's list order is itemwise; the repr agrees for
-        // the common one-kind lists).
-        (ScalarKey::Object(a_val), ScalarKey::Object(b_val)) => a_val.repr().cmp(&b_val.repr()),
+        // Object cells sort after every other kind, among themselves as
+        // Python orders them (dates by date; their reprs put 2020-01-15 before
+        // 2020-01-2) - ObjectValue's total order (fvsao.66).
+        (ScalarKey::Object(a_val), ScalarKey::Object(b_val)) => a_val.cmp(b_val),
         (ScalarKey::Object(_), _) => Ordering::Greater,
         (_, ScalarKey::Object(_)) => Ordering::Less,
         (Interval(_, _, _), _) => Ordering::Greater,
@@ -4323,6 +4338,8 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         // with Timedelta64). pandas `reset_index()` on a DatetimeIndex yields a
         // datetime64[ns] column, not a string.
         IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
+        // An object label is its cell again (fvsao.66).
+        IndexLabel::Object(object) => Scalar::Object(object.clone()),
         // The natural bijection: a typed-null label round-trips to the
         // same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
@@ -4336,6 +4353,7 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
         IndexLabel::Timedelta64(ns) => Scalar::Utf8(Timedelta::format(*ns)),
         IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+        IndexLabel::Object(object) => Scalar::Utf8(object.to_string()),
         IndexLabel::Null(_) => Scalar::Utf8(label.to_string()),
     }
 }
@@ -4772,6 +4790,7 @@ fn index_label_to_json_value(label: &IndexLabel) -> Value {
         IndexLabel::Utf8(v) => Value::String(v.clone()),
         IndexLabel::Timedelta64(ns) => Value::String(Timedelta::format(*ns)),
         IndexLabel::Datetime64(ns) => Value::String(format_datetime_ns(*ns)),
+        IndexLabel::Object(object) => scalar_to_json_value(&Scalar::Object(object.clone())),
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => Value::Null,
     }
@@ -4784,6 +4803,7 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
         f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     }
 }
@@ -4814,7 +4834,8 @@ fn index_label_to_table_schema_type(label: &IndexLabel) -> &'static str {
         IndexLabel::Int64(_) => "integer",
         IndexLabel::Float64(_) => "number",
         IndexLabel::Bool(_) => "boolean",
-        IndexLabel::Utf8(_) => "string",
+        // pandas' table schema calls any object column "string".
+        IndexLabel::Utf8(_) | IndexLabel::Object(_) => "string",
         IndexLabel::Timedelta64(_) => "duration",
         IndexLabel::Datetime64(_) => "datetime",
         // Same convention as DType::Null in dtype_to_table_schema_type.
@@ -5052,6 +5073,7 @@ fn add_offset_to_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, F
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
@@ -5072,6 +5094,7 @@ fn sub_offset_from_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel,
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
@@ -6973,6 +6996,7 @@ fn semantic_integer_label_kind_value(label: &IndexLabel) -> Option<(&'static [u8
         IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
         | IndexLabel::Utf8(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -7079,6 +7103,7 @@ fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
         | IndexLabel::Utf8(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => {
             return None;
         }
@@ -7090,6 +7115,7 @@ fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
         | IndexLabel::Utf8(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => {
             return None;
         }
@@ -7932,6 +7958,7 @@ fn compare_scalar_values(left: &Scalar, right: &Scalar) -> std::cmp::Ordering {
         (Scalar::Utf8(a), Scalar::Utf8(b)) => a.cmp(b),
         (Scalar::Bool(a), Scalar::Bool(b)) => a.cmp(b),
         (Scalar::Timedelta64(a), Scalar::Timedelta64(b)) => a.cmp(b),
+        (Scalar::Object(a), Scalar::Object(b)) => a.cmp(b),
         (a, b) => match (a.to_f64(), b.to_f64()) {
             (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(Ordering::Equal),
             _ => Ordering::Equal,
@@ -8375,6 +8402,9 @@ fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Orderi
         (Scalar::Datetime64(lhs), Scalar::Datetime64(rhs))
         | (Scalar::Timedelta64(lhs), Scalar::Timedelta64(rhs)) => lhs.cmp(rhs),
         (Scalar::Period(lhs), Scalar::Period(rhs)) => lhs.ordinal.cmp(&rhs.ordinal),
+        // Object cells (dates from s.dt.date) in Python's order; they share
+        // the Utf8 dtype, so the fallback called every pair Equal (fvsao.66).
+        (Scalar::Object(lhs), Scalar::Object(rhs)) => lhs.cmp(rhs),
         // Columns are dtype-homogeneous; this fallback is only for defensive
         // ordering when malformed mixed values leak in.
         _ => left.dtype().cmp(&right.dtype()),
@@ -10618,7 +10648,9 @@ impl Series {
                 IndexLabel::Utf8(s) => s.len(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns).len(),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns).len(),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string().len(),
+                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    f.to_string().len()
+                }
                 IndexLabel::Null(_) => l.to_string().len(),
             })
             .max()
@@ -10630,7 +10662,9 @@ impl Series {
                 IndexLabel::Utf8(s) => s.clone(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    f.to_string()
+                }
                 IndexLabel::Null(_) => label.to_string(),
             };
             let val_str = match val {
@@ -16137,20 +16171,30 @@ impl Series {
         {
             let mut seen: FxHashSet<u64> =
                 FxHashSet::with_capacity_and_hasher(self.len().min(1 << 18), Default::default());
+            // Under dropna=False each missing kind (None / nan / NaT) is one
+            // more value, as pandas counts them. A missing value panicked
+            // here ("bucket pre-checked all-numeric"; fvsao.66).
+            let mut missing_kinds: Vec<NullKind> = Vec::new();
             for value in self.column.values() {
-                if value.is_missing() && dropna {
-                    continue;
-                }
                 let numeric = match value {
                     Scalar::Bool(b) => f64::from(*b),
                     #[allow(clippy::cast_precision_loss)]
                     Scalar::Int64(v) => *v as f64,
-                    Scalar::Float64(v) => *v,
-                    _ => unreachable!("bucket pre-checked all-numeric"),
+                    Scalar::Float64(v) if !v.is_nan() => *v,
+                    _ => {
+                        let kind = match value {
+                            Scalar::Null(kind) => *kind,
+                            _ => NullKind::NaN,
+                        };
+                        if !dropna && !missing_kinds.contains(&kind) {
+                            missing_kinds.push(kind);
+                        }
+                        continue;
+                    }
                 };
                 seen.insert(if numeric == 0.0 { 0 } else { numeric.to_bits() });
             }
-            return seen.len();
+            return seen.len() + missing_kinds.len();
         }
 
         let mut seen_keys: FxHashMap<ScalarKey<'_>, ()> = FxHashMap::default();
@@ -16528,8 +16572,7 @@ impl Series {
         // is mapped (the common recode), it emits a CONTIGUOUS Utf8 column —
         // one shared byte buffer instead of N `Box<str>` Scalar clones —
         // bit-identical to the `Vec<Scalar::Utf8>` the generic path would build.
-        if self.column.dtype() == DType::Utf8
-            && self.column.validity().all()
+        if is_text_key_column(&self.column)
             && mapping.iter().all(|(k, _)| matches!(k, Scalar::Utf8(_)))
         {
             let mut idx: FxHashMap<&str, &Scalar> =
@@ -23215,10 +23258,7 @@ impl Series {
         // the borrowed bytes and emit typed Bool. Bit-identical: an all-valid
         // string value matches iff its bytes equal a string needle (non-string
         // needles never match a string value; no null to match).
-        if self.categorical.is_none()
-            && self.column.dtype() == DType::Utf8
-            && self.column.validity().all()
-        {
+        if self.categorical.is_none() && is_text_key_column(&self.column) {
             let values = self.column.values();
             let mut packed_values: Vec<u128> = Vec::with_capacity(values.len());
             let mut packed_width: Option<usize> = None;
@@ -24989,7 +25029,7 @@ impl Series {
         // factorize: 0.47x vs pandas). Bit-identical: first-seen code assignment
         // and uniques order match the ScalarKey path for all-valid Utf8.
         if self.categorical.is_none()
-            && self.column.dtype() == DType::Utf8
+            && is_text_key_column(&self.column)
             && !self.column.has_any_missing()
         {
             let vals = self.column.values();
@@ -26737,7 +26777,7 @@ impl Series {
                         scratch = format_datetime_ns(*ns);
                         &scratch
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
                         scratch = f.to_string();
                         &scratch
                     }
@@ -27018,6 +27058,7 @@ impl Series {
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
                         csv_escape(&f.to_string(), sep)
                     }
+                    IndexLabel::Object(object) => csv_escape(&object.to_string(), sep),
                     // pandas to_csv writes a missing index label as EMPTY
                     // (pd.Series([1], index=[nan]).to_csv() -> ",1").
                     IndexLabel::Null(_) => String::new(),
@@ -27140,6 +27181,7 @@ impl Series {
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
                         quote_str(&f.to_string(), false)
                     }
+                    IndexLabel::Object(object) => quote_str(&object.to_string(), false),
                     IndexLabel::Null(_) => quote_str(&label.to_string(), false),
                 };
                 out.push_str(&format!(
@@ -27664,7 +27706,7 @@ impl Series {
         // occurrence unflagged, the rest flagged on the same string keys; all-valid
         // ⇒ no Null bucket, matching the ScalarKey path's Utf8 handling.
         if self.categorical.is_none()
-            && self.column.dtype() == DType::Utf8
+            && is_text_key_column(&self.column)
             && !self.column.has_any_missing()
         {
             let vals = self.column.values();
@@ -35554,6 +35596,7 @@ fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -35617,6 +35660,7 @@ fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -35643,6 +35687,7 @@ fn resample_label_to_date(label: &IndexLabel) -> Option<NaiveDate> {
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -41336,10 +41381,7 @@ impl SeriesGroupBy<'_> {
         // column), same `groups` (ascending row indices). Gated to non-contiguous
         // backing (contiguous keeps the generic path, which has no materialize
         // regression here as it would for the dense single-key DF path).
-        if self.by.column.dtype() == DType::Utf8
-            && self.by.column.validity().all()
-            && self.by.column.as_utf8_contiguous().is_none()
-        {
+        if is_text_key_column(&self.by.column) && self.by.column.as_utf8_contiguous().is_none() {
             let vals = self.by.column.values();
             let mut gid: FxHashMap<&str, usize> = FxHashMap::default();
             let mut group_indices: Vec<Vec<usize>> = Vec::new();
@@ -41404,6 +41446,9 @@ impl SeriesGroupBy<'_> {
                     // timedelta-typed — never the string "NaN".
                     Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
                     Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
+                    // An object key (s.dt.date) labels its group as itself;
+                    // it rendered "Object(datetime.date(...))" (fvsao.66).
+                    Scalar::Object(object) => IndexLabel::Object(object.clone()),
                     // Period/Interval still have NO IndexLabel variant — a
                     // representation gap (no6s4 / 00ze3-class), not a mapping
                     // bug. The debug rendering keeps distinct groups DISTINCT;
@@ -41573,10 +41618,7 @@ impl SeriesGroupBy<'_> {
         // in-memory Utf8 keys, which otherwise fell to the generic per-group
         // Scalar gather in cum*/transform. gid numbering is irrelevant to the
         // dense consumers (they broadcast/fold per gid in row order).
-        if self.by.column.dtype() == DType::Utf8
-            && self.by.column.validity().all()
-            && self.by.column.as_utf8_contiguous().is_none()
-        {
+        if is_text_key_column(&self.by.column) && self.by.column.as_utf8_contiguous().is_none() {
             let vals = self.by.column.values();
             let mut gid_of: FxHashMap<&str, usize> = FxHashMap::default();
             let mut gid_per_row = Vec::with_capacity(vals.len());
@@ -62558,6 +62600,7 @@ pub fn index_to_frame(index: &Index, name: Option<&str>) -> Result<DataFrame, Fr
             IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
             IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+            IndexLabel::Object(object) => Scalar::Object(object.clone()),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         })
@@ -62584,6 +62627,7 @@ pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, Fram
             IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
             IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+            IndexLabel::Object(object) => Scalar::Object(object.clone()),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         })
@@ -63238,7 +63282,9 @@ pub fn concat_dataframes_with_keys(
                 IndexLabel::Utf8(s) => format!("{key}|{s}"),
                 IndexLabel::Timedelta64(ns) => format!("{key}|{}", Timedelta::format(*ns)),
                 IndexLabel::Datetime64(ns) => format!("{key}|{}", format_datetime_ns(*ns)),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => format!("{key}|{f}"),
+                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    format!("{key}|{f}")
+                }
                 IndexLabel::Null(_) => format!("{key}|{label}"),
             };
             labels.push(IndexLabel::Utf8(composite));
@@ -66496,6 +66542,7 @@ impl<'a> StyledDataFrame<'a> {
                     IndexLabel::Timedelta64(ns) => Self::escape_html_text(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => Self::escape_html_text(&format_datetime_ns(*ns)),
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    IndexLabel::Object(object) => Self::escape_html_text(&object.to_string()),
                     IndexLabel::Null(_) => label.to_string(),
                 };
                 out.push_str(&format!("      <th>{idx_str}</th>\n"));
@@ -67823,6 +67870,7 @@ impl DataFrame {
             // Preserve datetime dtype on reset/extraction (symmetric with
             // Timedelta64); pandas reset_index on a DatetimeIndex -> datetime64.
             IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
+            IndexLabel::Object(object) => Scalar::Object(object.clone()),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         }
@@ -72038,7 +72086,7 @@ impl DataFrame {
                     Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(v)),
                     Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
                     Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
-                    Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
+                    Scalar::Object(object) => IndexLabel::Object(object),
                 })
                 .collect::<Vec<_>>();
 
@@ -74516,7 +74564,7 @@ impl DataFrame {
             // `IndexLabel::Utf8` strings as the direct path, but set_index can
             // return without allocating one String per row.
             Index::from_utf8_contiguous(bytes, offsets).rename_index(Some(column))
-        } else if source.dtype() == DType::Utf8 && source.validity().all() {
+        } else if let Some((bytes, offsets)) = utf8_key_owned_contiguous(source) {
             // Scalar-backed (from_values) all-valid Utf8: the contiguous-arc fast
             // path above misses it, so set_index fell to the generic path that
             // allocates one IndexLabel::Utf8(String) PER ROW (2M small allocs,
@@ -74524,8 +74572,7 @@ impl DataFrame {
             // buffer (a single big alloc + sequential copy) and build the same
             // lazy Utf8 index. Bit-identical: the lazy index materializes the
             // identical per-row IndexLabel::Utf8 strings the generic path builds.
-            let (bytes, offsets) = utf8_key_owned_contiguous(source)
-                .expect("all-valid Utf8 column yields a contiguous buffer");
+            // An object column holding non-text cells is declined (fvsao.66).
             Index::from_utf8_contiguous(std::sync::Arc::from(bytes), std::sync::Arc::from(offsets))
                 .rename_index(Some(column))
         } else if let Some(data) = source.as_datetime64_slice() {
@@ -74791,7 +74838,7 @@ impl DataFrame {
                                 Scalar::Interval(interval) => {
                                     IndexLabel::Utf8(format!("{interval}"))
                                 }
-                                Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
+                                Scalar::Object(object) => IndexLabel::Object(object.clone()),
                             })
                             .unwrap_or(IndexLabel::Utf8(String::new()))
                     })
@@ -78090,6 +78137,7 @@ impl DataFrame {
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
                 f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                IndexLabel::Object(object) => object.to_string(),
                 null @ IndexLabel::Null(_) => null.to_string(),
             }
         };
@@ -79361,6 +79409,7 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
                     IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
                     IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+                    IndexLabel::Object(object) => Scalar::Object(object.clone()),
                     IndexLabel::Null(kind) => Scalar::Null(*kind),
                 });
                 for col_vals in &col_values {
@@ -80323,6 +80372,7 @@ impl DataFrame {
                     IndexLabel::Timedelta64(ns) => Timedelta::format(ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(ns),
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    IndexLabel::Object(object) => object.to_string(),
                     null @ IndexLabel::Null(_) => null.to_string(),
                 };
                 col_names.push(name);
@@ -85214,6 +85264,7 @@ impl DataFrame {
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    IndexLabel::Object(object) => object.to_string(),
                     IndexLabel::Null(_) => label.to_string(),
                 });
             }
@@ -85310,6 +85361,7 @@ impl DataFrame {
                     IndexLabel::Timedelta64(ns) => escape_html(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => escape_html(&format_datetime_ns(*ns)),
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    IndexLabel::Object(object) => escape_html(&object.to_string()),
                     IndexLabel::Null(_) => label.to_string(),
                 };
                 out.push_str(&format!("      <th>{idx_str}</th>\n"));
@@ -85732,6 +85784,7 @@ impl DataFrame {
                         IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
                         IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
                         IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+                        IndexLabel::Object(object) => Scalar::Object(object.clone()),
                         IndexLabel::Null(kind) => Scalar::Null(*kind),
                     })
                     .collect();
@@ -85876,6 +85929,9 @@ impl DataFrame {
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
                         out.push_str(&csv_escape(&f.to_string(), sep))
                     }
+                    IndexLabel::Object(object) => {
+                        out.push_str(&csv_escape(&object.to_string(), sep));
+                    }
                     // pandas to_csv writes a missing index label as EMPTY.
                     IndexLabel::Null(_) => {}
                 }
@@ -85969,6 +86025,9 @@ impl DataFrame {
                     }
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
                         out.push_str(&csv_escape(&f.to_string(), sep))
+                    }
+                    IndexLabel::Object(object) => {
+                        out.push_str(&csv_escape(&object.to_string(), sep));
                     }
                     // pandas to_csv writes a missing index label as EMPTY.
                     IndexLabel::Null(_) => {}
@@ -86117,6 +86176,9 @@ impl DataFrame {
                     }
                     f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
                         out.push_str(&quote_str(&f.to_string(), false))
+                    }
+                    IndexLabel::Object(object) => {
+                        out.push_str(&quote_str(&object.to_string(), false));
                     }
                     IndexLabel::Null(_) => out.push_str(&quote_str(&label.to_string(), false)),
                 }
@@ -86617,7 +86679,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Null(_) => l.to_string(),
                 })
                 .collect();
@@ -86763,7 +86827,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                        f.to_string()
+                    }
                     null @ IndexLabel::Null(_) => null.to_string(),
                 });
             }
@@ -86828,7 +86894,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Null(_) => l.to_string(),
                 })
                 .collect();
@@ -87377,7 +87445,7 @@ impl DataFrame {
                     IndexLabel::Utf8(v) => row_part.push_str(v),
                     IndexLabel::Timedelta64(ns) => row_part.push_str(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => row_part.push_str(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
                         row_part.push_str(&format!("{f}"))
                     }
                     l @ IndexLabel::Null(_) => row_part.push_str(&format!("{l}")),
@@ -87608,7 +87676,9 @@ impl DataFrame {
                 IndexLabel::Int64(v) => v.to_string(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    f.to_string()
+                }
                 IndexLabel::Null(_) => label.to_string(),
             };
             let sep_pos = label_str.rfind('|').ok_or_else(|| {
@@ -97204,10 +97274,7 @@ impl DataFrame {
         // into a direct-address i64 grid. Pure-Utf8 input has no Int64/Utf8
         // stringified-bucket merge quirk, so factorizing the raw strings is
         // exact; distinct keys sort by `str::cmp` == `pivot_axis_scalar_cmp`.
-        if index_series.column().dtype() == DType::Utf8
-            && columns_series.column().dtype() == DType::Utf8
-            && index_series.column().validity().all()
-            && columns_series.column().validity().all()
+        if is_text_key_column(index_series.column()) && is_text_key_column(columns_series.column())
         {
             return Self::crosstab_dense_utf8(index_series, columns_series);
         }
@@ -98252,8 +98319,7 @@ impl DataFrameGroupBy<'_> {
         // zero-copy byte-span path below (s7b7q) rather than materializing
         // `values()`.
         if self.by.len() == 1
-            && self.df.columns[&self.by[0]].dtype() == DType::Utf8
-            && self.df.columns[&self.by[0]].validity().all()
+            && is_text_key_column(&self.df.columns[&self.by[0]])
             && self.df.columns[&self.by[0]].as_utf8_contiguous().is_none()
         {
             let vals = self.df.columns[&self.by[0]].values();
@@ -98443,7 +98509,7 @@ impl DataFrameGroupBy<'_> {
                         offsets,
                         codes,
                     });
-                } else if col.dtype() == DType::Utf8 && col.validity().all() {
+                } else if is_text_key_column(col) {
                     any_str = true;
                     let vals = col.values();
                     let mut str_to_code: FxHashMap<&str, u32> = FxHashMap::default();
@@ -98771,6 +98837,9 @@ impl DataFrameGroupBy<'_> {
             // grouping machinery merges None into the nan group, NaT keeps NaT.
             Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
             Scalar::Null(_) => IndexLabel::Null(NullKind::NaN),
+            // An object key (a datetime.date from s.dt.date) labels its group
+            // as itself; it rendered as "Object(datetime.date(...))" (fvsao.66).
+            Scalar::Object(object) => IndexLabel::Object(object.clone()),
             // Still the debug rendering for PERIOD and INTERVAL keys, which
             // `IndexLabel` has no variant for — a representation gap, not a
             // mapping bug. See br-frankenpandas-no6s4.
@@ -99265,8 +99334,7 @@ impl DataFrameGroupBy<'_> {
                     | "prod"
                     | "median"
             )
-            && self.df.columns[&self.by[0]].dtype() == DType::Utf8
-            && self.df.columns[&self.by[0]].validity().all()
+            && is_text_key_column(&self.df.columns[&self.by[0]])
             && self.df.columns[&self.by[0]].as_utf8_contiguous().is_none()
             && value_cols.iter().all(|c| {
                 let col = &self.df.columns[c];
@@ -101867,7 +101935,7 @@ impl DataFrameGroupBy<'_> {
                 }
                 ranges.push((mx as i128 - mn as i128 + 1) as usize);
                 cols.push(ColKey::Int { s, min: mn });
-            } else if col.dtype() == DType::Utf8 && col.validity().all() {
+            } else if is_text_key_column(col) {
                 // Contiguous OR Scalar-backed Utf8 key (the prior branch only
                 // handled the contiguous backing, so a from_values key made the
                 // whole multi-key grouping fall to build_groups — catastrophic at
@@ -102799,7 +102867,7 @@ impl DataFrameGroupBy<'_> {
                 };
                 let (g, n, o, idx) = self.int64_dense_grouping(keys, min, range);
                 (g, n, o, idx, None)
-            } else if key_col.dtype() == DType::Utf8 && key_col.validity().all() {
+            } else if is_text_key_column(key_col) {
                 let (g, n, o, idx) = self.single_utf8_key_dense_grouping(key_col);
                 (g, n, o, idx, None)
             } else {
@@ -103022,7 +103090,7 @@ impl DataFrameGroupBy<'_> {
                     return Ok(None);
                 };
                 self.int64_dense_grouping(keys, min, range)
-            } else if key_col.dtype() == DType::Utf8 && key_col.validity().all() {
+            } else if is_text_key_column(key_col) {
                 // Contiguous OR Scalar-backed Utf8 key (the prior inline block only
                 // handled the contiguous backing, so a from_values key fell to the
                 // generic build_groups path).
@@ -103336,7 +103404,7 @@ impl DataFrameGroupBy<'_> {
                 };
                 let (g, n, o, idx) = self.int64_dense_grouping(keys, min, range);
                 (g, n, o, idx, None)
-            } else if key_col.dtype() == DType::Utf8 && key_col.validity().all() {
+            } else if is_text_key_column(key_col) {
                 // Single all-valid Utf8 key (contiguous OR Scalar-backed): the
                 // i64 gate above misses it, so idxmax/idxmin fell to build_groups
                 // + a scattered per-group `col.values()[idx]` gather (0.38-0.46x vs
@@ -103645,7 +103713,7 @@ impl DataFrameGroupBy<'_> {
                     return Ok(None);
                 };
                 self.int64_dense_grouping(keys, min, range)
-            } else if key_col.dtype() == DType::Utf8 && key_col.validity().all() {
+            } else if is_text_key_column(key_col) {
                 // Contiguous OR Scalar-backed Utf8 key (the prior inline block only
                 // handled the contiguous backing, so a from_values key fell to the
                 // generic build_groups path).
@@ -104384,10 +104452,7 @@ impl DataFrameGroupBy<'_> {
         // gather). `go_gid` translates each `group_order` entry to its gid by
         // looking its Utf8 key up in the same map (HashMap matches by string
         // content, so build_groups' distinct &str pointers resolve fine).
-        if self.by.len() == 1
-            && self.df.columns[&self.by[0]].dtype() == DType::Utf8
-            && self.df.columns[&self.by[0]].validity().all()
-        {
+        if self.by.len() == 1 && is_text_key_column(&self.df.columns[&self.by[0]]) {
             let col = &self.df.columns[&self.by[0]];
             let strs = pivot_utf8_key_strs(col, col.len());
             let mut gid_of: FxHashMap<&str, usize> = FxHashMap::default();
@@ -104451,7 +104516,7 @@ impl DataFrameGroupBy<'_> {
                 }
                 ranges.push((mx as i128 - mn as i128 + 1) as usize);
                 kcs.push(KeyCol::Int { s, min: mn });
-            } else if col.dtype() == DType::Utf8 && col.validity().all() {
+            } else if is_text_key_column(col) {
                 let strs = pivot_utf8_key_strs(col, nrows);
                 let mut map: FxHashMap<&str, u32> = FxHashMap::default();
                 let mut codes: Vec<u32> = Vec::with_capacity(nrows);
@@ -104606,10 +104671,7 @@ impl DataFrameGroupBy<'_> {
         // Single all-valid Utf8 key (contiguous OR Scalar-backed): Utf8 sibling of
         // the Int64 branch above — the moment engine (sem/skew/kurt) otherwise fell
         // to build_groups for a Utf8 key (0.64-0.72x vs pandas at high card).
-        if self.as_index
-            && self.by.len() == 1
-            && self.df.columns[&self.by[0]].dtype() == DType::Utf8
-            && self.df.columns[&self.by[0]].validity().all()
+        if self.as_index && self.by.len() == 1 && is_text_key_column(&self.df.columns[&self.by[0]])
         {
             let key_col = &self.df.columns[&self.by[0]];
             let (gid_per_row, ngroups, order, out_index) =
@@ -105384,6 +105446,7 @@ impl DataFrameGroupBy<'_> {
             } else {
                 "False".to_owned()
             }),
+            Scalar::Object(object) => IndexLabel::Object(object.clone()),
             other => IndexLabel::Utf8(format!("{other:?}")),
         }
     }
@@ -105901,8 +105964,7 @@ impl DataFrameGroupBy<'_> {
         // the generic per-group Scalar gather). gid numbering is irrelevant to
         // transform output (broadcast agg[gid[row]]), so first-seen is fine.
         if self.by.len() == 1
-            && self.df.columns[&self.by[0]].dtype() == DType::Utf8
-            && self.df.columns[&self.by[0]].validity().all()
+            && is_text_key_column(&self.df.columns[&self.by[0]])
             && self.df.columns[&self.by[0]].as_utf8_contiguous().is_none()
         {
             let vals = self.df.columns[&self.by[0]].values();
@@ -107902,7 +107964,7 @@ impl DataFrameGroupBy<'_> {
                     let (g, ng, order, _) = self.int64_dense_grouping(keys, min, range);
                     (g, ng, order)
                 })
-            } else if key_col.dtype() == DType::Utf8 && key_col.validity().all() {
+            } else if is_text_key_column(key_col) {
                 let (g, ng, order, _) = self.single_utf8_key_dense_grouping(key_col);
                 Some((g, ng, order))
             } else {
@@ -108019,7 +108081,7 @@ impl DataFrameGroupBy<'_> {
             let (min, range) = i64_dense_histogram_range(keys)?;
             let (g, n, _, _) = self.int64_dense_grouping(keys, min, range);
             (g, n)
-        } else if key_col.dtype() == DType::Utf8 && key_col.validity().all() {
+        } else if is_text_key_column(key_col) {
             // Single all-valid Utf8 key (contiguous OR Scalar-backed): head/tail/
             // nth otherwise fell to build_groups. Position semantics are gid-
             // relative in row order, so first-seen gids suffice (labels/order
@@ -108442,7 +108504,9 @@ impl DataFrameGroupBy<'_> {
                     IndexLabel::Int64(g) => format!("{g}|{stat}"),
                     IndexLabel::Timedelta64(ns) => format!("{}|{stat}", Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => format!("{}|{stat}", format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => format!("{f}|{stat}"),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                        format!("{f}|{stat}")
+                    }
                     IndexLabel::Null(_) => format!("{group_label}|{stat}"),
                 };
                 out_labels.push(IndexLabel::Utf8(label_str));
@@ -108548,7 +108612,9 @@ impl DataFrameGroupBy<'_> {
                 IndexLabel::Int64(v) => v.to_string(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    f.to_string()
+                }
                 IndexLabel::Null(_) => label.to_string(),
             };
             if label_str == name {
@@ -127003,6 +127069,137 @@ mod tests {
             head.astype(DType::Utf8).unwrap().values()[0],
             text("['a', 'b']")
         );
+    }
+
+    /// A host value ordered by its number and printed `Day(n)`, so its repr
+    /// order ("Day(15)" before "Day(2)") is not its own - as a date's.
+    struct Day(u32);
+
+    impl fp_types::HostObject for Day {
+        fn host_eq(&self, other: &dyn fp_types::HostObject) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Day>()
+                .is_some_and(|other| other.0 == self.0)
+        }
+        fn host_repr(&self) -> String {
+            format!("Day({})", self.0)
+        }
+        fn host_str(&self) -> String {
+            format!("day {}", self.0)
+        }
+        fn host_hash(&self) -> Option<u64> {
+            Some(u64::from(self.0))
+        }
+        fn host_cmp(&self, other: &dyn fp_types::HostObject) -> Option<std::cmp::Ordering> {
+            other
+                .as_any()
+                .downcast_ref::<Day>()
+                .map(|other| self.0.cmp(&other.0))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn object_cells_are_labels_in_their_own_order_fvsao_66() {
+        use fp_types::{HostValue, ObjectValue};
+        let day = |n: u32| Scalar::Object(ObjectValue::Host(HostValue::new(Day(n))));
+        let day_label = |n: u32| IndexLabel::Object(ObjectValue::Host(HostValue::new(Day(n))));
+        let rows: Vec<IndexLabel> = (0..4).map(IndexLabel::Int64).collect();
+        let days =
+            Series::from_values("d", rows.clone(), vec![day(15), day(2), day(15), day(9)]).unwrap();
+        let ints = |values: [i64; 4]| values.into_iter().map(Scalar::Int64).collect::<Vec<_>>();
+        let values = Series::from_values("v", rows.clone(), ints([1, 2, 3, 4])).unwrap();
+        // All-valid object data of host values is no text key: the text fast
+        // paths read each such cell as "" (one group, or none at all).
+        assert!(!crate::is_text_key_column(days.column()));
+        // Grouped by the days: a group per day labelled by the day itself
+        // (SeriesGroupBy keeps first-seen order; the binding sorts). The text
+        // fast path had put every row in one "" group, or dropped them all.
+        let sums = values.groupby(&days).unwrap().sum().unwrap();
+        assert_eq!(
+            sums.index().labels(),
+            &[day_label(15), day_label(2), day_label(9)]
+        );
+        assert_eq!(
+            sums.values(),
+            &[Scalar::Int64(4), Scalar::Int64(2), Scalar::Int64(4)]
+        );
+        // Sorted labels follow the days' own order (2 < 9 < 15), not their
+        // reprs' ("Day(15)" first): a frame's groupby sorts, and set_index /
+        // reset_index carry the objects across the axis and back.
+        let frame = DataFrame::from_dict(
+            &["d", "v"],
+            vec![
+                ("d", vec![day(15), day(2), day(15), day(9)]),
+                ("v", ints([1, 2, 3, 4])),
+            ],
+        )
+        .unwrap();
+        let grouped = frame.groupby(&["d"]).unwrap().sum().unwrap();
+        assert_eq!(
+            grouped.index().labels(),
+            &[day_label(2), day_label(9), day_label(15)]
+        );
+        let indexed = frame.set_index("d", true).unwrap();
+        assert_eq!(indexed.index().labels()[3], day_label(9));
+        let back = indexed.reset_index(false).unwrap();
+        assert_eq!(back.column("d").unwrap().values()[1], day(2));
+        // value_counts labels the counts by the objects; sort_values and
+        // duplicated see them as the values they are.
+        assert_eq!(
+            days.value_counts().unwrap().index().labels()[0],
+            day_label(15)
+        );
+        assert_eq!(
+            days.sort_values(true).unwrap().values(),
+            &[day(2), day(9), day(15), day(15)]
+        );
+        assert_eq!(
+            days.duplicated().unwrap().values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false)
+            ]
+        );
+        // NEGATIVE: text keys stay text labels.
+        let text = |value: &str| Scalar::Utf8(value.to_owned());
+        let words =
+            Series::from_values("w", rows, vec![text("b"), text("a"), text("b"), text("c")])
+                .unwrap();
+        assert!(crate::is_text_key_column(words.column()));
+        assert_eq!(
+            values
+                .groupby(&words)
+                .unwrap()
+                .sum()
+                .unwrap()
+                .index()
+                .labels(),
+            &[
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("c".into())
+            ]
+        );
+        // NEGATIVE: a missing value in a numeric object column counts once
+        // under dropna=False (pandas: 2) - it panicked.
+        let mixed = Series::new(
+            "m",
+            Index::from_range(0, 3, 1),
+            Column::from_object_values(vec![
+                Scalar::Bool(true),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(mixed.nunique_with_dropna(false), 2);
+        assert_eq!(mixed.nunique_with_dropna(true), 1);
     }
 
     #[test]

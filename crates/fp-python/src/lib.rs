@@ -3993,6 +3993,41 @@ fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     }
 }
 
+/// pandas' TypeError for a group key column holding an unhashable cell (a
+/// list, a dict): grouping hashes the keys. A list column grouped into
+/// nothing (fvsao.66).
+fn refuse_unhashable_keys(py: Python<'_>, column: &Column) -> PyResult<()> {
+    if column.dtype() != DType::Utf8 {
+        return Ok(());
+    }
+    for value in column.values() {
+        let Scalar::Object(object) = value else {
+            continue;
+        };
+        let unhashable = match object {
+            fp_types::ObjectValue::List(_) => Some("list".to_owned()),
+            fp_types::ObjectValue::Host(host) => host
+                .object()
+                .as_any()
+                .downcast_ref::<PyHost>()
+                .map(|host| host.0.bind(py))
+                .filter(|object| object.hash().is_err())
+                .map(|object| {
+                    object
+                        .get_type()
+                        .name()
+                        .map_or_else(|_| "object".to_owned(), |name| name.to_string())
+                }),
+        };
+        if let Some(kind) = unhashable {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "unhashable type: '{kind}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A Python object an object cell carries (fvsao.33): the core compares,
 /// prints and hashes it through Python.
 struct PyHost(Py<PyAny>);
@@ -4032,6 +4067,21 @@ impl fp_types::HostObject for PyHost {
                 .hash()
                 .ok()
                 .map(|hash| u64::from_ne_bytes(hash.to_ne_bytes()))
+        })
+    }
+
+    // Python's own < / > / ==; a TypeError (a date against a time) is None.
+    fn host_cmp(&self, other: &dyn fp_types::HostObject) -> Option<std::cmp::Ordering> {
+        let other = other.as_any().downcast_ref::<PyHost>()?;
+        Python::attach(|py| {
+            let (left, right) = (self.0.bind(py), other.0.bind(py));
+            if left.lt(right).ok()? {
+                Some(std::cmp::Ordering::Less)
+            } else if left.gt(right).ok()? {
+                Some(std::cmp::Ordering::Greater)
+            } else {
+                left.eq(right).ok()?.then_some(std::cmp::Ordering::Equal)
+            }
         })
     }
 
@@ -4778,13 +4828,18 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
                 obj.get_type().name()?
             )))
         }
-    } else if let Ok(s) = obj.str() {
-        Ok(IndexLabel::Utf8(s.to_str()?.to_string()))
+    } else if obj.is_instance_of::<pyo3::types::PyTuple>() {
+        // A tuple keys a MultiIndex in pandas; as a flat label it stays its
+        // text.
+        Ok(IndexLabel::Utf8(obj.str()?.to_str()?.to_string()))
     } else {
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-            "Cannot convert {} to IndexLabel",
-            obj.get_type().name()?
-        )))
+        // Any other object (a datetime.date) is its own label, as pandas'
+        // object Index holds it; it became its text, so Index([date(...)])
+        // held strings and .loc[date(...)] missed (fvsao.66).
+        match py_to_cell(obj.py(), obj)? {
+            Scalar::Object(object) => Ok(IndexLabel::Object(object)),
+            scalar => Ok(scalar_to_index_label_converter(&scalar)),
+        }
     }
 }
 
@@ -4818,6 +4873,8 @@ fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> 
             }
         }
         IndexLabel::Bool(b) => b.into_py_any(py),
+        // An object label is the Python object (fvsao.66).
+        IndexLabel::Object(object) => scalar_to_py(py, &Scalar::Object(object.clone())),
         IndexLabel::Null(NullKind::NaT) => nat_object(py),
         IndexLabel::Null(NullKind::NaN) => f64::NAN.into_py_any(py),
         IndexLabel::Null(NullKind::Null) => Ok(py.None()),
@@ -5124,6 +5181,7 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
         IndexLabel::Float64(f) => Scalar::Float64(f.0),
         IndexLabel::Bool(b) => Scalar::Bool(*b),
+        IndexLabel::Object(object) => Scalar::Object(object.clone()),
         IndexLabel::Null(k) => Scalar::Null(*k),
     }
 }
@@ -6319,6 +6377,7 @@ impl PyIndex {
             IndexLabel::Bool(b) => *b,
             IndexLabel::Timedelta64(t) => *t != 0,
             IndexLabel::Datetime64(d) => *d != 0,
+            IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
             IndexLabel::Null(_) => false,
         })
     }
@@ -6331,6 +6390,7 @@ impl PyIndex {
             IndexLabel::Bool(b) => *b,
             IndexLabel::Timedelta64(t) => *t != 0,
             IndexLabel::Datetime64(d) => *d != 0,
+            IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
             IndexLabel::Null(_) => false,
         })
     }
@@ -6712,6 +6772,7 @@ impl PyIndex {
                     IndexLabel::Bool(b) => Scalar::Bool(*b),
                     IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
                     IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
+                    IndexLabel::Object(object) => Scalar::Object(object.clone()),
                     IndexLabel::Null(k) => Scalar::Null(*k),
                 })
                 .collect(),
@@ -6740,6 +6801,7 @@ impl PyIndex {
                     IndexLabel::Bool(b) => Scalar::Bool(*b),
                     IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
                     IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
+                    IndexLabel::Object(object) => Scalar::Object(object.clone()),
                     IndexLabel::Null(k) => Scalar::Null(*k),
                 })
                 .collect(),
@@ -9825,7 +9887,7 @@ impl PyMultiIndex {
                         Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
                         Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
                         Scalar::Interval(inv) => IndexLabel::Utf8(inv.to_string()),
-                        Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
+                        Scalar::Object(object) => IndexLabel::Object(object.clone()),
                         Scalar::Null(k) => IndexLabel::Null(*k),
                     })
                     .collect();
@@ -16345,6 +16407,9 @@ fn sort_union_labels(labels: &mut [IndexLabel]) -> PyResult<()> {
         IndexLabel::Utf8(_) => "str",
         IndexLabel::Datetime64(_) => "Timestamp",
         IndexLabel::Timedelta64(_) => "Timedelta",
+        // Object labels order among themselves through Python (IndexLabel's
+        // Ord); the core cannot name their class.
+        IndexLabel::Object(_) => "object",
         IndexLabel::Null(_) => "NoneType",
     };
     let number = |label: &IndexLabel| match label {
@@ -20528,6 +20593,7 @@ impl PySeries {
                 ));
             }
         };
+        refuse_unhashable_keys(py, by_series.column())?;
         let unused = if by_series.column().categorical().is_some() {
             let keys = by_series.to_frame(Some("key")).map_err(frame_error_to_py)?;
             check_category_keys(py, &keys, &["key".to_owned()], observed)?
@@ -21987,8 +22053,21 @@ impl PySeries {
         Ok(PySeries { inner: res_series })
     }
 
+    /// pandas' `.dt`: only a datetime, duration or period column has it, any
+    /// other raises AttributeError (so `hasattr(s, "dt")` is False). It was
+    /// handed out for every column: a text column's `.dt.year` parsed the
+    /// strings where pandas refuses, a numeric one failed later with a
+    /// ValueError (fvsao.17).
     #[getter]
     fn dt(&self) -> PyResult<PySeriesDatetimeAccessor> {
+        if !matches!(
+            self.inner.column().dtype(),
+            DType::Datetime64 { .. } | DType::Timedelta64 | DType::Period
+        ) {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "Can only use .dt accessor with datetimelike values",
+            ));
+        }
         Ok(PySeriesDatetimeAccessor {
             series: self.inner.clone(),
         })
@@ -23030,6 +23109,40 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// `set_index`'s result `res`: refused on a duplicate key under
+    /// `verify_integrity` (pandas' ValueError naming them), then stored in
+    /// place (None) or returned.
+    fn finish_set_index(
+        &mut self,
+        py: Python<'_>,
+        res: DataFrame,
+        inplace: bool,
+        verify_integrity: bool,
+    ) -> PyResult<Option<Self>> {
+        if verify_integrity && res.index().has_duplicates() {
+            let mut seen = HashSet::new();
+            let mut duplicated = Vec::new();
+            for label in res.index().labels() {
+                if !seen.insert(label) && !duplicated.contains(label) {
+                    duplicated.push(label.clone());
+                }
+            }
+            let duplicated = Index::new(duplicated).rename_index(res.index().name());
+            let shown = Py::new(py, PyIndex { inner: duplicated })?
+                .bind(py)
+                .repr()?
+                .to_string();
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Index has duplicate keys: {shown}"
+            )));
+        }
+        if inplace {
+            self.inner = res;
+            return Ok(None);
+        }
+        Ok(Some(Self { inner: res }))
+    }
+
     /// The flat column names, in order.
     ///
     /// Positional, via `column_name_at`, NOT `column_names()`.
@@ -28735,6 +28848,11 @@ impl PyDataFrame {
                 ));
             }
         };
+        for key in &by {
+            if let Some(column) = df.column(key) {
+                refuse_unhashable_keys(py, column)?;
+            }
+        }
         // pandas' as_index=False output drops an unnamed array key and
         // inserts named ones as columns; only column keys are modelled there.
         let column_keys_only = by
@@ -29050,6 +29168,26 @@ impl PyDataFrame {
         inplace: bool,
         verify_integrity: bool,
     ) -> PyResult<Option<PyDataFrame>> {
+        // An array key (a Series, an Index, a numpy array) is the new index
+        // itself, named after it; `drop` concerns columns only. It raised
+        // "keys must be a column name" (fvsao.66: set_index(s.dt.date)).
+        if !append
+            && keys
+                .getattr("ndim")
+                .and_then(|ndim| ndim.extract::<usize>())
+                .is_ok_and(|ndim| ndim == 1)
+        {
+            let index = index_from_axis_value(keys)?;
+            if index.len() != self.inner.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Length mismatch: Expected {} rows, received array of length {}",
+                    self.inner.len(),
+                    index.len()
+                )));
+            }
+            let res = self.inner.with_index(index).map_err(frame_error_to_py)?;
+            return self.finish_set_index(py, res, inplace, verify_integrity);
+        }
         let keys = &column_arg(py, &self.inner, keys.clone())?;
         // A typed label (or list with one) labelling no column is pandas'
         // KeyError too.
@@ -29114,28 +29252,7 @@ impl PyDataFrame {
                 "keys must be a column name or list of column names",
             ));
         };
-        if verify_integrity && res.index().has_duplicates() {
-            let mut seen = HashSet::new();
-            let mut duplicated = Vec::new();
-            for label in res.index().labels() {
-                if !seen.insert(label) && !duplicated.contains(label) {
-                    duplicated.push(label.clone());
-                }
-            }
-            let duplicated = Index::new(duplicated).rename_index(res.index().name());
-            let shown = Py::new(py, PyIndex { inner: duplicated })?
-                .bind(py)
-                .repr()?
-                .to_string();
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Index has duplicate keys: {shown}"
-            )));
-        }
-        if inplace {
-            self.inner = res;
-            return Ok(None);
-        }
-        Ok(Some(PyDataFrame { inner: res }))
+        self.finish_set_index(py, res, inplace, verify_integrity)
     }
 
     /// Whether elements in DataFrame are contained in values.
@@ -36987,6 +37104,24 @@ impl PySeriesDatetimeAccessor {
     fn normalize(&self) -> PyResult<PySeries> {
         self.wrap(|dt| dt.normalize())
     }
+    /// pandas' `.dt.date`: each instant's `datetime.date` (a zoned column's
+    /// wall-clock date) as an object cell. fp-frame's `date()` is text, so
+    /// it was left unexposed rather than mistyped (fvsao.17).
+    #[getter]
+    fn date(&self, py: Python<'_>) -> PyResult<PySeries> {
+        self.timestamp_objects(py, "date")
+    }
+    /// pandas' `.dt.time`: each instant's wall-clock `datetime.time`
+    /// (microseconds, no tzinfo) as an object cell.
+    #[getter]
+    fn time(&self, py: Python<'_>) -> PyResult<PySeries> {
+        self.timestamp_objects(py, "time")
+    }
+    /// pandas' `.dt.timetz`: `time` with the column's tzinfo.
+    #[getter]
+    fn timetz(&self, py: Python<'_>) -> PyResult<PySeries> {
+        self.timestamp_objects(py, "timetz")
+    }
     /// pandas' `Series.dt.tz_localize(tz)`: naive wall times placed in `tz`
     /// (datetime64[ns, tz]; a DST-repeated or skipped wall time raises), or a
     /// zone dropped keeping the wall clock (None). fp-frame had it; the
@@ -37066,6 +37201,44 @@ impl PySeriesDatetimeAccessor {
 }
 
 impl PySeriesDatetimeAccessor {
+    /// Each instant's Timestamp `method()` (`date` / `time` / `timetz`) as an
+    /// object cell, NaT kept NaT. As pandas re-infers an object column that
+    /// is all NaT, a non-empty all-NaT result is datetime64[ns]. A duration or
+    /// period column has no such attribute.
+    fn timestamp_objects(&self, py: Python<'_>, method: &str) -> PyResult<PySeries> {
+        let column = self.series.column();
+        let kind = match column.dtype() {
+            DType::Datetime64 { .. } => None,
+            DType::Timedelta64 => Some("TimedeltaProperties"),
+            _ => Some("PeriodProperties"),
+        };
+        if let Some(kind) = kind {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                format!("'{kind}' object has no attribute '{method}'"),
+            ));
+        }
+        let cells = self
+            .series
+            .values()
+            .iter()
+            .map(|value| {
+                if value.is_missing() {
+                    return Ok(Scalar::Null(NullKind::NaT));
+                }
+                let stamp = cell_to_py(py, column, value)?;
+                py_to_cell(py, &stamp.bind(py).call_method0(method)?)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let column = if !cells.is_empty() && cells.iter().all(Scalar::is_missing) {
+            Column::new(DType::datetime64_naive(), cells).map_err(column_error_to_py)?
+        } else {
+            Column::from_object_values(cells)
+        };
+        Series::new(self.series.name(), self.series.index().clone(), column)
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
+    }
+
     fn wrap(
         &self,
         op: impl FnOnce(&fp_frame::DatetimeAccessor<'_>) -> Result<Series, FrameError>,
@@ -47831,7 +48004,7 @@ fn scalar_to_index_label_converter(s: &Scalar) -> IndexLabel {
         Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
         Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
         Scalar::Interval(inv) => IndexLabel::Utf8(inv.to_string()),
-        Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
+        Scalar::Object(object) => IndexLabel::Object(object.clone()),
         Scalar::Null(k) => IndexLabel::Null(*k),
     }
 }

@@ -1215,6 +1215,10 @@ pub trait HostObject: Send + Sync {
     fn host_str(&self) -> String;
     /// The host's hash, None for an unhashable value (a dict).
     fn host_hash(&self) -> Option<u64>;
+    /// `self` ordered against `other` in the host language (Python's `<` /
+    /// `>` / `==`), None where the host cannot order them (a date against a
+    /// time, two dicts).
+    fn host_cmp(&self, other: &dyn HostObject) -> Option<std::cmp::Ordering>;
     /// The value itself, for the host that made it to take back.
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -1293,6 +1297,96 @@ impl ObjectValue {
             }
             Self::Host(value) => value.0.host_str(),
         }
+    }
+
+    /// Python's ordering of two cells, None where Python raises: host values
+    /// by the host, lists item by item (a shorter prefix first), and a list
+    /// against a host value unordered.
+    #[must_use]
+    pub fn python_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Self::Host(left), Self::Host(right)) => {
+                if left == right {
+                    Some(std::cmp::Ordering::Equal)
+                } else {
+                    left.0.host_cmp(&*right.0)
+                }
+            }
+            (Self::List(left), Self::List(right)) => {
+                for (a, b) in left.iter().zip(right.iter()) {
+                    if a != b {
+                        let ordering = python_item_cmp(a, b)?;
+                        if ordering.is_ne() {
+                            return Some(ordering);
+                        }
+                    }
+                }
+                Some(left.len().cmp(&right.len()))
+            }
+            _ => None,
+        }
+    }
+
+    /// A total order over cells, for sorted labels and ordered maps: Python's
+    /// ordering where it has one; otherwise a list before a host value, then
+    /// the reprs, then identity - so two unequal cells are never Equal and
+    /// equal cells always are.
+    #[must_use]
+    pub fn total_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        if self == other {
+            return Ordering::Equal;
+        }
+        if let Some(ordering) = self.python_cmp(other).filter(|ordering| ordering.is_ne()) {
+            return ordering;
+        }
+        let rank = |cell: &Self| u8::from(matches!(cell, Self::Host(_)));
+        rank(self)
+            .cmp(&rank(other))
+            .then_with(|| self.repr().cmp(&other.repr()))
+            .then_with(|| self.address().cmp(&other.address()))
+    }
+
+    /// Where the cell's shared data lives: the last tie-break of
+    /// [`Self::total_cmp`] between unequal cells that print alike.
+    fn address(&self) -> usize {
+        match self {
+            Self::List(items) => items.as_ptr().addr(),
+            Self::Host(value) => std::sync::Arc::as_ptr(&value.0).cast::<()>().addr(),
+        }
+    }
+}
+
+/// Python's ordering of two list items: numbers by value, text by code
+/// point, nested cells by [`ObjectValue::python_cmp`]; None where Python
+/// raises (a number against text).
+fn python_item_cmp(left: &Scalar, right: &Scalar) -> Option<std::cmp::Ordering> {
+    let numeric = |value: &Scalar| {
+        matches!(
+            value,
+            Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
+        )
+    };
+    match (left, right) {
+        (Scalar::Utf8(a), Scalar::Utf8(b)) => Some(a.cmp(b)),
+        (Scalar::Object(a), Scalar::Object(b)) => a.python_cmp(b),
+        _ if numeric(left) && numeric(right) => {
+            left.to_f64().ok()?.partial_cmp(&right.to_f64().ok()?)
+        }
+        _ => None,
+    }
+}
+
+impl PartialOrd for ObjectValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// [`ObjectValue::total_cmp`], so a cell can be an ordered label.
+impl Ord for ObjectValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.total_cmp(other)
     }
 }
 
@@ -1883,6 +1977,8 @@ impl Scalar {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .then_with(|| a.closed.cmp(&b.closed)),
+            // Object cells (dates, lists) in Python's order (fvsao.66).
+            (Self::Object(a), Self::Object(b)) => a.cmp(b),
             // Cross-numeric comparison
             (Self::Int64(a), Self::Float64(b)) => (*a as f64)
                 .partial_cmp(b)
@@ -8722,9 +8818,53 @@ mod tests {
         fn host_hash(&self) -> Option<u64> {
             (!self.0.is_empty()).then_some(self.0.len() as u64)
         }
+        // Names starting with '!' cannot be ordered (as a date against a time).
+        fn host_cmp(&self, other: &dyn super::HostObject) -> Option<std::cmp::Ordering> {
+            let other = other.as_any().downcast_ref::<Named>()?;
+            (!self.0.starts_with('!') && !other.0.starts_with('!')).then(|| self.0.cmp(other.0))
+        }
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+    }
+
+    #[test]
+    fn object_cells_order_like_python_then_totally_fvsao_66() {
+        use std::cmp::Ordering;
+
+        use super::{HostValue, ObjectValue};
+        let host = |name: &'static str| ObjectValue::Host(HostValue::new(Named(name)));
+        let list = |items: Vec<Scalar>| ObjectValue::list(items);
+        // Host values order as the host orders them (a date before a later
+        // date), not by their reprs.
+        assert_eq!(host("a").python_cmp(&host("b")), Some(Ordering::Less));
+        assert!(host("b") > host("a"));
+        assert_eq!(host("a").cmp(&host("a")), Ordering::Equal);
+        // Lists item by item, numbers by value (1 < 10, where the reprs sort
+        // "10" first), a shorter prefix first.
+        let one_ten = list(vec![Scalar::Int64(1), Scalar::Int64(10)]);
+        let one_two = list(vec![Scalar::Int64(1), Scalar::Int64(2)]);
+        assert_eq!(one_two.python_cmp(&one_ten), Some(Ordering::Less));
+        assert!(list(vec![Scalar::Int64(1)]) < one_two);
+        // Python's 1 == 1.0: an equal item pair is skipped, not the answer.
+        let mixed = list(vec![Scalar::Float64(1.0), Scalar::Int64(3)]);
+        assert_eq!(one_two.python_cmp(&mixed), Some(Ordering::Less));
+        // Where Python raises there is no python_cmp, but the total order
+        // still separates the cells: a list before a host value, then reprs.
+        assert_eq!(one_two.python_cmp(&host("a")), None);
+        assert!(one_two < host("a"));
+        assert_eq!(host("!z").python_cmp(&host("!a")), None);
+        assert!(host("!a") < host("!z"));
+        let text = list(vec![Scalar::Utf8("a".to_owned())]);
+        assert_eq!(one_two.python_cmp(&text), None);
+        assert_ne!(one_two.cmp(&text), Ordering::Equal);
+        // NEGATIVE: unequal cells that print alike are never Equal (NaN is not
+        // equal to itself), so an ordered map cannot merge them.
+        let nan = || list(vec![Scalar::Float64(f64::NAN)]);
+        let (first, second) = (nan(), nan());
+        assert_ne!(first, second);
+        assert_ne!(first.cmp(&second), Ordering::Equal);
+        assert_eq!(first.cmp(&second), second.cmp(&first).reverse());
     }
 
     #[test]

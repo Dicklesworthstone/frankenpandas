@@ -164,6 +164,11 @@ pub enum IndexLabel {
     Float64(OrderedF64),
     /// pandas boolean index label.
     Bool(bool),
+    /// An object cell as a label (fvsao.66): a `datetime.date` from
+    /// `groupby(s.dt.date)`, kept as that object rather than its text.
+    /// Ordered by [`fp_types::ObjectValue::total_cmp`] (Python's own order
+    /// where it has one); before `Null` so null labels still sort last.
+    Object(fp_types::ObjectValue),
     /// Typed missing label (br-frankenpandas-joeff): lets value_counts
     /// (dropna=False) and friends keep pandas' distinct None / nan / NaT
     /// buckets instead of collapsing them or colliding with genuine
@@ -200,7 +205,7 @@ impl IndexLabel {
             Self::Timedelta64(value) => *value == Timedelta::NAT,
             Self::Datetime64(value) => *value == i64::MIN,
             Self::Float64(v) => v.0.is_nan(),
-            Self::Int64(_) | Self::Utf8(_) | Self::Bool(_) => false,
+            Self::Int64(_) | Self::Utf8(_) | Self::Bool(_) | Self::Object(_) => false,
             Self::Null(_) => true,
         }
     }
@@ -256,6 +261,8 @@ fn index_label_is_truthy(label: &IndexLabel) -> bool {
         IndexLabel::Utf8(s) => !s.is_empty(),
         IndexLabel::Timedelta64(v) => *v != 0,
         IndexLabel::Datetime64(v) => *v != 0,
+        // Python truth: an empty list is false, any other object true.
+        IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
         // Unreachable: is_missing() returned true above for every Null.
         IndexLabel::Null(_) => false,
     }
@@ -316,6 +323,8 @@ impl fmt::Display for IndexLabel {
             Self::Utf8(v) => write!(f, "{v}"),
             Self::Timedelta64(v) => write!(f, "{}", Timedelta::format(*v)),
             Self::Datetime64(v) => write!(f, "{}", format_datetime_ns(*v)),
+            // pandas prints an object label as its cell (`2020-01-05`).
+            Self::Object(object) => f.write_str(&object.pprint()),
             // Matches pandas' REPR of missing labels in an index (None / NaN /
             // NaT — note uppercase NaN: the formatter surface, unlike
             // str(nan)=='nan' which astype(str) uses). Verified pandas 2.2.3.
@@ -448,10 +457,13 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
             Some(IndexLabel::Utf8(_)) => SortOrder::AscendingUtf8,
             Some(IndexLabel::Timedelta64(_)) => SortOrder::AscendingTimedelta64,
             Some(IndexLabel::Datetime64(_)) => SortOrder::AscendingDatetime64,
-            // Float64/Bool/Null labels use the general (non-typed) backend.
-            Some(IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Null(_)) => {
-                SortOrder::Unsorted
-            }
+            // Float64/Bool/Object/Null labels use the general (non-typed) backend.
+            Some(
+                IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Null(_),
+            ) => SortOrder::Unsorted,
         };
     }
 
@@ -4795,10 +4807,10 @@ impl Index {
                         .map_or_else(|_| l.clone(), IndexLabel::Int64),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Int64(*ns),
                     IndexLabel::Datetime64(ns) => IndexLabel::Int64(*ns),
-                    // Missing labels have no integer form; preserved like
-                    // unparseable strings (pandas astype(int) raises on NaN —
-                    // callers reject before reaching here).
-                    IndexLabel::Null(_) => l.clone(),
+                    // Missing labels and objects have no integer form;
+                    // preserved like unparseable strings (pandas astype(int)
+                    // raises on NaN — callers reject before reaching here).
+                    IndexLabel::Object(_) | IndexLabel::Null(_) => l.clone(),
                 })
                 .collect(),
         ))
@@ -4828,6 +4840,12 @@ impl Index {
                             "Cannot cast a datetime-like Index to dtype float64".to_owned(),
                         ));
                     }
+                    IndexLabel::Object(object) => {
+                        return Err(IndexError::InvalidArgument(format!(
+                            "float() argument must be a string or a real number, not {}",
+                            object.repr()
+                        )));
+                    }
                 };
                 Ok(IndexLabel::Float64(OrderedF64(value)))
             })
@@ -4848,6 +4866,7 @@ impl Index {
                     IndexLabel::Float64(v) => v.0 != 0.0,
                     IndexLabel::Bool(b) => *b,
                     IndexLabel::Utf8(s) => !s.is_empty(),
+                    IndexLabel::Object(_) => index_label_is_truthy(label),
                     IndexLabel::Null(_)
                     | IndexLabel::Timedelta64(_)
                     | IndexLabel::Datetime64(_) => {
@@ -4898,6 +4917,7 @@ impl Index {
                     IndexLabel::Utf8(_) => l.clone(),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Utf8(Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => IndexLabel::Utf8(format_datetime_ns(*ns)),
+                    IndexLabel::Object(object) => IndexLabel::Utf8(object.to_string()),
                     // astype(str) uses Python str() forms: str(None)=='None',
                     // str(nan)=='nan' (LOWERCASE, unlike the repr surface),
                     // str(NaT)=='NaT'. Verified pandas 2.2.3.
@@ -5401,6 +5421,7 @@ impl Index {
                 | IndexLabel::Float64(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
+                | IndexLabel::Object(_)
                 | IndexLabel::Null(_) => 8,
                 IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(s) => {
@@ -5910,9 +5931,10 @@ impl Index {
             IndexLabel::Utf8(_) => "string",
             IndexLabel::Timedelta64(_) => "timedelta64",
             IndexLabel::Datetime64(_) => "datetime64",
-            // Unreachable: `first` comes from the non-missing iterator and
-            // every Null label is_missing.
-            IndexLabel::Null(_) => "mixed",
+            // The core cannot read an object's kind (pandas says "date" for
+            // datetime.date labels); and unreachable for Null: `first` comes
+            // from the non-missing iterator and every Null label is_missing.
+            IndexLabel::Object(_) | IndexLabel::Null(_) => "mixed",
         }
     }
 
@@ -6527,6 +6549,7 @@ impl<'a> IndexStringAccessor<'a> {
                 | IndexLabel::Bool(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
+                | IndexLabel::Object(_)
                 | IndexLabel::Null(_) => None,
             })
             .collect()
@@ -6694,6 +6717,7 @@ where
             | IndexLabel::Bool(_)
             | IndexLabel::Utf8(_)
             | IndexLabel::Timedelta64(_)
+            | IndexLabel::Object(_)
             | IndexLabel::Null(_) => None,
         })
         .collect()
@@ -6726,6 +6750,7 @@ fn datetime_label_time_nanos(label: &IndexLabel) -> Option<i64> {
         | IndexLabel::Bool(_)
         | IndexLabel::Utf8(_)
         | IndexLabel::Timedelta64(_)
+        | IndexLabel::Object(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -6764,6 +6789,7 @@ where
             | IndexLabel::Utf8(_)
             | IndexLabel::Timedelta64(_)
             | IndexLabel::Datetime64(_)
+            | IndexLabel::Object(_)
             | IndexLabel::Null(_) => None,
         })
         .collect()
@@ -7789,6 +7815,7 @@ impl DatetimeIndex {
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
+                | IndexLabel::Object(_)
                 | IndexLabel::Null(_) => None,
             })
             .collect()
@@ -7833,6 +7860,7 @@ impl DatetimeIndex {
                 | IndexLabel::Bool(_)
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Timedelta64(_)
+                | IndexLabel::Object(_)
                 | IndexLabel::Null(_) => i64::MIN,
             })
             .collect()
@@ -9811,6 +9839,7 @@ impl TimedeltaIndex {
                 | IndexLabel::Bool(_)
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Datetime64(_)
+                | IndexLabel::Object(_)
                 | IndexLabel::Null(_) => Timedelta::NAT,
             })
             .collect()
@@ -18932,7 +18961,7 @@ impl MultiIndex {
             Some(IndexLabel::Null(fp_types::NullKind::Null)) => "NoneType",
             Some(IndexLabel::Null(fp_types::NullKind::NaN)) => "float",
             Some(IndexLabel::Null(fp_types::NullKind::NaT)) => "NaTType",
-            None => "object",
+            Some(IndexLabel::Object(_)) | None => "object",
         }
     }
 
@@ -19321,6 +19350,7 @@ impl MultiIndex {
                 | IndexLabel::Float64(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
+                | IndexLabel::Object(_)
                 | IndexLabel::Null(_) => 8,
                 IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(value) => {

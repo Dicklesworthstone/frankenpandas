@@ -2910,7 +2910,8 @@ proptest! {
                     | IndexLabel::Timedelta64(_)
                     | IndexLabel::Datetime64(_)
                     | IndexLabel::Float64(_)
-                    | IndexLabel::Bool(_) => {}
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_) => {}
                     // All labels must be non-null when dropna=true. This used
                     // to be vacuous (IndexLabel had no null variant); since
                     // br-frankenpandas-joeff added IndexLabel::Null it is a
