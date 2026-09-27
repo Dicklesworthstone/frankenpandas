@@ -12358,3 +12358,64 @@ def _column_levels_outcome(m: Any, run: Any) -> Any:
 def test_multiindex_and_typed_columns_survive_like_pandas(case: str) -> None:
     run = _COLUMN_LEVELS_CASES[case]
     assert _column_levels_outcome(fpd, run) == _column_levels_outcome(pd, run), case
+
+
+# br-frankenpandas-i4m4g: df[('a', 'x')] = v under MultiIndex columns read
+# the tuple as a list of two flat names - it appended junk columns ('a', '')
+# and ('x', '') and lost the write; over flat columns it overwrote the
+# columns the tuple listed instead of adding one tuple-labelled column.
+def _i4_frame(m: Any) -> Any:
+    columns = m.MultiIndex.from_tuples([("a", "x"), ("a", "y"), ("b", "x")], names=["top", "sub"])
+    return m.DataFrame([[1, 2, 3], [4, 5, 6], [7, 8, 10]], columns=columns, index=["r0", "r1", "r2"])
+
+
+def _i4_set(m: Any, frame: Any, key: Any, value: Any) -> Any:
+    frame[key] = value
+    return (repr(frame), list(frame.columns), list(frame.columns.names))
+
+
+def _i4_rows(m: Any, **columns: Any) -> Any:
+    return m.DataFrame(columns, index=["r0", "r1", "r2"])
+
+
+_SETITEM_MI_CASES = {
+    "existing tuple, scalar": lambda m: _i4_set(m, _i4_frame(m), ("a", "x"), 0),
+    "existing tuple, list": lambda m: _i4_set(m, _i4_frame(m), ("b", "x"), [9, 8, 7]),
+    "existing tuple, reordered Series": lambda m: _i4_set(m, _i4_frame(m), ("a", "y"), m.Series([1, 2, 3], index=["r2", "r1", "r0"])),
+    "existing tuple, one-column frame": lambda m: _i4_set(m, _i4_frame(m), ("a", "x"), _i4_rows(m, q=[5, 5, 5])),
+    "new full tuple": lambda m: _i4_set(m, _i4_frame(m), ("c", "z"), 1),
+    "new full tuple under an existing top": lambda m: _i4_set(m, _i4_frame(m), ("a", "q"), 7),
+    "new tuple then read back": lambda m: repr((lambda f: (f.__setitem__(("c", "z"), [1, 2, 3]), f[("c", "z")])[1])(_i4_frame(m))),
+    "read a column by its tuple": lambda m: repr(_i4_frame(m)[("b", "x")]),
+    "top-level key, scalar": lambda m: _i4_set(m, _i4_frame(m), "a", 0),
+    "short tuple, scalar": lambda m: _i4_set(m, _i4_frame(m), ("a",), 0),
+    "top-level key, a list per column": lambda m: _i4_set(m, _i4_frame(m), "a", [1, 2, 3]),
+    "top-level key, frame aligned on the sub-labels": lambda m: _i4_set(m, _i4_frame(m), "a", _i4_rows(m, y=[8, 8, 8], x=[9, 9, 9])),
+    "top-level key, 2-D array": lambda m: _i4_set(m, _i4_frame(m), "a", np.array([[1, 2], [3, 4], [5, 6]])),
+    "list of tuples, 2-D list": lambda m: _i4_set(m, _i4_frame(m), [("a", "x"), ("b", "x")], [[1, 2], [3, 4], [5, 6]]),
+    "flat columns, tuple key adds one column": lambda m: _i4_set(m, m.DataFrame({"p": [1], "q": [2]}), ("p", "q"), 0),
+    "flat columns, tuple key read back": lambda m: repr((lambda f: (f.__setitem__(("p", "q"), [7]), f[("p", "q")])[1])(m.DataFrame({"p": [1], "q": [2]}))),
+    # pandas raises by design: a new tuple of another depth (ValueError), a
+    # tuple naming no flat column (KeyError); fp raises the same classes.
+    "new deeper tuple": lambda m: _i4_set(m, _i4_frame(m), ("c", "z", "w"), 1),
+    "new shorter tuple": lambda m: _i4_set(m, _i4_frame(m), ("c",), 1),
+    "flat columns, absent tuple read": lambda m: repr(m.DataFrame({"p": [1], "q": [2]})[("p", "q")]),
+    # NEGATIVE: a new top-level label is ('c', ''), and flat list writes are
+    # as before.
+    "new top-level label": lambda m: _i4_set(m, _i4_frame(m), "c", [1, 2, 3]),
+    "flat list of names": lambda m: _i4_set(m, m.DataFrame({"p": [1], "q": [2]}), ["p", "q"], 0),
+}
+
+
+def _setitem_mi_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SETITEM_MI_CASES))
+def test_setitem_by_tuple_like_pandas(case: str) -> None:
+    run = _SETITEM_MI_CASES[case]
+    assert _setitem_mi_outcome(fpd, run) == _setitem_mi_outcome(pd, run), case

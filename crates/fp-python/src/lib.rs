@@ -26149,6 +26149,154 @@ impl PyDataFrame {
         self.inner.column_name_at(position)
     }
 
+    /// `df[key] = value` under MultiIndex columns, as pandas writes it; false
+    /// when `key` is not this method's (flat columns, a key that is neither
+    /// a tuple, a label nor a list holding tuples, or a new top-level label,
+    /// which the flat path appends as (label, '')). A tuple, or a top-level
+    /// label, names the columns it heads: a full tuple its one column, a
+    /// shorter key every column under it - a frame value aligned on their
+    /// next-level labels, a 2-D value by position, any other value written
+    /// to each; a new full tuple appends one column under it, a new tuple of
+    /// another depth is pandas' ValueError; a list of full tuples writes
+    /// those columns. A tuple was read as a list of flat names, so
+    /// f[('a','x')] = 0 grew columns 'a' and 'x' (i4m4g).
+    fn set_multi_columns(
+        &mut self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
+        let Some(multi) = self.inner.columns_multiindex().cloned() else {
+            return Ok(false);
+        };
+        if let Ok(list) = key.cast::<PyList>()
+            && list.iter().any(|item| item.is_instance_of::<PyTuple>())
+        {
+            let Some(names) = self.sort_key_names(key) else {
+                return Ok(false);
+            };
+            self.inner = frame_columns_write(py, &self.inner, &names, value)?;
+            return Ok(true);
+        }
+        let wanted: Vec<IndexLabel> = if let Ok(tuple) = key.cast::<PyTuple>() {
+            tuple
+                .iter()
+                .map(|level| py_to_index_label(&level))
+                .collect::<PyResult<_>>()?
+        } else if key.is_instance_of::<pyo3::types::PyString>() {
+            vec![py_to_index_label(key)?]
+        } else {
+            return Ok(false);
+        };
+        let positions: Vec<usize> = (0..multi.len())
+            .filter(|&position| {
+                multi.get_tuple(position).is_some_and(|levels| {
+                    levels.len() >= wanted.len()
+                        && levels.iter().zip(&wanted).all(|(have, want)| *have == want)
+                })
+            })
+            .collect();
+        let names: Vec<String> = positions
+            .iter()
+            .filter_map(|&position| self.inner.column_name_at(position))
+            .collect();
+        if names.is_empty() {
+            if !key.is_instance_of::<PyTuple>() {
+                return Ok(false);
+            }
+            if wanted.len() != multi.nlevels() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Item must have length equal to number of levels.",
+                ));
+            }
+            // The storage key joins the levels with '_', as the constructors
+            // do; one already taken by another column is refused.
+            let name = wanted
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("_");
+            if self.inner.column(&name).is_some() {
+                return Err(not_implemented(&format!(
+                    "DataFrame.__setitem__ of a new MultiIndex column whose joined key {name:?} another column already has"
+                )));
+            }
+            self.assign_named_column(py, name, value)?;
+            // with_column appended (name, '', ...): the tuple itself.
+            let levels = multi
+                .insert(multi.len(), wanted)
+                .map_err(index_error_to_py)?;
+            self.inner = self
+                .inner
+                .with_columns_multiindex(Some(levels))
+                .map_err(frame_error_to_py)?;
+            return Ok(true);
+        }
+        if let [name] = names.as_slice()
+            && wanted.len() == multi.nlevels()
+        {
+            // One column: a one-column frame is that column's values.
+            let value = match value.extract::<PyRef<'_, PyDataFrame>>() {
+                Ok(frame) if frame.inner.num_columns() == 1 => {
+                    Bound::new(py, frame.column_series_at(0)?)?.into_any()
+                }
+                _ => value.clone(),
+            };
+            self.assign_named_column(py, name.clone(), &value)?;
+            return Ok(true);
+        }
+        if let Ok(frame) = value.extract::<PyRef<'_, PyDataFrame>>() {
+            // Aligned on the labels one level below the key.
+            let depth = wanted.len();
+            let mut picked = Vec::with_capacity(positions.len());
+            for &position in &positions {
+                let sub = multi
+                    .get_tuple(position)
+                    .and_then(|levels| levels.get(depth).map(|label| (*label).clone()))
+                    .ok_or_else(|| {
+                        not_implemented("DataFrame.__setitem__ of a frame below a full key")
+                    })?;
+                let at = (0..frame.inner.num_columns())
+                    .find(|&at| {
+                        frame
+                            .inner
+                            .column_name_at(at)
+                            .is_some_and(|name| frame.inner.column_label(&name) == sub)
+                    })
+                    .ok_or_else(|| {
+                        not_implemented(&format!(
+                            "DataFrame.__setitem__ of a frame lacking the column {sub} (pandas writes NaN)"
+                        ))
+                    })?;
+                picked.push(at);
+            }
+            let aligned = frame
+                .inner
+                .take_columns(&picked)
+                .map_err(frame_error_to_py)?;
+            let aligned = Bound::new(py, PyDataFrame { inner: aligned })?.into_any();
+            self.inner = frame_columns_write(py, &self.inner, &names, &aligned)?;
+            return Ok(true);
+        }
+        let two_d = value
+            .getattr("ndim")
+            .and_then(|ndim| ndim.extract::<usize>())
+            .is_ok_and(|ndim| ndim == 2)
+            || value.cast::<PyList>().is_ok_and(|rows| {
+                rows.iter().next().is_some_and(|row| {
+                    row.is_instance_of::<PyList>() || row.is_instance_of::<PyTuple>()
+                })
+            });
+        if two_d {
+            self.inner = frame_columns_write(py, &self.inner, &names, value)?;
+            return Ok(true);
+        }
+        for name in names {
+            self.assign_named_column(py, name, value)?;
+        }
+        Ok(true)
+    }
+
     /// `by=` / `columns=` names: a full tuple under MultiIndex columns, a
     /// list of them, or [`Self::column_names_arg`]'s typed labels.
     fn sort_key_names(&self, obj: &Bound<'_, PyAny>) -> Option<Vec<String>> {
@@ -26504,7 +26652,15 @@ impl PyDataFrame {
                 ));
             }
             [position] if depth == multi.nlevels() => {
-                let series = self.column_series_at(*position)?;
+                // Named by its tuple, as pandas (it was the joined key 'a_x';
+                // i4m4g).
+                let mut series = self.column_series_at(*position)?;
+                if key.is_instance_of::<PyTuple>() {
+                    series.inner = series
+                        .inner
+                        .rename(SeriesName::typed(py_to_index_label(key)?))
+                        .map_err(frame_error_to_py)?;
+                }
                 return Ok(Py::new(py, series)?.into_any());
             }
             _ => {}
@@ -29059,10 +29215,14 @@ impl PyDataFrame {
         }
         // `df[0]` / `df[1.5]` / `df[ts]`: a typed label selects the column
         // carrying it; none carrying it is pandas' KeyError (it raised
-        // TypeError: the key had to be a string; fvsao.32).
+        // TypeError: the key had to be a string; fvsao.32). A tuple over
+        // flat columns is one label too (it selected the columns it listed;
+        // i4m4g).
+        let flat_tuple =
+            key.is_instance_of::<PyTuple>() && self.inner.columns_multiindex().is_none();
         if !key.is_instance_of::<pyo3::types::PyString>()
             && key.extract::<PyRef<'_, PySeries>>().is_err()
-            && !key.hasattr("__len__")?
+            && (flat_tuple || !key.hasattr("__len__")?)
             && !key.is_callable()
             && key.cast::<pyo3::types::PySlice>().is_err()
         {
@@ -29207,9 +29367,13 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         // `df[3] = values`: a typed label names (or adds) the column keyed
-        // by its text, labelled by it (it raised TypeError; fvsao.32).
+        // by its text, labelled by it (it raised TypeError; fvsao.32). So
+        // does a tuple over flat columns - one label, as pandas; it was read
+        // as a list of names and overwrote them (i4m4g).
+        let flat_tuple =
+            key.is_instance_of::<PyTuple>() && self.inner.columns_multiindex().is_none();
         if !key.is_instance_of::<pyo3::types::PyString>()
-            && !key.hasattr("__len__")?
+            && (flat_tuple || !key.hasattr("__len__")?)
             && key.extract::<PyRef<'_, PySeries>>().is_err()
             && key.extract::<PyRef<'_, PyDataFrame>>().is_err()
             && let Ok(label) = py_to_index_label(key)
@@ -29231,6 +29395,10 @@ impl PyDataFrame {
                 inner = inner.with_column_range((start, next, step));
             }
             self.inner = inner;
+            return Ok(());
+        }
+        // A tuple or top-level label under MultiIndex columns (i4m4g).
+        if self.set_multi_columns(py, key, value)? {
             return Ok(());
         }
         if let Ok(name) = key.extract::<String>() {
