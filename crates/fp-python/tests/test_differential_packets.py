@@ -12572,3 +12572,69 @@ def _mi_column_ops_outcome(m: Any, run: Any) -> Any:
 def test_multiindex_column_selection_and_reshape_like_pandas(case: str) -> None:
     run = _MI_COLUMN_OPS_CASES[case]
     assert _mi_column_ops_outcome(fpd, run) == _mi_column_ops_outcome(pd, run), case
+
+
+# br-frankenpandas-rvqoi (everyday probe 12): over a row MultiIndex,
+# rename(index=) flattened it to 'n, a' labels, groupby(level=) transforms
+# dropped it, index.to_frame() was indexed by flat labels, reorder_levels /
+# query by a level name / read_csv(index_col=[..]) / asfreq(fill_value=)
+# were refused, and levels / codes / names were plain lists.
+def _rv_frame(m: Any) -> Any:
+    index = m.MultiIndex.from_tuples(
+        [("n", "a"), ("n", "b"), ("s", "a"), ("s", "c"), ("w", "b")], names=["region", "store"]
+    )
+    return m.DataFrame({"qty": [3, 1, 4, 1, 5], "price": [2.5, 3.0, 1.5, 4.0, 2.0]}, index=index)
+
+
+def _rv_days(m: Any) -> Any:
+    return m.Series([1, 2], index=m.to_datetime(["2024-01-01", "2024-01-03"]))
+
+
+_ROW_MI_CASES = {
+    "rename index by dict": lambda m: repr(_rv_frame(m).rename(index={"a": "A"})),
+    "rename index by function": lambda m: repr(_rv_frame(m).rename(index=str.upper)),
+    "groupby level cumsum": lambda m: repr(_rv_frame(m).groupby(level=0)["qty"].cumsum()),
+    "groupby level shift": lambda m: repr(_rv_frame(m).groupby(level=0)["qty"].shift()),
+    "groupby level rank": lambda m: repr(_rv_frame(m).groupby(level=0)["qty"].rank()),
+    "groupby level transform sum": lambda m: repr(_rv_frame(m).groupby(level=0)["qty"].transform("sum")),
+    "groupby level frame cumsum": lambda m: repr(_rv_frame(m).groupby(level=0).cumsum()),
+    "groupby level frame transform": lambda m: repr(_rv_frame(m).groupby(level=0).transform("mean")),
+    "index to_frame": lambda m: repr(_rv_frame(m).index.to_frame()),
+    "index to_frame index=False": lambda m: repr(_rv_frame(m).index.to_frame(index=False)),
+    "reorder_levels by names": lambda m: repr(_rv_frame(m).reorder_levels(["store", "region"])),
+    "reorder_levels by positions": lambda m: repr(_rv_frame(m).reorder_levels([1, 0])),
+    "Series reorder_levels": lambda m: repr(_rv_frame(m)["qty"].reorder_levels([1, 0])),
+    "reorder_levels of the columns": lambda m: repr(_rv_frame(m).T.reorder_levels([1, 0], axis=1)),
+    "query a level": lambda m: repr(_rv_frame(m).query("region == 'n'")),
+    "query a level and a column": lambda m: repr(_rv_frame(m).query("store == 'a' and qty > 3")),
+    "query a named flat index": lambda m: repr(m.DataFrame({"v": [1, 2, 3]}, index=m.Index(["x", "y", "z"], name="k")).query("k != 'y'")),
+    "read_csv two index columns": lambda m: repr(m.read_csv(io.StringIO("r,s,v\nn,a,1\ns,b,2\n"), index_col=[0, 1])),
+    "Series asfreq fill_value": lambda m: repr(_rv_days(m).asfreq("D", fill_value=0)),
+    "DataFrame asfreq fill_value": lambda m: repr(_rv_days(m).to_frame("v").asfreq("D", fill_value=-1)),
+    "levels": lambda m: repr(_rv_frame(m).index.levels),
+    "levels printed": lambda m: str(_rv_frame(m).index.levels),
+    "codes": lambda m: repr(_rv_frame(m).index.codes),
+    "names": lambda m: (repr(_rv_frame(m).index.names), str(_rv_frame(m).index.names)),
+    "names refuse mutation": lambda m: _rv_frame(m).index.names.append("x"),
+    # NEGATIVE: flat-index calls as before; reorder_levels of a flat axis
+    # is pandas' error (TypeError for a frame, Exception for a Series).
+    "flat rename index": lambda m: repr(m.DataFrame({"v": [1]}, index=["a"]).rename(index={"a": "A"})),
+    "flat groupby cumsum": lambda m: repr(m.DataFrame({"k": [1, 1], "v": [1, 2]}).groupby("k")["v"].cumsum()),
+    "flat read_csv index column": lambda m: repr(m.read_csv(io.StringIO("r,v\nn,1\n"), index_col=0)),
+    "flat reorder_levels": lambda m: repr(m.DataFrame({"v": [1]}).reorder_levels([0])),
+    "flat Series reorder_levels": lambda m: repr(m.Series([1]).reorder_levels([0])),
+}
+
+
+def _row_mi_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ROW_MI_CASES))
+def test_row_multiindex_everyday_ops_like_pandas(case: str) -> None:
+    run = _ROW_MI_CASES[case]
+    assert _row_mi_outcome(fpd, run) == _row_mi_outcome(pd, run), case

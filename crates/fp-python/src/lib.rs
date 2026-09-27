@@ -2322,6 +2322,87 @@ pub struct PyNAType;
 
 static NA_OBJECT: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
 
+static FROZEN_LIST: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+
+/// pandas' `FrozenList` (a MultiIndex's `levels` / `codes` / `names`): a
+/// list that refuses mutation, hashes as its tuple, keeps its type through
+/// `+`, `*` and slices, prints its items as pandas' `pprint_thing` does and
+/// reprs as `FrozenList([...])`.
+const FROZEN_LIST_SOURCE: &std::ffi::CStr = cr#"
+def _pprint(item):
+    if isinstance(item, str):
+        return repr(item)
+    if isinstance(item, tuple):
+        return "(" + ", ".join(_pprint(value) for value in item) + ")"
+    if isinstance(item, (bytes, dict)) or not hasattr(item, "__len__"):
+        return str(item)
+    try:
+        values = list(iter(item))
+    except TypeError:
+        return str(item)
+    return "[" + ", ".join(_pprint(value) for value in values) + "]"
+
+
+class FrozenList(list):
+    def _disabled(self, *args, **kwargs):
+        raise TypeError(f"'{type(self).__name__}' does not support mutable operations.")
+
+    __setitem__ = __delitem__ = __iadd__ = __imul__ = _disabled
+    append = extend = insert = pop = remove = sort = reverse = clear = _disabled
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return type(self)(super().__getitem__(key))
+        return super().__getitem__(key)
+
+    def __add__(self, other):
+        return type(self)(list(self) + list(other))
+
+    def __radd__(self, other):
+        return type(self)(list(other) + list(self))
+
+    def __mul__(self, count):
+        return type(self)(list(self) * count)
+
+    __rmul__ = __mul__
+
+    def __hash__(self):
+        return hash(tuple(self))
+
+    def __reduce__(self):
+        return type(self), (list(self),)
+
+    def union(self, other):
+        return type(self)(list(self) + [item for item in other if item not in self])
+
+    def difference(self, other):
+        return type(self)([item for item in self if item not in set(other)])
+
+    def __str__(self):
+        return _pprint(self)
+
+    def __repr__(self):
+        return f"{type(self).__name__}({self})"
+"#;
+
+/// `items` as pandas' `FrozenList` (they came back a plain list, so
+/// `mi.levels` printed Index reprs; rvqoi).
+fn frozen_list(py: Python<'_>, items: Vec<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    let class = FROZEN_LIST.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        let module = PyModule::from_code(
+            py,
+            FROZEN_LIST_SOURCE,
+            c"frankenpandas/frozen_list.py",
+            c"frankenpandas._frozen_list",
+        )?;
+        Ok(module.getattr("FrozenList")?.unbind())
+    })?;
+    class
+        .bind(py)
+        .call1((PyList::new(py, items)?,))
+        .map(Bound::unbind)
+}
+
 /// pandas' `pd.NA` is one object, so `x is pd.NA` holds for every missing
 /// cell; every NA the binding hands out is this one (each was a new
 /// object, so `x is fpd.NA` was False).
@@ -11485,9 +11566,16 @@ impl PyMultiIndex {
         Ok(PyMultiIndex { inner })
     }
 
+    /// pandas' FrozenList of the level names.
     #[getter]
-    fn names(&self) -> Vec<Option<String>> {
-        self.inner.names().to_vec()
+    fn names(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let names = self
+            .inner
+            .names()
+            .iter()
+            .map(|name| name.clone().into_py_any(py))
+            .collect::<PyResult<Vec<_>>>()?;
+        frozen_list(py, names)
     }
 
     #[getter]
@@ -11769,18 +11857,28 @@ impl PyMultiIndex {
         self.inner.dtypes()
     }
 
+    /// pandas' FrozenList of the level Indexes.
     #[getter]
-    fn levels(&self) -> Vec<PyIndex> {
-        self.inner
+    fn levels(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let levels = self
+            .inner
             .levels()
             .into_iter()
-            .map(|i| PyIndex { inner: i })
-            .collect()
+            .map(|level| Py::new(py, PyIndex { inner: level }).map(Py::into_any))
+            .collect::<PyResult<Vec<_>>>()?;
+        frozen_list(py, levels)
     }
 
+    /// pandas' FrozenList of each level's codes.
     #[getter]
-    fn codes(&self) -> Vec<Vec<isize>> {
-        self.inner.codes()
+    fn codes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let codes = self
+            .inner
+            .codes()
+            .into_iter()
+            .map(|level| level.into_py_any(py))
+            .collect::<PyResult<Vec<_>>>()?;
+        frozen_list(py, codes)
     }
 
     #[getter]
@@ -11952,11 +12050,7 @@ impl PyMultiIndex {
 
     #[pyo3(signature = (index=true, name=None))]
     fn to_frame(&self, index: bool, name: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let idx = if index {
-            self.inner.to_flat_index("/")
-        } else {
-            Index::from_range(0, self.inner.len() as i64, 1)
-        };
+        let idx = Index::from_range(0, self.inner.len() as i64, 1);
         let mut col_names = Vec::with_capacity(self.inner.nlevels());
         let mut col_map = BTreeMap::new();
         let custom_names: Option<Vec<String>> = if let Some(n_obj) = name {
@@ -11997,6 +12091,13 @@ impl PyMultiIndex {
         }
         let df =
             DataFrame::new_with_column_order(idx, col_map, col_names).map_err(frame_error_to_py)?;
+        // index=True: indexed by this MultiIndex itself, as pandas (the
+        // flat 'n/a' labels; rvqoi).
+        let df = if index {
+            with_row_axis(df, &row_multiindex_axis(self.inner.clone())?)?
+        } else {
+            df
+        };
         Ok(PyDataFrame { inner: df })
     }
 
@@ -18901,6 +19002,51 @@ fn is_sequence(value: &Bound<'_, PyAny>) -> bool {
         && value.try_iter().is_ok()
 }
 
+/// The flat row index a row MultiIndex rides on - its tuples joined by '/',
+/// as set_index keys them - with the levels attached.
+fn row_multiindex_axis(multi: fp_index::MultiIndex) -> PyResult<Index> {
+    let names: Vec<String> = multi
+        .names()
+        .iter()
+        .map(|name| name.clone().unwrap_or_default())
+        .collect();
+    multi
+        .to_flat_index("/")
+        .set_name(&names.join("/"))
+        .with_row_multiindex(multi)
+        .map_err(index_error_to_py)
+}
+
+/// `multi` with each level's labels mapped by a rename mapper: a dict's
+/// pairs where they match, a function's result for every label (pandas'
+/// rename over a MultiIndex axis).
+fn rename_multiindex_levels(
+    py: Python<'_>,
+    mapper: &Bound<'_, PyAny>,
+    multi: &fp_index::MultiIndex,
+) -> PyResult<fp_index::MultiIndex> {
+    let mut levels = Vec::with_capacity(multi.nlevels());
+    for level in 0..multi.nlevels() {
+        let values = multi
+            .get_level_values(level)
+            .map_err(index_error_to_py)?
+            .labels()
+            .to_vec();
+        let renamed: HashMap<IndexLabel, IndexLabel> = rename_pairs(py, mapper, &values, false)?
+            .into_iter()
+            .collect();
+        levels.push(
+            values
+                .into_iter()
+                .map(|label| renamed.get(&label).cloned().unwrap_or(label))
+                .collect::<Vec<_>>(),
+        );
+    }
+    Ok(fp_index::MultiIndex::from_arrays(levels)
+        .map_err(index_error_to_py)?
+        .set_names(multi.names().to_vec()))
+}
+
 /// `frame` relabelled with `index` as its row axis, MultiIndex levels too.
 fn with_row_axis(frame: DataFrame, index: &Index) -> PyResult<DataFrame> {
     let frame = frame.with_index(index.clone()).map_err(frame_error_to_py)?;
@@ -23555,11 +23701,30 @@ impl PySeries {
         )
     }
 
-    #[pyo3(signature = (freq, method=None))]
-    pub fn asfreq(&self, freq: &str, method: Option<&str>) -> PyResult<Self> {
+    /// pandas' `asfreq(freq, method=None, how=None, normalize=False,
+    /// fill_value=None)`: `fill_value` fills the new rows (it was an
+    /// unknown keyword though fp-frame took it; rvqoi).
+    #[pyo3(signature = (freq, method=None, how=None, normalize=false, fill_value=None))]
+    pub fn asfreq(
+        &self,
+        py: Python<'_>,
+        freq: &str,
+        method: Option<&str>,
+        how: Option<&str>,
+        normalize: bool,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        unsupported_params(
+            "Series.asfreq",
+            &[("how", how.is_none()), ("normalize", !normalize)],
+        )?;
+        let fill = fill_value
+            .filter(|fill| !fill.is_none())
+            .map(|fill| py_to_scalar(py, fill))
+            .transpose()?;
         let res = self
             .inner
-            .asfreq_with_options(freq, method, None)
+            .asfreq_with_options(freq, method, fill)
             .map_err(frame_error_to_py)?;
         Ok(Self { inner: res })
     }
@@ -25155,14 +25320,30 @@ impl PySeries {
         )
     }
 
-    /// A frankenpandas Series index is never hierarchical, which is the case
-    /// where pandas raises this (it used to return the Series unchanged).
+    /// pandas' `reorder_levels(order)`: the index's MultiIndex levels in
+    /// `order` - positions or names; a flat index is pandas' error (it
+    /// raised that whatever the index; rvqoi).
     #[pyo3(signature = (order))]
     fn reorder_levels(&self, order: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        let _ = order;
-        Err(PyErr::new::<pyo3::exceptions::PyException, _>(
-            "Can only reorder levels on a hierarchical axis.",
-        ))
+        let Some(multi) = self.inner.index().row_multiindex() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyException, _>(
+                "Can only reorder levels on a hierarchical axis.",
+            ));
+        };
+        let positions = order
+            .try_iter()?
+            .map(|level| multiindex_level_position(multi, &level?))
+            .collect::<PyResult<Vec<usize>>>()?;
+        let reordered = multi
+            .reorder_levels(&positions)
+            .map_err(index_error_to_py)?;
+        let inner = Series::new(
+            self.inner.name().clone(),
+            row_multiindex_axis(reordered)?,
+            self.inner.column().clone(),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     /// pandas' `set_flags`. frankenpandas always allows duplicate labels,
@@ -26176,6 +26357,45 @@ impl PyDataFrame {
             ))
         })?;
         index_label_to_py(py, &self.inner.column_label(&name))
+    }
+
+    /// The index levels a query expression can name: each named level of a
+    /// row MultiIndex (or a named flat index) that no column shadows and
+    /// `expr` mentions, as a column of its labels.
+    fn index_level_columns(&self, expr: &str) -> PyResult<Vec<(String, Column)>> {
+        let index = self.inner.index();
+        let levels: Vec<(Option<String>, Vec<IndexLabel>)> = match self.inner.row_multiindex() {
+            Some(multi) => (0..multi.nlevels())
+                .map(|level| {
+                    multi
+                        .get_level_values(level)
+                        .map(|values| {
+                            (
+                                multi.names().get(level).cloned().flatten(),
+                                values.labels().to_vec(),
+                            )
+                        })
+                        .map_err(index_error_to_py)
+                })
+                .collect::<PyResult<_>>()?,
+            None => vec![(index.name().map(str::to_owned), index.labels().to_vec())],
+        };
+        let mut columns = Vec::new();
+        for (name, labels) in levels {
+            let Some(name) = name.filter(|name| {
+                !name.is_empty()
+                    && expr.contains(name.as_str())
+                    && self.inner.column(name).is_none()
+            }) else {
+                continue;
+            };
+            let values = labels.iter().map(index_label_to_scalar).collect();
+            columns.push((
+                name,
+                Column::from_values(values).map_err(column_error_to_py)?,
+            ));
+        }
+        Ok(columns)
     }
 
     /// This frame with `axis` as its column axis: a MultiIndex keyed as the
@@ -31333,28 +31553,7 @@ impl PyDataFrame {
         {
             // Under MultiIndex columns every level's labels are mapped, as
             // pandas (they were left as they were; 7m8bq).
-            let mut levels = Vec::with_capacity(multi.nlevels());
-            for level in 0..multi.nlevels() {
-                let values = multi
-                    .get_level_values(level)
-                    .map_err(index_error_to_py)?
-                    .labels()
-                    .to_vec();
-                // A dict gives the pairs it matches, a function one per label.
-                let renamed: HashMap<IndexLabel, IndexLabel> =
-                    rename_pairs(py, columns, &values, false)?
-                        .into_iter()
-                        .collect();
-                levels.push(
-                    values
-                        .into_iter()
-                        .map(|label| renamed.get(&label).cloned().unwrap_or(label))
-                        .collect::<Vec<_>>(),
-                );
-            }
-            let renamed = fp_index::MultiIndex::from_arrays(levels)
-                .map_err(index_error_to_py)?
-                .set_names(multi.names().to_vec());
+            let renamed = rename_multiindex_levels(py, columns, &multi)?;
             out = PyDataFrame { inner: out }
                 .with_column_axis(fp_index::MultiIndexOrIndex::Multi(renamed))?;
         } else if let Some(columns) = columns {
@@ -31377,9 +31576,16 @@ impl PyDataFrame {
                 .with_recorded_column_labels(new_labels);
         }
         if let Some(index) = index {
-            let labels = out.index().labels().to_vec();
-            let pairs = rename_pairs(py, &index, &labels, raise)?;
-            out = out.rename_index(&pairs);
+            if let Some(multi) = out.row_multiindex().cloned() {
+                // Under a row MultiIndex every level's labels are mapped and
+                // the levels kept (they were flattened to 'n, a'; rvqoi).
+                let renamed = rename_multiindex_levels(py, &index, &multi)?;
+                out = with_row_axis(out, &row_multiindex_axis(renamed)?)?;
+            } else {
+                let labels = out.index().labels().to_vec();
+                let pairs = rename_pairs(py, &index, &labels, raise)?;
+                out = out.rename_index(&pairs);
+            }
         }
         if inplace {
             self.inner = out;
@@ -33238,10 +33444,33 @@ impl PyDataFrame {
     ) -> PyResult<Option<PyDataFrame>> {
         let _ = (engine, parser);
         let (expr, locals) = resolve_expr_locals(py, expr, local_dict, global_dict, level)?;
-        let res = self
-            .inner
-            .query_with_locals(&expr, &locals)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let query_error =
+            |e: fp_expr::ExprError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string());
+        // Index level names resolve as pandas' query resolves them (they
+        // raised 'unknown series reference'; rvqoi): each named level no
+        // column shadows rides as a column while the expression runs.
+        let levels = self.index_level_columns(&expr)?;
+        let res = if levels.is_empty() {
+            self.inner
+                .query_with_locals(&expr, &locals)
+                .map_err(query_error)?
+        } else {
+            let mut frame = self.inner.clone();
+            for (name, column) in levels {
+                frame = frame.with_column(name, column).map_err(frame_error_to_py)?;
+            }
+            let kept: Vec<&str> = self
+                .inner
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect();
+            frame
+                .query_with_locals(&expr, &locals)
+                .map_err(query_error)?
+                .select_columns(&kept)
+                .map_err(frame_error_to_py)?
+        };
         if inplace {
             self.inner = res;
             return Ok(None);
@@ -34189,11 +34418,29 @@ impl PyDataFrame {
         )
     }
 
-    #[pyo3(signature = (freq, method=None))]
-    pub fn asfreq(&self, freq: &str, method: Option<&str>) -> PyResult<Self> {
+    /// pandas' `asfreq(freq, method=None, how=None, normalize=False,
+    /// fill_value=None)`: `fill_value` fills the new rows (rvqoi).
+    #[pyo3(signature = (freq, method=None, how=None, normalize=false, fill_value=None))]
+    pub fn asfreq(
+        &self,
+        py: Python<'_>,
+        freq: &str,
+        method: Option<&str>,
+        how: Option<&str>,
+        normalize: bool,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        unsupported_params(
+            "DataFrame.asfreq",
+            &[("how", how.is_none()), ("normalize", !normalize)],
+        )?;
+        let fill = fill_value
+            .filter(|fill| !fill.is_none())
+            .map(|fill| py_to_scalar(py, fill))
+            .transpose()?;
         let res = self
             .inner
-            .asfreq_with_options(freq, method, None)
+            .asfreq_with_options(freq, method, fill)
             .map_err(frame_error_to_py)?;
         Ok(Self { inner: res })
     }
@@ -37481,15 +37728,39 @@ impl PyDataFrame {
         )
     }
 
-    #[pyo3(signature = (order, axis=0))]
+    /// pandas' `reorder_levels(order, axis=0)`: the row (or, axis=1, the
+    /// column) MultiIndex levels in `order` - positions or names (it was
+    /// refused; rvqoi).
+    #[pyo3(signature = (order, axis=None))]
     fn reorder_levels(
         &self,
         order: &Bound<'_, PyAny>,
-        axis: Option<usize>,
+        axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // This returned the frame unchanged whatever order was asked for.
-        let _ = (order, axis);
-        Err(not_implemented("DataFrame.reorder_levels"))
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let multi = if ax == 1 {
+            self.inner.columns_multiindex()
+        } else {
+            self.inner.row_multiindex()
+        }
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only reorder levels on a hierarchical axis.",
+            )
+        })?;
+        let positions = order
+            .try_iter()?
+            .map(|level| multiindex_level_position(multi, &level?))
+            .collect::<PyResult<Vec<usize>>>()?;
+        let reordered = multi
+            .reorder_levels(&positions)
+            .map_err(index_error_to_py)?;
+        let inner = if ax == 1 {
+            self.with_column_axis(fp_index::MultiIndexOrIndex::Multi(reordered))?
+        } else {
+            with_row_axis(self.inner.clone(), &row_multiindex_axis(reordered)?)?
+        };
+        Ok(PyDataFrame { inner })
     }
 
     /// pandas' `set_flags`. frankenpandas always allows duplicate labels,
@@ -44476,6 +44747,19 @@ impl PyGroupBy {
                 .collect();
             frame.select_columns(&kept).map_err(frame_error_to_py)?
         };
+        // A result over the frame's own rows (a transform) keeps their row
+        // MultiIndex (it came back flat; rvqoi).
+        let frame = match self.df.row_multiindex() {
+            Some(levels)
+                if frame.row_multiindex().is_none()
+                    && frame.index().labels() == self.df.index().labels() =>
+            {
+                frame
+                    .with_row_multiindex(levels.clone())
+                    .map_err(frame_error_to_py)?
+            }
+            _ => frame,
+        };
         Ok(PyDataFrame {
             inner: frame.with_typed_labels_of(&self.df),
         })
@@ -44861,9 +45145,11 @@ impl PyGroupBy {
             let values = self.df.column(col).ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Column not found: {col}"))
             })?;
+            // The rows' MultiIndex rides along, so a transform keeps it
+            // (it came back flat; rvqoi).
             Series::new(
                 self.df.column_series_name(col),
-                self.df.index().clone(),
+                self.df.series_index(),
                 values.clone(),
             )
             .map_err(frame_error_to_py)
@@ -50456,7 +50742,14 @@ fn read_csv_impl(
         match columns.as_slice() {
             [] => {}
             [one] => frame = frame.set_index(one, true).map_err(frame_error_to_py)?,
-            _ => return Err(not_implemented("read_csv(index_col=<several columns>)")),
+            // Several columns: a row MultiIndex of them, as set_index builds
+            // one (it was refused; rvqoi).
+            several => {
+                let refs: Vec<&str> = several.iter().map(String::as_str).collect();
+                frame = frame
+                    .set_index_multi(&refs, true, "/")
+                    .map_err(frame_error_to_py)?;
+            }
         }
     }
     if parse_index_dates && let Some(index) = datetime_index_if_parsed(frame.index())? {
