@@ -10806,3 +10806,40 @@ def _reshape_levels_outcome(m: Any, run: Any) -> Any:
 def test_pivot_table_and_unstack_of_any_levels_like_pandas(case: str) -> None:
     run = _RESHAPE_LEVELS_CASES[case]
     assert _reshape_levels_outcome(fpd, run) == _reshape_levels_outcome(pd, run), case
+
+
+# br-frankenpandas-0jg0l: a numeric (int / float / bool) or datetime column
+# Index prints its labels as one block at a common width (ints with a sign
+# space beside a negative, floats at one precision); each label printed at
+# its own width, so every frame with 11+ default columns differed.
+_HEADER_WIDTH_FRAMES = {
+    "eleven-plus default columns": lambda m: m.DataFrame([list(range(12))]),
+    "int labels over floats": lambda m: m.DataFrame([[1.5, 2.5]], columns=[5, 100]),
+    "int labels over text": lambda m: m.DataFrame([["a", "b"]], columns=[5, 100]),
+    "int labels over ints": lambda m: m.DataFrame([[1, 2]], columns=[5, 100]),
+    "a negative int label": lambda m: m.DataFrame([[1, 2, 3]], columns=[-5, 100, 7]),
+    "float labels": lambda m: m.DataFrame([[1, 2]], columns=[1.5, 10.25]),
+    "a negative float label": lambda m: m.DataFrame([[1, 2]], columns=[-1.5, 2.0]),
+    "int and float labels": lambda m: m.DataFrame([[1, 2]], columns=[1, 2.5]),
+    "float labels of different widths": lambda m: m.DataFrame([[1, 2]], columns=[0.1, 100.0]),
+    "wide cells": lambda m: m.DataFrame([[123456, 2]], columns=[5, 100]),
+    "a named index": lambda m: m.DataFrame([[1, 2]], columns=[5, 100], index=m.Index(["r"], name="i")),
+    "bool labels": lambda m: m.DataFrame([[1, 2, 3]], columns=[True, False, True]),
+    "datetime labels": lambda m: m.DataFrame([[1, 2]], columns=m.to_datetime(["2024-01-01", "2024-01-02"])),
+    "pivot of years": lambda m: m.DataFrame({"k": ["x", "y"], "yr": [2023, 2024], "v": [1, 2]}).pivot(index="k", columns="yr", values="v"),
+    "fifteen float columns": lambda m: m.DataFrame([[i * 0.5 for i in range(15)]]),
+    "truncated rows of twelve columns": lambda m: m.DataFrame([list(range(12))] * 70),
+    # NEGATIVES: mixed or text labels are not padded; labels of one width
+    # print as before.
+    "mixed labels": lambda m: m.DataFrame([[1, 2]], columns=["a", 100]),
+    "text labels": lambda m: m.DataFrame([[1, 2]], columns=["a", "bbb"]),
+    "labels of one width": lambda m: m.DataFrame([[1, 2]], columns=[5, 6]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_HEADER_WIDTH_FRAMES))
+def test_numeric_column_labels_print_at_one_width_like_pandas(case: str) -> None:
+    frame = _HEADER_WIDTH_FRAMES[case]
+    for text in (repr, lambda d: d.to_string(index=False)):
+        assert text(frame(fpd)) == text(frame(pd)), case

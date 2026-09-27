@@ -486,6 +486,62 @@ fn pandas_cells(column: &Column) -> Vec<String> {
     }
 }
 
+/// The header texts pandas prints for flat column `labels` (before a
+/// numeric column's leading space): a numeric (int / float / bool) or a
+/// datetime column Index is formatted as one block - ints and floats with a
+/// sign space on the others when any is negative, floats at one common
+/// precision ('1.50', '10.25') - and every text left-justified to the
+/// widest, as pandas' `_format_flat`; any other Index prints each label as
+/// it is. The labels printed each at its own width, so every frame with 11+
+/// default columns differed (br-frankenpandas-0jg0l).
+#[allow(clippy::cast_precision_loss)] // pandas' float Index holds the ints as floats
+fn pandas_column_label_texts(labels: &[IndexLabel]) -> Vec<String> {
+    let all = |test: fn(&IndexLabel) -> bool| !labels.is_empty() && labels.iter().all(test);
+    let texts: Vec<String> = if all(|label| matches!(label, IndexLabel::Int64(_))) {
+        let negative = labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Int64(v) if *v < 0));
+        labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Int64(v) if negative && *v >= 0 => format!(" {v}"),
+                other => other.to_string(),
+            })
+            .collect()
+    } else if all(|label| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_))) {
+        let values: Vec<Option<f64>> = labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Int64(v) => Some(*v as f64),
+                IndexLabel::Float64(v) => (!v.0.is_nan()).then_some(v.0),
+                _ => None,
+            })
+            .collect();
+        let cells = pandas_float_cells(&values);
+        // The cells carry a sign space; labels keep it only beside a
+        // negative one.
+        if cells.iter().any(|cell| cell.starts_with('-')) {
+            cells
+        } else {
+            cells
+                .into_iter()
+                .map(|cell| cell.strip_prefix(' ').map_or(cell.clone(), str::to_owned))
+                .collect()
+        }
+    } else if all(|label| matches!(label, IndexLabel::Bool(_)))
+        || all(|label| matches!(label, IndexLabel::Datetime64(_)))
+    {
+        pandas_label_texts(labels, None)
+    } else {
+        return labels.iter().map(fp_frame::column_key).collect();
+    };
+    let width = texts.iter().map(text_width).max().unwrap_or(0);
+    texts
+        .into_iter()
+        .map(|text| format!("{text:<width$}"))
+        .collect()
+}
+
 /// The texts of index `labels`, as pandas' index formatter prints them
 /// (left-justified by the caller).
 fn pandas_label_texts(labels: &[IndexLabel], zone: Option<&str>) -> Vec<String> {
@@ -917,8 +973,14 @@ fn pandas_frame_text(
     let (headers, corner): (Vec<Vec<String>>, Vec<String>) = match multi_headers {
         Some(multi_headers) => multi_headers,
         None => {
+            let labels = frame.column_labels();
+            let label_texts = if labels.len() == columns.len() {
+                pandas_column_label_texts(&labels)
+            } else {
+                columns.iter().map(|(name, _)| name.clone()).collect()
+            };
             let mut headers = Vec::with_capacity(columns.len());
-            for (name, column) in &columns {
+            for ((_, column), name) in columns.iter().zip(&label_texts) {
                 let dtype = column.dtype();
                 let numeric = matches!(
                     dtype,
