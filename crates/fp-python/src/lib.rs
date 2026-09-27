@@ -3624,6 +3624,57 @@ fn sequence_zone(data: &Bound<'_, PyAny>) -> Option<String> {
     zone
 }
 
+/// A list / tuple of datetimes in more than one zone (or aware beside
+/// naive), as pandas holds it: an object column of each value as it is, an
+/// aware one a host object keeping its zone. None for any other data. They
+/// became naive UTC instants, blending UTC with naive wall times (fvsao.60).
+fn mixed_zone_cells(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    if !(data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()) {
+        return Ok(None);
+    }
+    let mut zones: Vec<Option<String>> = Vec::new();
+    let mut aware = Vec::new();
+    for item in data.try_iter()? {
+        let item = item?;
+        let zone = if item.is_none() || item.is_instance_of::<PyNaTType>() {
+            aware.push(false);
+            continue;
+        } else if let Ok(ts) = item.extract::<PyRef<'_, PyTimestamp>>() {
+            if ts.inner.is_nat() {
+                aware.push(false);
+                continue;
+            }
+            ts.inner.tz.clone()
+        } else if let Ok(dt) = item.cast::<PyDateTime>() {
+            py_datetime_zone(dt)?
+        } else {
+            return Ok(None);
+        };
+        aware.push(zone.is_some());
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
+    }
+    if zones.len() < 2 {
+        return Ok(None);
+    }
+    let cells = data
+        .try_iter()?
+        .zip(aware)
+        .map(|(item, aware)| {
+            let item = item?;
+            if aware {
+                Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(item.unbind())),
+                )))
+            } else {
+                py_to_cell(py, &item)
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Some(Column::from_object_values(cells)))
+}
+
 /// `series` with the zone its source list carried (see [`sequence_zone`]):
 /// a naive datetime column's instants shown in it.
 fn with_sequence_zone(series: Series, data: Option<&Bound<'_, PyAny>>) -> PyResult<Series> {
@@ -18204,8 +18255,17 @@ impl PySeries {
                 _ => Self::from_data(py, data, index, name)?.inner,
             }
         };
-        // A list of tz-aware datetimes sharing a zone builds an aware column.
-        let series = with_sequence_zone(series, data)?;
+        // A list of tz-aware datetimes sharing a zone builds an aware column;
+        // of several zones, an object column of the values as they are.
+        let series = match data
+            .map(|data| mixed_zone_cells(py, data))
+            .transpose()?
+            .flatten()
+        {
+            Some(column) => Series::new(series.name(), series.index().clone(), column)
+                .map_err(frame_error_to_py)?,
+            None => with_sequence_zone(series, data)?,
+        };
         // An Index given as index= keeps its name, as pandas (it was dropped).
         let series = match index.and_then(py_index_arg_name) {
             Some(index_name) => Series::new(
@@ -26087,6 +26147,18 @@ impl PyDataFrame {
         let mut built = built;
         if let Some(dict) = data.and_then(|data| data.cast::<PyDict>().ok()) {
             for (key, value) in dict.iter() {
+                // Datetimes of several zones: an object column of the values
+                // as they are, as pandas (fvsao.60).
+                if let Some(cells) = mixed_zone_cells(py, &value)? {
+                    let name = key.str()?.extract::<String>()?;
+                    if built
+                        .column(&name)
+                        .is_some_and(|column| column.len() == cells.len())
+                    {
+                        built = built.with_column(name, cells).map_err(frame_error_to_py)?;
+                    }
+                    continue;
+                }
                 let Some(zone) = sequence_zone(&value) else {
                     continue;
                 };

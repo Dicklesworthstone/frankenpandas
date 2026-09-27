@@ -9414,13 +9414,29 @@ def test_tz_aware_columns_follow_their_wall_clock_like_pandas(case: str) -> None
     assert _aware_column_outcome(fpd, case) == _aware_column_outcome(pd, case), case
 
 
-@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="fvsao.60: Timestamps of two zones make pandas an object column of each Timestamp; fp keeps naive UTC instants (no object-Timestamp cells)")
-def test_series_of_two_zones_is_an_object_column_like_pandas() -> None:
-    def dtype(m: Any) -> str:
-        return str(m.Series([m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-01", tz="Asia/Tokyo")]).dtype)
+# fvsao.60: Timestamps of several zones (or aware beside naive) are pandas'
+# object column of each Timestamp as it is; fp built naive UTC instants,
+# blending UTC with naive wall times. (This was a strict xfail.)
+_ZONE_MIX_CASES = {
+    "two zones": lambda m: m.Series([m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-01", tz="Asia/Tokyo")]),
+    "aware and naive": lambda m: m.Series([m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-02")]),
+    "two zones and None": lambda m: m.Series([m.Timestamp("2024-01-01", tz="UTC"), None, m.Timestamp("2024-01-01", tz="Asia/Tokyo")]),
+    "a frame column of two zones": lambda m: m.DataFrame({"t": [m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-01", tz="Asia/Tokyo")]})["t"],
+    "Python datetimes of two zones": lambda m: m.Series([datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc), datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=9)))]),
+    # NEGATIVES: one zone is an aware column, all naive a datetime64 one.
+    "one zone": lambda m: m.Series([m.Timestamp("2024-01-01", tz="Asia/Tokyo"), m.Timestamp("2024-01-02", tz="Asia/Tokyo")]),
+    "all naive": lambda m: m.Series([m.Timestamp("2024-01-01"), None]),
+}
 
-    assert dtype(fpd) == dtype(pd)
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ZONE_MIX_CASES))
+def test_series_of_two_zones_is_an_object_column_like_pandas(case: str) -> None:
+    def view(m: Any) -> Any:
+        s = _ZONE_MIX_CASES[case](m)
+        return (str(s.dtype), [str(v) for v in s.tolist()], [type(v).__name__ for v in s.tolist()])
+
+    assert view(fpd) == view(pd), case
 
 
 # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18: a default index
