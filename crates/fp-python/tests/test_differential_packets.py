@@ -12489,3 +12489,86 @@ def _groupby_axis_outcome(m: Any, run: Any) -> Any:
 def test_groupby_results_keep_the_column_axis_like_pandas(case: str) -> None:
     run = _GROUPBY_AXIS_CASES[case]
     assert _groupby_axis_outcome(fpd, run) == _groupby_axis_outcome(pd, run), case
+
+
+# br-frankenpandas-7m8bq: selection, reshape and relabel calls on MultiIndex
+# columns raised (loc[:, 'a'], lists of tuples, xs / droplevel / swaplevel
+# over the columns, stack, drop / set_index / explode / astype by tuple,
+# reindex by a MultiIndex, mi[::-1]) or flattened (f['a'] unnamed,
+# to_flat_index joined text, rename left the levels, melt one 'variable',
+# select_dtypes of nothing, combine_first).
+def _mi7_frame(m: Any) -> Any:
+    columns = m.MultiIndex.from_tuples([("a", "x"), ("a", "y"), ("b", "x")], names=["top", "sub"])
+    return m.DataFrame([[1, 2, 3], [4, 5, 6], [7, 8, 10]], columns=columns, index=m.Index(["r0", "r1", "r2"], name="row"))
+
+
+def _mi7_unordered(m: Any) -> Any:
+    columns = m.MultiIndex.from_tuples([("b", "x"), ("a", "y"), ("a", "x")], names=["top", "sub"])
+    return m.DataFrame([[3, 2, 1], [6, 5, 4]], columns=columns, index=m.Index(["r0", "r1"], name="row"))
+
+
+_MI_COLUMN_OPS_CASES = {
+    "getitem top": lambda m: repr(_mi7_frame(m)["a"]),
+    "getitem top axis name": lambda m: _mi7_frame(m)["a"].columns.name,
+    "getitem list of tuples": lambda m: repr(_mi7_frame(m)[[("b", "x"), ("a", "x")]]),
+    "loc all rows, top": lambda m: repr(_mi7_frame(m).loc[:, "a"]),
+    "loc all rows, tuple": lambda m: repr(_mi7_frame(m).loc[:, ("b", "x")]),
+    "loc row slice, top": lambda m: repr(_mi7_frame(m).loc["r0":"r1", "a"]),
+    "loc list of tuples": lambda m: repr(_mi7_frame(m).loc[:, [("a", "y"), ("b", "x")]]),
+    "xs level position": lambda m: repr(_mi7_frame(m).xs("x", axis=1, level=1)),
+    "xs level name": lambda m: repr(_mi7_frame(m).xs("a", axis=1, level="top")),
+    "xs keeping the level": lambda m: repr(_mi7_frame(m).xs("x", axis=1, level=1, drop_level=False)),
+    "droplevel position": lambda m: repr(_mi7_frame(m).droplevel(0, axis=1)),
+    "droplevel name": lambda m: repr(_mi7_frame(m).droplevel("sub", axis=1)),
+    "swaplevel": lambda m: repr(_mi7_frame(m).swaplevel(axis=1)),
+    "swaplevel 0 1": lambda m: repr(_mi7_frame(m).swaplevel(0, 1, axis=1)),
+    "stack": lambda m: repr(_mi7_frame(m).stack()),
+    "stack, first level unordered": lambda m: repr(_mi7_unordered(m).stack()),
+    "stack dtypes": lambda m: [str(dtype) for dtype in _mi7_unordered(m).stack().dtypes],
+    "drop a tuple": lambda m: repr(_mi7_frame(m).drop(columns=[("a", "y")])),
+    "drop a top label": lambda m: repr(_mi7_frame(m).drop(columns="a")),
+    "drop an absent tuple, ignored": lambda m: repr(_mi7_frame(m).drop(columns=[("z", "q")], errors="ignore")),
+    "reindex by the reversed axis": lambda m: repr(_mi7_frame(m).reindex(columns=_mi7_frame(m).columns[::-1])),
+    "reindex with a new tuple": lambda m: repr(_mi7_frame(m).reindex(columns=m.MultiIndex.from_tuples([("a", "x"), ("c", "z")], names=["top", "sub"]))),
+    "MultiIndex slice": lambda m: list(_mi7_frame(m).columns[1:]),
+    "astype by tuple": lambda m: repr(_mi7_frame(m).astype({("a", "x"): float})),
+    "set_index by tuple": lambda m: (_mi7_frame(m).set_index(("a", "x")).values.tolist(), list(_mi7_frame(m).set_index(("a", "x")).columns)),
+    "explode by tuple": lambda m: repr(_mi7_frame(m).explode(("a", "x"))),
+    "to_flat_index": lambda m: list(_mi7_frame(m).columns.to_flat_index()),
+    "set_axis to the flat tuples": lambda m: list(_mi7_frame(m).set_axis(_mi7_frame(m).columns.to_flat_index(), axis=1).columns),
+    "rename by function": lambda m: repr(_mi7_frame(m).rename(columns=str.upper)),
+    "rename by dict": lambda m: repr(_mi7_frame(m).rename(columns={"x": "X"})),
+    "melt": lambda m: repr(_mi7_frame(m).melt()),
+    "melt, unnamed levels": lambda m: repr(m.DataFrame([[1, 2]], columns=m.MultiIndex.from_tuples([("a", "x"), ("b", "y")])).melt()),
+    "melt value_name": lambda m: repr(_mi7_frame(m).melt(value_name="v")),
+    "select_dtypes of no column": lambda m: repr(_mi7_frame(m).select_dtypes("object").columns),
+    "combine_first, equal axes": lambda m: repr(_mi7_unordered(m).combine_first(_mi7_unordered(m))),
+    "combine_first, a union": lambda m: repr(_mi7_unordered(m).combine_first(m.DataFrame([[9, 9]], columns=m.MultiIndex.from_tuples([("c", "z"), ("a", "x")], names=["top", "sub"]), index=m.Index(["r0"], name="row")))),
+    # pandas raises by design: dropping every level (ValueError), an absent
+    # tuple (KeyError), droplevel of flat columns (ValueError).
+    "droplevel of every level": lambda m: repr(_mi7_frame(m).droplevel([0, 1], axis=1)),
+    "drop an absent tuple": lambda m: repr(_mi7_frame(m).drop(columns=[("z", "q")])),
+    "flat droplevel": lambda m: repr(m.DataFrame({"p": [1]}).droplevel(0, axis=1)),
+    # NEGATIVE: flat columns as before.
+    "flat drop": lambda m: repr(m.DataFrame({"p": [1], "q": [2]}).drop(columns=["p"])),
+    "flat stack": lambda m: repr(m.DataFrame({"p": [1], "q": [2]}).stack()),
+    "flat melt": lambda m: repr(m.DataFrame({"p": [1], "q": [2]}).melt()),
+    "flat rename": lambda m: repr(m.DataFrame({"p": [1], "q": [2]}).rename(columns=str.upper)),
+}
+
+
+def _mi_column_ops_outcome(m: Any, run: Any) -> Any:
+    try:
+        with warnings.catch_warnings():
+            # pandas' deprecated-stack FutureWarning, which fp raises too.
+            warnings.simplefilter("ignore", FutureWarning)
+            return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MI_COLUMN_OPS_CASES))
+def test_multiindex_column_selection_and_reshape_like_pandas(case: str) -> None:
+    run = _MI_COLUMN_OPS_CASES[case]
+    assert _mi_column_ops_outcome(fpd, run) == _mi_column_ops_outcome(pd, run), case

@@ -6332,14 +6332,42 @@ fn column_dict_arg<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(dict.py());
     for (key, value) in dict.iter() {
-        match frame_column_name_for(frame, &key)
-            .filter(|_| !key.is_instance_of::<pyo3::types::PyString>())
-        {
+        // A full tuple names its MultiIndex column (7m8bq).
+        let tupled = frame_multi_column_position(frame, &key)
+            .and_then(|position| frame.column_name_at(position));
+        match tupled.or_else(|| {
+            frame_column_name_for(frame, &key)
+                .filter(|_| !key.is_instance_of::<pyo3::types::PyString>())
+        }) {
             Some(name) => out.set_item(name, value)?,
             None => out.set_item(key, value)?,
         }
     }
     Ok(out)
+}
+
+/// The position of the column a full-depth tuple names under `frame`'s
+/// MultiIndex columns; None over flat columns, for a non-tuple, or a tuple
+/// naming no single column.
+fn frame_multi_column_position(frame: &DataFrame, key: &Bound<'_, PyAny>) -> Option<usize> {
+    let multi = frame.columns_multiindex()?;
+    let wanted = key
+        .cast::<PyTuple>()
+        .ok()?
+        .iter()
+        .map(|level| py_to_index_label(&level).ok())
+        .collect::<Option<Vec<IndexLabel>>>()?;
+    let mut positions = (0..multi.len()).filter(|&position| {
+        multi.get_tuple(position).is_some_and(|levels| {
+            levels.len() == wanted.len()
+                && levels.iter().zip(&wanted).all(|(have, want)| *have == want)
+        })
+    });
+    let position = positions.next()?;
+    if positions.next().is_some() {
+        return None;
+    }
+    Some(position)
 }
 
 /// A Python column label's typed label: None for a string (a string names
@@ -11525,11 +11553,24 @@ impl PyMultiIndex {
         Ok(PyIndex { inner: idx })
     }
 
-    #[pyo3(signature = (sep="/"))]
-    fn to_flat_index(&self, sep: &str) -> PyIndex {
-        PyIndex {
-            inner: self.inner.to_flat_index(sep),
-        }
+    /// pandas' `to_flat_index()`: an Index of the tuples (it joined each
+    /// tuple's labels by a `sep` pandas does not take; 7m8bq).
+    fn to_flat_index(&self, py: Python<'_>) -> PyResult<PyIndex> {
+        let labels = (0..self.inner.len())
+            .map(|position| {
+                let levels = self
+                    .inner
+                    .get_tuple(position)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|label| index_label_to_py(py, label))
+                    .collect::<PyResult<Vec<_>>>()?;
+                py_to_index_label(PyTuple::new(py, levels)?.as_any())
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyIndex {
+            inner: Index::new(labels),
+        })
     }
 
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -11657,6 +11698,10 @@ impl PyMultiIndex {
         if n > MAX_SEQ_ITEMS {
             attrs.push(format!("length={n}"));
         }
+        // Empty: one line, as pandas (`MultiIndex([], names=[...])`; 7m8bq).
+        if n == 0 {
+            return format!("MultiIndex([], {})", attrs.join(", "));
+        }
         format!(
             "MultiIndex([{body}],\n{}{})",
             " ".repeat("MultiIndex(".len()),
@@ -11664,7 +11709,15 @@ impl PyMultiIndex {
         )
     }
 
-    fn __getitem__(&self, py: Python<'_>, idx: i64) -> PyResult<Py<PyAny>> {
+    /// A position is its tuple; a slice, a list of positions or a boolean
+    /// mask is the MultiIndex of those rows, as pandas (`mi[::-1]` raised
+    /// TypeError; 7m8bq).
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let Ok(idx) = key.extract::<i64>() else {
+            let positions = resolve_iloc_positions(self.inner.len(), key)?;
+            let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
+            return Ok(Py::new(py, PyMultiIndex { inner })?.into_any());
+        };
         let pos = if idx < 0 {
             (self.inner.len() as i64 + idx) as usize
         } else {
@@ -26125,28 +26178,150 @@ impl PyDataFrame {
         index_label_to_py(py, &self.inner.column_label(&name))
     }
 
+    /// This frame with `axis` as its column axis: a MultiIndex keyed as the
+    /// constructors key one, a single level left a flat axis of its labels
+    /// named as that level (droplevel / swaplevel / xs over the columns;
+    /// 7m8bq).
+    fn with_column_axis(&self, axis: fp_index::MultiIndexOrIndex) -> PyResult<DataFrame> {
+        match axis {
+            fp_index::MultiIndexOrIndex::Multi(multi) => {
+                frame_with_column_multiindex(&self.inner, multi)
+            }
+            fp_index::MultiIndexOrIndex::Index(index) => Ok(self
+                .inner
+                .set_axis(index.labels().to_vec(), 1)
+                .map_err(frame_error_to_py)?
+                .with_columns_name(index.name().map(str::to_owned))),
+        }
+    }
+
+    /// pandas 2.2's default (deprecated) `stack()` of two-level MultiIndex
+    /// columns: the last level moves into the rows, sorted, under each row;
+    /// the columns are the first level's labels in order of appearance,
+    /// named as it; a cell no column holds is missing (its column float) and
+    /// a row missing everywhere is dropped (it was refused; 7m8bq).
+    fn stack_last_column_level(&self, multi: &fp_index::MultiIndex) -> PyResult<DataFrame> {
+        let mut tops: Vec<IndexLabel> = Vec::new();
+        let mut subs: Vec<IndexLabel> = Vec::new();
+        let mut at: HashMap<(IndexLabel, IndexLabel), usize> = HashMap::new();
+        for column in 0..multi.len() {
+            let tuple = multi.get_tuple(column).unwrap_or_default();
+            let (Some(&top), Some(&sub)) = (tuple.first(), tuple.get(1)) else {
+                return Err(not_implemented("stack of a MultiIndex column axis"));
+            };
+            if !tops.contains(top) {
+                tops.push(top.clone());
+            }
+            if !subs.contains(sub) {
+                subs.push(sub.clone());
+            }
+            at.entry((top.clone(), sub.clone())).or_insert(column);
+        }
+        subs.sort();
+        let row_labels = self.inner.index().labels();
+        let mut kept: Vec<(usize, usize)> = Vec::new();
+        let mut cells: Vec<Vec<Scalar>> = vec![Vec::new(); tops.len()];
+        for row in 0..row_labels.len() {
+            for (s, sub) in subs.iter().enumerate() {
+                let values: Vec<Scalar> = tops
+                    .iter()
+                    .map(|top| {
+                        at.get(&(top.clone(), sub.clone()))
+                            .and_then(|&column| self.inner.column_at(column))
+                            .map_or(Scalar::Null(NullKind::NaN), |column| {
+                                column.values()[row].clone()
+                            })
+                    })
+                    .collect();
+                if values.iter().all(Scalar::is_missing) {
+                    continue;
+                }
+                for (cell, value) in cells.iter_mut().zip(values) {
+                    cell.push(value);
+                }
+                kept.push((row, s));
+            }
+        }
+        let mut columns = BTreeMap::new();
+        let mut order = Vec::with_capacity(tops.len());
+        for (top, values) in tops.iter().zip(cells) {
+            let name = fp_frame::column_key(top);
+            columns.insert(
+                name.clone(),
+                Column::from_values(pandas_promote_int_with_missing(values))
+                    .map_err(column_error_to_py)?,
+            );
+            order.push(name);
+        }
+        let flat: Vec<IndexLabel> = kept
+            .iter()
+            .map(|&(row, s)| IndexLabel::Utf8(format!("{}|{}", row_labels[row], subs[s])))
+            .collect();
+        let levels = fp_index::MultiIndex::from_arrays(vec![
+            kept.iter()
+                .map(|&(row, _)| row_labels[row].clone())
+                .collect(),
+            kept.iter().map(|&(_, s)| subs[s].clone()).collect(),
+        ])
+        .map_err(index_error_to_py)?
+        .set_names(vec![
+            self.inner.index().name().map(str::to_owned),
+            multi.names().get(1).cloned().flatten(),
+        ]);
+        DataFrame::new_with_column_order(Index::new(flat), columns, order)
+            .map(|frame| {
+                frame
+                    .with_recorded_column_labels(tops)
+                    .with_columns_name(multi.names().first().cloned().flatten())
+            })
+            .and_then(|frame| frame.with_row_multiindex(levels))
+            .map_err(frame_error_to_py)
+    }
+
     /// The column a full-depth tuple names under MultiIndex columns
     /// (`sort_values(('a', 'x'))`; g3bux). None for flat columns, a
     /// non-tuple, or a tuple naming no single column.
     fn multi_column_name(&self, key: &Bound<'_, PyAny>) -> Option<String> {
-        let multi = self.inner.columns_multiindex()?;
-        let wanted = key
-            .cast::<PyTuple>()
-            .ok()?
-            .iter()
-            .map(|level| py_to_index_label(&level).ok())
-            .collect::<Option<Vec<IndexLabel>>>()?;
-        let mut positions = (0..multi.len()).filter(|&position| {
-            multi.get_tuple(position).is_some_and(|levels| {
-                levels.len() == wanted.len()
-                    && levels.iter().zip(&wanted).all(|(have, want)| *have == want)
+        self.multi_column_position(key)
+            .and_then(|position| self.inner.column_name_at(position))
+    }
+
+    /// The position of the column a full-depth tuple names under MultiIndex
+    /// columns (see [`frame_multi_column_position`]).
+    fn multi_column_position(&self, key: &Bound<'_, PyAny>) -> Option<usize> {
+        frame_multi_column_position(&self.inner, key)
+    }
+
+    /// The columns a key heads under MultiIndex columns, by position, with
+    /// the key's labels: a tuple of the leading levels (all of them: one
+    /// column) or a top-level label. None over flat columns or for any other
+    /// key; no position for a key heading no column.
+    fn multi_prefix_positions(
+        &self,
+        key: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<(Vec<IndexLabel>, Vec<usize>)>> {
+        let Some(multi) = self.inner.columns_multiindex() else {
+            return Ok(None);
+        };
+        let wanted: Vec<IndexLabel> = if let Ok(tuple) = key.cast::<PyTuple>() {
+            tuple
+                .iter()
+                .map(|level| py_to_index_label(&level))
+                .collect::<PyResult<_>>()?
+        } else if key.is_instance_of::<pyo3::types::PyString>() {
+            vec![py_to_index_label(key)?]
+        } else {
+            return Ok(None);
+        };
+        let positions = (0..multi.len())
+            .filter(|&position| {
+                multi.get_tuple(position).is_some_and(|levels| {
+                    levels.len() >= wanted.len()
+                        && levels.iter().zip(&wanted).all(|(have, want)| *have == want)
+                })
             })
-        });
-        let position = positions.next()?;
-        if positions.next().is_some() {
-            return None;
-        }
-        self.inner.column_name_at(position)
+            .collect();
+        Ok(Some((wanted, positions)))
     }
 
     /// `df[key] = value` under MultiIndex columns, as pandas writes it; false
@@ -26178,24 +26353,9 @@ impl PyDataFrame {
             self.inner = frame_columns_write(py, &self.inner, &names, value)?;
             return Ok(true);
         }
-        let wanted: Vec<IndexLabel> = if let Ok(tuple) = key.cast::<PyTuple>() {
-            tuple
-                .iter()
-                .map(|level| py_to_index_label(&level))
-                .collect::<PyResult<_>>()?
-        } else if key.is_instance_of::<pyo3::types::PyString>() {
-            vec![py_to_index_label(key)?]
-        } else {
+        let Some((wanted, positions)) = self.multi_prefix_positions(key)? else {
             return Ok(false);
         };
-        let positions: Vec<usize> = (0..multi.len())
-            .filter(|&position| {
-                multi.get_tuple(position).is_some_and(|levels| {
-                    levels.len() >= wanted.len()
-                        && levels.iter().zip(&wanted).all(|(have, want)| *have == want)
-                })
-            })
-            .collect();
         let names: Vec<String> = positions
             .iter()
             .filter_map(|&position| self.inner.column_name_at(position))
@@ -26694,7 +26854,11 @@ impl PyDataFrame {
             let inner = series.inner.rename(&top).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner })?.into_any());
         }
-        let frame = frame.set_axis(sub_labels, 1).map_err(frame_error_to_py)?;
+        // Named as the level below the key, as pandas (7m8bq: unnamed).
+        let frame = frame
+            .set_axis(sub_labels, 1)
+            .map_err(frame_error_to_py)?
+            .with_columns_name(multi.names().get(depth).cloned().flatten());
         Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any())
     }
 
@@ -29213,6 +29377,26 @@ impl PyDataFrame {
         if let Some((depth, positions)) = self.multi_column_selection(key)? {
             return self.multi_column_item(py, key, depth, &positions);
         }
+        // `df[[('a', 'x'), ('b', 'x')]]`: those MultiIndex columns, in the
+        // order asked (a KeyError; 7m8bq).
+        if self.inner.columns_multiindex().is_some()
+            && let Ok(list) = key.cast::<PyList>()
+            && list.iter().any(|item| item.is_instance_of::<PyTuple>())
+        {
+            let positions = list
+                .iter()
+                .map(|item| {
+                    self.multi_column_position(&item).ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(item.clone().unbind())
+                    })
+                })
+                .collect::<PyResult<Vec<usize>>>()?;
+            let frame = self
+                .inner
+                .take_columns(&positions)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
+        }
         // `df[0]` / `df[1.5]` / `df[ts]`: a typed label selects the column
         // carrying it; none carrying it is pandas' KeyError (it raised
         // TypeError: the key had to be a string; fvsao.32). A tuple over
@@ -31045,7 +31229,30 @@ impl PyDataFrame {
                 .collect();
             out = out.take_rows(&keep).map_err(frame_error_to_py)?;
         }
-        if let Some(cols) = cols {
+        // Under MultiIndex columns a tuple names its column and a top-level
+        // label every column under it (a KeyError; 7m8bq).
+        if let Some(cols) = cols.as_ref().filter(|_| out.columns_multiindex().is_some()) {
+            let keys: Vec<Bound<'_, PyAny>> = match cols.cast::<PyList>() {
+                Ok(list) => list.iter().collect(),
+                Err(_) => vec![cols.clone()],
+            };
+            // The row drop above leaves the column axis as it is.
+            let mut positions = Vec::new();
+            let mut missing = Vec::new();
+            for key in &keys {
+                match self.multi_prefix_positions(key)? {
+                    Some((_, found)) if !found.is_empty() => positions.extend(found),
+                    _ => missing.push(py_to_index_label(key)?),
+                }
+            }
+            if !missing.is_empty() && !ignore {
+                return Err(not_found_in_axis(py, &missing)?);
+            }
+            let keep: Vec<usize> = (0..out.num_columns())
+                .filter(|position| !positions.contains(position))
+                .collect();
+            out = out.take_columns(&keep).map_err(frame_error_to_py)?;
+        } else if let Some(cols) = cols {
             let wanted = py_label_list(&cols)?;
             let (present, missing): (Vec<&IndexLabel>, Vec<&IndexLabel>) = wanted
                 .iter()
@@ -31121,7 +31328,36 @@ impl PyDataFrame {
         }
         let raise = errors == "raise";
         let mut out = self.inner.clone();
-        if let Some(columns) = columns {
+        if let Some(columns) = columns.as_ref()
+            && let Some(multi) = out.columns_multiindex().cloned()
+        {
+            // Under MultiIndex columns every level's labels are mapped, as
+            // pandas (they were left as they were; 7m8bq).
+            let mut levels = Vec::with_capacity(multi.nlevels());
+            for level in 0..multi.nlevels() {
+                let values = multi
+                    .get_level_values(level)
+                    .map_err(index_error_to_py)?
+                    .labels()
+                    .to_vec();
+                // A dict gives the pairs it matches, a function one per label.
+                let renamed: HashMap<IndexLabel, IndexLabel> =
+                    rename_pairs(py, columns, &values, false)?
+                        .into_iter()
+                        .collect();
+                levels.push(
+                    values
+                        .into_iter()
+                        .map(|label| renamed.get(&label).cloned().unwrap_or(label))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let renamed = fp_index::MultiIndex::from_arrays(levels)
+                .map_err(index_error_to_py)?
+                .set_names(multi.names().to_vec());
+            out = PyDataFrame { inner: out }
+                .with_column_axis(fp_index::MultiIndexOrIndex::Multi(renamed))?;
+        } else if let Some(columns) = columns {
             // The mapping matches and gives typed labels ({0: 'a'},
             // {'a': 5}); the columns were matched as strings (fvsao.32).
             let names = out.column_labels();
@@ -32554,7 +32790,18 @@ impl PyDataFrame {
             let res = self.inner.with_index(index).map_err(frame_error_to_py)?;
             return self.finish_set_index(py, res, inplace, verify_integrity);
         }
-        let keys = &column_arg(py, &self.inner, keys.clone())?;
+        // A full tuple, or a list holding them, names MultiIndex columns (a
+        // tuple was read as two names; 7m8bq).
+        let tupled = self.inner.columns_multiindex().is_some()
+            && (keys.is_instance_of::<PyTuple>()
+                || keys
+                    .cast::<PyList>()
+                    .is_ok_and(|list| list.iter().any(|item| item.is_instance_of::<PyTuple>())));
+        let resolved = match self.sort_key_names(keys).filter(|_| tupled) {
+            Some(names) => PyList::new(py, names)?.into_any(),
+            None => keys.clone(),
+        };
+        let keys = &column_arg(py, &self.inner, resolved)?;
         // A typed label (or list with one) labelling no column is pandas'
         // KeyError too.
         let label_list = keys.cast::<PyList>().is_ok_and(|list| {
@@ -33294,6 +33541,48 @@ impl PyDataFrame {
                 res = DataFrame::new_with_column_order(Index::new(repeated_labels), cols, order)
                     .map_err(frame_error_to_py)?;
             }
+        }
+        // Every column of MultiIndex columns melted: a column per level -
+        // named as it, else variable_<i> - in place of the one 'variable'
+        // of flat keys, as pandas (7m8bq).
+        if let Some(multi) = self.inner.columns_multiindex()
+            && id_strings.is_empty()
+            && val_strings.is_empty()
+            && var_name.is_none()
+        {
+            let rows = self.inner.len();
+            let value_label = value_name.unwrap_or("value");
+            let value = res.column(value_label).cloned().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>(value_label.to_owned())
+            })?;
+            let mut columns = std::collections::BTreeMap::new();
+            let mut order = Vec::with_capacity(multi.nlevels() + 1);
+            for level in 0..multi.nlevels() {
+                let name = multi
+                    .names()
+                    .get(level)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_else(|| format!("variable_{level}"));
+                let values: Vec<Scalar> = (0..multi.len())
+                    .flat_map(|column| {
+                        let label = multi
+                            .get_tuple(column)
+                            .and_then(|tuple| tuple.get(level).map(|label| (*label).clone()))
+                            .unwrap_or_else(|| IndexLabel::Utf8(String::new()));
+                        std::iter::repeat_n(index_label_to_scalar(&label), rows)
+                    })
+                    .collect();
+                columns.insert(
+                    name.clone(),
+                    Column::from_values(values).map_err(column_error_to_py)?,
+                );
+                order.push(name);
+            }
+            columns.insert(value_label.to_owned(), value);
+            order.push(value_label.to_owned());
+            res = DataFrame::new_with_column_order(res.index().clone(), columns, order)
+                .map_err(frame_error_to_py)?;
         }
         Ok(PyDataFrame { inner: res })
     }
@@ -34750,7 +35039,62 @@ impl PyDataFrame {
             .inner
             .combine_first(&other.inner)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        // Both sides under MultiIndex columns of the same levels: the union
+        // keeps its tuples, ordered by them as pandas sorts it (the flat
+        // keys; 7m8bq).
+        let (Some(left), Some(right)) = (
+            self.inner.columns_multiindex(),
+            other.inner.columns_multiindex(),
+        ) else {
+            return Ok(PyDataFrame { inner: res });
+        };
+        if left.names() != right.names() {
+            return Ok(PyDataFrame { inner: res });
+        }
+        // Equal column axes join to themselves: this frame's order.
+        if left.equals(right) {
+            return Ok(PyDataFrame {
+                inner: res
+                    .select_columns(
+                        &self
+                            .inner
+                            .column_names()
+                            .iter()
+                            .map(|name| name.as_str())
+                            .collect::<Vec<_>>(),
+                    )
+                    .and_then(|frame| frame.with_columns_multiindex(Some(left.clone())))
+                    .map_err(frame_error_to_py)?,
+            });
+        }
+        let tuple_of = |frame: &DataFrame, levels: &fp_index::MultiIndex, name: &str| {
+            frame
+                .column_names()
+                .iter()
+                .position(|column| column.as_str() == name)
+                .and_then(|at| levels.get_tuple(at))
+                .map(|tuple| tuple.into_iter().cloned().collect::<Vec<IndexLabel>>())
+        };
+        let mut keyed = Vec::with_capacity(res.num_columns());
+        for position in 0..res.num_columns() {
+            let Some(tuple) = res.column_name_at(position).and_then(|name| {
+                tuple_of(&self.inner, left, &name).or_else(|| tuple_of(&other.inner, right, &name))
+            }) else {
+                return Ok(PyDataFrame { inner: res });
+            };
+            keyed.push((tuple, position));
+        }
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        let order: Vec<usize> = keyed.iter().map(|(_, position)| *position).collect();
+        let levels =
+            fp_index::MultiIndex::from_tuples(keyed.into_iter().map(|(tuple, _)| tuple).collect())
+                .map_err(index_error_to_py)?
+                .set_names(left.names().to_vec());
+        let inner = res
+            .take_columns(&order)
+            .and_then(|frame| frame.with_columns_multiindex(Some(levels)))
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner })
     }
 
     #[pyo3(signature = (other, join="outer"))]
@@ -35781,18 +36125,73 @@ impl PyDataFrame {
         }
         let target_columns = columns.or_else(|| labels.filter(|_| ax == 1));
         if let Some(col_obj) = target_columns {
+            // A MultiIndex target - or tuples over MultiIndex columns - is
+            // the new column axis: each tuple its column, a new one a
+            // missing column under it (it raised; 7m8bq).
+            let target_multi = match col_obj.extract::<PyRef<'_, PyMultiIndex>>() {
+                Ok(multi) => Some(multi.inner.clone()),
+                Err(_) => match self.inner.columns_multiindex() {
+                    Some(source)
+                        if col_obj.cast::<PyList>().is_ok_and(|list| {
+                            list.iter().all(|item| item.is_instance_of::<PyTuple>())
+                        }) =>
+                    {
+                        let tuples = col_obj
+                            .try_iter()?
+                            .map(|item| {
+                                item?
+                                    .try_iter()?
+                                    .map(|level| py_to_index_label(&level?))
+                                    .collect::<PyResult<Vec<IndexLabel>>>()
+                            })
+                            .collect::<PyResult<Vec<_>>>()?;
+                        Some(
+                            fp_index::MultiIndex::from_tuples(tuples)
+                                .map_err(index_error_to_py)?
+                                .set_names(source.names().to_vec()),
+                        )
+                    }
+                    _ => None,
+                },
+            };
             // The target labels keep their types (columns=[2, 0]; a new one
             // is a new typed column; fvsao.32).
-            let col_labels: Vec<IndexLabel> = col_obj
-                .try_iter()?
-                .map(|item| {
-                    let item = item?;
-                    Ok(match typed_column_label(&item) {
-                        Some(label) => label,
-                        None => IndexLabel::Utf8(item.extract::<String>()?),
+            let col_labels: Vec<IndexLabel> = match &target_multi {
+                Some(multi) => (0..multi.len())
+                    .map(|position| {
+                        let tuple: Vec<IndexLabel> = multi
+                            .get_tuple(position)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .cloned()
+                            .collect();
+                        let existing = self.inner.columns_multiindex().and_then(|source| {
+                            source
+                                .get_loc_tuple(&tuple)
+                                .ok()
+                                .and_then(|found| found.first().copied())
+                                .and_then(|at| self.inner.column_name_at(at))
+                        });
+                        IndexLabel::Utf8(existing.unwrap_or_else(|| {
+                            tuple
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("_")
+                        }))
                     })
-                })
-                .collect::<PyResult<_>>()?;
+                    .collect(),
+                None => col_obj
+                    .try_iter()?
+                    .map(|item| {
+                        let item = item?;
+                        Ok(match typed_column_label(&item) {
+                            Some(label) => label,
+                            None => IndexLabel::Utf8(item.extract::<String>()?),
+                        })
+                    })
+                    .collect::<PyResult<_>>()?,
+            };
             let col_names: Vec<String> = col_labels.iter().map(fp_frame::column_key).collect();
             let str_cols: Vec<&str> = col_names.iter().map(String::as_str).collect();
             res = res
@@ -35808,6 +36207,11 @@ impl PyDataFrame {
                         .with_column(name.clone(), filled)
                         .map_err(frame_error_to_py)?;
                 }
+            }
+            if let Some(multi) = target_multi {
+                res = res
+                    .with_columns_multiindex(Some(multi))
+                    .map_err(frame_error_to_py)?;
             }
         }
         Ok(PyDataFrame { inner: res })
@@ -36083,9 +36487,29 @@ impl PyDataFrame {
         dropna: Option<bool>,
         sort: Option<bool>,
         future_stack: bool,
-    ) -> PyResult<PySeries> {
-        if self.inner.columns_multiindex().is_some() {
-            return Err(not_implemented("stack of a MultiIndex column axis"));
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(multi) = self.inner.columns_multiindex() {
+            if multi.nlevels() != 2
+                || !matches!(level, -1 | 1)
+                || future_stack
+                || sort == Some(false)
+                || dropna == Some(false)
+                || self.inner.row_multiindex().is_some()
+            {
+                return Err(not_implemented(
+                    "stack of a MultiIndex column axis other than its last of two levels under pandas 2.2's default implementation",
+                ));
+            }
+            // pandas warns on every stack of MultiIndex columns under its
+            // deprecated implementation.
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                c"The previous implementation of stack is deprecated and will be removed in a future version of pandas. See the What's New notes for pandas 2.1.0 for details. Specify future_stack=True to adopt the new implementation and silence this warning.",
+                1,
+            )?;
+            let inner = self.stack_last_column_level(multi)?;
+            return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
         }
         if level > 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
@@ -36166,7 +36590,7 @@ impl PyDataFrame {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let out =
             Series::new("", index, values.take_positions(&keep)).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: out })
+        Ok(Py::new(py, PySeries { inner: out })?.into_any())
     }
 
     /// pandas' `DataFrame.unstack(level=-1, fill_value=None, sort=True)`
@@ -36216,9 +36640,46 @@ impl PyDataFrame {
         Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
     }
 
-    /// `level` a position or a level name (a name raised TypeError).
-    #[pyo3(signature = (level=None))]
-    fn droplevel(&self, level: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    /// `level` a position or a level name (a name raised TypeError); with
+    /// `axis=1` the column levels, a list of them too (axis= was refused;
+    /// 7m8bq).
+    #[pyo3(signature = (level=None, axis=None))]
+    fn droplevel(
+        &self,
+        level: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        if parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0) == 1 {
+            let nlevels = self
+                .inner
+                .columns_multiindex()
+                .map_or(1, fp_index::MultiIndex::nlevels);
+            let mut positions = match (level, self.inner.columns_multiindex()) {
+                (Some(level), Some(multi)) => multiindex_level_positions(multi, level)?,
+                _ => vec![0],
+            };
+            positions.sort_unstable();
+            positions.dedup();
+            let Some(multi) = self
+                .inner
+                .columns_multiindex()
+                .filter(|_| positions.len() < nlevels)
+            else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Cannot remove {} levels from an index with {nlevels} levels: at least one level must be left.",
+                    positions.len()
+                )));
+            };
+            let mut axis = fp_index::MultiIndexOrIndex::Multi(multi.clone());
+            for position in positions.into_iter().rev() {
+                if let fp_index::MultiIndexOrIndex::Multi(levels) = axis {
+                    axis = levels.droplevel(position).map_err(index_error_to_py)?;
+                }
+            }
+            return Ok(PyDataFrame {
+                inner: self.with_column_axis(axis)?,
+            });
+        }
         let level = match (level, self.inner.row_multiindex()) {
             (Some(level), Some(multi)) => multiindex_level_position(multi, level)?,
             (Some(level), None) => level.extract::<usize>()?,
@@ -36231,10 +36692,43 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: df })
     }
 
-    /// Swaps the last two row levels, pandas' default; other levels and the
-    /// column axis are not supported yet (they were ignored).
-    #[pyo3(signature = (i=-2, j=-1, axis=0))]
-    fn swaplevel(&self, i: isize, j: isize, axis: usize) -> PyResult<PyDataFrame> {
+    /// Swaps the last two row levels, pandas' default; any two column levels
+    /// with `axis=1` (7m8bq); other row levels are not supported yet (they
+    /// were ignored).
+    #[pyo3(signature = (i=-2, j=-1, axis=None))]
+    fn swaplevel(
+        &self,
+        i: isize,
+        j: isize,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        if axis == 1 {
+            let multi = self.inner.columns_multiindex().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Can only swap levels on a hierarchical axis.",
+                )
+            })?;
+            let nlevels = isize::try_from(multi.nlevels()).unwrap_or(isize::MAX);
+            let position = |level: isize| {
+                let at = if level < 0 { level + nlevels } else { level };
+                usize::try_from(at)
+                    .ok()
+                    .filter(|&at| at < multi.nlevels())
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                            "Too many levels: Index has only {nlevels} levels, not {}",
+                            level + 1
+                        ))
+                    })
+            };
+            let swapped = multi
+                .swaplevel(position(i)?, position(j)?)
+                .map_err(index_error_to_py)?;
+            return Ok(PyDataFrame {
+                inner: self.with_column_axis(fp_index::MultiIndexOrIndex::Multi(swapped))?,
+            });
+        }
         unsupported_params(
             "DataFrame.swaplevel",
             &[("i", i == -2), ("j", j == -1), ("axis", axis == 0)],
@@ -36264,7 +36758,14 @@ impl PyDataFrame {
     /// stayed as they were, having no list cells).
     #[pyo3(signature = (column, ignore_index=false))]
     fn explode(&self, column: &Bound<'_, PyAny>, ignore_index: bool) -> PyResult<PyDataFrame> {
-        let col_names = extract_col_names_flexible(Some(column))?;
+        // A full tuple names its MultiIndex column (7m8bq).
+        let col_names = match self
+            .sort_key_names(column)
+            .filter(|_| self.inner.columns_multiindex().is_some())
+        {
+            Some(names) => names,
+            None => extract_col_names_flexible(Some(column))?,
+        };
         if col_names.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "column must be nonempty",
@@ -36385,6 +36886,41 @@ impl PyDataFrame {
         drop_level: bool,
     ) -> PyResult<Py<PyAny>> {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        // xs(key, axis=1, level=) over MultiIndex columns: the columns whose
+        // `level` is `key`, that level dropped unless drop_level=False (it
+        // raised NotImplementedError; 7m8bq).
+        if ax == 1
+            && let Some(level) = level.filter(|level| !level.is_none())
+            && let Some(multi) = self.inner.columns_multiindex()
+        {
+            let position = multiindex_level_position(multi, level)?;
+            let label = py_to_index_label(key)?;
+            let columns: Vec<usize> = (0..multi.len())
+                .filter(|&column| {
+                    multi
+                        .get_tuple(column)
+                        .is_some_and(|levels| levels.get(position).is_some_and(|l| **l == label))
+                })
+                .collect();
+            if columns.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                    "{}",
+                    key.repr()?
+                )));
+            }
+            let taken = self
+                .inner
+                .take_columns(&columns)
+                .map_err(frame_error_to_py)?;
+            let kept = match taken.columns_multiindex().cloned() {
+                Some(levels) if drop_level => {
+                    let axis = levels.droplevel(position).map_err(index_error_to_py)?;
+                    PyDataFrame { inner: taken }.with_column_axis(axis)?
+                }
+                _ => taken,
+            };
+            return Ok(Py::new(py, PyDataFrame { inner: kept })?.into_any());
+        }
         // xs(key, level=) over a row MultiIndex: the rows whose `level` is
         // `key`, that level dropped unless drop_level=False (fvsao.36; it
         // raised NotImplementedError).
@@ -39982,7 +40518,25 @@ impl PyDataFrameLoc {
                 };
             }
             let rows = resolve_loc_rows(&self.inner, &tuple.get_item(0)?)?;
-            let col_key = column_arg(py, &self.inner, tuple.get_item(1)?)?;
+            // Under MultiIndex columns the column key of a rows selection
+            // reads as `df[key]` does: a top-level label its sub-columns, a
+            // tuple its column, a list of tuples those columns (KeyError /
+            // TypeError; 7m8bq).
+            let columns_key = tuple.get_item(1)?;
+            if let LocRows::Frame(sub) = &rows
+                && self.inner.columns_multiindex().is_some()
+                && (columns_key.is_instance_of::<pyo3::types::PyString>()
+                    || columns_key.is_instance_of::<PyTuple>()
+                    || columns_key
+                        .cast::<PyList>()
+                        .is_ok_and(|list| list.iter().any(|item| item.is_instance_of::<PyTuple>())))
+            {
+                return PyDataFrame {
+                    inner: (**sub).clone(),
+                }
+                .__getitem__(py, &columns_key);
+            }
+            let col_key = column_arg(py, &self.inner, columns_key)?;
 
             match (rows, resolve_loc_columns(&self.inner, &col_key)?) {
                 // df.loc['r', 'c'] with a unique label -> scalar
@@ -61754,8 +62308,11 @@ mod tests {
             Python::attach(|py| py_mi.get_level_values(pyo3::types::PyInt::new(py, 0).as_any()))
                 .expect("level 0"); // ubs:ignore — test fixture
         assert_eq!(lvl0.len(), 2);
-        let flat = py_mi.to_flat_index("/");
+        // TEST-CHANGE (7m8bq): to_flat_index took a sep= pandas does not
+        // have and joined each tuple; pandas' is an Index of the tuples.
+        let flat = Python::attach(|py| py_mi.to_flat_index(py)).expect("flat index"); // ubs:ignore — test fixture
         assert_eq!(flat.len(), 2);
+        assert!(matches!(flat.inner.labels()[0], IndexLabel::Object(_)));
     }
 
     #[test]

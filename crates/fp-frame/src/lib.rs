@@ -98141,7 +98141,10 @@ impl DataFrame {
             }
         }
         if selected.is_empty() {
-            return Self::new(self.index.clone(), BTreeMap::new());
+            // No column: still this axis - its name, an empty MultiIndex of
+            // its level names (7m8bq).
+            return Self::new(self.index.clone(), BTreeMap::new())
+                .map(|out| out.with_typed_labels_of(self));
         }
         self.select_columns(&selected)
     }
@@ -170594,6 +170597,42 @@ mod tests {
                 .row_multiindex()
                 .is_none()
         );
+    }
+
+    /// select_dtypes choosing no column keeps the column axis: its name and,
+    /// under MultiIndex columns, an empty MultiIndex of its level names
+    /// (7m8bq: a bare unnamed axis).
+    #[test]
+    fn select_dtypes_of_no_column_keeps_the_axis_7m8bq() {
+        let ints = |values: [i64; 2]| values.map(Scalar::Int64).to_vec();
+        let flat = DataFrame::from_dict(
+            &["a_x", "b_y"],
+            vec![("a_x", ints([1, 2])), ("b_y", ints([3, 4]))],
+        )
+        .unwrap();
+        let levels = fp_index::MultiIndex::from_tuples(vec![
+            vec![IndexLabel::from("a"), IndexLabel::from("x")],
+            vec![IndexLabel::from("b"), IndexLabel::from("y")],
+        ])
+        .unwrap()
+        .set_names(vec![Some("top".into()), Some("sub".into())]);
+        let df = flat.with_columns_multiindex(Some(levels)).unwrap();
+        let none = df.select_dtypes(&[DType::Utf8], &[]).unwrap();
+        assert_eq!(none.num_columns(), 0);
+        let axis = none.columns_multiindex().unwrap();
+        assert_eq!(axis.len(), 0);
+        assert_eq!(
+            axis.names(),
+            [Some("top".to_owned()), Some("sub".to_owned())]
+        );
+        // A named flat axis keeps its name; NEGATIVE: a selection that keeps
+        // columns is as before.
+        let named = flat.clone().with_columns_name(Some("c".into()));
+        let none = named.select_dtypes(&[DType::Utf8], &[]).unwrap();
+        assert_eq!(none.columns_name(), Some("c"));
+        assert!(none.columns_multiindex().is_none());
+        let kept = named.select_dtypes(&[DType::Int64], &[]).unwrap();
+        assert_eq!(kept.column_names(), vec!["a_x", "b_y"]);
     }
 
     // ── Batch 12d: from_csv/to_string/from_dict ──
