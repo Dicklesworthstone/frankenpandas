@@ -26723,60 +26723,156 @@ impl Series {
         )
     }
 
-    /// `unstack()` of a two-level row MultiIndex, as pandas: the first level's
-    /// values (sorted) are the rows, named after that level, and the second's
-    /// (sorted) the columns; a combination that does not occur is missing,
-    /// and then every int column is float64 (one block, as pandas). The
-    /// composite-label path below reads only "row, col" strings, so a groupby
-    /// result raised (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
-    fn unstack_row_multiindex(
+    /// pandas' `unstack(level=moved)` over a row MultiIndex of any depth
+    /// (`moved`: level positions, in the order given): those levels become
+    /// the columns - one level's typed labels sorted, the column axis named
+    /// after it, or several levels' combinations in the order they first
+    /// appear (pandas' `_unstack_multiple`), a column MultiIndex named after
+    /// them - and the other levels, in order, the rows,
+    /// sorted (a MultiIndex when several, else an Index named after the
+    /// level). A combination that does not occur is missing, and then every
+    /// int column is float64 (one block, as pandas); a nullable dtype keeps
+    /// an NA. A repeated combination is pandas' "Index contains duplicate
+    /// entries, cannot reshape" (the first value won). `fill_value` fills
+    /// the missing combinations as pandas does while reshaping (an int
+    /// Series filled with an int stays int64). Only a two-level index's last
+    /// level unstacked (fvsao.13, br-frankenpandas-xbl2k).
+    pub fn unstack_levels(
         &self,
-        levels: &fp_index::MultiIndex,
+        moved: &[usize],
+        fill_value: Option<&Scalar>,
     ) -> Result<DataFrame, FrameError> {
-        let outer = levels.get_level_values(0)?;
-        let inner = levels.get_level_values(1)?;
-        let sorted_unique = |labels: &[IndexLabel]| {
-            let mut unique = labels.to_vec();
+        let Some(levels) = self.index.row_multiindex() else {
+            return Err(FrameError::CompatibilityRejected(
+                "unstack of index levels needs a row MultiIndex".to_owned(),
+            ));
+        };
+        let depth = levels.nlevels();
+        let mut is_moved = vec![false; depth];
+        for &level in moved {
+            if level >= depth || std::mem::replace(&mut is_moved[level], true) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "unstack: level {level} is not a distinct level of a {depth}-level MultiIndex"
+                )));
+            }
+        }
+        let kept: Vec<usize> = (0..depth).filter(|&level| !is_moved[level]).collect();
+        if moved.is_empty() || kept.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "unstack needs a level left for the rows and one for the columns".to_owned(),
+            ));
+        }
+        // Each level's sorted distinct labels and every row's code into them.
+        let mut uniques: Vec<Vec<IndexLabel>> = Vec::with_capacity(depth);
+        let mut codes: Vec<Vec<usize>> = Vec::with_capacity(depth);
+        for level in 0..depth {
+            let values = levels.get_level_values(level)?;
+            let mut unique = values.labels().to_vec();
             unique.sort();
             unique.dedup();
-            unique
-        };
-        let rows = sorted_unique(outer.labels());
-        let cols = sorted_unique(inner.labels());
-        let row_of: FxHashMap<&IndexLabel, usize> = rows
-            .iter()
-            .enumerate()
-            .map(|(i, label)| (label, i))
-            .collect();
-        let col_of: FxHashMap<&IndexLabel, usize> = cols
-            .iter()
-            .enumerate()
-            .map(|(i, label)| (label, i))
-            .collect();
-        let mut grid: Vec<Vec<Option<Scalar>>> = vec![vec![None; rows.len()]; cols.len()];
-        for (position, value) in self.column.values().iter().enumerate() {
-            let row = row_of[&outer.labels()[position]];
-            let col = col_of[&inner.labels()[position]];
-            // The first value of a repeated combination wins.
-            grid[col][row].get_or_insert_with(|| value.clone());
+            let code_of: FxHashMap<&IndexLabel, usize> = unique
+                .iter()
+                .enumerate()
+                .map(|(code, label)| (label, code))
+                .collect();
+            codes.push(values.labels().iter().map(|label| code_of[label]).collect());
+            uniques.push(unique);
         }
-        let any_missing = grid.iter().flatten().any(Option::is_none);
+        let n = self.len();
+        // A side's combinations present and each row's position among them:
+        // sorted level by level, or - several moved levels, as pandas'
+        // `_unstack_multiple` numbers them - in the order they first appear.
+        let side = |of: &[usize], sorted: bool| -> (Vec<Vec<usize>>, Vec<usize>) {
+            if let [level] = of {
+                let combos = (0..uniques[*level].len()).map(|code| vec![code]).collect();
+                return (combos, codes[*level].clone());
+            }
+            let keys: Vec<Vec<usize>> = (0..n)
+                .map(|row| of.iter().map(|&level| codes[level][row]).collect())
+                .collect();
+            let mut combos = keys.clone();
+            if sorted {
+                combos.sort_unstable();
+                combos.dedup();
+            } else {
+                let mut first = FxHashSet::default();
+                combos.retain(|combo| first.insert(combo.clone()));
+            }
+            let positions = {
+                let at: FxHashMap<&[usize], usize> = combos
+                    .iter()
+                    .enumerate()
+                    .map(|(position, combo)| (combo.as_slice(), position))
+                    .collect();
+                keys.iter().map(|key| at[key.as_slice()]).collect()
+            };
+            (combos, positions)
+        };
+        let (row_combos, row_at) = side(&kept, true);
+        let (col_combos, col_at) = side(moved, false);
+        let mut grid: Vec<Vec<Option<Scalar>>> =
+            vec![vec![None; row_combos.len()]; col_combos.len()];
+        for (position, value) in self.column.values().iter().enumerate() {
+            if grid[col_at[position]][row_at[position]]
+                .replace(value.clone())
+                .is_some()
+            {
+                return Err(FrameError::CompatibilityRejected(
+                    "Index contains duplicate entries, cannot reshape".to_owned(),
+                ));
+            }
+        }
+        // The labels of a side's combinations, one list per level.
+        let side_labels = |of: &[usize], combos: &[Vec<usize>]| -> Vec<Vec<IndexLabel>> {
+            of.iter()
+                .enumerate()
+                .map(|(at, &level)| {
+                    combos
+                        .iter()
+                        .map(|combo| uniques[level][combo[at]].clone())
+                        .collect()
+                })
+                .collect()
+        };
+        let names = levels.names();
+        let name_of = |of: &[usize]| -> Vec<Option<String>> {
+            of.iter().map(|&level| names[level].clone()).collect()
+        };
+        let row_labels = side_labels(&kept, &row_combos);
+        let index = if let [only] = kept.as_slice() {
+            Index::new(row_labels.into_iter().next().unwrap_or_default())
+                .rename_index(names[*only].as_deref())
+        } else {
+            let multi = fp_index::MultiIndex::from_arrays(row_labels)?.set_names(name_of(&kept));
+            multi.to_flat_index("|").with_row_multiindex(multi)?
+        };
+        let col_labels = side_labels(moved, &col_combos);
+        // A fill value takes a missing combination's place, so only an
+        // unfilled gap widens an int column.
+        let any_missing = fill_value.is_none() && grid.iter().flatten().any(Option::is_none);
         // A nullable source keeps its dtype, a missing combination NA (it
         // came back float64; 4qg5w.11).
         let nullable = self.column.dtype().is_nullable();
+        let keys: Vec<String> = if let [only] = col_labels.as_slice() {
+            only.iter().map(column_key).collect()
+        } else {
+            column_multiindex_keys(&col_labels)
+        };
         let mut columns = BTreeMap::new();
-        let mut order = Vec::with_capacity(cols.len());
-        for (label, cells) in cols.iter().zip(grid) {
+        let mut order = Vec::with_capacity(col_combos.len());
+        for (name, cells) in keys.into_iter().zip(grid) {
             let values: Vec<Scalar> = cells
                 .into_iter()
-                .map(|cell| match cell {
-                    Some(Scalar::Int64(v)) if any_missing && !nullable => Scalar::Float64(v as f64),
-                    Some(value) => value,
-                    None if nullable => Scalar::Null(NullKind::Null),
-                    None => Scalar::Null(NullKind::NaN),
+                .map(|cell| match (cell, fill_value) {
+                    (Some(Scalar::Int64(v)), _) if any_missing && !nullable => {
+                        Scalar::Float64(v as f64)
+                    }
+                    (Some(value), _) => value,
+                    (None, Some(fill)) => fill.clone(),
+                    (None, None) if nullable => Scalar::Null(NullKind::Null),
+                    (None, None) => Scalar::Null(NullKind::NaN),
                 })
                 .collect();
-            let name = label.to_string();
             // pandas upcasts a numeric source with missing cells to float64
             // for EVERY column; an all-missing one inferred object.
             let column = if nullable {
@@ -26789,24 +26885,32 @@ impl Series {
             columns.insert(name.clone(), column);
             order.push(name);
         }
-        let index = Index::new(rows).rename_index(levels.names()[0].as_deref());
-        // The columns are the inner level's labels, typed (1, not '1'), and
-        // named after it.
-        Ok(DataFrame::new_with_column_order(index, columns, order)?
-            .with_recorded_column_labels(cols)
-            .with_columns_name(levels.names()[1].clone()))
+        let frame = DataFrame::new_with_column_order(index, columns, order)?;
+        // One moved level: its labels, typed (1, not '1'), the column axis
+        // named after it; several: a column MultiIndex named after them.
+        Ok(match col_labels.len() {
+            1 => frame
+                .with_recorded_column_labels(col_labels.into_iter().flatten())
+                .with_columns_name(names[moved[0]].clone()),
+            _ => {
+                let multi =
+                    fp_index::MultiIndex::from_arrays(col_labels)?.set_names(name_of(moved));
+                frame.with_columns_multiindex(Some(multi))?
+            }
+        })
     }
 
     /// Unstack a Series with string-composite index into a DataFrame.
     ///
-    /// Matches `pd.Series.unstack()`. Expects index labels in the format
-    /// "row_key, col_key" (comma-separated composite keys). The first part
-    /// becomes the row index, the second part becomes column names.
+    /// Matches `pd.Series.unstack()`: a row MultiIndex unstacks its last
+    /// level ([`Self::unstack_levels`]). Without one, index labels in the
+    /// format "row_key, col_key" (comma-separated composite keys) split into
+    /// the row index and the column names.
     pub fn unstack(&self) -> Result<DataFrame, FrameError> {
         if let Some(levels) = self.index.row_multiindex()
-            && levels.nlevels() == 2
+            && levels.nlevels() >= 2
         {
-            return self.unstack_row_multiindex(levels);
+            return self.unstack_levels(&[levels.nlevels() - 1], None);
         }
         // Per br-frankenpandas-0528d: HashSet membership tracking + parallel
         // insertion-ordered Vec. Was O(n × k) Vec::contains per entry per
@@ -66009,6 +66113,38 @@ pub fn column_key(label: &IndexLabel) -> String {
     label.to_string()
 }
 
+/// The storage keys of the columns under a column MultiIndex given as one
+/// label list per level: each column's [`column_key`]s joined with '_', as
+/// the binding keys them, with `#<position>` appended where two would
+/// coincide (('a_b', 'c') and ('a', 'b_c')), so no column overwrites another.
+fn column_multiindex_keys(levels: &[Vec<IndexLabel>]) -> Vec<String> {
+    let width = levels.first().map_or(0, Vec::len);
+    let joined: Vec<String> = (0..width)
+        .map(|column| {
+            levels
+                .iter()
+                .map(|level| column_key(&level[column]))
+                .collect::<Vec<_>>()
+                .join("_")
+        })
+        .collect();
+    let mut counts: FxHashMap<&str, usize> = FxHashMap::default();
+    for key in &joined {
+        *counts.entry(key.as_str()).or_default() += 1;
+    }
+    joined
+        .iter()
+        .enumerate()
+        .map(|(position, key)| {
+            if counts[key.as_str()] > 1 {
+                format!("{key}#{position}")
+            } else {
+                key.clone()
+            }
+        })
+        .collect()
+}
+
 /// The column axis: the order of the names that key the columns, and the
 /// typed pandas label a name stands for when it is not the string itself
 /// (`DataFrame([[1, 2]])`'s columns are the integers 0 and 1, keyed "0"
@@ -75590,23 +75726,46 @@ impl DataFrame {
         self.sorted_rows_by_positions(order)
     }
 
-    /// Sort the DataFrame by column names (axis=1).
+    /// Sort the DataFrame by its column labels (axis=1).
     ///
-    /// Matches `df.sort_index(axis=1, ascending=...)`.
+    /// Matches `df.sort_index(axis=1, ascending=...)`: the labels
+    /// themselves - a column MultiIndex level by level, typed labels by
+    /// value (2 before 10) - not the storage names as text, which put the
+    /// column 10 before 2 and a pivot_table's (v, 10) before (v, 2)
+    /// (br-frankenpandas-xbl2k). Stable; a repeated name keeps its columns
+    /// together in their order.
     pub fn sort_index_axis1(&self, ascending: bool) -> Result<Self, FrameError> {
-        let mut order: Vec<usize> = (0..self.column_order.len()).collect();
+        let keys: Vec<Vec<IndexLabel>> = match self.columns_multiindex() {
+            Some(multi) => (0..multi.len())
+                .map(|position| {
+                    multi
+                        .get_tuple(position)
+                        .map(|labels| labels.into_iter().cloned().collect())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            None => self
+                .column_labels()
+                .into_iter()
+                .map(|label| vec![label])
+                .collect(),
+        };
+        let mut order: Vec<usize> = (0..keys.len()).collect();
         order.sort_by(|&a, &b| {
             if ascending {
-                self.column_order[a].cmp(&self.column_order[b])
+                keys[a].cmp(&keys[b])
             } else {
-                self.column_order[b].cmp(&self.column_order[a])
+                keys[b].cmp(&keys[a])
             }
         });
-        let sorted_cols: Vec<&str> = order
+        // select_columns takes every column a name keys, so each name once.
+        let mut seen = FxHashSet::default();
+        let names: Vec<&str> = order
             .iter()
-            .map(|&i| self.column_order[i].as_str())
+            .map(|&position| self.column_order[position].as_str())
+            .filter(|name| seen.insert(*name))
             .collect();
-        self.select_columns(&sorted_cols)
+        self.select_columns(&names)
     }
 
     /// Return a new DataFrame sorted by a column's values.
@@ -88214,6 +88373,90 @@ impl DataFrame {
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
         })
+    }
+
+    /// pandas' `DataFrame.unstack(level=moved, fill_value)` over a row
+    /// MultiIndex: each column unstacked as [`Series::unstack_levels`], side
+    /// by side under its label - the column MultiIndex (column levels,
+    /// *moved levels), its levels named after the column axis and the moved
+    /// levels (br-frankenpandas-xbl2k; the binding unstacked a column at a
+    /// time and lost the moved levels' names).
+    pub fn unstack_levels(
+        &self,
+        moved: &[usize],
+        fill_value: Option<&Scalar>,
+    ) -> Result<Self, FrameError> {
+        // The source's column levels: its column MultiIndex's, else its labels.
+        let (levels, mut names): (Vec<Vec<IndexLabel>>, Vec<Option<String>>) =
+            match self.columns_multiindex() {
+                Some(multi) => (
+                    (0..multi.nlevels())
+                        .map(|level| {
+                            multi
+                                .get_level_values(level)
+                                .map(|values| values.labels().to_vec())
+                        })
+                        .collect::<Result<_, _>>()?,
+                    multi.names().to_vec(),
+                ),
+                None => (
+                    vec![self.column_labels()],
+                    vec![self.columns_name().map(str::to_owned)],
+                ),
+            };
+        let source_depth = levels.len();
+        let mut tuples: Vec<Vec<IndexLabel>> = vec![Vec::new(); source_depth + moved.len()];
+        let mut pieces = Vec::new();
+        let mut rows = None;
+        let index = self.series_index();
+        for (position, name) in self.column_order.iter().enumerate() {
+            let column = self.columns.get(name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{name}' is missing"))
+            })?;
+            let series = Series::new(self.column_series_name(name), index.clone(), column.clone())?;
+            let piece = series.unstack_levels(moved, fill_value)?;
+            // The moved levels' labels of each of the piece's columns.
+            let moved_labels: Vec<Vec<IndexLabel>> = match piece.columns_multiindex() {
+                Some(multi) => (0..multi.nlevels())
+                    .map(|level| {
+                        multi
+                            .get_level_values(level)
+                            .map(|values| values.labels().to_vec())
+                    })
+                    .collect::<Result<_, _>>()?,
+                None => vec![piece.column_labels()],
+            };
+            if position == 0 {
+                names.extend(match piece.columns_multiindex() {
+                    Some(multi) => multi.names().to_vec(),
+                    None => vec![piece.columns_name().map(str::to_owned)],
+                });
+            }
+            for (at, piece_name) in piece.column_order.iter().enumerate() {
+                for (level, labels) in levels.iter().enumerate() {
+                    tuples[level].push(labels[position].clone());
+                }
+                for (level, labels) in moved_labels.iter().enumerate() {
+                    tuples[source_depth + level].push(labels[at].clone());
+                }
+                if let Some(cells) = piece.columns.get(piece_name) {
+                    pieces.push(cells.clone());
+                }
+            }
+            rows.get_or_insert_with(|| piece.index.clone());
+        }
+        let Some(rows) = rows else {
+            return Err(FrameError::CompatibilityRejected(
+                "unstack of a frame without columns".to_owned(),
+            ));
+        };
+        let keys = column_multiindex_keys(&tuples);
+        let multi = fp_index::MultiIndex::from_arrays(tuples)?.set_names(names);
+        let columns: BTreeMap<String, Column> = keys.iter().cloned().zip(pieces).collect();
+        let mut out = DataFrame::new_with_column_order(rows, columns, keys)?
+            .with_columns_multiindex(Some(multi))?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
     }
 
     /// Unstack: pivot rows into columns (long-to-wide).
@@ -172049,6 +172292,97 @@ mod tests {
             let err = df.describe_with_percentiles(percentiles).unwrap_err();
             assert!(matches!(err, FrameError::CompatibilityRejected(_)));
         }
+    }
+
+    #[test]
+    fn unstack_levels_moves_any_levels_xbl2k() {
+        // (a, b, c) -> w, as a three-level groupby result.
+        let tuples = [
+            ("x", 1, "p", 4),
+            ("x", 1, "q", 8),
+            ("x", 2, "q", 5),
+            ("y", 1, "p", 6),
+            ("y", 2, "p", 7),
+        ];
+        let text = |t: &str| IndexLabel::Utf8(t.to_owned());
+        let multi = fp_index::MultiIndex::from_arrays(vec![
+            tuples.iter().map(|t| text(t.0)).collect(),
+            tuples.iter().map(|t| IndexLabel::Int64(t.1)).collect(),
+            tuples.iter().map(|t| text(t.2)).collect(),
+        ])
+        .unwrap()
+        .set_names(vec![Some("a".into()), Some("b".into()), Some("c".into())]);
+        let index = multi.to_flat_index("|").with_row_multiindex(multi).unwrap();
+        let values = tuples.iter().map(|t| Scalar::Int64(t.3)).collect();
+        let s = Series::new("w", index, Column::new(DType::Int64, values).unwrap()).unwrap();
+        // The first level: rows (b, c) sorted, columns a named 'a'; a gap
+        // makes the ints float64.
+        let first = s.unstack_levels(&[0], None).unwrap();
+        assert_eq!(first.columns_name(), Some("a"));
+        assert_eq!(first.column_labels(), vec![text("x"), text("y")]);
+        assert_eq!(first.len(), 4);
+        assert_eq!(first.column("x").unwrap().dtype(), DType::Float64);
+        let rows = first.row_multiindex().unwrap();
+        assert_eq!(rows.names(), &[Some("b".to_owned()), Some("c".to_owned())]);
+        // Two levels: a column MultiIndex named (b, c), its combinations in
+        // the order they first appear, as pandas' _unstack_multiple.
+        let two = s.unstack_levels(&[1, 2], None).unwrap();
+        let columns = two.columns_multiindex().unwrap();
+        let names = [Some("b".to_owned()), Some("c".to_owned())];
+        assert_eq!(columns.names(), &names);
+        let order: Vec<Vec<IndexLabel>> = (0..columns.len())
+            .map(|p| columns.get_tuple(p).unwrap().into_iter().cloned().collect())
+            .collect();
+        assert_eq!(order[2], vec![IndexLabel::Int64(2), text("q")]);
+        assert_eq!(order[3], vec![IndexLabel::Int64(2), text("p")]);
+        // A fill value keeps the ints int64.
+        let filled = s.unstack_levels(&[2], Some(&Scalar::Int64(0))).unwrap();
+        assert_eq!(filled.column("p").unwrap().dtype(), DType::Int64);
+        assert_eq!(filled.column("p").unwrap().values()[1], Scalar::Int64(0));
+        // DataFrame: (column, moved level) columns, the moved level named.
+        let frame = s.to_frame(None).unwrap();
+        let unstacked = frame.unstack_levels(&[1], None).unwrap();
+        let multi = unstacked.columns_multiindex().unwrap();
+        assert_eq!(multi.names(), &[None, Some("b".to_owned())]);
+        assert_eq!(multi.len(), 2);
+        // NEGATIVE: a repeated combination is pandas' error, not the first value.
+        let repeated = fp_index::MultiIndex::from_arrays(vec![
+            vec![text("a"); 2],
+            vec![IndexLabel::Int64(1); 2],
+        ])
+        .unwrap();
+        let index = repeated
+            .to_flat_index("|")
+            .with_row_multiindex(repeated)
+            .unwrap();
+        let cells = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap();
+        let dup = Series::new("v", index, cells).unwrap();
+        let err = dup.unstack().unwrap_err().to_string();
+        assert!(
+            err.contains("Index contains duplicate entries, cannot reshape"),
+            "{err}"
+        );
+        // NEGATIVE: every level or none moved is refused, not a panic.
+        assert!(s.unstack_levels(&[0, 1, 2], None).is_err());
+        assert!(s.unstack_levels(&[3], None).is_err());
+    }
+
+    #[test]
+    fn sort_index_axis1_orders_typed_labels_xbl2k() {
+        let one = |v: i64| Column::from_values(vec![Scalar::Int64(v)]).unwrap();
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Int64(0)]),
+            BTreeMap::from([("10".to_owned(), one(1)), ("2".to_owned(), one(2))]),
+            vec!["10".to_owned(), "2".to_owned()],
+        )
+        .unwrap()
+        .with_recorded_column_labels([IndexLabel::Int64(10), IndexLabel::Int64(2)]);
+        // By value, 2 before 10 (the text order put "10" first).
+        let (two, ten) = (IndexLabel::Int64(2), IndexLabel::Int64(10));
+        let sorted = frame.sort_index_axis1(true).unwrap();
+        assert_eq!(sorted.column_labels(), vec![two.clone(), ten.clone()]);
+        let descending = frame.sort_index_axis1(false).unwrap();
+        assert_eq!(descending.column_labels(), vec![ten, two]);
     }
 
     /// DISC-011's per-path table on the Rust API: a gap an operation invents

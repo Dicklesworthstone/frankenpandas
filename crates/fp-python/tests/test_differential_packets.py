@@ -2330,10 +2330,13 @@ def test_concat_refuses_what_it_cannot_match() -> None:
     # pandas 2.2.3 truncates keys of another length (deprecated); names= only
     # names keys= levels. (keys= side by side is supported now:
     # test_concat_keys_side_by_side_match_pandas; keying frames whose columns
-    # are already two-level would need a third level.)
-    keyed = fpd.concat([frame, frame], keys=["p", "q"], axis=1)
-    with pytest.raises(NotImplementedError, match="MultiIndex"):
-        fpd.concat([keyed, keyed], keys=["r", "s"], axis=1)
+    # are already two-level puts the key on a third level, as pandas -
+    # br-frankenpandas-xbl2k: it was refused here.)
+    def keyed_twice(m: Any) -> Any:
+        keyed = m.concat([m.DataFrame(_CA), m.DataFrame(_CA)], keys=["p", "q"], axis=1)
+        return repr(m.concat([keyed, keyed], keys=["r", "s"], axis=1))
+
+    assert keyed_twice(fpd) == keyed_twice(pd)
     with pytest.raises(NotImplementedError, match="different length"):
         fpd.concat([frame, frame], keys=["p"])
     with pytest.raises(NotImplementedError, match="names"):
@@ -10737,3 +10740,69 @@ def _stamp_unit_outcome(m: Any, run: Any) -> Any:
 def test_timestamp_unit_is_its_resolution_like_pandas(case: str) -> None:
     run = _STAMP_UNIT_CASES[case]
     assert _stamp_unit_outcome(fpd, run) == _stamp_unit_outcome(pd, run), case
+
+
+# br-frankenpandas-xbl2k: pivot_table with several index / columns / values
+# keys, and unstack of any levels of a MultiIndex, were refused; the column
+# level an unstack moved was unnamed; sort_index(axis=1) ordered the column
+# names as text (10 before 2).
+def _reshape_frame(m: Any) -> Any:
+    return m.DataFrame({
+        "a": ["x", "x", "y", "y", "x"], "b": [1, 2, 1, 2, 1], "c": ["p", "q", "p", "p", "q"],
+        "v": [1.0, 2.5, 3.0, None, 4.0], "w": [4, 5, 6, 7, 8], "z": [0.5, 1.5, 2.5, 3.5, 4.5],
+    })
+
+
+def _three_level(m: Any) -> Any:
+    return _reshape_frame(m).groupby(["a", "b", "c"])["w"].sum()
+
+
+_RESHAPE_LEVELS_CASES = {
+    "pivot_table of a values list": lambda m: _reshape_frame(m).pivot_table(index="a", columns="b", values=["v", "w"], aggfunc="sum"),
+    "pivot_table sorts the value level": lambda m: _reshape_frame(m).pivot_table(index="a", columns="b", values=["z", "v"], aggfunc="sum"),
+    "pivot_table of two columns keys": lambda m: _reshape_frame(m).pivot_table(index="a", columns=["b", "c"], values="w", aggfunc="sum"),
+    "pivot_table of two index keys": lambda m: _reshape_frame(m).pivot_table(index=["a", "c"], columns="b", values="w", aggfunc="sum"),
+    "pivot_table of every other column": lambda m: _reshape_frame(m).drop(columns=["c"]).pivot_table(index="a", columns="b", aggfunc="sum"),
+    "pivot_table mean by default": lambda m: _reshape_frame(m).pivot_table(index="a", columns="b", values=["v", "w"]),
+    "pivot_table of a list of one value": lambda m: _reshape_frame(m).pivot_table(index="a", columns="b", values=["w"], aggfunc="max"),
+    "pivot_table fill_value keeps ints": lambda m: _reshape_frame(m).pivot_table(index="a", columns=["b", "c"], values=["w"], aggfunc="sum", fill_value=0),
+    "pivot_table drops an all-missing column": lambda m: m.DataFrame({"a": ["x", "y"], "b": [1, 2], "v": [None, 1.0], "w": [1, 2]}).pivot_table(index="a", columns="b", values=["v", "w"], aggfunc="max"),
+    "pivot_table of a list of functions": lambda m: _reshape_frame(m).pivot_table(index="a", columns="b", values=["w"], aggfunc=["sum", "max"]),
+    "Series.unstack of the first of three levels": lambda m: _three_level(m).unstack(0),
+    "Series.unstack of a middle level by name": lambda m: _three_level(m).unstack("b"),
+    "Series.unstack of two levels": lambda m: _three_level(m).unstack(["b", "c"]),
+    "Series.unstack of two levels by position": lambda m: _three_level(m).unstack([0, 2]),
+    "Series.unstack with fill_value": lambda m: _three_level(m).unstack("c", fill_value=0),
+    "Series.unstack of repeated entries raises": lambda m: m.Series([1, 2], index=m.MultiIndex.from_tuples([("a", 1), ("a", 1)])).unstack(),
+    "Series.unstack of a missing level raises": lambda m: _three_level(m).unstack("nope"),
+    "DataFrame.unstack names the moved level": lambda m: _reshape_frame(m).groupby(["a", "b"])[["v", "w"]].sum().unstack("b"),
+    "DataFrame.unstack of two levels": lambda m: _reshape_frame(m).groupby(["a", "b", "c"])[["w", "z"]].sum().unstack(["b", "c"]),
+    "DataFrame.unstack of the first level": lambda m: _reshape_frame(m).groupby(["a", "b"])[["w"]].sum().unstack(0),
+    "DataFrame.unstack with fill_value": lambda m: _reshape_frame(m).groupby(["a", "b", "c"])[["w"]].sum().unstack("c", fill_value=-1),
+    # (Labels and cells, not repr: an int column Index prints its labels at
+    # one common width, a separate repr gap.)
+    "sort_index(axis=1) orders typed labels": lambda m: (lambda d: m.DataFrame({"label": list(d.columns), "cell": d.iloc[0].tolist()}))(m.DataFrame([[1, 2, 3]], columns=[10, 2, 1]).sort_index(axis=1)),
+    "sort_index(axis=1) descending": lambda m: (lambda d: m.DataFrame({"label": list(d.columns), "cell": d.iloc[0].tolist()}))(m.DataFrame([[1, 2, 3]], columns=[2, 10, 1]).sort_index(axis=1, ascending=False)),
+    # NEGATIVES: one key of each with a str value keeps no value level; a
+    # two-level unstack() is unchanged; text columns sort as text.
+    "pivot_table of one key each": lambda m: _reshape_frame(m).pivot_table(index="a", columns="b", values="w", aggfunc="sum"),
+    "Series.unstack of the last level": lambda m: _reshape_frame(m).groupby(["a", "b"])["w"].sum().unstack(),
+    "sort_index(axis=1) of text": lambda m: m.DataFrame([[1, 2, 3]], columns=["b", "a10", "a2"]).sort_index(axis=1),
+}
+
+
+def _reshape_levels_outcome(m: Any, run: Any) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+    return (repr(r), [str(dtype) for dtype in r.dtypes], [list(level) if hasattr(level, "__iter__") else level for level in (r.columns.names, r.index.names)])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RESHAPE_LEVELS_CASES))
+def test_pivot_table_and_unstack_of_any_levels_like_pandas(case: str) -> None:
+    run = _RESHAPE_LEVELS_CASES[case]
+    assert _reshape_levels_outcome(fpd, run) == _reshape_levels_outcome(pd, run), case

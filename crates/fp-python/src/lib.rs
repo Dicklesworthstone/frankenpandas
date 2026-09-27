@@ -598,6 +598,10 @@ fn sparsify_level_texts(levels: &mut [Vec<String>]) {
 /// when no level is named).
 type LevelTexts = (Vec<Vec<String>>, Option<Vec<String>>);
 
+/// A frame's column axis as levels: one label list per level and each
+/// level's name.
+type ColumnLevels = (Vec<Vec<IndexLabel>>, Vec<Option<String>>);
+
 /// The texts pandas prints for a row MultiIndex at `rows`: one list per
 /// level, sparsified, and the level names when any level is named ("" for
 /// an unnamed one).
@@ -14723,6 +14727,7 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg.contains(" type does not support ")
                 || msg.starts_with("numpy boolean subtract")
                 || msg == "cannot reindex on an axis with duplicate labels"
+                || msg == "Index contains duplicate entries, cannot reshape"
                 || msg.starts_with("array is too big; ")
                 || msg == "Limit must be greater than 0"
                 || msg.starts_with("Invalid fill method. ")
@@ -22602,12 +22607,14 @@ impl PySeries {
         Ok(PySeries { inner: s })
     }
 
-    /// pandas' `Series.unstack(level=-1, fill_value=None, sort=True)`: the last
-    /// level becomes the columns; `fill_value` fills the combinations that do
+    /// pandas' `Series.unstack(level=-1, fill_value=None, sort=True)`: the
+    /// `level` levels - a position, a name, or a list of them, of a
+    /// MultiIndex of any depth - become the columns (see
+    /// `Series::unstack_levels`); `fill_value` fills the combinations that do
     /// not occur, and an int Series filled with an int stays int, as pandas
-    /// fills during the reshape (the method took no arguments;
-    /// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13). Other
-    /// levels and sort=False are not supported yet.
+    /// fills during the reshape (fvsao.13; a list of levels, or a level
+    /// other than the last of a deeper index, was refused -
+    /// br-frankenpandas-xbl2k). sort=False is not supported yet.
     #[pyo3(signature = (level=None, fill_value=None, sort=true))]
     fn unstack(
         &self,
@@ -22616,47 +22623,34 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         sort: bool,
     ) -> PyResult<PyDataFrame> {
-        // unstack(level=0 or its name) over a two-level MultiIndex swaps the
-        // levels and unstacks the last (fvsao.36; it raised
-        // NotImplementedError); other levels of a deeper index still raise.
-        let mut source = self.inner.clone();
-        if let Some(level) = level.filter(|level| !level.is_none())
-            && let Some(multi) = self.inner.index().row_multiindex()
-        {
-            let position = multiindex_level_position(multi, level)?;
-            if position + 1 != multi.nlevels() {
-                if multi.nlevels() != 2 {
-                    return Err(not_implemented(
-                        "Series.unstack of a level other than the last of a MultiIndex deeper than two levels",
-                    ));
-                }
-                let rows: Vec<usize> = (0..self.inner.len()).collect();
-                let (index, swapped) = multiindex_levels_index(multi, &rows, &[1, 0])?;
-                let index = match swapped {
-                    Some(swapped) => index
-                        .with_row_multiindex(swapped)
-                        .map_err(index_error_to_py)?,
-                    None => index,
-                };
-                source = Series::new(self.inner.name(), index, self.inner.column().clone())
-                    .map_err(frame_error_to_py)?;
-            }
-        } else if let Some(level) = level.filter(|level| !level.is_none())
-            && !matches!(level.extract::<i64>(), Ok(0 | -1))
-        {
-            return Err(not_implemented("Series.unstack of this level"));
-        }
         if !sort {
             return Err(not_implemented("Series.unstack(sort=False)"));
         }
-        let mut df = source.unstack().map_err(frame_error_to_py)?;
-        if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
-            let fill = py_to_scalar(py, fill)?;
-            df = df.fillna(&fill).map_err(frame_error_to_py)?;
-            if self.inner.dtype() == DType::Int64 && matches!(fill, Scalar::Int64(_)) {
-                df = df.astype(DType::Int64).map_err(frame_error_to_py)?;
+        let fill = fill_value
+            .filter(|fill| !fill.is_none())
+            .map(|fill| py_to_scalar(py, fill))
+            .transpose()?;
+        let level = level.filter(|level| !level.is_none());
+        let Some(multi) = self.inner.index().row_multiindex() else {
+            // A flat index of "row, col" composite labels unstacks its one
+            // split (level 0 or -1 name it).
+            if level.is_some_and(|level| !matches!(level.extract::<i64>(), Ok(0 | -1))) {
+                return Err(not_implemented("Series.unstack of this level"));
             }
-        }
+            let mut df = self.inner.unstack().map_err(frame_error_to_py)?;
+            if let Some(fill) = &fill {
+                df = df.fillna(fill).map_err(frame_error_to_py)?;
+            }
+            return Ok(PyDataFrame { inner: df });
+        };
+        let moved = match level {
+            Some(level) => multiindex_level_positions(multi, level)?,
+            None => vec![multi.nlevels() - 1],
+        };
+        let df = self
+            .inner
+            .unstack_levels(&moved, fill.as_ref())
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
@@ -30980,9 +30974,15 @@ impl PyDataFrame {
                 .get_item(&values_list)?
                 .call_method1("agg", (aggfunc,))
         };
-        let simple = column_keys.len() == 1
+        // `values` as one name (not a list, not every other column): the
+        // table's columns are the columns keys' values alone, no value level.
+        let single_value = values.is_some_and(|values| {
+            !values.is_none()
+                && !(values.is_instance_of::<PyList>() || values.is_instance_of::<PyTuple>())
+        });
+        let simple = single_value
+            && column_keys.len() == 1
             && index_keys.len() == 1
-            && value_names.len() == 1
             && aggfunc.extract::<String>().is_ok();
         let mut table = if column_keys.is_empty() {
             aggregate(&index_keys)?
@@ -31046,9 +31046,46 @@ impl PyDataFrame {
             }
             Bound::new(py, PyDataFrame { inner: res })?.into_any()
         } else {
-            return Err(not_implemented(
-                "DataFrame.pivot_table with several index / columns / values keys and columns=",
-            ));
+            // pandas' definition: the aggregate over the index and columns
+            // keys, a row whose every value is missing dropped, the columns
+            // keys' levels unstacked (filled as it goes), a column whose
+            // every value is missing dropped, the columns sorted; a single
+            // `values` name (not a list) keeps no value level
+            // (br-frankenpandas-xbl2k; it was refused).
+            if margins {
+                return Err(not_implemented(
+                    "DataFrame.pivot_table(margins=True) with several index / columns / values keys",
+                ));
+            }
+            if !sort {
+                return Err(not_implemented(
+                    "DataFrame.pivot_table(sort=False) with several index / columns / values keys",
+                ));
+            }
+            let mut keys = index_keys.clone();
+            keys.extend(column_keys.iter().cloned());
+            let all = || keyword("how", pyo3::types::PyString::new(py, "all").into_any());
+            let agged = aggregate(&keys)?.call_method("dropna", (), Some(&all()?))?;
+            let agged = if single_value {
+                agged.get_item(label_of(&value_names[0])?)?
+            } else {
+                agged
+            };
+            let unstack_kwargs = PyDict::new(py);
+            if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
+                unstack_kwargs.set_item("fill_value", fill)?;
+            }
+            let moved = PyList::new(py, index_keys.len()..keys.len())?;
+            let table = agged.call_method("unstack", (moved,), Some(&unstack_kwargs))?;
+            let by_columns = all()?;
+            by_columns.set_item("axis", 1)?;
+            let table = table.call_method("dropna", (), Some(&by_columns))?;
+            let sorted = table
+                .extract::<PyRef<'_, PyDataFrame>>()?
+                .inner
+                .sort_index_axis1(true)
+                .map_err(frame_error_to_py)?;
+            Bound::new(py, PyDataFrame { inner: sorted })?.into_any()
         };
         if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
             let fill = py_to_scalar(py, fill)?;
@@ -33405,10 +33442,11 @@ impl PyDataFrame {
     }
 
     /// pandas' `DataFrame.unstack(level=-1, fill_value=None, sort=True)`
-    /// over a row MultiIndex: each column unstacked as a Series (see
-    /// `PySeries::unstack`), side by side under its label - pandas'
-    /// (column, value) columns. It took no arguments and refused more than
-    /// one column.
+    /// over a row MultiIndex (see `DataFrame::unstack_levels`): each column
+    /// unstacked, side by side under its label - pandas' (column, *levels)
+    /// columns, named after the moved levels. It took no arguments and
+    /// refused more than one column; a list of levels, or a level other than
+    /// the last of a deeper index, was refused (br-frankenpandas-xbl2k).
     #[pyo3(signature = (level=None, fill_value=None, sort=true))]
     fn unstack(
         &self,
@@ -33429,23 +33467,25 @@ impl PyDataFrame {
             let df = self.inner.unstack().map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
         }
-        let index = self.inner.series_index();
-        let mut names = Vec::with_capacity(self.inner.num_columns());
-        let mut frames = Vec::with_capacity(self.inner.num_columns());
-        for position in 0..self.inner.num_columns() {
-            let name = self.inner.column_name_at(position).unwrap_or_default();
-            let column = self.inner.column_at(position).cloned().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                    "column position {position} is out of range"
-                ))
-            })?;
-            let series =
-                Series::new(name.clone(), index.clone(), column).map_err(frame_error_to_py)?;
-            let unstacked = PySeries { inner: series }.unstack(py, level, fill_value, sort)?;
-            frames.push(Py::new(py, unstacked)?.into_bound(py).into_any());
-            names.push(name);
+        if !sort {
+            return Err(not_implemented("DataFrame.unstack(sort=False)"));
         }
-        concat_side_by_side(py, frames, names).map(Bound::unbind)
+        let multi = self.inner.row_multiindex().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("unstack needs a row MultiIndex")
+        })?;
+        let moved = match level.filter(|level| !level.is_none()) {
+            Some(level) => multiindex_level_positions(multi, level)?,
+            None => vec![multi.nlevels() - 1],
+        };
+        let fill = fill_value
+            .filter(|fill| !fill.is_none())
+            .map(|fill| py_to_scalar(py, fill))
+            .transpose()?;
+        let df = self
+            .inner
+            .unstack_levels(&moved, fill.as_ref())
+            .map_err(frame_error_to_py)?;
+        Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
     }
 
     /// `level` a position or a level name (a name raised TypeError).
@@ -45829,28 +45869,64 @@ fn concat(
             Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)?;
         return PySeries { inner: out }.into_py_any(py);
     }
-    // Frames side by side under keys= get pandas' two-level column axis,
-    // (key, column) per column; a piece whose columns are already two-level
-    // would need a third level.
+    // Frames side by side under keys= get pandas' column axis with the key
+    // level on top of each piece's own levels - its typed labels, or its
+    // column MultiIndex's levels (a piece with one was refused, and a flat
+    // piece's labels were their text; br-frankenpandas-xbl2k); a level
+    // keeps its name where every piece agrees on it.
     let keyed_columns = match &keys {
         Some(keys) if axis == 1 && series.is_empty() => {
-            if frames
+            let piece_levels = |frame: &DataFrame| -> PyResult<ColumnLevels> {
+                Ok(match frame.columns_multiindex() {
+                    Some(multi) => (
+                        (0..multi.nlevels())
+                            .map(|level| {
+                                multi
+                                    .get_level_values(level)
+                                    .map(|values| values.labels().to_vec())
+                            })
+                            .collect::<Result<_, _>>()
+                            .map_err(index_error_to_py)?,
+                        multi.names().to_vec(),
+                    ),
+                    None => (
+                        vec![frame.column_labels()],
+                        vec![frame.columns_name().map(str::to_owned)],
+                    ),
+                })
+            };
+            let pieces = frames
                 .iter()
-                .any(|frame| frame.columns_multiindex().is_some())
-            {
+                .map(piece_levels)
+                .collect::<PyResult<Vec<_>>>()?;
+            let depth = pieces.first().map_or(1, |(levels, _)| levels.len());
+            if pieces.iter().any(|(levels, _)| levels.len() != depth) {
                 return Err(not_implemented(
-                    "concat(keys=..., axis=1) of DataFrames whose columns are a MultiIndex",
+                    "concat(keys=..., axis=1) of DataFrames whose columns have different numbers of levels",
                 ));
             }
-            let mut top = Vec::new();
-            let mut bottom = Vec::new();
-            for (key, frame) in keys.iter().zip(&frames) {
-                for name in frame.column_names() {
-                    top.push(key.clone());
-                    bottom.push(IndexLabel::Utf8(name.clone()));
+            let mut arrays: Vec<Vec<IndexLabel>> = vec![Vec::new(); depth + 1];
+            for (key, (levels, _)) in keys.iter().zip(&pieces) {
+                let width = levels.first().map_or(0, Vec::len);
+                arrays[0].extend(std::iter::repeat_n(key.clone(), width));
+                for (level, labels) in levels.iter().enumerate() {
+                    arrays[level + 1].extend(labels.iter().cloned());
                 }
             }
-            Some(fp_index::MultiIndex::from_arrays(vec![top, bottom]).map_err(index_error_to_py)?)
+            let mut names = vec![None];
+            names.extend((0..depth).map(|level| {
+                let first = pieces.first().and_then(|(_, names)| names[level].clone());
+                pieces
+                    .iter()
+                    .all(|(_, names)| names[level] == first)
+                    .then_some(first)
+                    .flatten()
+            }));
+            Some(
+                fp_index::MultiIndex::from_arrays(arrays)
+                    .map_err(index_error_to_py)?
+                    .set_names(names),
+            )
         }
         _ => None,
     };
