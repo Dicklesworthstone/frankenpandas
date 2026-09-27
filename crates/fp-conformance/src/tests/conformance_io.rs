@@ -263,6 +263,7 @@ fn scalar_to_jsonl_cell(value: &Scalar) -> Value {
         Scalar::Datetime64(ns) => serde_json::json!({"kind": "datetime64", "value": ns}),
         Scalar::Period(p) => serde_json::json!({"kind": "period", "value": p.ordinal}),
         Scalar::Interval(iv) => serde_json::json!({"kind": "interval", "value": iv.to_string()}),
+        Scalar::Object(object) => serde_json::json!({"kind": "object", "value": object.repr()}),
     }
 }
 

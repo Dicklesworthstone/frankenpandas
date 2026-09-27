@@ -218,6 +218,7 @@ fn poison_numeric_scalar(value: &Scalar) -> Scalar {
         Scalar::Datetime64(v) => Scalar::Datetime64(v.saturating_add(1)),
         Scalar::Period(v) => Scalar::Period(v.shift(1)),
         Scalar::Interval(iv) => Scalar::Interval(*iv),
+        Scalar::Object(object) => Scalar::Object(object.clone()),
     }
 }
 

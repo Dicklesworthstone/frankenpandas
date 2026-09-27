@@ -4610,6 +4610,86 @@ def test_str_list_results_match_pandas(case: str) -> None:
     assert _list_outcome(got) == _list_outcome(want)
 
 
+# fvsao.33: object cells. A Series or frame could hold no list (or other
+# Python object) per cell - Series([[1, 2], [3]]) raised "Cannot convert list
+# to Scalar", str.split returned a separate StringListSeries that no Series
+# operation reached, and explode was a no-op.
+def _object_view(x: Any) -> Any:
+    def one(v: Any) -> Any:
+        return "nan" if isinstance(v, float) and v != v else (type(v).__name__, repr(v))
+
+    if hasattr(x, "columns"):
+        return ("frame", repr(x.columns), repr(x.index), [[one(v) for v in row] for row in x.values.tolist()], [str(d) for d in x.dtypes])
+    if hasattr(x, "dtype") and hasattr(x, "index"):
+        return ("series", str(x.dtype), repr(x.index), [one(v) for v in x.tolist()], x.name)
+    return one(x)
+
+
+def _assigned_split(m: Any) -> Any:
+    frame = m.DataFrame({"s": ["a|b", "c"]})
+    frame["t"] = frame["s"].str.split("|")
+    return frame
+
+
+def _assign_list_column(m: Any, values: Any) -> Any:
+    frame = m.DataFrame({"a": [1, 2]})
+    frame["x"] = values
+    return frame
+
+
+_OBJECT_CELL_CASES = {
+    "Series of lists": lambda m: m.Series([[1, 2], [3], [], None]),
+    "Series of lists dtype=object": lambda m: m.Series([[1, 2], [3]], dtype=object),
+    "repr of a list cell": lambda m: repr(m.Series([[1, 2], ["a"]])),
+    "frame column of lists": lambda m: m.DataFrame({"a": [[1, 2], [3]], "b": [1, 2]}),
+    "frame rows holding lists": lambda m: m.DataFrame([[1, [2, 3]], [4, [5]]]),
+    "cell by label": lambda m: m.Series([[1, 2], [3]])[0],
+    "cell by position": lambda m: m.Series([[1, 2], [3]]).iloc[1],
+    "split is a Series": lambda m: isinstance(m.Series(["a b", "c"]).str.split(), m.Series),
+    "split then explode": lambda m: m.Series(["a b c", "d", None, "e f"]).str.split().explode(),
+    "explode": lambda m: m.Series([[1, 2], [3], [], None]).explode(),
+    "explode ignore_index": lambda m: m.Series([[1, 2], [3], [], None]).explode(ignore_index=True),
+    "frame explode": lambda m: m.DataFrame({"a": [[1, 2], [3]], "b": ["x", "y"]}).explode("a"),
+    "frame explode two columns": lambda m: m.DataFrame({"a": [[1, 2], [3]], "b": [["p", "q"], ["r"]]}).explode(["a", "b"]),
+    "assign a split, explode it": lambda m: _assigned_split(m).explode("t"),
+    "str.get on list cells": lambda m: m.Series(["a b c", "d", None]).str.split().str.get(1),
+    "str.len on list cells": lambda m: m.Series(["a b c", "d", None]).str.split().str.len(),
+    "str.join on list cells": lambda m: m.Series(["a b c", "d", None]).str.split().str.join("-"),
+    "== of list cells": lambda m: m.Series([[1, 2], [3]]) == m.Series([[1, 2], [4]]),
+    "map over list cells": lambda m: m.Series([[1, 2], [3]]).map(len),
+    "date cells": lambda m: m.Series([datetime.date(2024, 1, 5), datetime.date(2024, 2, 1)]),
+    "tuple cells": lambda m: m.Series([(1, 2), (3,)]),
+    "dict cells": lambda m: m.Series([{"a": 1}, {"b": 2}]),
+    "to_json of list cells": lambda m: m.Series([[1, 2], [3]]).to_json(),
+    "astype(str) of list cells": lambda m: m.Series([[1, "a"], [3]]).astype(str),
+    "isna of list cells": lambda m: m.Series([[1, 2], [], None]).isna(),
+    # NEGATIVES: a scalar argument is still a scalar (fillna of a list
+    # raises), a whole-column list still spreads over the rows (or raises
+    # at the wrong length), a string does not explode, and exploded columns
+    # must match in length.
+    "fillna of a list raises": lambda m: m.Series([1.0, None]).fillna([1, 2]),
+    "a list column spreads over the rows": lambda m: _assign_list_column(m, [7, 8]),
+    "a list of the wrong length raises": lambda m: _assign_list_column(m, [7, 8, 9]),
+    "a string does not explode": lambda m: m.Series(["a,b"]).explode(),
+    "mismatched explode raises": lambda m: m.DataFrame({"a": [[1, 2], [3]], "b": [["p"], ["r"]]}).explode(["a", "b"]),
+}
+
+
+def _object_cell_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _object_view(_OBJECT_CELL_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OBJECT_CELL_CASES))
+def test_object_cells_match_pandas(case: str) -> None:
+    assert _object_cell_outcome(fpd, case) == _object_cell_outcome(pd, case), case
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_string_arithmetic_matches_pandas() -> None:
     # fvsao.13: s + t concatenated nothing - "value 'a' has non-numeric dtype".

@@ -1830,7 +1830,50 @@ impl ColumnData {
 ///
 /// Both scalars are converted to `f64` for comparison. For `Utf8` values,
 /// lexicographic ordering is used. Returns `Err` for incompatible types.
+/// Python's ordering of two lists: the first unequal items decide, else the
+/// shorter list is the lesser.
+fn list_compare(left: &[Scalar], right: &[Scalar], op: ComparisonOp) -> Result<bool, ColumnError> {
+    for (a, b) in left.iter().zip(right) {
+        if !scalar_compare(a, b, ComparisonOp::Eq)? {
+            return scalar_compare(a, b, op);
+        }
+    }
+    let ordering = left.len().cmp(&right.len());
+    Ok(match op {
+        ComparisonOp::Lt => ordering.is_lt(),
+        ComparisonOp::Le => ordering.is_le(),
+        ComparisonOp::Gt => ordering.is_gt(),
+        ComparisonOp::Ge => ordering.is_ge(),
+        ComparisonOp::Eq => ordering.is_eq(),
+        ComparisonOp::Ne => ordering.is_ne(),
+    })
+}
+
 fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<bool, ColumnError> {
+    // Object cells (fvsao.33): == / != by the cells' own equality (a list is
+    // never equal to a value of another kind); ordering between two lists
+    // itemwise, as Python's; any other ordering of an object is a type error.
+    if matches!(left, Scalar::Object(_)) || matches!(right, Scalar::Object(_)) {
+        return match op {
+            ComparisonOp::Eq => Ok(left == right),
+            ComparisonOp::Ne => Ok(left != right),
+            _ => {
+                if let (Scalar::Object(a), Scalar::Object(b)) = (left, right)
+                    && let (Some(a), Some(b)) = (a.as_list(), b.as_list())
+                {
+                    return list_compare(a, b, op);
+                }
+                let shown = match (left, right) {
+                    (Scalar::Object(object), _) | (_, Scalar::Object(object)) => object.repr(),
+                    _ => String::new(),
+                };
+                Err(ColumnError::Type(TypeError::NonNumericValue {
+                    value: shown,
+                    dtype: DType::Utf8,
+                }))
+            }
+        };
+    }
     // Coerce differing numeric types to avoid precision loss (e.g. Bool vs Int64).
     let left_dtype = left.dtype();
     let right_dtype = right.dtype();
@@ -11596,6 +11639,8 @@ enum SetMemberKey<'a> {
     Datetime64(i64),
     Period(i64, PeriodFreq),
     Interval(u64, u64, IntervalClosed),
+    /// An object cell (a list, a host value), keyed by its repr.
+    Object(String),
 }
 
 fn set_member_key(v: &Scalar) -> Option<SetMemberKey<'_>> {
@@ -11614,6 +11659,7 @@ fn set_member_key(v: &Scalar) -> Option<SetMemberKey<'_>> {
             let (left, right, closed) = interval_key(v);
             SetMemberKey::Interval(left, right, closed)
         }
+        Scalar::Object(object) => SetMemberKey::Object(object.repr()),
         Scalar::Null(_) => return None,
     })
 }
@@ -23257,6 +23303,7 @@ impl Column {
             Datetime64(i64),
             Period(i64),
             Interval(u64, u64, IntervalClosed),
+            Object(String),
         }
         let mut seen: FxHashSet<Key<'_>> = FxHashSet::default();
         for v in &self.values {
@@ -23278,6 +23325,7 @@ impl Column {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
                 }
+                Scalar::Object(object) => Key::Object(object.repr()),
                 Scalar::Null(_) => continue,
             };
             if !seen.insert(key) {
@@ -24373,6 +24421,7 @@ impl Column {
             Datetime64(i64),
             Period(i64),
             Interval(u64, u64, IntervalClosed),
+            Object(String),
         }
         fn key_of(v: &Scalar) -> Option<Key<'_>> {
             if v.is_missing() {
@@ -24393,6 +24442,7 @@ impl Column {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
                 }
+                Scalar::Object(object) => Key::Object(object.repr()),
                 Scalar::Null(_) => return None,
             })
         }
@@ -25128,6 +25178,7 @@ impl Column {
                 Scalar::Datetime64(x) => *x != Timestamp::NAT,
                 Scalar::Period(p) => p.ordinal != i64::MIN,
                 Scalar::Interval(_) => true,
+                Scalar::Object(_) => v.to_bool().unwrap_or(true),
                 Scalar::Null(_) => false,
             };
             if truthy {
@@ -26268,6 +26319,17 @@ impl Column {
     /// the underlying TypeError so the caller can attribute the
     /// failing conversion. Missing values pass through as the
     /// target dtype's canonical missing representation.
+    /// Whether this object (Utf8) column holds a present value that is not
+    /// a string - an int of a mixed column, a list or host cell (fvsao.33).
+    fn holds_non_text(&self) -> bool {
+        if self.dtype != DType::Utf8 || self.as_utf8_contiguous().is_some() {
+            return false;
+        }
+        self.values()
+            .iter()
+            .any(|value| !value.is_missing() && !matches!(value, Scalar::Utf8(_)))
+    }
+
     pub fn astype(&self, target: DType) -> Result<Self, ColumnError> {
         if self.dtype == target {
             // ⚠️ EXCEPT Utf8 CARRYING A MISSING VALUE. Casting to string does not
@@ -26285,8 +26347,25 @@ impl Column {
             // `normalize_missing_for_dtype` preserves NaN and NaT verbatim, so
             // falling through to the cast produces pandas' spelling without any
             // new mapping. Every other same-dtype cast still short-circuits.
-            if target != DType::Utf8 || !self.has_nulls() {
+            if target != DType::Utf8 || (!self.has_nulls() && !self.holds_non_text()) {
                 return Ok(self.clone());
+            }
+            // astype(str) of an object column: every value becomes its str -
+            // an int, a list cell ('[1, 2]'), a host value ('2024-01-05') -
+            // as pandas' (fvsao.33; they stayed as they were, the cast being
+            // same-dtype).
+            if self.holds_non_text() {
+                let strings: Vec<Scalar> = self
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Utf8(text) => Scalar::Utf8(text.clone()),
+                        Scalar::Object(object) => Scalar::Utf8(object.to_string()),
+                        other => cast_scalar(other, DType::Utf8)
+                            .unwrap_or_else(|_| Scalar::Utf8(other.to_string())),
+                    })
+                    .collect();
+                return Self::new(DType::Utf8, strings);
             }
         }
         // astype('category'): the values stay, and the categories are the
@@ -27702,6 +27781,7 @@ impl Column {
             Datetime64(i64),
             Period(i64),
             Interval(u64, u64, IntervalClosed),
+            Object(String),
         }
         fn key_of(v: &Scalar) -> Key<'_> {
             if v.is_missing() {
@@ -27722,6 +27802,7 @@ impl Column {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
                 }
+                Scalar::Object(object) => Key::Object(object.repr()),
                 Scalar::Null(_) => Key::Null,
             }
         }
@@ -28166,7 +28247,7 @@ impl Column {
         // use_na_sentinel=false branch separately so multiple null
         // kinds collapse to the same code (matches the existing
         // is_missing-based check).
-        #[derive(Hash, PartialEq, Eq, Clone, Copy)]
+        #[derive(Hash, PartialEq, Eq, Clone)]
         enum LocalKey<'a> {
             Bool(bool),
             Int64(i64),
@@ -28176,6 +28257,8 @@ impl Column {
             Datetime64(i64),
             Period(i64),
             Interval(u64, u64, IntervalClosed),
+            /// An object cell, keyed by its repr.
+            Object(String),
         }
         fn key_of(s: &Scalar) -> Option<LocalKey<'_>> {
             match s {
@@ -28216,6 +28299,7 @@ impl Column {
                     let (left, right, closed) = interval_key(interval);
                     Some(LocalKey::Interval(left, right, closed))
                 }
+                Scalar::Object(object) => Some(LocalKey::Object(object.repr())),
             }
         }
 
@@ -32145,6 +32229,7 @@ impl Column {
             Datetime64(i64),
             Period(i64),
             Interval(u64, u64, IntervalClosed),
+            Object(String),
         }
         fn key_of(v: &Scalar) -> Option<Key<'_>> {
             if v.is_missing() {
@@ -32165,6 +32250,7 @@ impl Column {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
                 }
+                Scalar::Object(object) => Key::Object(object.repr()),
                 Scalar::Null(_) => return None,
             })
         }
@@ -32506,6 +32592,7 @@ impl Column {
             Datetime64(i64),
             Period(i64),
             Interval(u64, u64, IntervalClosed),
+            Object(String),
         }
 
         let mut seen: FxHashSet<Key<'_>> = FxHashSet::default();
@@ -32529,6 +32616,7 @@ impl Column {
                     let (left, right, closed) = interval_key(v);
                     Key::Interval(left, right, closed)
                 }
+                Scalar::Object(object) => Key::Object(object.repr()),
                 Scalar::Null(_) => continue,
             };
             if seen.insert(key) {

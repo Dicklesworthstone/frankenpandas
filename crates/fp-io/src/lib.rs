@@ -3096,6 +3096,7 @@ fn html_scalar_string(scalar: &Scalar, options: &HtmlWriteOptions) -> String {
             }
         }
         Scalar::Interval(iv) => html_text(&format!("{iv}"), options.escape),
+        Scalar::Object(object) => html_text(&object.to_string(), options.escape),
     }
 }
 
@@ -4184,6 +4185,7 @@ fn scalar_to_xml_value(scalar: &Scalar) -> Option<String> {
             }
         }
         Scalar::Interval(iv) => Some(format!("{iv}")),
+        Scalar::Object(object) => Some(object.to_string()),
     }
 }
 
@@ -4741,6 +4743,7 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
             }
         }
         Scalar::Interval(iv) => format!("{iv}"),
+        Scalar::Object(object) => object.to_string(),
     }
 }
 
@@ -5133,7 +5136,8 @@ fn apply_sql_coerce_float(columns: &mut [Vec<Scalar>]) {
                 | Scalar::Timedelta64(_)
                 | Scalar::Datetime64(_)
                 | Scalar::Period(_)
-                | Scalar::Interval(_) => {
+                | Scalar::Interval(_)
+                | Scalar::Object(_) => {
                     saw_text_float = false;
                     parsed_values.clear();
                     break;
@@ -5378,7 +5382,8 @@ fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
             | Scalar::Timedelta64(_)
             | Scalar::Datetime64(_)
             | Scalar::Period(_)
-            | Scalar::Interval(_) => {
+            | Scalar::Interval(_)
+            | Scalar::Object(_) => {
                 return false;
             }
         }
@@ -5608,6 +5613,7 @@ fn csv_index_label_from_scalar(value: Scalar) -> IndexLabel {
             }
         }
         Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
     }
 }
 
@@ -6149,6 +6155,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                     }
                 }
                 Scalar::Interval(iv) => fp_index::IndexLabel::Utf8(format!("{iv}")),
+                Scalar::Object(object) => fp_index::IndexLabel::Utf8(object.to_string()),
             })
             .collect();
         // Per br-frankenpandas-l0vbr: pandas pd.read_csv(index_col='col')
@@ -6934,6 +6941,11 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
             }
         }
         Scalar::Interval(iv) => serde_json::Value::String(format!("{iv}")),
+        // A list cell is a JSON array, a host value its str.
+        Scalar::Object(fp_types::ObjectValue::List(items)) => {
+            serde_json::Value::Array(items.iter().map(scalar_to_json).collect())
+        }
+        Scalar::Object(object) => serde_json::Value::String(object.to_string()),
     }
 }
 
@@ -11419,6 +11431,11 @@ fn write_excel_scalar(
                 .write_string(excel_row, excel_col, format!("{iv}"))
                 .map_err(|e| IoError::Excel(format!("write interval: {e}")))?;
         }
+        Scalar::Object(object) => {
+            worksheet
+                .write_string(excel_row, excel_col, object.to_string())
+                .map_err(|e| IoError::Excel(format!("write object: {e}")))?;
+        }
         Scalar::Float64(_) | Scalar::Null(_) => {}
     }
     Ok(())
@@ -12787,6 +12804,7 @@ fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
             }
         }
         Scalar::Interval(iv) => rusqlite::types::Value::Text(format!("{iv}")),
+        Scalar::Object(object) => rusqlite::types::Value::Text(object.to_string()),
     }
 }
 

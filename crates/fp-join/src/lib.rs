@@ -11095,7 +11095,7 @@ impl<'a> ByKey<'a> {
             Scalar::Timedelta64(v) => ByKey::Timedelta(*v),
             Scalar::Datetime64(v) => ByKey::Datetime(*v),
             Scalar::Period(v) => ByKey::Period(v.ordinal),
-            Scalar::Float64(_) | Scalar::Interval(_) => return None,
+            Scalar::Float64(_) | Scalar::Interval(_) | Scalar::Object(_) => return None,
         })
     }
 }

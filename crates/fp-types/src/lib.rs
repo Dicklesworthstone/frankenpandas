@@ -1187,6 +1187,184 @@ pub enum Scalar {
     Period(Period),
     /// Numeric interval value. Missing values remain `Scalar::Null`.
     Interval(Interval),
+    /// A pandas object cell none of the kinds above holds: a list
+    /// (`str.split`'s cells, `Series([[1, 2], [3]])`) or a host-language
+    /// value the core only carries (fvsao.33).
+    Object(ObjectValue),
+}
+
+/// A pandas object cell that is not one of [`Scalar`]'s value kinds: a list,
+/// or a value of the host language (a Python `datetime.date`, dict, numpy
+/// dtype) that the core carries without reading (fvsao.33).
+#[derive(Clone)]
+pub enum ObjectValue {
+    /// A list of values, compared and printed as Python's list.
+    List(std::sync::Arc<[Scalar]>),
+    /// A host-language value, opaque to the core.
+    Host(HostValue),
+}
+
+/// A host-language value an object cell carries - the Python binding's
+/// objects: compared and printed by the host itself.
+pub trait HostObject: Send + Sync {
+    /// `self == other` in the host language.
+    fn host_eq(&self, other: &dyn HostObject) -> bool;
+    /// The host's `repr` (`datetime.date(2024, 1, 5)`).
+    fn host_repr(&self) -> String;
+    /// The host's `str` (`2024-01-05`), how pandas prints the cell.
+    fn host_str(&self) -> String;
+    /// The host's hash, None for an unhashable value (a dict).
+    fn host_hash(&self) -> Option<u64>;
+    /// The value itself, for the host that made it to take back.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// A shared handle on a [`HostObject`].
+#[derive(Clone)]
+pub struct HostValue(std::sync::Arc<dyn HostObject>);
+
+impl HostValue {
+    #[must_use]
+    pub fn new(object: impl HostObject + 'static) -> Self {
+        Self(std::sync::Arc::new(object))
+    }
+
+    #[must_use]
+    pub fn object(&self) -> &dyn HostObject {
+        &*self.0
+    }
+}
+
+impl PartialEq for HostValue {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0.host_eq(&*other.0)
+    }
+}
+
+impl std::fmt::Debug for HostValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0.host_repr())
+    }
+}
+
+impl ObjectValue {
+    /// A list cell of `items`.
+    #[must_use]
+    pub fn list(items: Vec<Scalar>) -> Self {
+        Self::List(items.into())
+    }
+
+    /// The items of a list cell.
+    #[must_use]
+    pub fn as_list(&self) -> Option<&[Scalar]> {
+        match self {
+            Self::List(items) => Some(items),
+            Self::Host(_) => None,
+        }
+    }
+
+    /// The cell as Python's `repr` spells it (`[1, 'a', None]`).
+    #[must_use]
+    pub fn repr(&self) -> String {
+        match self {
+            Self::List(items) => {
+                let parts: Vec<String> = items.iter().map(Scalar::python_repr).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Self::Host(value) => value.0.host_repr(),
+        }
+    }
+
+    /// The cell as pandas displays it in a repr (pandas' `pprint_thing`): a
+    /// list's items unquoted (`[1, a]`), a host value by its str.
+    #[must_use]
+    pub fn pprint(&self) -> String {
+        match self {
+            Self::List(items) => {
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|item| match item {
+                        Scalar::Utf8(text) => text.clone(),
+                        Scalar::Object(object) => object.pprint(),
+                        other => other.python_repr(),
+                    })
+                    .collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Self::Host(value) => value.0.host_str(),
+        }
+    }
+}
+
+impl PartialEq for ObjectValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::List(left), Self::List(right)) => left == right,
+            (Self::Host(left), Self::Host(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+/// So a cell can key a hash map (groupby, unique, isin): lists by their
+/// items' reprs, host values by the host's hash (their repr when the host
+/// has none).
+impl Eq for ObjectValue {}
+
+impl std::hash::Hash for ObjectValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::List(items) => {
+                0_u8.hash(state);
+                for item in items.iter() {
+                    item.python_repr().hash(state);
+                }
+            }
+            Self::Host(value) => {
+                1_u8.hash(state);
+                match value.0.host_hash() {
+                    Some(hash) => hash.hash(state),
+                    None => value.0.host_repr().hash(state),
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for ObjectValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.repr())
+    }
+}
+
+/// Python's `str` of the cell - what `astype(str)` and the writers produce:
+/// a list as its repr (`['a', 1]`), a host value as its str.
+impl std::fmt::Display for ObjectValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::List(_) => formatter.write_str(&self.repr()),
+            Self::Host(value) => formatter.write_str(&value.0.host_str()),
+        }
+    }
+}
+
+/// A list cell serializes as the sequence of its items; a host value has no
+/// serialized form.
+impl Serialize for ObjectValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::List(items) => items.as_ref().serialize(serializer),
+            Self::Host(_) => Err(serde::ser::Error::custom(
+                "a host-language object cell cannot be serialized",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<Scalar>::deserialize(deserializer).map(Self::list)
+    }
 }
 
 impl std::fmt::Display for Scalar {
@@ -1215,6 +1393,58 @@ impl std::fmt::Display for Scalar {
                 }
             }
             Self::Interval(interval) => write!(f, "{interval}"),
+            Self::Object(object) => write!(f, "{object}"),
+        }
+    }
+}
+
+impl Scalar {
+    /// The value as Python's `repr` spells it inside a container (`'a'`,
+    /// `1`, `1.5`, `None`, `nan`, `[1, 2]`) - how a list cell prints its
+    /// items.
+    #[must_use]
+    pub fn python_repr(&self) -> String {
+        match self {
+            Self::Null(NullKind::NaN) => "nan".to_owned(),
+            Self::Null(NullKind::NaT) => "NaT".to_owned(),
+            Self::Null(NullKind::Null) => "None".to_owned(),
+            Self::Utf8(text) => {
+                let quote = if text.contains('\'') && !text.contains('"') {
+                    '"'
+                } else {
+                    '\''
+                };
+                let mut out = String::with_capacity(text.len() + 2);
+                out.push(quote);
+                for ch in text.chars() {
+                    match ch {
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        c if c == quote => {
+                            out.push('\\');
+                            out.push(c);
+                        }
+                        c => out.push(c),
+                    }
+                }
+                out.push(quote);
+                out
+            }
+            Self::Float64(value) => {
+                if value.is_nan() {
+                    "nan".to_owned()
+                } else if value.is_infinite() {
+                    if *value > 0.0 { "inf" } else { "-inf" }.to_owned()
+                } else if value.fract() == 0.0 && value.abs() < 1e16 {
+                    format!("{value:.1}")
+                } else {
+                    format!("{value}")
+                }
+            }
+            Self::Object(object) => object.repr(),
+            other => other.to_string(),
         }
     }
 }
@@ -1281,6 +1511,7 @@ impl Scalar {
             Self::Datetime64(_) => "Datetime64",
             Self::Period(_) => "Period",
             Self::Interval(_) => "Interval",
+            Self::Object(_) => "Object",
         }
     }
 
@@ -1296,6 +1527,8 @@ impl Scalar {
             Self::Datetime64(_) => DType::datetime64_naive(),
             Self::Period(_) => DType::Period,
             Self::Interval(_) => DType::Interval,
+            // pandas' object dtype, which this crate spells Utf8.
+            Self::Object(_) => DType::Utf8,
         }
     }
 
@@ -1699,6 +1932,10 @@ impl Scalar {
                 value: v.to_string(),
                 dtype: DType::Interval,
             }),
+            Self::Object(object) => Err(TypeError::NonNumericValue {
+                value: object.repr(),
+                dtype: DType::Utf8,
+            }),
         }
     }
 
@@ -1729,6 +1966,10 @@ impl Scalar {
                 value: v.to_string(),
                 dtype: DType::Interval,
             }),
+            Self::Object(object) => Err(TypeError::NonNumericValue {
+                value: object.repr(),
+                dtype: DType::Utf8,
+            }),
         }
     }
 
@@ -1753,6 +1994,10 @@ impl Scalar {
             }),
             Self::Period(p) => Ok(p.ordinal != 0),
             Self::Interval(_) => Ok(true),
+            // Python's truth: a list is true when it has items, any other
+            // object true.
+            Self::Object(ObjectValue::List(items)) => Ok(!items.is_empty()),
+            Self::Object(ObjectValue::Host(_)) => Ok(true),
         }
     }
 
@@ -1778,6 +2023,7 @@ impl Scalar {
             Self::Period(p) if p.ordinal == i64::MIN => "NaT".to_string(),
             Self::Period(p) => p.calendar_string(),
             Self::Interval(v) => v.to_string(),
+            Self::Object(object) => object.to_string(),
         }
     }
 }
@@ -2312,6 +2558,8 @@ fn scalar_to_string_for_astype(value: Scalar) -> String {
         Scalar::Period(p) if p.ordinal == i64::MIN => "NaT".to_owned(),
         Scalar::Period(p) => p.calendar_string(),
         Scalar::Interval(v) => v.to_string(),
+        // astype(str) of a list cell is its repr, of a host value its str.
+        Scalar::Object(object) => object.to_string(),
     }
 }
 
@@ -7482,6 +7730,9 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
         Datetime64(i64),
         Period(i64, PeriodFreq),
         Interval(u64, u64, IntervalClosed),
+        // An object cell counts by its repr (pandas hashes the object; a
+        // list would be unhashable there).
+        Object(String),
     }
 
     let mut seen = FxHashSet::default();
@@ -7505,6 +7756,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
                 normalized_float_bits(v.right),
                 v.closed,
             ),
+            Scalar::Object(object) => ScalarKey::Object(object.repr()),
             Scalar::Null(_) => continue,
         };
         seen.insert(key);
@@ -8449,6 +8701,89 @@ mod tests {
         DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType,
         cast_scalar, common_dtype, infer_dtype,
     };
+
+    /// A host value for the tests: a named thing, equal by name, unhashable
+    /// when the name is empty.
+    struct Named(&'static str);
+
+    impl super::HostObject for Named {
+        fn host_eq(&self, other: &dyn super::HostObject) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Named>()
+                .is_some_and(|other| other.0 == self.0)
+        }
+        fn host_repr(&self) -> String {
+            format!("Named({:?})", self.0)
+        }
+        fn host_str(&self) -> String {
+            self.0.to_owned()
+        }
+        fn host_hash(&self) -> Option<u64> {
+            (!self.0.is_empty()).then_some(self.0.len() as u64)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn object_cells_print_compare_and_hash_like_python_fvsao_33() {
+        use std::hash::{Hash, Hasher};
+
+        use super::{HostValue, ObjectValue};
+        let hash = |value: &ObjectValue| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        };
+        let list = ObjectValue::list(vec![
+            Scalar::Int64(1),
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Null(NullKind::Null),
+            Scalar::Float64(2.0),
+            Scalar::Object(ObjectValue::list(vec![Scalar::Utf8("b".to_owned())])),
+        ]);
+        // repr / str (astype(str), writers) quote strings; pandas' display
+        // (pprint) does not.
+        assert_eq!(list.repr(), "[1, 'a', None, 2.0, ['b']]");
+        assert_eq!(list.to_string(), "[1, 'a', None, 2.0, ['b']]");
+        assert_eq!(list.pprint(), "[1, a, None, 2.0, [b]]");
+        // An object cell is object data (pandas' object dtype, Utf8 here).
+        assert_eq!(Scalar::Object(list.clone()).dtype(), DType::Utf8);
+        assert!(!Scalar::Object(list.clone()).is_missing());
+        // Equal lists are equal and hash alike; a different item is not
+        // equal; a list never equals a host value.
+        let same = ObjectValue::list(list.as_list().unwrap().to_vec());
+        assert_eq!(list, same);
+        assert_eq!(hash(&list), hash(&same));
+        let other = ObjectValue::list(vec![Scalar::Int64(1)]);
+        assert_ne!(list, other);
+        let host = ObjectValue::Host(HostValue::new(Named("x")));
+        assert_ne!(list, host);
+        // Host values compare and print through the host.
+        assert_eq!(host, ObjectValue::Host(HostValue::new(Named("x"))));
+        assert_ne!(host, ObjectValue::Host(HostValue::new(Named("y"))));
+        assert_eq!(host.repr(), "Named(\"x\")");
+        assert_eq!(host.to_string(), "x");
+        // Python truth: an empty list is false, a host value true.
+        assert!(
+            !Scalar::Object(ObjectValue::list(Vec::new()))
+                .to_bool()
+                .unwrap()
+        );
+        assert!(Scalar::Object(host.clone()).to_bool().unwrap());
+        // A list is not a number.
+        assert!(Scalar::Object(list.clone()).to_f64().is_err());
+        // A list cell serializes as its items and reads back; a host value
+        // refuses to serialize.
+        let json = serde_json::to_string(&Scalar::Object(other.clone())).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Scalar>(&json).unwrap(),
+            Scalar::Object(other)
+        );
+        assert!(serde_json::to_string(&Scalar::Object(host)).is_err());
+    }
 
     #[test]
     fn float64_json_spells_infinity_and_round_trips() {

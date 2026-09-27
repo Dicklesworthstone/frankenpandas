@@ -1238,6 +1238,7 @@ pub(crate) fn scalar_plot_label(value: &Scalar) -> String {
         Scalar::Datetime64(value) => format_datetime_ns(*value),
         Scalar::Period(ordinal) => ordinal.calendar_string(),
         Scalar::Interval(interval) => format!("{interval}"),
+        Scalar::Object(object) => object.to_string(),
     }
 }
 
@@ -1266,6 +1267,7 @@ pub(crate) fn format_plot_table_scalar(val: &Scalar) -> String {
         Scalar::Datetime64(v) => format_datetime_ns(*v),
         Scalar::Period(v) => v.calendar_string(),
         Scalar::Interval(interval) => format!("{interval}"),
+        Scalar::Object(object) => object.to_string(),
     }
 }
 
@@ -1999,6 +2001,7 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
         Scalar::Period(ordinal) => IndexLabel::Utf8(ordinal.calendar_string()),
         Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
+        Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         // Typed null labels (br-frankenpandas-8m6ay): pandas keeps real
         // null index labels (pivot rows, categorical value_counts buckets)
         // and renders them None/NaN/NaT — the '<null>' string collided with
@@ -3245,6 +3248,8 @@ enum ScalarKey<'a> {
     Datetime64(i64),
     Period(i64),
     Interval(u64, u64, fp_types::IntervalClosed),
+    /// An object cell (a list, a host value), by its own hash and equality.
+    Object(&'a fp_types::ObjectValue),
 }
 
 type GroupKey<'a> = Vec<ScalarKey<'a>>;
@@ -3290,6 +3295,7 @@ fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
             interval.right.to_bits(),
             interval.closed,
         ),
+        Scalar::Object(object) => ScalarKey::Object(object),
     }
 }
 
@@ -3360,6 +3366,7 @@ struct IsinIndex<'a> {
     datetimes: FxHashSet<i64>,
     periods: FxHashSet<i64>,
     intervals: FxHashSet<(u64, u64, fp_types::IntervalClosed)>,
+    objects: FxHashSet<&'a fp_types::ObjectValue>,
     // Per br-frankenpandas: pandas isin matches a missing value ONLY against a
     // test value of the SAME missing kind — None (Null) ≠ np.nan (NaN) ≠ NaT.
     // e.g. Int64 NA matches pd.NA but not np.nan; float NaN matches np.nan but
@@ -3393,6 +3400,7 @@ impl<'a> IsinIndex<'a> {
             datetimes: FxHashSet::default(),
             periods: FxHashSet::default(),
             intervals: FxHashSet::default(),
+            objects: FxHashSet::default(),
             missing_kinds: FxHashSet::default(),
         };
         for tv in test_values {
@@ -3428,6 +3436,9 @@ impl<'a> IsinIndex<'a> {
                         interval.right.to_bits(),
                         interval.closed,
                     ));
+                }
+                Scalar::Object(object) => {
+                    idx.objects.insert(object);
                 }
                 Scalar::Null(_) => {}
             }
@@ -3501,6 +3512,7 @@ impl<'a> IsinIndex<'a> {
                 interval.right.to_bits(),
                 interval.closed,
             )),
+            Scalar::Object(object) => self.objects.contains(object),
             Scalar::Null(_) => false,
         }
     }
@@ -3617,6 +3629,7 @@ enum ModeKey<'a> {
     Datetime(i64),
     Period(i64),
     Interval(u64, u64, fp_types::IntervalClosed),
+    Object(&'a fp_types::ObjectValue),
 }
 
 fn mode_key(scalar: &Scalar) -> ModeKey<'_> {
@@ -3647,6 +3660,7 @@ fn mode_key(scalar: &Scalar) -> ModeKey<'_> {
             interval.right.to_bits(),
             interval.closed,
         ),
+        Scalar::Object(object) => ModeKey::Object(object),
     }
 }
 
@@ -4088,6 +4102,12 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
                 ord
             }
         }
+        // Object cells sort after every other kind, among themselves by
+        // their repr (Python's list order is itemwise; the repr agrees for
+        // the common one-kind lists).
+        (ScalarKey::Object(a_val), ScalarKey::Object(b_val)) => a_val.repr().cmp(&b_val.repr()),
+        (ScalarKey::Object(_), _) => Ordering::Greater,
+        (_, ScalarKey::Object(_)) => Ordering::Less,
         (Interval(_, _, _), _) => Ordering::Greater,
         (_, Interval(_, _, _)) => Ordering::Less,
         (Timedelta64(_), _) => Ordering::Greater,
@@ -4410,6 +4430,11 @@ fn scalar_to_json_value(value: &Scalar) -> Value {
         Scalar::Period(v) if v.ordinal == i64::MIN => Value::Null,
         Scalar::Period(v) => Value::String(v.calendar_string()),
         Scalar::Interval(interval) => Value::String(format!("{interval}")),
+        // A list cell is a JSON array (pandas' to_json), a host value its str.
+        Scalar::Object(fp_types::ObjectValue::List(items)) => {
+            Value::Array(items.iter().map(scalar_to_json_value).collect())
+        }
+        Scalar::Object(object) => Value::String(object.to_string()),
     }
 }
 
@@ -4488,6 +4513,15 @@ impl Serialize for CellJson<'_> {
             Scalar::Period(v) if v.ordinal == i64::MIN => serializer.serialize_none(),
             Scalar::Period(v) => serializer.serialize_str(&v.calendar_string()),
             Scalar::Interval(interval) => serializer.serialize_str(&format!("{interval}")),
+            Scalar::Object(fp_types::ObjectValue::List(items)) => {
+                use serde::ser::SerializeSeq;
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items.iter() {
+                    seq.serialize_element(&CellJson(item))?;
+                }
+                seq.end()
+            }
+            Scalar::Object(object) => serializer.serialize_str(&object.to_string()),
         }
     }
 }
@@ -10615,6 +10649,7 @@ impl Series {
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
                 Scalar::Period(ordinal) => ordinal.calendar_string(),
                 Scalar::Interval(interval) => format!("{interval}"),
+                Scalar::Object(object) => object.to_string(),
             };
             lines.push(format!("{lbl_str:<label_width$}    {val_str}"));
         }
@@ -19015,6 +19050,7 @@ impl Series {
             Scalar::Datetime64(v) => *v != Timedelta::NAT && *v != 0,
             Scalar::Period(v) => v.ordinal != i64::MIN && v.ordinal != 0,
             Scalar::Interval(_) => true,
+            Scalar::Object(_) => value.to_bool().unwrap_or(true),
         }
     }
 
@@ -26960,6 +26996,7 @@ impl Series {
                 Scalar::Period(v) if v.ordinal == i64::MIN => String::new(),
                 Scalar::Period(v) => v.calendar_string(),
                 Scalar::Interval(interval) => format!("{interval}"),
+                Scalar::Object(object) => csv_escape(&object.to_string(), sep),
             }
         }
 
@@ -27072,6 +27109,7 @@ impl Series {
                 Scalar::Period(v) if v.ordinal == i64::MIN => quote_str(na_rep, false),
                 Scalar::Period(v) => quote_str(&v.calendar_string(), false),
                 Scalar::Interval(interval) => quote_str(&format!("{interval}"), false),
+                Scalar::Object(object) => quote_str(&object.to_string(), false),
             }
         }
 
@@ -28441,6 +28479,19 @@ impl Series {
         // Per br-frankenpandas-g2u00: pandas Series.combine preserves
         // self.index.name through the outer-aligned result.
         self.with_labels_and_values_preserving_name(left_aligned.index().labels().to_vec(), out)
+    }
+
+    /// pandas' `s.explode(ignore_index)` over list cells (fvsao.33): a list
+    /// cell becomes one row per item (an empty list one row of NaN), any
+    /// other value stays one row; the result is object, as pandas', and the
+    /// index repeats its labels (a fresh RangeIndex with `ignore_index`).
+    pub fn explode_lists(&self, ignore_index: bool) -> Result<Self, FrameError> {
+        let frame = self.to_frame(Some("values"))?;
+        let exploded = frame.explode_lists(&["values"], ignore_index)?;
+        let column = exploded.column("values").cloned().ok_or_else(|| {
+            FrameError::CompatibilityRejected("explode lost its column".to_owned())
+        })?;
+        Self::new(self.name.clone(), exploded.index().clone(), column)
     }
 
     /// Explode a Series of string values by splitting on a separator.
@@ -30511,6 +30562,7 @@ impl Series {
                     }
                     Scalar::Period(n) => n.calendar_string(),
                     Scalar::Interval(interval) => format!("{interval}"),
+                    Scalar::Object(object) => object.to_string(),
                     Scalar::Null(_) => return Scalar::Null(NullKind::NaN),
                 };
                 mapping
@@ -49718,6 +49770,10 @@ impl ListAccessor<'_> {
         if value.is_missing() {
             return Ok(None);
         }
+        // A list cell is the list itself (fvsao.33).
+        if let Scalar::Object(fp_types::ObjectValue::List(items)) = value {
+            return Ok(Some(items.to_vec()));
+        }
 
         let Scalar::Utf8(raw) = value else {
             return Err(FrameError::CompatibilityRejected(format!(
@@ -50836,6 +50892,62 @@ impl StringAccessor<'_> {
         Series::new(name, index, Column::from_bool_values(out))
     }
 
+    /// When the Series holds list cells (fvsao.33; str.split's result),
+    /// pandas' str methods act on each cell as Python would: `on_list` on a
+    /// list's items, `on_text` on a string, NaN on anything else - with
+    /// pandas' object inference (ints beside a missing value are float64).
+    /// None when it holds no list cell, for the string paths to run.
+    fn over_list_cells(
+        &self,
+        on_list: impl Fn(&[Scalar]) -> Scalar,
+        on_text: impl Fn(&str) -> Scalar,
+    ) -> Option<Result<Series, FrameError>> {
+        let values = self.series.values();
+        if !values
+            .iter()
+            .any(|value| matches!(value, Scalar::Object(fp_types::ObjectValue::List(_))))
+        {
+            return None;
+        }
+        let out: Vec<Scalar> = values
+            .iter()
+            .map(|value| match value {
+                Scalar::Object(fp_types::ObjectValue::List(items)) => on_list(items),
+                Scalar::Utf8(text) => on_text(text),
+                // A missing cell stays the missing value it is (None, NaN).
+                missing if missing.is_missing() => missing.clone(),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        // Every result missing is pandas' float64 of NaN.
+        if out.iter().all(Scalar::is_missing) {
+            return Some(
+                Column::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); out.len()])
+                    .map_err(FrameError::from)
+                    .and_then(|column| {
+                        Series::new(self.series.name(), self.series.index().clone(), column)
+                    }),
+            );
+        }
+        let out: Vec<Scalar> = if out.iter().any(Scalar::is_missing) {
+            out.into_iter()
+                .map(|value| match value {
+                    Scalar::Int64(n) => Scalar::Float64(n as f64),
+                    other => other,
+                })
+                .collect()
+        } else {
+            out
+        };
+        Some(
+            Column::from_values(out)
+                .map_err(FrameError::from)
+                .and_then(|column| {
+                    Series::new(self.series.name(), self.series.index().clone(), column)
+                }),
+        )
+    }
+
     fn apply_str<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
@@ -51618,6 +51730,13 @@ impl StringAccessor<'_> {
     /// Per br-frankenpandas-rg8ys.6.6: pandas returns float64 (not int64)
     /// to represent nullable integers. Nulls become NaN.
     pub fn len(&self) -> Result<Series, FrameError> {
+        // A list cell's length (str.split(...).str.len()); fvsao.33.
+        if let Some(result) = self.over_list_cells(
+            |items| Scalar::Int64(i64::try_from(items.len()).unwrap_or(i64::MAX)),
+            |text| Scalar::Int64(i64::try_from(text.chars().count()).unwrap_or(i64::MAX)),
+        ) {
+            return result;
+        }
         // ASCII FAST PATH. `str_len @100k` was CERTIFIED SLOWER at 0.853x against
         // pandas 2.2.3 on Arrow-backed strings (three gate clauses, A/A nulls
         // 0.9995658 / 1.0004774), at 11.5ns/element for 15-byte inputs — about
@@ -52777,6 +52896,25 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.get(i)`. Returns NaN if index is out of bounds.
     pub fn get(&self, i: i64) -> Result<Series, FrameError> {
+        // A list cell's i-th item (str.split(...).str.get(0)); fvsao.33.
+        let position = |len: usize| {
+            let len = i64::try_from(len).unwrap_or(i64::MAX);
+            let at = if i < 0 { i + len } else { i };
+            (0..len).contains(&at).then_some(at as usize)
+        };
+        if let Some(result) = self.over_list_cells(
+            |items| {
+                position(items.len()).map_or(Scalar::Null(NullKind::NaN), |at| items[at].clone())
+            },
+            |text| {
+                let chars: Vec<char> = text.chars().collect();
+                position(chars.len()).map_or(Scalar::Null(NullKind::NaN), |at| {
+                    Scalar::Utf8(chars[at].to_string())
+                })
+            },
+        ) {
+            return result;
+        }
         // Per br-frankenpandas: pandas str.get supports NEGATIVE indices
         // (Python-style) — get(-1) is the last character, get(-len-1) is out of
         // range. Out-of-range (either direction) yields NaN. Verified vs live
@@ -61296,6 +61434,16 @@ pub fn to_timedelta_with_options(
                 ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
                 ToTimedeltaErrors::Ignore => val.clone(),
             },
+            Scalar::Object(object) => match options.errors {
+                ToTimedeltaErrors::Raise => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "cannot convert {} to timedelta",
+                        object.repr()
+                    )));
+                }
+                ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                ToTimedeltaErrors::Ignore => val.clone(),
+            },
         };
         converted.push(result);
     }
@@ -66208,6 +66356,7 @@ impl<'a> StyledDataFrame<'a> {
             Scalar::Datetime64(v) => Self::escape_html_text(&format_datetime_ns(*v)),
             Scalar::Period(v) => v.calendar_string(),
             Scalar::Interval(interval) => Self::escape_html_text(&format!("{interval}")),
+            Scalar::Object(object) => Self::escape_html_text(&object.to_string()),
         }
     }
 
@@ -71889,6 +72038,7 @@ impl DataFrame {
                     Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(v)),
                     Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
                     Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
+                    Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
                 })
                 .collect::<Vec<_>>();
 
@@ -73471,6 +73621,12 @@ impl DataFrame {
                     mix_digest(state, value.left.to_bits());
                     mix_digest(state, value.right.to_bits());
                 }
+                Scalar::Object(value) => {
+                    mix_digest(state, 9);
+                    let repr = value.repr();
+                    mix_digest(state, repr.len() as u64);
+                    mix_digest(state, bytes_digest(repr.as_bytes()));
+                }
             }
         }
 
@@ -74635,6 +74791,7 @@ impl DataFrame {
                                 Scalar::Interval(interval) => {
                                     IndexLabel::Utf8(format!("{interval}"))
                                 }
+                                Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
                             })
                             .unwrap_or(IndexLabel::Utf8(String::new()))
                     })
@@ -75815,6 +75972,7 @@ impl DataFrame {
                         Scalar::Datetime64(v) => Scalar::Utf8(format_datetime_ns(v)),
                         Scalar::Period(v) => Scalar::Utf8(v.calendar_string()),
                         Scalar::Interval(interval) => Scalar::Utf8(format!("{interval}")),
+                        object @ Scalar::Object(_) => object,
                     })
                     .collect();
                 Series::from_values(name, labels, utf8_values).map(|s| s.with_range_span(span))
@@ -85023,6 +85181,7 @@ impl DataFrame {
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
                 Scalar::Period(v) => v.calendar_string(),
                 Scalar::Interval(interval) => format!("{interval}"),
+                Scalar::Object(object) => object.to_string(),
             }
         }
 
@@ -85126,6 +85285,7 @@ impl DataFrame {
                 Scalar::Datetime64(v) => escape_html(&format_datetime_ns(*v)),
                 Scalar::Period(v) => v.calendar_string(),
                 Scalar::Interval(interval) => escape_html(&format!("{interval}")),
+                Scalar::Object(object) => escape_html(&object.to_string()),
             }
         }
 
@@ -85741,6 +85901,7 @@ impl DataFrame {
                     Scalar::Period(v) if v.ordinal == i64::MIN => {}
                     Scalar::Period(v) => out.push_str(&v.calendar_string()),
                     Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
+                    Scalar::Object(object) => out.push_str(&csv_escape(&object.to_string(), sep)),
                 }
             }
             out.push('\n');
@@ -85834,6 +85995,7 @@ impl DataFrame {
                     Scalar::Period(v) if v.ordinal == i64::MIN => out.push_str(&na_rep_escaped),
                     Scalar::Period(v) => out.push_str(&v.calendar_string()),
                     Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
+                    Scalar::Object(object) => out.push_str(&csv_escape(&object.to_string(), sep)),
                 }
             }
             out.push('\n');
@@ -85999,6 +86161,7 @@ impl DataFrame {
                     Scalar::Interval(interval) => {
                         out.push_str(&quote_str(&format!("{interval}"), false))
                     }
+                    Scalar::Object(object) => out.push_str(&quote_str(&object.to_string(), false)),
                 }
             }
             out.push('\n');
@@ -86435,6 +86598,7 @@ impl DataFrame {
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
                 Scalar::Period(v) => v.calendar_string(),
                 Scalar::Interval(interval) => format!("{interval}"),
+                Scalar::Object(object) => object.to_string(),
             }
         }
 
@@ -86570,6 +86734,7 @@ impl DataFrame {
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
                 Scalar::Period(v) => v.calendar_string(),
                 Scalar::Interval(interval) => format!("{interval}"),
+                Scalar::Object(object) => object.to_string(),
             }
         }
 
@@ -86644,6 +86809,7 @@ impl DataFrame {
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
                 Scalar::Period(v) => v.calendar_string(),
                 Scalar::Interval(interval) => format!("{interval}"),
+                Scalar::Object(object) => object.to_string(),
             }
         }
 
@@ -90804,6 +90970,7 @@ impl DataFrame {
                     Scalar::Datetime64(v) => *v != 0 && *v != Timedelta::NAT,
                     Scalar::Period(v) => v.ordinal != 0 && v.ordinal != i64::MIN,
                     Scalar::Interval(_) => true,
+                    Scalar::Object(_) => val.to_bool().unwrap_or(true),
                 }
             });
             values.push(Scalar::Bool(result));
@@ -90858,6 +91025,7 @@ impl DataFrame {
                     Scalar::Datetime64(v) => *v != 0 && *v != Timedelta::NAT,
                     Scalar::Period(v) => v.ordinal != 0 && v.ordinal != i64::MIN,
                     Scalar::Interval(_) => true,
+                    Scalar::Object(_) => val.to_bool().unwrap_or(true),
                 }
             });
             values.push(Scalar::Bool(result));
@@ -97421,6 +97589,66 @@ impl DataFrame {
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
         };
+        if ignore_index {
+            out.reset_index(true)
+        } else {
+            Ok(out)
+        }
+    }
+
+    /// pandas' `df.explode(columns, ignore_index)` over list cells
+    /// (fvsao.33): a row whose cell in `columns` is a list becomes one row
+    /// per item (an empty list one row of NaN), a non-list value stays one
+    /// row; several columns must hold lists of the same length in each row
+    /// (pandas' ValueError otherwise). The other columns repeat with their
+    /// dtypes, the exploded ones are object, as pandas', and the index
+    /// repeats its labels (a fresh RangeIndex with `ignore_index`).
+    pub fn explode_lists(&self, columns: &[&str], ignore_index: bool) -> Result<Self, FrameError> {
+        if columns.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "column must be nonempty".to_owned(),
+            ));
+        }
+        let sources: Vec<&Column> = columns
+            .iter()
+            .map(|name| {
+                self.column(name).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!("explode: column '{name}' not found"))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let items_of = |value: &Scalar| -> Vec<Scalar> {
+            match value {
+                Scalar::Object(fp_types::ObjectValue::List(items)) if items.is_empty() => {
+                    vec![Scalar::Null(NullKind::NaN)]
+                }
+                Scalar::Object(fp_types::ObjectValue::List(items)) => items.to_vec(),
+                other => vec![other.clone()],
+            }
+        };
+        let mut rows: Vec<usize> = Vec::new();
+        let mut exploded: Vec<Vec<Scalar>> = vec![Vec::new(); sources.len()];
+        for row in 0..self.len() {
+            let cells: Vec<Vec<Scalar>> = sources
+                .iter()
+                .map(|column| items_of(&column.values()[row]))
+                .collect();
+            let count = cells[0].len();
+            if cells.iter().any(|items| items.len() != count) {
+                return Err(FrameError::CompatibilityRejected(
+                    "columns must have matching element counts".to_owned(),
+                ));
+            }
+            rows.extend(std::iter::repeat_n(row, count));
+            for (out, items) in exploded.iter_mut().zip(cells) {
+                out.extend(items);
+            }
+        }
+        let mut out = self.take_rows_by_positions(&rows)?;
+        for (name, values) in columns.iter().zip(exploded) {
+            out = out.with_column(*name, Column::from_object_values(values))?;
+        }
+        let out = out.with_labels_of(self);
         if ignore_index {
             out.reset_index(true)
         } else {
@@ -126671,6 +126899,110 @@ mod tests {
         };
         assert!(concat(&[&ints, &text]).is_err());
         assert!(concat(&[&ints, &ints]).is_ok());
+    }
+
+    #[test]
+    fn list_cells_explode_index_and_compare_like_pandas_fvsao_33() {
+        use fp_types::ObjectValue;
+        let list = |items: Vec<Scalar>| Scalar::Object(ObjectValue::list(items));
+        let text = |value: &str| Scalar::Utf8(value.to_owned());
+        let lists = Series::from_values(
+            "t",
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(11),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(13),
+            ],
+            vec![
+                list(vec![text("a"), text("b")]),
+                list(vec![text("c")]),
+                list(Vec::new()),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+        // A list cell survives construction as itself (object data).
+        assert!(matches!(lists.values()[0], Scalar::Object(_)));
+        // explode: one row per item under the row's label, an empty list one
+        // NaN row, a missing cell itself; ignore_index renumbers.
+        let exploded = lists.explode_lists(false).unwrap();
+        assert_eq!(
+            exploded.index().labels(),
+            &[
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(11),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(13),
+            ]
+        );
+        assert_eq!(exploded.values()[1], text("b"));
+        assert!(exploded.values()[3].is_missing());
+        assert_eq!(
+            lists.explode_lists(true).unwrap().index().labels()[4],
+            IndexLabel::Int64(4)
+        );
+        // A string is not a list: it does not explode.
+        let strings =
+            Series::from_values("s", vec![IndexLabel::Int64(0)], vec![text("a,b")]).unwrap();
+        assert_eq!(strings.explode_lists(false).unwrap().len(), 1);
+        // str.get / str.len act on each list's items; a missing cell stays
+        // missing.
+        assert_eq!(lists.str().get(-1).unwrap().values()[0], text("b"));
+        assert!(lists.str().get(5).unwrap().values()[1].is_missing());
+        let lengths = lists.str().len().unwrap();
+        assert_eq!(lengths.values()[0], Scalar::Float64(2.0));
+        assert_eq!(lengths.values()[2], Scalar::Float64(0.0));
+        assert!(lengths.values()[3].is_missing());
+        // A frame explodes its list column, the other columns repeated; two
+        // list columns must match in length per row.
+        let frame = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        list(vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                        list(vec![Scalar::Int64(3)]),
+                    ],
+                ),
+                ("b", vec![text("x"), text("y")]),
+            ],
+        )
+        .unwrap();
+        let rows = frame.explode_lists(&["a"], false).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.column("b").unwrap().values()[1], text("x"));
+        let mismatched = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![list(vec![Scalar::Int64(1), Scalar::Int64(2)])]),
+                ("b", vec![list(vec![text("p")])]),
+            ],
+        )
+        .unwrap();
+        assert!(mismatched.explode_lists(&["a", "b"], false).is_err());
+        // == compares list cells by their items; astype(str) spells them as
+        // Python's str.
+        let other = Series::from_values(
+            "o",
+            vec![IndexLabel::Int64(10), IndexLabel::Int64(11)],
+            vec![list(vec![text("a"), text("b")]), list(vec![text("z")])],
+        )
+        .unwrap();
+        let head = lists.head(2).unwrap();
+        let equal = head
+            .column()
+            .binary_comparison(other.column(), fp_columnar::ComparisonOp::Eq);
+        assert_eq!(
+            equal.unwrap().values().to_vec(),
+            vec![Scalar::Bool(true), Scalar::Bool(false)]
+        );
+        assert_eq!(
+            head.astype(DType::Utf8).unwrap().values()[0],
+            text("['a', 'b']")
+        );
     }
 
     #[test]

@@ -622,6 +622,7 @@ fn emit_groupby_result<'a>(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(Scalar::Float64(sum));
     }
@@ -641,6 +642,7 @@ enum GroupKeyRef<'a> {
     Datetime64(i64),
     Period(i64),
     Interval(u64, u64, fp_types::IntervalClosed),
+    Object(&'a fp_types::ObjectValue),
 }
 
 impl<'a> GroupKeyRef<'a> {
@@ -682,6 +684,7 @@ impl<'a> GroupKeyRef<'a> {
             Scalar::Interval(iv) => {
                 Self::Interval(iv.left.to_bits(), iv.right.to_bits(), iv.closed)
             }
+            Scalar::Object(object) => Self::Object(object),
         }
     }
 }
@@ -791,6 +794,7 @@ fn groupby_sum_timedelta64(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(Scalar::Timedelta64(sum));
     }
@@ -875,6 +879,7 @@ fn groupby_sum_utf8(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(Scalar::Utf8(joined));
     }
@@ -986,6 +991,7 @@ fn groupby_sum_int64(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(match i64::try_from(total) {
             Ok(v) => Scalar::Int64(v),
@@ -1931,6 +1937,7 @@ fn try_groupby_count_size_counter(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(Scalar::Int64(if matches!(func, AggFunc::Count) {
             *non_missing
@@ -2006,6 +2013,7 @@ fn try_groupby_mean_numeric_counter(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(if *count == 0 {
             Scalar::Null(NullKind::NaN)
@@ -2121,6 +2129,7 @@ fn try_groupby_var_std_numeric_counter(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(if group.count <= 1 {
             Scalar::Null(NullKind::NaN)
@@ -2149,6 +2158,7 @@ fn scalar_group_label(label: &Scalar) -> IndexLabel {
         Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
         Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
         Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
     }
 }
 
@@ -2249,6 +2259,7 @@ enum NuniqueValueKey<'a> {
     Datetime64(i64),
     Period(i64, PeriodFreq),
     Interval(u64, u64, IntervalClosed),
+    Object(&'a fp_types::ObjectValue),
 }
 
 fn nunique_value_key(value: &Scalar) -> Option<NuniqueValueKey<'_>> {
@@ -2271,6 +2282,7 @@ fn nunique_value_key(value: &Scalar) -> Option<NuniqueValueKey<'_>> {
             if v.right == 0.0 { 0.0 } else { v.right }.to_bits(),
             v.closed,
         ),
+        Scalar::Object(object) => NuniqueValueKey::Object(object),
         Scalar::Null(_) => return None,
     })
 }
@@ -2471,6 +2483,7 @@ fn try_groupby_min_max_scalar_slot(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(if *invalid {
             Scalar::Null(NullKind::NaN)
@@ -2549,6 +2562,7 @@ fn try_groupby_first_last_scalar_slot(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(slot.clone().unwrap_or(Scalar::Null(NullKind::NaN)));
     }
@@ -2654,6 +2668,7 @@ fn try_groupby_sum_prod_integer_counter(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(if take_sum {
             match i64::try_from(group.sum) {
@@ -2748,6 +2763,7 @@ fn try_groupby_sum_prod_float_counter(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
         out_values.push(Scalar::Float64(if take_sum {
             group.sum
@@ -3034,6 +3050,7 @@ pub fn groupby_agg(
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
             Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Object(object) => IndexLabel::Utf8(object.to_string()),
         });
 
         let agg_value = match func {
@@ -3284,6 +3301,12 @@ fn scalar_to_hash_bits(value: &Scalar) -> u64 {
         Scalar::Datetime64(v) => *v as u64,
         Scalar::Period(v) => v.ordinal as u64,
         Scalar::Interval(iv) => iv.left.to_bits() ^ iv.right.to_bits(),
+        Scalar::Object(object) => {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = rustc_hash::FxHasher::default();
+            object.hash(&mut hasher);
+            hasher.finish()
+        }
     }
 }
 

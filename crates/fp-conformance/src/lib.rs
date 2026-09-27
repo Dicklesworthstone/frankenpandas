@@ -18661,6 +18661,7 @@ fn encode_groupby_composite_key(values: &[Scalar]) -> Result<String, String> {
                 format!("pd:{}:{}", v.freq, v.ordinal)
             }
             Scalar::Interval(iv) => format!("iv:{iv}"),
+            Scalar::Object(object) => format!("obj:{}", object.repr()),
             Scalar::Null(_) => {
                 return Err("groupby composite key component cannot be null".to_owned());
             }
