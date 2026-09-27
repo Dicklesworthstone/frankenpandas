@@ -19523,7 +19523,9 @@ impl Series {
                 }
                 return Ok(Scalar::Int64(total));
             }
-            DType::Bool => {
+            // The nullable boolean counts its Trues too, as an int (it summed
+            // as float: 2.0 for pandas' 2).
+            DType::Bool | DType::BoolNullable => {
                 let mut total: i64 = 0;
                 for val in self.column.values() {
                     if let Scalar::Bool(b) = val {
@@ -22050,38 +22052,61 @@ impl Series {
     /// `pd.Series.cumsum(skipna=...)`. `skipna=false` propagates the first
     /// NaN/NaT through every later position.
     pub fn cumsum_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
-        if skipna {
+        let out = if skipna {
             self.cumsum()
         } else {
             self.cum_skipna_false(Self::cumsum)
-        }
+        }?;
+        self.masked_cumulative(out, true)
     }
 
     /// Cumulative product with an explicit `skipna` (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cumprod_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
-        if skipna {
+        let out = if skipna {
             self.cumprod()
         } else {
             self.cum_skipna_false(Self::cumprod)
-        }
+        }?;
+        self.masked_cumulative(out, true)
     }
 
     /// Cumulative maximum with an explicit `skipna` (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cummax_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
-        if skipna {
+        let out = if skipna {
             self.cummax()
         } else {
             self.cum_skipna_false(Self::cummax)
-        }
+        }?;
+        self.masked_cumulative(out, false)
     }
 
     /// Cumulative minimum with an explicit `skipna` (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cummin_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
-        if skipna {
+        let out = if skipna {
             self.cummin()
         } else {
             self.cum_skipna_false(Self::cummin)
+        }?;
+        self.masked_cumulative(out, false)
+    }
+
+    /// A cumulative result over a nullable Series in pandas' masked dtype
+    /// (it came back float64 or object): Int64 stays Int64, Float64 Float64,
+    /// and boolean sums or products to Int64 (`arithmetic`) while its
+    /// running max / min stay boolean; a numpy Series' result as is.
+    fn masked_cumulative(&self, out: Self, arithmetic: bool) -> Result<Self, FrameError> {
+        let target = match self.column.dtype() {
+            DType::Int64Nullable => DType::Int64Nullable,
+            DType::Float64Nullable => DType::Float64Nullable,
+            DType::BoolNullable if arithmetic => DType::Int64Nullable,
+            DType::BoolNullable => DType::BoolNullable,
+            _ => return Ok(out),
+        };
+        if out.column.dtype() == target {
+            return Ok(out);
         }
+        let column = out.column.astype(target)?;
+        Self::new(out.name.clone(), out.index.clone(), column)
     }
 
     /// Cumulative product, skipping NaN.
@@ -23303,6 +23328,39 @@ impl Series {
     }
 
     pub fn isin(&self, test_values: &[Scalar]) -> Result<Self, FrameError> {
+        let flags = self.isin_flags(test_values)?;
+        self.masked_bool_result(flags, false)
+    }
+
+    /// A bool result over this Series as pandas' masked arrays give it: for
+    /// a nullable (Int64 / Float64 / boolean) Series the nullable `boolean`
+    /// dtype, <NA> where this Series is missing when `propagate_missing`
+    /// (`between`), else False there (`isin`); a numpy Series' result as is.
+    fn masked_bool_result(&self, flags: Self, propagate_missing: bool) -> Result<Self, FrameError> {
+        if !self.column.dtype().is_nullable() {
+            return Ok(flags);
+        }
+        let values: Vec<Scalar> = flags
+            .column
+            .values()
+            .iter()
+            .zip(self.column.values())
+            .map(|(flag, value)| {
+                if propagate_missing && value.is_missing() {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    flag.clone()
+                }
+            })
+            .collect();
+        Self::new(
+            flags.name.clone(),
+            flags.index.clone(),
+            Column::new(DType::BoolNullable, values)?,
+        )
+    }
+
+    fn isin_flags(&self, test_values: &[Scalar]) -> Result<Self, FrameError> {
         // ⚠️ A CATEGORICAL COLUMN HOLDS CODES, and this is the worst place for
         // that to go unnoticed: the Int64 fast path below would happily match a
         // user's integers against the CODES and return a confidently wrong
@@ -23501,8 +23559,19 @@ impl Series {
     /// - `"left"`: `left <= x < right`
     /// - `"right"`: `left < x <= right`
     ///
-    /// Null elements produce `false`.
+    /// Null elements produce `false`; a nullable Series gives the `boolean`
+    /// dtype with <NA> there, as pandas' masked comparison.
     pub fn between(
+        &self,
+        left: &Scalar,
+        right: &Scalar,
+        inclusive: &str,
+    ) -> Result<Self, FrameError> {
+        let flags = self.between_flags(left, right, inclusive)?;
+        self.masked_bool_result(flags, true)
+    }
+
+    fn between_flags(
         &self,
         left: &Scalar,
         right: &Scalar,
@@ -28581,17 +28650,20 @@ impl Series {
         //
         // FrankenPandas has no separate `string` extension dtype distinct from
         // Utf8, so the faithful result for a string column is the column
-        // itself; every other dtype was already returned unchanged.
-        // (br-frankenpandas-fixture-divergence-triage-9s0c4)
-        Ok(self.clone())
+        // itself. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+        //
+        // Numbers and bools take pandas' nullable dtypes (see
+        // `convert_column_dtypes`; they were returned unchanged).
+        let column = convert_column_dtypes(&self.column)?;
+        Self::new(self.name.clone(), self.index.clone(), column)
     }
 
     /// Infer object dtypes to best-possible scalar dtypes.
     ///
     /// Matches `pd.Series.infer_objects()` for the current Utf8-backed
-    /// object representation.
+    /// object representation: numpy dtypes stay, text stays text.
     pub fn infer_objects(&self) -> Result<Self, FrameError> {
-        self.convert_dtypes()
+        Ok(self.clone())
     }
 
     /// Map values with optional NaN skipping.
@@ -63122,6 +63194,60 @@ pub fn cut_bins(
     binned_categorical(series, bin_indices, &categories)
 }
 
+/// A column as pandas' `convert_dtypes` retypes it (live pandas 2.2.3): ints
+/// to the nullable Int64; floats to Int64 when every present value is a
+/// whole number (none present included), else to Float64; bools, and an
+/// object column of bools beside missing values, to boolean; an object
+/// column of numbers as those numbers would. Text stays text (pandas'
+/// `string` dtype has no separate form here), as do mixed object columns,
+/// empty or all-missing object columns, datetimes and categoricals.
+fn convert_column_dtypes(column: &Column) -> Result<Column, FrameError> {
+    let values = column.values();
+    let whole = |value: &Scalar| match value {
+        Scalar::Int64(_) => true,
+        Scalar::Float64(v) => v.is_finite() && v.fract() == 0.0,
+        _ => false,
+    };
+    let numbers = |present: &mut dyn Iterator<Item = &Scalar>| {
+        let mut all_whole = true;
+        for value in present {
+            match value {
+                Scalar::Int64(_) | Scalar::Float64(_) => all_whole &= whole(value),
+                _ => return None,
+            }
+        }
+        Some(if all_whole {
+            DType::Int64Nullable
+        } else {
+            DType::Float64Nullable
+        })
+    };
+    let mut present = values.iter().filter(|value| !value.is_missing());
+    let target = match column.dtype() {
+        DType::Int64 | DType::Int64Nullable => Some(DType::Int64Nullable),
+        DType::Bool | DType::BoolNullable
+            if present
+                .clone()
+                .all(|value| matches!(value, Scalar::Bool(_))) =>
+        {
+            Some(DType::BoolNullable)
+        }
+        DType::Float64 | DType::Float64Nullable => numbers(&mut present),
+        DType::Utf8 => match present.clone().next() {
+            None => None,
+            Some(Scalar::Bool(_)) => present
+                .all(|value| matches!(value, Scalar::Bool(_)))
+                .then_some(DType::BoolNullable),
+            Some(_) => numbers(&mut present),
+        },
+        _ => None,
+    };
+    match target {
+        Some(target) if target != column.dtype() => Ok(column.astype(target)?),
+        _ => Ok(column.clone()),
+    }
+}
+
 /// Quantile-based binning.
 ///
 /// Matches `pd.qcut(series, q)`. Creates bins with approximately equal
@@ -63418,6 +63544,34 @@ fn i64_slice_min_simd(data: &[i64]) -> Option<i64> {
 }
 
 fn concat_series_columns(series_list: &[&Series], total_len: usize) -> Result<Column, FrameError> {
+    // A nullable (masked) piece makes pandas' masked result: ints Int64, any
+    // float beside them Float64, bools boolean; bools beside numbers stay
+    // object (Int64 pieces came back an int64 column holding nulls).
+    if series_list.iter().any(|s| s.column().dtype().is_nullable()) {
+        let dtypes: Vec<DType> = series_list.iter().map(|s| s.column().dtype()).collect();
+        let all = |kinds: &[DType]| dtypes.iter().all(|dtype| kinds.contains(dtype));
+        let target = if all(&[DType::Bool, DType::BoolNullable]) {
+            Some(DType::BoolNullable)
+        } else if all(&[DType::Int64, DType::Int64Nullable]) {
+            Some(DType::Int64Nullable)
+        } else if all(&[
+            DType::Int64,
+            DType::Int64Nullable,
+            DType::Float64,
+            DType::Float64Nullable,
+        ]) {
+            Some(DType::Float64Nullable)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            let mut values = Vec::with_capacity(total_len);
+            for s in series_list {
+                values.extend_from_slice(s.values());
+            }
+            return Ok(Column::new(target, values)?);
+        }
+    }
     if series_list
         .iter()
         .all(|s| s.column().as_i64_arc_view_source().is_some())
@@ -84480,10 +84634,13 @@ impl DataFrame {
 
     /// Infer better dtypes for object columns.
     ///
-    /// Matches `pd.DataFrame.infer_objects()`. Attempts to convert Utf8
-    /// columns to numeric types. Delegates to per-column convert_dtypes.
+    /// Matches `pd.DataFrame.infer_objects()` for the Utf8-backed object
+    /// representation: numpy dtypes stay, text stays text.
     pub fn infer_objects(&self) -> Result<Self, FrameError> {
-        self.convert_dtypes()
+        // Text stays text (pandas: DataFrame({'n': ['10']}).infer_objects()
+        // is object); it ran convert_dtypes, which parsed numeric-looking
+        // text into numbers.
+        Ok(self.clone())
     }
 
     /// Get the top N rows ordered by a column.
@@ -96579,52 +96736,15 @@ impl DataFrame {
 
     /// Convert dtypes to best-possible types.
     ///
-    /// Matches `pd.DataFrame.convert_dtypes()`. In our type system this
-    /// attempts to promote Int64 columns containing NaN to Float64, and
-    /// tries to parse Utf8 values as numbers where possible.
+    /// Matches `pd.DataFrame.convert_dtypes()`: each column as
+    /// [`Series::convert_dtypes`] converts it - numbers and bools to pandas'
+    /// nullable dtypes, text left as text. It parsed numeric-looking text
+    /// into numbers (pandas keeps `['1', '2']` as strings; only to_numeric
+    /// parses) and left numbers unchanged.
     pub fn convert_dtypes(&self) -> Result<Self, FrameError> {
         let mut result_cols = BTreeMap::new();
         for name in &self.column_order {
-            let col = &self.columns[name];
-            match col.dtype() {
-                DType::Int64 => {
-                    // Check if any value is NaN (shouldn't happen in Int64, but if mixed)
-                    result_cols.insert(name.clone(), col.clone());
-                }
-                DType::Categorical => {
-                    result_cols.insert(name.clone(), col.clone());
-                }
-                DType::Utf8 => {
-                    // Try to parse as numeric
-                    let mut all_numeric = true;
-                    let mut converted = Vec::with_capacity(col.values().len());
-                    for val in col.values() {
-                        match val {
-                            Scalar::Utf8(s) => {
-                                if let Ok(i) = s.trim().parse::<i64>() {
-                                    converted.push(Scalar::Int64(i));
-                                } else if let Ok(f) = s.trim().parse::<f64>() {
-                                    converted.push(Scalar::Float64(f));
-                                } else {
-                                    all_numeric = false;
-                                    break;
-                                }
-                            }
-                            _ => {
-                                converted.push(val.clone());
-                            }
-                        }
-                    }
-                    if all_numeric {
-                        result_cols.insert(name.clone(), Column::from_values(converted)?);
-                    } else {
-                        result_cols.insert(name.clone(), col.clone());
-                    }
-                }
-                _ => {
-                    result_cols.insert(name.clone(), col.clone());
-                }
-            }
+            result_cols.insert(name.clone(), convert_column_dtypes(&self.columns[name])?);
         }
         Ok(Self {
             columns: result_cols.into(),
@@ -114848,17 +114968,19 @@ mod tests {
             );
         }
 
-        // A non-Utf8 column is unaffected either way.
+        // A non-Utf8 column keeps its values; convert_dtypes retypes ints to
+        // the nullable Int64 (TEST-CHANGE, 05cm6: live pandas 2.2.3 gives
+        // Int64), infer_objects keeps int64.
         let ints = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2)],
         )
         .unwrap();
-        assert_eq!(
-            ints.convert_dtypes().unwrap().values(),
-            &[Scalar::Int64(1), Scalar::Int64(2)]
-        );
+        let converted = ints.convert_dtypes().unwrap();
+        assert_eq!(converted.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+        assert_eq!(converted.column().dtype(), DType::Int64Nullable);
+        assert_eq!(ints.infer_objects().unwrap().column().dtype(), DType::Int64);
     }
 
     /// A NULL in the condition of `where`/`mask` behaves as FALSE — it selects
@@ -170235,8 +170357,10 @@ mod tests {
         );
     }
 
+    /// TEST-CHANGE (05cm6): this asserted '1.5' / '2.5' parsed to floats;
+    /// live pandas 2.2.3 keeps them as the strings (dtype string).
     #[test]
-    fn df_convert_dtypes_string_to_float() {
+    fn df_convert_dtypes_keeps_float_looking_text() {
         let df = DataFrame::from_dict(
             &["x"],
             vec![(
@@ -170246,8 +170370,14 @@ mod tests {
         )
         .unwrap();
         let result = df.convert_dtypes().unwrap();
-        assert_eq!(result.columns()["x"].values()[0], Scalar::Float64(1.5));
-        assert_eq!(result.columns()["x"].values()[1], Scalar::Float64(2.5));
+        assert_eq!(
+            result.columns()["x"].values()[0],
+            Scalar::Utf8("1.5".into())
+        );
+        assert_eq!(
+            result.columns()["x"].values()[1],
+            Scalar::Utf8("2.5".into())
+        );
     }
 
     #[test]
@@ -170640,20 +170770,134 @@ mod tests {
         assert_eq!(diff.columns()["other"].values()[0], Scalar::Int64(99));
     }
 
+    /// pandas' masked Series keep masked dtypes (live pandas 2.2.3): between
+    /// is `boolean` with <NA> where missing, isin `boolean` (False there),
+    /// cumulative ops stay Int64 (a boolean's sums Int64), concat of Int64
+    /// pieces is Int64 and a boolean sums to an int.
     #[test]
-    fn convert_dtypes_integers_stay_int() {
-        // Integer strings should parse as Int64, not Float64
+    fn masked_series_ops_keep_masked_dtypes_05cm6() {
+        let masked = |dtype: DType, values: Vec<Scalar>| {
+            let n = values.len() as i64;
+            Series::new(
+                "v",
+                Index::new((0..n).map(IndexLabel::Int64).collect()),
+                Column::new(dtype, values).unwrap(),
+            )
+            .unwrap()
+        };
+        let ints = masked(
+            DType::Int64Nullable,
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+            ],
+        );
+        let between = ints
+            .between(&Scalar::Int64(1), &Scalar::Int64(2), "both")
+            .unwrap();
+        assert_eq!(between.column().dtype(), DType::BoolNullable);
+        assert_eq!(between.values()[0], Scalar::Bool(true));
+        assert!(between.values()[1].is_missing());
+        let isin = ints.isin(&[Scalar::Int64(1)]).unwrap();
+        assert_eq!(isin.column().dtype(), DType::BoolNullable);
+        assert_eq!(isin.values()[1], Scalar::Bool(false));
+        let cumsum = ints.cumsum_with_skipna(true).unwrap();
+        assert_eq!(cumsum.column().dtype(), DType::Int64Nullable);
+        assert_eq!(cumsum.values()[2], Scalar::Int64(4));
+        let flags = masked(
+            DType::BoolNullable,
+            vec![
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(true),
+            ],
+        );
+        assert_eq!(
+            flags.cumsum_with_skipna(true).unwrap().column().dtype(),
+            DType::Int64Nullable
+        );
+        assert_eq!(
+            flags.cummax_with_skipna(true).unwrap().column().dtype(),
+            DType::BoolNullable
+        );
+        assert_eq!(flags.sum().unwrap(), Scalar::Int64(2));
+        let joined = super::concat_series(&[&ints, &ints]).unwrap();
+        assert_eq!(joined.column().dtype(), DType::Int64Nullable);
+        assert!(joined.values()[1].is_missing());
+        // NEGATIVE: numpy ints keep numpy results.
+        let numpy = masked(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(3)]);
+        assert_eq!(
+            numpy
+                .between(&Scalar::Int64(1), &Scalar::Int64(2), "both")
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Bool
+        );
+        assert_eq!(
+            numpy.cumsum_with_skipna(true).unwrap().column().dtype(),
+            DType::Int64
+        );
+        assert_eq!(
+            super::concat_series(&[&numpy, &numpy])
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Int64
+        );
+    }
+
+    /// TEST-CHANGE (05cm6): this asserted that numeric-looking text parsed to
+    /// Int64; live pandas 2.2.3 keeps `DataFrame({'x': ['1', '2']})
+    /// .convert_dtypes()` as the strings '1', '2' (only to_numeric parses),
+    /// as `Series::convert_dtypes` already did. The number columns take
+    /// pandas' nullable dtypes: whole floats Int64, fractional Float64,
+    /// bools beside a missing value boolean (live pandas 2.2.3).
+    #[test]
+    fn convert_dtypes_keeps_text_and_retypes_numbers() {
         let df = DataFrame::from_dict(
-            &["x"],
-            vec![(
-                "x",
-                vec![Scalar::Utf8("1".into()), Scalar::Utf8("2".into())],
-            )],
+            &["x", "whole", "frac", "flag"],
+            vec![
+                (
+                    "x",
+                    vec![Scalar::Utf8("1".into()), Scalar::Utf8("2".into())],
+                ),
+                (
+                    "whole",
+                    vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)],
+                ),
+                (
+                    "frac",
+                    vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)],
+                ),
+                (
+                    "flag",
+                    vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)],
+                ),
+            ],
         )
         .unwrap();
         let result = df.convert_dtypes().unwrap();
-        assert_eq!(result.columns()["x"].values()[0], Scalar::Int64(1));
-        assert_eq!(result.columns()["x"].values()[1], Scalar::Int64(2));
+        assert_eq!(
+            result.columns()["x"].values(),
+            &[Scalar::Utf8("1".into()), Scalar::Utf8("2".into())]
+        );
+        assert_eq!(result.columns()["whole"].dtype(), DType::Int64Nullable);
+        assert_eq!(result.columns()["whole"].values()[0], Scalar::Int64(1));
+        assert!(result.columns()["whole"].values()[1].is_missing());
+        assert_eq!(result.columns()["frac"].dtype(), DType::Float64Nullable);
+        assert_eq!(result.columns()["flag"].dtype(), DType::BoolNullable);
+        // NEGATIVE: a mixed object column stays as it is.
+        let mixed = DataFrame::from_dict(
+            &["m"],
+            vec![("m", vec![Scalar::Utf8("a".into()), Scalar::Int64(1)])],
+        )
+        .unwrap();
+        assert_eq!(
+            mixed.convert_dtypes().unwrap().columns()["m"].dtype(),
+            mixed.columns()["m"].dtype()
+        );
     }
 
     #[test]
@@ -172618,8 +172862,10 @@ mod tests {
         )
         .unwrap();
         let result = df.infer_objects().unwrap();
-        // "nums" column should be Int64, "strs" should remain Utf8
-        assert_eq!(result.columns["nums"].dtype(), DType::Int64);
+        // TEST-CHANGE (05cm6): "nums" was asserted Int64; live pandas 2.2.3
+        // leaves text columns object under infer_objects, numeric-looking or
+        // not ({'nums': object, 'strs': object}).
+        assert_eq!(result.columns["nums"].dtype(), DType::Utf8);
         assert_eq!(result.columns["strs"].dtype(), DType::Utf8);
     }
 

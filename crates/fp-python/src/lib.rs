@@ -495,6 +495,39 @@ fn pandas_timedelta_text(nanos: i64, long: bool) -> String {
     }
 }
 
+/// A masked (Float64) float as pandas prints it: `f"{x: .6f}"` - a sign
+/// space before a positive - with its trailing zeros trimmed to one decimal
+/// (1.414214, 2.0, -0.5). It printed each value's full repr
+/// (1.4142135623730951).
+fn masked_float_text(value: f64) -> String {
+    if !value.is_finite() {
+        let text = if value.is_nan() {
+            "nan"
+        } else if value > 0.0 {
+            "inf"
+        } else {
+            "-inf"
+        };
+        return if text.starts_with('-') {
+            text.to_owned()
+        } else {
+            format!(" {text}")
+        };
+    }
+    let text = format!("{value:.6}");
+    let trimmed = text.trim_end_matches('0');
+    let trimmed = if trimmed.ends_with('.') {
+        format!("{trimmed}0")
+    } else {
+        trimmed.to_owned()
+    };
+    if trimmed.starts_with('-') {
+        trimmed
+    } else {
+        format!(" {trimmed}")
+    }
+}
+
 /// A Python-`str()`-like text for one object cell.
 fn pandas_object_text(value: &Scalar) -> String {
     match value {
@@ -756,12 +789,10 @@ fn pandas_cells(column: &Column) -> Vec<String> {
         }
         DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable => values
             .iter()
-            .map(|value| {
-                if value.is_missing() {
-                    " <NA>".to_owned()
-                } else {
-                    format!(" {}", pandas_object_text(value))
-                }
+            .map(|value| match value {
+                value if value.is_missing() => " <NA>".to_owned(),
+                Scalar::Float64(v) => masked_float_text(*v),
+                value => format!(" {}", pandas_object_text(value)),
             })
             .collect(),
         // A numeric categorical prints as pandas formats its values' array
@@ -7144,6 +7175,44 @@ impl PyIndexStrMethod {
 /// 100 labels, non-string labels right-justified once the labels wrap,
 /// then `dtype=` / `name=` / `length=`. It printed every label on one line
 /// with no dtype.
+/// pandas' result dtype for a groupby reduction `op` over a nullable (masked)
+/// column: sum / prod of ints or bools Int64, of floats Float64; min / max /
+/// first / last the column's own; mean / median / std / var / sem / skew
+/// Float64; count / size Int64; any / all boolean. None for a numpy column
+/// or an op that stays numpy (nunique, idxmax). They came back numpy
+/// (float64 / int64 / object).
+fn masked_reduction_dtype(source: &DType, op: &str) -> Option<DType> {
+    if !source.is_nullable() {
+        return None;
+    }
+    let numeric = if *source == DType::Float64Nullable {
+        DType::Float64Nullable
+    } else {
+        DType::Int64Nullable
+    };
+    Some(match op.split('(').next().unwrap_or(op) {
+        "sum" | "prod" | "cumsum" | "cumprod" => numeric,
+        "min" | "max" | "first" | "last" | "cummin" | "cummax" => source.clone(),
+        "mean" | "median" | "std" | "var" | "sem" | "skew" => DType::Float64Nullable,
+        "count" | "size" => DType::Int64Nullable,
+        "any" | "all" => DType::BoolNullable,
+        _ => return None,
+    })
+}
+
+/// A groupby reduction's Series in its masked dtype (see
+/// [`masked_reduction_dtype`]).
+fn masked_reduction(source: &DType, op: &str, result: Series) -> PyResult<Series> {
+    let Some(target) = masked_reduction_dtype(source, op) else {
+        return Ok(result);
+    };
+    if result.column().dtype() == target {
+        return Ok(result);
+    }
+    let column = result.column().astype(target).map_err(column_error_to_py)?;
+    Series::new(result.name(), result.index().clone(), column).map_err(frame_error_to_py)
+}
+
 /// pandas' `limit_area=` of ffill / bfill: Some(true) for 'inside' (fill only
 /// between a column's first and last values), Some(false) for 'outside'
 /// (only before the first or after the last), None for every gap.
@@ -21524,6 +21593,18 @@ impl PySeries {
         } else {
             r
         };
+        // A nullable Series counts in the masked Int64 (its proportions
+        // Float64), as pandas' (int64 / float64).
+        if self.inner.dtype().is_nullable() {
+            let target = if normalize {
+                DType::Float64Nullable
+            } else {
+                DType::Int64Nullable
+            };
+            let column = r.column().astype(target).map_err(column_error_to_py)?;
+            let r = Series::new(r.name(), r.index().clone(), column).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: r });
+        }
         Ok(PySeries { inner: r })
     }
 
@@ -23969,6 +24050,20 @@ impl PySeries {
                 .map_err(frame_error_to_py)?,
             None => self.inner.describe().map_err(frame_error_to_py)?,
         };
+        // A nullable number Series describes in the masked Float64, as
+        // pandas' (float64).
+        if matches!(
+            self.inner.dtype(),
+            DType::Int64Nullable | DType::Float64Nullable
+        ) && s.column().dtype() == DType::Float64
+        {
+            let column = s
+                .column()
+                .astype(DType::Float64Nullable)
+                .map_err(column_error_to_py)?;
+            let s = Series::new(s.name(), s.index().clone(), column).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: s });
+        }
         Ok(PySeries { inner: s })
     }
 
@@ -43453,7 +43548,25 @@ impl PyGroupBy {
     /// A reduction `op`'s frame as Python's, with the unused categories'
     /// rows (see [`Self::with_unused`]).
     fn finish(&self, op: &str, result: Result<DataFrame, FrameError>) -> PyResult<PyDataFrame> {
-        let inner = self.with_unused(op, result.map_err(frame_error_to_py)?)?;
+        let mut inner = self.with_unused(op, result.map_err(frame_error_to_py)?)?;
+        // Each value column of a nullable dtype in pandas' masked result
+        // dtype (see `masked_reduction_dtype`).
+        let names: Vec<String> = inner.column_names().into_iter().cloned().collect();
+        for name in names {
+            let Some(source) = self.df.column(&name).map(Column::dtype) else {
+                continue;
+            };
+            if self.by.contains(&name) {
+                continue;
+            }
+            if let (Some(target), Some(column)) =
+                (masked_reduction_dtype(&source, op), inner.column(&name))
+                && column.dtype() != target
+            {
+                let column = column.astype(target).map_err(column_error_to_py)?;
+                inner = inner.with_column(name, column).map_err(frame_error_to_py)?;
+            }
+        }
         Ok(PyDataFrame { inner })
     }
 
@@ -45586,7 +45699,7 @@ impl PySeriesGroupBy {
     /// A reduction's result: sorted by key when `sort`, and with
     /// as_index=False the keys moved into a column beside it, as pandas does.
     fn wrap_result(&self, op: &str, s: Series) -> PyResult<Py<PyAny>> {
-        let res = self.per_group(op, s)?;
+        let res = masked_reduction(&self.series.column().dtype(), op, self.per_group(op, s)?)?;
         Python::attach(|py| {
             if self.as_index {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());

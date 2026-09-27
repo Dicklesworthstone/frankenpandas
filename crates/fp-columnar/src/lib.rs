@@ -18155,11 +18155,35 @@ impl Column {
         // Div always produces Float64. Pow keeps Int64 for int**int (numpy/pandas
         // semantics: 2 ** 3 -> int64 8, not float), but promotes to Float64 for any
         // float operand. Mod and FloorDiv preserve int if there are no zero divisors.
+        //
+        // A nullable (masked) operand makes a masked result, as pandas': Int64 /
+        // anything is Float64 (nullable), Int64 ** int Int64, anything with a
+        // float Float64, and a zero divisor of // or % gives 0, never a float
+        // promotion (Int64 / 2 was float64, Int64 ** 2 float64; Int64 * Int64
+        // ran through f64).
+        let masked = self.dtype.is_nullable() || right.dtype.is_nullable();
+        let int_operand = |dtype: &DType| {
+            matches!(dtype, DType::Int64)
+                || (masked
+                    && matches!(
+                        dtype,
+                        DType::Int64Nullable | DType::Bool | DType::BoolNullable
+                    ))
+        };
         let int_pow = matches!(op, ArithmeticOp::Pow)
-            && self.dtype == DType::Int64
-            && right.dtype == DType::Int64;
+            && int_operand(&self.dtype)
+            && int_operand(&right.dtype);
         if matches!(op, ArithmeticOp::Div | ArithmeticOp::Pow) && !int_pow {
             out_dtype = DType::Float64;
+        }
+        if masked {
+            out_dtype = match out_dtype {
+                DType::Int64 | DType::Int64Nullable | DType::Bool | DType::BoolNullable => {
+                    DType::Int64Nullable
+                }
+                DType::Float64 | DType::Float64Nullable => DType::Float64Nullable,
+                other => other,
+            };
         }
 
         // AG-10: Try vectorized path first; fallback to scalar path.
@@ -18208,7 +18232,7 @@ impl Column {
                     });
                 }
 
-                if matches!(out_dtype, DType::Int64) {
+                if matches!(out_dtype, DType::Int64 | DType::Int64Nullable) {
                     let lhs_i64 = match cast_scalar(left, DType::Int64)? {
                         Scalar::Int64(v) => v,
                         _ => unreachable!(),
@@ -18234,10 +18258,13 @@ impl Column {
                         // Null-dtype operand) and no zero divisor forced Float64 — e.g.
                         // `int64 // True` or `bool % 2`. This arm used to be
                         // `unreachable!()`, and `df.eval("a // True")` panicked
-                        // (Fuzz Nightly, fuzz_dataframe_eval).
+                        // (Fuzz Nightly, fuzz_dataframe_eval). A masked (Int64)
+                        // result keeps a zero divisor to here: pandas gives 0.
+                        ArithmeticOp::FloorDiv if rhs_i64 == 0 => 0,
                         ArithmeticOp::FloorDiv => python_floor_div_i64(lhs_i64, rhs_i64),
                         // A zero divisor only survives to here for a Bool divisor
-                        // (see `bool_divisor_mod`); numpy/pandas give 0.
+                        // (see `bool_divisor_mod`) or a masked result; numpy /
+                        // pandas give 0.
                         ArithmeticOp::Mod if rhs_i64 == 0 => 0,
                         ArithmeticOp::Mod => python_mod_i64(lhs_i64, rhs_i64),
                         // `out_dtype` is always Float64 for Div (set above), so the
@@ -19505,7 +19532,10 @@ impl Column {
     pub fn binary_comparison(&self, right: &Self, op: ComparisonOp) -> Result<Self, ColumnError> {
         let result = self.binary_comparison_propagating(right, op)?;
         if self.dtype.is_nullable() || right.dtype.is_nullable() {
-            return Ok(result);
+            // pandas' masked comparison is the nullable `boolean` dtype, <NA>
+            // where either side is missing (it was Bool holding nulls: an
+            // object column of None).
+            return Ok(result.with_dtype(DType::BoolNullable));
         }
         Ok(result.missing_compares_as(op == ComparisonOp::Ne))
     }
@@ -19881,7 +19911,9 @@ impl Column {
     pub fn compare_scalar(&self, scalar: &Scalar, op: ComparisonOp) -> Result<Self, ColumnError> {
         let result = self.compare_scalar_propagating(scalar, op)?;
         if self.dtype.is_nullable() {
-            return Ok(result);
+            // The nullable `boolean` dtype, <NA> where missing (see
+            // `binary_comparison`).
+            return Ok(result.with_dtype(DType::BoolNullable));
         }
         Ok(result.missing_compares_as(op == ComparisonOp::Ne))
     }
@@ -39566,6 +39598,66 @@ mod tests {
                     .collect();
                 assert_eq!(got.values(), expected, "nullable Int64 op {op:?}");
             }
+        }
+
+        /// pandas' masked arithmetic and comparison (live pandas 2.2.3): a
+        /// nullable operand compares to the nullable `boolean` (<NA> where
+        /// missing), divides to Float64, keeps Int64 under ** and exact int
+        /// arithmetic past 2**53, and a zero divisor of // or % gives 0.
+        #[test]
+        fn masked_operands_give_masked_results_05cm6() {
+            let masked = |values: Vec<Scalar>| Column::new(DType::Int64Nullable, values).unwrap();
+            let big = (1_i64 << 53) + 1;
+            let left = masked(vec![
+                Scalar::Int64(7),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(big),
+            ]);
+            let right = masked(vec![Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(1)]);
+            let gt = left
+                .compare_scalar(&Scalar::Int64(2), ComparisonOp::Gt)
+                .unwrap();
+            assert_eq!(gt.dtype(), DType::BoolNullable);
+            assert_eq!(gt.values()[0], Scalar::Bool(true));
+            assert!(gt.values()[1].is_missing());
+            let eq = left.binary_comparison(&right, ComparisonOp::Eq).unwrap();
+            assert_eq!(eq.dtype(), DType::BoolNullable);
+            assert!(eq.values()[1].is_missing());
+            let div = left.binary_numeric(&right, ArithmeticOp::Div).unwrap();
+            assert_eq!(div.dtype(), DType::Float64Nullable);
+            assert_eq!(div.values()[0], Scalar::Float64(3.5));
+            let pow = left.binary_numeric(&right, ArithmeticOp::Pow).unwrap();
+            assert_eq!(pow.dtype(), DType::Int64Nullable);
+            assert_eq!(pow.values()[0], Scalar::Int64(49));
+            let mul = left.binary_numeric(&right, ArithmeticOp::Mul).unwrap();
+            assert_eq!(mul.values()[2], Scalar::Int64(big));
+            let zero = masked(vec![Scalar::Int64(0); 3]);
+            let floor = left.binary_numeric(&zero, ArithmeticOp::FloorDiv).unwrap();
+            assert_eq!(floor.dtype(), DType::Int64Nullable);
+            assert_eq!(floor.values()[0], Scalar::Int64(0));
+            let floats = Column::from_f64_values(vec![1.5, 2.0, 3.0]);
+            let mixed = left.binary_numeric(&floats, ArithmeticOp::Add).unwrap();
+            assert_eq!(mixed.dtype(), DType::Float64Nullable);
+            // NEGATIVE: numpy ints compare to bool (missing is False) and
+            // divide to float64.
+            let numpy = Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(7), Scalar::Null(NullKind::Null)],
+            )
+            .unwrap();
+            let gt = numpy
+                .compare_scalar(&Scalar::Int64(2), ComparisonOp::Gt)
+                .unwrap();
+            assert_eq!(gt.dtype(), DType::Bool);
+            assert_eq!(gt.values()[1], Scalar::Bool(false));
+            let plain = Column::from_i64_values_owned(vec![7, 8]);
+            let div = plain
+                .binary_numeric(
+                    &Column::from_i64_values_owned(vec![2, 2]),
+                    ArithmeticOp::Div,
+                )
+                .unwrap();
+            assert_eq!(div.dtype(), DType::Float64);
         }
 
         #[test]

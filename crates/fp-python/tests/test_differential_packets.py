@@ -12008,3 +12008,78 @@ def _everyday10_outcome(m: Any, run: Any) -> Any:
 def test_everyday_ops_round_ten_like_pandas(case: str) -> None:
     run = _EVERYDAY10_CASES[case]
     assert _everyday10_outcome(fpd, run) == _everyday10_outcome(pd, run), case
+
+
+# br-frankenpandas-05cm6 (scratch p13/probe_nullable.py): results over pandas'
+# nullable Int64 / Float64 / boolean lost the masked dtype - comparisons were
+# object None, / and ** float64, cumsum / groupby reductions / concat float64
+# or an int64 holding nulls, value_counts int64, a boolean's sum a float,
+# describe float64 - and convert_dtypes changed nothing. Each case compares
+# the repr and the dtype.
+def _nl_int(m: Any, values: Any) -> Any:
+    return m.Series(values, dtype="Int64")
+
+
+def _nl_shown(result: Any) -> Any:
+    return (repr(result), str(result.dtype)) if hasattr(result, "dtype") else repr(result)
+
+
+def _nl_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "b", "a", "a"], "v": _nl_int(m, [1, None, 3, 4]), "w": [1.0, 2.0, 3.0, 4.0]})
+
+
+_MASKED_CASES = {
+    "Int64 > scalar": lambda m: _nl_shown(_nl_int(m, [1, None, 3]) > 1),
+    "Int64 == Int64": lambda m: _nl_shown(_nl_int(m, [1, None, 3]) == _nl_int(m, [1, 1, None])),
+    "int64 < Int64": lambda m: _nl_shown(m.Series([0, 1, 5]) < _nl_int(m, [1, None, 3])),
+    "Float64 >= scalar": lambda m: _nl_shown(m.Series([1.5, None], dtype="Float64") >= 1.5),
+    "boolean == True": lambda m: _nl_shown(m.Series([True, None, False], dtype="boolean") == True),  # noqa: E712
+    "Int64 isin": lambda m: _nl_shown(_nl_int(m, [1, None, 3]).isin([1])),
+    "Int64 between": lambda m: _nl_shown(_nl_int(m, [1, None, 3]).between(1, 2)),
+    "Int64 div": lambda m: _nl_shown(_nl_int(m, [1, None]) / 2),
+    "Int64 pow": lambda m: _nl_shown(_nl_int(m, [3, None]) ** 2),
+    "Int64 floordiv by zero": lambda m: _nl_shown(_nl_int(m, [7, None, -7]) // 0),
+    "Int64 mod by zero": lambda m: _nl_shown(_nl_int(m, [7, None]) % 0),
+    "Int64 plus a float": lambda m: _nl_shown(_nl_int(m, [1, None]) + 1.5),
+    "Int64 cumsum": lambda m: _nl_shown(_nl_int(m, [1, None, 3]).cumsum()),
+    "Int64 cummax skipna False": lambda m: _nl_shown(_nl_int(m, [1, None, 3]).cummax(skipna=False)),
+    "boolean cumsum": lambda m: _nl_shown(m.Series([True, None, True], dtype="boolean").cumsum()),
+    "boolean cummin": lambda m: _nl_shown(m.Series([True, None, False], dtype="boolean").cummin()),
+    "boolean sum": lambda m: repr(m.Series([True, None, True], dtype="boolean").sum()),
+    "groupby sum": lambda m: _nl_shown(_nl_frame(m).groupby("k")["v"].sum()),
+    "groupby mean": lambda m: _nl_shown(_nl_frame(m).groupby("k")["v"].mean()),
+    "groupby max": lambda m: _nl_shown(_nl_frame(m).groupby("k")["v"].max()),
+    "groupby count": lambda m: _nl_shown(_nl_frame(m).groupby("k")["v"].count()),
+    "groupby any": lambda m: _nl_shown(_nl_frame(m).groupby("k")["v"].any()),
+    "frame groupby sum": lambda m: (repr(_nl_frame(m).groupby("k").sum()), str(_nl_frame(m).groupby("k").sum().dtypes.to_dict())),
+    "value_counts": lambda m: _nl_shown(_nl_int(m, [1, None, 1, 2]).value_counts()),
+    "value_counts normalize": lambda m: _nl_shown(_nl_int(m, [1, None, 1, 2]).value_counts(normalize=True)),
+    "concat Int64 pieces": lambda m: _nl_shown(m.concat([_nl_int(m, [1, None]), _nl_int(m, [3])])),
+    "concat Int64 and int64": lambda m: _nl_shown(m.concat([_nl_int(m, [1, None]), m.Series([3])])),
+    "concat Int64 and float64": lambda m: _nl_shown(m.concat([_nl_int(m, [1, None]), m.Series([2.5])])),
+    # NEGATIVE: a bool beside Int64 is object.
+    "concat Int64 and bool": lambda m: _nl_shown(m.concat([_nl_int(m, [1]), m.Series([True])])),
+    "describe": lambda m: _nl_shown(_nl_int(m, [1, None, 3]).describe()),
+    "Float64 repr of long decimals": lambda m: _nl_shown(m.Series([2.0, 1.4142135623730951, -0.5, None], dtype="Float64")),
+    "convert_dtypes": lambda m: (lambda d: (repr(d), str(d.dtypes.to_dict())))(m.DataFrame({"a": [1, 2, None], "c": [True, False, None], "d": [1.5, None, 2.5], "e": [1.0, 2.0, 3.0], "f": [1, 2, 3]}).convert_dtypes()),
+    "Series convert_dtypes": lambda m: _nl_shown(m.Series([1.0, None, 3.0]).convert_dtypes()),
+    # NEGATIVE: numpy dtypes keep numpy results.
+    "int64 > scalar": lambda m: _nl_shown(m.Series([1, 3]) > 1),
+    "int64 div": lambda m: _nl_shown(m.Series([1, 3]) / 2),
+    "int64 groupby sum": lambda m: _nl_shown(m.DataFrame({"k": ["a", "b", "a"], "v": [1, 2, 3]}).groupby("k")["v"].sum()),
+    "int64 cumsum": lambda m: _nl_shown(m.Series([1, 2]).cumsum()),
+}
+
+
+def _masked_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MASKED_CASES))
+def test_masked_dtypes_propagate_like_pandas(case: str) -> None:
+    run = _MASKED_CASES[case]
+    assert _masked_outcome(fpd, run) == _masked_outcome(pd, run), case
