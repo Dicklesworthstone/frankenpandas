@@ -12212,3 +12212,62 @@ def _td_array_outcome(m: Any, run: Any) -> Any:
 def test_to_datetime_of_numpy_arrays_like_pandas(case: str) -> None:
     run = _TD_ARRAY_CASES[case]
     assert _td_array_outcome(fpd, run) == _td_array_outcome(pd, run), case
+
+
+# Found by the eleventh everyday-ops probe (scratch p13/probe_everyday11.py,
+# br-frankenpandas-5r7mv): a two-key groupby.agg(dict) was indexed by flat
+# 'n|feb' labels; crosstab refused a list of arrays; a frame's rolling corr /
+# cov with no other was flat 'a__b' columns; transform refused numpy function
+# names and a {column: func} dict.
+def _e11_sales(m: Any) -> Any:
+    return m.DataFrame({
+        "region": ["n", "s", "n", "s", "n", "s"],
+        "store": ["a", "b", "a", "c", "d", "b"],
+        "month": ["jan", "jan", "feb", "feb", "mar", "mar"],
+        "qty": [3, 1, 4, 1, 5, 9],
+        "price": [2.5, 3.0, 1.5, 4.0, 2.0, 1.0],
+    })
+
+
+def _e11_nums(m: Any) -> Any:
+    return m.DataFrame({"a": [1.0, 2, 3, 4, 5], "b": [2.0, 1, 4, 3, 5], "c": [5.0, 3, 4, 1, 2]}, index=m.Index([10, 20, 30, 40, 50], name="t"))
+
+
+_EVERYDAY11_CASES = {
+    "two-key agg dict": lambda m: repr(_e11_sales(m).groupby(["region", "month"]).agg({"qty": "sum", "price": "mean"})),
+    "two-key agg dict with text": lambda m: repr(_e11_sales(m).groupby(["region", "month"]).agg({"qty": "sum", "store": "first"})),
+    # NEGATIVE: one key is a flat index as before.
+    "one-key agg dict": lambda m: repr(_e11_sales(m).groupby("region").agg({"qty": "sum", "price": "mean"})),
+    "crosstab of a list of one": lambda m: repr(m.crosstab(_e11_sales(m)["region"], [_e11_sales(m)["month"]])),
+    "crosstab of two row arrays": lambda m: repr(m.crosstab([_e11_sales(m)["region"], _e11_sales(m)["store"]], _e11_sales(m)["month"])),
+    "crosstab of two column arrays": lambda m: repr(m.crosstab(_e11_sales(m)["region"], [_e11_sales(m)["month"], _e11_sales(m)["store"]])),
+    "crosstab names for several": lambda m: repr(m.crosstab([_e11_sales(m)["region"], _e11_sales(m)["store"]], _e11_sales(m)["month"], rownames=["r", "s"], colnames=["m"])),
+    # NEGATIVE: two Series as before.
+    "crosstab of Series": lambda m: repr(m.crosstab(_e11_sales(m)["region"], _e11_sales(m)["month"])),
+    "rolling frame corr": lambda m: repr(_e11_nums(m).rolling(3).corr()),
+    "rolling frame cov": lambda m: repr(_e11_nums(m).rolling(3).cov()),
+    # NEGATIVE: with another Series, one column per input column.
+    "rolling frame corr with a Series": lambda m: repr(_e11_nums(m).rolling(3).corr(_e11_nums(m)["c"])),
+    "Series transform numpy name": lambda m: repr(m.Series([1.0, 4.0, 9.0]).transform("sqrt")),
+    "Series agg numpy name": lambda m: repr(m.Series([1.0, 4.0]).agg("sqrt")),
+    "frame transform dict": lambda m: repr(_e11_sales(m)[["qty", "price"]].transform({"qty": lambda s: s * 2, "price": "sqrt"})),
+    "frame transform numpy name": lambda m: repr(_e11_sales(m)[["qty", "price"]].transform("sqrt")),
+    # NEGATIVE: a method name as before; a reduction does not transform.
+    "Series transform method name": lambda m: repr(m.Series([-1, 2]).transform("abs")),
+    "Series transform of a reduction": lambda m: m.Series([1, 2]).transform("sum"),
+    "Series transform of an unknown name": lambda m: m.Series([1, 2]).transform("nope"),
+}
+
+
+def _everyday11_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY11_CASES))
+def test_everyday_ops_round_eleven_like_pandas(case: str) -> None:
+    run = _EVERYDAY11_CASES[case]
+    assert _everyday11_outcome(fpd, run) == _everyday11_outcome(pd, run), case

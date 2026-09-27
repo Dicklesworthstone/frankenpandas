@@ -105396,12 +105396,14 @@ impl DataFrameGroupBy<'_> {
                     }
                 }
                 if col_order.len() == specs.len() {
+                    // Several keys keep their row MultiIndex (it was dropped:
+                    // the rows were the flat 'n|feb' labels).
                     return Ok(DataFrame {
                         columns: result_cols.into(),
                         column_order: col_order.into(),
                         index: typed.index.clone(),
                         column_multiindex: None,
-                        row_multiindex: None,
+                        row_multiindex: typed.row_multiindex.clone(),
                         allows_duplicate_labels: self.df.allows_duplicate_labels,
                     });
                 }

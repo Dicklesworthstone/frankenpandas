@@ -19060,6 +19060,105 @@ fn frame_from_values<'py>(
     .into_bound_py_any(py)
 }
 
+/// pandas' pairwise window statistic of a frame with no `other` (rolling /
+/// expanding / ewm corr and cov): each window's matrix, rows (row label,
+/// column) under the columns, built from fp-frame's one `{left}__{right}`
+/// column per pair (that flat frame was returned). Any other result as is.
+fn pairwise_window_result(
+    py: Python<'_>,
+    source: Option<&DataFrame>,
+    other: Option<&Bound<'_, PyAny>>,
+    result: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let Some(source) = source.filter(|_| other.is_none_or(|other| other.is_none())) else {
+        return Ok(result);
+    };
+    let flat = result
+        .bind(py)
+        .extract::<PyRef<'_, PyDataFrame>>()?
+        .inner
+        .clone();
+    let columns: Vec<String> = source
+        .column_names()
+        .into_iter()
+        .filter(|name| flat.column(&format!("{name}__{name}")).is_some())
+        .cloned()
+        .collect();
+    let (n, k) = (source.len(), columns.len());
+    let pair = |a: usize, b: usize| {
+        let (low, high) = if a <= b { (a, b) } else { (b, a) };
+        format!("{}__{}", columns[low], columns[high])
+    };
+    let mut values: Vec<Vec<Scalar>> = vec![Vec::with_capacity(n * k); k];
+    let mut row_labels = Vec::with_capacity(n * k);
+    let mut column_labels = Vec::with_capacity(n * k);
+    for (position, row_label) in source.index().labels().iter().enumerate() {
+        for (row_column, name) in columns.iter().enumerate() {
+            row_labels.push(row_label.clone());
+            column_labels.push(source.column_label(name));
+            for (out_column, out) in values.iter_mut().enumerate() {
+                out.push(
+                    flat.column(&pair(row_column, out_column))
+                        .map_or(Scalar::Null(NullKind::NaN), |column| {
+                            column.values()[position].clone()
+                        }),
+                );
+            }
+        }
+    }
+    let mut map = BTreeMap::new();
+    for (name, column_values) in columns.iter().zip(values) {
+        map.insert(
+            name.clone(),
+            Column::new(DType::Float64, column_values).map_err(column_error_to_py)?,
+        );
+    }
+    let multi = fp_index::MultiIndex::from_arrays(vec![row_labels, column_labels])
+        .map_err(index_error_to_py)?
+        .set_names(vec![source.index().name().map(str::to_owned), None]);
+    let frame = DataFrame::new_with_column_order(Index::default_range(n * k), map, columns)
+        .map_err(frame_error_to_py)?
+        .with_row_multiindex(multi)
+        .map_err(frame_error_to_py)?
+        .with_typed_labels_of(source);
+    PyDataFrame { inner: frame }.into_py_any(py)
+}
+
+/// pandas' transform error rule: a TypeError passes through, any other
+/// failure of the function is `ValueError: Transform function failed`.
+fn transform_failure(err: PyErr) -> PyErr {
+    Python::attach(|py| {
+        if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
+            err
+        } else {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Transform function failed")
+        }
+    })
+}
+
+/// pandas' `_apply_str` for a name the object has no method for: numpy's
+/// function of that name applied to it (`transform('sqrt')` is
+/// `np.sqrt(obj)`; it was an AttributeError), else pandas' AttributeError.
+fn numpy_named_function<'py>(
+    obj: &Bound<'py, PyAny>,
+    name: &str,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+    owner: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = obj.py();
+    if let Ok(function) = py.import("numpy")?.getattr(name)
+        && function.is_callable()
+    {
+        let mut call_args = vec![obj.clone()];
+        call_args.extend(args.iter());
+        return function.call(PyTuple::new(py, call_args)?, kwargs);
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+        format!("'{name}' is not a valid function for '{owner}' object"),
+    ))
+}
+
 /// `Series.agg(func, axis, *args, **kwargs)`, as pandas' `SeriesApply.agg`:
 /// a name is that reduction (any other method name is that method); a
 /// `_cython_table` callable is its name; any other callable is tried
@@ -19082,9 +19181,7 @@ fn series_agg<'py>(
         return match this.getattr(name.as_str()) {
             Ok(method) if method.is_callable() => method.call(args, kwargs),
             Ok(value) => Ok(value),
-            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
-                format!("'{name}' is not a valid function for 'Series' object"),
-            )),
+            Err(_) => numpy_named_function(this.as_any(), &name, args, kwargs, "Series"),
         };
     }
     let (labels, funcs): (Vec<String>, Vec<Bound<'py, PyAny>>) = if let Ok(mapping) =
@@ -19179,11 +19276,9 @@ fn frame_agg<'py>(
     let py = this.py();
     let plain = args.is_empty() && kwargs.is_none_or(|kwargs| kwargs.is_empty());
     if let Ok(name) = func.extract::<String>() {
-        let method = this.getattr(name.as_str()).map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(format!(
-                "'{name}' is not a valid function for 'DataFrame' object"
-            ))
-        })?;
+        let Ok(method) = this.getattr(name.as_str()) else {
+            return numpy_named_function(this.as_any(), &name, args, kwargs, "DataFrame");
+        };
         if !method.is_callable() {
             return Ok(method);
         }
@@ -25420,6 +25515,26 @@ impl PySeries {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {bad} for object type Series"
             )));
+        }
+        // A name is that method, else numpy's function of it (pandas'
+        // _apply_str; the name was called as a function: TypeError), and
+        // must give a Series indexed like this one.
+        if let Ok(name) = func.extract::<String>() {
+            let this = Bound::new(py, self.clone())?.into_any();
+            let result = match this.getattr(name.as_str()) {
+                Ok(method) if method.is_callable() => method.call(args, kwargs),
+                Ok(value) => Ok(value),
+                Err(_) => numpy_named_function(&this, &name, args, kwargs, "Series"),
+            }
+            .map_err(transform_failure)?;
+            return match result.extract::<PyRef<'_, PySeries>>() {
+                Ok(series) if series.inner.index().labels() == self.inner.index().labels() => {
+                    Ok(series.clone())
+                }
+                _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Function did not transform",
+                )),
+            };
         }
         self.apply(py, func, true, Some(args), kwargs)
     }
@@ -37262,6 +37377,47 @@ impl PyDataFrame {
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
+        // A {column: func} dict transforms each named column by its own
+        // function, in the dict's order (pandas' transform_dict_like; it
+        // went through apply as an aggregation).
+        if let Ok(mapping) = func.cast::<PyDict>()
+            && parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0) == 0
+        {
+            let columns = PyDict::new(py);
+            for (column, function) in mapping.iter() {
+                let transformed = slf.as_any().get_item(&column)?.call_method(
+                    "transform",
+                    (function,),
+                    kwargs,
+                )?;
+                columns.set_item(column, transformed)?;
+            }
+            return py.get_type::<PyDataFrame>().call1((columns,));
+        }
+        // A name is that method, else numpy's function of it, as the
+        // Series' (apply looked it up as a frame attribute alone).
+        if let Ok(name) = func.extract::<String>()
+            && parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0) == 0
+        {
+            let this = slf.as_any();
+            let result = match this.getattr(name.as_str()) {
+                Ok(method) if method.is_callable() => method.call(args, kwargs),
+                Ok(value) => Ok(value),
+                Err(_) => numpy_named_function(this, &name, args, kwargs, "DataFrame"),
+            }
+            .map_err(transform_failure)?;
+            let same_rows = result
+                .extract::<PyRef<'_, PyDataFrame>>()
+                .is_ok_and(|frame| {
+                    frame.inner.index().labels() == slf.borrow().inner.index().labels()
+                });
+            if !same_rows {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Function did not transform",
+                ));
+            }
+            return Ok(result);
+        }
         let call_kwargs = match kwargs {
             Some(given) => given.copy()?,
             None => PyDict::new(py),
@@ -41966,7 +42122,7 @@ impl PyRolling {
     pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
         self.require_count_window("corr")?;
         let (window, min_periods, center) = (self.window, self.min_periods, self.center);
-        execute_window_bivariate(
+        let result = execute_window_bivariate(
             py,
             self.series.as_ref(),
             self.dataframe.as_ref(),
@@ -41975,14 +42131,15 @@ impl PyRolling {
             Some(|df: &DataFrame| df.rolling_with_center(window, min_periods, center).corr()),
             "Empty rolling object",
             "DataFrame rolling corr without other is not supported",
-        )
+        )?;
+        pairwise_window_result(py, self.dataframe.as_ref(), other, result)
     }
 
     #[pyo3(signature = (other=None))]
     pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
         self.require_count_window("cov")?;
         let (window, min_periods, center) = (self.window, self.min_periods, self.center);
-        execute_window_bivariate(
+        let result = execute_window_bivariate(
             py,
             self.series.as_ref(),
             self.dataframe.as_ref(),
@@ -41991,7 +42148,8 @@ impl PyRolling {
             Some(|df: &DataFrame| df.rolling_with_center(window, min_periods, center).cov()),
             "Empty rolling object",
             "DataFrame rolling cov without other is not supported",
-        )
+        )?;
+        pairwise_window_result(py, self.dataframe.as_ref(), other, result)
     }
 
     /// pandas' `Rolling.agg`: a name (or a list of them) is that
@@ -52960,11 +53118,17 @@ fn crosstab<'py>(
                 .and_then(Result::ok)
                 .is_some_and(|first| is_sequence(&first))
     };
-    if several(index) || several(columns) {
-        return Err(not_implemented(
-            "crosstab over several index / columns arrays",
-        ));
-    }
+    // Each axis's arrays: a list of them (a list of one is that array), else
+    // the one array (several were refused).
+    let arrays = |keys: &Bound<'py, PyAny>| -> PyResult<Vec<Bound<'py, PyAny>>> {
+        if several(keys) {
+            keys.try_iter()?.collect()
+        } else {
+            Ok(vec![keys.clone()])
+        }
+    };
+    let row_arrays = arrays(index)?;
+    let col_arrays = arrays(columns)?;
     // "all" / True over everything, "index" per row, "columns" per column.
     let normalize = match normalize.filter(|value| !value.is_none()) {
         None => None,
@@ -52982,30 +53146,67 @@ fn crosstab<'py>(
     if normalize.is_some() && margins {
         return Err(not_implemented("crosstab(normalize=..., margins=True)"));
     }
-    let row = PySeries::from_data(py, Some(index), None, None)?;
-    let col = PySeries::from_data(py, Some(columns), None, None)?;
-    if row.inner.len() != col.inner.len() {
+    let to_series = |arrays: &[Bound<'py, PyAny>]| -> PyResult<Vec<PySeries>> {
+        arrays
+            .iter()
+            .map(|array| PySeries::from_data(py, Some(array), None, None))
+            .collect()
+    };
+    let rows = to_series(&row_arrays)?;
+    let cols = to_series(&col_arrays)?;
+    let n = rows.first().map_or(0, |row| row.inner.len());
+    if rows
+        .iter()
+        .chain(&cols)
+        .any(|series| series.inner.len() != n)
+    {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "index and columns must have the same length",
         ));
     }
-    // pandas' _get_names: the given name, else the array's, else row_0 / col_0.
-    let name_of = |given: Option<Vec<String>>, series: &PySeries, prefix: &str| {
-        given
-            .and_then(|names| names.into_iter().next())
-            .or_else(|| (!series.inner.name().is_empty()).then(|| series.inner.name().to_string()))
-            .unwrap_or_else(|| format!("{prefix}_0"))
+    // pandas' _get_names: the given name, else the array's, else row_i /
+    // col_i.
+    let names_of = |given: &Option<Vec<String>>, series: &[PySeries], prefix: &str| {
+        series
+            .iter()
+            .enumerate()
+            .map(|(position, series)| {
+                given
+                    .as_ref()
+                    .and_then(|names| names.get(position).cloned())
+                    .or_else(|| {
+                        (!series.inner.name().is_empty()).then(|| series.inner.name().to_string())
+                    })
+                    .unwrap_or_else(|| format!("{prefix}_{position}"))
+            })
+            .collect::<Vec<String>>()
     };
-    let row_name = name_of(rownames, &row, "row");
-    let col_name = name_of(colnames, &col, "col");
-    if row_name == col_name {
+    let row_names = names_of(&rownames, &rows, "row");
+    let col_names = names_of(&colnames, &cols, "col");
+    let mut distinct: HashSet<&String> = HashSet::new();
+    if !row_names
+        .iter()
+        .chain(&col_names)
+        .all(|name| distinct.insert(name))
+    {
         return Err(not_implemented(
             "crosstab whose row and column arrays share a name",
         ));
     }
     let data = PyDict::new(py);
-    data.set_item(&row_name, Py::new(py, row.clone())?)?;
-    data.set_item(&col_name, Py::new(py, col)?)?;
+    for (name, series) in row_names
+        .iter()
+        .zip(&rows)
+        .chain(col_names.iter().zip(&cols))
+    {
+        data.set_item(name, Py::new(py, series.clone())?)?;
+    }
+    let axis_keys = |names: &[String]| -> PyResult<Bound<'py, PyAny>> {
+        match names {
+            [one] => Ok(pyo3::types::PyString::new(py, one).into_any()),
+            _ => Ok(PyList::new(py, names)?.into_any()),
+        }
+    };
     let pivot_kwargs = PyDict::new(py);
     match (values, aggfunc) {
         (Some(values), Some(aggfunc)) => {
@@ -53016,14 +53217,14 @@ fn crosstab<'py>(
             pivot_kwargs.set_item("aggfunc", aggfunc)?;
         }
         _ => {
-            data.set_item("__dummy__", PyList::new(py, vec![0_i64; row.inner.len()])?)?;
+            data.set_item("__dummy__", PyList::new(py, vec![0_i64; n])?)?;
             pivot_kwargs.set_item("aggfunc", "count")?;
             pivot_kwargs.set_item("fill_value", 0_i64)?;
         }
     }
     pivot_kwargs.set_item("values", "__dummy__")?;
-    pivot_kwargs.set_item("index", &row_name)?;
-    pivot_kwargs.set_item("columns", &col_name)?;
+    pivot_kwargs.set_item("index", axis_keys(&row_names)?)?;
+    pivot_kwargs.set_item("columns", axis_keys(&col_names)?)?;
     pivot_kwargs.set_item("margins", margins)?;
     pivot_kwargs.set_item("margins_name", margins_name)?;
     // dropna=False keeps a missing key as its own row / column (it was
@@ -53055,7 +53256,9 @@ fn crosstab<'py>(
     } else {
         table
     };
-    table.getattr("index")?.setattr("name", &row_name)?;
+    if let [row_name] = row_names.as_slice() {
+        table.getattr("index")?.setattr("name", row_name)?;
+    }
     Ok(table)
 }
 
