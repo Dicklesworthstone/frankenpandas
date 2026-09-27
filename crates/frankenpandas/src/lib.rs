@@ -1792,7 +1792,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cut_res.len(), 3);
-        let qcut_res = qcut_at_quantiles(&num_series, &[0.0, 0.5, 1.0], None).unwrap();
+        let qcut_res = qcut_at_quantiles(&num_series, &[0.0, 0.5, 1.0], None, false).unwrap();
         assert_eq!(qcut_res.len(), 3);
 
         // json_normalize_str test

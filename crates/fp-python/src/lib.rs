@@ -7144,6 +7144,140 @@ impl PyIndexStrMethod {
 /// 100 labels, non-string labels right-justified once the labels wrap,
 /// then `dtype=` / `name=` / `length=`. It printed every label on one line
 /// with no dtype.
+/// pandas' `limit_area=` of ffill / bfill: Some(true) for 'inside' (fill only
+/// between a column's first and last values), Some(false) for 'outside'
+/// (only before the first or after the last), None for every gap.
+fn fill_limit_area(limit_area: Option<&Bound<'_, PyAny>>) -> PyResult<Option<bool>> {
+    let Some(area) = limit_area.filter(|area| !area.is_none()) else {
+        return Ok(None);
+    };
+    match area.extract::<String>()?.as_str() {
+        "inside" => Ok(Some(true)),
+        "outside" => Ok(Some(false)),
+        other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Invalid limit_area: expecting one of ['inside', 'outside'], got {other}."
+        ))),
+    }
+}
+
+/// `filled` with the fills `limit_area` forbids undone: a value missing in
+/// `original` stays missing where it lies outside (for 'inside') or inside
+/// (for 'outside') the span from `original`'s first value to its last.
+fn restrict_fill_area(
+    original: &Column,
+    filled: &Column,
+    inside: bool,
+) -> Result<Column, fp_columnar::ColumnError> {
+    let values = original.values();
+    let first = values.iter().position(|value| !value.is_missing());
+    let last = values.iter().rposition(|value| !value.is_missing());
+    let (Some(first), Some(last)) = (first, last) else {
+        return Ok(filled.clone());
+    };
+    let mut out = filled.values().to_vec();
+    for (position, value) in values.iter().enumerate() {
+        if value.is_missing() && (first < position && position < last) != inside {
+            out[position] = value.clone();
+        }
+    }
+    Column::new(filled.dtype(), out)
+}
+
+/// A Series fill restricted to its `limit_area` (see [`fill_limit_area`]).
+fn series_fill_area(original: &Series, filled: Series, inside: Option<bool>) -> PyResult<Series> {
+    let Some(inside) = inside else {
+        return Ok(filled);
+    };
+    let column = restrict_fill_area(original.column(), filled.column(), inside)
+        .map_err(column_error_to_py)?;
+    Series::new(filled.name(), filled.index().clone(), column).map_err(frame_error_to_py)
+}
+
+/// A frame fill down its columns restricted to its `limit_area`.
+fn frame_fill_area(
+    original: &DataFrame,
+    filled: DataFrame,
+    inside: Option<bool>,
+) -> PyResult<DataFrame> {
+    let Some(inside) = inside else {
+        return Ok(filled);
+    };
+    let mut out = filled.clone();
+    for name in filled.column_names() {
+        let (Some(before), Some(after)) = (original.column(name), filled.column(name)) else {
+            continue;
+        };
+        let column = restrict_fill_area(before, after, inside).map_err(column_error_to_py)?;
+        out = out
+            .with_column(name.clone(), column)
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(out)
+}
+
+/// The positions ordering `index` as pandas' nargsort does: its present
+/// labels ascending, or descending with tied labels in index order, and the
+/// missing ones after (or before) them in index order.
+fn nargsort(index: &Index, ascending: bool, na_first: bool) -> Vec<usize> {
+    let labels = index.labels();
+    let order = if ascending {
+        index.argsort()
+    } else {
+        let mut order: Vec<usize> = (0..labels.len()).collect();
+        order.sort_by(|&a, &b| labels[b].cmp(&labels[a]));
+        order
+    };
+    let (mut missing, present): (Vec<usize>, Vec<usize>) = order
+        .into_iter()
+        .partition(|&position| labels[position].is_missing());
+    missing.sort_unstable();
+    if na_first {
+        [missing, present].concat()
+    } else {
+        [present, missing].concat()
+    }
+}
+
+/// pandas' `Index.get_loc(key)`: the position of a label that occurs once;
+/// where it repeats, `slice(first, last + 1)` over a monotonic-increasing
+/// index, else a bool mask over the index (it gave the first position). A
+/// missing label is pandas' `KeyError(key)`.
+fn pandas_get_loc(
+    py: Python<'_>,
+    index: &Index,
+    label: &IndexLabel,
+    key: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let missing = || PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind());
+    if index.is_unique() {
+        return index.get_loc(label).ok_or_else(missing)?.into_py_any(py);
+    }
+    let mut positions = index.get_loc_all(label);
+    // An int key finds its float label, as the unique lookup does.
+    if positions.is_empty()
+        && let IndexLabel::Int64(value) = label
+    {
+        positions = index.get_loc_all(&IndexLabel::Float64(OrderedF64(*value as f64)));
+    }
+    match positions.as_slice() {
+        [] => Err(missing()),
+        [only] => only.into_py_any(py),
+        [first, .., last] if index.is_monotonic_increasing() => {
+            // slice(first, stop): its step None, as pandas'.
+            py.get_type::<pyo3::types::PySlice>()
+                .call1((*first, *last + 1))?
+                .into_py_any(py)
+        }
+        _ => {
+            let mut mask = vec![false; index.len()];
+            for position in positions {
+                mask[position] = true;
+            }
+            BoolArray::from(mask).into_py_any(py)
+        }
+    }
+}
+
 fn pandas_index_repr(py: Python<'_>, index: &Index) -> PyResult<String> {
     let dtype = index.dtype();
     let items = index
@@ -7352,6 +7486,26 @@ impl<'py> IntoPyObject<'py> for IndexerArray {
 
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         column_ndarray(py, &Column::from_i64_values_owned(self.0))
+    }
+}
+
+/// One position as pandas returns it (`argmax`, `argmin`): a numpy int64
+/// (it was a Python int).
+pub struct NumpyInt64(i64);
+
+impl From<usize> for NumpyInt64 {
+    fn from(position: usize) -> Self {
+        Self(i64::try_from(position).unwrap_or(i64::MAX))
+    }
+}
+
+impl<'py> IntoPyObject<'py> for NumpyInt64 {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("numpy")?.getattr("int64")?.call1((self.0,))
     }
 }
 
@@ -8139,12 +8293,9 @@ impl PyIndex {
     }
 
     /// A missing label is pandas' `KeyError(label)` (its message was
-    /// "<label> not found in Index").
-    fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let label = py_to_index_label(key)?;
-        self.inner
-            .get_loc(&label)
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind()))
+    /// "<label> not found in Index"); a repeated one a slice or a mask.
+    fn get_loc(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        pandas_get_loc(py, &self.inner, &py_to_index_label(key)?, key)
     }
 
     fn copy(&self) -> Self {
@@ -8194,7 +8345,7 @@ impl PyIndex {
         }
     }
 
-    fn argmax(&self) -> PyResult<usize> {
+    fn argmax(&self) -> PyResult<NumpyInt64> {
         let labels = self.inner.labels();
         if labels.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -8207,10 +8358,10 @@ impl PyIndex {
                 max_idx = i;
             }
         }
-        Ok(max_idx)
+        Ok(max_idx.into())
     }
 
-    fn argmin(&self) -> PyResult<usize> {
+    fn argmin(&self) -> PyResult<NumpyInt64> {
         let labels = self.inner.labels();
         if labels.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -8223,7 +8374,7 @@ impl PyIndex {
                 min_idx = i;
             }
         }
-        Ok(min_idx)
+        Ok(min_idx.into())
     }
 
     fn argsort(&self) -> IndexerArray {
@@ -8292,8 +8443,21 @@ impl PyIndex {
         let Some(value) = value.filter(|v| !v.is_none()) else {
             return Ok(self.clone());
         };
-        let fill_lbl = py_to_index_label(value)?;
         let labels = self.inner.labels();
+        // An int fills a float index as a float (Index([1.0, nan]).fillna(0)
+        // is float64 [1.0, 0.0]; it made an object index).
+        let float_index = labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Float64(_)))
+            && labels
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Float64(_) | IndexLabel::Null(_)));
+        let fill_lbl = match py_to_index_label(value)? {
+            IndexLabel::Int64(value) if float_index => {
+                IndexLabel::Float64(OrderedF64(value as f64))
+            }
+            other => other,
+        };
         let filled: Vec<IndexLabel> = labels
             .iter()
             .map(|l| match l {
@@ -8572,22 +8736,60 @@ impl PyIndex {
         self.slice_locs(start, end, step)
     }
 
-    #[pyo3(signature = (ascending=true))]
-    fn sort_values(&self, ascending: bool) -> Self {
-        let mut sorted = self.inner.sort_values();
-        if !ascending {
-            let mut rev_labels = sorted.labels().to_vec();
-            rev_labels.reverse();
-            sorted = Index::new(rev_labels);
-            if let Some(n) = self.inner.name() {
-                sorted = sorted.rename_index(Some(n));
+    /// pandas' `Index.sort_values(return_indexer=, ascending=, na_position=,
+    /// key=)`: the labels in order - descending keeps tied labels in index
+    /// order - the missing ones last (or first), `key` ordering by its result
+    /// over the index, `return_indexer` pairing the index with the positions
+    /// as an int64 array (only `ascending` was taken; descending put a
+    /// missing label first).
+    #[pyo3(signature = (*, return_indexer=false, ascending=true, na_position="last", key=None))]
+    fn sort_values(
+        &self,
+        py: Python<'_>,
+        return_indexer: bool,
+        ascending: bool,
+        na_position: &str,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let na_first = match na_position {
+            "first" => true,
+            "last" => false,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "invalid na_position: {other}"
+                )));
             }
+        };
+        let order = match key.filter(|key| !key.is_none()) {
+            Some(key) => {
+                let keyed = key
+                    .call1((self.clone(),))?
+                    .extract::<IndexArg>()?
+                    .inner
+                    .clone();
+                if keyed.len() != self.inner.len() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "User-provided `key` function must not change the shape of the array.",
+                    ));
+                }
+                nargsort(&keyed, ascending, na_first)
+            }
+            None => nargsort(&self.inner, ascending, na_first),
+        };
+        let sorted = PyIndex {
+            inner: self.inner.take(&order),
+        };
+        if return_indexer {
+            (sorted, IndexerArray::from(order)).into_py_any(py)
+        } else {
+            sorted.into_py_any(py)
         }
-        PyIndex { inner: sorted }
     }
 
     fn sort(&self) -> Self {
-        self.sort_values(true)
+        PyIndex {
+            inner: self.inner.take(&nargsort(&self.inner, true, false)),
+        }
     }
 
     /// pandas refuses to drop the only level of a flat index (it returned
@@ -8828,12 +9030,24 @@ impl PyIndex {
         value: &Bound<'_, PyAny>,
         side: &str,
         sorter: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<Py<PyAny>> {
         unsupported_params("Index.searchsorted", &[("sorter", sorter.is_none())])?;
-        let lbl = py_to_index_label(value)?;
-        self.inner
-            .searchsorted(&lbl, side)
-            .map_err(index_error_to_py)
+        let py = value.py();
+        let position = |item: &Bound<'_, PyAny>| -> PyResult<usize> {
+            self.inner
+                .searchsorted(&py_to_index_label(item)?, side)
+                .map_err(index_error_to_py)
+        };
+        // A list of values gives an int64 array of positions, one value a
+        // numpy int64, as pandas' (a list was one label; an int a Python int).
+        if is_list_like_impl(value) && !value.is_instance_of::<PyTuple>() {
+            let positions = value
+                .try_iter()?
+                .map(|item| position(&item?))
+                .collect::<PyResult<Vec<_>>>()?;
+            return IndexerArray::from(positions).into_py_any(py);
+        }
+        NumpyInt64::from(position(value)?).into_py_any(py)
     }
 
     fn get_slice_bound(&self, label: &Bound<'_, PyAny>, side: &str) -> PyResult<usize> {
@@ -9945,12 +10159,8 @@ impl PyDatetimeIndex {
         }
     }
 
-    fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let label = py_to_index_label(key)?;
-        self.inner
-            .as_index()
-            .get_loc(&label)
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
+    fn get_loc(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        pandas_get_loc(py, self.inner.as_index(), &py_to_index_label(key)?, key)
     }
 
     fn get_indexer(&self, target: IndexArg) -> IndexerArray {
@@ -10198,11 +10408,11 @@ impl PyDatetimeIndex {
         Ok(Py::new(py, object_index_of(this, pieces)?)?.into_any())
     }
 
-    fn argmax(&self) -> PyResult<usize> {
+    fn argmax(&self) -> PyResult<NumpyInt64> {
         self.as_py_index().argmax()
     }
 
-    fn argmin(&self) -> PyResult<usize> {
+    fn argmin(&self) -> PyResult<NumpyInt64> {
         self.as_py_index().argmin()
     }
 
@@ -10400,10 +10610,15 @@ impl PyDatetimeIndex {
         }
     }
 
-    fn indexer_at_time(&self, time: &str) -> PyResult<Vec<usize>> {
-        self.inner.indexer_at_time(time).map_err(index_error_to_py)
+    /// The positions as an int64 array, as pandas' (a list).
+    fn indexer_at_time(&self, time: &str) -> PyResult<IndexerArray> {
+        self.inner
+            .indexer_at_time(time)
+            .map(IndexerArray::from)
+            .map_err(index_error_to_py)
     }
 
+    /// The positions as an int64 array, as pandas' (a list).
     #[pyo3(signature = (start_time, end_time, include_start=true, include_end=true))]
     fn indexer_between_time(
         &self,
@@ -10411,9 +10626,10 @@ impl PyDatetimeIndex {
         end_time: &str,
         include_start: bool,
         include_end: bool,
-    ) -> PyResult<Vec<usize>> {
+    ) -> PyResult<IndexerArray> {
         self.inner
             .indexer_between_time(start_time, end_time, include_start, include_end)
+            .map(IndexerArray::from)
             .map_err(index_error_to_py)
     }
 
@@ -10564,7 +10780,7 @@ impl PyDatetimeIndex {
         value: &Bound<'_, PyAny>,
         side: &str,
         sorter: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<Py<PyAny>> {
         self.as_py_index().searchsorted(value, side, sorter)
     }
 
@@ -11689,12 +11905,12 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
-    fn argmax(&self) -> PyResult<usize> {
+    fn argmax(&self) -> PyResult<NumpyInt64> {
         let flat = self.inner.to_flat_index("/");
         PyIndex { inner: flat }.argmax()
     }
 
-    fn argmin(&self) -> PyResult<usize> {
+    fn argmin(&self) -> PyResult<NumpyInt64> {
         let flat = self.inner.to_flat_index("/");
         PyIndex { inner: flat }.argmin()
     }
@@ -13017,12 +13233,8 @@ impl PyTimedeltaIndex {
         }
     }
 
-    fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let label = py_to_index_label(key)?;
-        self.inner
-            .as_index()
-            .get_loc(&label)
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
+    fn get_loc(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        pandas_get_loc(py, self.inner.as_index(), &py_to_index_label(key)?, key)
     }
 
     fn get_indexer(&self, target: IndexArg) -> IndexerArray {
@@ -13302,6 +13514,9 @@ impl PyTimedeltaIndex {
         self.as_py_index().astype_name(&index_astype_name(dtype)?)
     }
 
+    /// pandas' `components` property (it was a method: `.components` gave
+    /// the bound method).
+    #[getter]
     fn components(&self) -> PyResult<PyDataFrame> {
         let nanos_per_sec: i64 = 1_000_000_000;
         let nanos_per_min: i64 = 60 * nanos_per_sec;
@@ -13561,7 +13776,7 @@ impl PyTimedeltaIndex {
         value: &Bound<'_, PyAny>,
         side: &str,
         sorter: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<Py<PyAny>> {
         self.as_py_index().searchsorted(value, side, sorter)
     }
 
@@ -14710,11 +14925,11 @@ impl PyPeriodIndex {
         Ok(Py::new(py, Self { inner: out })?.into_any())
     }
 
-    fn argmax(&self) -> PyResult<usize> {
+    fn argmax(&self) -> PyResult<NumpyInt64> {
         self.as_py_index().argmax()
     }
 
-    fn argmin(&self) -> PyResult<usize> {
+    fn argmin(&self) -> PyResult<NumpyInt64> {
         self.as_py_index().argmin()
     }
 
@@ -15067,7 +15282,7 @@ impl PyPeriodIndex {
         value: &Bound<'_, PyAny>,
         side: &str,
         sorter: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<Py<PyAny>> {
         self.as_py_index().searchsorted(value, side, sorter)
     }
 
@@ -15323,13 +15538,38 @@ impl PyCategoricalIndex {
         self.inner.len()
     }
 
+    /// pandas' repr: the labels quoted, then `categories=` (past
+    /// display.max_categories 8, the first and last 4 around `...`),
+    /// `ordered=`, the dtype and the name (it printed Rust's `["a"]` and
+    /// `ordered=false`).
     pub fn __repr__(&self) -> String {
-        format!(
-            "CategoricalIndex({:?}, categories={:?}, ordered={}, dtype='category')",
-            self.inner.labels(),
-            self.inner.categories(),
-            self.inner.ordered()
-        )
+        let quoted = |label: &String| format!("'{label}'");
+        let items: Vec<String> = self.inner.labels().iter().map(quoted).collect();
+        let categories = self.inner.categories();
+        let shown: Vec<String> = if categories.len() > 8 {
+            categories[..4]
+                .iter()
+                .map(quoted)
+                .chain(std::iter::once("...".to_owned()))
+                .chain(categories[categories.len() - 4..].iter().map(quoted))
+                .collect()
+        } else {
+            categories.iter().map(quoted).collect()
+        };
+        let mut attrs = vec![
+            format!("categories=[{}]", shown.join(", ")),
+            format!(
+                "ordered={}",
+                if self.inner.ordered() {
+                    "True"
+                } else {
+                    "False"
+                }
+            ),
+            "dtype='category'".to_owned(),
+        ];
+        attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
+        pandas_index_text("CategoricalIndex", &items, false, attrs)
     }
 
     pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -15731,11 +15971,11 @@ impl PyCategoricalIndex {
         })
     }
 
-    fn argmax(&self) -> PyResult<usize> {
+    fn argmax(&self) -> PyResult<NumpyInt64> {
         self.as_py_index().argmax()
     }
 
-    fn argmin(&self) -> PyResult<usize> {
+    fn argmin(&self) -> PyResult<NumpyInt64> {
         self.as_py_index().argmin()
     }
 
@@ -15974,7 +16214,7 @@ impl PyCategoricalIndex {
         value: &Bound<'_, PyAny>,
         side: &str,
         sorter: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<Py<PyAny>> {
         self.as_py_index().searchsorted(value, side, sorter)
     }
 
@@ -16144,7 +16384,8 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 // Python's TypeError for values it cannot order, and pandas'
                 // refusal to rank an unordered categorical by group (fvsao.71).
                 || msg.starts_with("'<' not supported between instances of ")
-                || msg == "Cannot perform rank with non-ordered Categorical";
+                || msg == "Cannot perform rank with non-ordered Categorical"
+                || msg.starts_with("Bin edges must be unique: ");
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -22395,12 +22636,18 @@ impl PySeries {
         }
     }
 
-    fn argmax(&self) -> PyResult<i64> {
-        self.inner.argmax().map_err(frame_error_to_py)
+    fn argmax(&self) -> PyResult<NumpyInt64> {
+        self.inner
+            .argmax()
+            .map(NumpyInt64)
+            .map_err(frame_error_to_py)
     }
 
-    fn argmin(&self) -> PyResult<i64> {
-        self.inner.argmin().map_err(frame_error_to_py)
+    fn argmin(&self) -> PyResult<NumpyInt64> {
+        self.inner
+            .argmin()
+            .map(NumpyInt64)
+            .map_err(frame_error_to_py)
     }
 
     /// Shift index by desired number of periods.
@@ -22684,13 +22931,8 @@ impl PySeries {
         downcast: Option<&Bound<'_, PyAny>>,
         limit_area: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PySeries>> {
-        unsupported_params(
-            "Series.ffill",
-            &[
-                ("downcast", downcast.is_none()),
-                ("limit_area", limit_area.is_none()),
-            ],
-        )?;
+        unsupported_params("Series.ffill", &[("downcast", downcast.is_none())])?;
+        let inside = fill_limit_area(limit_area)?;
         let result = (|| -> PyResult<PySeries> {
             let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
             if ax != 0 {
@@ -22708,7 +22950,9 @@ impl PySeries {
                 None => None,
             };
             let res = self.inner.ffill(limit_usize).map_err(frame_error_to_py)?;
-            Ok(PySeries { inner: res })
+            Ok(PySeries {
+                inner: series_fill_area(&self.inner, res, inside)?,
+            })
         })()?;
         Ok(series_inplace(&mut self.inner, result, inplace))
     }
@@ -22723,13 +22967,8 @@ impl PySeries {
         downcast: Option<&Bound<'_, PyAny>>,
         limit_area: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PySeries>> {
-        unsupported_params(
-            "Series.bfill",
-            &[
-                ("downcast", downcast.is_none()),
-                ("limit_area", limit_area.is_none()),
-            ],
-        )?;
+        unsupported_params("Series.bfill", &[("downcast", downcast.is_none())])?;
+        let inside = fill_limit_area(limit_area)?;
         let result = (|| -> PyResult<PySeries> {
             let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
             if ax != 0 {
@@ -22747,7 +22986,9 @@ impl PySeries {
                 None => None,
             };
             let res = self.inner.bfill(limit_usize).map_err(frame_error_to_py)?;
-            Ok(PySeries { inner: res })
+            Ok(PySeries {
+                inner: series_fill_area(&self.inner, res, inside)?,
+            })
         })()?;
         Ok(series_inplace(&mut self.inner, result, inplace))
     }
@@ -23400,12 +23641,10 @@ impl PySeries {
             let positions = items
                 .map(|item| position(&item?))
                 .collect::<PyResult<Vec<_>>>()?;
-            return Ok(py
-                .import("numpy")?
-                .call_method1("array", (positions,))?
-                .unbind());
+            return IndexerArray::from(positions).into_py_any(py);
         }
-        position(value)?.into_py_any(py)
+        // One position is a numpy int64, as pandas' (a Python int).
+        NumpyInt64::from(position(value)?).into_py_any(py)
     }
 
     /// pandas' `memory_usage(index=True, deep=False)`; deep=True counts an
@@ -24090,7 +24329,33 @@ impl PySeries {
         Ok((PySeries { inner: codes }, PySeries { inner: uniques }))
     }
 
-    fn case_when(&self, caselist: &Bound<'_, PyList>) -> PyResult<PySeries> {
+    /// pandas' `case_when(caselist)`: each condition and replacement a
+    /// Series, an array over this Series' rows, a callable of this Series,
+    /// or (a replacement) a scalar for every row (only Series were taken: a
+    /// scalar replacement was a TypeError).
+    fn case_when(&self, py: Python<'_>, caselist: &Bound<'_, PyList>) -> PyResult<PySeries> {
+        let aligned = |argument: Bound<'_, PyAny>| -> PyResult<Series> {
+            let argument = if argument.is_callable() {
+                argument.call1((self.clone(),))?
+            } else {
+                argument
+            };
+            if let Ok(series) = argument.extract::<PyRef<'_, PySeries>>() {
+                return Ok(series.inner.clone());
+            }
+            let values: Vec<Scalar> =
+                if is_list_like_impl(&argument) && !argument.is_instance_of::<PyTuple>() {
+                    argument
+                        .try_iter()?
+                        .map(|item| py_to_scalar(py, &item?))
+                        .collect::<PyResult<_>>()?
+                } else {
+                    vec![py_to_scalar(py, &argument)?; self.inner.len()]
+                };
+            let column = Column::from_values(values).map_err(column_error_to_py)?;
+            Series::new(self.inner.name(), self.inner.index().clone(), column)
+                .map_err(frame_error_to_py)
+        };
         let mut cases = Vec::with_capacity(caselist.len());
         for item in caselist.iter() {
             let pair = item.cast::<pyo3::types::PyTuple>()?;
@@ -24099,9 +24364,7 @@ impl PySeries {
                     "case_when requires pairs of (condition, value)",
                 ));
             }
-            let cond = pair.get_item(0)?.extract::<PyRef<'_, PySeries>>()?;
-            let val = pair.get_item(1)?.extract::<PyRef<'_, PySeries>>()?;
-            cases.push((cond.inner.clone(), val.inner.clone()));
+            cases.push((aligned(pair.get_item(0)?)?, aligned(pair.get_item(1)?)?));
         }
         let s = self.inner.case_when(&cases).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
@@ -32335,13 +32598,8 @@ impl PyDataFrame {
         downcast: Option<&Bound<'_, PyAny>>,
         limit_area: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PyDataFrame>> {
-        unsupported_params(
-            "DataFrame.ffill",
-            &[
-                ("downcast", downcast.is_none()),
-                ("limit_area", limit_area.is_none()),
-            ],
-        )?;
+        unsupported_params("DataFrame.ffill", &[("downcast", downcast.is_none())])?;
+        let inside = fill_limit_area(limit_area)?;
         let result = (|| -> PyResult<PyDataFrame> {
             let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
             let limit_usize = match limit {
@@ -32355,6 +32613,9 @@ impl PyDataFrame {
             };
             let res = match ax {
                 0 => self.inner.ffill(limit_usize).map_err(frame_error_to_py)?,
+                1 if inside.is_some() => {
+                    return Err(not_implemented("DataFrame.ffill(axis=1, limit_area=...)"));
+                }
                 1 => self
                     .inner
                     .ffill_axis1(limit_usize)
@@ -32365,7 +32626,9 @@ impl PyDataFrame {
                     )));
                 }
             };
-            Ok(PyDataFrame { inner: res })
+            Ok(PyDataFrame {
+                inner: frame_fill_area(&self.inner, res, inside)?,
+            })
         })()?;
         Ok(frame_inplace(&mut self.inner, result, inplace))
     }
@@ -32380,13 +32643,8 @@ impl PyDataFrame {
         downcast: Option<&Bound<'_, PyAny>>,
         limit_area: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PyDataFrame>> {
-        unsupported_params(
-            "DataFrame.bfill",
-            &[
-                ("downcast", downcast.is_none()),
-                ("limit_area", limit_area.is_none()),
-            ],
-        )?;
+        unsupported_params("DataFrame.bfill", &[("downcast", downcast.is_none())])?;
+        let inside = fill_limit_area(limit_area)?;
         let result = (|| -> PyResult<PyDataFrame> {
             let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
             let limit_usize = match limit {
@@ -32400,6 +32658,9 @@ impl PyDataFrame {
             };
             let res = match ax {
                 0 => self.inner.bfill(limit_usize).map_err(frame_error_to_py)?,
+                1 if inside.is_some() => {
+                    return Err(not_implemented("DataFrame.bfill(axis=1, limit_area=...)"));
+                }
                 1 => self
                     .inner
                     .bfill_axis1(limit_usize)
@@ -32410,7 +32671,9 @@ impl PyDataFrame {
                     )));
                 }
             };
-            Ok(PyDataFrame { inner: res })
+            Ok(PyDataFrame {
+                inner: frame_fill_area(&self.inner, res, inside)?,
+            })
         })()?;
         Ok(frame_inplace(&mut self.inner, result, inplace))
     }
@@ -32491,6 +32754,7 @@ impl PyDataFrame {
     #[pyo3(signature = (columns=None, index=None, values=None))]
     fn pivot(
         &self,
+        py: Python<'_>,
         columns: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
         values: Option<&Bound<'_, PyAny>>,
@@ -32503,6 +32767,54 @@ impl PyDataFrame {
                 ));
             }
         };
+
+        // values= a list, or left out: each value column pivots, side by
+        // side under a (value, label) column MultiIndex, as pandas' unstack
+        // of the frame indexed by index / columns (it kept the first column
+        // and dropped the rest). One label (a tuple is one) stays flat.
+        let listed = values.is_none_or(|values| {
+            values.is_none() || (is_list_like_impl(values) && !values.is_instance_of::<PyTuple>())
+        });
+        if listed {
+            let skip = match index {
+                Some(index) if !index.is_none() => extract_col_names_flexible(Some(index))?,
+                _ => Vec::new(),
+            };
+            let names: Vec<String> = match values {
+                Some(values) if !values.is_none() => extract_col_names_flexible(Some(values))?,
+                _ => self
+                    .inner
+                    .column_names()
+                    .into_iter()
+                    .filter(|name| **name != col_name && !skip.contains(name))
+                    .cloned()
+                    .collect(),
+            };
+            if !names.is_empty() {
+                let mut pieces = Vec::with_capacity(names.len());
+                let mut keys = Vec::with_capacity(names.len());
+                for name in &names {
+                    let value = pyo3::types::PyString::new(py, name).into_any();
+                    pieces.push(self.pivot(py, columns, index, Some(&value))?);
+                    keys.push(index_label_to_py(py, &self.inner.column_label(name))?);
+                }
+                let side_by_side = concat(
+                    py,
+                    PyList::new(py, pieces)?.as_any(),
+                    Some(&1_i64.into_bound_py_any(py)?),
+                    "outer",
+                    false,
+                    Some(PyList::new(py, keys)?.as_any()),
+                    false,
+                    None,
+                    None,
+                )?;
+                return Ok(side_by_side
+                    .bind(py)
+                    .extract::<PyRef<'_, PyDataFrame>>()?
+                    .clone());
+            }
+        }
 
         let val_names = extract_col_names_flexible(values)?;
         let val_name = if !val_names.is_empty() {
@@ -48644,6 +48956,12 @@ fn read_csv_impl(
             _ => return Err(not_implemented("read_csv(on_bad_lines=<callable>)")),
         }),
     };
+    // dayfirst=True: the parse_dates columns read day before month, as
+    // to_datetime(dayfirst=True) reads them (it was refused).
+    let dayfirst = take("dayfirst")?
+        .map(|v| v.is_truthy())
+        .transpose()?
+        .unwrap_or(false);
     // converters={column: func} (it was refused): see `apply_csv_converters`.
     let converters = take("converters")?;
     if converters.is_some() && args.names.is_some() {
@@ -48773,9 +49091,32 @@ fn read_csv_impl(
         opts.usecols = Some(names.clone());
     }
 
+    let day_first_dates = if dayfirst {
+        opts.parse_dates.take().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut frame = fp_io::read_csv_with_options(&text, &opts).map_err(io_error_to_py)?;
     if let Some(converters) = &converters {
         frame = apply_csv_converters(py, frame, &text, &opts, converters)?;
+    }
+    for name in &day_first_dates {
+        let Some(column) = frame.column(name) else {
+            continue;
+        };
+        let text_dates = Series::new(name.as_str(), frame.index().clone(), column.clone())
+            .map_err(frame_error_to_py)?;
+        let dates = fp_frame::to_datetime_with_options(
+            &text_dates,
+            fp_frame::ToDatetimeOptions {
+                dayfirst: true,
+                ..Default::default()
+            },
+        )
+        .map_err(frame_error_to_py)?;
+        frame = frame
+            .with_column(name.clone(), dates.column().clone())
+            .map_err(frame_error_to_py)?;
     }
 
     if let Some(names) = &args.names {
@@ -50435,12 +50776,13 @@ fn melt(
 #[pyfunction]
 #[pyo3(signature = (data, columns=None, index=None, values=None))]
 fn pivot(
+    py: Python<'_>,
     data: &PyDataFrame,
     columns: Option<&Bound<'_, PyAny>>,
     index: Option<&Bound<'_, PyAny>>,
     values: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyDataFrame> {
-    data.pivot(columns, index, values)
+    data.pivot(py, columns, index, values)
 }
 
 /// Create a spreadsheet-style pivot table as a DataFrame (pandas `pivot_table`).
@@ -50779,18 +51121,31 @@ fn bin_codes(binned: &Series) -> PyResult<Series> {
 }
 
 /// Discretize variable into equal-sized buckets based on rank or sample quantiles (pandas `qcut`).
+/// `duplicates='drop'` bins over the distinct edges where tied values repeat
+/// one; the default `'raise'` refuses them, as pandas (the keyword was
+/// unknown, and repeated edges were binned).
 #[pyfunction]
-#[pyo3(signature = (x, q, labels=None, precision=3))]
+#[pyo3(signature = (x, q, labels=None, precision=3, duplicates="raise"))]
 fn qcut(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     q: &Bound<'_, PyAny>,
     labels: Option<&Bound<'_, PyAny>>,
     precision: usize,
+    duplicates: &str,
 ) -> PyResult<PySeries> {
+    let drop_duplicates = match duplicates {
+        "raise" => false,
+        "drop" => true,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "invalid value for 'duplicates' parameter, valid options are: raise, drop",
+            ));
+        }
+    };
     let (labels, codes) = bin_labels_arg(labels)?;
     if codes {
-        let binned = qcut(py, x, q, None, precision)?;
+        let binned = qcut(py, x, q, None, precision, duplicates)?;
         return Ok(PySeries {
             inner: bin_codes(&binned.inner)?,
         });
@@ -50827,18 +51182,19 @@ fn qcut(
     };
 
     let res = if let Ok(n_q) = q.extract::<usize>() {
-        if let Some(lbls) = label_refs {
-            let probs: Vec<f64> = (0..=n_q).map(|i| i as f64 / n_q as f64).collect();
-            fp_frame::qcut_at_quantiles(&series, &probs, Some(&lbls)).map_err(frame_error_to_py)?
-        } else {
+        if n_q == 0 {
             fp_frame::qcut(&series, n_q).map_err(frame_error_to_py)?
+        } else {
+            let probs: Vec<f64> = (0..=n_q).map(|i| i as f64 / n_q as f64).collect();
+            fp_frame::qcut_at_quantiles(&series, &probs, label_refs.as_deref(), drop_duplicates)
+                .map_err(frame_error_to_py)?
         }
     } else if let Ok(q_list) = q.cast::<PyList>() {
         let quantiles: Vec<f64> = q_list
             .iter()
             .map(|v| v.extract::<f64>())
             .collect::<PyResult<Vec<_>>>()?;
-        fp_frame::qcut_at_quantiles(&series, &quantiles, label_refs.as_deref())
+        fp_frame::qcut_at_quantiles(&series, &quantiles, label_refs.as_deref(), drop_duplicates)
             .map_err(frame_error_to_py)?
     } else {
         return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -51546,78 +51902,266 @@ fn is_hashable_impl(obj: &Bound<'_, PyAny>) -> bool {
     obj.hash().is_ok()
 }
 
-fn infer_dtype_impl(obj: &Bound<'_, PyAny>, skipna: bool) -> PyResult<&'static str> {
-    if !is_list_like_impl(obj) {
-        return Ok("unknown");
-    }
-    let seq = obj.try_iter()?;
-    let mut has_int = false;
-    let mut has_float = false;
-    let mut has_bool = false;
-    let mut has_str = false;
-    let mut has_ts = false;
-    let mut has_td = false;
-    let mut has_period = false;
-    let mut count = 0;
-
-    for item_res in seq {
-        let item = item_res?;
-        if item.is_none() || item.is_instance_of::<PyNAType>() || item.is_instance_of::<PyNaTType>()
+/// pandas' `infer_dtype` of a dtype: its kind, None for object data (read
+/// value by value). A dtype is numpy's, an extension dtype, or its name.
+fn inferred_kind_of_dtype(dtype: &Bound<'_, PyAny>) -> Option<&'static str> {
+    let name = dtype.extract::<String>().unwrap_or_else(|_| {
+        dtype
+            .getattr("name")
+            .and_then(|name| name.extract::<String>())
+            .unwrap_or_default()
+    });
+    let kind = dtype
+        .getattr("kind")
+        .and_then(|kind| kind.extract::<String>())
+        .ok();
+    match name.as_str() {
+        "category" => Some("categorical"),
+        "string" | "str" => Some("string"),
+        "object" | "O" => None,
+        "boolean" | "bool" => Some("boolean"),
+        name if name.starts_with("interval") => Some("interval"),
+        name if name.starts_with("period") => Some("period"),
+        name if name.starts_with("datetime64") => Some("datetime64"),
+        name if name.starts_with("timedelta64") => Some("timedelta64"),
+        name if ["int", "uint", "Int", "UInt"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix)) =>
         {
-            if !skipna {
-                return Ok("mixed");
-            }
-            continue;
+            Some("integer")
         }
-        count += 1;
-        if item.is_instance_of::<pyo3::types::PyBool>() {
-            has_bool = true;
-        } else if item.is_instance_of::<pyo3::types::PyInt>() {
-            has_int = true;
-        } else if item.is_instance_of::<pyo3::types::PyFloat>() {
-            has_float = true;
-        } else if item.is_instance_of::<pyo3::types::PyString>() {
-            has_str = true;
-        } else if item.is_instance_of::<PyTimestamp>() {
-            has_ts = true;
-        } else if item.is_instance_of::<PyTimedelta>() {
-            has_td = true;
-        } else if item.is_instance_of::<PyPeriod>() {
-            has_period = true;
+        name if name.starts_with("float") || name.starts_with("Float") => Some("floating"),
+        name if name.starts_with("complex") => Some("complex"),
+        _ => match kind.as_deref() {
+            Some("b") => Some("boolean"),
+            Some("i" | "u") => Some("integer"),
+            Some("f") => Some("floating"),
+            Some("c") => Some("complex"),
+            Some("M") => Some("datetime64"),
+            Some("m") => Some("timedelta64"),
+            Some("S") => Some("bytes"),
+            Some("U") => Some("string"),
+            _ => None,
+        },
+    }
+}
+
+/// pandas' `api.types.infer_dtype(value, skipna=)`. A Series, Index or
+/// array answers by its dtype (an Index by its inferred_type under
+/// skipna=False); object data, or a list, by its first value that is not
+/// missing, every value then checked against that kind (`integer`,
+/// `integer-na` for ints beside NaN, `mixed-integer-float`, `floating`,
+/// `boolean`, `string`, `bytes`, `datetime`, `date`, `time`, `datetime64`,
+/// `timedelta`, `decimal`, `complex`, `period`, `interval`), else
+/// `mixed-integer` when any value is an int and `mixed` when none is; only
+/// missing values are `empty` (NaT alone `datetime`). It tallied a few
+/// kinds (['a', 1] was 'mixed', [1, 1.5] 'floating', Timestamps
+/// 'datetime64').
+fn infer_dtype_impl(obj: &Bound<'_, PyAny>, skipna: bool) -> PyResult<&'static str> {
+    let py = obj.py();
+    let is_array = obj.hasattr("shape")? && obj.hasattr("dtype")?;
+    if !is_array && !skipna && obj.get_type().hasattr("inferred_type")? {
+        if let Ok(inferred) = obj.getattr("inferred_type")?.extract::<String>() {
+            let known = [
+                "integer",
+                "integer-na",
+                "mixed-integer",
+                "mixed-integer-float",
+                "floating",
+                "boolean",
+                "string",
+                "bytes",
+                "datetime",
+                "date",
+                "time",
+                "datetime64",
+                "timedelta",
+                "timedelta64",
+                "decimal",
+                "complex",
+                "period",
+                "interval",
+                "categorical",
+                "mixed",
+                "empty",
+            ];
+            if let Some(kind) = known.iter().find(|kind| **kind == inferred) {
+                return Ok(kind);
+            }
         }
     }
-
-    if count == 0 {
+    if obj.hasattr("dtype")?
+        && let Some(kind) = inferred_kind_of_dtype(&obj.getattr("dtype")?)
+    {
+        return Ok(kind);
+    }
+    let values: Vec<Bound<'_, PyAny>> = obj.try_iter()?.collect::<PyResult<_>>()?;
+    if values.is_empty() {
         return Ok("empty");
     }
-    if has_bool && !has_int && !has_float && !has_str && !has_ts && !has_td && !has_period {
-        return Ok("boolean");
+    let numpy = py.import("numpy")?;
+    let np_type = |name: &str| numpy.getattr(name);
+    let (np_integer, np_floating, np_bool, np_complex, np_datetime64, np_timedelta64) = (
+        np_type("integer")?,
+        np_type("floating")?,
+        np_type("bool_")?,
+        np_type("complexfloating")?,
+        np_type("datetime64")?,
+        np_type("timedelta64")?,
+    );
+    let decimal = py.import("decimal")?.getattr("Decimal")?;
+    let isa = |value: &Bound<'_, PyAny>, kind: &Bound<'_, PyAny>| {
+        value.is_instance(kind).unwrap_or(false)
+    };
+    let is_bool = |value: &Bound<'_, PyAny>| {
+        value.is_instance_of::<pyo3::types::PyBool>() || isa(value, &np_bool)
+    };
+    let is_int = |value: &Bound<'_, PyAny>| {
+        (value.is_instance_of::<pyo3::types::PyInt>() || isa(value, &np_integer)) && !is_bool(value)
+    };
+    let is_float = |value: &Bound<'_, PyAny>| {
+        value.is_instance_of::<pyo3::types::PyFloat>() || isa(value, &np_floating)
+    };
+    let is_nan =
+        |value: &Bound<'_, PyAny>| is_float(value) && value.extract::<f64>().is_ok_and(f64::is_nan);
+    let is_nat = |value: &Bound<'_, PyAny>| value.is_instance_of::<PyNaTType>();
+    // pandas' generic missing value: None, NaN, NA.
+    let is_null = |value: &Bound<'_, PyAny>| {
+        value.is_none() || is_nan(value) || value.is_instance_of::<PyNAType>()
+    };
+    let is_datetime = |value: &Bound<'_, PyAny>| {
+        value.is_instance_of::<PyDateTime>() || value.is_instance_of::<PyTimestamp>()
+    };
+    let is_date = |value: &Bound<'_, PyAny>| value.is_instance_of::<pyo3::types::PyDate>();
+    let is_time = |value: &Bound<'_, PyAny>| value.is_instance_of::<pyo3::types::PyTime>();
+    let is_timedelta = |value: &Bound<'_, PyAny>| {
+        value.is_instance_of::<PyDelta>()
+            || value.is_instance_of::<PyTimedelta>()
+            || isa(value, &np_timedelta64)
+    };
+    // Every value of the kind, the missing ones passing under skipna
+    // (`typed_null` passes too: NaT for the temporal kinds).
+    let all = |typed: &dyn Fn(&Bound<'_, PyAny>) -> bool,
+               typed_null: &dyn Fn(&Bound<'_, PyAny>) -> bool,
+               skipna: bool| {
+        values
+            .iter()
+            .all(|value| typed(value) || (skipna && (is_null(value) || typed_null(value))))
+    };
+    let none = |_: &Bound<'_, PyAny>| false;
+    let mut first = None;
+    let mut seen_nat = false;
+    for value in &values {
+        if is_null(value) {
+            continue;
+        }
+        if is_nat(value) {
+            seen_nat = true;
+            continue;
+        }
+        first = Some(value);
+        break;
     }
-    if has_int && !has_float && !has_bool && !has_str && !has_ts && !has_td && !has_period {
-        return Ok("integer");
-    }
-    if (has_float || (has_int && has_float))
-        && !has_bool
-        && !has_str
-        && !has_ts
-        && !has_td
-        && !has_period
+    let first = match first {
+        Some(first) => first,
+        None if seen_nat => return Ok("datetime"),
+        None if skipna => return Ok("empty"),
+        None => &values[values.len() - 1],
+    };
+    let int_or_float = |value: &Bound<'_, PyAny>| is_int(value) || is_float(value);
+    let int_or_nan = |value: &Bound<'_, PyAny>| is_int(value) || is_nan(value);
+    if isa(first, &np_datetime64) {
+        if all(&|value| isa(value, &np_datetime64), &is_nat, skipna) {
+            return Ok("datetime64");
+        }
+    } else if is_timedelta(first) {
+        if all(&is_timedelta, &is_nat, skipna) {
+            return Ok("timedelta");
+        }
+    } else if is_int(first) {
+        if all(&is_int, &none, skipna) {
+            return Ok("integer");
+        }
+        if all(&int_or_float, &none, skipna) {
+            return Ok(if all(&int_or_nan, &none, skipna) {
+                "integer-na"
+            } else {
+                "mixed-integer-float"
+            });
+        }
+        return Ok("mixed-integer");
+    } else if is_datetime(first) {
+        if all(&is_datetime, &is_nat, skipna) {
+            return Ok("datetime");
+        }
+        if all(&is_date, &is_nat, skipna) {
+            return Ok("date");
+        }
+    } else if is_date(first) {
+        if all(&is_date, &none, skipna) {
+            return Ok("date");
+        }
+    } else if is_time(first) {
+        if all(&is_time, &none, skipna) {
+            return Ok("time");
+        }
+    } else if isa(first, &decimal) {
+        if all(&|value| isa(value, &decimal), &none, skipna) {
+            return Ok("decimal");
+        }
+    } else if first.is_instance_of::<pyo3::types::PyComplex>() || isa(first, &np_complex) {
+        if all(
+            &|value| value.is_instance_of::<pyo3::types::PyComplex>() || isa(value, &np_complex),
+            &none,
+            false,
+        ) {
+            return Ok("complex");
+        }
+    } else if is_float(first) {
+        if all(&is_float, &none, false) {
+            return Ok("floating");
+        }
+        if all(&int_or_float, &none, skipna) {
+            return Ok(if all(&int_or_nan, &none, skipna) {
+                "integer-na"
+            } else {
+                "mixed-integer-float"
+            });
+        }
+    } else if is_bool(first) {
+        if all(&is_bool, &none, skipna) {
+            return Ok("boolean");
+        }
+    } else if first.is_instance_of::<pyo3::types::PyString>() {
+        if all(
+            &|value| value.is_instance_of::<pyo3::types::PyString>(),
+            &none,
+            skipna,
+        ) {
+            return Ok("string");
+        }
+    } else if first.is_instance_of::<pyo3::types::PyBytes>() {
+        if all(
+            &|value| value.is_instance_of::<pyo3::types::PyBytes>(),
+            &none,
+            skipna,
+        ) {
+            return Ok("bytes");
+        }
+    } else if first.is_instance_of::<PyPeriod>() {
+        if all(&|value| value.is_instance_of::<PyPeriod>(), &is_nat, skipna) {
+            return Ok("period");
+        }
+    } else if first.is_instance_of::<PyInterval>()
+        && all(&|value| value.is_instance_of::<PyInterval>(), &none, false)
     {
-        return Ok("floating");
+        return Ok("interval");
     }
-    if has_str && !has_int && !has_float && !has_bool && !has_ts && !has_td && !has_period {
-        return Ok("string");
-    }
-    if has_ts && !has_int && !has_float && !has_bool && !has_str && !has_td && !has_period {
-        return Ok("datetime64");
-    }
-    if has_td && !has_int && !has_float && !has_bool && !has_str && !has_ts && !has_period {
-        return Ok("timedelta64");
-    }
-    if has_period && !has_int && !has_float && !has_bool && !has_str && !has_ts && !has_td {
-        return Ok("period");
-    }
-    Ok("mixed")
+    Ok(if values.iter().any(is_int) {
+        "mixed-integer"
+    } else {
+        "mixed"
+    })
 }
 
 #[pyfunction(name = "is_bool_dtype")]
@@ -53748,6 +54292,25 @@ impl PyInterval {
     }
 }
 
+/// Interval endpoints as floats, and whether pandas keeps them int64: an
+/// integer array or Index, or every one a Python int (a bool is not).
+fn interval_endpoints(values: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, bool)> {
+    let int_array = values
+        .getattr("dtype")
+        .and_then(|dtype| dtype.getattr("kind"))
+        .and_then(|kind| kind.extract::<String>())
+        .is_ok_and(|kind| kind == "i" || kind == "u");
+    let mut ints = true;
+    let mut endpoints = Vec::new();
+    for value in values.try_iter()? {
+        let value = value?;
+        ints &= value.is_instance_of::<pyo3::types::PyInt>()
+            && !value.is_instance_of::<pyo3::types::PyBool>();
+        endpoints.push(value.extract::<f64>()?);
+    }
+    Ok((endpoints, int_array || ints))
+}
+
 #[pyclass(name = "IntervalIndex", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyIntervalIndex {
@@ -53780,23 +54343,28 @@ impl PyIntervalIndex {
         })
     }
 
+    /// Intervals of int breaks (Python ints, an integer array) are
+    /// interval[int64], as pandas' (they were float64).
     #[classmethod]
     #[pyo3(signature = (breaks, closed="right", name=None))]
     fn from_breaks(
         _cls: &Bound<'_, pyo3::types::PyType>,
-        breaks: Vec<f64>,
+        breaks: &Bound<'_, PyAny>,
         closed: Option<&str>,
         name: Option<&str>,
     ) -> PyResult<Self> {
         let closed_str = closed.unwrap_or("right");
+        let (breaks, ints) = interval_endpoints(breaks)?;
         if breaks.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "breaks must have at least 2 elements",
             ));
         }
         let mut intervals = Vec::with_capacity(breaks.len() - 1);
-        for i in 0..(breaks.len() - 1) {
-            intervals.push(PyInterval::floats(breaks[i], breaks[i + 1], closed_str)?);
+        for pair in breaks.windows(2) {
+            let mut interval = PyInterval::floats(pair[0], pair[1], closed_str)?;
+            interval.int_endpoints = ints;
+            intervals.push(interval);
         }
         Ok(Self {
             intervals,
@@ -53804,18 +54372,33 @@ impl PyIntervalIndex {
         })
     }
 
+    /// Tuples of ints are interval[int64] intervals, as pandas'.
     #[classmethod]
     #[pyo3(signature = (data, closed="right", name=None))]
     fn from_tuples(
         _cls: &Bound<'_, pyo3::types::PyType>,
-        data: Vec<(f64, f64)>,
+        data: &Bound<'_, PyAny>,
         closed: Option<&str>,
         name: Option<&str>,
     ) -> PyResult<Self> {
         let closed_str = closed.unwrap_or("right");
-        let mut intervals = Vec::with_capacity(data.len());
-        for (left, right) in data {
-            intervals.push(PyInterval::floats(left, right, closed_str)?);
+        let mut pairs = Vec::new();
+        let mut ints = true;
+        for pair in data.try_iter()? {
+            let (endpoints, whole) = interval_endpoints(&pair?)?;
+            let [left, right] = endpoints[..] else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "each tuple must hold a left and a right endpoint",
+                ));
+            };
+            ints &= whole;
+            pairs.push((left, right));
+        }
+        let mut intervals = Vec::with_capacity(pairs.len());
+        for (left, right) in pairs {
+            let mut interval = PyInterval::floats(left, right, closed_str)?;
+            interval.int_endpoints = ints;
+            intervals.push(interval);
         }
         Ok(Self {
             intervals,
@@ -53823,16 +54406,19 @@ impl PyIntervalIndex {
         })
     }
 
+    /// Int left and right arrays are interval[int64] intervals, as pandas'.
     #[classmethod]
     #[pyo3(signature = (left, right, closed="right", name=None))]
     fn from_arrays(
         _cls: &Bound<'_, pyo3::types::PyType>,
-        left: Vec<f64>,
-        right: Vec<f64>,
+        left: &Bound<'_, PyAny>,
+        right: &Bound<'_, PyAny>,
         closed: Option<&str>,
         name: Option<&str>,
     ) -> PyResult<Self> {
         let closed_str = closed.unwrap_or("right");
+        let (left, left_ints) = interval_endpoints(left)?;
+        let (right, right_ints) = interval_endpoints(right)?;
         if left.len() != right.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "left and right arrays must have equal length",
@@ -53840,7 +54426,9 @@ impl PyIntervalIndex {
         }
         let mut intervals = Vec::with_capacity(left.len());
         for (l, r) in left.into_iter().zip(right) {
-            intervals.push(PyInterval::floats(l, r, closed_str)?);
+            let mut interval = PyInterval::floats(l, r, closed_str)?;
+            interval.int_endpoints = left_ints && right_ints;
+            intervals.push(interval);
         }
         Ok(Self {
             intervals,
@@ -54172,6 +54760,67 @@ impl PyCategorical {
             }
         }
         .map_err(frame_error_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// pandas' `Categorical.from_codes(codes, categories=, ordered=,
+    /// dtype=)`: each code picks its category, -1 a missing value; a code
+    /// outside them is pandas' ValueError (it was missing).
+    #[staticmethod]
+    #[pyo3(signature = (codes, categories=None, ordered=None, dtype=None, validate=true))]
+    fn from_codes(
+        py: Python<'_>,
+        codes: &Bound<'_, PyAny>,
+        categories: Option<&Bound<'_, PyAny>>,
+        ordered: Option<bool>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        validate: bool,
+    ) -> PyResult<Self> {
+        let _ = validate; // the codes are always checked
+        let value_error =
+            |message: &str| PyErr::new::<pyo3::exceptions::PyValueError, _>(message.to_owned());
+        let (categories, dtype_ordered) = match (
+            categories.filter(|categories| !categories.is_none()),
+            dtype.filter(|dtype| !dtype.is_none()),
+        ) {
+            (Some(categories), None) => (
+                categories
+                    .try_iter()?
+                    .map(|item| py_to_scalar(py, &item?))
+                    .collect::<PyResult<Vec<Scalar>>>()?,
+                None,
+            ),
+            (None, Some(dtype)) => {
+                let dtype = dtype.extract::<PyRef<'_, PyCategoricalDtype>>()?;
+                (
+                    dtype.categories.clone().unwrap_or_default(),
+                    Some(dtype.ordered),
+                )
+            }
+            (Some(_), Some(_)) => {
+                return Err(value_error(
+                    "Cannot specify `categories` or `ordered` together with `dtype`.",
+                ));
+            }
+            (None, None) => {
+                return Err(value_error(
+                    "The categories must be provided in 'categories' or 'dtype'. Both were None.",
+                ));
+            }
+        };
+        let codes = codes
+            .try_iter()?
+            .map(|code| code?.extract::<i64>())
+            .collect::<PyResult<Vec<i64>>>()?;
+        let count = i64::try_from(categories.len()).unwrap_or(i64::MAX);
+        if codes.iter().any(|&code| code < -1 || code >= count) {
+            return Err(value_error(
+                "codes need to be between -1 and len(categories)-1",
+            ));
+        }
+        let ordered = ordered.or(dtype_ordered).unwrap_or(false);
+        let inner = Series::from_categorical_codes("", codes, categories, ordered)
+            .map_err(frame_error_to_py)?;
         Ok(Self { inner })
     }
 
@@ -60361,8 +61010,8 @@ mod tests {
             ]
         );
 
-        assert_eq!(py_s.argmax().expect("argmax"), 1); // ubs:ignore — test fixture
-        assert_eq!(py_s.argmin().expect("argmin"), 0); // ubs:ignore — test fixture
+        assert_eq!(py_s.argmax().expect("argmax").0, 1); // ubs:ignore — test fixture
+        assert_eq!(py_s.argmin().expect("argmin").0, 0); // ubs:ignore — test fixture
         assert_eq!(py_s.inner.idxmax().expect("idxmax"), IndexLabel::Int64(1)); // ubs:ignore — test fixture
         assert_eq!(py_s.inner.idxmin().expect("idxmin"), IndexLabel::Int64(0)); // ubs:ignore — test fixture
 
@@ -60546,8 +61195,8 @@ mod tests {
             let int = |value: PyResult<Py<PyAny>>| value.and_then(|v| v.extract::<i64>(py)).ok();
             assert_eq!(int(index.min(py)), Some(0));
             assert_eq!(int(index.max(py)), Some(8));
-            assert_eq!(index.argmax().unwrap(), 4);
-            assert_eq!(index.argmin().unwrap(), 0);
+            assert_eq!(index.argmax().unwrap().0, 4);
+            assert_eq!(index.argmin().unwrap().0, 0);
             assert_eq!(index.argsort().0, vec![0, 1, 2, 3, 4]);
             assert!(!index.all());
             assert!(index.any());

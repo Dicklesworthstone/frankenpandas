@@ -11921,3 +11921,90 @@ def _everyday9_outcome(m: Any, run: Any) -> Any:
 def test_everyday_ops_round_nine_like_pandas(case: str) -> None:
     run = _EVERYDAY9_CASES[case]
     assert _everyday9_outcome(fpd, run) == _everyday9_outcome(pd, run), case
+
+
+# Found by the tenth everyday-ops probe (scratch p13/probe_everyday10.py,
+# br-frankenpandas-hayfo): pivot without values= kept only the first column;
+# Index.get_loc of a repeated label gave one position; Index.fillna(0) of a
+# float index made object; Index.sort_values took only ascending;
+# CategoricalIndex printed Rust's debug text; indexers were lists and
+# TimedeltaIndex.components a method; merge_ordered's ffill made ints float;
+# infer_dtype tallied a few kinds; Categorical.from_codes, qcut(duplicates=),
+# ffill(limit_area=) and read_csv(dayfirst=) were missing; interval
+# constructors made float intervals of ints; case_when took only Series;
+# cumsum(axis=1) of ints was float64; argmax / searchsorted were Python ints.
+def _e10_wide(m: Any) -> Any:
+    return m.DataFrame({"i": [1, 1, 2], "c": ["x", "y", "x"], "p": [1, 2, 3], "q": [4, 5, 6]})
+
+
+def _e10_infer(m: Any) -> Any:
+    infer = m.api.types.infer_dtype
+    lists = [["a", 1], [1, 1.5], [1.5, "a"], [True, 1], [1, np.nan], [1, None], ["a", None], [None], [], [b"a"], [datetime.date(2024, 1, 2)], [m.Timestamp("2024-01-02")], [m.NaT]]
+    return [(infer(v), infer(v, skipna=False)) for v in lists] + [infer(np.array([1, 2])), infer(m.Series(["a"])), infer(m.Series([1.5]))]
+
+
+_EVERYDAY10_CASES = {
+    "pivot without values": lambda m: repr(_e10_wide(m).pivot(index="i", columns="c")),
+    "pivot of a values list": lambda m: repr(_e10_wide(m).pivot(index="i", columns="c", values=["q", "p"])),
+    "pivot of a one-item values list": lambda m: repr(_e10_wide(m).pivot(index="i", columns="c", values=["q"])),
+    # NEGATIVE: one values label stays flat.
+    "pivot of one values label": lambda m: repr(_e10_wide(m).pivot(index="i", columns="c", values="p")),
+    "get_loc of a run": lambda m: repr(m.Index(["a", "b", "b", "c"]).get_loc("b")),
+    "get_loc of a scattered label": lambda m: repr(m.Index(["b", "a", "b"]).get_loc("b")),
+    "get_loc once in a repeating index": lambda m: repr(m.Index(["b", "a", "b"]).get_loc("a")),
+    # NEGATIVE: a unique index still gives the position.
+    "get_loc of a unique label": lambda m: repr(m.Index([10, 20]).get_loc(20)),
+    "get_loc of a missing label": lambda m: m.Index(["b", "a", "b"]).get_loc("z"),
+    "fillna of a float index": lambda m: repr(m.Index([1.0, None]).fillna(0)),
+    # NEGATIVE: an object index stays object.
+    "fillna of an object index": lambda m: repr(m.Index(["a", None]).fillna("z")),
+    "sort_values return_indexer": lambda m: repr(m.Index([3, 1, 2]).sort_values(return_indexer=True)),
+    "sort_values descending keeps NaN last": lambda m: repr(m.Index([3.0, None, 1.0]).sort_values(ascending=False)),
+    "sort_values na_position first": lambda m: repr(m.Index([3.0, None, 1.0]).sort_values(na_position="first")),
+    "sort_values key": lambda m: repr(m.Index(["b", "A", "c"]).sort_values(key=lambda i: i.str.lower())),
+    "CategoricalIndex repr": lambda m: repr(m.CategoricalIndex(["a", "b", "a"])),
+    "CategoricalIndex of many categories": lambda m: repr(m.CategoricalIndex(list("abcdefghij"), name="k")),
+    "indexer_between_time": lambda m: repr(m.date_range("2024-01-01", periods=6, freq="4h").indexer_between_time("06:00", "14:00")),
+    "TimedeltaIndex components": lambda m: repr(m.to_timedelta(["1 day 2h", "3h"]).components),
+    "merge_ordered ffill": lambda m: repr(m.merge_ordered(m.DataFrame({"k": [1, 3], "a": [1, 2]}), m.DataFrame({"k": [2, 3], "b": [3, 4]}), on="k", fill_method="ffill")),
+    "infer_dtype": _e10_infer,
+    "Categorical.from_codes": lambda m: repr(m.Categorical.from_codes([0, 1, 0, -1], categories=["p", "q"])),
+    "Categorical.from_codes by dtype": lambda m: repr(m.Categorical.from_codes([1, 0], dtype=m.CategoricalDtype(["x", "y"], ordered=True))),
+    "Categorical.from_codes out of range": lambda m: m.Categorical.from_codes([2], categories=["p", "q"]),
+    "IntervalIndex.from_breaks of ints": lambda m: repr(m.IntervalIndex.from_breaks([0, 1, 3])),
+    "IntervalIndex.from_tuples of ints": lambda m: repr(m.IntervalIndex.from_tuples([(0, 1), (2, 4)])),
+    "IntervalIndex.from_arrays of ints": lambda m: repr(m.IntervalIndex.from_arrays([0, 2], [1, 4], closed="left")),
+    # NEGATIVE: float breaks stay float.
+    "IntervalIndex.from_breaks of floats": lambda m: repr(m.IntervalIndex.from_breaks([0, 1.5, 3])),
+    "qcut duplicates drop": lambda m: repr(m.qcut(m.Series([1, 1, 1, 2]), 3, duplicates="drop")),
+    "qcut duplicates raise": lambda m: m.qcut(m.Series([1, 1, 1, 2]), 3),
+    # Values and dtype only: the footer of no categories names their dtype,
+    # interval[float64, right] in pandas, object here (noted on hayfo).
+    "qcut duplicates drop leaves one edge": lambda m: (lambda r: (r.isna().tolist(), str(r.dtype), len(r.cat.categories)))(m.qcut(m.Series([1, 1, 1]), 2, duplicates="drop")),
+    "case_when scalar": lambda m: repr(m.Series([1, 5, 9]).case_when([(m.Series([1, 5, 9]) > 4, "big")])),
+    "case_when callables": lambda m: repr(m.Series([1, 5, 9]).case_when([(lambda s: s > 4, lambda s: s * 10)])),
+    "cumsum axis=1 of ints": lambda m: repr(m.DataFrame({"a": [1, 5], "b": [3, 2]}).cumsum(axis=1)),
+    "cummax axis=1 of ints": lambda m: repr(m.DataFrame({"a": [1, 5], "b": [3, 2]}).cummax(axis=1)),
+    # NEGATIVE: an int beside a float column runs in float64.
+    "cumsum axis=1 of mixed": lambda m: repr(m.DataFrame({"a": [1, 5], "b": [3.5, 2.0]}).cumsum(axis=1)),
+    "ffill limit_area inside": lambda m: repr(m.DataFrame({"a": [None, 1, None, 3, None]}).ffill(limit_area="inside")),
+    "ffill limit_area outside": lambda m: repr(m.Series([None, 1, None, 3, None]).ffill(limit_area="outside")),
+    "bfill limit_area outside": lambda m: repr(m.Series([None, 1, None, 3, None]).bfill(limit_area="outside")),
+    "read_csv dayfirst": lambda m: repr(m.read_csv(io.StringIO("d\n05/01/2024\n13/01/2024\n"), parse_dates=["d"], dayfirst=True)),
+    "argmax and argmin are numpy ints": lambda m: repr((m.Series([3, 9, 1]).argmax(), m.Index([3, 9]).argmin())),
+    "searchsorted of a value and a list": lambda m: repr((m.Series([1, 3]).searchsorted(2), m.Index([1, 3]).searchsorted([0, 2]))),
+}
+
+
+def _everyday10_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY10_CASES))
+def test_everyday_ops_round_ten_like_pandas(case: str) -> None:
+    run = _EVERYDAY10_CASES[case]
+    assert _everyday10_outcome(fpd, run) == _everyday10_outcome(pd, run), case

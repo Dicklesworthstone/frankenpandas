@@ -10363,6 +10363,28 @@ pub fn merge_ordered(
                 )));
             }
         };
+        // pandas forward-fills the join's row indexers, not the values: a
+        // column the fill leaves whole keeps its side's dtype (an int
+        // column stayed float64 after the outer join's NaN), one with a
+        // leading gap is still float64 NaN there.
+        let names: Vec<String> = df.column_names().into_iter().cloned().collect();
+        for name in names {
+            let Some(source) = source_column_dtype(left, right, &name) else {
+                continue;
+            };
+            let Some(filled) = df.column(&name) else {
+                continue;
+            };
+            if filled.dtype() != source
+                && matches!(source, DType::Int64 | DType::Bool)
+                && !filled.values().iter().any(Scalar::is_missing)
+            {
+                let restored = filled.astype(source).map_err(|err| {
+                    JoinError::Frame(FrameError::CompatibilityRejected(err.to_string()))
+                })?;
+                df = df.with_column(name, restored).map_err(JoinError::Frame)?;
+            }
+        }
 
         let column_order = df.column_names().into_iter().cloned().collect();
         Ok(MergedDataFrame {
@@ -10372,6 +10394,25 @@ pub fn merge_ordered(
         })
     } else {
         Ok(merged)
+    }
+}
+
+/// The dtype of the input column a merged column `name` came from: the
+/// left's or the right's of that name, else (an overlap) the left's for a
+/// `_x` suffix and the right's for a `_y` one.
+fn source_column_dtype(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    name: &str,
+) -> Option<DType> {
+    let dtype = |frame: &fp_frame::DataFrame, name: &str| frame.column(name).map(Column::dtype);
+    match (left.column(name), right.column(name)) {
+        (Some(column), None) | (None, Some(column)) => Some(column.dtype()),
+        (Some(_), Some(_)) => None,
+        (None, None) => name
+            .strip_suffix("_x")
+            .and_then(|stem| dtype(left, stem))
+            .or_else(|| name.strip_suffix("_y").and_then(|stem| dtype(right, stem))),
     }
 }
 
@@ -20999,14 +21040,13 @@ mod tests {
             frame.column("date").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
         );
+        // TEST-CHANGE (hayfo): left_val is int64, as live pandas 2.2.3's
+        // (it asserted the float64 the value fill left behind).
         assert_eq!(
             frame.column("left_val").unwrap().values(),
-            &[
-                Scalar::Float64(10.0),
-                Scalar::Float64(10.0),
-                Scalar::Float64(30.0),
-            ]
+            &[Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(30)]
         );
+        // NEGATIVE: a leading gap stays NaN, so the column stays float64.
         assert_eq!(
             frame.column("right_val").unwrap().values(),
             &[
@@ -21015,6 +21055,40 @@ mod tests {
                 Scalar::Float64(300.0),
             ]
         );
+    }
+
+    /// A filled bool column stays bool, a suffixed overlap its side's int64
+    /// (live pandas 2.2.3: v bool, s_x int64, s_y float64).
+    #[test]
+    fn merge_ordered_ffill_keeps_each_sides_dtype() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["k", "v", "s"],
+            vec![
+                ("k", vec![Scalar::Int64(1), Scalar::Int64(3)]),
+                ("v", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+                ("s", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["k", "s"],
+            vec![
+                ("k", vec![Scalar::Int64(2), Scalar::Int64(3)]),
+                ("s", vec![Scalar::Int64(5), Scalar::Int64(6)]),
+            ],
+        )
+        .unwrap();
+        let result = super::merge_ordered(&left, &right, &["k"], Some("ffill")).unwrap();
+        let frame = fp_frame::DataFrame::new(result.index, result.columns).unwrap();
+        assert_eq!(
+            frame.column("v").unwrap().values(),
+            &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+        assert_eq!(
+            frame.column("s_x").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(frame.column("s_y").unwrap().dtype(), DType::Float64);
     }
 
     #[test]

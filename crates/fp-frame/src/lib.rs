@@ -63133,7 +63133,7 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
         ));
     }
     let probs: Vec<f64> = (0..=q).map(|i| i as f64 / q as f64).collect();
-    qcut_at_quantiles(series, &probs, None)
+    qcut_at_quantiles(series, &probs, None, false)
 }
 
 /// Quantile-based binning at an explicit sequence of quantile probabilities.
@@ -63143,10 +63143,16 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
 /// quantiles at those probabilities; bucket assignment matches [`qcut`].
 /// `quantiles` must be strictly increasing with at least 2 entries. When
 /// `labels` is `Some`, those strings replace the interval labels (one per bin).
+///
+/// Tied values can make two edges equal: pandas' `duplicates='raise'` (the
+/// default, `drop_duplicate_edges` false) refuses with its "Bin edges must
+/// be unique" ValueError, `duplicates='drop'` bins over the distinct edges
+/// (one bin fewer per tie). Such a series was binned over the repeated edges.
 pub fn qcut_at_quantiles(
     series: &Series,
     quantiles: &[f64],
     labels: Option<&[&str]>,
+    drop_duplicate_edges: bool,
 ) -> Result<Series, FrameError> {
     if quantiles.len() < 2 {
         return Err(FrameError::CompatibilityRejected(
@@ -63216,7 +63222,7 @@ pub fn qcut_at_quantiles(
     let n = valid.len();
 
     // Sample quantile (numpy 'linear') at each probability.
-    let edges: Vec<f64> = quantiles
+    let mut edges: Vec<f64> = quantiles
         .iter()
         .map(|&frac| {
             let idx = frac * (n - 1) as f64;
@@ -63226,6 +63232,34 @@ pub fn qcut_at_quantiles(
             valid[lo] * (1.0 - t) + valid[hi] * t
         })
         .collect();
+    if edges.windows(2).any(|pair| pair[0] == pair[1]) {
+        if !drop_duplicate_edges {
+            let shown: Vec<String> = edges
+                .iter()
+                .map(|edge| {
+                    if edge.fract() == 0.0 && edge.abs() < 1e16 {
+                        format!("{edge:.1}")
+                    } else {
+                        edge.to_string()
+                    }
+                })
+                .collect();
+            return Err(FrameError::CompatibilityRejected(format!(
+                "Bin edges must be unique: Index([{}], dtype='float64').\nYou can drop duplicate edges by setting the 'duplicates' kwarg",
+                shown.join(", ")
+            )));
+        }
+        edges.dedup();
+        // One edge left (every value tied) bins nothing: all missing, no
+        // categories, as pandas.
+        if edges.len() < 2 {
+            return binned_categorical(
+                series,
+                floats.iter().map(|_| None),
+                &BinCategories::Intervals(Vec::new()),
+            );
+        }
+    }
     let q = edges.len() - 1;
 
     // Per br-frankenpandas-e00ce: build the bins ONCE (q of them) and
@@ -92549,10 +92583,51 @@ impl DataFrame {
         self.apply_per_column(|s| s.cummin_with_skipna(skipna))
     }
 
-    fn cumulative_axis1<F>(&self, init: f64, op: F, skipna: bool) -> Result<Self, FrameError>
+    fn cumulative_axis1<F>(
+        &self,
+        init: f64,
+        op: F,
+        int_op: fn(i64, i64) -> i64,
+        skipna: bool,
+    ) -> Result<Self, FrameError>
     where
         F: Fn(f64, f64) -> f64 + Copy,
     {
+        // Every column an all-valid Int64: the row runs stay int64, wrapping
+        // as numpy does - pandas' cumsum / cumprod / cummin / cummax(axis=1)
+        // of an int frame is int64 (it was float64).
+        let n_cols = self.num_columns();
+        let ints: Option<Vec<&[i64]>> = (0..n_cols)
+            .map(|pos| self.column_at(pos).and_then(Column::as_i64_slice))
+            .collect();
+        if let Some(ints) = ints.filter(|ints| !ints.is_empty()) {
+            let n = self.len();
+            let mut out_cols: Vec<Vec<i64>> = (0..n_cols).map(|_| Vec::with_capacity(n)).collect();
+            for row in 0..n {
+                let mut acc = ints[0][row];
+                out_cols[0].push(acc);
+                for (col_idx, col) in ints.iter().enumerate().skip(1) {
+                    acc = int_op(acc, col[row]);
+                    out_cols[col_idx].push(acc);
+                }
+            }
+            let mut pairs = Vec::with_capacity(n_cols);
+            let mut column_order = Vec::with_capacity(n_cols);
+            for (pos, vals) in out_cols.into_iter().enumerate() {
+                let name = self.column_name_at(pos).expect("column in bounds");
+                pairs.push((name.clone(), Column::from_i64_values_owned(vals)));
+                column_order.push(name);
+            }
+            let mut out = Self::new_with_axes(
+                self.index.clone(),
+                self.row_multiindex.clone(),
+                ColumnStore::from_pairs(pairs),
+                column_order,
+                self.column_multiindex.clone(),
+            )?;
+            out.allows_duplicate_labels = self.allows_duplicate_labels;
+            return Ok(out.with_labels_of(self));
+        }
         // Typed fast path: when EVERY column is an all-valid no-NaN Float64 (borrow
         // its slice) or an all-valid Int64 (materialize the `v as f64` view once),
         // there is nothing missing, so each output column is a typed row-cumulative
@@ -92756,7 +92831,7 @@ impl DataFrame {
         if self.all_columns_timedelta() {
             return self.cumulative_axis1_timedelta(0, Timedelta::add, skipna);
         }
-        self.cumulative_axis1(0.0, |acc, x| acc + x, skipna)
+        self.cumulative_axis1(0.0, |acc, x| acc + x, i64::wrapping_add, skipna)
     }
 
     /// Cumulative sum across columns, computed row-wise.
@@ -92795,7 +92870,7 @@ impl DataFrame {
             out.allows_duplicate_labels = self.allows_duplicate_labels;
             return Ok(out.with_labels_of(self));
         }
-        self.cumulative_axis1(1.0, |acc, x| acc * x, skipna)
+        self.cumulative_axis1(1.0, |acc, x| acc * x, i64::wrapping_mul, skipna)
     }
 
     /// Cumulative product across columns, computed row-wise.
@@ -92811,7 +92886,7 @@ impl DataFrame {
         if self.all_columns_timedelta() {
             return self.cumulative_axis1_timedelta(i64::MAX, |a, b| a.min(b), skipna);
         }
-        self.cumulative_axis1(f64::INFINITY, f64::min, skipna)
+        self.cumulative_axis1(f64::INFINITY, f64::min, i64::min, skipna)
     }
 
     /// Cumulative minimum across columns, computed row-wise.
@@ -92827,7 +92902,7 @@ impl DataFrame {
         if self.all_columns_timedelta() {
             return self.cumulative_axis1_timedelta(i64::MIN, |a, b| a.max(b), skipna);
         }
-        self.cumulative_axis1(f64::NEG_INFINITY, f64::max, skipna)
+        self.cumulative_axis1(f64::NEG_INFINITY, f64::max, i64::max, skipna)
     }
 
     /// Cumulative maximum across columns, computed row-wise.
@@ -159337,7 +159412,7 @@ mod tests {
             let n = vals.len();
             let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
             let s = Series::from_values("x", idx, vals).unwrap();
-            let res = super::qcut_at_quantiles(&s, &quantiles, None).unwrap();
+            let res = super::qcut_at_quantiles(&s, &quantiles, None, false).unwrap();
             // TEST-CHANGE (fvsao.54): the Intervals' text, was the values.
             let got: Vec<String> = res
                 .values()
@@ -159355,10 +159430,11 @@ mod tests {
         )
         .unwrap();
         let a: Vec<Scalar> = super::qcut(&s, 4).unwrap().values().to_vec();
-        let b: Vec<Scalar> = super::qcut_at_quantiles(&s, &[0.0, 0.25, 0.5, 0.75, 1.0], None)
-            .unwrap()
-            .values()
-            .to_vec();
+        let b: Vec<Scalar> =
+            super::qcut_at_quantiles(&s, &[0.0, 0.25, 0.5, 0.75, 1.0], None, false)
+                .unwrap()
+                .values()
+                .to_vec();
         assert_eq!(a, b);
         // labels= replaces interval strings.
         let s8 = Series::from_values(
@@ -159367,17 +159443,74 @@ mod tests {
             (1..=8).map(|i| Scalar::Float64(i as f64)).collect(),
         )
         .unwrap();
-        let got: Vec<String> = super::qcut_at_quantiles(&s8, &[0.0, 0.5, 1.0], Some(&["A", "B"]))
-            .unwrap()
-            .values()
-            .iter()
-            .map(|v| match v {
-                Scalar::Utf8(t) => t.clone(),
-                _ => "?".into(),
-            })
-            .collect();
+        let got: Vec<String> =
+            super::qcut_at_quantiles(&s8, &[0.0, 0.5, 1.0], Some(&["A", "B"]), false)
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Utf8(t) => t.clone(),
+                    _ => "?".into(),
+                })
+                .collect();
         assert_eq!(got, vec!["A", "A", "A", "A", "B", "B", "B", "B"]);
-        assert!(super::qcut_at_quantiles(&s8, &[0.0, 0.5, 1.0], Some(&["only"])).is_err());
+        assert!(super::qcut_at_quantiles(&s8, &[0.0, 0.5, 1.0], Some(&["only"]), false).is_err());
+    }
+
+    /// Tied values make equal edges: pandas' default refuses them with its
+    /// ValueError text, `duplicates='drop'` bins over the distinct edges,
+    /// and a series of one value bins nothing (live pandas 2.2.3).
+    #[test]
+    fn qcut_refuses_or_drops_duplicate_edges_like_pandas() {
+        let series = |values: &[f64]| {
+            Series::from_values(
+                "x",
+                (0..values.len() as i64).map(IndexLabel::Int64).collect(),
+                values.iter().map(|&v| Scalar::Float64(v)).collect(),
+            )
+            .unwrap()
+        };
+        let texts = |binned: &Series| -> Vec<String> {
+            binned
+                .values()
+                .iter()
+                .map(|v| interval_text(v).unwrap_or_else(|| "<NaN>".to_string()))
+                .collect()
+        };
+        let tied = series(&[1.0, 1.0, 1.0, 2.0]);
+        let thirds = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0];
+        let err = super::qcut_at_quantiles(&tied, &thirds, None, false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: Bin edges must be unique: \
+             Index([1.0, 1.0, 1.0, 2.0], dtype='float64').\n\
+             You can drop duplicate edges by setting the 'duplicates' kwarg"
+        );
+        assert!(super::qcut(&tied, 3).is_err());
+        let dropped = super::qcut_at_quantiles(&tied, &thirds, None, true).unwrap();
+        assert_eq!(texts(&dropped), vec!["(0.999, 2.0]"; 4]);
+        let run = series(&[1.0, 2.0, 2.0, 2.0, 3.0]);
+        let quarters = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let dropped = super::qcut_at_quantiles(&run, &quarters, None, true).unwrap();
+        assert_eq!(
+            texts(&dropped),
+            vec![
+                "(0.999, 2.0]",
+                "(0.999, 2.0]",
+                "(0.999, 2.0]",
+                "(0.999, 2.0]",
+                "(2.0, 3.0]"
+            ]
+        );
+        let flat =
+            super::qcut_at_quantiles(&series(&[1.0; 3]), &[0.0, 0.5, 1.0], None, true).unwrap();
+        assert_eq!(texts(&flat), vec!["<NaN>"; 3]);
+        // NEGATIVE: distinct edges bin as before, either way.
+        let spread = series(&[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            texts(&super::qcut_at_quantiles(&spread, &[0.0, 0.5, 1.0], None, false).unwrap()),
+            texts(&super::qcut_at_quantiles(&spread, &[0.0, 0.5, 1.0], None, true).unwrap())
+        );
     }
 
     #[test]
@@ -169630,6 +169763,42 @@ mod tests {
         assert!(result.columns()["a"].values()[1].is_missing());
         assert_eq!(result.columns()["b"].values()[1], Scalar::Float64(4.0));
         assert_eq!(result.columns()["c"].values()[1], Scalar::Float64(4.0));
+    }
+
+    /// An int frame's row runs stay int64, wrapping as numpy (live pandas
+    /// 2.2.3: cumsum / cumprod / cummin / cummax(axis=1) of ints are int64,
+    /// 2**62 + 2**62 is -2**63); they were float64.
+    #[test]
+    fn df_cumulative_axis1_of_ints_stays_int64() {
+        let ints = |values: &[i64]| values.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>();
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![("a", ints(&[1, 5, 1 << 62])), ("b", ints(&[3, 2, 1 << 62]))],
+        )
+        .unwrap();
+        let column = |frame: &DataFrame, name: &str| frame.columns()[name].values().to_vec();
+        let sum = df.cumsum_axis1().unwrap();
+        assert_eq!(column(&sum, "b"), ints(&[4, 7, i64::MIN]));
+        assert_eq!(sum.columns()["a"].dtype(), DType::Int64);
+        assert_eq!(column(&df.cumprod_axis1().unwrap(), "b"), ints(&[3, 10, 0]));
+        assert_eq!(
+            column(&df.cummin_axis1().unwrap(), "b"),
+            ints(&[1, 2, 1 << 62])
+        );
+        assert_eq!(
+            column(&df.cummax_axis1().unwrap(), "b"),
+            ints(&[3, 5, 1 << 62])
+        );
+        // NEGATIVE: an int beside a float column runs in float64.
+        let mixed = DataFrame::from_dict(
+            &["a", "b"],
+            vec![("a", ints(&[1])), ("b", vec![Scalar::Float64(2.5)])],
+        )
+        .unwrap();
+        assert_eq!(
+            column(&mixed.cumsum_axis1().unwrap(), "b"),
+            vec![Scalar::Float64(3.5)]
+        );
     }
 
     #[test]
