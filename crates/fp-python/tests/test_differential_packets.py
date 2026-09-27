@@ -10349,3 +10349,45 @@ def _nullable_stats_outcome(m: Any, run: Any) -> Any:
 def test_corr_cov_quantile_read_nullable_columns_like_pandas(case: str) -> None:
     run = _NULLABLE_STATS_CASES[case]
     assert _nullable_stats_outcome(fpd, run) == _nullable_stats_outcome(pd, run), case
+
+
+# o46uo: quantile over bool and text. pandas interpolates with `-`, which
+# numpy refuses on booleans and Python on str, so both are its TypeError;
+# frankenpandas dropped them (a bool list read as 0.5) and answered. A row
+# along axis=1 mixes its cells into one float row, a bool as 0 / 1 (the
+# bool cells were skipped).
+_QUANTILE_REFUSAL_CASES = {
+    "a bool column": lambda m: m.DataFrame({"f": [1.0, 2.0], "b": [True, False]}).quantile(0.5),
+    "a bool column, numeric_only": lambda m: m.DataFrame({"f": [1.0, 2.0], "b": [True, False]}).quantile(0.5, numeric_only=True),
+    "a bool column, a list of q": lambda m: m.DataFrame({"f": [1.0, 2.0], "b": [True, False]}).quantile([0.5]),
+    "a boolean column": lambda m: m.DataFrame({"f": [1.0, 2.0], "B": m.Series([True, None], dtype="boolean")}).quantile(0.5),
+    "a bool Series": lambda m: m.Series([True, False, True]).quantile(0.5),
+    "a boolean Series": lambda m: m.Series([True, False, None], dtype="boolean").quantile(0.5),
+    "a bool Series, a list of q": lambda m: m.Series([True, False, True]).quantile([0.5]),
+    "a text column": lambda m: m.DataFrame({"f": [1.0, 2.0], "t": ["a", "b"]}).quantile(0.5),
+    "a text Series": lambda m: m.Series(["a", "b"]).quantile(0.5),
+    "a frame of bools along axis=1": lambda m: m.DataFrame({"a": [True, False], "b": [True, True]}).quantile(0.5, axis=1),
+    # Answers: a bool cell in a mixed row is 0 / 1; numeric_only drops text;
+    # numbers keep answering.
+    "bool cells in a mixed row along axis=1": lambda m: m.DataFrame({"f": [1.0, 2.0], "b": [True, False]}).quantile(0.5, axis=1),
+    "numeric_only drops a text column": lambda m: m.DataFrame({"f": [1.0, 2.0], "t": ["a", "b"]}).quantile(0.5, numeric_only=True),
+    "numbers": lambda m: m.DataFrame({"f": [1.0, 2.0, 4.0], "i": [1, 2, 3]}).quantile(0.5),
+    "numbers along axis=1": lambda m: m.DataFrame({"f": [1.0, 2.0], "i": [3, 4]}).quantile(0.5, axis=1),
+}
+
+
+def _quantile_refusal_outcome(m: Any, run: Any) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = run(m)
+            return r.to_dict() if hasattr(r, "to_dict") else r
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_QUANTILE_REFUSAL_CASES))
+def test_quantile_refuses_bool_and_text_like_pandas(case: str) -> None:
+    run = _QUANTILE_REFUSAL_CASES[case]
+    assert _quantile_refusal_outcome(fpd, run) == _quantile_refusal_outcome(pd, run), case

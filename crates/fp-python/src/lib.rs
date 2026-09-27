@@ -4427,6 +4427,36 @@ fn mixed_zone_rows(py: Python<'_>, indexes: &[&Index]) -> PyResult<Option<Index>
     Ok(Some(object_index_of(first, pieces)?.inner))
 }
 
+/// pandas' TypeError for a quantile over values it cannot interpolate: a
+/// bool / boolean column (numpy refuses `-` on booleans; along axis=1 only
+/// a frame of nothing but booleans, whose rows stay boolean) or a text
+/// column (Python refuses `-` on str; object cells that subtract, dates,
+/// pandas interpolates). They were dropped, or a bool read as 0.5 (o46uo).
+fn quantile_refusal(columns: &[&Column], axis: usize) -> PyResult<()> {
+    let refuse_bool = if axis == 0 {
+        columns.iter().any(|column| column.dtype().is_bool())
+    } else {
+        !columns.is_empty() && columns.iter().all(|column| column.dtype().is_bool())
+    };
+    if refuse_bool {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            fp_frame::NUMPY_BOOL_SUBTRACT,
+        ));
+    }
+    let unsubtractable = columns
+        .iter()
+        .filter(|column| column.dtype() == DType::Utf8)
+        .find_map(|column| column.values().iter().find(|value| !value.is_missing()))
+        .filter(|value| matches!(value, Scalar::Utf8(_)));
+    if let Some(value) = unsubtractable {
+        let kind = value.python_type_name();
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "unsupported operand type(s) for -: '{kind}' and '{kind}'"
+        )));
+    }
+    Ok(())
+}
+
 /// A column pandas' corr / corrwith / quantile read as numbers: ints and
 /// floats, nullable or not, and booleans. The nullable Int64 / Float64 /
 /// boolean columns were left out - dropped from the result, or refused
@@ -19279,6 +19309,8 @@ impl PySeries {
         q: Option<&Bound<'_, PyAny>>,
         interpolation: &str,
     ) -> PyResult<Py<PyAny>> {
+        // Booleans and text are pandas' TypeError, not a number (o46uo).
+        quantile_refusal(&[self.inner.column()], 0)?;
         if let Some(q_obj) = q {
             if let Ok(f) = q_obj.extract::<f64>() {
                 let r = self
@@ -30970,6 +31002,12 @@ impl PyDataFrame {
         } else {
             self.inner.clone()
         };
+        let columns: Vec<&Column> = target_df
+            .column_names()
+            .into_iter()
+            .filter_map(|name| target_df.column(name))
+            .collect();
+        quantile_refusal(&columns, ax)?;
 
         let mut q_scalar: Option<f64> = None;
         let mut q_vec: Option<Vec<f64>> = None;

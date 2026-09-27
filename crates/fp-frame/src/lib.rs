@@ -112,6 +112,10 @@ use fp_runtime::{
     SemanticWitnessRecord,
 };
 
+/// numpy's TypeError for subtracting booleans, which pandas lets through
+/// from `bool - bool` and from a quantile interpolating bool values.
+pub const NUMPY_BOOL_SUBTRACT: &str = "numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, the `^` operator, or the logical_xor function instead.";
+
 /// Map the runtime's compatibility mode onto the temporal overflow policy.
 ///
 /// br-frankenpandas-5e47p (fyr1z.6). This mapping lives HERE and not in either
@@ -11351,7 +11355,7 @@ impl Series {
             ArithmeticOp::Mul => |a, b| a && b,
             ArithmeticOp::Sub => {
                 return Err(FrameError::CompatibilityRejected(
-                    "numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, the `^` operator, or the logical_xor function instead.".to_owned(),
+                    NUMPY_BOOL_SUBTRACT.to_owned(),
                 ));
             }
             ArithmeticOp::Div => return Err(refused("truediv")),
@@ -91470,7 +91474,10 @@ impl DataFrame {
             let mut nums: Vec<f64> = Vec::new();
             for name in &self.column_order {
                 let col = &self.columns[name];
-                if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                // A row mixes the columns into one float row, a bool as 0 / 1
+                // (pandas' [2.0, False] has median 1.0; the bool cells were
+                // skipped, o46uo), the nullable numbers as numbers.
+                if !(col.dtype().is_numeric() || col.dtype().is_bool()) {
                     continue;
                 }
                 let v = &col.values()[row_idx];
@@ -119560,6 +119567,44 @@ mod tests {
         let result = frame.corrwith(&doubled).unwrap();
         assert_eq!(result.name(), "");
         assert_eq!(result.values(), &[Scalar::Float64(1.0)]);
+    }
+
+    #[test]
+    fn quantile_along_rows_reads_bool_cells_as_numbers_o46uo() {
+        let frame = DataFrame::new_with_column_order(
+            Index::from_range(0, 2, 1),
+            BTreeMap::from([
+                ("f".to_owned(), Column::from_f64_values(vec![1.0, 2.0])),
+                (
+                    "b".to_owned(),
+                    Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).unwrap(),
+                ),
+            ]),
+            vec!["f".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        // pandas' rows [1.0, True] and [2.0, False] have median 1.0 each; the
+        // bool cells were skipped, so the second row was 2.0.
+        let medians = frame.quantile_axis1(0.5).unwrap();
+        assert_eq!(
+            medians.values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(1.0)]
+        );
+        // NEGATIVE: a text column still takes no part in a row.
+        let with_text = frame
+            .with_column(
+                "t",
+                Column::from_values(vec![
+                    Scalar::Utf8("x".to_owned()),
+                    Scalar::Utf8("y".to_owned()),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            with_text.quantile_axis1(0.5).unwrap().values(),
+            medians.values()
+        );
     }
 
     #[test]
