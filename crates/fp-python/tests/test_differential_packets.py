@@ -12419,3 +12419,73 @@ def _setitem_mi_outcome(m: Any, run: Any) -> Any:
 def test_setitem_by_tuple_like_pandas(case: str) -> None:
     run = _SETITEM_MI_CASES[case]
     assert _setitem_mi_outcome(fpd, run) == _setitem_mi_outcome(pd, run), case
+
+
+# br-frankenpandas-sdyhq: groupby results dropped the column axis - MultiIndex
+# columns came back as the flat 'a_x' keys (an agg list as ('a_x', 'sum')),
+# a named axis unnamed, int labels as text; head / tail carried an array
+# key's own column; a tuple key raised; transform('cumsum') was refused.
+def _sd_frame(m: Any) -> Any:
+    columns = m.MultiIndex.from_tuples([("a", "x"), ("a", "y"), ("b", "x")], names=["top", "sub"])
+    return m.DataFrame([[1, 2, 3], [4, 5, 6], [7, 8, 10], [2, 2, 2]], columns=columns, index=["r0", "r1", "r2", "r3"])
+
+
+def _sd_named(m: Any) -> Any:
+    frame = m.DataFrame({"k": [1, 1, 2], "v": [1, 2, 3], "w": [4.0, 5.0, 6.0]})
+    frame.columns.name = "c"
+    return frame
+
+
+def _sd_axis(frame: Any) -> Any:
+    return (list(frame.columns), list(frame.columns.names))
+
+
+_SD_KEY = [0, 0, 1, 1]
+
+_GROUPBY_AXIS_CASES = {
+    "sum": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).sum()),
+    "mean": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).mean()),
+    "first": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).first()),
+    "count": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).count()),
+    "cumsum": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).cumsum()),
+    "cummax": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).cummax()),
+    "diff": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).diff()),
+    "shift": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).shift()),
+    "rank": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).rank()),
+    "head": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).head(1)),
+    "tail": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).tail(1)),
+    "get_group": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).get_group(1)),
+    "idxmax": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).idxmax()),
+    "quantile": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).quantile(0.5)),
+    "agg list": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).agg(["sum", "max"])),
+    "transform cumsum": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).transform("cumsum")),
+    "transform ffill": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).transform("ffill")),
+    "transform sum": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).transform("sum")),
+    "transform lambda": lambda m: repr(_sd_frame(m).groupby(_SD_KEY).transform(lambda g: g - g.min())),
+    "Series key": lambda m: repr(_sd_frame(m).groupby(m.Series(["p", "p", "q", "q"], index=["r0", "r1", "r2", "r3"])).min()),
+    # [ns] the index name: pandas names it by the tuple, fp's axis names
+    # are text (fvsao.64) - the columns and values are compared.
+    "tuple key": lambda m: (_sd_axis(_sd_frame(m).groupby(("a", "x")).sum()), _sd_frame(m).groupby(("a", "x")).sum().values.tolist()),
+    "named axis, sum": lambda m: _sd_axis(_sd_named(m).groupby("k").sum()),
+    "named axis, cumsum": lambda m: _sd_axis(_sd_named(m).groupby("k").cumsum()),
+    "int labels, cumsum": lambda m: list(m.DataFrame([[1, 2], [3, 4], [5, 7]]).groupby(m.Series(["p", "p", "q"])).cumsum().columns),
+    # NEGATIVE: flat unnamed columns as before; a column key is never among
+    # the value columns.
+    "flat sum": lambda m: repr(m.DataFrame({"k": [1, 1, 2], "v": [1, 2, 3]}).groupby("k").sum()),
+    "flat cumsum": lambda m: repr(m.DataFrame({"k": [1, 1, 2], "v": [1, 2, 3]}).groupby("k").cumsum()),
+    "flat head": lambda m: repr(m.DataFrame({"k": [1, 1, 2], "v": [1, 2, 3]}).groupby("k").head(1)),
+}
+
+
+def _groupby_axis_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GROUPBY_AXIS_CASES))
+def test_groupby_results_keep_the_column_axis_like_pandas(case: str) -> None:
+    run = _GROUPBY_AXIS_CASES[case]
+    assert _groupby_axis_outcome(fpd, run) == _groupby_axis_outcome(pd, run), case

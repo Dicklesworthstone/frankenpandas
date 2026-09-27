@@ -32142,7 +32142,8 @@ impl PyDataFrame {
         }
         // A typed column label (by=0, by=[0, 'a']) names its column
         // (fvsao.32): read as the names it resolves to.
-        let named_by = match by.map(|by| (by, self.column_names_arg(by))) {
+        // A full tuple names its MultiIndex column (sdyhq).
+        let named_by = match by.map(|by| (by, self.sort_key_names(by))) {
             Some((by, Some(names))) if by.is_instance_of::<PyList>() => {
                 Some(PyList::new(py, names)?.into_any())
             }
@@ -43896,6 +43897,36 @@ impl PyGroupBy {
     }
 
     /// This groupby over another frame with the same keys and options.
+    /// A result over this groupby's columns with their axis whole: typed
+    /// labels, name and the MultiIndex levels of the columns it keeps (they
+    /// came back flat and unnamed; sdyhq). An array / Series / callable
+    /// key's own column is no column of the frame, so a result carrying it
+    /// (head, tail, get_group, ...) drops it, as pandas has none.
+    fn out(&self, frame: DataFrame) -> PyResult<PyDataFrame> {
+        let synthetic: Vec<&str> = self
+            .by
+            .iter()
+            .zip(&self.key_names)
+            .filter(|(column, name)| name.as_deref() != Some(column.as_str()))
+            .map(|(column, _)| column.as_str())
+            .filter(|column| frame.column(column).is_some())
+            .collect();
+        let frame = if synthetic.is_empty() {
+            frame
+        } else {
+            let kept: Vec<&str> = frame
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .filter(|column| !synthetic.contains(column))
+                .collect();
+            frame.select_columns(&kept).map_err(frame_error_to_py)?
+        };
+        Ok(PyDataFrame {
+            inner: frame.with_typed_labels_of(&self.df),
+        })
+    }
+
     fn over(&self, df: DataFrame) -> Self {
         Self {
             df,
@@ -44001,8 +44032,9 @@ impl PyGroupBy {
     /// categories (observed=False): each column holds `op` over no rows (see
     /// [`with_unused_categories`]), in category order when `sort` (fvsao.39).
     fn with_unused(&self, op: &str, df: DataFrame) -> PyResult<DataFrame> {
-        // The value columns keep the typed labels they had (fvsao.32).
-        let df = df.with_recorded_column_labels(self.df.column_labels());
+        // The value columns keep their axis: typed labels (fvsao.32), name
+        // and MultiIndex levels (sdyhq).
+        let df = df.with_typed_labels_of(&self.df);
         let df = match self.key_zone() {
             Some(zone) => df
                 .with_index(index_in_zone(df.index().clone(), &zone))
@@ -44631,7 +44663,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cumsum()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     fn cumprod(&self) -> PyResult<PyDataFrame> {
@@ -44640,7 +44672,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cumprod()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     fn cummin(&self) -> PyResult<PyDataFrame> {
@@ -44649,7 +44681,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cummin()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     fn cummax(&self) -> PyResult<PyDataFrame> {
@@ -44658,7 +44690,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cummax()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     #[pyo3(signature = (periods=1))]
@@ -44669,7 +44701,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .diff(periods)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     #[pyo3(signature = (periods=1))]
@@ -44680,7 +44712,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .pct_change(periods)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     #[pyo3(signature = (n=5))]
@@ -44690,7 +44722,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .head(n)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     #[pyo3(signature = (n=5))]
@@ -44700,7 +44732,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .tail(n)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     fn corr(&self) -> PyResult<PyDataFrame> {
@@ -44771,7 +44803,7 @@ impl PyGroupBy {
                 .map_err(frame_error_to_py)?
                 .quantile(q)
                 .map_err(frame_error_to_py)?;
-            return Ok(PyDataFrame { inner: result });
+            return this.out(result);
         }
         let names: Vec<String> = this
             .df
@@ -44819,7 +44851,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .skew()
             .map_err(float_conversion_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     fn kurt(&self) -> PyResult<PyDataFrame> {
@@ -44829,7 +44861,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .kurtosis()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     fn kurtosis(&self) -> PyResult<PyDataFrame> {
@@ -44857,7 +44889,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .rank_with_pct(method, ascending.0, na_option, pct.0)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        self.out(result)
     }
 
     #[pyo3(signature = (ascending=true))]
@@ -45041,6 +45073,45 @@ impl PyGroupBy {
             })
         }
         .map_err(frame_error_to_py)?;
+        // Under MultiIndex columns a (column, function) axis leads with the
+        // column's own levels, the function last (sdyhq: the joined key
+        // led).
+        let res = match (self.df.columns_multiindex(), res.columns_multiindex()) {
+            (Some(source), Some(pairs)) if two_level && pairs.nlevels() == 2 => {
+                let names = self.df.column_names();
+                let mut levels: Vec<Vec<IndexLabel>> = vec![Vec::new(); source.nlevels() + 1];
+                for position in 0..pairs.len() {
+                    let pair = pairs.get_tuple(position).unwrap_or_default();
+                    let (Some(&column), Some(&function)) = (pair.first(), pair.get(1)) else {
+                        return Err(not_implemented(
+                            "DataFrameGroupBy.agg of a list over MultiIndex columns",
+                        ));
+                    };
+                    let key = fp_frame::column_key(column);
+                    let tuple = names
+                        .iter()
+                        .position(|name| **name == key)
+                        .and_then(|at| source.get_tuple(at))
+                        .ok_or_else(|| {
+                            not_implemented(
+                                "DataFrameGroupBy.agg of a list over MultiIndex columns",
+                            )
+                        })?;
+                    for (level, label) in levels.iter_mut().zip(tuple.into_iter().chain([function]))
+                    {
+                        level.push(label.clone());
+                    }
+                }
+                let mut level_names = source.names().to_vec();
+                level_names.extend(pairs.names().get(1).cloned());
+                let axis = fp_index::MultiIndex::from_arrays(levels)
+                    .map_err(index_error_to_py)?
+                    .set_names(level_names);
+                res.with_columns_multiindex(Some(axis))
+                    .map_err(frame_error_to_py)?
+            }
+            _ => res,
+        };
         // The aggregated columns keep their typed labels.
         Ok(Py::new(
             py,
@@ -45069,7 +45140,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .ffill(limit)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     #[pyo3(signature = (limit=None))]
@@ -45079,7 +45150,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .bfill(limit)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     /// pandas' `describe()`: each numeric column's per-group statistics
@@ -45167,7 +45238,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .get_group(&s)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     /// pandas' `gb.groups`: each group's row labels, in group order.
@@ -45501,7 +45572,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .fillna(&sc)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     #[pyo3(signature = (func, dropna=true))]
@@ -45652,7 +45723,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .idxmax()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     #[pyo3(signature = (axis=0, skipna=true, numeric_only=false))]
@@ -45676,7 +45747,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .idxmin()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     #[pyo3(signature = (n=None, frac=None, replace=false, weights=None, random_state=None))]
@@ -45694,7 +45765,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .sample(n, frac, replace.unwrap_or(false), random_state)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     #[pyo3(signature = (periods=1, freq=None, axis=None, fill_value=None, suffix=None))]
@@ -45721,7 +45792,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .shift(periods.unwrap_or(1))
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     #[pyo3(signature = (indices, axis=None))]
@@ -45735,7 +45806,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .take(&indices)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        self.out(res)
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]
@@ -45755,8 +45826,24 @@ impl PyGroupBy {
                     "DataFrameGroupBy.transform('{func_str}') with arguments"
                 )));
             }
+            // pandas' transformation kernels by name are those methods
+            // (fp-frame's transform broadcasts the reductions alone; sdyhq).
+            let kernel = match func_str.as_str() {
+                "cumsum" => Some(self.cumsum()?),
+                "cumprod" => Some(self.cumprod()?),
+                "cummin" => Some(self.cummin()?),
+                "cummax" => Some(self.cummax()?),
+                "ffill" => Some(self.ffill(None)?),
+                "bfill" => Some(self.bfill(None)?),
+                "diff" => Some(self.diff(1)?),
+                "pct_change" => Some(self.pct_change(1)?),
+                _ => None,
+            };
+            if let Some(kernel) = kernel {
+                return Ok(Py::new(py, kernel)?.into_any());
+            }
             let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            return Ok(Py::new(py, self.out(res)?)?.into_any());
         }
         // pandas' transform(func): func over each group without the
         // grouping columns, the results back in the original row order (it
@@ -45796,10 +45883,8 @@ impl PyGroupBy {
                 "DataFrameGroupBy.transform(func) with rows whose key is missing (pandas gives them NaN)",
             ));
         }
-        PyDataFrame {
-            inner: lay_out_frames(&pieces, AppliedLayout::Restored(origin))?,
-        }
-        .into_py_any(py)
+        self.out(lay_out_frames(&pieces, AppliedLayout::Restored(origin))?)?
+            .into_py_any(py)
     }
 
     /// pandas' `gb.value_counts(subset=None, normalize=False, sort=True,
