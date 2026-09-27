@@ -37671,6 +37671,30 @@ impl PyDataFrame {
                 ("nrows", nrows.is_none()),
             ],
         )?;
+        // A field name, or a list of them, is where the index comes from,
+        // as pandas; any other value is the labels (a name was read as the
+        // labels and raised a length mismatch; 32791).
+        if let Some(index) = index.filter(|index| !index.is_none()) {
+            let names: Option<Vec<String>> = if index.is_instance_of::<pyo3::types::PyString>() {
+                index.extract::<String>().ok().map(|name| vec![name])
+            } else if index.is_instance_of::<PyList>() {
+                index.extract::<Vec<String>>().ok()
+            } else {
+                None
+            };
+            let built = Self::new(py, Some(data), None, columns, None)?;
+            if let Some(names) = names.filter(|names| {
+                !names.is_empty() && names.iter().all(|name| built.inner.column(name).is_some())
+            }) {
+                let key = match names.as_slice() {
+                    [one] => pyo3::types::PyString::new(py, one).into_any(),
+                    several => PyList::new(py, several)?.into_any(),
+                };
+                return Ok(Bound::new(py, built)?
+                    .call_method1("set_index", (key,))?
+                    .extract::<Self>()?);
+            }
+        }
         Self::new(py, Some(data), index, columns, None)
     }
 

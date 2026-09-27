@@ -12714,3 +12714,31 @@ def _mi_levels_outcome(m: Any, run: Any) -> Any:
 def test_multiindex_levels_sorted_like_pandas(case: str) -> None:
     run = _MI_LEVELS_CASES[case]
     assert _mi_levels_outcome(fpd, run) == _mi_levels_outcome(pd, run), case
+
+
+# br-frankenpandas-32791 (everyday probe 14): from_records(index='field') read
+# the name as the labels and raised a length mismatch.
+_FR_RECORDS = [{"k": "x", "j": 1, "v": 1.5}, {"k": "y", "j": 2, "v": 2.5}]
+
+_FROM_RECORDS_CASES = {
+    "index a field": lambda m: repr(m.DataFrame.from_records(_FR_RECORDS, index="k")),
+    "index two fields": lambda m: repr(m.DataFrame.from_records(_FR_RECORDS, index=["k", "j"])),
+    "index a tuple-record field": lambda m: repr(m.DataFrame.from_records([(1, "a"), (2, "b")], columns=["n", "s"], index="s")),
+    # NEGATIVE: labels given as such are the index as before.
+    "index labels": lambda m: repr(m.DataFrame.from_records(_FR_RECORDS, index=["r1", "r2"])),
+    "no index": lambda m: repr(m.DataFrame.from_records(_FR_RECORDS)),
+}
+
+
+def _from_records_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FROM_RECORDS_CASES))
+def test_from_records_index_field_like_pandas(case: str) -> None:
+    run = _FROM_RECORDS_CASES[case]
+    assert _from_records_outcome(fpd, run) == _from_records_outcome(pd, run), case
