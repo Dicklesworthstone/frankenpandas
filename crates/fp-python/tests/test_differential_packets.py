@@ -10589,3 +10589,55 @@ def _nullable_outcome(m: Any, run: Any) -> Any:
 def test_nullable_dtypes_keep_their_na_like_pandas(case: str) -> None:
     run = _NULLABLE_KEEP_CASES[case]
     assert _nullable_outcome(fpd, run) == _nullable_outcome(pd, run), case
+
+
+# fvsao.35: a zone is pandas' tzinfo object - datetime.timezone.utc for
+# 'UTC', a datetime.timezone for a fixed offset, pytz's zone for an IANA
+# name (localized to the instant on a Timestamp) - not its name as a str
+# (`datetime.now(idx.tz)` raised TypeError); Timestamp.tzinfo was missing.
+def _zone_view(v: Any) -> Any:
+    if isinstance(v, datetime.tzinfo):
+        return (type(v).__module__, type(v).__name__, repr(v), str(v))
+    if isinstance(v, tuple):
+        return tuple(_zone_view(x) for x in v)
+    return repr(v)
+
+
+_TZ_OBJECT_CASES = {
+    "Timestamp tz in winter": lambda m: m.Timestamp("2024-01-05 10:00", tz="US/Eastern").tz,
+    "Timestamp tz in summer": lambda m: m.Timestamp("2024-07-05 10:00", tz="US/Eastern").tz,
+    "Timestamp tzinfo is its tz": lambda m: (lambda ts: (ts.tzinfo is ts.tz, ts.tzinfo))(m.Timestamp("2024-07-05 10:00", tz="US/Eastern")),
+    "Timestamp tz UTC": lambda m: m.Timestamp("2024-01-05 10:00", tz="UTC").tz,
+    "Timestamp tz of a fixed offset": lambda m: m.Timestamp("2024-01-05 10:00", tz="+09:00").tz,
+    "Timestamp of an aware datetime": lambda m: m.Timestamp(datetime.datetime(2024, 1, 1, 9, tzinfo=datetime.timezone(datetime.timedelta(hours=-3)))).tzinfo,
+    "Timestamp tz utcoffset": lambda m: (lambda ts: ts.tz.utcoffset(ts.to_pydatetime().replace(tzinfo=None)))(m.Timestamp("2024-07-05 10:00", tz="US/Eastern")),
+    "DatetimeIndex tz": lambda m: _eastern_range(m).tz,
+    "DatetimeIndex tzinfo": lambda m: _eastern_range(m).tzinfo,
+    "DatetimeIndex tz of Etc/GMT+5": lambda m: m.DatetimeIndex(["2024-01-01"]).tz_localize("Etc/GMT+5").tz,
+    "DatetimeIndex tz of a fixed offset": lambda m: _eastern_range(m, "h", "+05:30").tz,
+    "Series.dt.tz": lambda m: m.Series(_eastern_range(m, "h", "Asia/Tokyo")).dt.tz,
+    "dtype tz": lambda m: m.Series(_eastern_range(m, "h", "UTC")).dtype.tz,
+    "index and dtype zones are equal": lambda m: (lambda i: i.tz == m.Series(i).dtype.tz)(_eastern_range(m)),
+    "the zone is a working tzinfo": lambda m: datetime.datetime(2024, 1, 5, 10, tzinfo=datetime.timezone.utc).astimezone(_eastern_range(m).tz).isoformat(),
+    "the pytz zone's name": lambda m: _eastern_range(m).tz.zone,
+    "DatetimeTZDtype of a tzinfo": lambda m: str(m.DatetimeTZDtype(tz=datetime.timezone.utc)),
+    "DatetimeTZDtype of an offset": lambda m: str(m.DatetimeTZDtype("ns", "+09:00")),
+    "DatetimeTZDtype needs a tz": lambda m: m.DatetimeTZDtype(),
+    # NEGATIVES: naive is None everywhere.
+    "naive Timestamp": lambda m: (m.Timestamp("2024-01-05").tz, m.Timestamp("2024-01-05").tzinfo),
+    "naive index and column": lambda m: (m.DatetimeIndex(["2024-01-01"]).tz, m.Series(m.DatetimeIndex(["2024-01-01"])).dt.tz),
+}
+
+
+def _tz_object_outcome(m: Any, run: Any) -> Any:
+    try:
+        return _zone_view(run(m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TZ_OBJECT_CASES))
+def test_zones_are_tzinfo_objects_like_pandas(case: str) -> None:
+    run = _TZ_OBJECT_CASES[case]
+    assert _tz_object_outcome(fpd, run) == _tz_object_outcome(pd, run), case

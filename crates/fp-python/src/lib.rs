@@ -2154,6 +2154,38 @@ fn tz_name(zone: &Bound<'_, PyAny>) -> PyResult<String> {
     fp_types::tz_canonical_name(&name).map_err(|err| tz_error_to_py(zone.py(), err))
 }
 
+/// The tzinfo object pandas 2.2.3 hands out for the zone `name` (it was the
+/// name, a str - `datetime.now(idx.tz)` raised; fvsao.35): 'UTC' is
+/// `datetime.timezone.utc`, a fixed offset ('UTC+09:00') a
+/// `datetime.timezone`, an IANA name pytz's zone, as pandas 2.2.3 builds
+/// them (`zoneinfo.ZoneInfo` where pytz is absent). `at`, a UTC instant in
+/// ns, localizes a pytz zone to the offset it has then, as `Timestamp.tz`
+/// is (`EST` / `EDT`; an index's or a dtype's zone is the zone itself).
+fn tz_object<'py>(py: Python<'py>, name: &str, at: Option<i64>) -> PyResult<Bound<'py, PyAny>> {
+    let datetime = py.import("datetime")?;
+    let timezone = datetime.getattr("timezone")?;
+    if name == "UTC" {
+        return timezone.getattr("utc");
+    }
+    if name.starts_with("UTC+") || name.starts_with("UTC-") {
+        let seconds =
+            fp_types::tz_offset_seconds(name, 0).map_err(|err| tz_error_to_py(py, err))?;
+        return timezone.call1((PyDelta::new(py, 0, seconds, 0, true)?,));
+    }
+    let Ok(pytz) = py.import("pytz") else {
+        return py.import("zoneinfo")?.getattr("ZoneInfo")?.call1((name,));
+    };
+    let zone = pytz.getattr("timezone")?.call1((name,))?;
+    Ok(match at {
+        Some(nanos) if nanos != i64::MIN => datetime
+            .getattr("datetime")?
+            .call_method1("fromtimestamp", (nanos.div_euclid(1_000_000_000), &zone))
+            .and_then(|stamp| stamp.getattr("tzinfo"))
+            .unwrap_or(zone),
+        _ => zone,
+    })
+}
+
 /// A time-zone failure as pandas raises it: pytz's UnknownTimeZoneError (a
 /// KeyError), NonExistentTimeError or AmbiguousTimeError, the classes
 /// pandas' users catch - KeyError / ValueError when pytz is absent.
@@ -2833,9 +2865,21 @@ impl PyTimestamp {
         self.wall().daysinmonth()
     }
 
+    /// The zone as pandas' tzinfo object, localized to this instant (see
+    /// [`tz_object`]); None when naive.
     #[getter]
-    fn tz(&self) -> Option<String> {
-        self.inner.tz.clone()
+    fn tz<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.inner
+            .tz
+            .as_deref()
+            .map(|name| tz_object(py, name, Some(self.inner.nanos)))
+            .transpose()
+    }
+
+    /// datetime's name for [`Self::tz`] (it was missing).
+    #[getter]
+    fn tzinfo<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.tz(py)
     }
 
     #[getter]
@@ -9268,10 +9312,14 @@ impl PyDatetimeIndex {
         self.clone()
     }
 
-    /// The zone's name (None when naive).
+    /// The zone as pandas' tzinfo object (see [`tz_object`]); None when
+    /// naive.
     #[getter]
-    fn tz(&self) -> Option<String> {
-        self.inner.tz()
+    fn tz<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.inner
+            .tz()
+            .map(|name| tz_object(py, &name, None))
+            .transpose()
     }
 
     /// pandas' `tz_convert(tz)`: the same instants shown in `tz` (None: UTC,
@@ -9362,8 +9410,8 @@ impl PyDatetimeIndex {
     }
 
     #[getter]
-    fn tzinfo(&self) -> Option<String> {
-        self.inner.tz()
+    fn tzinfo<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.tz(py)
     }
 
     fn view(&self) -> Self {
@@ -37997,12 +38045,13 @@ impl PySeriesDatetimeAccessor {
         let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
         self.wrap(|dt| dt.tz_convert(zone.as_deref()))
     }
-    /// The column's zone name; None for a naive column.
+    /// The column's zone as pandas' tzinfo object (see [`tz_object`]); None
+    /// for a naive column.
     #[getter]
-    fn tz(&self) -> Option<String> {
+    fn tz<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         match self.series.column().dtype() {
-            DType::Datetime64 { tz } => tz,
-            _ => None,
+            DType::Datetime64 { tz: Some(name) } => tz_object(py, &name, None).map(Some),
+            _ => Ok(None),
         }
     }
     #[pyo3(signature = (freq=None))]
@@ -49911,19 +49960,32 @@ impl PyCategoricalDtype {
 pub struct PyDatetimeTZDtype {
     #[pyo3(get)]
     pub unit: String,
-    #[pyo3(get)]
+    /// The zone's canonical name; Python reads it as a tzinfo object.
     pub tz: String,
 }
 
 #[pymethods]
 impl PyDatetimeTZDtype {
+    /// A zone given by name or as a tzinfo object (only a str was taken),
+    /// named as pandas names it ('+09:00' is 'UTC+09:00'); none is pandas'
+    /// TypeError (it was UTC).
     #[new]
-    #[pyo3(signature = (unit="ns", tz="UTC"))]
-    fn new(unit: Option<&str>, tz: Option<&str>) -> Self {
-        Self {
+    #[pyo3(signature = (unit="ns", tz=None))]
+    fn new(unit: Option<&str>, tz: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let zone = tz
+            .filter(|tz| !tz.is_none())
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyTypeError, _>("A 'tz' is required."))?;
+        Ok(Self {
             unit: unit.unwrap_or("ns").to_string(),
-            tz: tz.unwrap_or("UTC").to_string(),
-        }
+            tz: tz_name(zone)?,
+        })
+    }
+
+    /// The zone as pandas' tzinfo object (see [`tz_object`]; it was the
+    /// name, a str).
+    #[getter]
+    fn tz<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        tz_object(py, &self.tz, None)
     }
 
     #[getter]
