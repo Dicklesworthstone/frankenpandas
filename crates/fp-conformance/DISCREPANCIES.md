@@ -8,7 +8,7 @@
 > resolve to the wrong entry depending on which heading a reader hit first, and one
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
 > number on whichever entry the existing in-tree citations actually meant. The next
-> free number is DISC-030. To see every ID in use:
+> free number is DISC-031. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -166,6 +166,14 @@
 - **Impact:** those two shapes only; every other rank of datetime, timedelta and nullable data agrees (probe `p12/probe_rank_dtypes.py` of `br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.71`: the remaining rows are these and the nullable groupby OUTPUT dtype, `Float64` in pandas and `float64` here, a separate masked-dtype gap). Reproducing (1) would rank a missing instant ahead of every real one, against pandas' own `Series.rank` and its NaT semantics; reproducing (2) needs the placeholder pandas happened to store, which depends on how the array was built.
 - **Resolution:** ACCEPTED (2026-09-27, `br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.71`). Revisit if a pinned pandas release masks both.
 - **Tests affected:** `test_rank_of_a_missing_value_pandas_does_not_mask` (its two strict xfail cases) and `test_rank_keeps_the_missing_values_pandas_ranks_missing` (fp-python pytest).
+- **Review date:** 2026-09-27
+
+### DISC-030: `to_string(max_cols=, formatters={...})` formats the column each key names
+- **Reference:** MEASURED, live pandas 2.2.3: a formatters MAPPING is looked up by the column's position in the truncated frame, mapped through the FULL column list (`DataFrameFormatter._get_formatter`: `i = self.columns[i]` when the position is not itself a label). Past `max_cols` a formatter lands on the wrong column: `DataFrame({f"c{i}": [i] for i in range(6)}).to_string(max_cols=2, formatters={"c1": "<{}>".format})` prints `<5>` under `c5`, and `formatters={"c5": ...}` formats nothing.
+- **Our impl:** fp applies each formatter to the column its key names, truncated or not (a formatters LIST is truncated with the columns, as pandas does). Without `max_cols` truncation the two agree.
+- **Impact:** only a formatters mapping together with a `max_cols` that truncates: the named column prints formatted, its header without the numeric sign space (as pandas prints a formatted column).
+- **Resolution:** ACCEPTED (2026-09-27, br-frankenpandas-xn05q). Reproducing it would format one column's values with another column's formatter.
+- **Tests affected:** `test_to_string_formats_the_named_column_past_max_cols` pins fp's behavior (the differential table `test_to_string_keywords_like_pandas` covers a truncated formatters LIST instead).
 - **Review date:** 2026-09-27
 
 ## Resolved Divergences

@@ -693,6 +693,307 @@ fn pandas_cells(column: &Column) -> Vec<String> {
     }
 }
 
+/// The cells pandas' `format_array` makes for `column` under `to_string`'s
+/// `formatter` (the column's own), `float_format`, `na_rep` and `decimal`,
+/// as printed (`leading_space` is pandas' `index`), or None when they change
+/// nothing ([`pandas_cells`]). A float column: a formatter or a callable
+/// float_format gives each value's text (NaN as `na_rep`; no sign space, no
+/// decimal swap), a '%' float_format each value's `%` text with its decimal
+/// point swapped, else pandas' own cells with `na_rep` and the decimal
+/// point. An int or datetime column takes only a formatter (each value's
+/// text, NaT's too). Any other column is pandas' generic formatter: a space
+/// and each value's text (the formatter's; a float's float_format text
+/// without the space), None / NaT / <NA> as they print, NaN as `na_rep`.
+#[allow(clippy::cast_precision_loss)] // an int column with a NaN is pandas' float64
+fn styled_cells(
+    py: Python<'_>,
+    column: &Column,
+    formatter: Option<&Bound<'_, PyAny>>,
+    float_format: Option<&Bound<'_, PyAny>>,
+    na_rep: &str,
+    decimal: &str,
+    leading_space: bool,
+) -> PyResult<Option<Vec<String>>> {
+    let called = |callable: &Bound<'_, PyAny>, value: Py<PyAny>| -> PyResult<String> {
+        Ok(callable.call1((value,))?.str()?.to_string())
+    };
+    let missing =
+        |value: &Scalar| value.is_missing() || matches!(value, Scalar::Float64(v) if v.is_nan());
+    let as_float = |value: &Scalar| match value {
+        Scalar::Int64(v) => *v as f64,
+        Scalar::Float64(v) => *v,
+        _ => f64::NAN,
+    };
+    let values = materialized_values(column);
+    let dtype = column.dtype();
+    if dtype == DType::Float64 || (dtype == DType::Int64 && !column.validity().all()) {
+        let callable = formatter.or(float_format.filter(|format| format.is_callable()));
+        if let Some(callable) = callable {
+            return values
+                .iter()
+                .map(|value| {
+                    if missing(value) {
+                        Ok(na_rep.to_owned())
+                    } else {
+                        called(callable, as_float(value).into_py_any(py)?)
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()
+                .map(Some);
+        }
+        if let Some(pattern) = float_format {
+            return values
+                .iter()
+                .map(|value| {
+                    if missing(value) {
+                        return Ok(na_rep.to_owned());
+                    }
+                    let text = pattern.rem(as_float(value))?.str()?.to_string();
+                    Ok(text.replacen('.', decimal, 1))
+                })
+                .collect::<PyResult<Vec<_>>>()
+                .map(Some);
+        }
+        if na_rep == "NaN" && decimal == "." {
+            return Ok(None);
+        }
+        return Ok(Some(
+            values
+                .iter()
+                .zip(pandas_cells(column))
+                .map(|(value, cell)| {
+                    if missing(value) {
+                        na_rep.to_owned()
+                    } else if leading_space {
+                        cell.replacen('.', decimal, 1)
+                    } else {
+                        without_leading_space(cell).replacen('.', decimal, 1)
+                    }
+                })
+                .collect(),
+        ));
+    }
+    match dtype {
+        DType::Int64 | DType::Datetime64 { .. } | DType::Timedelta64 => {
+            let Some(formatter) = formatter else {
+                return Ok(None);
+            };
+            values
+                .iter()
+                .map(|value| called(formatter, scalar_to_py(py, value)?))
+                .collect::<PyResult<Vec<_>>>()
+                .map(Some)
+        }
+        // A categorical prints its values' own array; only a formatter is
+        // taken for it.
+        DType::Categorical if formatter.is_none() => Ok(None),
+        _ if formatter.is_none() && float_format.is_none() && na_rep == "NaN" => Ok(None),
+        _ => {
+            let lead = if leading_space { " " } else { "" };
+            let nullable = matches!(
+                dtype,
+                DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable
+            );
+            values
+                .iter()
+                .map(|value| {
+                    Ok(match value {
+                        value if nullable && value.is_missing() => format!("{lead}<NA>"),
+                        Scalar::Null(NullKind::Null) => format!("{lead}None"),
+                        Scalar::Null(NullKind::NaT) => format!("{lead}NaT"),
+                        value if missing(value) => format!("{lead}{na_rep}"),
+                        value => match (formatter, float_format, value) {
+                            (Some(formatter), _, value) => {
+                                format!("{lead}{}", called(formatter, scalar_to_py(py, value)?)?)
+                            }
+                            (None, Some(format), Scalar::Float64(v)) => {
+                                called(format, v.into_py_any(py)?)?
+                            }
+                            _ => format!("{lead}{}", pandas_object_text(value)),
+                        },
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()
+                .map(Some)
+        }
+    }
+}
+
+/// `DataFrame.to_string`'s keywords that shape its layout (see
+/// [`TextKeywords::style`]).
+struct TextKeywords<'a, 'py> {
+    col_space: Option<&'a Bound<'py, PyAny>>,
+    header: Option<&'a Bound<'py, PyAny>>,
+    formatters: Option<&'a Bound<'py, PyAny>>,
+    float_format: Option<&'a Bound<'py, PyAny>>,
+    na_rep: &'a str,
+    decimal: &'a str,
+    justify: Option<&'a str>,
+    index_names: bool,
+    sparsify: Option<bool>,
+}
+
+impl TextKeywords<'_, '_> {
+    /// The [`FrameTextStyle`] of `frame`'s layout over `rows`, as pandas'
+    /// DataFrameFormatter reads the keywords: `header` False hides the
+    /// header, a list names the columns (one a column, text); `formatters`
+    /// is a mapping by column label ('__index__' formats a flat index) or a
+    /// list by position (one a column); `col_space` an int for the index and
+    /// every column, a mapping by label ('' the index; only columns), or a
+    /// list by position (one a column). pandas' errors for each.
+    fn style(
+        &self,
+        py: Python<'_>,
+        frame: &DataFrame,
+        rows: &[usize],
+        show_index: bool,
+    ) -> PyResult<FrameTextStyle> {
+        let value_error =
+            |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
+        let width = frame.shape().1;
+        let labels: Vec<Bound<'_, PyAny>> = match frame.column_labels() {
+            labels if labels.len() == width => labels
+                .iter()
+                .map(|label| index_label_to_py(py, label).map(|label| label.into_bound(py)))
+                .collect::<PyResult<_>>()?,
+            _ => (0..width)
+                .filter_map(|position| frame.column_name_at(position))
+                .map(|name| name.into_bound_py_any(py))
+                .collect::<PyResult<_>>()?,
+        };
+        let mut style = FrameTextStyle {
+            justify: self.justify.map_or(Justify::Right, Justify::of),
+            hide_names: !self.index_names,
+            dense: !self.sparsify.unwrap_or(true),
+            ..FrameTextStyle::default()
+        };
+        if let Some(header) = self.header {
+            if is_list_like_impl(header) {
+                let aliases = header
+                    .try_iter()?
+                    .map(|alias| {
+                        let alias = alias?;
+                        alias.extract::<String>().map_err(|_| {
+                            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                                "object of type '{}' has no len()",
+                                alias
+                                    .get_type()
+                                    .name()
+                                    .map_or_else(|_| "object".into(), |n| n.to_string())
+                            ))
+                        })
+                    })
+                    .collect::<PyResult<Vec<String>>>()?;
+                if aliases.len() != width {
+                    return Err(value_error(format!(
+                        "Writing {width} cols but got {} aliases",
+                        aliases.len()
+                    )));
+                }
+                style.aliases = Some(aliases);
+            } else {
+                style.hide_header = !header.is_truthy()?;
+            }
+        }
+        let mut formatter_of: Vec<Option<Bound<'_, PyAny>>> = vec![None; width];
+        if let Some(formatters) = self.formatters {
+            if let Ok(mapping) = formatters.cast::<PyDict>() {
+                for (position, label) in labels.iter().enumerate() {
+                    formatter_of[position] = mapping.get_item(label)?.filter(|f| !f.is_none());
+                }
+                let index_formatter = mapping.get_item("__index__")?.filter(|f| !f.is_none());
+                if let Some(formatter) =
+                    index_formatter.filter(|_| frame.row_multiindex().is_none())
+                {
+                    let texts = rows
+                        .iter()
+                        .map(|&row| {
+                            let label = index_label_to_py(py, &frame.index().labels()[row])?;
+                            Ok(formatter.call1((label,))?.str()?.to_string())
+                        })
+                        .collect::<PyResult<Vec<String>>>()?;
+                    style.index_cells = Some(texts);
+                }
+            } else {
+                let count = formatters.len()?;
+                if count != width {
+                    return Err(value_error(format!(
+                        "Formatters length({count}) should match DataFrame number of columns({width})"
+                    )));
+                }
+                for (position, slot) in formatter_of.iter_mut().enumerate() {
+                    *slot = Some(formatters.get_item(position)?).filter(|f| !f.is_none());
+                }
+            }
+        }
+        style.formatted = formatter_of.iter().map(Option::is_some).collect();
+        style.cells = (0..width)
+            .map(|position| {
+                let Some(column) = frame.column_at(position) else {
+                    return Ok(None);
+                };
+                styled_cells(
+                    py,
+                    &column.take_positions(rows),
+                    formatter_of[position].as_ref(),
+                    self.float_format,
+                    self.na_rep,
+                    self.decimal,
+                    show_index,
+                )
+            })
+            .collect::<PyResult<_>>()?;
+        if let Some(space) = self.col_space {
+            // pandas reads each entry with int() ('8' is 8).
+            let int_of = |value: &Bound<'_, PyAny>| -> PyResult<usize> {
+                let count = py
+                    .get_type::<pyo3::types::PyInt>()
+                    .call1((value,))?
+                    .extract::<i64>()?;
+                Ok(usize::try_from(count).unwrap_or(0))
+            };
+            if space.is_instance_of::<pyo3::types::PyInt>()
+                || space.is_instance_of::<pyo3::types::PyString>()
+            {
+                let count = int_of(space)?;
+                style.index_space = count;
+                style.col_space = vec![count; width];
+            } else if let Ok(mapping) = space.cast::<PyDict>() {
+                for key in mapping.keys() {
+                    let index_key = key.extract::<String>().is_ok_and(|key| key.is_empty());
+                    if !index_key && !labels.iter().any(|label| label.eq(&key).unwrap_or(false)) {
+                        return Err(value_error(format!(
+                            "Col_space is defined for an unknown column: {key}"
+                        )));
+                    }
+                }
+                if let Some(count) = mapping.get_item("")? {
+                    style.index_space = int_of(&count)?;
+                }
+                style.col_space = labels
+                    .iter()
+                    .map(|label| {
+                        mapping
+                            .get_item(label)?
+                            .map_or(Ok(0), |count| int_of(&count))
+                    })
+                    .collect::<PyResult<_>>()?;
+            } else {
+                let count = space.len()?;
+                if count != width {
+                    return Err(value_error(format!(
+                        "Col_space length({count}) should match DataFrame number of columns({width})"
+                    )));
+                }
+                style.col_space = (0..width)
+                    .map(|position| int_of(&space.get_item(position)?))
+                    .collect::<PyResult<_>>()?;
+            }
+        }
+        Ok(style)
+    }
+}
+
 /// The header texts pandas prints for flat column `labels` (before a
 /// numeric column's leading space): a numeric (int / float / bool) or a
 /// datetime column Index is formatted as one block ([`pandas_label_texts`])
@@ -867,6 +1168,90 @@ fn python_center(text: &str, width: usize) -> String {
     format!("{}{text}{}", " ".repeat(left), " ".repeat(pad - left))
 }
 
+/// pandas' `justify` for `to_string`'s headers (and the cells short of a
+/// `col_space`): 'left' and 'center' as named, any other mode right.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Justify {
+    Left,
+    Center,
+    #[default]
+    Right,
+}
+
+impl Justify {
+    fn of(mode: &str) -> Self {
+        match mode {
+            "left" => Self::Left,
+            "center" => Self::Center,
+            _ => Self::Right,
+        }
+    }
+
+    /// `text` in `width` characters, as pandas' `adj.justify` places it.
+    fn place(self, text: &str, width: usize) -> String {
+        match self {
+            Self::Left => format!("{text:<width$}"),
+            Self::Center => python_center(text, width),
+            Self::Right => format!("{text:>width$}"),
+        }
+    }
+}
+
+/// What `DataFrame.to_string`'s keywords change in pandas' frame layout
+/// (the repr takes the default). The per-column parts go by the frame's
+/// column position; a missing entry changes nothing.
+#[derive(Clone, Default)]
+struct FrameTextStyle {
+    /// header=False: no header lines.
+    hide_header: bool,
+    /// header=[...]: each column's header as given (no sign space).
+    aliases: Option<Vec<String>>,
+    /// A column's own cells for the rows shown (its formatter,
+    /// float_format, na_rep or decimal; [`styled_cells`]), as printed.
+    cells: Vec<Option<Vec<String>>>,
+    /// The columns with a formatter: their header takes no sign space.
+    formatted: Vec<bool>,
+    /// A flat index's texts for the rows shown (formatters['__index__']).
+    index_cells: Option<Vec<String>>,
+    /// col_space: the least width of each index level, and of each column.
+    index_space: usize,
+    col_space: Vec<usize>,
+    justify: Justify,
+    /// index_names=False: neither the row index's names nor the column
+    /// axis's print.
+    hide_names: bool,
+    /// sparsify=False: a MultiIndex prints every label.
+    dense: bool,
+}
+
+impl FrameTextStyle {
+    /// This style over the columns at `positions` (a truncated layout's).
+    fn select(&self, positions: &[usize]) -> Self {
+        Self {
+            aliases: self.aliases.as_ref().map(|aliases| {
+                positions
+                    .iter()
+                    .filter_map(|&position| aliases.get(position).cloned())
+                    .collect()
+            }),
+            cells: positions
+                .iter()
+                .map(|&position| self.cells.get(position).cloned().flatten())
+                .collect(),
+            formatted: positions
+                .iter()
+                .map(|&position| self.formatted.get(position).copied().unwrap_or(false))
+                .collect(),
+            col_space: positions
+                .iter()
+                .map(|&position| self.col_space.get(position).copied().unwrap_or(0))
+                .collect(),
+            index_cells: self.index_cells.clone(),
+            ..*self
+        }
+    }
+}
+
 /// A cell's display width in characters, which `{:>w$}` pads by (a byte
 /// length misaligns non-ASCII text).
 #[allow(clippy::ptr_arg)] // mapped over `&String` items: `.map(text_width)`
@@ -905,9 +1290,13 @@ type LevelTexts = (Vec<Vec<String>>, Option<Vec<String>>);
 type ColumnLevels = (Vec<Vec<IndexLabel>>, Vec<Option<String>>);
 
 /// The texts pandas prints for a row MultiIndex at `rows`: one list per
-/// level, sparsified, and the level names when any level is named ("" for
-/// an unnamed one).
-fn pandas_multiindex_texts(multi: &fp_index::MultiIndex, rows: &[usize]) -> Option<LevelTexts> {
+/// level, sparsified unless `sparsify` is false (to_string's), and the level
+/// names when any level is named ("" for an unnamed one).
+fn pandas_multiindex_texts(
+    multi: &fp_index::MultiIndex,
+    rows: &[usize],
+    sparsify: bool,
+) -> Option<LevelTexts> {
     let mut levels = Vec::with_capacity(multi.nlevels());
     for level in 0..multi.nlevels() {
         let values = multi.get_level_values(level).ok()?;
@@ -917,7 +1306,9 @@ fn pandas_multiindex_texts(multi: &fp_index::MultiIndex, rows: &[usize]) -> Opti
             .collect::<Option<_>>()?;
         levels.push(pandas_label_texts(&shown, None));
     }
-    sparsify_level_texts(&mut levels);
+    if sparsify {
+        sparsify_level_texts(&mut levels);
+    }
     let names = multi.names().iter().any(Option::is_some).then(|| {
         multi
             .names()
@@ -979,7 +1370,14 @@ impl SeriesFooter {
 
 /// pandas' `repr(series)` (see [`pandas_series_text`]).
 fn pandas_series_repr(series: &Series) -> String {
-    pandas_series_text(series, RowLimits::repr(), true, true, SeriesFooter::REPR)
+    pandas_series_text(
+        series,
+        RowLimits::repr(),
+        true,
+        true,
+        SeriesFooter::REPR,
+        None,
+    )
 }
 
 /// pandas' Series text layout (`SeriesFormatter`), shared by the repr and
@@ -988,14 +1386,17 @@ fn pandas_series_repr(series: &Series) -> String {
 /// line of the level names when any is named (`show_header`; printed even
 /// without the index, as pandas does), `limits` rows, the chosen footer
 /// parts. Without the index the values lose their sign space, as pandas'
-/// `leading_space=index`. Every Series prints this way (a Series it could
-/// not lay out printed frankenpandas' own Display; fvsao.34).
+/// `leading_space=index`. `own_cells` are the rows shown as `to_string`'s
+/// na_rep / float_format print them ([`styled_cells`]). Every Series prints
+/// this way (a Series it could not lay out printed frankenpandas' own
+/// Display; fvsao.34).
 fn pandas_series_text(
     series: &Series,
     limits: RowLimits,
     show_index: bool,
     show_header: bool,
     parts: SeriesFooter,
+    own_cells: Option<Vec<String>>,
 ) -> String {
     let index = series.index();
     let column = series.column();
@@ -1025,10 +1426,17 @@ fn pandas_series_text(
     if series.is_empty() {
         return format!("Series([], {footer})");
     }
-    let mut cells = limits.clip(pandas_cells(&column.take_positions(&rows)));
-    if !show_index {
-        cells = cells.into_iter().map(without_leading_space).collect();
-    }
+    let mut cells = match own_cells {
+        Some(cells) => limits.clip(cells),
+        None => {
+            let cells = limits.clip(pandas_cells(&column.take_positions(&rows)));
+            if show_index {
+                cells
+            } else {
+                cells.into_iter().map(without_leading_space).collect()
+            }
+        }
+    };
     let width = cells.iter().map(text_width).max().unwrap_or(0);
     for cell in &mut cells {
         *cell = format!("{cell:>width$}");
@@ -1037,7 +1445,7 @@ fn pandas_series_text(
     // names laid out over its level columns (which the names widen).
     let multi_texts = index
         .row_multiindex()
-        .and_then(|multi| pandas_multiindex_texts(multi, &rows));
+        .and_then(|multi| pandas_multiindex_texts(multi, &rows, true));
     let (mut labels, header) = match multi_texts {
         Some((levels, names)) => {
             let lists: Vec<Vec<String>> = levels
@@ -1119,7 +1527,14 @@ fn pandas_multiindex_tuples(multi: &fp_index::MultiIndex) -> Option<Vec<String>>
 /// rows and columns - fitted to the terminal's width by default, as pandas
 /// in a terminal or a script (it printed every column).
 fn pandas_frame_repr(frame: &DataFrame) -> String {
-    pandas_frame_text(frame, RowLimits::repr(), true, None, ColumnLayout::repr())
+    pandas_frame_text(
+        frame,
+        RowLimits::repr(),
+        true,
+        None,
+        ColumnLayout::repr(),
+        &FrameTextStyle::default(),
+    )
 }
 
 /// How many of a frame's columns its text lays out.
@@ -1271,12 +1686,13 @@ fn fitted_column_count(strcols: &[Vec<String>], terminal: usize, show_index: boo
 }
 
 /// The header texts of a column MultiIndex over `width` columns, one per
-/// level for each column, sparsified across the columns, and the corner
-/// beside them (the column-axis level names, blank when none is named);
-/// None when its levels do not cover the columns.
+/// level for each column, sparsified across the columns unless `sparsify`
+/// is false, and the corner beside them (the column-axis level names, blank
+/// when none is named); None when its levels do not cover the columns.
 fn column_multiindex_headers(
     multi: &fp_index::MultiIndex,
     width: usize,
+    sparsify: bool,
 ) -> Option<(Vec<Vec<String>>, Vec<String>)> {
     let mut levels: Vec<Vec<String>> = (0..multi.nlevels())
         .map(|level| {
@@ -1289,7 +1705,9 @@ fn column_multiindex_headers(
     if levels.iter().any(|texts| texts.len() != width) {
         return None;
     }
-    sparsify_level_texts(&mut levels);
+    if sparsify {
+        sparsify_level_texts(&mut levels);
+    }
     let headers = (0..width)
         .map(|column| levels.iter().map(|texts| texts[column].clone()).collect())
         .collect();
@@ -1315,15 +1733,20 @@ fn column_multiindex_headers(
 /// the cells lose their sign space, as pandas' `leading_space=index`.
 /// `columns` says how many columns show: past those, the first and last
 /// half are laid out again around a '...' column, as pandas truncates a
-/// repr to the terminal's width (every column was shown). Every frame
-/// prints this way (a frame it could not lay out printed frankenpandas' own
-/// Display; fvsao.34).
+/// repr to the terminal's width (every column was shown). `style` is what
+/// `to_string`'s keywords change (see [`FrameTextStyle`]): a column's
+/// header and cells take at least its `col_space` and are justified by
+/// `justify` in it (the cells right-justified among themselves first), each
+/// index level takes at least the index's `col_space`, left-justified.
+/// Every frame prints this way (a frame it could not lay out printed
+/// frankenpandas' own Display; fvsao.34).
 fn pandas_frame_text(
     frame: &DataFrame,
     limits: RowLimits,
     show_index: bool,
     show_dimensions: Option<bool>,
     columns_shown: ColumnLayout,
+    style: &FrameTextStyle,
 ) -> String {
     let (len, width) = frame.shape();
     let columns: Vec<(String, &Column)> = (0..width)
@@ -1347,20 +1770,28 @@ fn pandas_frame_text(
     let (rows, dots_at) = limits.shown(len);
     // The column headers, one text per column-axis level for each column,
     // and what the index column shows beside them.
-    let multi_headers =
-        column_multi.and_then(|multi| column_multiindex_headers(multi, columns.len()));
+    let multi_headers = column_multi
+        .filter(|_| style.aliases.is_none())
+        .and_then(|multi| column_multiindex_headers(multi, columns.len(), !style.dense));
     let (headers, corner): (Vec<Vec<String>>, Vec<String>) = match multi_headers {
         Some(multi_headers) => multi_headers,
         None => {
-            let labels = frame.column_labels();
-            let label_texts = if labels.len() == columns.len() {
-                pandas_column_label_texts(&labels)
-            } else {
-                columns.iter().map(|(name, _)| name.clone()).collect()
+            let label_texts = match &style.aliases {
+                Some(aliases) => aliases.clone(),
+                None => {
+                    let labels = frame.column_labels();
+                    if labels.len() == columns.len() {
+                        pandas_column_label_texts(&labels)
+                    } else {
+                        columns.iter().map(|(name, _)| name.clone()).collect()
+                    }
+                }
             };
             let mut headers = Vec::with_capacity(columns.len());
-            for ((_, column), name) in columns.iter().zip(&label_texts) {
+            for (position, ((_, column), name)) in columns.iter().zip(&label_texts).enumerate() {
                 let dtype = column.dtype();
+                // A numeric column's header takes a sign space, unless it is
+                // an alias or the column has a formatter.
                 let numeric = matches!(
                     dtype,
                     DType::Int64
@@ -1369,7 +1800,9 @@ fn pandas_frame_text(
                         | DType::Int64Nullable
                         | DType::Float64Nullable
                         | DType::BoolNullable
-                ) && !(dtype == DType::Bool && column.has_any_missing());
+                ) && !(dtype == DType::Bool && column.has_any_missing())
+                    && style.aliases.is_none()
+                    && !style.formatted.get(position).copied().unwrap_or(false);
                 headers.push(vec![if numeric {
                     format!(" {name}")
                 } else {
@@ -1384,32 +1817,51 @@ fn pandas_frame_text(
             )
         }
     };
+    let (headers, corner) = if style.hide_header {
+        (vec![Vec::new(); columns.len()], Vec::new())
+    } else if style.hide_names {
+        let blank = vec![String::new(); corner.len()];
+        (headers, blank)
+    } else {
+        (headers, corner)
+    };
     let header_rows = corner.len();
     let multi_texts = frame
         .row_multiindex()
-        .and_then(|multi| pandas_multiindex_texts(multi, &rows));
+        .and_then(|multi| pandas_multiindex_texts(multi, &rows, !style.dense));
     let (index_levels, row_names) = match multi_texts {
         Some(texts) => texts,
         None => {
-            let shown: Vec<IndexLabel> = rows
-                .iter()
-                .map(|&row| frame.index().labels()[row].clone())
-                .collect();
+            let texts = style.index_cells.clone().unwrap_or_else(|| {
+                let shown: Vec<IndexLabel> = rows
+                    .iter()
+                    .map(|&row| frame.index().labels()[row].clone())
+                    .collect();
+                pandas_label_texts(&shown, frame.index().tz())
+            });
             (
-                vec![pandas_label_texts(&shown, frame.index().tz())],
+                vec![texts],
                 frame.index().name().map(|name| vec![name.to_owned()]),
             )
         }
     };
+    let row_names = row_names.filter(|_| !style.hide_names);
     let blank_rows = usize::from(show_index && row_names.is_some());
     let mut strcols: Vec<Vec<String>> = Vec::with_capacity(width + 1);
     if show_index {
+        let space = style.index_space;
         let lists: Vec<Vec<String>> = index_levels
             .into_iter()
             .enumerate()
             .map(|(level, mut texts)| {
                 if let Some(row_names) = &row_names {
                     texts.insert(0, row_names.get(level).cloned().unwrap_or_default());
+                }
+                if space > 0 {
+                    texts = texts
+                        .into_iter()
+                        .map(|text| format!("{text:<space$}"))
+                        .collect();
                 }
                 texts
             })
@@ -1430,25 +1882,36 @@ fn pandas_frame_text(
         }
         strcols.push(index_col);
     }
-    for ((_, column), header) in columns.iter().zip(&headers) {
-        let mut cells = limits.clip(pandas_cells(&column.take_positions(&rows)));
-        if !show_index {
-            cells = cells.into_iter().map(without_leading_space).collect();
-        }
-        let col_width = cells
+    for (position, ((_, column), header)) in columns.iter().zip(&headers).enumerate() {
+        let cells = match style.cells.get(position).cloned().flatten() {
+            Some(cells) => limits.clip(cells),
+            None => {
+                let cells = limits.clip(pandas_cells(&column.take_positions(&rows)));
+                if show_index {
+                    cells
+                } else {
+                    cells.into_iter().map(without_leading_space).collect()
+                }
+            }
+        };
+        let cells_width = cells.iter().map(text_width).max().unwrap_or(0);
+        let col_width = header
             .iter()
-            .chain(header)
             .map(text_width)
-            .max()
-            .unwrap_or(0);
+            .chain(style.col_space.get(position).copied())
+            .fold(cells_width, usize::max);
+        let justify = style.justify;
         let mut strcol: Vec<String> = header
             .iter()
-            .map(|text| format!("{text:>col_width$}"))
+            .map(|text| justify.place(text, col_width))
             .collect();
         if blank_rows == 1 {
             strcol.push(" ".repeat(col_width));
         }
-        strcol.extend(cells.iter().map(|cell| format!("{cell:>col_width$}")));
+        strcol.extend(cells.iter().map(|cell| match justify {
+            Justify::Right => format!("{cell:>col_width$}"),
+            _ => justify.place(&format!("{cell:>cells_width$}"), col_width),
+        }));
         if let Some(at) = dots_at {
             let dots = if col_width > 3 { "..." } else { ".." };
             strcol.insert(header_rows + blank_rows + at, format!("{dots:>col_width$}"));
@@ -1473,18 +1936,25 @@ fn pandas_frame_text(
             ((0..fitted).collect(), fitted)
         };
         let mut seen = HashSet::new();
-        let kept: Vec<String> = positions
+        let (kept_positions, kept): (Vec<usize>, Vec<String>) = positions
             .iter()
-            .filter_map(|&position| frame.column_name_at(position))
-            .filter(|name| seen.insert(name.clone()))
-            .collect();
+            .filter_map(|&position| Some((position, frame.column_name_at(position)?)))
+            .filter(|(_, name)| seen.insert(name.clone()))
+            .unzip();
         let refs: Vec<&str> = kept.iter().map(String::as_str).collect();
         if let Ok(cut) = frame.select_columns(&refs) {
             let dots = ColumnLayout::Dots {
                 after,
                 total: width,
             };
-            return pandas_frame_text(&cut, limits, show_index, show_dimensions, dots);
+            return pandas_frame_text(
+                &cut,
+                limits,
+                show_index,
+                show_dimensions,
+                dots,
+                &style.select(&kept_positions),
+            );
         }
     }
     let total_columns = match columns_shown {
@@ -24035,13 +24505,15 @@ impl PySeries {
 
     /// pandas' `Series.to_string`: the repr's layout (see
     /// [`pandas_series_text`]) with every row unless `max_rows`/`min_rows`
-    /// truncate, and only the footer parts asked for. It printed
-    /// frankenpandas' own Display and refused every keyword (fvsao.34);
-    /// `na_rep` and `float_format` still raise instead of being dropped.
+    /// truncate, the values as `na_rep` / `float_format` print them
+    /// ([`styled_cells`]; both raised), and only the footer parts asked
+    /// for. It printed frankenpandas' own Display and refused every keyword
+    /// (fvsao.34).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (buf=None, na_rep="NaN", float_format=None, header=true, index=true, length=false, dtype=false, name=false, max_rows=None, min_rows=None))]
     fn to_string(
         &self,
+        py: Python<'_>,
         buf: Option<&Bound<'_, PyAny>>,
         na_rep: &str,
         float_format: Option<&Bound<'_, PyAny>>,
@@ -24053,21 +24525,25 @@ impl PySeries {
         max_rows: Option<usize>,
         min_rows: Option<usize>,
     ) -> PyResult<Option<String>> {
-        unsupported_params(
-            "Series.to_string",
-            &[
-                ("na_rep", na_rep == "NaN"),
-                ("float_format", float_format.is_none()),
-            ],
+        let limits = RowLimits {
+            max_rows,
+            min_rows,
+            max_colwidth: None,
+            wrap_width: None,
+        };
+        let (rows, _) = limits.shown(self.inner.len());
+        let own_cells = styled_cells(
+            py,
+            &self.inner.column().take_positions(&rows),
+            None,
+            float_format,
+            na_rep,
+            ".",
+            index,
         )?;
         let text = pandas_series_text(
             &self.inner,
-            RowLimits {
-                max_rows,
-                min_rows,
-                max_colwidth: None,
-                wrap_width: None,
-            },
+            limits,
             index,
             header,
             SeriesFooter {
@@ -24075,6 +24551,7 @@ impl PySeries {
                 dtype,
                 length: Some(length),
             },
+            own_cells,
         );
         write_text_target(buf, text, false)
     }
@@ -30745,19 +31222,39 @@ impl PyDataFrame {
 
     /// pandas' `DataFrame.to_string`: the repr's layout (see
     /// [`pandas_frame_text`]) over `columns`, every row unless
-    /// `max_rows`/`min_rows` truncate, the dimensions line per
-    /// `show_dimensions` (True, False or "truncate"), written to `buf` or
+    /// `max_rows`/`min_rows` truncate and every column unless `max_cols`
+    /// does, cells cut to `max_colwidth`, blocks of `line_width`, the
+    /// dimensions line per `show_dimensions` (True, False or "truncate"),
+    /// the header / formatters / float_format / na_rep / decimal / col_space
+    /// / justify / index_names / sparsify as pandas reads them
+    /// ([`TextKeywords::style`]), written to `buf` (in `encoding`) or
     /// returned. It printed a different table (no index names, its own float
-    /// widths) and took only `index` (fvsao.34).
-    #[pyo3(signature = (buf=None, columns=None, index=true, max_rows=None, min_rows=None, show_dimensions=None))]
+    /// widths) and took only `index` (fvsao.34); then every other keyword
+    /// but the row limits raised TypeError (xn05q).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (buf=None, columns=None, col_space=None, header=None, index=true, na_rep="NaN", formatters=None, float_format=None, sparsify=None, index_names=true, justify=None, max_rows=None, max_cols=None, show_dimensions=None, decimal=".", line_width=None, min_rows=None, max_colwidth=None, encoding=None))]
     fn to_string(
         &self,
+        py: Python<'_>,
         buf: Option<&Bound<'_, PyAny>>,
         columns: Option<Vec<String>>,
+        col_space: Option<&Bound<'_, PyAny>>,
+        header: Option<&Bound<'_, PyAny>>,
         index: bool,
+        na_rep: &str,
+        formatters: Option<&Bound<'_, PyAny>>,
+        float_format: Option<&Bound<'_, PyAny>>,
+        sparsify: Option<bool>,
+        index_names: bool,
+        justify: Option<&str>,
         max_rows: Option<usize>,
-        min_rows: Option<usize>,
+        max_cols: Option<usize>,
         show_dimensions: Option<&Bound<'_, PyAny>>,
+        decimal: &str,
+        line_width: Option<usize>,
+        min_rows: Option<usize>,
+        max_colwidth: Option<usize>,
+        encoding: Option<&str>,
     ) -> PyResult<Option<String>> {
         let show_dimensions = match show_dimensions {
             None => Some(false),
@@ -30779,19 +31276,31 @@ impl PyDataFrame {
             }
             None => self.inner.clone(),
         };
-        let text = pandas_frame_text(
-            &frame,
-            RowLimits {
-                max_rows,
-                min_rows,
-                max_colwidth: None,
-                wrap_width: None,
-            },
-            index,
-            show_dimensions,
-            ColumnLayout::All,
-        );
-        write_text_target(buf, text, false)
+        let limits = RowLimits {
+            max_rows,
+            min_rows,
+            max_colwidth,
+            wrap_width: line_width,
+        };
+        let (rows, _) = limits.shown(frame.shape().0);
+        let style = TextKeywords {
+            col_space,
+            header,
+            formatters,
+            float_format,
+            na_rep,
+            decimal,
+            justify,
+            index_names,
+            sparsify,
+        }
+        .style(py, &frame, &rows, index)?;
+        let layout = match max_cols {
+            Some(count) if count > 0 => ColumnLayout::Max(count),
+            _ => ColumnLayout::All,
+        };
+        let text = pandas_frame_text(&frame, limits, index, show_dimensions, layout, &style);
+        write_encoded_text(py, buf, text, encoding)
     }
 
     /// Return a chainable Styler for HTML formatting (pandas `DataFrame.style`).
@@ -56019,6 +56528,38 @@ fn write_text_target(
         .open(&path)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
     std::io::Write::write_all(&mut file, text.as_bytes())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    Ok(None)
+}
+
+/// [`write_text_target`] under pandas' `encoding=`: only a path (str /
+/// os.PathLike) takes one, the text written in it; returning the text or a
+/// writable target beside an encoding is pandas' ValueError.
+fn write_encoded_text(
+    py: Python<'_>,
+    target: Option<&Bound<'_, PyAny>>,
+    text: String,
+    encoding: Option<&str>,
+) -> PyResult<Option<String>> {
+    let Some(encoding) = encoding else {
+        return write_text_target(target, text, false);
+    };
+    let path = match target.filter(|target| !target.is_none()) {
+        Some(target)
+            if target.is_instance_of::<pyo3::types::PyString>()
+                || target.hasattr("__fspath__")? =>
+        {
+            py_fspath(target)?
+        }
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "buf is not a file name and encoding is specified.",
+            ));
+        }
+    };
+    let encoded = pyo3::types::PyString::new(py, &text).call_method1("encode", (encoding,))?;
+    let bytes = encoded.cast::<pyo3::types::PyBytes>()?;
+    std::fs::write(&path, bytes.as_bytes())
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
     Ok(None)
 }

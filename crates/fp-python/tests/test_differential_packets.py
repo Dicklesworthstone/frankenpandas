@@ -2808,7 +2808,8 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
         # its Series of lists is built from object cells now
         # (test_frame_apply_object_results_match_pandas).
         lambda: _hs(fpd).interpolate(method="nearest", limit_direction="both"),
-        lambda: _hs(fpd).to_string(float_format="{:.1f}".format),
+        # TEST-CHANGE (xn05q): Series.to_string(float_format=) left this list;
+        # it formats as pandas now (test_to_string_keywords_like_pandas).
         lambda: _hs(fpd).view("int64"),
         lambda: fpd.PeriodIndex.from_fields(year=[2024]),
         lambda: _hg(fpd).groupby("k").transform("shift", periods=2),
@@ -11430,3 +11431,127 @@ def _everyday6_outcome(m: Any, run: Any) -> Any:
 def test_everyday_ops_round_six_like_pandas(case: str) -> None:
     run = _EVERYDAY6_CASES[case]
     assert _everyday6_outcome(fpd, run) == _everyday6_outcome(pd, run), case
+
+
+# DataFrame.to_string took only buf / columns / index / the row limits /
+# show_dimensions, and Series.to_string refused na_rep and float_format: every
+# other keyword pandas takes was a TypeError (br-frankenpandas-xn05q).
+def _ts_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {"x": [1.23456, None, 2.5], "n": [1, 22, 333], "s": ["a", None, "ccc"]},
+        index=["r1", "r2", "r3"],
+    )
+
+
+def _ts_floats(m: Any) -> Any:
+    return m.DataFrame({"x": [1.20, 2.50], "y": [0.5, 10.0]})
+
+
+def _ts_multi(m: Any) -> Any:
+    return m.DataFrame(
+        {"v": [1, 2, 3, 4]},
+        index=m.MultiIndex.from_product([["a", "b"], [1, 2]], names=["k", "j"]),
+    )
+
+
+_TO_STRING_KEYWORD_CASES = {
+    "float_format callable": lambda m: _ts_frame(m).to_string(float_format="{:.1f}".format),
+    "float_format %": lambda m: _ts_frame(m).to_string(float_format="%.3f"),
+    "float_format keeps its zeros": lambda m: _ts_floats(m).to_string(float_format="{:.2f}".format),
+    "float_format without the index": lambda m: _ts_floats(m).to_string(float_format="{:.2f}".format, index=False),
+    "float_format over truncated rows": lambda m: m.DataFrame({"x": [i / 3 for i in range(10)]}).to_string(max_rows=4, float_format="{:.2f}".format),
+    "float_format on float objects": lambda m: m.DataFrame({"o": m.Series([1.23456, "a"], dtype=object)}).to_string(float_format="{:.2f}".format),
+    # NEGATIVE: an int column is not a float one.
+    "float_format leaves ints": lambda m: m.DataFrame({"n": [1, 2]}).to_string(float_format="{:.2f}".format),
+    "na_rep": lambda m: _ts_frame(m).to_string(na_rep="--"),
+    "na_rep with float_format": lambda m: _ts_frame(m).to_string(na_rep="-", float_format="{:.2f}".format),
+    "na_rep without the index": lambda m: _ts_frame(m).to_string(index=False, na_rep="--"),
+    "na_rep for an object NaN": lambda m: m.DataFrame({"o": m.Series(["a", float("nan")], dtype=object)}).to_string(na_rep="?"),
+    # NEGATIVE: None, NaT and <NA> print as they are.
+    "na_rep leaves NaT": lambda m: m.DataFrame({"d": m.to_datetime(["2024-01-05", None])}).to_string(na_rep="?"),
+    "na_rep leaves <NA>": lambda m: m.DataFrame({"i": m.array([1, None], dtype="Int64")}).to_string(na_rep="?"),
+    "header False": lambda m: _ts_frame(m).to_string(header=False),
+    "header False, named index": lambda m: _ts_frame(m).rename_axis("row").to_string(header=False),
+    "header aliases": lambda m: _ts_frame(m).to_string(header=["X", "N", "S"]),
+    "header aliases take no sign space": lambda m: m.DataFrame({"a": [1, 2]}).to_string(header=["AA"]),
+    "header aliases, wrong count": lambda m: _ts_frame(m).to_string(header=["X"]),
+    "formatters by label": lambda m: _ts_frame(m).to_string(formatters={"n": "{:,}".format, "s": str.upper}),
+    "formatters by position": lambda m: _ts_floats(m).to_string(formatters=[lambda v: f"<{v}>", "{:.3f}".format]),
+    "formatters, wrong count": lambda m: _ts_floats(m).to_string(formatters=[str]),
+    "formatters without the index": lambda m: _ts_frame(m).to_string(index=False, formatters={"s": str.upper, "n": "<{}>".format}),
+    "formatters for the index": lambda m: _ts_frame(m).to_string(formatters={"__index__": str.upper}),
+    "formatters, int labels": lambda m: m.DataFrame({0: [1.5], 1: [2.5]}).to_string(formatters={1: "<{}>".format}),
+    "formatter on ints drops the sign space": lambda m: m.DataFrame({"n": [5, 10]}).to_string(formatters={"n": "{:04d}".format}),
+    "formatter on bools": lambda m: m.DataFrame({"b": [True, False]}).to_string(formatters={"b": lambda v: "Y" if v else "N"}),
+    "formatter on datetimes": lambda m: m.DataFrame({"d": m.to_datetime(["2024-01-05", None])}).to_string(formatters={"d": lambda t: "D"}),
+    "col_space int": lambda m: _ts_frame(m).to_string(col_space=8),
+    "col_space by label": lambda m: _ts_frame(m).to_string(col_space={"x": 10}),
+    "col_space for the index": lambda m: _ts_frame(m).to_string(col_space={"": 6}),
+    "col_space by position": lambda m: _ts_floats(m).to_string(col_space=[6, 9]),
+    "col_space, unknown label": lambda m: _ts_frame(m).to_string(col_space={"zz": 3}),
+    "col_space, wrong count": lambda m: _ts_frame(m).to_string(col_space=[3]),
+    "col_space over MultiIndex levels": lambda m: _ts_multi(m).to_string(col_space=4),
+    "index_names False": lambda m: _ts_frame(m).rename_axis("row").to_string(index_names=False),
+    "index_names False, MultiIndex": lambda m: _ts_multi(m).to_string(index_names=False),
+    "justify left": lambda m: _ts_frame(m).to_string(justify="left"),
+    "justify center": lambda m: _ts_frame(m).to_string(justify="center"),
+    "justify left with col_space": lambda m: _ts_frame(m).to_string(justify="left", col_space=10),
+    "justify center, no header": lambda m: _ts_frame(m).to_string(justify="center", header=False, col_space=10),
+    "decimal": lambda m: _ts_floats(m).to_string(decimal=","),
+    "decimal with a % float_format": lambda m: m.DataFrame({"x": [1.5, None]}).to_string(float_format="%.2f", decimal=","),
+    # NEGATIVE: a callable float_format is the formatter; no decimal swap.
+    "decimal with a callable float_format": lambda m: m.DataFrame({"x": [1.5, None]}).to_string(float_format="{:.2f}".format, decimal=","),
+    "decimal with na_rep": lambda m: m.DataFrame({"x": [1.5, None]}).to_string(decimal=",", na_rep="-"),
+    "line_width": lambda m: m.DataFrame({f"col{i}": [i * 1.5] for i in range(8)}).to_string(line_width=30),
+    "max_cols": lambda m: m.DataFrame({f"c{i}": [i] for i in range(8)}).to_string(max_cols=4),
+    "max_cols with a formatters list": lambda m: m.DataFrame({f"c{i}": [i] for i in range(6)}).to_string(max_cols=2, formatters=[str] * 5 + ["<{}>".format]),
+    "max_colwidth": lambda m: m.DataFrame({"t": ["abcdefghijklmnopqrstuvwxyz"]}).to_string(max_colwidth=10),
+    "sparsify False": lambda m: _ts_multi(m).to_string(sparsify=False),
+    "encoding without a path": lambda m: _ts_frame(m).to_string(buf=io.StringIO(), encoding="utf-8"),
+    "encoding returning the text": lambda m: _ts_frame(m).to_string(encoding="utf-8"),
+    "Series float_format": lambda m: m.Series([1.23456, None]).to_string(float_format="{:.2f}".format),
+    "Series float_format without the index": lambda m: m.Series([1.5, None]).to_string(float_format="{:.2f}".format, index=False),
+    "Series na_rep": lambda m: m.Series([1.5, None]).to_string(na_rep="--"),
+    "Series float_format with the footer": lambda m: m.Series([1.2, 2.5], name="v").to_string(float_format="{:.3f}".format, name=True, dtype=True),
+    # NEGATIVE: an object Series keeps None.
+    "Series na_rep leaves None": lambda m: m.Series(["a", None]).to_string(na_rep="?"),
+}
+
+
+def _to_string_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TO_STRING_KEYWORD_CASES))
+def test_to_string_keywords_like_pandas(case: str) -> None:
+    run = _TO_STRING_KEYWORD_CASES[case]
+    assert _to_string_outcome(fpd, run) == _to_string_outcome(pd, run), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_string_writes_a_path_in_its_encoding(tmp_path: Path) -> None:
+    frame = {"t": ["café", "ü"]}
+    pd.DataFrame(frame).to_string(tmp_path / "pd.txt", encoding="utf-16")
+    fpd.DataFrame(frame).to_string(tmp_path / "fp.txt", encoding="utf-16")
+    assert (tmp_path / "fp.txt").read_bytes() == (tmp_path / "pd.txt").read_bytes()
+    # NEGATIVE: not written as UTF-8.
+    assert (tmp_path / "fp.txt").read_bytes() != fpd.DataFrame(frame).to_string().encode()
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_string_formats_the_named_column_past_max_cols() -> None:
+    # DISC-030: pandas looks a formatters mapping up by truncated position
+    # and formats c5 with c1's formatter; fp formats the column each key
+    # names.
+    frame = fpd.DataFrame({f"c{i}": [i] for i in range(6)})
+    assert frame.to_string(max_cols=2, formatters={"c5": "<{}>".format}) == (
+        "   c0  ...  c5\n0   0  ... <5>"
+    )
+    # NEGATIVE: a hidden column's formatter formats nothing shown.
+    assert frame.to_string(max_cols=2, formatters={"c1": "<{}>".format}) == (
+        "   c0  ...  c5\n0   0  ...   5"
+    )

@@ -642,11 +642,11 @@ fn readme_documented_numbers_match_the_tree() {
     let readme = fs::read_to_string(root.join("README.md")).expect("read README");
     let tree = TreeCounts::measure(&root);
     assert_eq!(
-        tree.disc_total, 29,
+        tree.disc_total, 30,
         "DISCREPANCIES entry count changed; update README + this gate"
     );
     assert_eq!(
-        tree.disc_active, 16,
+        tree.disc_active, 17,
         "DISCREPANCIES active-section count changed; update README + this gate"
     );
     let violations = readme_number_violations(&readme, &tree);
