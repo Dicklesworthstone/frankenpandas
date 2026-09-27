@@ -4943,6 +4943,62 @@ def test_temporal_to_json_matches_pandas(case: str) -> None:
     assert _temporal_json_outcome(fpd, case) == _temporal_json_outcome(pd, case), case
 
 
+# fvsao.65: DataFrame.dtypes held each dtype's NAME as text, so .kind raised,
+# np.issubdtype(df.dtypes[c], np.number) read a str and
+# isinstance(d, pd.CategoricalDtype) was False.
+def _typed_columns(m: Any) -> Any:
+    aware = m.Series(m.to_datetime(["2020-01-05", "2020-01-06"])).dt.tz_localize("UTC")
+    return m.DataFrame(
+        {
+            "i": [1, 2],
+            "f": [1.5, None],
+            "b": [True, False],
+            "s": ["x", None],
+            "d": m.to_datetime(["2020-01-05", None]),
+            "z": aware,
+            "t": m.to_timedelta(["1D", None]),
+            "c": m.Series(["a", "b"], dtype="category"),
+            "n": m.Series([1, None], dtype="Int64"),
+        }
+    )
+
+
+_DTYPES_CASES = {
+    "dtype objects": lambda m: [(type(d).__name__, str(d)) for d in _typed_columns(m).dtypes],
+    "dtypes Series": lambda m: _typed_columns(m)[["i", "f", "s"]].dtypes,
+    "kind": lambda m: [d.kind for d in _typed_columns(m)[["i", "f", "b", "s", "d", "t"]].dtypes],
+    "np.issubdtype number": lambda m: [np.issubdtype(d, np.number) for d in _typed_columns(m)[["i", "f", "b", "s"]].dtypes],
+    "== np.float64": lambda m: _typed_columns(m)[["i", "f", "s"]].dtypes == np.float64,
+    "== object": lambda m: _typed_columns(m)[["i", "s"]].dtypes == object,
+    "select columns by dtype": lambda m: list(_typed_columns(m).dtypes[_typed_columns(m).dtypes == "object"].index),
+    "value_counts": lambda m: _typed_columns(m)[["i", "f", "s", "b"]].dtypes.value_counts(),
+    "astype(str)": lambda m: _typed_columns(m).dtypes.astype(str),
+    "to_dict": lambda m: {k: str(v) for k, v in _typed_columns(m)[["i", "s"]].dtypes.to_dict().items()},
+    "repr": lambda m: repr(_typed_columns(m)[["i", "f", "s"]].dtypes),
+    "isinstance CategoricalDtype": lambda m: isinstance(_typed_columns(m).dtypes["c"], m.CategoricalDtype),
+    "after astype": lambda m: [(type(d).__name__, str(d)) for d in _typed_columns(m)[["i", "f"]].astype({"i": float}).dtypes],
+    "typed column labels": lambda m: m.DataFrame([[1, "a"]]).dtypes,
+    # NEGATIVES: a dtype still equals its name; a string column's dtype is
+    # dtype('O'), not the text 'object'; a date cell does not equal its text.
+    "== 'float64'": lambda m: _typed_columns(m).dtypes == "float64",
+    "object column dtype is dtype('O')": lambda m: type(_typed_columns(m).dtypes["s"]).__name__,
+    "a date is not its text": lambda m: m.Series([datetime.date(2020, 1, 5)]) == "2020-01-05",
+}
+
+
+def _dtypes_outcome(m: Any, case: str) -> Any:
+    try:
+        return _typed_view(_DTYPES_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DTYPES_CASES))
+def test_dtypes_are_dtype_objects_like_pandas(case: str) -> None:
+    assert _dtypes_outcome(fpd, case) == _dtypes_outcome(pd, case), case
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_string_arithmetic_matches_pandas() -> None:
     # fvsao.13: s + t concatenated nothing - "value 'a' has non-numeric dtype".

@@ -1219,6 +1219,11 @@ pub trait HostObject: Send + Sync {
     /// `>` / `==`), None where the host cannot order them (a date against a
     /// time, two dicts).
     fn host_cmp(&self, other: &dyn HostObject) -> Option<std::cmp::Ordering>;
+    /// `self == other` in the host language for a plain value (numpy's
+    /// `dtype('float64') == 'float64'` is True); false unless the host says so.
+    fn host_eq_scalar(&self, _other: &Scalar) -> bool {
+        false
+    }
     /// The value itself, for the host that made it to take back.
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -1296,6 +1301,16 @@ impl ObjectValue {
                 format!("[{}]", parts.join(", "))
             }
             Self::Host(value) => value.0.host_str(),
+        }
+    }
+
+    /// Python's `==` between this cell and a plain value: a host value asks
+    /// the host (a dtype equals its name), a list never equals one.
+    #[must_use]
+    pub fn python_eq_scalar(&self, other: &Scalar) -> bool {
+        match self {
+            Self::Host(value) => value.0.host_eq_scalar(other),
+            Self::List(_) => false,
         }
     }
 

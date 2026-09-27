@@ -4168,6 +4168,15 @@ impl fp_types::HostObject for PyHost {
         })
     }
 
+    // Python's own == against the value as Python has it.
+    fn host_eq_scalar(&self, other: &Scalar) -> bool {
+        Python::attach(|py| {
+            scalar_to_py(py, other)
+                .and_then(|other| self.0.bind(py).eq(other.bind(py)))
+                .unwrap_or(false)
+        })
+    }
+
     // Python's own < / > / ==; a TypeError (a date against a time) is None.
     fn host_cmp(&self, other: &dyn fp_types::HostObject) -> Option<std::cmp::Ordering> {
         let other = other.as_any().downcast_ref::<PyHost>()?;
@@ -25903,8 +25912,13 @@ impl PyDataFrame {
         self.inner.shape().0 * self.inner.shape().1
     }
 
+    /// pandas' `DataFrame.dtypes`: an object Series of each column's dtype
+    /// OBJECT - the numpy dtype or extension dtype `df[c].dtype` answers - so
+    /// `.kind`, `np.issubdtype` and `isinstance(d, pd.CategoricalDtype)` work;
+    /// it held the names as text (fvsao.65). A dtype still equals its name
+    /// (`df.dtypes == 'float64'`), as numpy's does.
     #[getter]
-    fn dtypes(&self) -> PyResult<PySeries> {
+    fn dtypes(&self, py: Python<'_>) -> PyResult<PySeries> {
         let cols = self.column_labels();
         let mut labels = Vec::with_capacity(cols.len());
         let mut dtypes = Vec::with_capacity(cols.len());
@@ -25914,11 +25928,11 @@ impl PyDataFrame {
         for (position, col) in cols.into_iter().enumerate() {
             // The column's typed label (0, not '0'; fvsao.32).
             labels.push(self.inner.column_label(&col));
-            let dt = match self.inner.column_at(position) {
-                Some(c) => column_pandas_dtype_name(c),
-                None => "object".to_string(),
+            let dtype = match self.inner.column_at(position) {
+                Some(column) => column_pandas_dtype(py, column)?,
+                None => py.import("numpy")?.call_method1("dtype", ("object",))?,
             };
-            dtypes.push(Scalar::Utf8(dt));
+            dtypes.push(py_to_cell(py, &dtype)?);
         }
         let s = Series::from_values("", labels, dtypes)
             .map_err(frame_error_to_py)?
@@ -41060,10 +41074,10 @@ impl PyGroupBy {
     }
 
     #[getter]
-    fn dtypes(&self) -> PyResult<PySeries> {
+    fn dtypes(&self, py: Python<'_>) -> PyResult<PySeries> {
         let gb = self.grouped().map_err(frame_error_to_py)?;
         let first = gb.first().map_err(frame_error_to_py)?;
-        PyDataFrame { inner: first }.dtypes()
+        PyDataFrame { inner: first }.dtypes(py)
     }
 
     fn corrwith(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {

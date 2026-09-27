@@ -127175,9 +127175,43 @@ mod tests {
                 .downcast_ref::<Day>()
                 .map(|other| self.0.cmp(&other.0))
         }
+        // A day equals its number (as a numpy dtype equals its name).
+        fn host_eq_scalar(&self, other: &Scalar) -> bool {
+            matches!(other, Scalar::Int64(n) if *n == i64::from(self.0))
+        }
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+    }
+
+    #[test]
+    fn host_values_equal_plain_values_as_the_host_says_fvsao_65() {
+        use fp_types::{HostValue, ObjectValue};
+        let day = |n: u32| Scalar::Object(ObjectValue::Host(HostValue::new(Day(n))));
+        let rows: Vec<IndexLabel> = (0..3).map(IndexLabel::Int64).collect();
+        let days = Series::from_values("d", rows.clone(), vec![day(1), day(2), day(3)]).unwrap();
+        let twos = Series::from_values("n", rows.clone(), vec![Scalar::Int64(2); 3]).unwrap();
+        let flags = |series: Series| series.values().to_vec();
+        let bools = |values: [bool; 3]| values.into_iter().map(Scalar::Bool).collect::<Vec<_>>();
+        // == / != ask the host, in either operand order.
+        assert_eq!(flags(days.eq(&twos).unwrap()), bools([false, true, false]));
+        assert_eq!(flags(twos.eq(&days).unwrap()), bools([false, true, false]));
+        assert_eq!(flags(days.ne(&twos).unwrap()), bools([true, false, true]));
+        // NEGATIVE: the host decides - text is not a day - and a list never
+        // equals a plain value.
+        let text =
+            Series::from_values("t", rows.clone(), vec![Scalar::Utf8("2".into()); 3]).unwrap();
+        assert_eq!(flags(days.eq(&text).unwrap()), bools([false, false, false]));
+        let lists = Series::from_values(
+            "l",
+            rows,
+            vec![Scalar::Object(ObjectValue::list(vec![Scalar::Int64(2)])); 3],
+        )
+        .unwrap();
+        assert_eq!(
+            flags(lists.eq(&twos).unwrap()),
+            bools([false, false, false])
+        );
     }
 
     #[test]

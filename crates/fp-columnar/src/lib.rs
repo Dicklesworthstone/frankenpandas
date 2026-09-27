@@ -1859,9 +1859,19 @@ fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<boo
     // itemwise and between two host values (dates) as Python orders them
     // (fvsao.67); any other ordering of an object is a type error.
     if matches!(left, Scalar::Object(_)) || matches!(right, Scalar::Object(_)) {
+        // An object cell against a plain value is equal as the host says
+        // (a numpy dtype equals its name; fvsao.65).
+        let equal = match (left, right) {
+            (Scalar::Object(object), plain) | (plain, Scalar::Object(object))
+                if !matches!(plain, Scalar::Object(_)) =>
+            {
+                object.python_eq_scalar(plain)
+            }
+            _ => left == right,
+        };
         return match op {
-            ComparisonOp::Eq => Ok(left == right),
-            ComparisonOp::Ne => Ok(left != right),
+            ComparisonOp::Eq => Ok(equal),
+            ComparisonOp::Ne => Ok(!equal),
             _ => {
                 if let (Scalar::Object(a), Scalar::Object(b)) = (left, right) {
                     if let (Some(a), Some(b)) = (a.as_list(), b.as_list()) {
