@@ -2803,7 +2803,9 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
     [
         lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), normalize=True, margins=True),
         lambda: _hd(fpd).groupby("a").value_counts(dropna=False),
-        lambda: _hd(fpd).pivot_table(index="a", values="b", dropna=False),
+        # TEST-CHANGE (vbt4s): pivot_table(dropna=False) left this list; it
+        # keeps a missing key as its own group as pandas does now
+        # (test_everyday_ops_round_seven_like_pandas).
         # TEST-CHANGE (fvsao.69): apply(lambda r: [...], axis=1) left this list;
         # its Series of lists is built from object cells now
         # (test_frame_apply_object_results_match_pandas).
@@ -11555,3 +11557,81 @@ def test_to_string_formats_the_named_column_past_max_cols() -> None:
     assert frame.to_string(max_cols=2, formatters={"c1": "<{}>".format}) == (
         "   c0  ...  c5\n0   0  ...   5"
     )
+
+
+# Found by the seventh everyday-ops probe (scratch p13/probe_everyday7.py):
+# read_csv(skiprows=<list>) raised TypeError and na_values=<dict> was
+# refused; between_time dropped the index freq (and a take in steady steps
+# kept it only for a consecutive run); SeriesGroupBy.agg(<list>) listed the
+# groups first-seen whatever sort said; melt of text beside numbers raised;
+# crosstab / pivot_table kept a key whose co-key was missing and refused
+# dropna=False (br-frankenpandas-vbt4s).
+_EV7_CSV = 'id,when,amount,city,flag\n1,2024-01-05,10.5,NYC,y\n2,2024-01-06,,LA,n\n3,"2024-02-10",7.25,"N\nYC",y\n4,2024-03-01,3,SF,\n5,2024-03-15,12,LA,n\n'
+
+
+def _ev7_read(m: Any, **kwargs: Any) -> Any:
+    return m.read_csv(io.StringIO(_EV7_CSV), **kwargs)
+
+
+def _ev7_hours(m: Any) -> Any:
+    return m.Series(range(72), index=m.date_range("2024-01-01", periods=72, freq="h"))
+
+
+def _ev7_keys(m: Any) -> Any:
+    return m.DataFrame({"r": ["LA", "SF", "LA", None, "NYC"], "c": ["x", None, "y", "y", "x"], "v": [1, 2, 3, 4, 5]})
+
+
+_EVERYDAY7_CASES = {
+    "read_csv skiprows list": lambda m: repr(_ev7_read(m, skiprows=[1, 4])),
+    "read_csv skiprows list with the header line": lambda m: repr(_ev7_read(m, skiprows=[0])),
+    "read_csv skiprows over a quoted line break": lambda m: repr(_ev7_read(m, skiprows=[3])),
+    "read_csv skiprows inside a quoted field": lambda m: repr(_ev7_read(m, skiprows=[4])),
+    "read_csv skiprows callable": lambda m: repr(_ev7_read(m, skiprows=lambda line: line % 2 == 1)),
+    # NEGATIVE: an int still skips that many leading lines.
+    "read_csv skiprows int": lambda m: repr(_ev7_read(m, skiprows=2, header=None)),
+    "read_csv na_values dict": lambda m: repr(_ev7_read(m, na_values={"city": ["LA"], "amount": [3]})),
+    "read_csv na_values dict of a scalar": lambda m: repr(_ev7_read(m, na_values={"flag": "y"})),
+    "read_csv na_values dict, no defaults": lambda m: repr(_ev7_read(m, na_values={"city": ["SF"]}, keep_default_na=False)),
+    "read_csv na_values list of numbers": lambda m: repr(_ev7_read(m, na_values=[1, 12])),
+    "between_time keeps the freq": lambda m: repr(m.Series([1, 2, 3], index=m.date_range("2024-01-01 08:00", periods=3, freq="h")).between_time("08:30", "10:00")),
+    # NEGATIVE: hours of several days are no steady step.
+    "between_time over days has none": lambda m: repr(_ev7_hours(m).between_time("08:30", "10:00").head(3)),
+    "at_time freq scales by the step": lambda m: str(_ev7_hours(m).at_time("09:00").index.freq),
+    "DataFrame at_time": lambda m: str(m.DataFrame({"v": range(72)}, index=_ev7_hours(m).index).at_time("09:00").index.freq),
+    "iloc steady step keeps a scaled freq": lambda m: str(m.Series(range(6), index=m.date_range("2024-01-01", periods=6)).iloc[[0, 2, 4]].index.freq),
+    "iloc descending step": lambda m: str(m.Series(range(6), index=m.date_range("2024-01-01", periods=6)).iloc[[4, 2, 0]].index.freq),
+    "take steady step": lambda m: str(m.Series(range(6), index=m.date_range("2024-01-01", periods=6)).take([1, 4]).index.freq),
+    "DataFrame iloc steady step": lambda m: str(m.DataFrame({"v": range(6)}, index=m.date_range("2024-01-01", periods=6)).iloc[[0, 2, 4]].index.freq),
+    # NEGATIVE: unsteady positions have no freq; Series.sort_values selects
+    # by getitem, which keeps none.
+    "iloc unsteady positions drop the freq": lambda m: str(m.Series(range(6), index=m.date_range("2024-01-01", periods=6)).iloc[[0, 1, 4]].index.freq),
+    "sort_values descending drops the freq": lambda m: str(m.Series(range(6), index=m.date_range("2024-01-01", periods=6)).sort_values(ascending=False).index.freq),
+    "SeriesGroupBy agg list sorts the groups": lambda m: repr(_ev7_keys(m).groupby("r")["v"].agg(["min", "max", "sum"])),
+    # NEGATIVE: sort=False keeps first seen.
+    "SeriesGroupBy agg list, sort=False": lambda m: repr(_ev7_keys(m).groupby("r", sort=False)["v"].agg(["min", "max"])),
+    "melt text beside numbers": lambda m: repr(_ev7_read(m)[["id", "city", "amount"]].melt(id_vars="id")),
+    # NEGATIVE: numbers alone stay float64.
+    "melt numbers alone": lambda m: repr(_ev7_read(m)[["id", "amount"]].melt(id_vars="id").dtypes),
+    "crosstab drops a missing co-key": lambda m: repr(m.crosstab(_ev7_keys(m)["r"], _ev7_keys(m)["c"])),
+    "crosstab margins over present keys": lambda m: repr(m.crosstab(_ev7_keys(m)["r"], _ev7_keys(m)["c"], margins=True)),
+    "crosstab dropna=False": lambda m: repr(m.crosstab(_ev7_keys(m)["r"], _ev7_keys(m)["c"], dropna=False)),
+    "pivot_table drops a missing key": lambda m: repr(_ev7_keys(m).pivot_table(index="r", columns="c", values="v", aggfunc="sum")),
+    "pivot_table dropna=False": lambda m: repr(_ev7_keys(m).pivot_table(index="r", columns="c", values="v", aggfunc="sum", dropna=False)),
+    "pivot_table dropna=False count": lambda m: repr(_ev7_keys(m).pivot_table(index="r", columns="c", values="v", aggfunc="count", dropna=False, fill_value=0)),
+    "pivot_table dropna=False without columns": lambda m: repr(_ev7_keys(m).pivot_table(index="r", values="v", aggfunc="sum", dropna=False)),
+    "pivot_table margins drop a missing value": lambda m: repr(m.DataFrame({"r": ["a", "a", "b"], "c": ["x", "y", "x"], "v": [1.0, None, 3.0]}).pivot_table(index="r", columns="c", values="v", aggfunc="sum", margins=True)),
+}
+
+
+def _everyday7_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY7_CASES))
+def test_everyday_ops_round_seven_like_pandas(case: str) -> None:
+    run = _EVERYDAY7_CASES[case]
+    assert _everyday7_outcome(fpd, run) == _everyday7_outcome(pd, run), case

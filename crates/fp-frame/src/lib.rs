@@ -1568,8 +1568,10 @@ fn require_datetime_index(labels: &[IndexLabel], op: &str) -> Result<(), FrameEr
 /// Render parsed string datetime labels the same way a pandas `DatetimeIndex`
 /// renders its `Timestamp`s. Temporal selectors construct a datetime index from
 /// string input, so their result must not retain an ISO `T` separator from the
-/// caller's original spelling.
-fn canonicalize_datetime_index_labels(index: &Index) -> Index {
+/// caller's original spelling. `freq` is the one the selection keeps (pandas'
+/// take: the source's, scaled by a steady step - between_time over a run of
+/// hours 'h', at_time over days '24h'; it was dropped).
+fn canonicalize_datetime_index_labels(index: &Index, freq: Option<String>) -> Index {
     let labels = index
         .labels()
         .iter()
@@ -1581,7 +1583,9 @@ fn canonicalize_datetime_index_labels(index: &Index) -> Index {
             _ => label.clone(),
         })
         .collect();
-    let canonical = Index::new(labels).rename_index(index.name());
+    let canonical = Index::new(labels)
+        .rename_index(index.name())
+        .with_freq(freq);
     // A tz-aware index keeps its zone (its datetime labels are unchanged).
     match index.tz() {
         Some(zone) => canonical.clone().with_tz(Some(zone)).unwrap_or(canonical),
@@ -13772,10 +13776,13 @@ impl Series {
         // construction (categorical/sparse reset to None) — only the column
         // gather changes from a Scalar loop to the typed take_positions.
         // Index::take keeps the name and carries row MultiIndex levels
-        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9); pandas'
+        // iloc is a take, keeping the freq scaled by a steady step
+        // ([0, 2, 4] of 'D' is '2D').
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &normalized);
         Self::new(
             self.name.clone(),
-            self.index.take(&normalized),
+            self.index.take(&normalized).with_freq(freq),
             self.column.take_positions(&normalized),
         )
     }
@@ -24632,7 +24639,13 @@ impl Series {
         // perf (br-frankenpandas-3v7o8): gather the result index via Index::take
         // (preserves the lazy/typed backing — zero-copy for affine) instead of a
         // per-label clone + Index::new rescan. Bit-identical labels (2bgtq).
-        let index = self.index.take(&normalized).rename_index(self.index.name());
+        // pandas' take keeps the freq scaled by a steady step.
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &normalized);
+        let index = self
+            .index
+            .take(&normalized)
+            .rename_index(self.index.name())
+            .with_freq(freq);
         Self::new(
             self.name.clone(),
             index,
@@ -28729,7 +28742,8 @@ impl Series {
         // the DATAFRAME selectors only; these two Series siblings kept the ISO
         // `T`. (br-frankenpandas-2und8)
         let mut selected = self.reorder_by_positions(&keep)?;
-        selected.index = canonicalize_datetime_index_labels(&selected.index);
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
+        selected.index = canonicalize_datetime_index_labels(&selected.index, freq);
         Ok(selected)
     }
 
@@ -28747,7 +28761,8 @@ impl Series {
 
         // See `Series::at_time` (br-frankenpandas-2und8).
         let mut selected = self.reorder_by_positions(&keep)?;
-        selected.index = canonicalize_datetime_index_labels(&selected.index);
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
+        selected.index = canonicalize_datetime_index_labels(&selected.index, freq);
         Ok(selected)
     }
 
@@ -76467,11 +76482,16 @@ impl DataFrame {
         // identical: the affine path selects the same rows in the same order and
         // preserves each source dtype/value and the index labels (proven by the
         // shared use in `loc_bool`).
+        // pandas' iloc is a take: the freq scaled by a steady step.
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &normalized_positions);
         if column_selector.is_none()
             && let Some(certificate) = affine_certificate_from_positions(&normalized_positions)
             && let Some(result) = self.take_rows_by_affine_certificate_unchecked(certificate)
         {
-            return result;
+            return result.map(|mut out| {
+                out.index = out.index.clone().with_freq(freq);
+                out
+            });
         }
 
         let mut out_labels = Vec::with_capacity(normalized_positions.len());
@@ -76519,7 +76539,8 @@ impl DataFrame {
         // (and a tz-aware index's zone).
         let index = Index::new(out_labels)
             .rename_index(self.index.name())
-            .with_tz(self.index.tz())?;
+            .with_tz(self.index.tz())?
+            .with_freq(freq);
         let columns = ColumnStore::from_pairs(pairs);
         if !self.allows_duplicate_labels && (columns.has_duplicates() || index.has_duplicates()) {
             return Err(FrameError::CompatibilityRejected(
@@ -80999,15 +81020,19 @@ impl DataFrame {
             // Determine a common dtype across all melted value columns so mixed
             // numeric inputs promote the same way pandas does.
             let value_dtype = if actual_value_vars.is_empty() {
-                DType::Float64
+                Ok(DType::Float64)
             } else {
                 actual_value_vars
                     .iter()
                     .map(|name| self.columns[name].dtype())
                     .try_fold(DType::Null, common_dtype)
-                    .map_err(|err| FrameError::CompatibilityRejected(err.to_string()))?
             };
-            Column::new(value_dtype, value_vals)?
+            match value_dtype {
+                Ok(dtype) => Column::new(dtype, value_vals)?,
+                // Text beside numbers has no common type: pandas' object
+                // column holds each value as it is (melt raised).
+                Err(_) => Column::from_object_values(value_vals),
+            }
         };
         result_cols.insert(val_col_name.to_string(), value_column);
         col_order.push(val_col_name.to_string());
@@ -85981,7 +86006,8 @@ impl DataFrame {
         );
 
         let mut selected = self.take_rows_by_positions(&keep)?;
-        selected.index = canonicalize_datetime_index_labels(&selected.index);
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
+        selected.index = canonicalize_datetime_index_labels(&selected.index, freq);
         Ok(selected)
     }
 
@@ -85995,7 +86021,8 @@ impl DataFrame {
         let keep = between_time_positions(&wall_clock_labels(&self.index), target, target);
 
         let mut selected = self.take_rows_by_positions(&keep)?;
-        selected.index = canonicalize_datetime_index_labels(&selected.index);
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
+        selected.index = canonicalize_datetime_index_labels(&selected.index, freq);
         Ok(selected)
     }
 
@@ -171842,6 +171869,66 @@ mod tests {
         // NEGATIVE: a count without a unit, or a non-fixed frequency, is refused.
         assert!(s.dt().floor("15").is_err());
         assert!(s.dt().floor("M").is_err());
+    }
+
+    #[test]
+    fn take_based_selections_keep_a_steady_steps_freq() {
+        // pandas' iloc / take / at_time / between_time are takes: positions
+        // in one steady step keep the freq, scaled by the step.
+        let start = parse_datetime64_nanos("2024-01-01").unwrap();
+        let hours: Vec<IndexLabel> = (0..72_i64)
+            .map(|hour| IndexLabel::Datetime64(start + hour * 3_600_000_000_000))
+            .collect();
+        let index = Index::new(hours).with_freq(Some("h".to_owned()));
+        let values = Column::from_values((0..72_i64).map(Scalar::Int64).collect()).unwrap();
+        let s = Series::new("v", index, values).unwrap();
+        let freq_of = |series: &Series| series.index().freq().map(str::to_owned);
+        assert_eq!(freq_of(&s.iloc(&[0, 2, 4]).unwrap()).as_deref(), Some("2h"));
+        assert_eq!(
+            freq_of(&s.iloc(&[4, 2, 0]).unwrap()).as_deref(),
+            Some("-2h")
+        );
+        assert_eq!(freq_of(&s.take(&[1, 4]).unwrap()).as_deref(), Some("3h"));
+        assert_eq!(
+            freq_of(&s.at_time("09:00").unwrap()).as_deref(),
+            Some("24h")
+        );
+        let frame = s.to_frame(Some("v")).unwrap();
+        assert_eq!(frame.index().freq(), Some("h"));
+        assert_eq!(frame.iloc(&[0, 2, 4]).unwrap().index().freq(), Some("2h"));
+        assert_eq!(frame.at_time("09:00").unwrap().index().freq(), Some("24h"));
+        // NEGATIVE: unsteady positions, and hours of several days, keep none.
+        assert_eq!(freq_of(&s.iloc(&[0, 1, 4]).unwrap()), None);
+        assert_eq!(freq_of(&s.between_time("08:30", "10:00").unwrap()), None);
+        assert_eq!(frame.iloc(&[0, 1, 4]).unwrap().index().freq(), None);
+    }
+
+    #[test]
+    fn melt_of_text_beside_numbers_is_an_object_column() {
+        let df = DataFrame::from_dict(
+            &["id", "city", "amount"],
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "city",
+                    vec![Scalar::Utf8("NYC".into()), Scalar::Utf8("LA".into())],
+                ),
+                (
+                    "amount",
+                    vec![Scalar::Float64(10.5), Scalar::Null(NullKind::NaN)],
+                ),
+            ],
+        )
+        .unwrap();
+        // pandas: an object value column holding each value as it is.
+        let melted = df.melt(&["id"], &[], None, None).unwrap();
+        let value = melted.column("value").unwrap();
+        assert_eq!(value.values()[0], Scalar::Utf8("NYC".into()));
+        assert_eq!(value.values()[2], Scalar::Float64(10.5));
+        assert!(value.values()[3].is_missing());
+        // NEGATIVE: numbers alone still promote to float64.
+        let numbers = df.melt(&["id"], &["amount"], None, None).unwrap();
+        assert_eq!(numbers.column("value").unwrap().dtype(), DType::Float64);
     }
 
     // ── DataFrame.from_dict_index ──

@@ -32206,7 +32206,6 @@ impl PyDataFrame {
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let _ = observed;
-        unsupported_params("DataFrame.pivot_table", &[("dropna", dropna)])?;
         let names = |spec: Option<&Bound<'py, PyAny>>| -> PyResult<Vec<String>> {
             match spec.filter(|spec| !spec.is_none()) {
                 None => Ok(Vec::new()),
@@ -32310,13 +32309,42 @@ impl PyDataFrame {
                 .map(label_of)
                 .collect::<PyResult<Vec<_>>>()?,
         )?;
-        let aggregate = |keys: &[String]| -> PyResult<Bound<'py, PyAny>> {
-            let groupby_kwargs = PyDict::new(py);
-            groupby_kwargs.set_item("sort", sort)?;
-            slf.call_method("groupby", (key_list(keys)?,), Some(&groupby_kwargs))?
-                .get_item(&values_list)?
-                .call_method1("agg", (aggfunc,))
+        // pandas' dropna=True: a row missing a key takes no part in the
+        // table (it gave a row of NaN / zeros - crosstab's key whose only
+        // co-key is NaN), and the margins drop a row missing any key or
+        // value; dropna=False keeps every row (a missing key its own group;
+        // it was refused).
+        let rows_with_every = |names: &[&String]| -> PyResult<Bound<'py, PyAny>> {
+            if !dropna {
+                return Ok(slf.clone().into_any());
+            }
+            let frame = &slf.borrow().inner;
+            let cells: Vec<&[Scalar]> = names
+                .iter()
+                .filter_map(|name| frame.column(name))
+                .map(Column::values)
+                .collect();
+            let keep: Vec<usize> = (0..frame.len())
+                .filter(|&row| cells.iter().all(|cells| !cells[row].is_missing()))
+                .collect();
+            if keep.len() == frame.len() {
+                return Ok(slf.clone().into_any());
+            }
+            let kept = frame.take_rows(&keep).map_err(frame_error_to_py)?;
+            Ok(Bound::new(py, PyDataFrame { inner: kept })?.into_any())
         };
+        let key_names: Vec<&String> = index_keys.iter().chain(&column_keys).collect();
+        let data = rows_with_every(&key_names)?;
+        let aggregate =
+            |source: &Bound<'py, PyAny>, keys: &[String]| -> PyResult<Bound<'py, PyAny>> {
+                let groupby_kwargs = PyDict::new(py);
+                groupby_kwargs.set_item("sort", sort)?;
+                groupby_kwargs.set_item("dropna", dropna)?;
+                source
+                    .call_method("groupby", (key_list(keys)?,), Some(&groupby_kwargs))?
+                    .get_item(&values_list)?
+                    .call_method1("agg", (aggfunc,))
+            };
         // `values` as one name (not a list, not every other column): the
         // table's columns are the columns keys' values alone, no value level.
         let single_value = values.is_some_and(|values| {
@@ -32326,12 +32354,13 @@ impl PyDataFrame {
         let simple = single_value
             && column_keys.len() == 1
             && index_keys.len() == 1
-            && aggfunc.extract::<String>().is_ok();
+            && aggfunc.extract::<String>().is_ok()
+            && dropna;
         let mut table = if column_keys.is_empty() {
-            aggregate(&index_keys)?
+            aggregate(&data, &index_keys)?
         } else if simple {
             let name = aggfunc.extract::<String>()?;
-            let frame = slf.borrow().inner.clone();
+            let frame = data.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
             let mut res = frame
                 .pivot_table(&value_names[0], &index_keys[0], &column_keys[0], &name)
                 .map_err(frame_error_to_py)?;
@@ -32408,7 +32437,12 @@ impl PyDataFrame {
             let mut keys = index_keys.clone();
             keys.extend(column_keys.iter().cloned());
             let all = || keyword("how", pyo3::types::PyString::new(py, "all").into_any());
-            let agged = aggregate(&keys)?.call_method("dropna", (), Some(&all()?))?;
+            let agged = aggregate(&data, &keys)?;
+            let agged = if dropna {
+                agged.call_method("dropna", (), Some(&all()?))?
+            } else {
+                agged
+            };
             let agged = if single_value {
                 agged.get_item(label_of(&value_names[0])?)?
             } else {
@@ -32420,9 +32454,13 @@ impl PyDataFrame {
             }
             let moved = PyList::new(py, index_keys.len()..keys.len())?;
             let table = agged.call_method("unstack", (moved,), Some(&unstack_kwargs))?;
-            let by_columns = all()?;
-            by_columns.set_item("axis", 1)?;
-            let table = table.call_method("dropna", (), Some(&by_columns))?;
+            let table = if dropna {
+                let by_columns = all()?;
+                by_columns.set_item("axis", 1)?;
+                table.call_method("dropna", (), Some(&by_columns))?
+            } else {
+                table
+            };
             let sorted = table
                 .extract::<PyRef<'_, PyDataFrame>>()?
                 .inner
@@ -32474,7 +32512,9 @@ impl PyDataFrame {
             py.get_type::<PyDataFrame>()
                 .call((cells,), Some(&keyword("index", labels.into_any())?))
         };
-        let totals = slf
+        let margin_names: Vec<&String> = key_names.iter().copied().chain(&value_names).collect();
+        let margin_data = rows_with_every(&margin_names)?;
+        let totals = margin_data
             .get_item(&values_list)?
             .call_method1("agg", (aggfunc,))?;
         let with_row = if column_keys.is_empty() {
@@ -32488,16 +32528,18 @@ impl PyDataFrame {
             // All row: each column label over every index group; the corner:
             // everything.
             let value = &value_names[0];
-            let by_index = aggregate(&index_keys)?.get_item(value)?;
-            let by_column = aggregate(&column_keys)?.get_item(value)?;
+            let by_index = aggregate(&margin_data, &index_keys)?.get_item(value)?;
+            let by_column = aggregate(&margin_data, &column_keys)?.get_item(value)?;
             table.set_item(margins_name, by_index)?;
             let cells = PyDict::new(py);
             for label in table.getattr("columns")?.try_iter()? {
                 let label = label?;
+                // A column label no complete row has (its every value
+                // missing) totals NaN (it raised KeyError).
                 let cell = if label.eq(margins_name)? {
                     totals.get_item(value)?
                 } else {
-                    by_column.get_item(&label)?
+                    by_column.call_method1("get", (&label, f64::NAN))?
                 };
                 cells.set_item(label, PyList::new(py, [cell])?)?;
             }
@@ -44603,6 +44645,9 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .agg(&refs)
             .map_err(frame_error_to_py)?;
+        // The groups sorted when `sort`, as pandas (first seen, whatever
+        // `sort` said).
+        let df = self.ordered_group_frame(df)?;
         // One tz-aware key: the groups in its zone (fvsao.60).
         let df = match column_zone(self.by.column()) {
             Some(zone) => df
@@ -47654,10 +47699,100 @@ struct CsvReadArgs<'a, 'py> {
     parse_dates: Option<&'a Bound<'py, PyAny>>,
     na_values: Option<&'a Bound<'py, PyAny>>,
     keep_default_na: bool,
-    skiprows: Option<usize>,
+    /// An int, a list-like of 0-based line numbers, or a callable of one.
+    skiprows: Option<&'a Bound<'py, PyAny>>,
     nrows: Option<usize>,
     encoding: Option<&'a str>,
     kwargs: Option<&'a Bound<'py, PyDict>>,
+}
+
+/// pandas' NA markers from `na_values` entries: each as its text, a number
+/// as both its int and float spellings too (-1 is '-1' and '-1.0'), as
+/// pandas' `_stringify_na_values`.
+fn stringified_na_values(values: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    let one = |value: &Bound<'_, PyAny>, out: &mut Vec<String>| -> PyResult<()> {
+        let numeric = !value.is_instance_of::<pyo3::types::PyBool>()
+            && (value.is_instance_of::<pyo3::types::PyInt>()
+                || value.is_instance_of::<pyo3::types::PyFloat>());
+        out.push(value.str()?.to_string());
+        if numeric {
+            let float = value.extract::<f64>()?;
+            out.push(Scalar::Float64(float).python_repr());
+            if float.is_finite() && float.fract() == 0.0 {
+                out.push(format!("{float:.0}"));
+            }
+        }
+        Ok(())
+    };
+    let mut out = Vec::new();
+    if is_list_like_impl(values) {
+        for value in values.try_iter()? {
+            one(&value?, &mut out)?;
+        }
+    } else {
+        one(values, &mut out)?;
+    }
+    out.dedup();
+    Ok(out)
+}
+
+/// `text` without the CSV rows `skiprows` names, as pandas' tokenizer
+/// skips them: a list-like of 0-based row numbers (the header's row
+/// included) skips those rows, a callable each row number it is true for.
+/// A quoted field's line break does not end a row, so it does not count
+/// (`quote` only opens a field at its start).
+fn skip_csv_records(
+    text: &str,
+    skiprows: &Bound<'_, PyAny>,
+    delimiter: u8,
+    quote: u8,
+) -> PyResult<String> {
+    let listed: Option<HashSet<i64>> = if skiprows.is_callable() {
+        None
+    } else {
+        Some(
+            skiprows
+                .try_iter()?
+                .map(|line| line?.extract::<i64>())
+                .collect::<PyResult<_>>()?,
+        )
+    };
+    let bytes = text.as_bytes();
+    let mut kept = String::with_capacity(text.len());
+    let (mut start, mut row) = (0_usize, 0_i64);
+    while start < bytes.len() {
+        // The end of the row starting at `start` (past its line break).
+        let (mut at, mut in_quote, mut field_start) = (start, false, true);
+        while at < bytes.len() {
+            let byte = bytes[at];
+            at += 1;
+            if in_quote {
+                if byte == quote {
+                    if bytes.get(at) == Some(&quote) {
+                        at += 1;
+                    } else {
+                        in_quote = false;
+                    }
+                }
+                continue;
+            }
+            if byte == b'\n' {
+                break;
+            }
+            in_quote = field_start && byte == quote;
+            field_start = byte == delimiter;
+        }
+        let skip = match &listed {
+            Some(rows) => rows.contains(&row),
+            None => skiprows.call1((row,))?.is_truthy()?,
+        };
+        if !skip {
+            kept.push_str(&text[start..at]);
+        }
+        row += 1;
+        start = at;
+    }
+    Ok(kept)
 }
 
 /// One column label from a pandas position-or-name argument.
@@ -47811,6 +47946,18 @@ fn read_csv_impl(
     if let Some(stripped) = text.strip_prefix('\u{feff}') {
         text = stripped.to_owned();
     }
+    // skiprows: an int skips that many leading lines; a list-like or a
+    // callable skips the records it names (it raised TypeError).
+    let mut skip_leading = 0;
+    if let Some(skiprows) = args.skiprows.filter(|skiprows| !skiprows.is_none()) {
+        match skiprows.extract::<usize>() {
+            Ok(count) => skip_leading = count,
+            Err(_) => {
+                let quote = quotechar.unwrap_or(fp_io::CsvReadOptions::default().quotechar);
+                text = skip_csv_records(&text, skiprows, sep, quote)?;
+            }
+        }
+    }
 
     let defaults = fp_io::CsvReadOptions::default();
     let mut opts = fp_io::CsvReadOptions {
@@ -47818,7 +47965,7 @@ fn read_csv_impl(
         has_headers: header_row.is_some(),
         keep_default_na: args.keep_default_na,
         nrows: args.nrows,
-        skiprows: args.skiprows.unwrap_or(0) + header_row.unwrap_or(0),
+        skiprows: skip_leading + header_row.unwrap_or(0),
         thousands,
         decimal: decimal.unwrap_or(defaults.decimal),
         comment,
@@ -47835,13 +47982,21 @@ fn read_csv_impl(
         ..defaults
     };
     if let Some(na) = args.na_values.filter(|v| !v.is_none()) {
-        opts.na_values = if let Ok(one) = na.extract::<String>() {
-            vec![one]
-        } else if na.is_instance_of::<PyDict>() {
-            return Err(not_implemented("read_csv(na_values=<dict>)"));
+        // A mapping gives each named column its own markers (it was
+        // refused); anything else is every column's.
+        if let Ok(mapping) = na.cast::<PyDict>() {
+            let mut by_column = std::collections::HashMap::new();
+            for (column, values) in mapping.iter() {
+                let column = match column.extract::<String>() {
+                    Ok(name) => name,
+                    Err(_) => column.str()?.to_string(),
+                };
+                by_column.insert(column, stringified_na_values(&values)?);
+            }
+            opts.na_values_by_column = Some(by_column);
         } else {
-            na.extract::<Vec<String>>()?
-        };
+            opts.na_values = stringified_na_values(na)?;
+        }
     }
     let mut frame_dtype: Option<DType> = None;
     if let Some(dtype) = args.dtype.filter(|d| !d.is_none()) {
@@ -48072,7 +48227,7 @@ fn read_csv(
     parse_dates: Option<&Bound<'_, PyAny>>,
     na_values: Option<&Bound<'_, PyAny>>,
     keep_default_na: bool,
-    skiprows: Option<usize>,
+    skiprows: Option<&Bound<'_, PyAny>>,
     nrows: Option<usize>,
     encoding: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
@@ -51272,21 +51427,6 @@ fn crosstab<'py>(
             "crosstab whose row and column arrays share a name",
         ));
     }
-    // dropna=False keeps missing keys and all-missing columns; a count over
-    // keys with no missing value has neither.
-    let has_missing = |series: &PySeries| {
-        series
-            .inner
-            .column()
-            .values()
-            .iter()
-            .any(Scalar::is_missing)
-    };
-    if !dropna && (values.is_some() || has_missing(&row) || has_missing(&col)) {
-        return Err(not_implemented(
-            "crosstab(dropna=False) with values or missing keys",
-        ));
-    }
     let data = PyDict::new(py);
     data.set_item(&row_name, Py::new(py, row.clone())?)?;
     data.set_item(&col_name, Py::new(py, col)?)?;
@@ -51310,6 +51450,9 @@ fn crosstab<'py>(
     pivot_kwargs.set_item("columns", &col_name)?;
     pivot_kwargs.set_item("margins", margins)?;
     pivot_kwargs.set_item("margins_name", margins_name)?;
+    // dropna=False keeps a missing key as its own row / column (it was
+    // refused), as pandas' pivot does.
+    pivot_kwargs.set_item("dropna", dropna)?;
     let frame = py.get_type::<PyDataFrame>().call1((data,))?;
     let table = frame.call_method("pivot_table", (), Some(&pivot_kwargs))?;
     let table = match normalize.as_deref() {
@@ -54280,7 +54423,7 @@ pub fn read_table(
     parse_dates: Option<&Bound<'_, PyAny>>,
     na_values: Option<&Bound<'_, PyAny>>,
     keep_default_na: bool,
-    skiprows: Option<usize>,
+    skiprows: Option<&Bound<'_, PyAny>>,
     nrows: Option<usize>,
     encoding: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,

@@ -248,6 +248,11 @@ pub struct CsvReadOptions {
     pub has_headers: bool,
     /// Additional NA values to recognize beyond the pandas defaults.
     pub na_values: Vec<String>,
+    /// pandas' `na_values={column: [...]}`: each named column's own NA
+    /// markers, beside `na_values` and (unless `keep_default_na` is false)
+    /// the defaults; a column not named has only those. None: no column
+    /// has its own.
+    pub na_values_by_column: Option<std::collections::HashMap<String, Vec<String>>>,
     /// Whether to include the default NaN values when parsing data.
     /// If `na_values` are specified and `keep_default_na` is false, only the
     /// specified `na_values` will be treated as NA.
@@ -339,6 +344,7 @@ impl Default for CsvReadOptions {
             delimiter: b',',
             has_headers: true,
             na_values: Vec::new(),
+            na_values_by_column: None,
             keep_default_na: true,
             na_filter: true,
             index_col: None,
@@ -369,6 +375,7 @@ fn csv_read_options_match_default_shape(options: &CsvReadOptions, na_filter: boo
     options.delimiter == b','
         && options.has_headers
         && options.na_values.is_empty()
+        && options.na_values_by_column.is_none()
         && options.keep_default_na
         && options.na_filter == na_filter
         && options.index_col.is_none()
@@ -587,6 +594,7 @@ fn fwf_csv_options(options: &FwfReadOptions) -> CsvReadOptions {
         delimiter: b',',
         has_headers: options.has_headers,
         na_values: options.na_values.clone(),
+        na_values_by_column: None,
         keep_default_na: options.keep_default_na,
         na_filter: options.na_filter,
         index_col: options.index_col.clone(),
@@ -4989,6 +4997,8 @@ fn apply_csv_parse_dates(
         let Some(column_idx) = headers.iter().position(|header| header == column_name) else {
             continue;
         };
+        let own_na = csv_column_na_set(options, column_name, na_set);
+        let na_set = own_na.as_ref().unwrap_or(na_set);
 
         let parsed = if deferred_parse_date_columns
             .get(column_idx)
@@ -5462,12 +5472,28 @@ fn apply_parse_date_combinations_named(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The NA markers of column `name` when pandas' `na_values={column: [...]}`
+/// gives it its own: `na_set` (every column's) and those; None when it has
+/// none of its own.
+fn csv_column_na_set<'a>(
+    options: &'a CsvReadOptions,
+    name: &str,
+    na_set: &HashSet<&'a str>,
+) -> Option<HashSet<&'a str>> {
+    let own = options.na_values_by_column.as_ref()?.get(name)?;
+    let mut set = na_set.clone();
+    set.extend(own.iter().map(String::as_str));
+    Some(set)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn append_csv_record(
     columns: &mut [Vec<Scalar>],
     raw_columns: &mut [Vec<String>],
     record: &StringRecord,
     options: &CsvReadOptions,
     na_set: &HashSet<&str>,
+    column_na: &[Option<HashSet<&str>>],
     true_set: &HashSet<&str>,
     false_set: &HashSet<&str>,
     deferred_parse_date_columns: &[bool],
@@ -5485,7 +5511,10 @@ fn append_csv_record(
                 field,
                 options.na_filter,
                 options.keep_default_na,
-                na_set,
+                column_na
+                    .get(idx)
+                    .and_then(Option::as_ref)
+                    .unwrap_or(na_set),
                 true_set,
                 false_set,
                 options.decimal,
@@ -5896,7 +5925,14 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     // raw_columns shadows columns with each cell's verbatim text so an
     // object-fallback column can preserve original literals (see the final
     // build step and build_csv_object_aware_column).
-    let (headers, mut columns, mut raw_columns, deferred_parse_date_columns) =
+    // Each column's own NA markers (na_values={column: [...]}), by position.
+    let column_na_sets = |headers: &[String]| -> Vec<Option<HashSet<&str>>> {
+        headers
+            .iter()
+            .map(|header| csv_column_na_set(options, header, &na_set))
+            .collect()
+    };
+    let (headers, mut columns, mut raw_columns, deferred_parse_date_columns, column_na) =
         if options.has_headers {
             let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
             if headers_record.is_empty() {
@@ -5913,8 +5949,15 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 .map(|_| Vec::with_capacity(row_hint))
                 .collect();
             let deferred_parse_date_columns = deferred_parse_date_column_mask(&headers, options);
+            let column_na = column_na_sets(&headers);
 
-            (headers, columns, raw_columns, deferred_parse_date_columns)
+            (
+                headers,
+                columns,
+                raw_columns,
+                deferred_parse_date_columns,
+                column_na,
+            )
         } else {
             let first_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
             if first_record.is_empty() {
@@ -5934,6 +5977,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 .map(|_| Vec::with_capacity(row_hint))
                 .collect();
             let deferred_parse_date_columns = deferred_parse_date_column_mask(&headers, options);
+            let column_na = column_na_sets(&headers);
 
             if (row_count as usize) < max_rows {
                 append_csv_record(
@@ -5942,6 +5986,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                     &first_record,
                     options,
                     &na_set,
+                    &column_na,
                     &true_set,
                     &false_set,
                     &deferred_parse_date_columns,
@@ -5949,7 +5994,13 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 row_count += 1;
             }
 
-            (headers, columns, raw_columns, deferred_parse_date_columns)
+            (
+                headers,
+                columns,
+                raw_columns,
+                deferred_parse_date_columns,
+                column_na,
+            )
         };
 
     for row in records {
@@ -5973,6 +6024,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             &record,
             options,
             &na_set,
+            &column_na,
             &true_set,
             &false_set,
             &deferred_parse_date_columns,
@@ -23528,6 +23580,41 @@ mod tests {
         assert!(b.values()[0].is_missing());
         assert!(b.values()[1].is_missing());
         assert_eq!(b.values()[2], Scalar::Utf8("valid".into()));
+    }
+
+    #[test]
+    fn csv_na_values_by_column_mark_only_their_column() {
+        // pd.read_csv(..., na_values={'b': ['x', '-1']}): b's own markers
+        // beside the defaults; a reads 'x' and -1 as values.
+        let input = "a,b\nx,x\n-1,-1\n,3\n";
+        let opts = CsvReadOptions {
+            na_values_by_column: Some(std::collections::HashMap::from([(
+                "b".to_owned(),
+                vec!["x".to_owned(), "-1".to_owned()],
+            )])),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let b = frame.column("b").unwrap();
+        assert_eq!(b.dtype(), DType::Float64);
+        assert!(b.values()[0].is_missing() && b.values()[1].is_missing());
+        assert_eq!(b.values()[2], Scalar::Float64(3.0));
+        // NEGATIVE: column a keeps 'x' and -1; its empty cell is a default NA.
+        let a = frame.column("a").unwrap();
+        assert_eq!(a.values()[0], Scalar::Utf8("x".into()));
+        assert_eq!(a.values()[1], Scalar::Utf8("-1".into()));
+        assert!(a.values()[2].is_missing());
+        // Without the defaults an empty cell of an unnamed column is text.
+        let strict = CsvReadOptions {
+            keep_default_na: false,
+            ..opts
+        };
+        let frame = read_csv_with_options(input, &strict).expect("parse");
+        assert_eq!(
+            frame.column("a").unwrap().values()[2],
+            Scalar::Utf8(String::new())
+        );
+        assert!(frame.column("b").unwrap().values()[0].is_missing());
     }
 
     #[test]

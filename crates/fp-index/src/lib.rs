@@ -4340,7 +4340,8 @@ impl Index {
     pub fn take(&self, indices: &[usize]) -> Self {
         let mut taken = self.take_labels(indices);
         // A run of consecutive positions is a slice: it keeps the freq, as
-        // pandas' getitem keeps it for a slice or a mask selecting a run.
+        // pandas' getitem keeps it for a slice or a mask selecting a run
+        // (pandas' take keeps a steady step too: see `take_freq`).
         if !indices.is_empty() && indices.windows(2).all(|pair| pair[1] == pair[0] + 1) {
             taken.freq.clone_from(&self.freq);
         }
@@ -7408,7 +7409,11 @@ pub fn scale_freq(freqstr: &str, factor: i64) -> Option<String> {
 /// The freq a `take` of `positions` keeps: pandas reads positions in one
 /// constant nonzero step as a slice (`maybe_indices_to_slice`), so the freq
 /// scales by the step ([0, 2] of 'h' is '2h'); any other take has none.
-fn take_freq(freq: Option<String>, positions: &[usize]) -> Option<String> {
+/// pandas' take-based selections (iloc / take with positions, between_time,
+/// at_time) keep it so; its getitem with positions (Series.sort_values, loc)
+/// does not.
+#[must_use]
+pub fn take_freq(freq: Option<String>, positions: &[usize]) -> Option<String> {
     let freq = freq?;
     let step = match positions {
         [] => return None,
