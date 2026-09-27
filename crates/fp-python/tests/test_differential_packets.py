@@ -12271,3 +12271,90 @@ def _everyday11_outcome(m: Any, run: Any) -> Any:
 def test_everyday_ops_round_eleven_like_pandas(case: str) -> None:
     run = _EVERYDAY11_CASES[case]
     assert _everyday11_outcome(fpd, run) == _everyday11_outcome(pd, run), case
+
+
+# br-frankenpandas-g3bux: a row or a reduction of a frame with MultiIndex
+# columns was indexed by the flat 'a_x' keys, and most results over the
+# columns (windows, mode, quantile, agg, apply, iloc rows, where, ...)
+# dropped the levels; int column labels came back as the text '0' through
+# the same paths. pandas keeps the column axis.
+def _g3_frame(m: Any) -> Any:
+    columns = m.MultiIndex.from_tuples([("a", "x"), ("a", "y"), ("b", "x")], names=["top", "sub"])
+    return m.DataFrame([[1, 2, 3], [4, 5, 6], [7, 8, 10]], columns=columns, index=["r0", "r1", "r2"])
+
+
+def _g3_ints(m: Any) -> Any:
+    return m.DataFrame([[1, 2], [3, 4], [5, 7]])
+
+
+def _g3_axis(frame: Any) -> Any:
+    columns = frame.columns
+    return (type(columns).__name__, list(columns), list(columns.names))
+
+
+_COLUMN_LEVELS_CASES = {
+    "iloc row": lambda m: repr(_g3_frame(m).iloc[0]),
+    "loc row": lambda m: repr(_g3_frame(m).loc["r1"]),
+    "iterrows row": lambda m: repr(next(_g3_frame(m).iterrows())[1]),
+    "a row's tuple lookup": lambda m: int(_g3_frame(m).iloc[0][("a", "y")]),
+    "a row's top-level lookup": lambda m: repr(_g3_frame(m).iloc[0]["a"]),
+    "sum": lambda m: repr(_g3_frame(m).sum()),
+    "mean": lambda m: repr(_g3_frame(m).mean()),
+    "std": lambda m: repr(_g3_frame(m).std()),
+    "idxmax": lambda m: repr(_g3_frame(m).idxmax()),
+    "dtypes": lambda m: repr(_g3_frame(m).dtypes),
+    "items keys": lambda m: [key for key, _ in _g3_frame(m).items()],
+    "to_dict keys": lambda m: list(_g3_frame(m).to_dict()),
+    "to_dict split columns": lambda m: _g3_frame(m).to_dict("split")["columns"],
+    "agg list": lambda m: repr(_g3_frame(m).agg(["sum", "max"])),
+    "agg of a reducing lambda": lambda m: repr(_g3_frame(m).agg(lambda c: c.max())),
+    "apply of a reducing lambda": lambda m: repr(_g3_frame(m).apply(lambda c: c.max())),
+    "apply": lambda m: repr(_g3_frame(m).apply(lambda c: c * 2)),
+    "transform": lambda m: repr(_g3_frame(m).transform(lambda c: c + 1)),
+    "describe": lambda m: repr(_g3_frame(m).describe()),
+    "quantile list": lambda m: repr(_g3_frame(m).quantile([0.5])),
+    "mode": lambda m: repr(_g3_frame(m).mode()),
+    "rolling sum": lambda m: repr(_g3_frame(m).rolling(2).sum()),
+    "expanding mean": lambda m: repr(_g3_frame(m).expanding().mean()),
+    "ewm mean": lambda m: repr(_g3_frame(m).ewm(span=2).mean()),
+    "rolling agg list": lambda m: repr(_g3_frame(m).rolling(2).agg(["sum", "max"])),
+    "iloc rows": lambda m: repr(_g3_frame(m).iloc[[0, 2]]),
+    "where": lambda m: repr(_g3_frame(m).where(_g3_frame(m) > 2)),
+    "div by a row, axis=1": lambda m: repr(_g3_frame(m).div(_g3_frame(m).iloc[0], axis=1)),
+    "sort_values by a tuple": lambda m: repr(_g3_frame(m).sort_values(("a", "x"), ascending=False)),
+    "sort_values by tuples": lambda m: repr(_g3_frame(m).sort_values([("b", "x"), ("a", "y")])),
+    "nlargest by a tuple": lambda m: repr(_g3_frame(m).nlargest(2, ("a", "x"))),
+    "nsmallest by a tuple": lambda m: repr(_g3_frame(m).nsmallest(1, ("b", "x"))),
+    "concat rows": lambda m: _g3_axis(m.concat([_g3_frame(m), _g3_frame(m)])),
+    "isin": lambda m: repr(_g3_frame(m).isin([1, 5])),
+    "map": lambda m: repr(_g3_frame(m).map(lambda v: v * 10)),
+    "int columns rolling": lambda m: _g3_axis(_g3_ints(m).rolling(2).sum()),
+    "int columns expanding agg list": lambda m: _g3_axis(_g3_ints(m).expanding().agg(["sum"])),
+    "int columns mode": lambda m: _g3_axis(_g3_ints(m).mode()),
+    "int columns quantile list": lambda m: _g3_axis(_g3_ints(m).quantile([0.5])),
+    "int columns agg list": lambda m: _g3_axis(_g3_ints(m).agg(["sum"])),
+    "int columns std": lambda m: list(_g3_ints(m).std().index),
+    "int columns idxmax": lambda m: list(_g3_ints(m).idxmax().index),
+    "int columns map": lambda m: _g3_axis(_g3_ints(m).map(lambda v: v + 1)),
+    # NEGATIVE: flat columns index a row and a reduction by their names; a
+    # mixed flat row is object as before; pandas raises a KeyError for a
+    # tuple naming no column (fp too).
+    "flat row": lambda m: repr(m.DataFrame({"p": [1], "q": [2]}).iloc[0]),
+    "flat sum": lambda m: repr(m.DataFrame({"p": [1], "q": [2.5]}).sum()),
+    "flat mixed iterrows row": lambda m: repr([r for _, r in m.DataFrame({"p": [1, 2], "q": ["u", "v"]}).iterrows()][1]),
+    "sort_values by an unknown tuple": lambda m: _g3_frame(m).sort_values(("z", "q")),
+}
+
+
+def _column_levels_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_COLUMN_LEVELS_CASES))
+def test_multiindex_and_typed_columns_survive_like_pandas(case: str) -> None:
+    run = _COLUMN_LEVELS_CASES[case]
+    assert _column_levels_outcome(fpd, run) == _column_levels_outcome(pd, run), case

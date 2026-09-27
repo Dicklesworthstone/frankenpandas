@@ -19312,20 +19312,14 @@ fn frame_agg<'py>(
     }
     let side_by_side =
         |results: Vec<Bound<'py, PyAny>>, keys: Vec<String>| concat_side_by_side(py, results, keys);
-    let series_of = |values: Vec<Bound<'py, PyAny>>, labels: Vec<String>| {
+    let series_of = |values: Vec<Bound<'py, PyAny>>, index: Index| {
         let kw = PyDict::new(py);
-        kw.set_item(
-            "index",
-            Py::new(
-                py,
-                PyIndex {
-                    inner: Index::new(labels.into_iter().map(IndexLabel::Utf8).collect()),
-                },
-            )?,
-        )?;
+        kw.set_item("index", Py::new(py, PyIndex { inner: index })?)?;
         py.get_type::<PySeries>()
             .call((PyList::new(py, values)?,), Some(&kw))
     };
+    let text_index =
+        |labels: Vec<String>| Index::new(labels.into_iter().map(IndexLabel::Utf8).collect());
     let (width, names) = {
         let frame = this.borrow();
         let width = frame.inner.shape().1;
@@ -19362,7 +19356,7 @@ fn frame_agg<'py>(
             let target = target.cast::<PySeries>()?;
             let mut result = series_agg(target, &f, args, kwargs)?;
             if listed && !is_pandas_object(&result) {
-                result = series_of(vec![result], vec![agg_label(&f)?])?;
+                result = series_of(vec![result], text_index(vec![agg_label(&f)?]))?;
             }
             labels.push(label);
             results.push(result);
@@ -19370,7 +19364,7 @@ fn frame_agg<'py>(
         return if listed {
             side_by_side(results, labels)
         } else {
-            series_of(results, labels)
+            series_of(results, text_index(labels))
         };
     }
     let listed = func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>();
@@ -19389,11 +19383,27 @@ fn frame_agg<'py>(
             func.call(prepend_arg(target.into_any(), Some(args))?, kwargs)?
         });
     }
+    // The columns keep their own labels (0, not '0') and MultiIndex levels
+    // (g3bux): side by side, as a new Index of them; reduced, as the index.
     if listed || results.iter().any(is_pandas_object) {
-        side_by_side(results, names)
-    } else {
-        series_of(results, names)
+        let result = side_by_side(results, names)?;
+        let Ok(out) = result.cast::<PyDataFrame>() else {
+            return Ok(result);
+        };
+        let inner = out
+            .borrow()
+            .inner
+            .clone()
+            .with_typed_labels_of(&this.borrow().inner);
+        return Ok(Bound::new(py, PyDataFrame { inner })?.into_any());
     }
+    let labels = this.borrow().inner.column_labels();
+    let result = series_of(results, Index::new(labels))?;
+    let Ok(series) = result.extract::<PyRef<'_, PySeries>>() else {
+        return Ok(result);
+    };
+    let inner = this.borrow().inner.with_column_levels(series.inner.clone());
+    Ok(Bound::new(py, PySeries { inner })?.into_any())
 }
 
 /// The operator pandas' `maybe_dispatch_ufunc_to_dunder_op` sends a ufunc
@@ -26092,6 +26102,74 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// The Python key of the column at `position`: its tuple under
+    /// MultiIndex columns (g3bux), else its typed label (0, not '0';
+    /// fvsao.32).
+    fn column_key_py(&self, py: Python<'_>, position: usize) -> PyResult<Py<PyAny>> {
+        if let Some(levels) = self
+            .inner
+            .columns_multiindex()
+            .and_then(|multi| multi.get_tuple(position))
+        {
+            let levels = levels
+                .into_iter()
+                .map(|level| index_label_to_py(py, level))
+                .collect::<PyResult<Vec<_>>>()?;
+            return Ok(PyTuple::new(py, levels)?.into_any().unbind());
+        }
+        let name = self.inner.column_name_at(position).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "column position {position} out of bounds"
+            ))
+        })?;
+        index_label_to_py(py, &self.inner.column_label(&name))
+    }
+
+    /// The column a full-depth tuple names under MultiIndex columns
+    /// (`sort_values(('a', 'x'))`; g3bux). None for flat columns, a
+    /// non-tuple, or a tuple naming no single column.
+    fn multi_column_name(&self, key: &Bound<'_, PyAny>) -> Option<String> {
+        let multi = self.inner.columns_multiindex()?;
+        let wanted = key
+            .cast::<PyTuple>()
+            .ok()?
+            .iter()
+            .map(|level| py_to_index_label(&level).ok())
+            .collect::<Option<Vec<IndexLabel>>>()?;
+        let mut positions = (0..multi.len()).filter(|&position| {
+            multi.get_tuple(position).is_some_and(|levels| {
+                levels.len() == wanted.len()
+                    && levels.iter().zip(&wanted).all(|(have, want)| *have == want)
+            })
+        });
+        let position = positions.next()?;
+        if positions.next().is_some() {
+            return None;
+        }
+        self.inner.column_name_at(position)
+    }
+
+    /// `by=` / `columns=` names: a full tuple under MultiIndex columns, a
+    /// list of them, or [`Self::column_names_arg`]'s typed labels.
+    fn sort_key_names(&self, obj: &Bound<'_, PyAny>) -> Option<Vec<String>> {
+        if let Some(name) = self.multi_column_name(obj) {
+            return Some(vec![name]);
+        }
+        if self.inner.columns_multiindex().is_some()
+            && let Ok(list) = obj.cast::<PyList>()
+            && list.iter().any(|item| item.is_instance_of::<PyTuple>())
+        {
+            return list
+                .iter()
+                .map(|item| {
+                    self.multi_column_name(&item)
+                        .or_else(|| item.extract::<String>().ok())
+                })
+                .collect();
+        }
+        self.column_names_arg(obj)
+    }
+
     /// `set_index`'s result `res`: refused on a duplicate key under
     /// `verify_integrity` (pandas' ValueError naming them), then stored in
     /// place (None) or returned.
@@ -27086,7 +27164,9 @@ impl PyDataFrame {
             let mut values = Vec::with_capacity(candidate_cols.len());
 
             for name in candidate_cols {
-                labels.push(IndexLabel::Utf8(name.clone()));
+                // Indexed as a reduction: the columns' typed labels (0, not
+                // '0'), their range and MultiIndex levels (g3bux).
+                labels.push(self.inner.column_label(&name));
                 if let Some(col) = self.inner.column(&name) {
                     let val = match stat {
                         "var" => col.var_skipna(ddof, skipna),
@@ -27100,7 +27180,12 @@ impl PyDataFrame {
                 }
             }
 
+            let span = self
+                .inner
+                .column_range_span()
+                .filter(|_| labels == self.inner.column_labels());
             Series::from_values("".to_string(), labels, values)
+                .map(|series| self.inner.with_column_levels(series.with_range_span(span)))
         }
     }
 
@@ -28789,7 +28874,9 @@ impl PyDataFrame {
         let s = Series::from_values("", labels, dtypes)
             .map_err(frame_error_to_py)?
             .with_range_span(self.inner.column_range_span());
-        Ok(PySeries { inner: s })
+        Ok(PySeries {
+            inner: self.inner.with_column_levels(s),
+        })
     }
 
     /// pandas' `DataFrame.to_numpy(dtype=None, copy=False, na_value=...)`:
@@ -31685,8 +31772,9 @@ impl PyDataFrame {
                 )));
             }
 
-            let by_cols: Vec<String> = if let Some(names) = self.column_names_arg(by) {
-                // A typed label (by=0) names its column (fvsao.32).
+            let by_cols: Vec<String> = if let Some(names) = self.sort_key_names(by) {
+                // A typed label (by=0) names its column (fvsao.32), a
+                // tuple its MultiIndex column (g3bux).
                 names
             } else if let Ok(single) = by.extract::<String>() {
                 vec![single]
@@ -32005,8 +32093,11 @@ impl PyDataFrame {
         let n_rows = self.inner.len();
         let col_names = self.inner.column_names();
         let idx_labels = self.inner.index().labels();
-        // A column's key is its typed label (0, not '0'; fvsao.32).
-        let key = |name: &str| index_label_to_py(py, &self.inner.column_label(name));
+        // A column's key, by position: its typed label (0, not '0';
+        // fvsao.32), its tuple under MultiIndex columns (g3bux).
+        let keys = (0..col_names.len())
+            .map(|position| self.column_key_py(py, position))
+            .collect::<PyResult<Vec<_>>>()?;
 
         if self.inner.index().has_duplicates() && (orient == "dict" || orient == "index") {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -32017,7 +32108,7 @@ impl PyDataFrame {
         match orient {
             "dict" => {
                 let out = PyDict::new(py);
-                for name in col_names {
+                for (name, key) in col_names.into_iter().zip(&keys) {
                     let col = self.inner.column(name).ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
                             "column {name:?} missing"
@@ -32029,13 +32120,13 @@ impl PyDataFrame {
                         let v = scalar_to_py(py, val)?;
                         inner_dict.set_item(k, v)?;
                     }
-                    out.set_item(key(name)?, inner_dict)?;
+                    out.set_item(key, inner_dict)?;
                 }
                 Ok(out.into_any().unbind())
             }
             "list" => {
                 let out = PyDict::new(py);
-                for name in col_names {
+                for (name, key) in col_names.into_iter().zip(&keys) {
                     let col = self.inner.column(name).ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
                             "column {name:?} missing"
@@ -32046,7 +32137,7 @@ impl PyDataFrame {
                         .iter()
                         .map(|s| scalar_to_py(py, s))
                         .collect::<PyResult<Vec<_>>>()?;
-                    out.set_item(key(name)?, PyList::new(py, values)?)?;
+                    out.set_item(key, PyList::new(py, values)?)?;
                 }
                 Ok(out.into_any().unbind())
             }
@@ -32054,14 +32145,14 @@ impl PyDataFrame {
                 let mut rows_list = Vec::with_capacity(n_rows);
                 for row_idx in 0..n_rows {
                     let row_dict = PyDict::new(py);
-                    for name in &col_names {
+                    for (name, key) in col_names.iter().zip(&keys) {
                         let col = self.inner.column(name).ok_or_else(|| {
                             PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
                                 "column {name:?} missing"
                             ))
                         })?;
                         let v = scalar_to_py(py, &col.values()[row_idx])?;
-                        row_dict.set_item(key(name)?, v)?;
+                        row_dict.set_item(key, v)?;
                     }
                     rows_list.push(row_dict);
                 }
@@ -32072,14 +32163,14 @@ impl PyDataFrame {
                 for row_idx in 0..n_rows {
                     let k = index_label_to_py(py, &idx_labels[row_idx])?;
                     let row_dict = PyDict::new(py);
-                    for name in &col_names {
+                    for (name, key) in col_names.iter().zip(&keys) {
                         let col = self.inner.column(name).ok_or_else(|| {
                             PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
                                 "column {name:?} missing"
                             ))
                         })?;
                         let v = scalar_to_py(py, &col.values()[row_idx])?;
-                        row_dict.set_item(key(name)?, v)?;
+                        row_dict.set_item(key, v)?;
                     }
                     out.set_item(k, row_dict)?;
                 }
@@ -32087,9 +32178,9 @@ impl PyDataFrame {
             }
             "series" => {
                 let out = PyDict::new(py);
-                for name in col_names {
+                for (name, key) in col_names.into_iter().zip(&keys) {
                     let col_series = self.column_series(name)?;
-                    out.set_item(key(name)?, Py::new(py, col_series)?)?;
+                    out.set_item(key, Py::new(py, col_series)?)?;
                 }
                 Ok(out.into_any().unbind())
             }
@@ -32100,14 +32191,7 @@ impl PyDataFrame {
                     .map(|l| index_label_to_py(py, l))
                     .collect::<PyResult<Vec<_>>>()?;
                 out.set_item("index", PyList::new(py, idx_list)?)?;
-                let cols_list = PyList::new(
-                    py,
-                    col_names
-                        .iter()
-                        .map(|name| key(name))
-                        .collect::<PyResult<Vec<_>>>()?,
-                )?;
-                out.set_item("columns", cols_list)?;
+                out.set_item("columns", PyList::new(py, &keys)?)?;
                 // Columns by position, so a duplicated name keeps its own data
                 // (br-frankenpandas-5ihhi).
                 let columns: Vec<&Column> = (0..col_names.len())
@@ -32437,7 +32521,11 @@ impl PyDataFrame {
     /// Return the first n rows ordered by columns in descending order.
     #[pyo3(signature = (n, columns, keep="first"))]
     fn nlargest(&self, n: usize, columns: &Bound<'_, PyAny>, keep: &str) -> PyResult<PyDataFrame> {
-        let cols = extract_col_names_flexible(Some(columns))?;
+        // A tuple names its MultiIndex column (g3bux).
+        let cols = match self.sort_key_names(columns) {
+            Some(names) => names,
+            None => extract_col_names_flexible(Some(columns))?,
+        };
         if cols.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "columns cannot be empty",
@@ -32463,7 +32551,11 @@ impl PyDataFrame {
     /// Return the first n rows ordered by columns in ascending order.
     #[pyo3(signature = (n, columns, keep="first"))]
     fn nsmallest(&self, n: usize, columns: &Bound<'_, PyAny>, keep: &str) -> PyResult<PyDataFrame> {
-        let cols = extract_col_names_flexible(Some(columns))?;
+        // A tuple names its MultiIndex column (g3bux).
+        let cols = match self.sort_key_names(columns) {
+            Some(names) => names,
+            None => extract_col_names_flexible(Some(columns))?,
+        };
         if cols.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "columns cannot be empty",
@@ -33873,6 +33965,13 @@ impl PyDataFrame {
             } else {
                 DataFrame::from_series(series_list).map_err(frame_error_to_py)?
             };
+            // Along the rows the columns keep their labels (0, not '0') and
+            // MultiIndex levels (g3bux).
+            let res_df = if ax == 0 {
+                res_df.with_labels_of(&self.inner)
+            } else {
+                res_df
+            };
             return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
         }
 
@@ -34285,30 +34384,27 @@ impl PyDataFrame {
     /// iterators (they were lists, so `next(df.iterrows())` raised).
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let mut list = Vec::with_capacity(self.inner.column_names().len());
-        for col_name in self.inner.column_names() {
+        for (position, col_name) in self.inner.column_names().into_iter().enumerate() {
             let s = self.column_series(col_name)?;
             let py_s = Py::new(py, s)?;
-            // The typed label (0, not '0'; fvsao.32).
-            let label = index_label_to_py(py, &self.inner.column_label(col_name))?;
+            let label = self.column_key_py(py, position)?;
             list.push((label, py_s).into_pyobject(py)?);
         }
         Ok(PyList::new(py, list)?.try_iter()?.into_any().unbind())
     }
 
     fn iterrows(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let rows = self.inner.iterrows();
-        let mut list = Vec::with_capacity(rows.len());
-        for (label, row_data) in rows {
-            let py_label = index_label_to_py(py, &label)?;
-            let mut col_items = Vec::with_capacity(row_data.len());
-            let mut col_labels = Vec::with_capacity(row_data.len());
-            for (col_name, val) in row_data {
-                col_labels.push(self.inner.column_label(col_name));
-                col_items.push(val);
-            }
-            let s = Series::from_values(SeriesName::typed(label), col_labels, col_items)
+        let labels = self.inner.index().labels();
+        let mut list = Vec::with_capacity(labels.len());
+        for (position, label) in labels.iter().enumerate() {
+            let py_label = index_label_to_py(py, label)?;
+            // Each row as iloc reads it: the columns' interleaved dtype,
+            // indexed by the column axis, its MultiIndex too (g3bux).
+            let row = self
+                .inner
+                .iloc_row(i64::try_from(position).unwrap_or(i64::MAX))
                 .map_err(frame_error_to_py)?;
-            let py_s = Py::new(py, PySeries { inner: s })?;
+            let py_s = Py::new(py, PySeries { inner: row })?;
             list.push(pyo3::types::PyTuple::new(py, &[py_label, py_s.into_any()])?);
         }
         Ok(PyList::new(py, list)?.try_iter()?.into_any().unbind())
@@ -34878,6 +34974,13 @@ impl PyDataFrame {
         let row_index = frame_row_index(&frame)?;
         let column_index =
             Index::new(column_labels.clone()).with_range_span(frame.column_range_span());
+        // MultiIndex columns index a reduction by that MultiIndex (g3bux).
+        let column_index = match frame.columns_multiindex() {
+            Some(multi) => column_index
+                .with_row_multiindex(multi.clone())
+                .map_err(index_error_to_py)?,
+            None => column_index,
+        };
         // The results label the other axis; each piece runs `along` one.
         let (count, along, result_index) = if ax == 0 {
             (ncols, nrows, &column_index)
@@ -35111,6 +35214,9 @@ impl PyDataFrame {
             if let Some(span) = frame.column_range_span() {
                 inner = inner.with_column_range(span);
             }
+            // pandas sets the frame's columns on it: their name and
+            // MultiIndex levels too (g3bux).
+            let inner = inner.with_typed_labels_of(&frame);
             return PyDataFrame { inner }.into_bound_py_any(py);
         }
         // pandas' FrameColumnApply.wrap_results_for_axis: Series results, or
@@ -35210,7 +35316,10 @@ impl PyDataFrame {
         let df =
             DataFrame::new_with_column_order(self.inner.index().clone(), col_map, column_order)
                 .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+        // The columns keep their labels, range and MultiIndex levels (g3bux).
+        Ok(PyDataFrame {
+            inner: df.with_labels_of(&self.inner),
+        })
     }
 
     fn map(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
@@ -41708,23 +41817,47 @@ where
 /// A frame window's `agg([...])` with pandas' (column, function) column
 /// MultiIndex; fp-frame names each column `{column}_{function}`, column by
 /// column in `funcs` order.
-fn func_columns(frame: DataFrame, funcs: &[&str]) -> PyResult<DataFrame> {
+fn func_columns(frame: DataFrame, source: &DataFrame, funcs: &[&str]) -> PyResult<DataFrame> {
     if funcs.is_empty() {
         return Ok(frame);
     }
-    let mut columns = Vec::new();
-    let mut functions = Vec::new();
+    // Each column's levels are `source`'s: its typed label (0, not '0'),
+    // or its tuple under MultiIndex columns (g3bux); the function last, the
+    // axis names before an unnamed function level, as pandas.
+    let source_multi = source.columns_multiindex();
+    let depth = source_multi.map_or(1, fp_index::MultiIndex::nlevels);
+    let source_names = source.column_names();
+    let mut levels: Vec<Vec<IndexLabel>> = vec![Vec::new(); depth + 1];
     for (position, name) in frame.column_names().into_iter().enumerate() {
         let func = funcs[position % funcs.len()];
         let column = name
             .strip_suffix(func)
             .and_then(|rest| rest.strip_suffix('_'))
             .unwrap_or(name);
-        columns.push(IndexLabel::Utf8(column.to_owned()));
-        functions.push(IndexLabel::Utf8(func.to_owned()));
+        let tuple = source_multi.and_then(|multi| {
+            let at = source_names
+                .iter()
+                .position(|source| source.as_str() == column)?;
+            multi.get_tuple(at)
+        });
+        let mut labels: Vec<IndexLabel> = match tuple {
+            Some(tuple) => tuple.into_iter().cloned().collect(),
+            None => vec![source.column_label(column)],
+        };
+        labels.resize(depth, IndexLabel::Utf8(String::new()));
+        labels.push(IndexLabel::Utf8(func.to_owned()));
+        for (level, label) in levels.iter_mut().zip(labels) {
+            level.push(label);
+        }
     }
-    let multi =
-        fp_index::MultiIndex::from_arrays(vec![columns, functions]).map_err(index_error_to_py)?;
+    let mut names: Vec<Option<String>> = match source_multi {
+        Some(multi) => multi.names().to_vec(),
+        None => vec![source.columns_name().map(str::to_owned)],
+    };
+    names.push(None);
+    let multi = fp_index::MultiIndex::from_arrays(levels)
+        .map_err(index_error_to_py)?
+        .set_names(names);
     frame
         .with_columns_multiindex(Some(multi))
         .map_err(frame_error_to_py)
@@ -42197,7 +42330,7 @@ impl PyRolling {
                     .rolling_with_center(self.window, self.min_periods, self.center)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
-                let res = func_columns(res, &str_slices)?;
+                let res = func_columns(res, df, &str_slices)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -42679,7 +42812,7 @@ impl PyExpanding {
                     .expanding(self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
-                let res = func_columns(res, &str_slices)?;
+                let res = func_columns(res, df, &str_slices)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -42976,7 +43109,7 @@ impl PyExponentialMovingWindow {
                     .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
-                let res = func_columns(res, &str_slices)?;
+                let res = func_columns(res, df, &str_slices)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(

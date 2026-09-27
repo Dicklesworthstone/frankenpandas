@@ -39007,7 +39007,9 @@ impl DataFrameRolling<'_> {
             None,
         )?;
         out.allows_duplicate_labels = self.df.allows_duplicate_labels;
-        Ok(out)
+        // The columns' own labels (0, not '0') and MultiIndex levels, in a
+        // new Index as pandas builds (g3bux).
+        Ok(out.with_typed_labels_of(self.df))
     }
 
     /// Rolling sum across all numeric columns.
@@ -39406,7 +39408,8 @@ impl DataFrameExpanding<'_> {
             None,
         )?;
         out.allows_duplicate_labels = self.df.allows_duplicate_labels;
-        Ok(out)
+        // The columns' own labels and MultiIndex levels (g3bux).
+        Ok(out.with_typed_labels_of(self.df))
     }
 
     /// Expanding sum across all numeric columns.
@@ -39663,7 +39666,8 @@ impl DataFrameEwm<'_> {
             None,
         )?;
         out.allows_duplicate_labels = self.df.allows_duplicate_labels;
-        Ok(out)
+        // The columns' own labels and MultiIndex levels (g3bux).
+        Ok(out.with_typed_labels_of(self.df))
     }
 
     /// One column's EWM with this window's span/alpha, adjust and min_periods.
@@ -70134,6 +70138,21 @@ impl DataFrame {
         Self::new_with_column_order_and_multiindex(index, columns, column_order, None)
     }
 
+    /// A frame of `columns` (keyed as this frame's) over `index`, with this
+    /// frame's column axis whole - order, typed labels, name and MultiIndex
+    /// levels: an elementwise result's (the levels were dropped; g3bux).
+    fn over_own_columns<C>(&self, index: Index, columns: C) -> Result<Self, FrameError>
+    where
+        C: Into<ColumnStore>,
+    {
+        Self::new_with_column_order_and_multiindex(
+            index,
+            columns,
+            self.column_order.clone(),
+            self.column_multiindex.clone(),
+        )
+    }
+
     pub fn new_with_row_multiindex(
         index: Index,
         row_multiindex: fp_index::MultiIndex,
@@ -73686,7 +73705,50 @@ impl DataFrame {
         let span = self
             .column_range_span()
             .filter(|_| labels == self.column_labels());
-        Ok(Series::from_values(name, labels, values)?.with_range_span(span))
+        Ok(self
+            .with_column_levels(Series::from_values(name, labels, values)?.with_range_span(span)))
+    }
+
+    /// The column MultiIndex levels of `labels`, (some of) this frame's
+    /// column labels, when its columns have them: pandas keeps them on a
+    /// result over those columns and indexes a row or a reduction by them
+    /// (g3bux). None for flat columns, a label naming no column (a renamed
+    /// or new one), or a subset of repeated column names.
+    fn column_levels_of(&self, labels: &[IndexLabel]) -> Option<fp_index::MultiIndex> {
+        let levels = self.column_multiindex.as_ref()?;
+        let columns = self.column_labels();
+        if labels == columns.as_slice() {
+            return Some(levels.clone());
+        }
+        let mut position_of: FxHashMap<&IndexLabel, usize> =
+            FxHashMap::with_capacity_and_hasher(columns.len(), Default::default());
+        for (position, label) in columns.iter().enumerate() {
+            if position_of.insert(label, position).is_some() {
+                return None;
+            }
+        }
+        let positions = labels
+            .iter()
+            .map(|label| position_of.get(label).copied())
+            .collect::<Option<Vec<usize>>>()?;
+        levels.take(&positions).ok()
+    }
+
+    /// `series`, indexed by (some of) this frame's columns, with those
+    /// columns' MultiIndex levels attached: pandas indexes a row or a
+    /// reduction of MultiIndex columns by that MultiIndex (`df.iloc[0]`,
+    /// `df.sum()` - the flat keys were the index; g3bux).
+    #[must_use]
+    pub fn with_column_levels(&self, mut series: Series) -> Series {
+        let levels = self.column_levels_of(series.index.labels());
+        if let Some(levels) = levels.filter(|levels| levels.len() == series.index.len()) {
+            let index = std::mem::replace(&mut series.index, Index::new(Vec::new()));
+            // The heights match, so the levels attach.
+            if let Ok(index) = index.with_row_multiindex(levels) {
+                series.index = index;
+            }
+        }
+        series
     }
 
     /// [`Self::with_labels_of`] without the RangeIndex mark, for a result
@@ -73699,6 +73761,10 @@ impl DataFrame {
         // The column axis keeps its name too.
         if self.column_order.name.is_none() {
             self.column_order.name.clone_from(&source.column_order.name);
+        }
+        // And the MultiIndex levels of the columns it keeps (g3bux).
+        if self.column_multiindex.is_none() {
+            self.column_multiindex = source.column_levels_of(&self.column_labels());
         }
         self
     }
@@ -77027,8 +77093,10 @@ impl DataFrame {
 
         // The index label is the Series name, typed (pandas semantics).
         let name = SeriesName::typed(self.index.labels()[position].clone());
-        // Indexed by the columns: a RangeIndex when they are one (fvsao.32).
+        // Indexed by the columns: a RangeIndex when they are one (fvsao.32),
+        // their MultiIndex when they have one (g3bux).
         let span = self.column_range_span();
+        let finish = |series: Series| self.with_column_levels(series.with_range_span(span));
 
         // The row's dtype is the columns' common one, as pandas'
         // interleaved dtype - not what this row's values happen to be (a
@@ -77048,17 +77116,17 @@ impl DataFrame {
                         other => other,
                     })
                     .collect();
-                return Series::from_values(name, labels, floats).map(|s| s.with_range_span(span));
+                return Series::from_values(name, labels, floats).map(finish);
             }
             return Series::new(name, Index::new(labels), Column::from_object_values(values))
-                .map(|s| s.with_range_span(span));
+                .map(finish);
         }
 
         // Try direct construction first. If dtypes are incompatible (e.g.,
         // Int64 + Utf8), fall back to Utf8 representation, matching pandas'
         // `object` dtype behavior for mixed-type rows.
         match Series::from_values(name.clone(), labels.clone(), values.clone()) {
-            Ok(s) => Ok(s.with_range_span(span)),
+            Ok(s) => Ok(finish(s)),
             Err(_) => {
                 let utf8_values: Vec<Scalar> = values
                     .into_iter()
@@ -77077,7 +77145,7 @@ impl DataFrame {
                         object @ Scalar::Object(_) => object,
                     })
                     .collect();
-                Series::from_values(name, labels, utf8_values).map(|s| s.with_range_span(span))
+                Series::from_values(name, labels, utf8_values).map(finish)
             }
         }
     }
@@ -77377,7 +77445,7 @@ impl DataFrame {
             };
             columns.insert(name.clone(), coerced);
         }
-        Self::new_with_axis(self.index.clone(), columns, self.column_order.clone())
+        self.over_own_columns(self.index.clone(), columns)
     }
 
     /// Localize tz-naive datetime columns to a timezone or strip timezone info.
@@ -77565,7 +77633,7 @@ impl DataFrame {
                     let casted = Column::new(dtype.clone(), vals)?;
                     columns.insert(name.to_owned(), casted);
                 }
-                Self::new_with_axis(self.index.clone(), columns, self.column_order.clone())
+                self.over_own_columns(self.index.clone(), columns)
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "astype: errors must be 'raise', 'ignore', or 'coerce', got '{other}'"
@@ -89967,7 +90035,9 @@ impl DataFrame {
                         .collect();
                 }
 
-                Series::from_values("", labels, values)
+                // Indexed as a reduction: the columns' own labels, range and
+                // MultiIndex levels (g3bux).
+                self.columns_series("", labels, values)
             }
             1 => {
                 if self.is_empty() {
@@ -90582,7 +90652,10 @@ impl DataFrame {
         dropna: bool,
     ) -> Result<Self, FrameError> {
         match axis {
-            0 => self.mode_axis0(numeric_only, dropna),
+            // The columns keep their labels and MultiIndex levels (g3bux).
+            0 => self
+                .mode_axis0(numeric_only, dropna)
+                .map(|out| out.with_labels_of(self)),
             1 => self.mode_axis1(numeric_only, dropna),
             _ => Err(FrameError::CompatibilityRejected(format!(
                 "axis must be 0 or 1, got {axis}"
@@ -93697,7 +93770,7 @@ impl DataFrame {
             };
             result_cols.insert(name.clone(), clipped);
         }
-        Self::new_with_axis(self.index.clone(), result_cols, self.column_order.clone())
+        self.over_own_columns(self.index.clone(), result_cols)
     }
 
     /// Clip each row to its own bound, matching `df.clip(lower=s, upper=s,
@@ -93812,7 +93885,7 @@ impl DataFrame {
             };
             result_cols.insert(name.clone(), column);
         }
-        Self::new_with_axis(self.index.clone(), result_cols, self.column_order.clone())
+        self.over_own_columns(self.index.clone(), result_cols)
     }
 
     /// Round numeric columns to specified decimal places.
@@ -94259,9 +94332,10 @@ impl DataFrame {
             }
             let index = index.unwrap_or_else(|| self.index.clone());
             // The columns are untouched: their axis whole - typed labels,
-            // name - rides along (they came back as text, unnamed:
-            // df.div(s, axis=0), crosstab(normalize='index') lost both).
-            return Self::new_with_axis(index, columns, self.column_order.clone());
+            // name, MultiIndex levels (g3bux) - rides along (they came back
+            // as text, unnamed: df.div(s, axis=0), crosstab(normalize='index')
+            // lost both).
+            return self.over_own_columns(index, columns);
         }
         let labels: Vec<String> = series
             .index()
@@ -94320,7 +94394,7 @@ impl DataFrame {
         // Series' labels are exactly the columns; a union of the two keeps a
         // name only both share. Both were always dropped.
         if self.column_order.as_slice() == labels.as_slice() {
-            return Self::new_with_axis(self.index.clone(), columns, self.column_order.clone());
+            return self.over_own_columns(self.index.clone(), columns);
         }
         let axis_name = (series.index().name() == self.columns_name())
             .then(|| self.columns_name().map(str::to_owned))
@@ -97363,7 +97437,7 @@ impl DataFrame {
             .index
             .slice(start, take)
             .rename_index(self.index.name());
-        Self::new_with_axis(index, columns, self.column_order.clone())
+        self.over_own_columns(index, columns)
     }
 
     /// Insert a column at a specific position.
@@ -98185,7 +98259,7 @@ impl DataFrame {
         for (name, column) in self.column_order.iter().zip(columns) {
             new_cols.insert(name.clone(), column);
         }
-        Self::new_with_axis(self.index.clone(), new_cols, self.column_order.clone())
+        self.over_own_columns(self.index.clone(), new_cols)
     }
 
     /// Element-wise membership test with per-column value sets.
@@ -170426,6 +170500,99 @@ mod tests {
         assert_eq!(
             result.columns()["x"].values()[0],
             Scalar::Utf8("hello".into())
+        );
+    }
+
+    /// A row or a reduction of MultiIndex columns is indexed by that
+    /// MultiIndex, and a result over (some of) the columns keeps their
+    /// levels, as pandas (g3bux: the flat 'a_x' keys were the axis).
+    #[test]
+    fn multiindex_columns_index_rows_and_reductions_g3bux() {
+        let ints = |values: [i64; 3]| values.map(Scalar::Int64).to_vec();
+        let flat = DataFrame::from_dict(
+            &["a_x", "a_y", "b_x"],
+            vec![
+                ("a_x", ints([1, 4, 7])),
+                ("a_y", ints([2, 5, 8])),
+                ("b_x", ints([3, 6, 10])),
+            ],
+        )
+        .unwrap();
+        let tuple = |top: &str, sub: &str| vec![IndexLabel::from(top), IndexLabel::from(sub)];
+        let levels = fp_index::MultiIndex::from_tuples(vec![
+            tuple("a", "x"),
+            tuple("a", "y"),
+            tuple("b", "x"),
+        ])
+        .unwrap()
+        .set_names(vec![Some("top".into()), Some("sub".into())]);
+        let df = flat.with_columns_multiindex(Some(levels.clone())).unwrap();
+
+        // A row and the reductions: indexed by the column MultiIndex.
+        assert_eq!(
+            df.iloc_row(1).unwrap().index().row_multiindex(),
+            Some(&levels)
+        );
+        assert_eq!(df.sum().unwrap().index().row_multiindex(), Some(&levels));
+        assert_eq!(
+            df.idxmax_ext(0, true, false)
+                .unwrap()
+                .index()
+                .row_multiindex(),
+            Some(&levels)
+        );
+        // Results over the columns keep them: a take of rows, a window, a
+        // mode, an elementwise membership test.
+        assert_eq!(
+            df.iloc(&[0, 2]).unwrap().columns_multiindex(),
+            Some(&levels)
+        );
+        assert_eq!(
+            df.rolling(2, None).sum().unwrap().columns_multiindex(),
+            Some(&levels)
+        );
+        assert_eq!(df.mode().unwrap().columns_multiindex(), Some(&levels));
+        assert_eq!(
+            df.isin(&[Scalar::Int64(4)]).unwrap().columns_multiindex(),
+            Some(&levels)
+        );
+        // A subset, reordered, keeps its own columns' tuples.
+        let subset = df.select_columns(&["b_x", "a_x"]).unwrap();
+        let kept = subset.columns_multiindex().unwrap();
+        assert_eq!(
+            kept.get_tuple(0).unwrap(),
+            vec![&IndexLabel::from("b"), &IndexLabel::from("x")]
+        );
+        assert_eq!(
+            kept.get_tuple(1).unwrap(),
+            vec![&IndexLabel::from("a"), &IndexLabel::from("x")]
+        );
+        assert_eq!(kept.names(), levels.names());
+
+        // An op's own levels stand: a new column is pandas' ('c_z', '').
+        let widened = df
+            .with_column("c_z", Column::from_values(ints([0, 0, 0])).unwrap())
+            .unwrap();
+        assert_eq!(
+            widened.columns_multiindex().unwrap().get_tuple(3).unwrap(),
+            vec![&IndexLabel::from("c_z"), &IndexLabel::from("")]
+        );
+
+        // NEGATIVE: flat columns index a row by their names; labels naming
+        // no column have no tuple, so they stay flat rather than mislabelled.
+        assert!(flat.iloc_row(0).unwrap().index().row_multiindex().is_none());
+        assert!(flat.sum().unwrap().index().row_multiindex().is_none());
+        let stranger = Series::from_values(
+            "s",
+            vec![IndexLabel::from("a_x"), IndexLabel::from("zz")],
+            ints([1, 2, 3])[..2].to_vec(),
+        )
+        .unwrap();
+        assert!(
+            df.with_column_levels(stranger)
+                .index()
+                .row_multiindex()
+                .is_none()
         );
     }
 
