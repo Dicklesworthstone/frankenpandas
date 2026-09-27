@@ -12177,3 +12177,38 @@ def _wide_outcome(m: Any, run: Any) -> Any:
 def test_wide_frames_build_like_pandas(case: str) -> None:
     run = _WIDE_CASES[case]
     assert _wide_outcome(fpd, run) == _wide_outcome(pd, run), case
+
+
+# br-frankenpandas-31bni: to_datetime of a numpy array was a TypeError; pandas
+# gives a DatetimeIndex (ints under unit=, text, datetime64 of any unit).
+_TD_ARRAY_CASES = {
+    "ints unit=s": lambda m: repr(m.to_datetime(np.array([1_600_000_000, 1_700_000_000]), unit="s")),
+    "ints unit=ms": lambda m: repr(m.to_datetime(np.array([1_600_000_000_123]), unit="ms")),
+    "ints default ns": lambda m: repr(m.to_datetime(np.array([1_600_000_000_000_000_000]))),
+    "floats unit=s": lambda m: repr(m.to_datetime(np.array([1.5, 2.25]), unit="s")),
+    "strings": lambda m: repr(m.to_datetime(np.array(["2024-01-01", "2024-02-15"]))),
+    # pandas raises: the second string does not match the first's format.
+    "strings of two formats raise": lambda m: repr(m.to_datetime(np.array(["2024-01-01", "2024-02-15 10:30"]))),
+    "strings with a bad value, coerce": lambda m: repr(m.to_datetime(np.array(["2024-01-01", "nope"]), errors="coerce")),
+    "datetime64[ns]": lambda m: repr(m.to_datetime(np.array(["2024-01-01T01:02:03"], dtype="datetime64[ns]"))),
+    # [ns]: pandas 2 keeps a datetime64[s] array's second resolution, which fp
+    # does not have (nanoseconds only); a 2-D array makes pandas build a
+    # malformed index of an array, not followed (fp raises TypeError).
+    "datetime64[ns] with NaT": lambda m: repr(m.to_datetime(np.array(["2024-01-01", "NaT"], dtype="datetime64[ns]"))),
+    # NEGATIVE: a list is converted as before.
+    "a list": lambda m: repr(m.to_datetime(["2024-01-01"])),
+}
+
+
+def _td_array_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TD_ARRAY_CASES))
+def test_to_datetime_of_numpy_arrays_like_pandas(case: str) -> None:
+    run = _TD_ARRAY_CASES[case]
+    assert _td_array_outcome(fpd, run) == _td_array_outcome(pd, run), case

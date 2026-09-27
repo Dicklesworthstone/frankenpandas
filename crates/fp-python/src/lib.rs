@@ -50202,6 +50202,24 @@ fn to_datetime(
         let res = with_sequence_zone(res, Some(arg))?;
         return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
     }
+    // A numpy array is its values - ints under unit=, text, datetime64 -
+    // as a DatetimeIndex, as pandas' (it was a TypeError); a 2-D one is
+    // pandas' TypeError.
+    if arg.get_type().name()? == "ndarray" {
+        if arg.getattr("ndim")?.extract::<usize>()? != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "arg must be a string, datetime, list, tuple, 1-d array, or Series",
+            ));
+        }
+        if let Some(column) = py_array_like_column(py, arg)? {
+            let temp_series = Series::new("", Index::default_range(column.len()), column)
+                .map_err(frame_error_to_py)?;
+            warn_order(temp_series.values())?;
+            let res = fp_frame::to_datetime_with_options(&temp_series, opts)
+                .map_err(to_datetime_error)?;
+            return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
+        }
+    }
     // A Timestamp, datetime or date is that instant as a Timestamp, its zone
     // kept (an aware one came back naive, a date raised); utc=True converts
     // it (or reads a naive one as UTC).
