@@ -6726,7 +6726,9 @@ fn datetime_period_ordinal_at_boundary(
     datetime_period_ordinal(nanos, freq)
 }
 
-fn datetime_nanos_to_period(nanos: i64, freq: PeriodFreq) -> Result<Period, IndexError> {
+/// The period of `freq` holding the wall-clock instant `nanos`, as pandas'
+/// `Timestamp.to_period(freq)` (a NaT or out-of-range instant is an error).
+pub fn datetime_nanos_to_period(nanos: i64, freq: PeriodFreq) -> Result<Period, IndexError> {
     datetime_period_ordinal(nanos, freq).map(|ordinal| Period::new(ordinal, freq))
 }
 
@@ -7093,6 +7095,11 @@ fn period_end_nanos(period: Period) -> Result<i64, IndexError> {
 }
 
 fn period_boundary_nanos(period: Period, boundary: PeriodBoundary) -> Result<i64, IndexError> {
+    // A NaT period's boundary is NaT (pandas' start_time / end_time /
+    // to_timestamp of NaT; every field read through it raised).
+    if period.ordinal == i64::MIN {
+        return Ok(i64::MIN);
+    }
     match boundary {
         PeriodBoundary::Start => period_start_nanos(period),
         PeriodBoundary::End => period_end_nanos(period),
@@ -7110,6 +7117,10 @@ fn parse_period_boundary_how(how: &str, context: &str) -> Result<PeriodBoundary,
 }
 
 fn period_qyear(period: Period) -> Result<i32, IndexError> {
+    // pandas' field of a NaT period is -1.
+    if period.ordinal == i64::MIN {
+        return Ok(-1);
+    }
     let end_nanos = period_end_nanos(period)?;
     datetime_nanos_to_date(end_nanos)
         .map(|date| date.year())
@@ -11493,6 +11504,10 @@ impl PeriodIndex {
             .iter()
             .copied()
             .map(|period| {
+                // NaT stays NaT at the new frequency.
+                if period.ordinal == i64::MIN {
+                    return Ok(Period::new(i64::MIN, target_freq));
+                }
                 let nanos = period_boundary_nanos(period, boundary)?;
                 datetime_period_ordinal_at_boundary(nanos, target_freq, boundary)
                     .map(|ordinal| Period::new(ordinal, target_freq))
@@ -11560,44 +11575,72 @@ impl PeriodIndex {
 
     // ── Per br-frankenpandas-qigpe: date-part accessors (19 methods) ──
 
+    /// The instant each period's fields read, as pandas' `get_date_info`
+    /// reads them: the period's END date at midnight - a month's day is its
+    /// last (31), a quarter's month its third, a week's year that of its
+    /// Sunday - and a sub-daily period its own start (the hour it is). NaT
+    /// stays NaT. The fields read the start (day 1, month 1 of a quarter).
+    fn field_instants(&self) -> Result<DatetimeIndex, IndexError> {
+        const DAY: i64 = 86_400_000_000_000;
+        let nanos = self
+            .values
+            .iter()
+            .map(|&period| {
+                if period.ordinal == i64::MIN {
+                    return Ok(i64::MIN);
+                }
+                match period.freq {
+                    PeriodFreq::Hourly
+                    | PeriodFreq::Minutely
+                    | PeriodFreq::Secondly
+                    | PeriodFreq::Milliseconds
+                    | PeriodFreq::Microseconds
+                    | PeriodFreq::Nanoseconds => period_start_nanos(period),
+                    _ => period_end_nanos(period).map(|end| end - end.rem_euclid(DAY)),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(DatetimeIndex::new(nanos))
+    }
+
     /// Year component for each period, matching `pd.PeriodIndex.year`.
     pub fn year(&self) -> Result<Vec<Option<i32>>, IndexError> {
-        Ok(self.start_time()?.year())
+        Ok(self.field_instants()?.year())
     }
 
     /// Month component (1-12), matching `pd.PeriodIndex.month`.
     pub fn month(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.month())
+        Ok(self.field_instants()?.month())
     }
 
     /// Day of month (1-31), matching `pd.PeriodIndex.day`.
     pub fn day(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.day())
+        Ok(self.field_instants()?.day())
     }
 
     /// Hour (0-23), matching `pd.PeriodIndex.hour`.
     pub fn hour(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.hour())
+        Ok(self.field_instants()?.hour())
     }
 
     /// Minute (0-59), matching `pd.PeriodIndex.minute`.
     pub fn minute(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.minute())
+        Ok(self.field_instants()?.minute())
     }
 
     /// Second (0-59), matching `pd.PeriodIndex.second`.
     pub fn second(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.second())
+        Ok(self.field_instants()?.second())
     }
 
     /// Quarter (1-4), matching `pd.PeriodIndex.quarter`.
     pub fn quarter(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.quarter())
+        Ok(self.field_instants()?.quarter())
     }
 
     /// Day of week (0=Monday, 6=Sunday), matching `pd.PeriodIndex.weekday`.
     pub fn weekday(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.weekday())
+        Ok(self.field_instants()?.weekday())
     }
 
     /// Day of week (0=Monday, 6=Sunday), alias for weekday.
@@ -11614,7 +11657,7 @@ impl PeriodIndex {
 
     /// Day of year (1-366), matching `pd.PeriodIndex.dayofyear`.
     pub fn dayofyear(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.dayofyear())
+        Ok(self.field_instants()?.dayofyear())
     }
 
     /// Day of year (1-366), alias for dayofyear.
@@ -11625,7 +11668,7 @@ impl PeriodIndex {
 
     /// Days in month (28-31), matching `pd.PeriodIndex.days_in_month`.
     pub fn days_in_month(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.daysinmonth())
+        Ok(self.field_instants()?.daysinmonth())
     }
 
     /// Days in month (28-31), alias for days_in_month.
@@ -11636,7 +11679,7 @@ impl PeriodIndex {
 
     /// ISO week number (1-53), matching `pd.PeriodIndex.week`.
     pub fn week(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.start_time()?.week())
+        Ok(self.field_instants()?.week())
     }
 
     /// ISO week number (1-53), alias for week.
@@ -11647,7 +11690,7 @@ impl PeriodIndex {
 
     /// Whether year is a leap year, matching `pd.PeriodIndex.is_leap_year`.
     pub fn is_leap_year(&self) -> Result<Vec<Option<bool>>, IndexError> {
-        Ok(self.start_time()?.is_leap_year())
+        Ok(self.field_instants()?.is_leap_year())
     }
 
     /// Frequency resolution string, matching `pd.PeriodIndex.resolution`.
@@ -11661,7 +11704,7 @@ impl PeriodIndex {
 
     /// Format each period as a string with strftime, matching `pd.PeriodIndex.strftime`.
     pub fn strftime(&self, fmt: &str) -> Result<Vec<Option<String>>, IndexError> {
-        Ok(self.start_time()?.strftime(fmt))
+        Ok(self.field_instants()?.strftime(fmt))
     }
 
     fn ensure_homogeneous_freq(&self) -> Result<Option<PeriodFreq>, IndexError> {
@@ -31735,6 +31778,35 @@ mod tests {
         let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::Annual);
         assert!(empty.is_empty());
         assert!(empty.asi8().is_empty());
+    }
+
+    #[test]
+    fn period_fields_read_the_end_date_and_nat_is_missing() -> Result<(), super::IndexError> {
+        use fp_types::PeriodFreq;
+        // pd.PeriodIndex(['2024-01', NaT, '2023-02'], freq='M'): a month's
+        // day is its last; a NaT period's fields are missing (the binding's
+        // -1), its boundaries NaT, its asfreq NaT.
+        let months = super::PeriodIndex::from_ordinals(&[648, i64::MIN, 637], PeriodFreq::Monthly);
+        assert_eq!(months.day()?, vec![Some(31), None, Some(28)]);
+        assert_eq!(months.dayofyear()?, vec![Some(31), None, Some(59)]);
+        assert_eq!(months.week()?, vec![Some(5), None, Some(9)]);
+        assert_eq!(months.qyear()?, vec![2024, -1, 2023]);
+        assert_eq!(
+            months.start_time()?.as_index().labels()[1],
+            super::IndexLabel::Datetime64(i64::MIN)
+        );
+        let days = months.asfreq("D")?;
+        assert_eq!(days.values()[1].ordinal, i64::MIN);
+        assert_eq!(days.values()[1].freq, PeriodFreq::Daily);
+        // A quarter's month is its third; an hour's hour is itself.
+        let quarters = super::PeriodIndex::from_ordinals(&[216], PeriodFreq::Quarterly);
+        assert_eq!(quarters.month()?, vec![Some(3)]);
+        let hours = super::PeriodIndex::from_ordinals(&[473_374], PeriodFreq::Hourly);
+        assert_eq!(hours.hour()?, vec![Some(22)]);
+        // NEGATIVE: a month's year and month are those of its start too.
+        assert_eq!(months.year()?, vec![Some(2024), None, Some(2023)]);
+        assert_eq!(months.month()?, vec![Some(1), None, Some(2)]);
+        Ok(())
     }
 
     #[test]

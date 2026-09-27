@@ -11635,3 +11635,93 @@ def _everyday7_outcome(m: Any, run: Any) -> Any:
 def test_everyday_ops_round_seven_like_pandas(case: str) -> None:
     run = _EVERYDAY7_CASES[case]
     assert _everyday7_outcome(fpd, run) == _everyday7_outcome(pd, run), case
+
+
+# Period columns (br-frankenpandas-39h5n): dt.to_period gave the periods'
+# text (dtype object); a Period Series' dtype said 'period'; + / - an int,
+# .dt fields and a comparison with a Period raised; PeriodIndex fields were
+# lists read from each period's START (pandas reads its END date: January's
+# day is 31) and raised on NaT; period_range read '2024-12-30' at 'W' as
+# week 20,000-odd and could not read '2024-01-01 22:00' at 'h'.
+def _pc_stamps(m: Any) -> Any:
+    return m.to_datetime(m.Series(["2024-01-15", None, "2024-05-20", "2023-12-31"], name="d"))
+
+
+def _pc_months(m: Any) -> Any:
+    return _pc_stamps(m).dt.to_period("M")
+
+
+def _pc_index(m: Any) -> Any:
+    return m.PeriodIndex(["2024-01", None, "2023-02"], freq="M")
+
+
+_PERIOD_COLUMN_CASES = {
+    "to_period M": lambda m: repr(_pc_months(m)),
+    "to_period Q": lambda m: repr(_pc_stamps(m).dt.to_period("Q")),
+    "to_period Y": lambda m: repr(_pc_stamps(m).dt.to_period("Y")),
+    "to_period W": lambda m: repr(_pc_stamps(m).dt.to_period("W")),
+    "to_period B": lambda m: repr(_pc_stamps(m).dt.to_period("B")),
+    "to_period h": lambda m: repr(m.to_datetime(m.Series(["2024-01-15 10:30"])).dt.to_period("h")),
+    "to_period of a zone's wall clock": lambda m: repr(m.to_datetime(m.Series(["2024-01-15 23:30"])).dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo").dt.to_period("D")),
+    "dtype": lambda m: str(_pc_months(m).dtype),
+    "frame dtypes": lambda m: repr(m.DataFrame({"p": _pc_months(m), "v": [1, 2, 3, 4]}).dtypes),
+    "plus an int": lambda m: repr(_pc_months(m) + 1),
+    "minus an int": lambda m: repr(_pc_months(m) - 2),
+    "int plus": lambda m: repr(3 + _pc_months(m)),
+    "dt.start_time": lambda m: repr(_pc_months(m).dt.start_time),
+    "dt.end_time": lambda m: repr(_pc_months(m).dt.end_time),
+    "dt fields": lambda m: repr(m.DataFrame({"y": _pc_months(m).dt.year, "m": _pc_months(m).dt.month, "d": _pc_months(m).dt.day, "q": _pc_months(m).dt.quarter})),
+    "dt.strftime": lambda m: repr(_pc_months(m).dt.strftime("%Y/%m/%d")),
+    "dt.to_timestamp": lambda m: repr(_pc_months(m).dt.to_timestamp()),
+    "dt.asfreq": lambda m: repr(_pc_months(m).dt.asfreq("D")),
+    "dt.days_in_month": lambda m: repr(_pc_months(m).dt.days_in_month),
+    "compare with a Period": lambda m: repr(_pc_months(m) > m.Period("2024-01", "M")),
+    "compare with period text": lambda m: repr(_pc_months(m) == "2024-05"),
+    "not equal keeps NaT True": lambda m: repr(_pc_months(m) != m.Period("2024-01", "M")),
+    "sort_values": lambda m: repr(_pc_months(m).sort_values()),
+    "astype str": lambda m: repr(_pc_months(m).astype(str)),
+    "Series of Periods beside None": lambda m: repr(m.Series([m.Period("2024-01", "M"), None])),
+    "PeriodIndex beside None": lambda m: repr(_pc_index(m)),
+    "PeriodIndex fields read the end date": lambda m: [list(getattr(_pc_index(m), f)) for f in ("year", "month", "day", "dayofweek", "dayofyear", "week", "quarter", "qyear", "days_in_month")],
+    "PeriodIndex quarterly fields": lambda m: [list(getattr(m.period_range("2024Q1", periods=2, freq="Q"), f)) for f in ("month", "day", "dayofyear")],
+    "PeriodIndex hourly fields": lambda m: [list(getattr(m.period_range("2024-01-01 22:00", periods=3, freq="h"), f)) for f in ("day", "hour", "dayofyear")],
+    "PeriodIndex is_leap_year": lambda m: list(_pc_index(m).is_leap_year),
+    "PeriodIndex strftime": lambda m: repr(_pc_index(m).strftime("%Y-%m-%d")),
+    "PeriodIndex start_time": lambda m: repr(_pc_index(m).start_time),
+    "PeriodIndex asfreq": lambda m: repr(_pc_index(m).asfreq("D")),
+    "period_range weekly": lambda m: repr(m.period_range("2024-12-30", periods=2, freq="W")),
+    "period_range business": lambda m: repr(m.period_range("2024-01-05", periods=2, freq="B")),
+    "period_range hourly": lambda m: repr(m.period_range("2024-01-01 22:00", periods=2, freq="h")),
+    "Period of an instant": lambda m: repr(m.Period("2024-01-01 22:00", freq="h")),
+    # NEGATIVE: a datetime column's dt, and its arithmetic, are unchanged.
+    "datetime dt.year": lambda m: repr(_pc_stamps(m).dt.year),
+    "datetime plus a day": lambda m: repr(_pc_stamps(m) + m.Timedelta(days=1)),
+    "period_range monthly": lambda m: repr(m.period_range("2024-01", periods=2, freq="M")),
+}
+
+
+def _period_column_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PERIOD_COLUMN_CASES))
+def test_period_columns_like_pandas(case: str) -> None:
+    run = _PERIOD_COLUMN_CASES[case]
+    assert _period_column_outcome(fpd, run) == _period_column_outcome(pd, run), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_period_warns_that_it_drops_the_zone() -> None:
+    for m in (pd, fpd):
+        aware = m.to_datetime(m.Series(["2024-01-15 23:30"])).dt.tz_localize("UTC")
+        with pytest.warns(UserWarning, match="drop timezone information"):
+            aware.dt.to_period("D")
+        # NEGATIVE: a naive column converts without a warning.
+        naive = m.to_datetime(m.Series(["2024-01-15 23:30"]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            naive.dt.to_period("D")
