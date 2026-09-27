@@ -446,6 +446,69 @@ fn categories_dtype_name(categories: &[Scalar]) -> String {
     }
 }
 
+/// pandas' `format_array(values, quoting=QUOTE_NONNUMERIC)`, stripped, as a
+/// Categorical prints its values and categories: text quoted, numbers at the
+/// common precision their column prints ('1.25', '2.50'), a missing value
+/// NaN, anything else as it prints.
+fn pandas_quoted_texts(values: &[Scalar]) -> Vec<String> {
+    let cells = Column::from_values(values.to_vec())
+        .map(|column| pandas_cells(&column))
+        .unwrap_or_default();
+    values
+        .iter()
+        .enumerate()
+        .map(|(position, value)| match value {
+            Scalar::Utf8(text) => format!("'{text}'"),
+            value if value.is_missing() => "NaN".to_owned(),
+            other => cells
+                .get(position)
+                .map_or_else(|| pandas_object_text(other), |cell| cell.trim().to_owned()),
+        })
+        .collect()
+}
+
+/// pandas' `Categorical._repr_categories_info` at the default display.width
+/// 80 and display.max_categories 8: `Categories (n, dtype): [...]`, the
+/// first and last 4 around '...' past 8, joined by ' < ' when ordered, the
+/// line broken under the bracket past 80 columns (with pandas' own column
+/// count). It listed every category on one line.
+fn pandas_categories_info(meta: &CategoricalMetadata) -> String {
+    const MAX_WIDTH: usize = 80;
+    const MAX_CATEGORIES: usize = 8;
+    let categories = &meta.categories;
+    let texts = if categories.len() > MAX_CATEGORIES {
+        let num = MAX_CATEGORIES / 2;
+        let mut texts = pandas_quoted_texts(&categories[..num]);
+        texts.push("...".to_owned());
+        texts.extend(pandas_quoted_texts(&categories[categories.len() - num..]));
+        texts
+    } else {
+        pandas_quoted_texts(categories)
+    };
+    let header = format!(
+        "Categories ({}, {}): ",
+        categories.len(),
+        categories_dtype_name(categories)
+    );
+    let header_len = header.chars().count();
+    let (sep_len, sep) = if meta.ordered { (3, " < ") } else { (2, ", ") };
+    let line_break = format!("{}\n{}", sep.trim_end(), " ".repeat(header_len + 1));
+    let mut levels = String::new();
+    let mut width = header_len;
+    for (position, text) in texts.iter().enumerate() {
+        let text_len = text.chars().count();
+        if width + sep_len + text_len > MAX_WIDTH {
+            levels.push_str(&line_break);
+            width = header_len + 1;
+        } else if position > 0 {
+            levels.push_str(sep);
+            width += text_len;
+        }
+        levels.push_str(text);
+    }
+    format!("{header}[{}]", levels.replace(" < ... < ", " ... "))
+}
+
 /// `categories` as pandas' Index repr lists them: text quoted (escaped),
 /// an Interval as it prints, anything else as Python prints it.
 fn category_repr_items(categories: &[Scalar]) -> Vec<String> {
@@ -591,6 +654,30 @@ fn pandas_cells(column: &Column) -> Vec<String> {
                 }
             })
             .collect(),
+        // A numeric categorical prints as pandas formats its values' array
+        // (Categorical._internal_get_values): floats at one precision
+        // ('2.50'), ints with a sign space only beside a negative - ints
+        // beside a NaN are the object array they become, printed below.
+        // They printed each on its own ('2.5', ' -1'; ba9pc).
+        DType::Categorical
+            if column.categorical().is_some_and(|meta| {
+                let all = |test: fn(&Scalar) -> bool| {
+                    !meta.categories.is_empty() && meta.categories.iter().all(test)
+                };
+                all(|c| matches!(c, Scalar::Int64(_) | Scalar::Float64(_)))
+                    && !(all(|c| matches!(c, Scalar::Int64(_))) && !column.validity().all())
+            }) =>
+        {
+            Column::from_values(values.to_vec()).map_or_else(
+                |_| {
+                    values
+                        .iter()
+                        .map(|value| format!(" {}", pandas_object_text(value)))
+                        .collect()
+                },
+                |plain| pandas_cells(&plain),
+            )
+        }
         _ => values
             .iter()
             .map(|value| format!(" {}", pandas_object_text(value)))
@@ -922,24 +1009,10 @@ fn pandas_series_text(
     }
     let mut footer = footer.join(", ");
     if let Some(meta) = column.categorical() {
-        let shown: Vec<String> = meta
-            .categories
-            .iter()
-            .map(|category| match category {
-                Scalar::Utf8(text) => format!("'{text}'"),
-                other => pandas_object_text(other),
-            })
-            .collect();
-        let kind = categories_dtype_name(&meta.categories);
-        let joiner = if meta.ordered { " < " } else { ", " };
         if !footer.is_empty() {
             footer.push('\n');
         }
-        footer.push_str(&format!(
-            "Categories ({}, {kind}): [{}]",
-            meta.categories.len(),
-            shown.join(joiner)
-        ));
+        footer.push_str(&pandas_categories_info(meta));
     }
     if series.is_empty() {
         return format!("Series([], {footer})");
@@ -20252,6 +20325,30 @@ impl PySeries {
     /// array in the column's numpy dtype, as pandas' - it was a Python list
     /// (fvsao.30).
     fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // A categorical's are a Categorical keeping every category and the
+        // ordering, as pandas' Categorical.unique; an object array dropped
+        // them (br-frankenpandas-ba9pc).
+        if let Some(meta) = self.inner.column().categorical() {
+            let codes = self
+                .inner
+                .unique()
+                .iter()
+                .map(|value| {
+                    meta.categories
+                        .iter()
+                        .position(|category| !value.is_missing() && category == value)
+                        .map_or(-1, |position| position as i64)
+                })
+                .collect();
+            let inner = Series::from_categorical_codes(
+                self.inner.name(),
+                codes,
+                meta.categories.clone(),
+                meta.ordered,
+            )
+            .map_err(frame_error_to_py)?;
+            return PyCategorical { inner }.into_py_any(py);
+        }
         // A datetime / duration column's are Timestamps / Timedeltas, a
         // zoned one's in its zone (pandas' DatetimeArray / TimedeltaArray; a
         // DatetimeIndex / TimedeltaIndex here). The numpy array iterated
@@ -52234,17 +52331,23 @@ impl PyCategorical {
             .collect()
     }
 
+    /// pandas' repr: the values (the first and last 5 around '...' past 10,
+    /// then `Length: n`) over the categories line. It printed
+    /// `Categorical(categories=[...], ordered=.., length=..)` (ba9pc).
     fn __repr__(&self) -> String {
-        let meta = self.meta();
-        format!(
-            "Categorical(categories={:?}, ordered={}, length={})",
-            meta.categories
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-            meta.ordered,
-            self.inner.len()
-        )
+        // Each run printed is formatted on its own, as pandas slices first
+        // (an interval[int64] run holding a NaN prints as float64).
+        let footer = pandas_categories_info(&self.meta());
+        let values = self.inner.column().values();
+        match values.len() {
+            0 => format!("[], {footer}"),
+            n if n > 10 => format!(
+                "[{}, ..., {}]\nLength: {n}\n{footer}",
+                pandas_quoted_texts(&values[..5]).join(", "),
+                pandas_quoted_texts(&values[n - 5..]).join(", ")
+            ),
+            _ => format!("[{}]\n{footer}", pandas_quoted_texts(values).join(", ")),
+        }
     }
 
     fn __len__(&self) -> usize {

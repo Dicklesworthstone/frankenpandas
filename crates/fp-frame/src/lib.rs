@@ -26433,6 +26433,52 @@ impl Series {
         self.describe_with_percentiles(&[0.25, 0.5, 0.75])
     }
 
+    /// A categorical's describe, as pandas' `describe_categorical_1d`:
+    /// count, unique (the categories present), top - the most frequent, a tie
+    /// to the earlier category - and freq, in a Series whose dtype pandas
+    /// infers from them (int64 / float64 for a number, object otherwise and
+    /// with nothing present, top and freq NaN). It ran the numeric summary:
+    /// NaN statistics for text, the mean of numbers (br-frankenpandas-ba9pc).
+    /// `None` for a Series that is not categorical.
+    fn describe_categorical(&self) -> Result<Option<Self>, FrameError> {
+        let (Some(meta), Some(codes)) = (self.categorical.as_ref(), self.category_codes()) else {
+            return Ok(None);
+        };
+        let mut counts = vec![0_i64; meta.categories.len()];
+        for code in codes {
+            if let Some(slot) = usize::try_from(code).ok().and_then(|c| counts.get_mut(c)) {
+                *slot += 1;
+            }
+        }
+        let count: i64 = counts.iter().sum();
+        let unique = counts.iter().filter(|&&n| n > 0).count() as i64;
+        // The earliest category of the highest count (a strict `>`).
+        let top = counts
+            .iter()
+            .enumerate()
+            .fold(None::<(usize, i64)>, |best, (position, &n)| match best {
+                Some((_, most)) if n <= most => best,
+                _ if n > 0 => Some((position, n)),
+                _ => best,
+            });
+        let labels: Vec<IndexLabel> = ["count", "unique", "top", "freq"]
+            .iter()
+            .map(|name| IndexLabel::Utf8((*name).to_string()))
+            .collect();
+        let (top, freq) = match top {
+            Some((position, freq)) => (meta.categories[position].clone(), Scalar::Int64(freq)),
+            None => (Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)),
+        };
+        let numeric = matches!(top, Scalar::Int64(_) | Scalar::Float64(_));
+        let stats = vec![Scalar::Int64(count), Scalar::Int64(unique), top, freq];
+        let column = if numeric {
+            Column::from_values(stats)?
+        } else {
+            Column::from_object_values(stats)
+        };
+        Self::new(self.name.clone(), Index::new(labels), column).map(Some)
+    }
+
     /// Generate descriptive statistics with custom percentiles.
     ///
     /// Matches `pd.Series.describe(percentiles=[...])`.
@@ -26455,6 +26501,9 @@ impl Series {
         // The result mixes Int64 and Utf8; `Column::from_values` holds that by
         // falling back to its object representation.
         // br-frankenpandas-live-oracle-passes-by-skip-l7r1p.
+        if let Some(described) = self.describe_categorical()? {
+            return Ok(described);
+        }
         if self.column.dtype() == DType::Utf8 {
             let values = self.column.values();
             let mut order: Vec<String> = Vec::new();
@@ -174988,6 +175037,74 @@ mod tests {
 
         let result = s.describe().unwrap();
         assert!(matches!(result.values()[2], Scalar::Float64(v) if v.is_nan()));
+    }
+
+    #[test]
+    fn describe_of_a_categorical_counts_its_categories_ba9pc() {
+        let text = |t: &str| Scalar::Utf8(t.to_owned());
+        // count / unique / top / freq, a tie to the EARLIER category ('b'
+        // precedes 'a' here), the missing value not counted.
+        let s = Series::from_categorical_codes(
+            "c",
+            vec![1, 0, 1, 0, -1],
+            vec![text("b"), text("a")],
+            false,
+        )
+        .unwrap();
+        let described = s.describe().unwrap();
+        let labels: Vec<String> = described
+            .index()
+            .labels()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(labels, ["count", "unique", "top", "freq"]);
+        assert_eq!(
+            described.values(),
+            &[
+                Scalar::Int64(4),
+                Scalar::Int64(2),
+                text("b"),
+                Scalar::Int64(2)
+            ]
+        );
+        assert_eq!(described.name(), "c");
+        // Int categories make an int64 result, as pandas infers it.
+        let ints = Series::from_categorical(
+            "n",
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+            false,
+        )
+        .unwrap()
+        .describe()
+        .unwrap();
+        assert_eq!(ints.column().dtype(), DType::Int64);
+        assert_eq!(
+            ints.values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(2)
+            ]
+        );
+        // Nothing present: top and freq are missing.
+        let none = Series::from_categorical_codes("e", vec![-1, -1], vec![text("a")], false)
+            .unwrap()
+            .describe()
+            .unwrap();
+        assert_eq!(&none.values()[..2], &[Scalar::Int64(0), Scalar::Int64(0)]);
+        assert!(none.values()[2].is_missing() && none.values()[3].is_missing());
+        // NEGATIVE: a plain int Series keeps the numeric summary.
+        let plain = Series::from_values(
+            "p",
+            (0..3_i64).map(IndexLabel::from).collect(),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap()
+        .describe()
+        .unwrap();
+        assert_eq!(plain.len(), 8);
     }
 
     // ── DataFrame.to_csv_options ────────────────────────────────

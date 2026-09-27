@@ -11114,3 +11114,62 @@ def _cut_interval_outcome(m: Any, run: Any) -> Any:
 def test_cut_and_qcut_values_are_intervals_like_pandas(case: str) -> None:
     run = _CUT_INTERVAL_CASES[case]
     assert _cut_interval_outcome(fpd, run) == _cut_interval_outcome(pd, run), case
+
+
+# br-frankenpandas-ba9pc: a categorical's describe() is pandas'
+# describe_categorical_1d (count / unique / top / freq, top the most frequent
+# with a tie to the earlier category, the dtype inferred from the four); its
+# unique() a Categorical keeping every category. They were the numeric summary
+# and an object array. The Categories line truncates past 8 and wraps at 80
+# columns; a Categorical prints as pandas'; numeric categories print as their
+# values' array ('2.50').
+def _cat_series(m: Any, vals: Any, cats: Any = None, ordered: bool = False, name: Any = None) -> Any:
+    return m.Series(m.Categorical(vals, categories=cats, ordered=ordered), name=name)
+
+
+_CATEGORICAL_SUMMARY_CASES = {
+    "describe text": lambda m: repr(_cat_series(m, ["a", "b", "a", None]).describe()),
+    "describe tie to the earlier category": lambda m: repr(_cat_series(m, ["b", "a", "b", "a"], cats=["b", "a"]).describe()),
+    "describe tie, default order": lambda m: repr(_cat_series(m, ["c", "b", "c", "b", "a", "a"]).describe()),
+    "describe ints": lambda m: repr(_cat_series(m, [1, 2, 1]).describe()),
+    "describe floats": lambda m: repr(_cat_series(m, [1.5, 2.5]).describe()),
+    "describe bools": lambda m: repr(_cat_series(m, [True, False, True]).describe()),
+    "describe nothing present": lambda m: repr(_cat_series(m, [None, None], cats=["a"]).describe()),
+    "describe keeps the name": lambda m: repr(_cat_series(m, ["a", "b", "a"], name="nm").describe()),
+    "describe cut": lambda m: repr(m.cut(m.Series([25, 3, 7, 30]), [0, 5, 50]).describe()),
+    "unique text": lambda m: repr(_cat_series(m, ["a", "b", "a", None]).unique()),
+    "unique keeps unused categories": lambda m: repr(_cat_series(m, ["a"], cats=["a", "b"]).unique()),
+    "unique ordered": lambda m: repr(_cat_series(m, [2, 1, 2], ordered=True).unique()),
+    "unique cut with a NaN": lambda m: repr(m.cut(m.Series([25, 3, None]), [0, 5, 50]).unique()),
+    "unique cut": lambda m: repr(m.cut(m.Series([25, 3]), [0, 5, 50]).unique()),
+    "unique long": lambda m: repr(_cat_series(m, list("abcdefghijklmnopqrstuvwxyz") * 2).unique()),
+    "unique is a Categorical": lambda m: type(_cat_series(m, ["a"]).unique()).__name__,
+    "Categorical empty": lambda m: repr(m.Categorical([])),
+    "Categorical ordered": lambda m: repr(m.Categorical(["a", "b"], ordered=True)),
+    "Categorical floats with a NaN": lambda m: repr(m.Categorical([1.25, 2.5, None])),
+    "Categories past 8, cut": lambda m: repr(m.cut(m.Series(range(100)), 10)),
+    "Categories past 8, ordered": lambda m: repr(_cat_series(m, list("abcdefghij"), ordered=True)),
+    "Categories past 8": lambda m: repr(_cat_series(m, list("abcdefghij"))),
+    "Categories wrap at 80": lambda m: repr(_cat_series(m, ["x" * 30, "y" * 30, "z" * 30])),
+    "float categories": lambda m: repr(_cat_series(m, [1.25, 2.5])),
+    "negative int categories": lambda m: repr(_cat_series(m, [-1, 5])),
+    "int categories with a NaN": lambda m: repr(m.DataFrame({"c": _cat_series(m, [1, 2, None])})),
+    # NEGATIVE: a plain Series' describe / unique are not a categorical's.
+    "describe plain text": lambda m: repr(m.Series(["a", "b", "a"]).describe()),
+    "describe plain ints": lambda m: repr(m.Series([1, 2, 3]).describe()),
+    "unique plain": lambda m: repr(m.Series(["a", "b", "a"]).unique()),
+}
+
+
+def _categorical_summary_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CATEGORICAL_SUMMARY_CASES))
+def test_categorical_describe_unique_and_repr_like_pandas(case: str) -> None:
+    run = _CATEGORICAL_SUMMARY_CASES[case]
+    assert _categorical_summary_outcome(fpd, run) == _categorical_summary_outcome(pd, run), case
