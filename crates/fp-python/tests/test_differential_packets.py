@@ -12083,3 +12083,58 @@ def _masked_outcome(m: Any, run: Any) -> Any:
 def test_masked_dtypes_propagate_like_pandas(case: str) -> None:
     run = _MASKED_CASES[case]
     assert _masked_outcome(fpd, run) == _masked_outcome(pd, run), case
+
+
+# br-frankenpandas-dffjf: an Index's .dtype was a str ('int64'; .kind and
+# .name raised), the api.types predicates tested False for a dtype object
+# (Series.dtype, which is numpy's) and True in is_extension_array_dtype for
+# any, and Index(tupleize_cols=False) was refused.
+def _dt_of(d: Any) -> Any:
+    return (type(d).__name__, getattr(d, "kind", None), getattr(d, "name", None), str(d))
+
+
+_INDEX_DTYPE_CASES = {
+    "int Index dtype": lambda m: _dt_of(m.Index([1, 2]).dtype),
+    "float Index dtype": lambda m: _dt_of(m.Index([1.5]).dtype),
+    "object Index dtype": lambda m: _dt_of(m.Index(["a"]).dtype),
+    "bool Index dtype": lambda m: _dt_of(m.Index([True, False]).dtype),
+    "DatetimeIndex dtype": lambda m: _dt_of(m.date_range("2024-01-01", periods=2).dtype),
+    "zoned DatetimeIndex dtype": lambda m: str(m.date_range("2024-01-01", periods=2, tz="UTC").dtype),
+    "TimedeltaIndex dtype": lambda m: _dt_of(m.to_timedelta(["1 day"]).dtype),
+    "PeriodIndex dtype": lambda m: _dt_of(m.period_range("2024-01", periods=2, freq="M").dtype),
+    "CategoricalIndex dtype": lambda m: (lambda d: (type(d).__name__, d.name, list(d.categories), d.ordered))(m.CategoricalIndex(["b", "a"]).dtype),
+    "MultiIndex dtype": lambda m: _dt_of(m.MultiIndex.from_tuples([("a", 1)]).dtype),
+    # NEGATIVE: comparing with the name still works.
+    "Index dtype equals its name": lambda m: (m.Index([1]).dtype == "int64", m.Index(["a"]).dtype == "object"),
+    "is_integer_dtype of Series.dtype": lambda m: m.api.types.is_integer_dtype(m.Series([1]).dtype),
+    "is_integer_dtype of an Int64 Series": lambda m: (m.api.types.is_integer_dtype(m.Series([1, None], dtype="Int64")), m.api.types.is_integer_dtype(m.Series([1, None], dtype="Int64").dtype)),
+    "is_float_dtype of Index.dtype": lambda m: m.api.types.is_float_dtype(m.Index([1.5]).dtype),
+    "is_bool_dtype of Series": lambda m: m.api.types.is_bool_dtype(m.Series([True])),
+    "is_numeric_dtype of types": lambda m: [m.api.types.is_numeric_dtype(t) for t in (int, float, complex, str, np.int32)],
+    "is_string_dtype": lambda m: [m.api.types.is_string_dtype(x) for x in (m.Series(["a"]), m.Series([1, "a"]), m.Series(["a", None]), m.Series(["a"], dtype="category"), m.Series([1], dtype="category"), np.dtype("O"), str)],
+    "is_object_dtype": lambda m: [m.api.types.is_object_dtype(x) for x in (m.Series(["a"]), m.Series(["a"], dtype="category"), np.dtype("O"), m.Index(["a"]))],
+    "is_datetime64 family": lambda m: (lambda aware, naive: [f(x) for f in (m.api.types.is_datetime64_dtype, m.api.types.is_datetime64_ns_dtype, m.api.types.is_datetime64_any_dtype) for x in (aware, naive)])(m.Series(m.to_datetime(["2024"]).tz_localize("UTC")), m.Series(m.to_datetime(["2024"]))),
+    "is_extension_array_dtype": lambda m: [m.api.types.is_extension_array_dtype(x) for x in (np.dtype("int64"), m.Series([1]), m.Series([1], dtype="Int64"), "category", "int64")],
+    # NEGATIVE: an interval dtype is not an integer dtype.
+    "is_integer_dtype of an interval dtype": lambda m: m.api.types.is_integer_dtype(m.interval_range(0, 2).dtype),
+    "Index tupleize_cols=False": lambda m: repr(m.Index([("a", 1), ("b", 2)], tupleize_cols=False)),
+    "Series over an Index of tuples": lambda m: repr(m.Series([1, 2], index=m.Index([("a", 1), ("b", 2)], tupleize_cols=False))),
+    # NEGATIVE: tuples still make a MultiIndex by default.
+    "Index of tuples": lambda m: type(m.Index([("a", 1), ("b", 2)])).__name__,
+}
+
+
+def _index_dtype_outcome(m: Any, run: Any) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_INDEX_DTYPE_CASES))
+def test_index_dtypes_and_type_predicates_like_pandas(case: str) -> None:
+    run = _INDEX_DTYPE_CASES[case]
+    assert _index_dtype_outcome(fpd, run) == _index_dtype_outcome(pd, run), case

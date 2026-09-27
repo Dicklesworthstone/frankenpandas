@@ -316,6 +316,52 @@ fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<
     }
 }
 
+/// pandas' dtype object for an index's dtype `name` (as the index spells
+/// it): numpy's for int64 / float64 / bool / object / datetime64[ns] /
+/// timedelta64[ns], DatetimeTZDtype for a zoned one, PeriodDtype for
+/// period[F], CategoricalDtype (of `categories`) for category; the name for
+/// anything else. `Index.dtype` was the name as a str (`.kind` raised).
+fn index_dtype_object<'py>(
+    py: Python<'py>,
+    name: &str,
+    categories: Option<(Vec<Scalar>, bool)>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if matches!(
+        name,
+        "int64" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
+    ) {
+        return py.import("numpy")?.call_method1("dtype", (name,));
+    }
+    if let Some(zone) = name
+        .strip_prefix("datetime64[ns, ")
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        return PyDatetimeTZDtype {
+            unit: "ns".to_owned(),
+            tz: zone.to_owned(),
+        }
+        .into_bound_py_any(py);
+    }
+    if let Some(freq) = name
+        .strip_prefix("period[")
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        return PyPeriodDtype {
+            freq: freq.to_owned(),
+        }
+        .into_bound_py_any(py);
+    }
+    if name == "category" {
+        let (categories, ordered) = categories.unwrap_or_default();
+        return PyCategoricalDtype {
+            categories: Some(categories),
+            ordered,
+        }
+        .into_bound_py_any(py);
+    }
+    Ok(pyo3::types::PyString::new(py, name).into_any())
+}
+
 /// pandas' name for a dtype, as `Series.dtype` / `DataFrame.dtypes` print it.
 fn pandas_dtype_name(dtype: &fp_types::DType) -> String {
     use fp_types::DType;
@@ -7920,7 +7966,6 @@ impl PyIndex {
         tupleize_cols: bool,
     ) -> PyResult<Py<PyAny>> {
         let _ = copy; // pandas' copy= does not change the labels
-        unsupported_params("Index", &[("tupleize_cols", tupleize_cols)])?;
         if let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) {
             return Ok(Py::new(py, Self::new(data, name)?.astype(dtype, true)?)?.into_any());
         }
@@ -7933,8 +7978,12 @@ impl PyIndex {
             let index = PyDatetimeIndex::new(py, Some(data), None, None, name)?;
             return Ok(Py::new(py, index)?.into_any());
         }
-        // Tuples are pandas' MultiIndex (they became their text; r0hk0).
-        if let Some(multi) = data.map(tuple_labels_multiindex).transpose()?.flatten() {
+        // Tuples are pandas' MultiIndex (they became their text; r0hk0) -
+        // under tupleize_cols=False an object Index of the tuples themselves
+        // (it was refused).
+        if tupleize_cols
+            && let Some(multi) = data.map(tuple_labels_multiindex).transpose()?.flatten()
+        {
             return Ok(Py::new(py, PyMultiIndex { inner: multi })?.into_any());
         }
         let index = Self::new(data, name)?.inner;
@@ -8068,9 +8117,10 @@ impl PyIndex {
         ))
     }
 
+    /// pandas' dtype object (see [`index_dtype_object`]).
     #[getter]
-    fn dtype(&self) -> &'static str {
-        self.inner.dtype()
+    fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        index_dtype_object(py, self.inner.dtype(), None)
     }
 
     #[getter]
@@ -9615,13 +9665,15 @@ impl PyDatetimeIndex {
         self.inner = self.inner.set_names(name);
     }
 
-    /// `datetime64[ns]`, or `datetime64[ns, zone]` for a tz-aware index.
+    /// `datetime64[ns]`, or `datetime64[ns, zone]` for a tz-aware index, as
+    /// pandas' dtype object (see [`index_dtype_object`]).
     #[getter]
-    fn dtype(&self) -> String {
-        match self.inner.tz() {
+    fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let name = match self.inner.tz() {
             Some(zone) => format!("datetime64[ns, {zone}]"),
             None => "datetime64[ns]".to_owned(),
-        }
+        };
+        index_dtype_object(py, &name, None)
     }
 
     #[getter]
@@ -10060,7 +10112,11 @@ impl PyDatetimeIndex {
             None => pandas_datetime_cells(&instants, true),
         };
         let items: Vec<String> = texts.into_iter().map(|text| format!("'{text}'")).collect();
-        let mut attrs = vec![format!("dtype='{}'", self.dtype())];
+        let dtype = match self.inner.tz() {
+            Some(zone) => format!("datetime64[ns, {zone}]"),
+            None => "datetime64[ns]".to_owned(),
+        };
+        let mut attrs = vec![format!("dtype='{dtype}'")];
         attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
         attrs.push(match self.inner.freq() {
             Some(freq) => format!("freq='{freq}'"),
@@ -11649,9 +11705,10 @@ impl PyMultiIndex {
         self.inner.memory_usage(deep)
     }
 
+    /// numpy's object dtype, as pandas' MultiIndex.dtype (a str).
     #[getter]
-    fn dtype(&self) -> &'static str {
-        self.inner.dtype()
+    fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        index_dtype_object(py, self.inner.dtype(), None)
     }
 
     #[getter]
@@ -12924,9 +12981,10 @@ impl PyTimedeltaIndex {
         self.inner.empty()
     }
 
+    /// numpy's timedelta64[ns] dtype (a str; see [`index_dtype_object`]).
     #[getter]
-    pub fn dtype(&self) -> &'static str {
-        self.inner.dtype()
+    pub fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        index_dtype_object(py, self.inner.dtype(), None)
     }
 
     #[getter]
@@ -14497,9 +14555,10 @@ impl PyPeriodIndex {
         self.inner.empty()
     }
 
+    /// pandas' PeriodDtype (a str; see [`index_dtype_object`]).
     #[getter]
-    pub fn dtype(&self) -> String {
-        self.inner.dtype()
+    pub fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        index_dtype_object(py, &self.inner.dtype(), None)
     }
 
     #[getter]
@@ -15508,12 +15567,16 @@ impl PyCategoricalIndex {
             Vec::new()
         };
 
-        let mut inner = if let Some(cats) = categories {
-            CategoricalIndex::with_categories(labels, cats, ordered)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-        } else {
-            CategoricalIndex::from_values(labels, ordered)
-        };
+        // Inferred categories are the sorted distinct labels, as pandas'
+        // (they were in first-seen order).
+        let categories = categories.unwrap_or_else(|| {
+            let mut distinct = labels.clone();
+            distinct.sort();
+            distinct.dedup();
+            distinct
+        });
+        let mut inner = CategoricalIndex::with_categories(labels, categories, ordered)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         if let Some(n) = name {
             inner = inner.set_name(n);
         }
@@ -15560,9 +15623,20 @@ impl PyCategoricalIndex {
         self.inner.empty()
     }
 
+    /// pandas' CategoricalDtype of these categories (a str).
     #[getter]
-    pub fn dtype(&self) -> &'static str {
-        self.inner.dtype()
+    pub fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let categories = self
+            .inner
+            .categories()
+            .iter()
+            .map(|category| Scalar::Utf8(category.clone()))
+            .collect();
+        index_dtype_object(
+            py,
+            self.inner.dtype(),
+            Some((categories, self.inner.ordered())),
+        )
     }
 
     pub fn tolist(&self) -> Vec<String> {
@@ -51815,176 +51889,130 @@ pyo3::create_exception!(
     pyo3::exceptions::PyUserWarning
 );
 
+/// The dtype name pandas' `api.types` predicates test: a dtype object's
+/// name (numpy's 'int64', 'Int64', 'category', 'datetime64[ns, UTC]'), a
+/// dtype string as given, a type's numpy name (int -> int64, float ->
+/// float64, bool, str, np.int32 -> int32), or a Series', Index's or
+/// array's dtype; None for anything else. The predicates read a str or a
+/// type's `__name__` alone, so a dtype object - `Series.dtype` - tested
+/// False (`is_integer_dtype(s.dtype)`).
+fn dtype_spelling(obj: &Bound<'_, PyAny>) -> Option<String> {
+    if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
+        return Some(series.dtype_name());
+    }
+    if let Ok(text) = obj.extract::<String>() {
+        return Some(text);
+    }
+    if let Ok(kind) = obj.cast::<pyo3::types::PyType>() {
+        let name = kind.name().ok()?.to_string();
+        return Some(
+            match name.as_str() {
+                "int" => "int64",
+                "float" => "float64",
+                "complex" => "complex128",
+                "bool" | "bool_" => "bool",
+                "str" | "str_" => "str",
+                "object" | "object_" => "object",
+                other => other,
+            }
+            .to_owned(),
+        );
+    }
+    if obj.hasattr("kind").unwrap_or(false)
+        && let Ok(name) = obj
+            .getattr("name")
+            .and_then(|name| name.extract::<String>())
+    {
+        return Some(name);
+    }
+    obj.getattr("dtype")
+        .ok()
+        .and_then(|dtype| dtype_spelling(&dtype))
+}
+
 fn is_bool_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(b) = obj.extract::<bool>() {
-        return b;
-    }
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype_name() == "bool" || s.dtype_name() == "boolean";
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        return idx.dtype() == "bool" || idx.dtype() == "boolean";
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return s == "bool" || s == "boolean";
-    }
-    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
-        return name == "bool";
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| name == "bool" || name == "boolean")
+}
+
+/// int64, Int64, uint8, UInt16 ... - not interval[int64].
+fn is_integer_name(name: &str) -> bool {
+    (name.starts_with("int") || name.starts_with("Int"))
+        && !name.to_ascii_lowercase().starts_with("interval")
+        || name.starts_with("uint")
+        || name.starts_with("UInt")
 }
 
 fn is_integer_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype_name().contains("int");
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        return idx.dtype().contains("int");
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return s.contains("int");
-    }
-    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
-        return name == "int" || name.starts_with("int") || name.starts_with("uint");
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| is_integer_name(&name))
 }
 
 fn is_unsigned_integer_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype_name().contains("uint");
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        return idx.dtype().contains("uint");
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return s.contains("uint");
-    }
-    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
-        return name.starts_with("uint");
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| name.starts_with("uint") || name.starts_with("UInt"))
 }
 
 fn is_float_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype_name().contains("float");
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        return idx.dtype().contains("float");
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return s.contains("float");
-    }
-    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
-        return name == "float" || name.starts_with("float");
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| name.starts_with("float") || name.starts_with("Float"))
 }
 
 fn is_numeric_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if is_bool_dtype_impl(obj) || is_integer_dtype_impl(obj) || is_float_dtype_impl(obj) {
-        return true;
-    }
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        let dt = s.dtype_name();
-        return dt.contains("int") || dt.contains("float") || dt == "bool";
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        let dt = idx.dtype();
-        return dt.contains("int") || dt.contains("float") || dt == "bool";
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return s.contains("int") || s.contains("float") || s == "number" || s == "numeric";
-    }
-    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
-        return name == "int" || name == "float" || name == "complex" || name == "number";
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| {
+        is_integer_name(&name)
+            || name.starts_with("float")
+            || name.starts_with("Float")
+            || name.starts_with("complex")
+            || matches!(name.as_str(), "bool" | "boolean" | "number" | "numeric")
+    })
 }
 
+/// pandas' `is_string_dtype`: an object Series or Index only when every
+/// value is a str (a None is not; it was any object column), a categorical
+/// Series when its categories are strs, else a str / object / string dtype.
 fn is_string_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        let dt = s.dtype_name();
-        return dt == "string" || dt == "object" || dt == "utf8";
+    let text = |value: &Scalar| matches!(value, Scalar::Utf8(_));
+    if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
+        if let Some(meta) = series.inner.column().categorical() {
+            return meta.categories.iter().all(text);
+        }
+        if series.inner.dtype() == DType::Utf8 {
+            return series.inner.values().iter().all(text);
+        }
     }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        let dt = idx.dtype();
-        return dt == "string" || dt == "object" || dt == "utf8";
+    if let Ok(index) = obj.extract::<PyRef<'_, PyIndex>>()
+        && index.inner.dtype() == "object"
+    {
+        return index
+            .inner
+            .labels()
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Utf8(_)));
     }
-    if let Ok(s) = obj.extract::<String>() {
-        return s == "str" || s == "string" || s == "object" || s == "utf8";
-    }
-    if let Ok(name) = obj.getattr("__name__").and_then(|t| t.extract::<String>()) {
-        return name == "str" || name == "String";
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| {
+        matches!(name.as_str(), "str" | "string" | "object" | "O" | "utf8")
+            || name.starts_with("<U")
+    })
 }
 
+/// Any datetime64 dtype, naive or zoned (`is_datetime64_any_dtype`).
 fn is_datetime_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype_name().contains("datetime");
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        let _ = idx;
-        return true;
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return s.contains("datetime");
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| name.starts_with("datetime64"))
 }
 
 fn is_timedelta_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype_name().contains("timedelta");
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
-        let _ = idx;
-        return true;
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return s.contains("timedelta");
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| name.starts_with("timedelta64"))
 }
 
 fn is_period_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype_name().contains("period") || s.dtype_name().contains("Period");
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
-        let _ = idx;
-        return true;
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return s.starts_with("period") || s.starts_with("Period");
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| name.starts_with("period") || name.starts_with("Period"))
 }
 
 fn is_categorical_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
-        return s.dtype_name().contains("category") || s.dtype_name().contains("categorical");
-    }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
-        let _ = idx;
+    if let Ok(name) = obj.getattr("__name__")
+        && let Ok(name) = name.extract::<String>()
+        && (name == "CategoricalDtype" || name == "Categorical")
+    {
         return true;
     }
-    if let Ok(s) = obj.extract::<String>() {
-        return s == "category" || s == "categorical";
-    }
-    if let Ok(name) = obj.getattr("name")
-        && let Ok(s) = name.extract::<String>()
-    {
-        return s == "category" || s == "categorical";
-    }
-    if let Ok(name) = obj.getattr("__name__")
-        && let Ok(s) = name.extract::<String>()
-    {
-        return s == "CategoricalDtype" || s == "Categorical";
-    }
-    false
+    dtype_spelling(obj).is_some_and(|name| name == "category" || name == "categorical")
 }
 
 fn is_list_like_impl(obj: &Bound<'_, PyAny>) -> bool {
@@ -52317,9 +52345,10 @@ fn api_is_datetime64_any_dtype(dtype: &Bound<'_, PyAny>) -> bool {
     is_datetime_dtype_impl(dtype)
 }
 
+/// A naive datetime64 dtype only; a zoned one is not (it was).
 #[pyfunction(name = "is_datetime64_dtype")]
 fn api_is_datetime64_dtype(dtype: &Bound<'_, PyAny>) -> bool {
-    is_datetime_dtype_impl(dtype)
+    dtype_spelling(dtype).is_some_and(|name| name.starts_with("datetime64") && !name.contains(", "))
 }
 
 #[pyfunction(name = "is_datetime64_ns_dtype")]
@@ -52349,39 +52378,36 @@ fn api_is_categorical_dtype(dtype: &Bound<'_, PyAny>) -> bool {
 
 #[pyfunction(name = "is_interval_dtype")]
 fn api_is_interval_dtype(dtype: &Bound<'_, PyAny>) -> bool {
-    if let Ok(s) = dtype.extract::<String>() {
-        return s.starts_with("interval") || s.starts_with("Interval");
-    }
-    if let Ok(name) = dtype.getattr("name")
-        && let Ok(s) = name.extract::<String>()
-    {
-        return s.starts_with("interval") || s.starts_with("Interval");
-    }
-    if let Ok(name) = dtype.getattr("__name__")
-        && let Ok(s) = name.extract::<String>()
-    {
-        return s.starts_with("Interval");
-    }
-    false
+    dtype_spelling(dtype)
+        .is_some_and(|name| name.starts_with("interval") || name.starts_with("Interval"))
 }
 
+/// pandas' extension dtypes - the nullable Int / UInt / Float / boolean,
+/// string, category, period, interval and zoned datetimes - of a dtype or
+/// of a Series / array; a numpy dtype is not (every dtype object was).
 #[pyfunction(name = "is_extension_array_dtype")]
 fn api_is_extension_array_dtype(dtype: &Bound<'_, PyAny>) -> bool {
-    if dtype.hasattr("kind").unwrap_or(false) && dtype.hasattr("name").unwrap_or(false) {
-        return true;
-    }
     if let Ok(name) = dtype.getattr("__name__")
-        && let Ok(s) = name.extract::<String>()
-        && s.ends_with("Dtype")
+        && let Ok(name) = name.extract::<String>()
+        && name.ends_with("Dtype")
     {
         return true;
     }
-    false
+    dtype_spelling(dtype).is_some_and(|name| {
+        matches!(name.as_str(), "boolean" | "string" | "category")
+            || [
+                "Int", "UInt", "Float", "period", "interval", "Sparse", "string[",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            || (name.starts_with("datetime64") && name.contains(", "))
+    })
 }
 
+/// The object dtype (text columns here); a categorical is not (it was).
 #[pyfunction(name = "is_object_dtype")]
 fn api_is_object_dtype(dtype: &Bound<'_, PyAny>) -> bool {
-    is_string_dtype_impl(dtype)
+    dtype_spelling(dtype).is_some_and(|name| name == "object" || name == "O")
 }
 
 #[pyfunction(name = "is_list_like")]
@@ -60925,7 +60951,9 @@ mod tests {
         let idx = PyIndex {
             inner: Index::new(labels),
         };
-        assert_eq!(idx.dtype(), "int64");
+        // TEST-CHANGE (dffjf): the getter is numpy's dtype object now; the
+        // index's own name is unchanged.
+        assert_eq!(idx.inner.dtype(), "int64");
         assert_eq!(idx.shape(), (4,));
         assert_eq!(idx.size(), 4);
         assert_eq!(idx.ndim(), 1);
@@ -61010,7 +61038,9 @@ mod tests {
             inner: DatetimeIndex::new(vec![nanos1, nanos2]),
         };
 
-        assert_eq!(dti.dtype(), "datetime64[ns]");
+        // TEST-CHANGE (dffjf): the getter is numpy's dtype object now; a
+        // naive index has no zone.
+        assert_eq!(dti.inner.tz(), None);
         assert_eq!(dti.shape(), (2,));
         assert_eq!(dti.size(), 2);
         assert_eq!(dti.ndim(), 1);
