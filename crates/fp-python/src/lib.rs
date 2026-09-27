@@ -28174,8 +28174,10 @@ impl PyDataFrame {
                         col_map.insert(c.clone(), col);
                     }
                 }
-                // Retain only columns in column_order
-                col_map.retain(|k, _| column_order.contains(k));
+                // Retain only columns in column_order (a set: the Vec scan
+                // per column made a 20,000-column dict quadratic).
+                let wanted: HashSet<&String> = column_order.iter().collect();
+                col_map.retain(|k, _| wanted.contains(k));
 
                 let df =
                     DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
@@ -52635,12 +52637,62 @@ fn factorize(
 
 /// A get_dummies cell in pandas' `dtype` (bool by default; float64 was
 /// ignored and came back bool).
-fn dummy_cell(matches: bool, dtype: Option<&str>) -> Scalar {
-    match dtype {
-        Some("int64") => Scalar::Int64(i64::from(matches)),
-        Some("float64") => Scalar::Float64(f64::from(u8::from(matches))),
-        _ => Scalar::Bool(matches),
+/// One dummy column per category of `categories` over `values` - a value
+/// matches the category of its text that it equals, a missing value the
+/// missing category - typed bool, or int64 / float64 for that `dtype`. The
+/// values are coded once and each column's buffer filled from its rows (it
+/// compared every value with every category through boxed scalars:
+/// get_dummies of 50,000 values in 5,000 categories took 25 s).
+fn dummy_columns(values: &[Scalar], categories: &[Scalar], dtype: Option<&str>) -> Vec<Column> {
+    let mut by_text: HashMap<String, usize> = HashMap::with_capacity(categories.len());
+    let mut missing_at = None;
+    for (at, category) in categories.iter().enumerate() {
+        if category.is_null() {
+            missing_at = Some(at);
+        } else {
+            by_text.entry(scalar_to_label_str(category)).or_insert(at);
+        }
     }
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new(); categories.len()];
+    for (row, value) in values.iter().enumerate() {
+        let at = if value.is_null() {
+            missing_at
+        } else {
+            by_text
+                .get(&scalar_to_label_str(value))
+                .copied()
+                .filter(|&at| *value == categories[at])
+        };
+        if let Some(at) = at {
+            rows[at].push(row);
+        }
+    }
+    let n = values.len();
+    rows.into_iter()
+        .map(|rows| match dtype {
+            Some("int64") => {
+                let mut data = vec![0_i64; n];
+                for row in rows {
+                    data[row] = 1;
+                }
+                Column::from_i64_values_owned(data)
+            }
+            Some("float64") => {
+                let mut data = vec![0.0_f64; n];
+                for row in rows {
+                    data[row] = 1.0;
+                }
+                Column::from_f64_values_owned(data)
+            }
+            _ => {
+                let mut data = vec![false; n];
+                for row in rows {
+                    data[row] = true;
+                }
+                Column::from_bool_values(data)
+            }
+        })
+        .collect()
 }
 
 #[pyfunction]
@@ -52709,8 +52761,9 @@ fn get_dummies(
         let mut result_col_order = Vec::new();
 
         // 1. Non-target columns first (matches pandas behavior)
+        let targets: HashSet<&String> = target_cols.iter().collect();
         for c_name in &all_df_cols {
-            if !target_cols.contains(c_name) {
+            if !targets.contains(c_name) {
                 let col_obj = df.inner.column(c_name).unwrap().clone();
                 result_col_map.insert(c_name.clone(), col_obj);
                 result_col_order.push(c_name.clone());
@@ -52747,23 +52800,14 @@ fn get_dummies(
                 } else {
                     0
                 };
-                for cat in distinct_cats.iter().skip(start_idx) {
+                let kept = &distinct_cats[start_idx..];
+                for (cat, col_obj) in kept.iter().zip(dummy_columns(vals, kept, dtype)) {
                     let dummy_name = if cat.is_null() {
                         format!("{label}{prefix_sep}nan")
                     } else {
                         let cat_str = scalar_to_label_str(cat);
                         format!("{label}{prefix_sep}{cat_str}")
                     };
-                    let bool_vals: Vec<Scalar> = vals
-                        .iter()
-                        .map(|v| {
-                            let matches = if cat.is_null() { v.is_null() } else { v == cat };
-                            dummy_cell(matches, dtype)
-                        })
-                        .collect();
-                    let col_obj = Column::from_values(bool_vals).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                    })?;
                     result_col_map.insert(dummy_name.clone(), col_obj);
                     result_col_order.push(dummy_name);
                 }
@@ -52809,12 +52853,14 @@ fn get_dummies(
     let mut col_map = BTreeMap::new();
     let mut col_order = Vec::new();
 
-    for cat in distinct_cats.iter().skip(start_idx) {
+    let kept = &distinct_cats[start_idx..];
+    for (cat, col_obj) in kept.iter().zip(dummy_columns(vals, kept, dtype)) {
         let dummy_name = if cat.is_null() {
             if let Some(p) = prefix {
                 format!("{p}{prefix_sep}nan")
             } else {
-                "nan".to_string()
+                // Keyed as a NaN label is, relabeled below.
+                fp_frame::column_key(&IndexLabel::Null(NullKind::NaN))
             }
         } else {
             let cat_str = scalar_to_label_str(cat);
@@ -52824,24 +52870,24 @@ fn get_dummies(
                 cat_str
             }
         };
-        let bool_vals: Vec<Scalar> = vals
-            .iter()
-            .map(|v| {
-                let matches = if cat.is_null() { v.is_null() } else { v == cat };
-                dummy_cell(matches, dtype)
-            })
-            .collect();
-        let col_obj = Column::from_values(bool_vals)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         col_map.insert(dummy_name.clone(), col_obj);
         col_order.push(dummy_name);
     }
     let df = DataFrame::new_with_column_order(s.inner.index().clone(), col_map, col_order)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    // Unprefixed, the columns are the values themselves, typed (fvsao.32).
+    // Unprefixed, the columns are the values themselves, typed (fvsao.32),
+    // the missing category's a NaN label as pandas' (it was the text 'nan').
     let df = match prefix {
         None => df.with_value_labels(&s.inner.column().dtype()),
         Some(_) => df,
+    };
+    let df = match (prefix, kept.iter().position(Scalar::is_null)) {
+        (None, Some(at)) => {
+            let mut labels = df.column_labels();
+            labels[at] = IndexLabel::Null(NullKind::NaN);
+            df.with_column_labels(labels).map_err(frame_error_to_py)?
+        }
+        _ => df,
     };
     Ok(PyDataFrame { inner: df })
 }

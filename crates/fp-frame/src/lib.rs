@@ -65371,19 +65371,49 @@ impl ColumnStore {
     }
 
     /// Reorder columns according to `order`, keeping any unlisted columns at the end.
+    ///
+    /// Each listed name takes the next of its stored columns in position
+    /// order; a name listed more often than it is stored repeats its first
+    /// placed column; a name never stored is skipped. Linear in the column
+    /// count through the name -> positions lookup: it searched every slot for
+    /// each name, O(n^2), and a 100k-column frame (the transpose of 100k
+    /// rows) spent 26 s here.
     pub fn reorder(&mut self, order: &[String]) {
+        if self.columns.len() == order.len()
+            && self
+                .columns
+                .iter()
+                .zip(order)
+                .all(|((name, _), listed)| name == listed)
+        {
+            return;
+        }
         let old_columns = std::mem::take(&mut self.columns);
         let mut slots: Vec<Option<(String, Column)>> = old_columns.into_iter().map(Some).collect();
         let mut new_columns = Vec::with_capacity(slots.len().max(order.len()));
-
+        // How many of each name's stored positions are taken, and where its
+        // first placed column landed.
+        let mut taken: FxHashMap<&str, usize> = FxHashMap::default();
+        let mut first_placed: FxHashMap<&str, usize> = FxHashMap::default();
         for name in order {
-            if let Some(slot) = slots
-                .iter_mut()
-                .find(|s| s.as_ref().is_some_and(|(n, _)| n == name))
+            let count = taken.entry(name.as_str()).or_insert(0);
+            let position = self
+                .lookup
+                .get(name.as_str())
+                .and_then(|positions| positions.get(*count))
+                .copied();
+            if let Some(pair) = position
+                .and_then(|position| slots.get_mut(position))
+                .and_then(Option::take)
             {
-                new_columns.push(slot.take().unwrap());
-            } else if let Some((_, col)) = new_columns.iter().find(|(n, _)| n == name) {
-                new_columns.push((name.clone(), col.clone()));
+                *count += 1;
+                first_placed
+                    .entry(name.as_str())
+                    .or_insert(new_columns.len());
+                new_columns.push(pair);
+            } else if let Some(&at) = first_placed.get(name.as_str()) {
+                let column = new_columns[at].1.clone();
+                new_columns.push((name.clone(), column));
             }
         }
         for slot in slots.into_iter().flatten() {
@@ -224685,6 +224715,66 @@ mod column_store_yion1 {
         assert_eq!(store.column_at(1).unwrap().as_f64_slice().unwrap()[0], 1.0);
         assert_eq!(store.column_at(2).unwrap().as_f64_slice().unwrap()[0], 2.0);
         assert_eq!(store.column_at(3).unwrap().as_f64_slice().unwrap()[0], 3.0);
+    }
+
+    /// The linear reorder places exactly what the quadratic search did:
+    /// checked against that search (kept here as the reference) over seeded
+    /// random stores with repeated names, names listed more often than
+    /// stored, unknown names and unlisted columns.
+    #[test]
+    fn column_store_reorder_matches_the_linear_search_reference() {
+        fn reference(pairs: &[(String, f64)], order: &[String]) -> Vec<(String, f64)> {
+            let mut slots: Vec<Option<(String, f64)>> = pairs.iter().cloned().map(Some).collect();
+            let mut out: Vec<(String, f64)> = Vec::new();
+            for name in order {
+                if let Some(slot) = slots
+                    .iter_mut()
+                    .find(|s| s.as_ref().is_some_and(|(n, _)| n == name))
+                {
+                    out.push(slot.take().unwrap());
+                } else if let Some((_, v)) = out.iter().find(|(n, _)| n == name) {
+                    out.push((name.clone(), *v));
+                }
+            }
+            out.extend(slots.into_iter().flatten());
+            out
+        }
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for _ in 0..300 {
+            let pairs: Vec<(String, f64)> = (0..next(8))
+                .map(|i| (format!("c{}", next(4)), i as f64))
+                .collect();
+            let order: Vec<String> = (0..next(10)).map(|_| format!("c{}", next(6))).collect();
+            let mut store = ColumnStore::from_pairs(
+                pairs
+                    .iter()
+                    .map(|(name, value)| (name.clone(), column(&[*value]))),
+            );
+            store.reorder(&order);
+            let got: Vec<(String, f64)> = (0..store.len())
+                .map(|at| {
+                    (
+                        store.name_at(at).unwrap().to_owned(),
+                        store.column_at(at).unwrap().as_f64_slice().unwrap()[0],
+                    )
+                })
+                .collect();
+            assert_eq!(
+                got,
+                reference(&pairs, &order),
+                "order {order:?} over {pairs:?}"
+            );
+            // The lookup answers for the new positions.
+            for (at, (name, _)) in got.iter().enumerate() {
+                assert!(store.lookup[name].contains(&at));
+            }
+        }
     }
 
     #[test]

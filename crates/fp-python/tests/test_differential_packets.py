@@ -12138,3 +12138,42 @@ def _index_dtype_outcome(m: Any, run: Any) -> Any:
 def test_index_dtypes_and_type_predicates_like_pandas(case: str) -> None:
     run = _INDEX_DTYPE_CASES[case]
     assert _index_dtype_outcome(fpd, run) == _index_dtype_outcome(pd, run), case
+
+
+# Wide frames (scratch p13/wide_bench.py): transposing 100,000 rows took 26 s
+# (fp-frame's ColumnStore::reorder searched every slot per name), get_dummies
+# of 5,000 categories 25 s (a boxed compare of every value with every
+# category) and a 20,000-column dict frame 1.8 s (a Vec scan per column), all
+# quadratic. These check that the linear paths build the same frames.
+def _wide_summary(d: Any) -> Any:
+    return (d.shape, [str(c) for c in list(d.columns[:3])], [str(c) for c in list(d.columns[-2:])], [str(v) for v in d.dtypes.iloc[:2]])
+
+
+_WIDE_CASES = {
+    "transpose of many rows": lambda m: (lambda d: (_wide_summary(d), d.iloc[:, 1234].tolist()))(m.DataFrame({"a": range(3000), "b": range(3000, 6000)}).T),
+    "transpose of a string index": lambda m: (lambda d: (_wide_summary(d), d.loc["b"].tolist()[-3:]))(m.DataFrame({"a": [1.5] * 2500, "b": [2.5] * 2500}, index=[f"r{i}" for i in range(2500)]).T),
+    "transpose of repeated row labels": lambda m: repr(m.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}, index=["x", "y", "x"]).T),
+    "dict frame of many columns": lambda m: (lambda d: (_wide_summary(d), d.iloc[0, 2999]))(m.DataFrame({f"c{i}": [i, i + 1] for i in range(3000)})),
+    # str: pandas' object row holds numpy ints, fp's Python ints.
+    "dict frame with columns=": lambda m: (lambda d: (list(d.columns), [str(v) for v in d.iloc[0].tolist()]))(m.DataFrame({f"c{i}": [i] for i in range(50)}, columns=[f"c{i}" for i in range(49, 0, -7)] + ["zz"])),
+    "get_dummies of many categories": lambda m: (lambda d: (_wide_summary(d), int(d.iloc[:, 7].sum()), d.iloc[3].tolist().index(True)))(m.get_dummies(m.Series([f"k{i % 600:03d}" for i in range(2400)]))),
+    "get_dummies dummy_na": lambda m: repr(m.get_dummies(m.Series(["a", None, "b", "a"]), dummy_na=True)),
+    "get_dummies drop_first dummy_na": lambda m: repr(m.get_dummies(m.Series(["b", None, "a"]), dummy_na=True, drop_first=True)),
+    "get_dummies of floats": lambda m: repr(m.get_dummies(m.Series([1.5, 2.5, 1.5]), dtype=float)),
+    "get_dummies of bools": lambda m: repr(m.get_dummies(m.Series([True, False, True]))),
+    "get_dummies frame with a NaN": lambda m: repr(m.get_dummies(m.DataFrame({"k": ["x", None, "y"], "v": [1, 2, 3]}), dummy_na=True, dtype=int)),
+}
+
+
+def _wide_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WIDE_CASES))
+def test_wide_frames_build_like_pandas(case: str) -> None:
+    run = _WIDE_CASES[case]
+    assert _wide_outcome(fpd, run) == _wide_outcome(pd, run), case
