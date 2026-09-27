@@ -9061,3 +9061,112 @@ def _ts_ctor_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_TS_CTOR_CASES))
 def test_timestamp_and_timedelta_constructors_and_nat_match_pandas(case: str) -> None:
     assert _ts_ctor_outcome(fpd, case) == _ts_ctor_outcome(pd, case), case
+
+
+# fvsao.32: column labels keep their types. DataFrame([[1, 2]])'s columns
+# were the strings '0' and '1', so df[0] raised TypeError and every int /
+# float / bool / Timestamp label came back as text.
+def _intcol_frame(m: Any) -> Any:
+    return m.DataFrame([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+
+
+def _mixed_label_frame(m: Any) -> Any:
+    return m.DataFrame({1: [1.0, 2.0], 2.5: [3.0, 4.0], "s": ["x", "y"]})
+
+
+def _intcol_view(x: Any) -> Any:
+    if hasattr(x, "columns"):
+        return ("frame", type(x.columns).__name__, list(x.columns), repr(x))
+    if hasattr(x, "index") and hasattr(x, "dtype"):
+        return ("series", type(x.index).__name__, list(x.index), x.tolist())
+    if hasattr(x, "tolist"):
+        return (type(x).__name__, x.tolist())
+    return x
+
+
+def _intcol_setitem(m: Any) -> Any:
+    frame = _intcol_frame(m)
+    frame[3] = [0, 0, 0]
+    return frame
+
+
+def _intcol_set_columns(m: Any) -> Any:
+    frame = _intcol_frame(m)
+    frame.columns = [5, 6, 7]
+    return frame
+
+
+_COLUMN_LABEL_CASES = {
+    "list of lists": _intcol_frame,
+    "ndarray": lambda m: m.DataFrame(np.arange(6).reshape(2, 3)),
+    "1-d ndarray": lambda m: m.DataFrame(np.array([1.5, 2.5])),
+    "columns=": lambda m: m.DataFrame([[1, 2]], columns=[10, 20]),
+    "columns=range": lambda m: m.DataFrame([[1, 2]], columns=range(2)),
+    "dict keys": _mixed_label_frame,
+    "records": lambda m: m.DataFrame([{0: 1, "a": 2}]),
+    "df[0]": lambda m: _intcol_frame(m)[0],
+    "df[[0, 2]]": lambda m: _intcol_frame(m)[[0, 2]],
+    "mixed[1]": lambda m: _mixed_label_frame(m)[1],
+    "mixed[2.5]": lambda m: _mixed_label_frame(m)[2.5],
+    "mixed['s']": lambda m: _mixed_label_frame(m)["s"],
+    "head": lambda m: _intcol_frame(m).head(2),
+    "iloc rows": lambda m: _intcol_frame(m).iloc[1:],
+    "filter": lambda m: (lambda f: f[f[0] > 1])(_intcol_frame(m)),
+    "sort_values(0)": lambda m: _intcol_frame(m).sort_values(0, ascending=False),
+    "sum": lambda m: _intcol_frame(m).sum(),
+    "mean": lambda m: _intcol_frame(m).mean(),
+    "count": lambda m: _intcol_frame(m).count(),
+    "T": lambda m: _intcol_frame(m).T,
+    "T.T": lambda m: _intcol_frame(m).T.T,
+    "iloc row index": lambda m: list(_intcol_frame(m).iloc[1].index),
+    "add": lambda m: _intcol_frame(m) + 1,
+    "add frames": lambda m: _intcol_frame(m) + _intcol_frame(m),
+    "astype": lambda m: _intcol_frame(m).astype(float),
+    "fillna": lambda m: _intcol_frame(m).fillna(0),
+    "drop": lambda m: list(_intcol_frame(m).drop(columns=[1]).columns),
+    "rename": lambda m: _intcol_frame(m).rename(columns={0: "a"}),
+    "rename to an int": lambda m: m.DataFrame({"a": [1]}).rename(columns={"a": 5}),
+    "setitem": _intcol_setitem,
+    "set columns": _intcol_set_columns,
+    "assign": lambda m: _intcol_frame(m).assign(x=1),
+    "describe": lambda m: _intcol_frame(m).describe(),
+    "cumsum": lambda m: _intcol_frame(m).cumsum(),
+    "shift": lambda m: _intcol_frame(m).shift(1),
+    "isna": lambda m: _intcol_frame(m).isna(),
+    "dtypes": lambda m: _intcol_frame(m).dtypes,
+    "apply": lambda m: _intcol_frame(m).apply(lambda c: c * 2),
+    "loc[:, 0]": lambda m: _intcol_frame(m).loc[:, 0],
+    "loc[:, [0, 1]]": lambda m: _intcol_frame(m).loc[:, [0, 1]],
+    "0 in df": lambda m: 0 in _intcol_frame(m),
+    "list(df)": lambda m: list(_intcol_frame(m)),
+    "to_dict keys": lambda m: list(_intcol_frame(m).to_dict().keys()),
+    "to_dict records": lambda m: _intcol_frame(m).to_dict("records"),
+    "items": lambda m: [label for label, _ in _intcol_frame(m).items()],
+    "reset_index": lambda m: _intcol_frame(m).reset_index(),
+    "groupby(0).sum()": lambda m: list(_intcol_frame(m).groupby(0).sum().columns),
+    "concat": lambda m: m.concat([_intcol_frame(m), _intcol_frame(m)]),
+    "concat axis=1": lambda m: list(m.concat([_intcol_frame(m), _intcol_frame(m)], axis=1).columns),
+    "where": lambda m: (lambda f: f.where(f > 2))(_intcol_frame(m)),
+    "loc[1:]": lambda m: _intcol_frame(m).loc[1:],
+    # NEGATIVES: '0' is not 0, and a string column named '0' is not 0.
+    "df['0'] raises": lambda m: _intcol_frame(m)["0"],
+    "df[5] raises": lambda m: _intcol_frame(m)[5],
+    "'0' in df": lambda m: "0" in _intcol_frame(m),
+    "string '0' column is not 0": lambda m: m.DataFrame({"0": [1]})[0],
+    "string '0' column by string": lambda m: m.DataFrame({"0": [1]})["0"],
+}
+
+
+def _column_label_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _intcol_view(_COLUMN_LABEL_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_COLUMN_LABEL_CASES))
+def test_column_labels_keep_their_types_like_pandas(case: str) -> None:
+    assert _column_label_outcome(fpd, case) == _column_label_outcome(pd, case), case

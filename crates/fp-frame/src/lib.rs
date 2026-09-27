@@ -62835,7 +62835,7 @@ pub fn concat_dataframes_with_axis_join(
     axis: i64,
     join: ConcatJoin,
 ) -> Result<DataFrame, FrameError> {
-    match axis {
+    let out = match axis {
         0 => match join {
             ConcatJoin::Outer => concat_dataframes(frames),
             ConcatJoin::Inner => concat_dataframes_axis0_inner(frames),
@@ -62844,7 +62844,22 @@ pub fn concat_dataframes_with_axis_join(
         _ => Err(FrameError::CompatibilityRejected(format!(
             "unsupported concat axis {axis}; expected 0 or 1"
         ))),
+    }?;
+    Ok(concat_column_labels(out, frames, axis == 0))
+}
+
+/// `out`, a concat of `frames`, with the typed column labels the frames
+/// carry (their columns became strings; fvsao.32); a row concat keeps a
+/// RangeIndex column axis every frame shares.
+fn concat_column_labels(mut out: DataFrame, frames: &[&DataFrame], rows: bool) -> DataFrame {
+    for frame in frames {
+        out = out.with_typed_labels_of(frame);
     }
+    let range = frames.first().and_then(|first| first.column_order.range);
+    if rows && range.is_some() && frames.iter().all(|frame| frame.column_order.range == range) {
+        out.column_order.range = range;
+    }
+    out
 }
 
 /// Concatenate DataFrames with keys for hierarchical labeling.
@@ -65071,9 +65086,226 @@ type DataFrameColumnsStore = LazyDataFrameColumns;
 type DataFrameColumnsStore = ColumnStore;
 
 #[cfg(feature = "lazy-transpose-view")]
-type DataFrameColumnOrderStore = LazyDataFrameColumnOrder;
+type ColumnOrderNames = LazyDataFrameColumnOrder;
 #[cfg(not(feature = "lazy-transpose-view"))]
-type DataFrameColumnOrderStore = Vec<String>;
+type ColumnOrderNames = Vec<String>;
+
+type DataFrameColumnOrderStore = ColumnAxis;
+
+/// The canonical name a typed column label keys its column under: its
+/// pandas text (`0`, `1.5`, `True`, `2024-01-01 00:00:00`), the string
+/// itself for a string label. The binding keys columns by it, so a label
+/// and its name always agree.
+#[must_use]
+pub fn column_key(label: &IndexLabel) -> String {
+    label.to_string()
+}
+
+/// The column axis: the order of the names that key the columns, and the
+/// typed pandas label a name stands for when it is not the string itself
+/// (`DataFrame([[1, 2]])`'s columns are the integers 0 and 1, keyed "0"
+/// and "1"; they came back as the strings '0' and '1'). The labels ride
+/// along wherever the order is cloned or mutated in place; an order rebuilt
+/// from names alone reads every name as its string, and a label whose key is
+/// no longer its name is ignored. Equality, Debug and serde see the names
+/// only (fvsao.32).
+#[derive(Default)]
+struct ColumnAxis {
+    order: ColumnOrderNames,
+    labels: Option<Arc<FxHashMap<String, IndexLabel>>>,
+    /// The `range(start, stop, step)` of pandas' default RangeIndex columns
+    /// (see [`DataFrame::column_range_span`], which checks it still holds).
+    range: Option<(i64, i64, i64)>,
+}
+
+impl ColumnAxis {
+    /// The typed label of the column keyed `name`: its recorded label, an
+    /// integer of a transposed range, else the string `name`.
+    fn label(&self, name: &str) -> IndexLabel {
+        if let Some(label) = self
+            .labels
+            .as_deref()
+            .and_then(|labels| labels.get(name))
+            .filter(|label| column_key(label) == name)
+        {
+            return label.clone();
+        }
+        #[cfg(feature = "lazy-transpose-view")]
+        if matches!(self.order, LazyDataFrameColumnOrder::Int64UnitRange { .. })
+            && let Ok(value) = name.parse::<i64>()
+        {
+            return IndexLabel::Int64(value);
+        }
+        IndexLabel::Utf8(name.to_owned())
+    }
+
+    /// Records `labels` for the names they key (a string label needs no
+    /// record).
+    fn record(&mut self, labels: impl IntoIterator<Item = IndexLabel>) {
+        let mut map = self.labels.as_deref().cloned().unwrap_or_default();
+        for label in labels {
+            if !matches!(label, IndexLabel::Utf8(_)) {
+                map.insert(column_key(&label), label);
+            }
+        }
+        self.labels = (!map.is_empty()).then(|| Arc::new(map));
+    }
+
+    /// Whether any name stands for a label other than its string.
+    fn has_typed_labels(&self) -> bool {
+        #[cfg(feature = "lazy-transpose-view")]
+        if matches!(self.order, LazyDataFrameColumnOrder::Int64UnitRange { .. }) {
+            return true;
+        }
+        self.labels.is_some()
+    }
+
+    #[cfg(feature = "lazy-transpose-view")]
+    fn is_lazy_range(&self) -> bool {
+        self.order.is_lazy_range()
+    }
+
+    #[cfg(feature = "lazy-transpose-view")]
+    fn name_at(&self, position: usize) -> Option<String> {
+        self.order.name_at(position)
+    }
+}
+
+impl From<Vec<String>> for ColumnAxis {
+    // The names are the lazy order under lazy-transpose-view, a Vec without.
+    #[allow(clippy::useless_conversion)]
+    fn from(names: Vec<String>) -> Self {
+        Self {
+            order: names.into(),
+            labels: None,
+            range: None,
+        }
+    }
+}
+
+#[cfg(feature = "lazy-transpose-view")]
+impl From<LazyDataFrameColumnOrder> for ColumnAxis {
+    fn from(order: LazyDataFrameColumnOrder) -> Self {
+        Self {
+            order,
+            labels: None,
+            range: None,
+        }
+    }
+}
+
+impl From<ColumnAxis> for Vec<String> {
+    #[allow(clippy::useless_conversion)]
+    fn from(axis: ColumnAxis) -> Self {
+        axis.order.into()
+    }
+}
+
+impl Clone for ColumnAxis {
+    fn clone(&self) -> Self {
+        Self {
+            order: self.order.clone(),
+            labels: self.labels.clone(),
+            range: self.range,
+        }
+    }
+}
+
+impl PartialEq for ColumnAxis {
+    fn eq(&self, other: &Self) -> bool {
+        self.order == other.order
+    }
+}
+
+impl<T: AsRef<str>> PartialEq<Vec<T>> for ColumnAxis {
+    fn eq(&self, other: &Vec<T>) -> bool {
+        self.len() == other.len()
+            && self
+                .iter()
+                .zip(other)
+                .all(|(left, right)| left == right.as_ref())
+    }
+}
+
+impl<T: AsRef<str>> PartialEq<ColumnAxis> for Vec<T> {
+    fn eq(&self, other: &ColumnAxis) -> bool {
+        other == self
+    }
+}
+
+impl<T: AsRef<str>, const N: usize> PartialEq<&[T; N]> for ColumnAxis {
+    fn eq(&self, other: &&[T; N]) -> bool {
+        self.len() == N
+            && self
+                .iter()
+                .zip(other.iter())
+                .all(|(left, right)| left == right.as_ref())
+    }
+}
+
+impl std::fmt::Debug for ColumnAxis {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.order.fmt(formatter)
+    }
+}
+
+impl Serialize for ColumnAxis {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.order.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ColumnAxis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ColumnOrderNames::deserialize(deserializer).map(|order| Self {
+            order,
+            labels: None,
+            range: None,
+        })
+    }
+}
+
+impl std::ops::Deref for ColumnAxis {
+    type Target = Vec<String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.order
+    }
+}
+
+impl std::ops::DerefMut for ColumnAxis {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.order
+    }
+}
+
+impl IntoIterator for ColumnAxis {
+    type Item = String;
+    type IntoIter = std::vec::IntoIter<String>;
+
+    #[allow(clippy::useless_conversion)]
+    fn into_iter(self) -> Self::IntoIter {
+        Vec::<String>::from(self.order).into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ColumnAxis {
+    type Item = &'a String;
+    type IntoIter = std::slice::Iter<'a, String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut ColumnAxis {
+    type Item = &'a mut String;
+    type IntoIter = std::slice::IterMut<'a, String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataFrame {
@@ -67612,7 +67844,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Owned-permutation sibling used by large all-valid Float64 sorts.
@@ -67661,7 +67893,7 @@ impl DataFrame {
         let mut out =
             Self::new_with_axes(index, None, columns, order, self.column_multiindex.clone())?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     fn take_rows_by_positions(&self, positions: &[usize]) -> Result<Self, FrameError> {
@@ -67699,7 +67931,7 @@ impl DataFrame {
         let mut out =
             Self::new_with_axes(index, None, columns, order, self.column_multiindex.clone())?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Internal unchecked variant - caller guarantees positions are in bounds.
@@ -67830,7 +68062,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Internal unchecked variant for ascending contiguous source runs.
@@ -67960,7 +68192,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Boolean-filter-only unchecked variant - caller guarantees positions are
@@ -68088,7 +68320,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Boolean-filter-only affine fast path. The caller proves the selected
@@ -68163,7 +68395,8 @@ impl DataFrame {
             column_order: order.into(),
             column_multiindex: self.column_multiindex.clone(),
             allows_duplicate_labels: self.allows_duplicate_labels,
-        }))
+        }
+        .with_labels_of(self)))
     }
 
     fn rows_equal_on_positions(&self, left: usize, right: usize, positions: &[usize]) -> bool {
@@ -68319,10 +68552,13 @@ impl DataFrame {
     ) -> Result<Self, FrameError>
     where
         C: Into<ColumnStore>,
-        O: Into<Vec<String>>,
+        O: Into<DataFrameColumnOrderStore>,
     {
         let mut columns: ColumnStore = columns.into();
-        let column_order: Vec<String> = column_order.into();
+        // An axis passed through keeps its typed labels (fvsao.32).
+        let axis: DataFrameColumnOrderStore = column_order.into();
+        let (labels, range) = (axis.labels.clone(), axis.range);
+        let column_order: Vec<String> = axis.into();
         Self::validate_column_lengths(&index, &columns)?;
         if let Some(multiindex) = row_multiindex.as_ref()
             && multiindex.len() != index.len()
@@ -68348,7 +68584,11 @@ impl DataFrame {
             index,
             row_multiindex,
             columns: columns.into(),
-            column_order: column_order.into(),
+            column_order: ColumnAxis {
+                labels,
+                range,
+                ..column_order.into()
+            },
             column_multiindex,
             allows_duplicate_labels: true,
         })
@@ -68363,16 +68603,22 @@ impl DataFrame {
     ) -> Self
     where
         C: Into<ColumnStore>,
-        O: Into<Vec<String>>,
+        O: Into<DataFrameColumnOrderStore>,
     {
         let mut columns: ColumnStore = columns.into();
-        let column_order: Vec<String> = column_order.into();
+        let axis: DataFrameColumnOrderStore = column_order.into();
+        let (labels, range) = (axis.labels.clone(), axis.range);
+        let column_order: Vec<String> = axis.into();
         columns.reorder(&column_order);
         Self {
             index,
             row_multiindex,
             columns: columns.into(),
-            column_order: column_order.into(),
+            column_order: ColumnAxis {
+                labels,
+                range,
+                ..column_order.into()
+            },
             column_multiindex,
             allows_duplicate_labels: true,
         }
@@ -68386,7 +68632,7 @@ impl DataFrame {
     ) -> Result<Self, FrameError>
     where
         C: Into<ColumnStore>,
-        O: Into<Vec<String>>,
+        O: Into<DataFrameColumnOrderStore>,
     {
         Self::new_with_axes(index, None, columns, column_order, column_multiindex)
     }
@@ -68483,6 +68729,18 @@ impl DataFrame {
     where
         C: Into<ColumnStore>,
         O: Into<Vec<String>>,
+    {
+        let column_order: Vec<String> = column_order.into();
+        Self::new_with_column_order_and_multiindex(index, columns, column_order, None)
+    }
+
+    /// [`Self::new_with_column_order`] for fp-frame's own results: an order
+    /// that is a frame's column axis (`self.column_order.clone()`) keeps its
+    /// typed labels (fvsao.32); a list of names is as before.
+    fn new_with_axis<C, O>(index: Index, columns: C, column_order: O) -> Result<Self, FrameError>
+    where
+        C: Into<ColumnStore>,
+        O: Into<DataFrameColumnOrderStore>,
     {
         Self::new_with_column_order_and_multiindex(index, columns, column_order, None)
     }
@@ -70404,7 +70662,7 @@ impl DataFrame {
             order.push(name.clone());
         }
         let cols = ColumnStore::from_pairs(pairs);
-        Self::new_with_column_order(aligned.index.clone(), cols, order)
+        Self::new_with_axis(aligned.index.clone(), cols, order)
     }
 
     /// AG-05: Pre-compute N-way union index across all series first, then
@@ -70502,7 +70760,7 @@ impl DataFrame {
             columns.insert(series.name, aligned_column);
         }
 
-        Self::new_with_column_order(union_index, columns, column_order)
+        Self::new_with_axis(union_index, columns, column_order)
     }
 
     /// Construct a DataFrame from a dict of column vectors.
@@ -70539,7 +70797,7 @@ impl DataFrame {
         }
 
         if column_order.is_empty() {
-            Self::new_with_column_order(index, ColumnStore::from_pairs(input_pairs), input_order)
+            Self::new_with_axis(index, ColumnStore::from_pairs(input_pairs), input_order)
         } else {
             let mut explicit = Vec::with_capacity(column_order.len());
             let mut pairs = Vec::with_capacity(column_order.len());
@@ -70559,7 +70817,7 @@ impl DataFrame {
                     pairs.push((name, col));
                 }
             }
-            Self::new_with_column_order(index, ColumnStore::from_pairs(pairs), explicit)
+            Self::new_with_axis(index, ColumnStore::from_pairs(pairs), explicit)
         }
     }
 
@@ -70655,7 +70913,7 @@ impl DataFrame {
             None => Index::default_range(row_count),
         };
         let cols = ColumnStore::from_pairs(pairs);
-        Self::new_with_column_order(index, cols, order)
+        Self::new_with_axis(index, cols, order)
     }
 
     /// Construct a DataFrame from a dict with `orient='index'`.
@@ -70693,7 +70951,7 @@ impl DataFrame {
             col_order.push(col_name);
         }
 
-        Self::new_with_column_order(index, columns, col_order)
+        Self::new_with_axis(index, columns, col_order)
     }
 
     /// Construct a DataFrame from a dict with orient='index' and custom column names.
@@ -70727,7 +70985,7 @@ impl DataFrame {
             col_order.push(col_name.to_string());
         }
 
-        Self::new_with_column_order(index, columns, col_order)
+        Self::new_with_axis(index, columns, col_order)
     }
 
     /// What a row-matrix constructor does with a cell no row supplied.
@@ -70935,7 +71193,7 @@ impl DataFrame {
         }
 
         let columns = ColumnStore::from_pairs(pairs);
-        Self::new_with_column_order(index, columns, output_order)
+        Self::new_with_axis(index, columns, output_order)
     }
 
     /// Construct a DataFrame from row-oriented list-like records.
@@ -71019,7 +71277,7 @@ impl DataFrame {
         }
 
         let columns = ColumnStore::from_pairs(pairs);
-        Self::new_with_column_order(Index::new(index_labels), columns, column_order.to_vec())
+        Self::new_with_axis(Index::new(index_labels), columns, column_order.to_vec())
     }
 
     pub fn from_tuples(records: Vec<Vec<Scalar>>, columns: &[&str]) -> Result<Self, FrameError> {
@@ -71029,7 +71287,7 @@ impl DataFrame {
                 .map(|&c| Ok((c.to_string(), Column::new(DType::Float64, Vec::new())?)))
                 .collect::<Result<Vec<_>, FrameError>>()?;
             let col_order: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
-            return Self::new_with_column_order(
+            return Self::new_with_axis(
                 Index::new(Vec::new()),
                 ColumnStore::from_pairs(pairs),
                 col_order,
@@ -71209,7 +71467,7 @@ impl DataFrame {
         };
 
         let columns = ColumnStore::from_pairs(pairs);
-        Self::new_with_column_order(index, columns, output_order)
+        Self::new_with_axis(index, columns, output_order)
     }
 
     /// Parse a CSV string into a DataFrame.
@@ -71465,7 +71723,7 @@ impl DataFrame {
             columns.insert(name.to_owned(), Column::from_values(values)?);
         }
 
-        Self::new_with_column_order(index, columns, input_order)
+        Self::new_with_axis(index, columns, input_order)
     }
 
     /// Construct a DataFrame from mixed dict inputs with an explicit index.
@@ -71544,7 +71802,7 @@ impl DataFrame {
             column_multiindex,
         )?;
         out.allows_duplicate_labels = allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// How many columns carry the label `name` (0 when none; more than one
@@ -71815,6 +72073,151 @@ impl DataFrame {
         self.column_order.iter().collect()
     }
 
+    /// The typed pandas label of the column keyed `name` (see
+    /// [`column_key`]): 0 for `DataFrame([[1, 2]])`'s first column, the
+    /// string itself for a string label.
+    #[must_use]
+    pub fn column_label(&self, name: &str) -> IndexLabel {
+        self.column_order.label(name)
+    }
+
+    /// Every column's typed label, in column order.
+    #[must_use]
+    pub fn column_labels(&self) -> Vec<IndexLabel> {
+        self.column_order
+            .iter()
+            .map(|name| self.column_order.label(name))
+            .collect()
+    }
+
+    /// This frame with its columns labelled `labels`, one per column in
+    /// order; each must key its column (`column_key(label)` is the name).
+    pub fn with_column_labels(self, labels: Vec<IndexLabel>) -> Result<Self, FrameError> {
+        if labels.len() != self.column_order.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: labels.len(),
+                column_len: self.column_order.len(),
+            });
+        }
+        if let Some((name, label)) = self
+            .column_order
+            .iter()
+            .zip(&labels)
+            .find(|(name, label)| column_key(label) != **name)
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "column label {label:?} does not key column '{name}'"
+            )));
+        }
+        Ok(self.with_recorded_column_labels(labels))
+    }
+
+    /// This frame recording `labels` as the typed labels of the columns
+    /// they key (see [`column_key`]); a label keying no column is ignored.
+    #[must_use]
+    pub fn with_recorded_column_labels(
+        mut self,
+        labels: impl IntoIterator<Item = IndexLabel>,
+    ) -> Self {
+        self.column_order.record(labels);
+        self
+    }
+
+    /// The `range(start, stop, step)` the column labels are when they are
+    /// pandas' default RangeIndex (`DataFrame([[1, 2]]).columns`), while the
+    /// columns still are exactly that range.
+    #[must_use]
+    pub fn column_range_span(&self) -> Option<(i64, i64, i64)> {
+        let (start, stop, step) = self.column_order.range?;
+        let labels = self.column_labels();
+        let expected = (0..labels.len()).map(|at| {
+            i64::try_from(at)
+                .ok()
+                .and_then(|at| at.checked_mul(step))
+                .and_then(|offset| start.checked_add(offset))
+        });
+        let holds = labels
+            .iter()
+            .zip(expected)
+            .all(|(label, value)| value.is_some_and(|value| *label == IndexLabel::Int64(value)));
+        let len = fp_index::RangeIndex::new(start, stop, step).ok()?.len();
+        (holds && len == labels.len()).then_some((start, stop, step))
+    }
+
+    /// This frame's columns marked as pandas' default RangeIndex `span` (its
+    /// integer labels recorded too).
+    #[must_use]
+    pub fn with_column_range(mut self, span: (i64, i64, i64)) -> Self {
+        let (start, _, step) = span;
+        let labels: Vec<IndexLabel> = (0..self.column_order.len())
+            .filter_map(|at| {
+                let offset = i64::try_from(at).ok()?.checked_mul(step)?;
+                Some(IndexLabel::Int64(start.checked_add(offset)?))
+            })
+            .collect();
+        self.column_order.record(labels);
+        self.column_order.range = Some(span);
+        self
+    }
+
+    /// This frame with the typed column labels `source` records for the
+    /// columns they share by name - for a result whose columns are some of
+    /// `source`'s (a selection, a reordering, a row operation rebuilt from
+    /// names), which dropped them (fvsao.32).
+    #[must_use]
+    fn with_labels_of(self, source: &Self) -> Self {
+        let mut out = self.with_typed_labels_of(source);
+        // A RangeIndex column axis stays one while the columns still are it
+        // (column_range_span checks).
+        if out.column_order.range.is_none() {
+            out.column_order.range = source.column_order.range;
+        }
+        out
+    }
+
+    /// A Series indexed by (some of) this frame's columns - a reduction's:
+    /// each label naming a column is that column's typed label, and the
+    /// index is a RangeIndex when it is every column of pandas' default
+    /// RangeIndex columns (`DataFrame([[1, 2]]).sum().index`; fvsao.32).
+    fn columns_series(
+        &self,
+        name: impl Into<String>,
+        labels: Vec<IndexLabel>,
+        values: Vec<Scalar>,
+    ) -> Result<Series, FrameError> {
+        let labels: Vec<IndexLabel> = labels
+            .into_iter()
+            .map(|label| match label {
+                IndexLabel::Utf8(name) if self.column(&name).is_some() => self.column_label(&name),
+                other => other,
+            })
+            .collect();
+        let span = self
+            .column_range_span()
+            .filter(|_| labels == self.column_labels());
+        Ok(Series::from_values(name, labels, values)?.with_range_span(span))
+    }
+
+    /// [`Self::with_labels_of`] without the RangeIndex mark, for a result
+    /// pandas builds a new column Index for (describe's).
+    #[must_use]
+    fn with_typed_labels_of(mut self, source: &Self) -> Self {
+        if let Some(labels) = source.column_order.labels.as_deref() {
+            self.column_order.record(labels.values().cloned());
+        }
+        self
+    }
+
+    /// The column labels as a row index (a transpose's): the Utf8 index of
+    /// the names when every label is its name, else the typed labels.
+    fn columns_as_row_index(&self) -> Index {
+        if self.column_order.has_typed_labels() {
+            Index::new(self.column_labels()).with_range_span(self.column_range_span())
+        } else {
+            Index::from_utf8(self.column_order.to_vec())
+        }
+    }
+
     #[must_use]
     pub fn column(&self, name: &str) -> Option<&Column> {
         #[cfg(feature = "lazy-transpose-view")]
@@ -71994,7 +72397,7 @@ impl DataFrame {
                 self.column_multiindex.clone(),
             )?;
             out.allows_duplicate_labels = self.allows_duplicate_labels;
-            return Ok(out);
+            return Ok(out.with_labels_of(self));
         }
 
         let plan = align(&self.index, mask.index(), AlignMode::Left);
@@ -72056,7 +72459,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Return a DataFrame of booleans indicating missing values.
@@ -72082,7 +72485,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Return a DataFrame of booleans indicating non-missing values.
@@ -72108,7 +72511,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Alias for `isna`.
@@ -72136,11 +72539,11 @@ impl DataFrame {
             let name = self.column_name_at(pos).expect("column in bounds");
             let column = self.column_at(pos).expect("column in bounds");
             let count = i64::try_from(column.validity().count_valid()).unwrap_or(i64::MAX);
-            labels.push(IndexLabel::Utf8(name.to_string()));
+            labels.push(self.column_label(&name));
             values.push(Scalar::Int64(count));
         }
         // Unnamed, as pandas' `df.count()` (fvsao.7: it was named 'count').
-        Series::from_values("", labels, values)
+        self.columns_series("", labels, values)
     }
 
     /// Count of missing (NaN/null) values per column.
@@ -72154,7 +72557,7 @@ impl DataFrame {
             let name = self.column_name_at(pos).expect("column in bounds");
             let col = self.column_at(pos).expect("column in bounds");
             let na_count = col.values().iter().filter(|v| v.is_missing()).count();
-            labels.push(IndexLabel::Utf8(name.to_string()));
+            labels.push(self.column_label(&name));
             values.push(Scalar::Int64(na_count as i64));
         }
         Series::from_values("count_na", labels, values)
@@ -72193,7 +72596,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Fill missing values with `fill_value`, filling at most `limit`
@@ -72238,7 +72641,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Drop rows containing missing values in any selected column.
@@ -72494,7 +72897,7 @@ impl DataFrame {
             column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Drop columns by minimum non-missing value count.
@@ -72554,7 +72957,7 @@ impl DataFrame {
             column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Return a boolean Series indicating duplicated rows.
@@ -73547,7 +73950,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Return the last `n` rows.
@@ -73587,7 +73990,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Set the DataFrame index from an existing column.
@@ -73730,7 +74133,7 @@ impl DataFrame {
             )?
         };
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Set the index from multiple columns, creating a composite index.
@@ -73860,7 +74263,7 @@ impl DataFrame {
             )?
         };
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Extract a `MultiIndex` from the specified columns.
@@ -73945,7 +74348,7 @@ impl DataFrame {
                 self.column_multiindex.clone(),
             )?;
             out.allows_duplicate_labels = self.allows_duplicate_labels;
-            return Ok(out);
+            return Ok(out.with_labels_of(self));
         }
 
         if let Some(row_multiindex) = self.row_multiindex.as_ref() {
@@ -73968,7 +74371,7 @@ impl DataFrame {
             let mut out =
                 Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
             out.allows_duplicate_labels = self.allows_duplicate_labels;
-            return Ok(out);
+            return Ok(out.with_labels_of(self));
         }
 
         let index_column_name = self.reset_index_column_name()?;
@@ -73997,7 +74400,7 @@ impl DataFrame {
 
         let mut out = Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// The column MultiIndex with `names` in front, each as `(name, '', ...)`,
@@ -74039,7 +74442,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     fn rebuild_with_row_index(
@@ -74056,7 +74459,7 @@ impl DataFrame {
                     self.column_multiindex.clone(),
                 )?;
                 out.allows_duplicate_labels = self.allows_duplicate_labels;
-                Ok(out)
+                Ok(out.with_labels_of(self))
             }
             fp_index::MultiIndexOrIndex::Multi(row_multiindex) => {
                 self.rebuild_with_row_multiindex(row_multiindex)
@@ -74629,9 +75032,9 @@ impl DataFrame {
         } else {
             Index::new(out_labels).rename_index(self.index.name())
         };
-        let mut out = Self::new_with_column_order(index, columns, out_columns)?;
+        let mut out = Self::new_with_axis(index, columns, out_columns)?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     fn require_row_multiindex(&self) -> Result<&fp_index::MultiIndex, FrameError> {
@@ -74726,7 +75129,7 @@ impl DataFrame {
             }
         };
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Return row positions for a row-MultiIndex tuple or a single level key.
@@ -74848,9 +75251,9 @@ impl DataFrame {
             ));
         }
 
-        let mut out = Self::new_with_column_order(index, columns, out_columns)?;
+        let mut out = Self::new_with_axis(index, columns, out_columns)?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Boolean mask row selection.
@@ -74949,7 +75352,7 @@ impl DataFrame {
                     .expect("column name listed in order must exist");
                 empty_cols.insert(name.clone(), Column::new(col.dtype(), Vec::new())?);
             }
-            return Self::new_with_column_order(
+            return Self::new_with_axis(
                 Index::new(Vec::new()),
                 empty_cols,
                 self.column_order.clone(),
@@ -74959,8 +75362,15 @@ impl DataFrame {
         let Some((start_pos, end_pos)) = loc_slice_positions(labels, start, stop)? else {
             return self.take_rows_by_positions(&[]);
         };
-        let positions: Vec<usize> = (start_pos..=end_pos).collect();
-        self.take_rows_by_positions(&positions)
+        // A label slice is a contiguous run of rows: a slice of the index,
+        // so a RangeIndex stays one (pandas' df.loc[1:]; it became an Index).
+        match (i64::try_from(start_pos), i64::try_from(end_pos + 1)) {
+            (Ok(first), Ok(stop)) => self.iloc_slice(Some(first), Some(stop)),
+            _ => {
+                let positions: Vec<usize> = (start_pos..=end_pos).collect();
+                self.take_rows_by_positions(&positions)
+            }
+        }
     }
 
     /// The row positions `.loc[start:stop]` selects, resolved as
@@ -75057,7 +75467,7 @@ impl DataFrame {
         let mut values = Vec::with_capacity(self.column_order.len());
 
         for name in &self.column_order {
-            labels.push(IndexLabel::Utf8(name.clone()));
+            labels.push(self.column_label(name));
             let col = self.columns.get(name).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!("column '{name}' not found"))
             })?;
@@ -75078,8 +75488,10 @@ impl DataFrame {
         // Try direct construction first. If dtypes are incompatible (e.g.,
         // Int64 + Utf8), fall back to Utf8 representation, matching pandas'
         // `object` dtype behavior for mixed-type rows.
+        // Indexed by the columns: a RangeIndex when they are one (fvsao.32).
+        let span = self.column_range_span();
         match Series::from_values(name.clone(), labels.clone(), values.clone()) {
-            Ok(s) => Ok(s),
+            Ok(s) => Ok(s.with_range_span(span)),
             Err(_) => {
                 let utf8_values: Vec<Scalar> = values
                     .into_iter()
@@ -75097,7 +75509,7 @@ impl DataFrame {
                         Scalar::Interval(interval) => Scalar::Utf8(format!("{interval}")),
                     })
                     .collect();
-                Series::from_values(name, labels, utf8_values)
+                Series::from_values(name, labels, utf8_values).map(|s| s.with_range_span(span))
             }
         }
     }
@@ -75150,7 +75562,7 @@ impl DataFrame {
             new_column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Cast one or more columns to target dtypes.
@@ -75200,7 +75612,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Cast a single column to a target dtype.
@@ -75234,7 +75646,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Apply the CONSTRUCTOR's `dtype=` argument to every column.
@@ -75397,7 +75809,7 @@ impl DataFrame {
             };
             columns.insert(name.clone(), coerced);
         }
-        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), columns, self.column_order.clone())
     }
 
     /// Localize tz-naive datetime columns to a timezone or strip timezone info.
@@ -75552,7 +75964,8 @@ impl DataFrame {
                 new_columns.insert(name.clone(), col.clone());
             }
         }
-        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
+            .map(|out| out.with_labels_of(self))
     }
 
     /// Cast one or more columns with error handling.
@@ -75584,7 +75997,7 @@ impl DataFrame {
                     let casted = Column::new(dtype.clone(), vals)?;
                     columns.insert(name.to_owned(), casted);
                 }
-                Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+                Self::new_with_axis(self.index.clone(), columns, self.column_order.clone())
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "astype: errors must be 'raise', 'ignore', or 'coerce', got '{other}'"
@@ -75643,7 +76056,7 @@ impl DataFrame {
             column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Drop multiple columns at once.
@@ -75685,7 +76098,7 @@ impl DataFrame {
             column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Filter the DataFrame by column-label patterns.
@@ -75806,7 +76219,7 @@ impl DataFrame {
             column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     fn filter_row_positions_by_label(
@@ -75905,7 +76318,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Rename columns using a HashMap mapping.
@@ -75955,7 +76368,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Rename index labels using a mapping.
@@ -76235,7 +76648,8 @@ impl DataFrame {
             out_columns.insert(name.clone(), column);
         }
 
-        Self::new_with_column_order(out_index, out_columns, out_order)
+        Self::new_with_axis(out_index, out_columns, out_order)
+            .map(|out| out.with_typed_labels_of(self))
     }
 
     /// Describe with custom percentiles.
@@ -76324,7 +76738,8 @@ impl DataFrame {
             out_columns.insert(name.clone(), column);
         }
 
-        Self::new_with_column_order(out_index, out_columns, out_order)
+        Self::new_with_axis(out_index, out_columns, out_order)
+            .map(|out| out.with_typed_labels_of(self))
     }
 
     /// Describe with include/exclude dtype filters.
@@ -76422,7 +76837,7 @@ impl DataFrame {
                 out_columns.insert(name.clone(), Column::from_object_values(stats));
                 out_order.push(name.clone());
             }
-            return Self::new_with_column_order(out_index, out_columns, out_order);
+            return Self::new_with_axis(out_index, out_columns, out_order);
         }
 
         // Numeric describe: filter to included columns, then delegate
@@ -76506,11 +76921,8 @@ impl DataFrame {
                 Scalar::Float64(Self::quantile_select(&mut nums, q))
             })
         })?;
-        let labels: Vec<IndexLabel> = allowed
-            .iter()
-            .map(|name| IndexLabel::Utf8(name.clone()))
-            .collect();
-        Series::from_values(format!("{q}"), labels, values)
+        let labels: Vec<IndexLabel> = allowed.iter().map(|name| self.column_label(name)).collect();
+        self.columns_series(format!("{q}"), labels, values)
     }
 
     /// Apply an aggregation function along an axis.
@@ -76534,7 +76946,7 @@ impl DataFrame {
                     .columns
                     .get(name)
                     .expect("column name listed in order must exist");
-                labels.push(IndexLabel::Utf8(name.clone()));
+                labels.push(self.column_label(name));
                 let s = Series::new(name.clone(), self.index.clone(), col.clone())?;
                 let agg = match func {
                     "sum" => s.sum()?,
@@ -76889,7 +77301,7 @@ impl DataFrame {
         if !f64_columns.is_empty() {
             return Ok(Some(DataFrameTransposeView {
                 source_columns: HomogeneousTransposeColumns::Float64(f64_columns),
-                row_index: Index::from_utf8(self.column_order.to_vec()),
+                row_index: self.columns_as_row_index(),
                 column_start,
                 column_len,
             }));
@@ -76912,7 +77324,7 @@ impl DataFrame {
         if !i64_columns.is_empty() {
             return Ok(Some(DataFrameTransposeView {
                 source_columns: HomogeneousTransposeColumns::Int64(i64_columns),
-                row_index: Index::from_utf8(self.column_order.to_vec()),
+                row_index: self.columns_as_row_index(),
                 column_start,
                 column_len,
             }));
@@ -76943,7 +77355,7 @@ impl DataFrame {
         if !datetime_columns.is_empty() {
             return Ok(Some(DataFrameTransposeView {
                 source_columns: HomogeneousTransposeColumns::Datetime64(datetime_columns),
-                row_index: Index::from_utf8(self.column_order.to_vec()),
+                row_index: self.columns_as_row_index(),
                 column_start,
                 column_len,
             }));
@@ -76973,7 +77385,7 @@ impl DataFrame {
         if !timedelta_columns.is_empty() {
             return Ok(Some(DataFrameTransposeView {
                 source_columns: HomogeneousTransposeColumns::Timedelta64(timedelta_columns),
-                row_index: Index::from_utf8(self.column_order.to_vec()),
+                row_index: self.columns_as_row_index(),
                 column_start,
                 column_len,
             }));
@@ -76996,7 +77408,7 @@ impl DataFrame {
         if !bool_columns.is_empty() {
             return Ok(Some(DataFrameTransposeView {
                 source_columns: HomogeneousTransposeColumns::Bool(bool_columns),
-                row_index: Index::from_utf8(self.column_order.to_vec()),
+                row_index: self.columns_as_row_index(),
                 column_start,
                 column_len,
             }));
@@ -77028,7 +77440,7 @@ impl DataFrame {
         if !utf8_columns.is_empty() {
             return Ok(Some(DataFrameTransposeView {
                 source_columns: HomogeneousTransposeColumns::Utf8(utf8_columns),
-                row_index: Index::from_utf8(self.column_order.to_vec()),
+                row_index: self.columns_as_row_index(),
                 column_start,
                 column_len,
             }));
@@ -77057,7 +77469,7 @@ impl DataFrame {
         if !nullable_i64_columns.is_empty() {
             return Ok(Some(DataFrameTransposeView {
                 source_columns: HomogeneousTransposeColumns::NullableInt64(nullable_i64_columns),
-                row_index: Index::from_utf8(self.column_order.to_vec()),
+                row_index: self.columns_as_row_index(),
                 column_start,
                 column_len,
             }));
@@ -77085,7 +77497,7 @@ impl DataFrame {
         if !nullable_f64_columns.is_empty() {
             return Ok(Some(DataFrameTransposeView {
                 source_columns: HomogeneousTransposeColumns::NullableFloat64(nullable_f64_columns),
-                row_index: Index::from_utf8(self.column_order.to_vec()),
+                row_index: self.columns_as_row_index(),
                 column_start,
                 column_len,
             }));
@@ -77170,10 +77582,11 @@ impl DataFrame {
                     Arc::clone(&plan),
                     view.column_start,
                 ),
-                column_order: LazyDataFrameColumnOrder::int64_unit_range(
-                    view.column_start,
-                    view.column_len,
-                ),
+                column_order: ColumnAxis {
+                    range: self.index.range_span(),
+                    ..LazyDataFrameColumnOrder::int64_unit_range(view.column_start, view.column_len)
+                        .into()
+                },
                 column_multiindex: None,
                 allows_duplicate_labels: self.allows_duplicate_labels,
             });
@@ -77194,14 +77607,9 @@ impl DataFrame {
         let n_rows = self.len();
         let n_cols = self.num_columns();
 
-        // New index: original column names
-        let new_index_labels: Vec<IndexLabel> = (0..n_cols)
-            .map(|pos| {
-                let name = self.column_name_at(pos).expect("column position in bounds");
-                IndexLabel::Utf8(name)
-            })
-            .collect();
-        let new_index = Index::new(new_index_labels);
+        // New index: the original columns' typed labels (0, not '0', for
+        // DataFrame([[1, 2]]).T; fvsao.32), a RangeIndex if they were one.
+        let new_index = self.columns_as_row_index();
 
         let label_to_name = |label: &IndexLabel| -> String {
             match label {
@@ -77231,6 +77639,11 @@ impl DataFrame {
                 let mut out =
                     Self::new_with_axes_trusted(new_index, None, new_columns, new_order, None);
                 out.allows_duplicate_labels = self.allows_duplicate_labels;
+                // The new columns are the row labels, typed (each keyed by
+                // its text, as `label_to_name` spells it), a RangeIndex if
+                // the rows were one.
+                out.column_order.record(self.index.labels().iter().cloned());
+                out.column_order.range = self.index.range_span();
                 Ok(out)
             };
 
@@ -77749,7 +78162,7 @@ impl DataFrame {
         for (name, column) in self.column_order.iter().zip(computed) {
             new_columns.insert(name.clone(), column.expect("all columns checked is_some"));
         }
-        Some(Self::new_with_column_order(
+        Some(Self::new_with_axis(
             self.index.clone(),
             new_columns,
             self.column_order.clone(),
@@ -77831,7 +78244,7 @@ impl DataFrame {
         for (name, column) in self.column_order.iter().zip(computed) {
             new_columns.insert(name.clone(), column.expect("all columns checked is_some"));
         }
-        Some(Self::new_with_column_order(
+        Some(Self::new_with_axis(
             self.index.clone(),
             new_columns,
             self.column_order.clone(),
@@ -77939,7 +78352,8 @@ impl DataFrame {
             new_columns.insert(col_name.clone(), Column::from_values(values)?);
         }
 
-        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
+            .map(|out| out.with_labels_of(self))
     }
 
     /// pandas-named alias for [`Self::where_cond`]. Matches `df.where(cond, other)`.
@@ -77999,7 +78413,8 @@ impl DataFrame {
             new_columns.insert(col_name.clone(), Column::from_values(values)?);
         }
 
-        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
+            .map(|out| out.with_labels_of(self))
     }
 
     /// Keep values where `cond` is True, replacing False positions with
@@ -78063,7 +78478,7 @@ impl DataFrame {
                 for (name, column) in self.column_order.iter().zip(computed) {
                     result_cols.insert(name.clone(), column);
                 }
-                return Self::new_with_column_order(
+                return Self::new_with_axis(
                     self.index.clone(),
                     result_cols,
                     self.column_order.clone(),
@@ -78115,7 +78530,7 @@ impl DataFrame {
                 for (name, column) in self.column_order.iter().zip(computed) {
                     result_cols.insert(name.clone(), column.expect("all is_some checked"));
                 }
-                return Self::new_with_column_order(
+                return Self::new_with_axis(
                     self.index.clone(),
                     result_cols,
                     self.column_order.clone(),
@@ -78167,7 +78582,8 @@ impl DataFrame {
             new_columns.insert(col_name.clone(), Column::from_values(values)?);
         }
 
-        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
+            .map(|out| out.with_labels_of(self))
     }
 
     /// Replace values where `cond` is True with corresponding values from
@@ -78225,7 +78641,7 @@ impl DataFrame {
                 for (name, column) in self.column_order.iter().zip(computed) {
                     result_cols.insert(name.clone(), column);
                 }
-                return Self::new_with_column_order(
+                return Self::new_with_axis(
                     self.index.clone(),
                     result_cols,
                     self.column_order.clone(),
@@ -78273,7 +78689,7 @@ impl DataFrame {
                 for (name, column) in self.column_order.iter().zip(computed) {
                     result_cols.insert(name.clone(), column.expect("all is_some checked"));
                 }
-                return Self::new_with_column_order(
+                return Self::new_with_axis(
                     self.index.clone(),
                     result_cols,
                     self.column_order.clone(),
@@ -78329,7 +78745,8 @@ impl DataFrame {
             new_columns.insert(col_name.clone(), Column::from_values(values)?);
         }
 
-        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
+            .map(|out| out.with_labels_of(self))
     }
 
     /// Symmetry alias for `where_cond_df` (br-frankenpandas-df9v7 /
@@ -81520,10 +81937,7 @@ impl DataFrame {
             let ss = Series::new(name.to_string(), self.index.clone(), sc.clone())?;
             let so = Series::new(name.to_string(), other.index.clone(), oc.clone())?;
             let r = ss.corr(&so)?;
-            Ok(Some((
-                IndexLabel::Utf8(name.to_string()),
-                Scalar::Float64(r),
-            )))
+            Ok(Some((self.column_label(name), Scalar::Float64(r))))
         };
 
         // par_map_columns keeps small/single-column frames serial (16384-cell,
@@ -81540,7 +81954,7 @@ impl DataFrame {
         }
 
         // Unnamed, as pandas (it was named "corrwith").
-        Series::from_values(String::new(), labels, values)
+        self.columns_series(String::new(), labels, values)
     }
 
     /// Compute pairwise correlation with another DataFrame along the given axis.
@@ -82158,7 +82572,7 @@ impl DataFrame {
                     seen.insert(key);
                 }
             }
-            labels.push(IndexLabel::Utf8(col_name.clone()));
+            labels.push(self.column_label(col_name));
             counts.push(Scalar::Int64(seen.len() as i64));
         }
         let mut result_cols = BTreeMap::new();
@@ -82293,6 +82707,9 @@ impl DataFrame {
                     None,
                 )?;
                 out.allows_duplicate_labels = self.allows_duplicate_labels;
+                // The new labels keep their types (df.columns = [0, 1] is
+                // the integers; they became '0' and '1').
+                out.column_order.record(labels);
                 Ok(out)
             }
             other => Err(FrameError::CompatibilityRejected(format!(
@@ -83451,7 +83868,7 @@ impl DataFrame {
             None,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Update values using non-null values from another DataFrame.
@@ -86747,7 +87164,7 @@ impl DataFrame {
             let mut values = Vec::new();
             for name in &self.column_order {
                 let col = &self.columns[name];
-                labels.push(IndexLabel::Utf8(name.clone()));
+                labels.push(self.column_label(name));
                 values.push(func(col.values()));
             }
             let s = Series::from_values("result", labels, values)?;
@@ -87387,7 +87804,7 @@ impl DataFrame {
         }
 
         // Unnamed, as pandas' (fvsao.30: it was named 'memory_usage').
-        Series::from_values(String::new(), labels, values)
+        self.columns_series(String::new(), labels, values)
     }
 
     // ── DataFrame column-wise aggregation stats ──
@@ -87526,7 +87943,7 @@ impl DataFrame {
         })?;
         // Unnamed, as pandas' DataFrame.nunique() (it was named "nunique";
         // fvsao.13).
-        Series::from_values(String::new(), labels, values)
+        self.columns_series(String::new(), labels, values)
     }
 
     /// Count unique non-null values with axis parameter.
@@ -88189,7 +88606,7 @@ impl DataFrame {
             let s = self.column_as_series(name)?;
             values.push(Scalar::Bool(s.all()?));
         }
-        Series::from_values(String::new(), labels, values)
+        self.columns_series(String::new(), labels, values)
     }
 
     /// Whether any non-null value is truthy, per column.
@@ -88206,7 +88623,7 @@ impl DataFrame {
             let s = self.column_as_series(name)?;
             values.push(Scalar::Bool(s.any()?));
         }
-        Series::from_values(String::new(), labels, values)
+        self.columns_series(String::new(), labels, values)
     }
 
     /// Sum of non-null values per column.
@@ -88334,7 +88751,7 @@ impl DataFrame {
                 continue;
             }
             let s = self.column_as_series(name)?;
-            labels.push(IndexLabel::Utf8(name.clone()));
+            labels.push(self.column_label(name));
             values.push(s.std_ddof(ddof)?);
         }
         Series::from_values("std".to_string(), labels, values)
@@ -88356,7 +88773,7 @@ impl DataFrame {
                 continue;
             }
             let s = self.column_as_series(name)?;
-            labels.push(IndexLabel::Utf8(name.clone()));
+            labels.push(self.column_label(name));
             values.push(s.var_ddof(ddof)?);
         }
         Series::from_values("var".to_string(), labels, values)
@@ -88501,11 +88918,7 @@ impl DataFrame {
                 let dtype = self.columns[name.as_str()].dtype();
                 result_cols.insert(name.clone(), Column::new(dtype, Vec::new())?);
             }
-            return Self::new_with_column_order(
-                Index::new(Vec::new()),
-                result_cols,
-                selected_columns,
-            );
+            return Self::new_with_axis(Index::new(Vec::new()), result_cols, selected_columns);
         }
 
         for (name, modes) in column_modes {
@@ -88545,7 +88958,7 @@ impl DataFrame {
         }
 
         let labels: Vec<IndexLabel> = (0..max_modes).map(|i| (i as i64).into()).collect();
-        Self::new_with_column_order(Index::new(labels), result_cols, selected_columns)
+        Self::new_with_axis(Index::new(labels), result_cols, selected_columns)
     }
 
     fn mode_axis1(&self, numeric_only: bool, dropna: bool) -> Result<Self, FrameError> {
@@ -88564,7 +88977,7 @@ impl DataFrame {
             .collect::<Vec<_>>();
 
         if selected_columns.is_empty() {
-            return Self::new_with_column_order(self.index.clone(), BTreeMap::new(), Vec::new());
+            return Self::new_with_axis(self.index.clone(), BTreeMap::new(), Vec::new());
         }
 
         let mut row_modes = Vec::with_capacity(self.len());
@@ -88580,7 +88993,7 @@ impl DataFrame {
         }
 
         if max_modes == 0 {
-            return Self::new_with_column_order(self.index.clone(), BTreeMap::new(), Vec::new());
+            return Self::new_with_axis(self.index.clone(), BTreeMap::new(), Vec::new());
         }
 
         let mode_columns = (0..max_modes).map(|i| i.to_string()).collect::<Vec<_>>();
@@ -88619,7 +89032,7 @@ impl DataFrame {
             result_cols.insert(name.clone(), build_mode_column(values)?);
         }
 
-        Self::new_with_column_order(self.index.clone(), result_cols, mode_columns)
+        Self::new_with_axis(self.index.clone(), result_cols, mode_columns)
     }
 
     /// Internal: reduce each numeric column to a single scalar via the named function.
@@ -88993,11 +89406,8 @@ impl DataFrame {
                 }
             })
         })?;
-        let labels: Vec<IndexLabel> = allowed
-            .iter()
-            .map(|name| IndexLabel::Utf8(name.clone()))
-            .collect();
-        Series::from_values(String::new(), labels, values)
+        let labels: Vec<IndexLabel> = allowed.iter().map(|name| self.column_label(name)).collect();
+        self.columns_series(String::new(), labels, values)
     }
 
     /// Internal: reduce each numeric column with skipna control.
@@ -89035,11 +89445,8 @@ impl DataFrame {
                 }
             })
         })?;
-        let labels: Vec<IndexLabel> = allowed
-            .iter()
-            .map(|name| IndexLabel::Utf8(name.clone()))
-            .collect();
-        Series::from_values(String::new(), labels, values)
+        let labels: Vec<IndexLabel> = allowed.iter().map(|name| self.column_label(name)).collect();
+        self.columns_series(String::new(), labels, values)
     }
 
     /// Sum per column with skipna control.
@@ -90657,7 +91064,7 @@ impl DataFrame {
                 self.column_multiindex.clone(),
             )?;
             out.allows_duplicate_labels = self.allows_duplicate_labels;
-            return Ok(out);
+            return Ok(out.with_labels_of(self));
         }
 
         let n_cols = self.num_columns();
@@ -90703,7 +91110,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Per br-frankenpandas-bktp1: detect uniformly-Timedelta64 DataFrame.
@@ -90778,7 +91185,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Cumulative sum across columns with explicit `skipna`, computed row-wise.
@@ -90823,7 +91230,7 @@ impl DataFrame {
                 self.column_multiindex.clone(),
             )?;
             out.allows_duplicate_labels = self.allows_duplicate_labels;
-            return Ok(out);
+            return Ok(out.with_labels_of(self));
         }
         self.cumulative_axis1(1.0, |acc, x| acc * x, skipna)
     }
@@ -90943,7 +91350,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// First-order difference across columns per row.
@@ -91077,7 +91484,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Percentage change across columns per row.
@@ -91152,7 +91559,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Shift values per column.
@@ -91251,7 +91658,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Shift values per column, filling the vacated positions with `fill_value`
@@ -91340,7 +91747,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Absolute value per column.
@@ -91450,7 +91857,7 @@ impl DataFrame {
                 result_cols.insert(name.clone(), col.clone());
                 continue;
             }
-            let label = IndexLabel::Utf8(name.clone());
+            let label = self.column_label(name);
             let (lo_provided, lo) = resolve(lower, &label);
             let (hi_provided, hi) = resolve(upper, &label);
 
@@ -91465,7 +91872,7 @@ impl DataFrame {
             };
             result_cols.insert(name.clone(), clipped);
         }
-        Self::new_with_column_order(self.index.clone(), result_cols, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), result_cols, self.column_order.clone())
     }
 
     /// Clip each row to its own bound, matching `df.clip(lower=s, upper=s,
@@ -91580,7 +91987,7 @@ impl DataFrame {
             };
             result_cols.insert(name.clone(), column);
         }
-        Self::new_with_column_order(self.index.clone(), result_cols, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), result_cols, self.column_order.clone())
     }
 
     /// Round numeric columns to specified decimal places.
@@ -92026,7 +92433,7 @@ impl DataFrame {
                 columns.insert(name.clone(), out.column().clone());
             }
             let index = index.unwrap_or_else(|| self.index.clone());
-            return Self::new_with_column_order(index, columns, self.column_order.to_vec());
+            return Self::new_with_axis(index, columns, self.column_order.to_vec());
         }
         let labels: Vec<String> = series
             .index()
@@ -92081,7 +92488,7 @@ impl DataFrame {
             };
             columns.insert(name.clone(), column);
         }
-        Self::new_with_column_order(self.index.clone(), columns, names)
+        Self::new_with_axis(self.index.clone(), columns, names)
     }
 
     /// `df <op> scalar`, or `scalar <op> df` when `reflected`, with pandas'
@@ -93893,7 +94300,7 @@ impl DataFrame {
                 res_col_order.push(pfx.clone());
             }
 
-            Self::new_with_column_order(self.index().clone(), res_col_map, res_col_order)
+            Self::new_with_axis(self.index().clone(), res_col_map, res_col_order)
         } else {
             let mut result_cats = Vec::with_capacity(num_rows);
             for row_idx in 0..num_rows {
@@ -93936,7 +94343,7 @@ impl DataFrame {
             let mut res_col_map = BTreeMap::new();
             let res_col_order = vec!["".to_string()];
             res_col_map.insert("".to_string(), col);
-            Self::new_with_column_order(self.index().clone(), res_col_map, res_col_order)
+            Self::new_with_axis(self.index().clone(), res_col_map, res_col_order)
         }
     }
 
@@ -94979,7 +95386,7 @@ impl DataFrame {
                 column_multiindex,
             )?;
             out.allows_duplicate_labels = self.allows_duplicate_labels;
-            Ok(out)
+            Ok(out.with_labels_of(self))
         } else {
             // Drop rows by index label
             let drop_set: BTreeSet<IndexLabel> = labels
@@ -95052,7 +95459,7 @@ impl DataFrame {
             columns.insert(name.clone(), col.slice(start, take)?);
         }
         // Per br-frankenpandas-oygjj: preserve index name.
-        Self::new_with_column_order(
+        Self::new_with_axis(
             self.index
                 .slice(start, take)
                 .rename_index(self.index.name()),
@@ -95156,7 +95563,7 @@ impl DataFrame {
             .index
             .slice(start, take)
             .rename_index(self.index.name());
-        Self::new_with_column_order(index, columns, self.column_order.clone())
+        Self::new_with_axis(index, columns, self.column_order.clone())
     }
 
     /// Insert a column at a specific position.
@@ -95253,7 +95660,7 @@ impl DataFrame {
             new_column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Replace the column at a specific integer position.
@@ -95353,7 +95760,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Replace values on a per-column basis.
@@ -95399,7 +95806,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Replace string values matching a regex pattern across all columns.
@@ -95439,7 +95846,7 @@ impl DataFrame {
             self.column_multiindex.clone(),
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     /// Align two DataFrames on their indices.
@@ -95588,9 +95995,8 @@ impl DataFrame {
             );
         }
 
-        let left =
-            Self::new_with_column_order(plan.union_index.clone(), left_cols, all_columns.clone())?;
-        let right = Self::new_with_column_order(plan.union_index, right_cols, all_columns)?;
+        let left = Self::new_with_axis(plan.union_index.clone(), left_cols, all_columns.clone())?;
+        let right = Self::new_with_axis(plan.union_index, right_cols, all_columns)?;
         Ok((left, right))
     }
 
@@ -95945,7 +96351,7 @@ impl DataFrame {
             column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out)
+        Ok(out.with_labels_of(self))
     }
 
     // ── DataFrame utility: isin / equals / first_valid_index / last_valid_index ──
@@ -95975,7 +96381,7 @@ impl DataFrame {
         for (name, column) in self.column_order.iter().zip(columns) {
             new_cols.insert(name.clone(), column);
         }
-        Self::new_with_column_order(self.index.clone(), new_cols, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), new_cols, self.column_order.clone())
     }
 
     /// Element-wise membership test with per-column value sets.
@@ -96007,7 +96413,7 @@ impl DataFrame {
         for (name, column) in self.column_order.iter().zip(columns) {
             new_cols.insert(name.clone(), column);
         }
-        Self::new_with_column_order(self.index.clone(), new_cols, self.column_order.clone())
+        Self::new_with_axis(self.index.clone(), new_cols, self.column_order.clone())
     }
 
     /// Check whether this DataFrame is identical to another.
@@ -125693,6 +126099,83 @@ mod tests {
         assert!(result.values()[1].is_missing());
         let v2 = result.values()[2].to_f64().unwrap();
         assert!((v2 - 0.5).abs() < 1e-10); // (150-100)/100 = 0.5
+    }
+
+    #[test]
+    fn typed_column_labels_ride_along_and_move_between_axes_fvsao_32() {
+        let frame = DataFrame::from_dict(
+            &["0", "1", "x"],
+            vec![
+                ("0", vec![Scalar::Int64(3), Scalar::Int64(1)]),
+                ("1", vec![Scalar::Int64(4), Scalar::Int64(2)]),
+                ("x", vec![Scalar::Int64(5), Scalar::Int64(6)]),
+            ],
+        )
+        .unwrap();
+        // Unlabelled, every column is its string.
+        assert_eq!(frame.column_label("0"), IndexLabel::Utf8("0".to_owned()));
+        let typed = frame
+            .clone()
+            .with_column_labels(vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Utf8("x".to_owned()),
+            ])
+            .unwrap();
+        assert_eq!(typed.column_label("0"), IndexLabel::Int64(0));
+        assert_eq!(typed.column_label("x"), IndexLabel::Utf8("x".to_owned()));
+        // A label that does not key its column is refused.
+        assert!(
+            frame
+                .clone()
+                .with_column_labels(vec![
+                    IndexLabel::Int64(7),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Utf8("x".to_owned()),
+                ])
+                .is_err()
+        );
+        // Row operations, selections and reductions keep them.
+        assert_eq!(
+            typed.head(1).unwrap().column_label("1"),
+            IndexLabel::Int64(1)
+        );
+        assert_eq!(
+            typed.sort_values("0", true).unwrap().column_label("0"),
+            IndexLabel::Int64(0)
+        );
+        assert_eq!(
+            typed.select_columns(&["1"]).unwrap().column_label("1"),
+            IndexLabel::Int64(1)
+        );
+        assert_eq!(
+            typed.sum().unwrap().index().labels()[0],
+            IndexLabel::Int64(0)
+        );
+        // A transpose moves them to the rows, and the rows back.
+        let transposed = typed.transpose().unwrap();
+        assert_eq!(transposed.index().labels()[0], IndexLabel::Int64(0));
+        assert_eq!(
+            transposed.transpose().unwrap().column_label("0"),
+            IndexLabel::Int64(0)
+        );
+        // A renamed column leaves its old label behind.
+        let renamed = typed.rename_columns(&[("0", "a")]).unwrap();
+        assert_eq!(renamed.column_label("a"), IndexLabel::Utf8("a".to_owned()));
+        // pandas' default RangeIndex columns: marked, and checked on read.
+        let ranged = frame
+            .select_columns(&["0", "1"])
+            .unwrap()
+            .with_column_range((0, 2, 1));
+        assert_eq!(ranged.column_range_span(), Some((0, 2, 1)));
+        assert_eq!(ranged.column_label("1"), IndexLabel::Int64(1));
+        assert_eq!(ranged.head(1).unwrap().column_range_span(), Some((0, 2, 1)));
+        assert_eq!(
+            ranged.select_columns(&["1"]).unwrap().column_range_span(),
+            None
+        );
+        // Equality ignores the labels.
+        assert_eq!(typed, frame);
     }
 
     #[test]
