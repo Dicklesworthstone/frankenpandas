@@ -1922,10 +1922,13 @@ def test_ddof_cov_reductions_parity():
     for col in ["a", "b"]:
         pd.testing.assert_series_equal(pd.Series(cov_mp_fp[col].to_list(), index=cov_mp_pd.index, name=col), cov_mp_pd[col])
 
-    # 11. DataFrame cov with non-numeric column and numeric_only=False raises TypeError
+    # 11. DataFrame cov with a non-numeric column and numeric_only=False is
+    # Python's float("x") ValueError, as pandas raises (this pinned TypeError,
+    # frankenpandas' old answer, without asking pandas; 4qg5w.5).
     df_str_fp = fpd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
-    with pytest.raises(TypeError):
-        df_str_fp.cov(numeric_only=False)
+    for frame in (pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}), df_str_fp):
+        with pytest.raises(ValueError, match="could not convert string to float: 'x'"):
+            frame.cov(numeric_only=False)
 
     # 12. DataFrame std, var, sem with numeric_only=True drops non-numeric column
     assert list(df_str_fp.std(numeric_only=True).to_dict().keys()) == ["a"]
@@ -10270,3 +10273,79 @@ def test_groupby_rank_refuses_intervals_like_pandas() -> None:
         frame = m.DataFrame({"k": [1, 1], "v": m.Series(m.IntervalIndex.from_tuples([(0, 1), (1, 3)]))})
         with pytest.raises(TypeError, match="rank is not supported for interval"):
             frame.groupby("k")["v"].rank()
+
+
+# 4qg5w.5: DataFrame.corr / cov / corrwith / quantile read the nullable
+# Int64 / Float64 / boolean columns as numbers, as pandas does. corr and
+# quantile dropped them from the result, cov refused them with a Rust
+# spelling of the value ("could not convert string to float: 'Int64(1)'"),
+# corrwith skipped them; corr(min_periods=n) above 2 was refused though
+# fp-frame counts each pair's observations.
+def _nullable_stats_frame(m: Any, text: bool = False) -> Any:
+    columns = {
+        "i": [1, 2, 3, 4, 6],
+        "I": m.Series([1, 2, None, 4, 7], dtype="Int64"),
+        "F": m.Series([1.0, 2.5, 3.0, None, 2.0], dtype="Float64"),
+        "f": [1.0, 2.0, 3.0, 5.0, 4.0],
+        "b": [True, False, True, True, False],
+        "B": m.Series([True, False, None, True, True], dtype="boolean"),
+        "N": m.Series([5, 3, 1, 2, 2], dtype="Int64"),
+    }
+    if text:
+        columns["t"] = ["a", "b", "c", "d", "e"]
+    return m.DataFrame(columns)
+
+
+def _stats_view(r: Any) -> Any:
+    def cell(v: Any) -> Any:
+        return None if v != v else round(float(v), 9)
+
+    if hasattr(r, "columns"):
+        return ("frame", [str(c) for c in r.columns], [str(i) for i in r.index], [[cell(v) for v in row] for row in r.values.tolist()])
+    return ("series", [str(i) for i in r.index], [cell(v) for v in r.tolist()])
+
+
+def _no_bool(m: Any) -> Any:
+    return _nullable_stats_frame(m).drop(columns=["b", "B"])
+
+
+_NULLABLE_STATS_CASES = {
+    "corr": lambda m: _nullable_stats_frame(m).corr(),
+    "corr spearman": lambda m: _nullable_stats_frame(m).corr(method="spearman"),
+    "corr kendall": lambda m: _nullable_stats_frame(m).corr(method="kendall"),
+    "corr numeric_only skips text": lambda m: _nullable_stats_frame(m, True).corr(numeric_only=True),
+    "corr min_periods 4": lambda m: _nullable_stats_frame(m).corr(min_periods=4),
+    "corr min_periods 5": lambda m: _nullable_stats_frame(m).corr(min_periods=5),
+    "cov": lambda m: _nullable_stats_frame(m).cov(),
+    "cov numeric_only skips text": lambda m: _nullable_stats_frame(m, True).cov(numeric_only=True),
+    "cov min_periods 5": lambda m: _nullable_stats_frame(m).cov(min_periods=5),
+    "corrwith a frame": lambda m: _nullable_stats_frame(m).corrwith(_nullable_stats_frame(m) * 2),
+    "corrwith a Series": lambda m: _nullable_stats_frame(m).corrwith(m.Series([2.0, 1.0, 4.0, 3.0, 5.0])),
+    "corrwith numeric_only": lambda m: _nullable_stats_frame(m, True).corrwith(_nullable_stats_frame(m) + 1, numeric_only=True),
+    "quantile": lambda m: _no_bool(m).quantile(0.5),
+    "quantile lower": lambda m: _no_bool(m).quantile(0.3, interpolation="lower"),
+    "quantile list": lambda m: _no_bool(m).quantile([0.25, 0.5]),
+    "quantile axis=1": lambda m: _nullable_stats_frame(m)[["i", "I", "F"]].quantile(0.5, axis=1),
+    # NEGATIVES: a nullable column without a missing value is a column like
+    # any other; a text column is Python's float() ValueError unless
+    # numeric_only.
+    "a nullable column with no NA is in the matrix": lambda m: _nullable_stats_frame(m)[["N", "f"]].corr(),
+    "corr of a text column raises": lambda m: _nullable_stats_frame(m, True).corr(),
+    "cov of a text column raises": lambda m: _nullable_stats_frame(m, True).cov(),
+}
+
+
+def _nullable_stats_outcome(m: Any, run: Any) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _stats_view(run(m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NULLABLE_STATS_CASES))
+def test_corr_cov_quantile_read_nullable_columns_like_pandas(case: str) -> None:
+    run = _NULLABLE_STATS_CASES[case]
+    assert _nullable_stats_outcome(fpd, run) == _nullable_stats_outcome(pd, run), case

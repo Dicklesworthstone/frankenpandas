@@ -77666,15 +77666,12 @@ impl DataFrame {
         // quantile (typed extraction + O(n) quantile_select) is independent, so
         // spread the columns across par_map_columns scope workers. Bit-identical —
         // identical per-column extraction/select, reassembled in column_order.
+        // The nullable Int64 / Float64 columns are numeric too: they were
+        // left out of the result (4qg5w.5).
         let allowed: Vec<String> = self
             .column_order
             .iter()
-            .filter(|name| {
-                matches!(
-                    self.columns[name.as_str()].dtype(),
-                    DType::Int64 | DType::Float64
-                )
-            })
+            .filter(|name| self.columns[name.as_str()].dtype().is_numeric())
             .cloned()
             .collect();
         let values = self.par_map_columns(&allowed, |name| {
@@ -81671,7 +81668,7 @@ impl DataFrame {
                     .find(|value| !value.is_missing())
                     .map(|value| match value {
                         Scalar::Utf8(text) => text.clone(),
-                        other => format!("{other:?}"),
+                        other => other.to_string(),
                     })
                     .unwrap_or_default();
                 return Err(FrameError::CompatibilityRejected(format!(
@@ -81688,14 +81685,23 @@ impl DataFrame {
         }
         // Per br-frankenpandas-qk3s0: include Timedelta64 columns. pandas
         // df.corr() / df.cov() returns f64 statistics for Timedelta cols
-        // by treating their ns counts as ordered numerics.
+        // by treating their ns counts as ordered numerics. The nullable
+        // Int64 / Float64 / boolean columns are numeric too: they were left
+        // out, silently shrinking the matrix (4qg5w.5); their <NA> is a
+        // missing value the pairwise statistics skip.
         Ok(self
             .column_order
             .iter()
             .filter(|name| {
                 matches!(
                     self.columns[name.as_str()].dtype(),
-                    DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
+                    DType::Bool
+                        | DType::Int64
+                        | DType::Float64
+                        | DType::Timedelta64
+                        | DType::BoolNullable
+                        | DType::Int64Nullable
+                        | DType::Float64Nullable
                 )
             })
             .cloned()
@@ -82780,7 +82786,10 @@ impl DataFrame {
                     "corrwith: pandas rejects shared Timedelta64 columns".into(),
                 ));
             }
-            let numeric = |dt: DType| matches!(dt, DType::Int64 | DType::Float64);
+            // Ints and floats, nullable or not, and booleans are numbers to
+            // pandas' corrwith; the nullable columns (and booleans) were
+            // skipped, dropping their row from the result (4qg5w.5).
+            let numeric = |dt: DType| dt.is_numeric() || dt.is_bool();
             if !numeric(dt_s) || !numeric(dt_o) {
                 return Ok(None);
             }
@@ -119551,6 +119560,60 @@ mod tests {
         let result = frame.corrwith(&doubled).unwrap();
         assert_eq!(result.name(), "");
         assert_eq!(result.values(), &[Scalar::Float64(1.0)]);
+    }
+
+    #[test]
+    fn corr_quantile_and_corrwith_read_nullable_numeric_columns_4qg5w_5() {
+        use fp_types::CategoricalMetadata;
+        let nullable = Column::new(
+            DType::Int64Nullable,
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        let floats = Column::from_f64_values(vec![1.0, 2.0, 3.0, 4.0]);
+        let frame = DataFrame::new_with_column_order(
+            Index::from_range(0, 4, 1),
+            BTreeMap::from([("I".to_owned(), nullable), ("f".to_owned(), floats)]),
+            vec!["I".to_owned(), "f".to_owned()],
+        )
+        .unwrap();
+        // The nullable column is in the matrix (it was dropped), its <NA>
+        // row skipped pairwise: r over (1, 1), (2, 2), (5, 4).
+        let corr = frame.corr().unwrap();
+        assert_eq!(corr.column_names(), vec!["I", "f"]);
+        let r = corr.column("f").unwrap().values()[0].to_f64().unwrap();
+        assert!((r - 57.0 / 3276.0_f64.sqrt()).abs() < 1e-12, "{r}");
+        // quantile keeps it too: the median of 1, 2, 5.
+        let medians = frame.quantile(0.5).unwrap();
+        assert_eq!(medians.values()[0], Scalar::Float64(2.0));
+        // corrwith correlates it against its partner.
+        let with = frame.corrwith(&frame).unwrap();
+        assert_eq!(with.len(), 2);
+        // NEGATIVE: a non-text category still refuses corr, its witness the
+        // value as Python prints it, not Rust's Debug ('Int64(1)').
+        let codes = Column::new(DType::Categorical, vec![Scalar::Int64(1), Scalar::Int64(2)])
+            .unwrap()
+            .with_categorical(Some(CategoricalMetadata::new(
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+                false,
+            )));
+        let categorical = DataFrame::new_with_column_order(
+            Index::from_range(0, 2, 1),
+            BTreeMap::from([("c".to_owned(), codes)]),
+            vec!["c".to_owned()],
+        )
+        .unwrap();
+        match categorical.corr() {
+            Err(FrameError::CompatibilityRejected(message)) => {
+                assert_eq!(message, "could not convert string to float: '1'");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]

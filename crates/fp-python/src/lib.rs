@@ -4427,6 +4427,14 @@ fn mixed_zone_rows(py: Python<'_>, indexes: &[&Index]) -> PyResult<Option<Index>
     Ok(Some(object_index_of(first, pieces)?.inner))
 }
 
+/// A column pandas' corr / corrwith / quantile read as numbers: ints and
+/// floats, nullable or not, and booleans. The nullable Int64 / Float64 /
+/// boolean columns were left out - dropped from the result, or refused
+/// (4qg5w.5).
+fn corr_numeric(dtype: &DType) -> bool {
+    dtype.is_numeric() || dtype.is_bool()
+}
+
 /// The zone of a tz-aware datetime column (a groupby key's); None for any
 /// other column.
 fn column_zone(column: &Column) -> Option<String> {
@@ -14473,11 +14481,12 @@ fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
     }
 }
 
-/// [`frame_error_to_py`] for groupby std/sem/skew: over a string column pandas
-/// lets Python's `float("x")` ValueError through, where the shared text rules
-/// call "could not convert" a TypeError, as DataFrame.std raises
-/// (br-frankenpandas-bcj6d).
-fn groupby_moment_error_to_py(err: fp_frame::FrameError) -> PyErr {
+/// [`frame_error_to_py`] where pandas lets Python's `float("x")` ValueError
+/// through over a string column - groupby std/sem/skew
+/// (br-frankenpandas-bcj6d), DataFrame.corr / cov (4qg5w.5) - while the
+/// shared text rules call "could not convert" a TypeError, as DataFrame.std
+/// raises.
+fn float_conversion_error_to_py(err: fp_frame::FrameError) -> PyErr {
     let (_, msg) = classify_frame_error(&err);
     if msg.contains("could not convert string to float") {
         return PyErr::new::<pyo3::exceptions::PyValueError, _>(msg);
@@ -24623,9 +24632,18 @@ impl PyDataFrame {
         let mut candidate_cols = Vec::new();
         for name in self.inner.column_names() {
             if let Some(col) = self.inner.column(name) {
+                // The nullable Int64 / Float64 / boolean columns are numeric
+                // too; they were refused with a Rust-spelled witness
+                // ('Int64(1)'), or dropped (4qg5w.5).
                 if matches!(
                     col.dtype(),
-                    DType::Int64 | DType::Float64 | DType::Bool | DType::Timedelta64
+                    DType::Int64
+                        | DType::Float64
+                        | DType::Bool
+                        | DType::Timedelta64
+                        | DType::Int64Nullable
+                        | DType::Float64Nullable
+                        | DType::BoolNullable
                 ) {
                     candidate_cols.push(name.clone());
                 } else if !numeric_only {
@@ -24635,7 +24653,7 @@ impl PyDataFrame {
                         .find(|v| !v.is_missing())
                         .map(|v| match v {
                             Scalar::Utf8(text) => text.clone(),
-                            other => format!("{other:?}"),
+                            other => other.to_string(),
                         })
                         .unwrap_or_default();
                     return Err(FrameError::CompatibilityRejected(format!(
@@ -27420,16 +27438,22 @@ impl PyDataFrame {
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
         // Fewer than two pairs already correlate to NaN, so min_periods up to
-        // 2 is the default answer; a larger floor needs per-pair counts.
+        // 2 is the default answer; a larger floor counts each pair's
+        // observations - fp-frame's pairwise Pearson does (it was refused;
+        // 4qg5w.5), the rank methods do not yet.
+        let m = method.unwrap_or("pearson");
+        let floor = min_periods.filter(|&floor| floor > 2);
         unsupported_params(
             "DataFrame.corr",
-            &[("min_periods", min_periods.is_none_or(|m| m <= 2))],
+            &[("min_periods", floor.is_none() || m == "pearson")],
         )?;
-        let m = method.unwrap_or("pearson");
-        let result = self
-            .inner
-            .corr_method_with_numeric_only(m, numeric_only)
-            .map_err(frame_error_to_py)?;
+        let result = match floor {
+            Some(floor) => self
+                .inner
+                .corr_min_periods_with_numeric_only(floor, numeric_only),
+            None => self.inner.corr_method_with_numeric_only(m, numeric_only),
+        }
+        .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -30330,9 +30354,10 @@ impl PyDataFrame {
         ddof: Option<usize>,
         numeric_only: bool,
     ) -> PyResult<PyDataFrame> {
+        // A string column is Python's float("x") ValueError, as pandas'.
         let res = self
             .cov_internal(min_periods, ddof.unwrap_or(1), numeric_only)
-            .map_err(frame_error_to_py)?;
+            .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
@@ -30927,9 +30952,20 @@ impl PyDataFrame {
             &[("method", matches!(method, None | Some("single")))],
         )?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        // numeric_only keeps the nullable numeric columns too (4qg5w.5).
         let target_df = if numeric_only {
             self.inner
-                .select_dtypes(&[DType::Int64, DType::Float64, DType::Bool], &[])
+                .select_dtypes(
+                    &[
+                        DType::Int64,
+                        DType::Float64,
+                        DType::Bool,
+                        DType::Int64Nullable,
+                        DType::Float64Nullable,
+                        DType::BoolNullable,
+                    ],
+                    &[],
+                )
                 .map_err(frame_error_to_py)?
         } else {
             self.inner.clone()
@@ -30982,7 +31018,7 @@ impl PyDataFrame {
                 .column_names()
                 .into_iter()
                 .filter_map(|name| target_df.column(name).map(|column| (name, column)))
-                .filter(|(_, column)| matches!(column.dtype(), DType::Int64 | DType::Float64))
+                .filter(|(_, column)| column.dtype().is_numeric())
                 .collect();
             let quantile = |values: Vec<Scalar>| {
                 let labels = (0..values.len())
@@ -31029,7 +31065,7 @@ impl PyDataFrame {
             let mut series_list = Vec::new();
             for col_name in df_to_use.column_names() {
                 if let Some(col) = df_to_use.column(col_name) {
-                    if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+                    if corr_numeric(&col.dtype()) {
                         let s =
                             Series::new(col_name.clone(), df_to_use.index().clone(), col.clone())
                                 .map_err(frame_error_to_py)?;
@@ -31725,10 +31761,7 @@ impl PyDataFrame {
         };
 
         if let Ok(other_s) = other.extract::<PyRef<PySeries>>() {
-            if !matches!(
-                other_s.inner.dtype(),
-                DType::Int64 | DType::Float64 | DType::Bool
-            ) {
+            if !corr_numeric(&other_s.inner.dtype()) {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "could not convert non-numeric series to float",
                 ));
@@ -31741,7 +31774,7 @@ impl PyDataFrame {
                         Some(c) => c,
                         None => continue,
                     };
-                    let is_num = matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool);
+                    let is_num = corr_numeric(&col.dtype());
                     if !is_num {
                         if numeric_only {
                             continue;
@@ -31770,7 +31803,7 @@ impl PyDataFrame {
                         Some(c) => c,
                         None => continue,
                     };
-                    let is_num = matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool);
+                    let is_num = corr_numeric(&col.dtype());
                     if !is_num {
                         if numeric_only {
                             continue;
@@ -31828,12 +31861,8 @@ impl PyDataFrame {
                 for col_name in &all_cols {
                     let col1 = self.inner.column(col_name);
                     let col2 = other_df.inner.column(col_name);
-                    let is_num1 = col1.is_none_or(|c| {
-                        matches!(c.dtype(), DType::Int64 | DType::Float64 | DType::Bool)
-                    });
-                    let is_num2 = col2.is_none_or(|c| {
-                        matches!(c.dtype(), DType::Int64 | DType::Float64 | DType::Bool)
-                    });
+                    let is_num1 = col1.is_none_or(|c| corr_numeric(&c.dtype()));
+                    let is_num2 = col2.is_none_or(|c| corr_numeric(&c.dtype()));
                     if !is_num1 || !is_num2 {
                         if numeric_only {
                             continue;
@@ -31874,10 +31903,8 @@ impl PyDataFrame {
                 for c in self.inner.column_names() {
                     if let Some(other_c) = other_df.inner.column(c) {
                         let self_c = self.inner.column(c).unwrap();
-                        let s_num =
-                            matches!(self_c.dtype(), DType::Int64 | DType::Float64 | DType::Bool);
-                        let o_num =
-                            matches!(other_c.dtype(), DType::Int64 | DType::Float64 | DType::Bool);
+                        let s_num = corr_numeric(&self_c.dtype());
+                        let o_num = corr_numeric(&other_c.dtype());
                         if !s_num || !o_num {
                             if numeric_only {
                                 continue;
@@ -40833,7 +40860,7 @@ impl PyGroupBy {
         let ddof = groupby_ddof("DataFrameGroupBy.std", ddof)?;
         let result = self
             .reduce(numeric_only, |gb| gb.std_ddof(ddof))
-            .map_err(groupby_moment_error_to_py)?;
+            .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame {
             inner: self.with_unused("std", result)?,
         })
@@ -41127,7 +41154,7 @@ impl PyGroupBy {
         let ddof = groupby_ddof("DataFrameGroupBy.sem", ddof)?;
         let result = self
             .reduce(numeric_only, |gb| gb.sem_ddof(ddof))
-            .map_err(groupby_moment_error_to_py)?;
+            .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame {
             inner: self.with_unused("sem", result)?,
         })
@@ -41139,7 +41166,7 @@ impl PyGroupBy {
             .grouped()
             .map_err(frame_error_to_py)?
             .skew()
-            .map_err(groupby_moment_error_to_py)?;
+            .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
 
@@ -42738,7 +42765,7 @@ impl PySeriesGroupBy {
         let res = self
             .grouped()?
             .std_ddof(ddof)
-            .map_err(groupby_moment_error_to_py)?;
+            .map_err(float_conversion_error_to_py)?;
         self.wrap_result("std", res)
     }
 
@@ -43056,7 +43083,7 @@ impl PySeriesGroupBy {
         let res = self
             .grouped()?
             .sem_ddof(ddof)
-            .map_err(groupby_moment_error_to_py)?;
+            .map_err(float_conversion_error_to_py)?;
         self.wrap_result("sem", res)
     }
 
@@ -43066,7 +43093,7 @@ impl PySeriesGroupBy {
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .skew()
-            .map_err(groupby_moment_error_to_py)?;
+            .map_err(float_conversion_error_to_py)?;
         self.wrap_result("skew", res)
     }
 
@@ -44205,7 +44232,7 @@ impl PyResampler {
         D: FnOnce(&fp_frame::DataFrameResample<'_>) -> Result<DataFrame, FrameError>,
     {
         let to_py: fn(FrameError) -> PyErr = if matches!(how, "std" | "sem") {
-            groupby_moment_error_to_py
+            float_conversion_error_to_py
         } else {
             frame_error_to_py
         };
