@@ -1997,6 +1997,23 @@ fn python_slice_chars(
     out
 }
 
+/// Group numbers or counts as pandas' result holds them: int64, or float64
+/// once a row has none (a missing key's NaN) - they were an int64 column
+/// holding a NaN (ngroup).
+#[allow(clippy::cast_precision_loss)] // group numbers stay far below 2^53
+fn float_if_any_missing(values: Vec<Scalar>) -> Vec<Scalar> {
+    if !values.iter().any(Scalar::is_missing) {
+        return values;
+    }
+    values
+        .into_iter()
+        .map(|value| match value {
+            Scalar::Int64(number) => Scalar::Float64(number as f64),
+            other => other,
+        })
+        .collect()
+}
+
 fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
     match value {
         Scalar::Int64(v) => IndexLabel::Int64(*v),
@@ -46244,7 +46261,7 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-i72df: pandas DataFrameGroupBy.ngroup returns
         // a Series whose index.name == source df.index.name.
         let index = self.series.index.clone();
-        let column = Column::from_values(out)?;
+        let column = Column::from_values(float_if_any_missing(out))?;
         Series::new("", index, column)
     }
 
@@ -58168,7 +58185,7 @@ impl DatetimeAccessor<'_> {
             let rounded = wall.dt().round_to_freq(freq, mode)?;
             return rounded.dt().tz_localize(Some(&zone));
         }
-        let freq_ns = resolve_timedelta_unit(Some(freq))?;
+        let freq_ns = resolve_fixed_frequency(freq)?;
         if self.is_typed_datetime() {
             // Typed all-valid fast path (br-frankenpandas-j5150): read the nanos
             // directly off `as_datetime64_slice`, snap each, and emit a typed
@@ -62128,6 +62145,42 @@ pub fn to_timedelta_with_options(
     let index = series.index().clone();
     let column = Column::from_values(converted)?;
     Series::new(series.name().to_owned(), index, column)
+}
+
+/// The nanoseconds of a fixed frequency as `dt.floor` / `ceil` / `round`
+/// take it: units each with an optional count, added up ('15min', '2h',
+/// '90s', '1h30min'; a bare unit counts once). Only a bare unit went
+/// through: '15min' raised "invalid timedelta unit".
+fn resolve_fixed_frequency(freq: &str) -> Result<i64, FrameError> {
+    let invalid = || FrameError::CompatibilityRejected(format!("invalid frequency: '{freq}'"));
+    let mut rest = freq.trim();
+    if rest.is_empty() {
+        return Err(invalid());
+    }
+    let mut total: i64 = 0;
+    while !rest.is_empty() {
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let count: i64 = if digits == 0 {
+            1
+        } else {
+            rest[..digits].parse().map_err(|_| invalid())?
+        };
+        rest = &rest[digits..];
+        let letters = rest.len()
+            - rest
+                .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+                .len();
+        if letters == 0 {
+            return Err(invalid());
+        }
+        let unit = resolve_timedelta_unit(Some(&rest[..letters]))?;
+        rest = &rest[letters..];
+        total = count
+            .checked_mul(unit)
+            .and_then(|nanos| total.checked_add(nanos))
+            .ok_or_else(invalid)?;
+    }
+    if total > 0 { Ok(total) } else { Err(invalid()) }
 }
 
 /// Resolve timedelta unit string to nanoseconds multiplier.
@@ -76688,6 +76741,7 @@ impl DataFrame {
     fn row_to_series(&self, position: usize) -> Result<Series, FrameError> {
         let mut labels = Vec::with_capacity(self.column_order.len());
         let mut values = Vec::with_capacity(self.column_order.len());
+        let mut dtypes: Vec<DType> = Vec::with_capacity(self.column_order.len());
 
         for name in &self.column_order {
             labels.push(self.column_label(name));
@@ -76695,16 +76749,43 @@ impl DataFrame {
                 FrameError::CompatibilityRejected(format!("column '{name}' not found"))
             })?;
             values.push(col.values()[position].clone());
+            if !dtypes.contains(&col.dtype()) {
+                dtypes.push(col.dtype());
+            }
         }
 
         // The index label is the Series name, typed (pandas semantics).
         let name = SeriesName::typed(self.index.labels()[position].clone());
+        // Indexed by the columns: a RangeIndex when they are one (fvsao.32).
+        let span = self.column_range_span();
+
+        // The row's dtype is the columns' common one, as pandas'
+        // interleaved dtype - not what this row's values happen to be (a
+        // row [NaN, 4, 3.5] of text / int / float columns read as float64
+        // and gave 4.0): int64 beside float64 is float64; any other mix is
+        // an object row keeping each value as it is.
+        if dtypes.len() > 1 {
+            if dtypes
+                .iter()
+                .all(|dtype| matches!(dtype, DType::Int64 | DType::Float64))
+            {
+                #[allow(clippy::cast_precision_loss)] // pandas widens int64 to float64
+                let floats: Vec<Scalar> = values
+                    .into_iter()
+                    .map(|value| match value {
+                        Scalar::Int64(number) => Scalar::Float64(number as f64),
+                        other => other,
+                    })
+                    .collect();
+                return Series::from_values(name, labels, floats).map(|s| s.with_range_span(span));
+            }
+            return Series::new(name, Index::new(labels), Column::from_object_values(values))
+                .map(|s| s.with_range_span(span));
+        }
 
         // Try direct construction first. If dtypes are incompatible (e.g.,
         // Int64 + Utf8), fall back to Utf8 representation, matching pandas'
         // `object` dtype behavior for mixed-type rows.
-        // Indexed by the columns: a RangeIndex when they are one (fvsao.32).
-        let span = self.column_range_span();
         match Series::from_values(name.clone(), labels.clone(), values.clone()) {
             Ok(s) => Ok(s.with_range_span(span)),
             Err(_) => {
@@ -109626,7 +109707,7 @@ impl DataFrameGroupBy<'_> {
         // Per br-frankenpandas-pqvd2: pandas groupby.ngroup preserves source
         // row-axis name. Sister to cumcount fix above.
         let index = self.df.index().clone();
-        let column = Column::from_values(out)?;
+        let column = Column::from_values(float_if_any_missing(out))?;
         Series::new(String::new(), index, column)
     }
 
@@ -165487,10 +165568,20 @@ mod tests {
         .unwrap();
         let gb = df.groupby_full_options(&["g"], true, true, true).unwrap();
         let ng = gb.ngroup().unwrap();
-        assert_eq!(ng.values()[0], Scalar::Int64(0));
-        assert_eq!(ng.values()[1], Scalar::Null(NullKind::NaN));
-        assert_eq!(ng.values()[2], Scalar::Int64(1));
-        assert_eq!(ng.values()[3], Scalar::Int64(0));
+        // TEST-CHANGE: pandas' numbers are float64 once a key is missing
+        // ([0.0, nan, 1.0, 0.0], live 2.2.3); they were int64 beside a NaN.
+        assert_eq!(ng.column().dtype(), DType::Float64);
+        assert_eq!(ng.values()[0], Scalar::Float64(0.0));
+        assert!(ng.values()[1].is_missing());
+        assert_eq!(ng.values()[2], Scalar::Float64(1.0));
+        assert_eq!(ng.values()[3], Scalar::Float64(0.0));
+        // NEGATIVE: every key present keeps int64.
+        let full = df
+            .groupby_full_options(&["v"], true, true, true)
+            .unwrap()
+            .ngroup()
+            .unwrap();
+        assert_eq!(full.column().dtype(), DType::Int64);
     }
 
     #[test]
@@ -171689,6 +171780,68 @@ mod tests {
             split.str().get_dummies("|").unwrap().column_names(),
             [" a", "b", "c"]
         );
+    }
+
+    #[test]
+    fn a_row_takes_the_columns_common_dtype() {
+        // pandas' row dtype is the columns' interleaved dtype, whatever the
+        // row holds: [NaN, 4, 3.5] of text / int / float columns read as
+        // float64 (4 became 4.0); an int / float row is float64 even with a
+        // NaN beside the int.
+        let df = DataFrame::from_dict(
+            &["k", "v", "w"],
+            vec![
+                (
+                    "k",
+                    vec![Scalar::Utf8("a".into()), Scalar::Null(NullKind::Null)],
+                ),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(4)]),
+                ("w", vec![Scalar::Null(NullKind::NaN), Scalar::Float64(3.5)]),
+            ],
+        )
+        .unwrap();
+        let mixed = df.iloc_row(1).unwrap();
+        assert_eq!(mixed.values()[1], Scalar::Int64(4));
+        assert_eq!(mixed.values()[2], Scalar::Float64(3.5));
+        let numeric = df.select_columns(&["v", "w"]).unwrap();
+        let first = numeric.iloc_row(0).unwrap();
+        assert_eq!(first.column().dtype(), DType::Float64);
+        assert_eq!(first.values()[0], Scalar::Float64(1.0));
+        // NEGATIVE: one dtype keeps it (an int row stays int64).
+        let ints = df.select_columns(&["v"]).unwrap().iloc_row(0).unwrap();
+        assert_eq!(ints.values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn dt_rounding_takes_counted_frequencies() {
+        let at = |text: &str| Scalar::Datetime64(parse_datetime64_nanos(text).unwrap());
+        let s = Series::from_values(
+            "t",
+            (0..2_i64).map(IndexLabel::from).collect(),
+            vec![at("2024-01-01 10:47:31"), at("2024-01-01 11:05:02")],
+        )
+        .unwrap();
+        let floor = |freq: &str| s.dt().floor(freq).unwrap().values().to_vec();
+        let round = s.dt().round("15min").unwrap().values().to_vec();
+        assert_eq!(
+            round,
+            [at("2024-01-01 10:45:00"), at("2024-01-01 11:00:00")]
+        );
+        assert_eq!(
+            floor("2h"),
+            [at("2024-01-01 10:00:00"), at("2024-01-01 10:00:00")]
+        );
+        assert_eq!(
+            floor("90s"),
+            [at("2024-01-01 10:46:30"), at("2024-01-01 11:04:30")]
+        );
+        assert_eq!(
+            floor("1h30min"),
+            [at("2024-01-01 10:30:00"), at("2024-01-01 10:30:00")]
+        );
+        // NEGATIVE: a count without a unit, or a non-fixed frequency, is refused.
+        assert!(s.dt().floor("15").is_err());
+        assert!(s.dt().floor("M").is_err());
     }
 
     // ── DataFrame.from_dict_index ──

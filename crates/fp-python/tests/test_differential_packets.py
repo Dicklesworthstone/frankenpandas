@@ -11294,3 +11294,69 @@ def _callable_and_axis_outcome(m: Any, run: Any) -> Any:
 def test_callable_keys_dummies_pivot_order_and_column_axis_like_pandas(case: str) -> None:
     run = _CALLABLE_AND_AXIS_CASES[case]
     assert _callable_and_axis_outcome(fpd, run) == _callable_and_axis_outcome(pd, run), case
+
+
+# Found by the fifth everyday-ops probe (scratch p13/probe_everyday5.py):
+# dt.floor / ceil / round refused a counted frequency ('15min'); shift(freq=)
+# lost the index freq; PeriodIndex printed only its length; SeriesGroupBy
+# transform('rank') was refused and shift(fill_value=) raised TypeError;
+# ngroup was an int64 column holding a NaN; value_counts(bins=) named its
+# index; a row took its values' dtype, not the columns' (apply expand gave
+# floats); a numeric index beside None kept the None; memory_usage counted a
+# RangeIndex 8 bytes a label; cut had no ordered= / duplicates=.
+def _ev5_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "b", "a", None, "b", "a"], "v": [1, 2, 3, 4, 5, 6], "w": [1.5, None, 2.5, 3.5, None, 4.5]})
+
+
+def _ev5_times(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-01-01 10:47:31", "2024-01-01 11:05:02"]))
+
+
+_EVERYDAY5_CASES = {
+    "dt.round 15min": lambda m: _ev5_times(m).dt.round("15min").tolist(),
+    "dt.floor 2h": lambda m: _ev5_times(m).dt.floor("2h").tolist(),
+    "dt.ceil 90s": lambda m: _ev5_times(m).dt.ceil("90s").tolist(),
+    "dt.floor 1h30min": lambda m: _ev5_times(m).dt.floor("1h30min").tolist(),
+    "shift freq keeps the index freq": lambda m: repr(m.Series([1.0, 2.0, 3.0], index=m.date_range("2024-01-01", periods=3, freq="6h")).shift(1, freq="h")),
+    "period_range repr": lambda m: repr(m.period_range("2024-01", periods=3, freq="M")),
+    "period_range wraps, named": lambda m: repr(m.period_range("2024-01-01", periods=12, freq="D", name="p")),
+    "SeriesGroupBy transform rank": lambda m: repr(_ev5_frame(m).groupby("k")["v"].transform("rank")),
+    "SeriesGroupBy transform cumsum": lambda m: repr(_ev5_frame(m).groupby("k")["v"].transform("cumsum")),
+    "SeriesGroupBy transform shift periods": lambda m: repr(_ev5_frame(m).groupby("k")["v"].transform("shift", periods=2)),
+    "SeriesGroupBy shift fill_value": lambda m: repr(_ev5_frame(m).groupby("k")["v"].shift(1, fill_value=0)),
+    "SeriesGroupBy shift back fill_value": lambda m: repr(_ev5_frame(m).groupby("k")["v"].shift(-1, fill_value=-9)),
+    "ngroup with a missing key": lambda m: repr(_ev5_frame(m).groupby("k").ngroup()),
+    # NEGATIVE: every key present stays int64.
+    "ngroup, every key present": lambda m: repr(_ev5_frame(m).groupby("v").ngroup()),
+    "value_counts bins": lambda m: repr(_ev5_frame(m)["v"].value_counts(bins=3)),
+    "apply expand keeps ints": lambda m: repr(_ev5_frame(m).apply(lambda r: [r["v"], r["v"] * 2], axis=1, result_type="expand")),
+    # (pandas' object row holds a numpy int64 where fp holds a Python int:
+    # the numpy-scalar gap; what matters here is that it is not a float.)
+    "a mixed row keeps an int": lambda m: (repr(_ev5_frame(m).iloc[3]), isinstance(_ev5_frame(m).iloc[3]["v"], float)),
+    "an int and float row is float": lambda m: repr(_ev5_frame(m)[["v", "w"]].iloc[1]),
+    "float index beside None": lambda m: repr(m.Series([1, 2, 3], index=[2.0, None, 1.0]).sort_index(na_position="first")),
+    "int index beside None": lambda m: repr(m.Series([1, 2], index=[1, None])),
+    "memory_usage RangeIndex": lambda m: repr(_ev5_frame(m)[["v"]].memory_usage()),
+    "Series memory_usage RangeIndex": lambda m: m.Series([1, 2, 3]).memory_usage(),
+    # NEGATIVE: a label index counts 8 bytes a label.
+    "memory_usage label index": lambda m: repr(m.DataFrame({"v": [1, 2]}, index=[5, 6]).memory_usage()),
+    "cut ordered False": lambda m: repr(m.cut(_ev5_frame(m)["v"], 2, labels=["L", "H"], ordered=False)),
+    "cut ordered False repeated labels": lambda m: repr(m.cut(_ev5_frame(m)["v"], 3, labels=["L", "H", "L"], ordered=False)),
+    "cut ordered False without labels raises": lambda m: m.cut(_ev5_frame(m)["v"], 2, ordered=False),
+    "cut repeated labels ordered raises": lambda m: m.cut(_ev5_frame(m)["v"], 3, labels=["L", "H", "L"]),
+    "cut duplicates drop": lambda m: repr(m.cut(_ev5_frame(m)["v"], [0, 2, 2, 6], duplicates="drop")),
+}
+
+
+def _everyday5_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY5_CASES))
+def test_everyday_ops_round_five_like_pandas(case: str) -> None:
+    run = _EVERYDAY5_CASES[case]
+    assert _everyday5_outcome(fpd, run) == _everyday5_outcome(pd, run), case

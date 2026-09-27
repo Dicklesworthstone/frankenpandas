@@ -142,10 +142,13 @@ fn shift_index_by_freq(
             other => Ok(other.clone()),
         })
         .collect::<PyResult<Vec<_>>>()?;
-    // A fixed duration moves the instants; a tz-aware index keeps its zone.
+    // A fixed duration moves the instants; a tz-aware index keeps its zone,
+    // and the spacing - its freq - is unchanged (pandas keeps it; the
+    // footer's 'Freq: 6h' was lost).
     Index::new(moved)
         .set_names(index.name())
         .with_tz(index.tz())
+        .map(|shifted| shifted.with_freq(index.freq().map(str::to_owned)))
         .map_err(index_error_to_py)
 }
 
@@ -6082,6 +6085,31 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     .into_any())
 }
 
+/// Labels as pandas' Index holds numbers beside a missing one: float64, the
+/// missing label NaN - `Index([2.0, None, 1.0])`, and `Index([1, None])`
+/// whose ints become floats. The None stayed (printed None where pandas
+/// prints NaN). Any other mix is left as it is (an object Index keeps None).
+#[allow(clippy::cast_precision_loss)] // pandas widens the ints the same way
+fn float_index_labels(labels: Vec<IndexLabel>) -> Vec<IndexLabel> {
+    let numeric =
+        |label: &IndexLabel| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_));
+    let missing = |label: &IndexLabel| matches!(label, IndexLabel::Null(_));
+    if !labels.iter().any(missing)
+        || !labels.iter().any(numeric)
+        || !labels.iter().all(|label| numeric(label) || missing(label))
+    {
+        return labels;
+    }
+    labels
+        .into_iter()
+        .map(|label| match label {
+            IndexLabel::Int64(value) => IndexLabel::Float64(fp_index::OrderedF64(value as f64)),
+            IndexLabel::Null(_) => IndexLabel::Null(NullKind::NaN),
+            other => other,
+        })
+        .collect()
+}
+
 /// Extract index labels from an optional Python object (Index, list, tuple, sequence, or None).
 fn extract_index_labels(
     index: Option<&Bound<'_, PyAny>>,
@@ -6111,15 +6139,22 @@ fn extract_index_labels(
                 .map(scalar_to_index_label_converter)
                 .collect())
         } else if let Ok(list) = index.cast::<PyList>() {
-            list.iter().map(|item| py_to_index_label(&item)).collect()
+            list.iter()
+                .map(|item| py_to_index_label(&item))
+                .collect::<PyResult<Vec<_>>>()
+                .map(float_index_labels)
         } else if let Ok(tuple) = index.cast::<PyTuple>() {
-            tuple.iter().map(|item| py_to_index_label(&item)).collect()
+            tuple
+                .iter()
+                .map(|item| py_to_index_label(&item))
+                .collect::<PyResult<Vec<_>>>()
+                .map(float_index_labels)
         } else if let Ok(iter) = index.try_iter() {
             let mut labels = Vec::new();
             for item in iter {
                 labels.push(py_to_index_label(&item?)?);
             }
-            Ok(labels)
+            Ok(float_index_labels(labels))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Index must be a sequence or Index",
@@ -13426,12 +13461,24 @@ impl PyPeriodIndex {
         self.inner.len()
     }
 
+    /// pandas' repr: the periods quoted as its Index summary lists them (NaT
+    /// bare), then dtype and name. It printed only the length and dtype.
     pub fn __repr__(&self) -> String {
-        format!(
-            "PeriodIndex(len={}, dtype='{}')",
-            self.inner.len(),
-            self.inner.dtype()
-        )
+        let items: Vec<String> = self
+            .inner
+            .values()
+            .iter()
+            .map(|period| {
+                if period.ordinal == i64::MIN {
+                    "NaT".to_owned()
+                } else {
+                    format!("'{}'", period.calendar_string())
+                }
+            })
+            .collect();
+        let mut attrs = vec![format!("dtype='{}'", self.inner.dtype())];
+        attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
+        pandas_index_text("PeriodIndex", &items, false, attrs)
     }
 
     pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -20311,13 +20358,21 @@ impl PySeries {
                         inner: self.inner.clone(),
                     },
                 )?;
-                cut(py, series.as_any(), bins, true, None, 3, true)?.inner
+                cut_series(py, series.as_any(), bins, true, None, 3, true, "raise")?.inner
             }
             None => self.inner.clone(),
         };
         let r = counted
             .value_counts_with_options(normalize, sort, ascending, dropna)
             .map_err(frame_error_to_py)?;
+        // pandas' binned counts sit on an unnamed index (the bins are not
+        // the Series' values; it was named after the Series).
+        let r = if bins.is_some_and(|bins| !bins.is_none()) {
+            Series::new(r.name(), r.index().rename_index(None), r.column().clone())
+                .map_err(frame_error_to_py)?
+        } else {
+            r
+        };
         Ok(PySeries { inner: r })
     }
 
@@ -22432,11 +22487,13 @@ impl PySeries {
     }
 
     #[pyo3(signature = (index=true))]
-    fn memory_usage(&self, index: bool) -> usize {
-        if index {
-            self.inner.memory_usage()
-        } else {
-            self.inner.nbytes()
+    fn memory_usage(&self, py: Python<'_>, index: bool) -> PyResult<usize> {
+        if !index {
+            return Ok(self.inner.nbytes());
+        }
+        match self.inner.index().range_span() {
+            Some(span) => Ok(self.inner.nbytes() + range_index_nbytes(py, span)?),
+            None => Ok(self.inner.memory_usage()),
         }
     }
 
@@ -32685,12 +32742,24 @@ impl PyDataFrame {
     /// pandas' `memory_usage(index=True, deep=False)` (deep= was an unknown
     /// keyword; fvsao.30).
     #[pyo3(signature = (index=true, deep=false))]
-    fn memory_usage(&self, index: bool, deep: bool) -> PyResult<PySeries> {
+    fn memory_usage(&self, py: Python<'_>, index: bool, deep: bool) -> PyResult<PySeries> {
         let res = self
             .inner
             .memory_usage_with_options(index, deep)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        // A RangeIndex's entry is pandas' (see range_index_nbytes).
+        let Some(span) = self.inner.index().range_span().filter(|_| index) else {
+            return Ok(PySeries { inner: res });
+        };
+        let mut values = res.values().to_vec();
+        if let Some(first) = values.first_mut() {
+            *first =
+                Scalar::Int64(i64::try_from(range_index_nbytes(py, span)?).unwrap_or(i64::MAX));
+        }
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        let inner =
+            Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     #[getter]
@@ -33181,14 +33250,6 @@ impl PyDataFrame {
         } else {
             None
         };
-        let cells: Vec<&[Scalar]> = (0..ncols)
-            .map(|position| {
-                frame
-                    .column_at(position)
-                    .map(Column::values)
-                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>(position))
-            })
-            .collect::<PyResult<_>>()?;
         let mut results = Vec::with_capacity(count);
         for position in 0..count {
             let piece = match (&values, ax) {
@@ -33205,22 +33266,15 @@ impl PyDataFrame {
                     .map_err(frame_error_to_py)?,
                 }
                 .into_bound_py_any(py)?,
-                (None, _) => {
-                    let label = frame.index().labels()[position].clone();
-                    let row = cells
-                        .iter()
-                        .map(|column| column[position].clone())
-                        .collect();
-                    PySeries {
-                        inner: Series::from_values(
-                            SeriesName::typed(label),
-                            column_labels.clone(),
-                            row,
-                        )
+                // A row takes the columns' common dtype, as pandas' (an
+                // object row keeps an int an int beside text and a float;
+                // its values' own inference made [None, 4, 3.5] float64).
+                (None, _) => PySeries {
+                    inner: frame
+                        .iloc_row(i64::try_from(position).unwrap_or(i64::MAX))
                         .map_err(frame_error_to_py)?,
-                    }
-                    .into_bound_py_any(py)?
                 }
+                .into_bound_py_any(py)?,
             };
             results.push(func.call(prepend_arg(piece, Some(&args))?, kwargs)?);
         }
@@ -44283,16 +44337,58 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (periods=1))]
-    fn shift(&self, periods: i64) -> PyResult<PySeries> {
+    /// pandas' `SeriesGroupBy.shift(periods, fill_value=)`: the rows a
+    /// shift empties take `fill_value` (the keyword raised TypeError).
+    #[pyo3(signature = (periods=1, freq=None, axis=None, fill_value=None, suffix=None))]
+    fn shift(
+        &self,
+        py: Python<'_>,
+        periods: i64,
+        freq: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        suffix: Option<&str>,
+    ) -> PyResult<PySeries> {
+        unsupported_params(
+            "SeriesGroupBy.shift",
+            &[
+                ("freq", freq.is_none_or(|f| f.is_none())),
+                ("axis", axis.is_none_or(|a| a.is_none())),
+                ("suffix", suffix.is_none()),
+            ],
+        )?;
         require_c_int_periods(i128::from(periods))?;
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .shift(periods)
-            .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
+        let Some(fill) = fill_value.filter(|fill| !fill.is_none()) else {
+            let res = gb.shift(periods).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: res });
+        };
+        // Each value moves |periods| rows within its group; every row no
+        // value moves into - the first |periods| of each group (the last
+        // shifting backwards) and a row whose key is missing, as pandas'
+        // shift indexer marks them - takes the fill. The values keep their
+        // type (an int column filled with an int stays int64).
+        let fill = py_to_scalar(py, fill)?;
+        let source = self.series.values();
+        let mut values = vec![fill; self.series.len()];
+        for (_, positions) in &self.ordered_groups(false)? {
+            let n = positions.len();
+            let k = usize::try_from(periods.unsigned_abs())
+                .unwrap_or(usize::MAX)
+                .min(n);
+            for i in 0..n - k {
+                let (to, from) = if periods >= 0 {
+                    (positions[i + k], positions[i])
+                } else {
+                    (positions[i], positions[i + k])
+                };
+                values[to] = source[from].clone();
+            }
+        }
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        Series::new(self.series.name(), self.series.index().clone(), column)
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
     }
 
     fn cumsum(&self) -> PyResult<PySeries> {
@@ -44968,7 +45064,13 @@ impl PySeriesGroupBy {
                 codes[position] = Scalar::Int64(number as i64);
             }
         }
+        // A row whose key is missing makes the numbers float64, as pandas.
         let column = Column::from_values(codes).map_err(column_error_to_py)?;
+        let column = if column.validity().all() {
+            column
+        } else {
+            column.astype(DType::Float64).map_err(column_error_to_py)?
+        };
         let inner =
             Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
         Ok(PySeries { inner })
@@ -45120,8 +45222,33 @@ impl PySeriesGroupBy {
     ) -> PyResult<Py<PyAny>> {
         let gb = self.series.groupby(&self.by).map_err(frame_error_to_py)?;
         if let Ok(func_str) = func.extract::<String>() {
-            // A named transform takes no arguments here; transform('shift',
-            // periods=2) used to shift by one (fvsao.5).
+            // pandas' transformation kernels are this groupby's own method of
+            // that name, with the arguments given (transform('rank') was
+            // refused; transform('shift', periods=2) now shifts by two).
+            const TRANSFORMATION_KERNELS: [&str; 13] = [
+                "bfill",
+                "cumcount",
+                "cummax",
+                "cummin",
+                "cumprod",
+                "cumsum",
+                "diff",
+                "ffill",
+                "fillna",
+                "ngroup",
+                "pct_change",
+                "rank",
+                "shift",
+            ];
+            if TRANSFORMATION_KERNELS.contains(&func_str.as_str()) {
+                let this = Py::new(py, self.clone())?;
+                return Ok(this
+                    .bind(py)
+                    .call_method(func_str.as_str(), args, kwargs)?
+                    .unbind());
+            }
+            // A named reduction takes no arguments here; transform('sum',
+            // min_count=1) is refused rather than ignored (fvsao.5).
             if !args.is_empty() || kwargs.is_some_and(|k| !k.is_empty()) {
                 return Err(not_implemented(&format!(
                     "SeriesGroupBy.transform('{func_str}') with arguments"
@@ -48744,23 +48871,120 @@ fn pivot_table<'py>(
 
 /// Bin values into discrete intervals (pandas `cut`).
 #[pyfunction]
-#[pyo3(signature = (x, bins, right=true, labels=None, precision=3, include_lowest=false))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (x, bins, right=true, labels=None, retbins=false, precision=3, include_lowest=false, duplicates="raise", ordered=true))]
 fn cut(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     bins: &Bound<'_, PyAny>,
     right: bool,
     labels: Option<&Bound<'_, PyAny>>,
+    retbins: bool,
     precision: usize,
     include_lowest: bool,
+    duplicates: &str,
+    ordered: bool,
 ) -> PyResult<PySeries> {
+    // retbins returns the edges pandas computed too; not produced yet.
+    unsupported_params("cut", &[("retbins", !retbins)])?;
+    if !matches!(duplicates, "raise" | "drop") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "invalid value for 'duplicates' parameter, valid options are: raise, drop; got '{duplicates}'"
+        )));
+    }
     let (labels, codes) = bin_labels_arg(labels)?;
     if codes {
-        let binned = cut(py, x, bins, right, None, precision, include_lowest)?;
+        let binned = cut(
+            py,
+            x,
+            bins,
+            right,
+            None,
+            false,
+            precision,
+            include_lowest,
+            duplicates,
+            true,
+        )?;
         return Ok(PySeries {
             inner: bin_codes(&binned.inner)?,
         });
     }
+    // pandas' ordered=: False needs the labels and lets them repeat (one
+    // category each); True refuses repeated labels. The keyword raised
+    // TypeError.
+    match &labels {
+        None if !ordered => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "'labels' must be provided if 'ordered = False'",
+            ));
+        }
+        Some(names)
+            if ordered
+                && names
+                    .iter()
+                    .enumerate()
+                    .any(|(i, name)| names[..i].contains(name)) =>
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "labels must be unique if ordered=True; pass ordered=False for duplicate labels",
+            ));
+        }
+        _ => {}
+    }
+    let binned = cut_series(
+        py,
+        x,
+        bins,
+        right,
+        labels,
+        precision,
+        include_lowest,
+        duplicates,
+    )?;
+    if ordered {
+        return Ok(binned);
+    }
+    // Unordered: one category per distinct label - in the labels' order,
+    // or sorted when a label repeats (pandas then infers the categories:
+    // Categorical(labels, categories=None)).
+    let mut categories: Vec<Scalar> = Vec::new();
+    let all: Vec<Scalar> = binned
+        .inner
+        .column()
+        .categorical()
+        .map(|meta| meta.categories.clone())
+        .unwrap_or_default();
+    for category in &all {
+        if !categories.contains(category) {
+            categories.push(category.clone());
+        }
+    }
+    if categories.len() < all.len() {
+        categories.sort_by(|a, b| a.semantic_cmp(b));
+    }
+    let column = binned
+        .inner
+        .column()
+        .clone()
+        .with_categorical(Some(CategoricalMetadata::new(categories, false)));
+    Series::new(binned.inner.name(), binned.inner.index().clone(), column)
+        .map(|inner| PySeries { inner })
+        .map_err(frame_error_to_py)
+}
+
+/// `pd.cut` after its argument checks (see [`cut`]).
+#[allow(clippy::too_many_arguments)]
+fn cut_series(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    bins: &Bound<'_, PyAny>,
+    right: bool,
+    labels: Option<Vec<String>>,
+    precision: usize,
+    include_lowest: bool,
+    duplicates: &str,
+) -> PyResult<PySeries> {
     // precision sets the digits of the interval labels; only pandas'
     // default is produced (it was ignored).
     unsupported_params("cut", &[("precision", precision == 3)])?;
@@ -48869,10 +49093,14 @@ fn cut(
             fp_frame::cut(&series, n_bins).map_err(frame_error_to_py)?
         }
     } else if let Ok(edges_list) = bins.cast::<PyList>() {
-        let edges: Vec<Scalar> = edges_list
+        let mut edges: Vec<Scalar> = edges_list
             .iter()
             .map(|v| py_to_scalar(py, &v))
             .collect::<PyResult<Vec<_>>>()?;
+        // duplicates='drop' bins between the distinct edges.
+        if duplicates == "drop" {
+            edges.dedup_by(|b, a| a.semantic_eq(b));
+        }
         fp_frame::cut_bins(
             &series,
             &edges,
@@ -55923,6 +56151,24 @@ fn ascii_escape_json(text: &str) -> String {
         }
     }
     out
+}
+
+/// pandas' `RangeIndex.nbytes` (its memory_usage entry): the range object and
+/// its start, stop and step as Python sizes them - not 8 bytes a label
+/// (range(0, 2) is 132, it was 16).
+fn range_index_nbytes(py: Python<'_>, (start, stop, step): (i64, i64, i64)) -> PyResult<usize> {
+    let sys = py.import("sys")?;
+    let size = |obj: Bound<'_, PyAny>| -> PyResult<usize> {
+        sys.call_method1("getsizeof", (obj,))?.extract()
+    };
+    let range = py
+        .import("builtins")?
+        .getattr("range")?
+        .call1((start, stop, step))?;
+    Ok(size(range)?
+        + size(start.into_bound_py_any(py)?)?
+        + size(stop.into_bound_py_any(py)?)?
+        + size(step.into_bound_py_any(py)?)?)
 }
 
 /// pandas' `compression='infer'` compresses a path ending in a compression
