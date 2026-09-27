@@ -18694,6 +18694,12 @@ pub struct MultiIndex {
     /// Per-level first-seen identity codes, used by duplicate/unique kernels.
     #[serde(skip)]
     identity_codes: Option<Vec<Vec<u32>>>,
+    /// A missing label is a value of its level - pandas' groupby
+    /// (dropna=False) keys, NaN inside `levels` - rather than pandas' code
+    /// -1 (set_index, from_arrays): an unstack sorts it with the values
+    /// (last) instead of first. Only [`Self::with_missing_as_level`] sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    missing_is_a_level: bool,
 }
 
 /// Typed position plan for an outer alignment of two unique MultiIndexes.
@@ -18790,7 +18796,22 @@ impl MultiIndex {
             levels,
             names,
             identity_codes,
+            missing_is_a_level: false,
         }
+    }
+
+    /// These levels with a missing label read as a value of its level (see
+    /// the field): a groupby result's keys under dropna=False.
+    #[must_use]
+    pub fn with_missing_as_level(mut self, missing_is_a_level: bool) -> Self {
+        self.missing_is_a_level = missing_is_a_level;
+        self
+    }
+
+    /// Whether a missing label is a value of its level (see the field).
+    #[must_use]
+    pub fn missing_is_a_level(&self) -> bool {
+        self.missing_is_a_level
     }
 
     fn compact_two_level_identity_layout(&self) -> Option<CompactIdentityCodeLayout<'_>> {
@@ -19243,6 +19264,7 @@ impl MultiIndex {
             })
             .collect();
         Self::from_levels_and_names(levels, self.names.clone())
+            .with_missing_as_level(self.missing_is_a_level)
     }
 
     fn missing_label_for_level(&self, level_idx: usize) -> IndexLabel {
@@ -19846,7 +19868,9 @@ impl MultiIndex {
             levels.push(selected);
         }
 
-        Ok(Self::from_levels_and_names(levels, self.names.clone()))
+        // Rows of the same levels: a missing label stays what it was.
+        Ok(Self::from_levels_and_names(levels, self.names.clone())
+            .with_missing_as_level(self.missing_is_a_level))
     }
 
     /// Delete the tuple at a positional location.
@@ -37460,6 +37484,7 @@ mod tests {
             levels: mi.levels.clone(),
             names: mi.names.clone(),
             identity_codes: None,
+            missing_is_a_level: false,
         };
         assert!(
             without_sidecar

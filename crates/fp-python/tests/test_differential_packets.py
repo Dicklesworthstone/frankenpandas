@@ -11725,3 +11725,57 @@ def test_to_period_warns_that_it_drops_the_zone() -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             naive.dt.to_period("D")
+
+
+# A missing key (br-frankenpandas-eozb0): unstack and pivot put it LAST
+# where pandas' code -1 puts it first; pivot labelled it 'Null(NaN)' and a
+# float key 'Float64(1.0)'; groupby first / last of an object column gave
+# NaN for a group with no value, where pandas' object result is None.
+def _nk_people(m: Any) -> Any:
+    return m.DataFrame({
+        "dept": ["eng", "eng", "hr", "ops", "ops"],
+        "name": ["Ann Lee", "Cy Po", None, "Di Ng", "bob Ray"],
+        "salary": [120.5, 95.25, 70.0, 88.8, 80.0],
+    })
+
+
+_NAN_KEY_CASES = {
+    "unstack puts NaN first": lambda m: repr(_nk_people(m).set_index(["dept", "name"])[["salary"]].unstack()),
+    "unstack NaN rows first": lambda m: repr(_nk_people(m).set_index(["name", "dept"])["salary"].unstack()),
+    "unstack float level NaN": lambda m: repr(m.Series([1.0, 2.0, 3.0], index=m.MultiIndex.from_tuples([("a", 2.0), ("a", float("nan")), ("b", 1.0)])).unstack()),
+    # NEGATIVE: a groupby(dropna=False) key is a value of its level, which
+    # pandas' unstack sorts LAST.
+    "groupby dropna=False unstack": lambda m: repr(m.DataFrame({"a": ["x", "y", "x", None], "b": ["p", None, "q", "p"], "v": [1, 2, 3, 4]}).groupby(["a", "b"], dropna=False)["v"].sum().unstack()),
+    "value_counts dropna=False unstack": lambda m: repr(m.DataFrame({"a": ["x", "y", "x", None], "b": ["p", None, "q", "p"]}).value_counts(["a", "b"], dropna=False).unstack()),
+    "pivot text column key None": lambda m: repr(m.DataFrame({"r": ["a", "b", "a"], "c": ["x", None, "y"], "v": [1.0, 2.0, 3.0]}).pivot(index="r", columns="c", values="v")),
+    "pivot text index key None": lambda m: repr(m.DataFrame({"r": ["a", None, "b"], "c": ["x", "x", "y"], "v": [1.0, 2.0, 3.0]}).pivot(index="r", columns="c", values="v")),
+    "pivot float column keys": lambda m: repr(m.DataFrame({"r": ["a", "b", "a"], "c": [2.0, float("nan"), 1.0], "v": [1.0, 2.0, 3.0]}).pivot(index="r", columns="c", values="v")),
+    "pivot float index keys": lambda m: repr(m.DataFrame({"r": [2.0, float("nan"), 1.0], "c": ["x", "x", "y"], "v": [1.0, 2.0, 3.0]}).pivot(index="r", columns="c", values="v")),
+    "pivot float index labels": lambda m: m.DataFrame({"r": [2.0, 1.0], "c": ["x", "y"], "v": [1, 2]}).pivot(index="r", columns="c", values="v").index.tolist(),
+    "pivot bool column keys": lambda m: repr(m.DataFrame({"r": ["a", "b"], "c": [True, False], "v": [1.0, 2.0]}).pivot(index="r", columns="c", values="v")),
+    "pivot int values beside a missing key": lambda m: repr(m.DataFrame({"r": ["a", "b"], "c": [None, "y"], "v": [1, 2]}).pivot(index="r", columns="c", values="v")),
+    # NEGATIVE: keys all present keep their order.
+    "pivot present keys": lambda m: repr(m.DataFrame({"r": ["b", "a"], "c": ["y", "x"], "v": [1.0, 2.0]}).pivot(index="r", columns="c", values="v")),
+    "groupby first of an all-None group": lambda m: m.DataFrame({"k": ["a", "b", "b"], "v": ["x", None, None]}).groupby("k")["v"].first().tolist(),
+    "groupby first of a NaN text group": lambda m: m.DataFrame({"k": ["a", "b"], "v": ["x", float("nan")]}).groupby("k")["v"].first().tolist(),
+    "groupby last": lambda m: repr(_nk_people(m).groupby("dept")["name"].last()),
+    "DataFrameGroupBy first": lambda m: repr(m.DataFrame({"k": ["a", "b"], "v": ["x", None], "n": [1.0, None]}).groupby("k").first()),
+    "agg first last": lambda m: repr(_nk_people(m).groupby("dept").agg(["first", "last"])),
+    # NEGATIVE: a float column's empty group is NaN; max of text keeps NaN.
+    "groupby first of floats": lambda m: repr(m.DataFrame({"k": ["a", "b"], "v": [1.0, None]}).groupby("k")["v"].first()),
+    "groupby max of text": lambda m: m.DataFrame({"k": ["a", "b"], "v": ["x", None]}).groupby("k")["v"].max().tolist(),
+}
+
+
+def _nan_key_outcome(m: Any, run: Any) -> Any:
+    try:
+        return _nan_marked(run(m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NAN_KEY_CASES))
+def test_missing_keys_and_object_first_like_pandas(case: str) -> None:
+    run = _NAN_KEY_CASES[case]
+    assert _nan_key_outcome(fpd, run) == _nan_key_outcome(pd, run), case

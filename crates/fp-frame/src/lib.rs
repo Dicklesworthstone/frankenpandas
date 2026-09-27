@@ -26845,7 +26845,11 @@ impl Series {
                 "unstack needs a level left for the rows and one for the columns".to_owned(),
             ));
         }
-        // Each level's sorted distinct labels and every row's code into them.
+        // Each level's sorted distinct labels and every row's code into them;
+        // a missing label first, as pandas' code -1 sorts (it came last) -
+        // unless it is a value of its level (groupby dropna=False keys),
+        // which sorts last as pandas' does.
+        let missing_first = !levels.missing_is_a_level();
         let mut uniques: Vec<Vec<IndexLabel>> = Vec::with_capacity(depth);
         let mut codes: Vec<Vec<usize>> = Vec::with_capacity(depth);
         for level in 0..depth {
@@ -26853,6 +26857,9 @@ impl Series {
             let mut unique = values.labels().to_vec();
             unique.sort();
             unique.dedup();
+            if missing_first {
+                unique.sort_by_key(|label| !label.is_missing());
+            }
             let code_of: FxHashMap<&IndexLabel, usize> = unique
                 .iter()
                 .enumerate()
@@ -42656,6 +42663,18 @@ impl SeriesGroupBy<'_> {
         Series::new(name, index, column)
     }
 
+    /// The value `first` / `last` give a group with no value: None for a
+    /// pandas object column (text, or bools beside a missing one) - pandas'
+    /// object result - else NaN (it was NaN for every column).
+    fn object_missing_value(&self) -> Scalar {
+        let dtype = self.series.column.dtype();
+        if dtype == DType::Utf8 || (dtype == DType::Bool && self.series.column.has_any_missing()) {
+            Scalar::Null(NullKind::Null)
+        } else {
+            Scalar::Null(NullKind::NaN)
+        }
+    }
+
     fn grouped_value_or_null(values: &[Scalar], index: Option<usize>) -> Scalar {
         index
             .and_then(|idx| values.get(idx))
@@ -47932,6 +47951,7 @@ impl SeriesGroupBy<'_> {
             Column::from_i64_values_owned(out)
         } else {
             let series_values = self.series.column.values();
+            let missing = self.object_missing_value();
             let mut values = Vec::with_capacity(order_keys.len());
             for key in &order_keys {
                 let indices = &groups[key];
@@ -47940,7 +47960,11 @@ impl SeriesGroupBy<'_> {
                         .get(idx)
                         .is_some_and(|value| !value.is_missing())
                 });
-                values.push(Self::grouped_value_or_null(series_values, first_valid));
+                values.push(
+                    first_valid
+                        .and_then(|idx| series_values.get(idx).cloned())
+                        .unwrap_or_else(|| missing.clone()),
+                );
             }
             Column::from_values(values)?
         };
@@ -48005,6 +48029,7 @@ impl SeriesGroupBy<'_> {
             Column::from_i64_values_owned(out)
         } else {
             let series_values = self.series.column.values();
+            let missing = self.object_missing_value();
             let mut values = Vec::with_capacity(order_keys.len());
             for key in &order_keys {
                 let indices = &groups[key];
@@ -48013,7 +48038,11 @@ impl SeriesGroupBy<'_> {
                         .get(idx)
                         .is_some_and(|value| !value.is_missing())
                 });
-                values.push(Self::grouped_value_or_null(series_values, last_valid));
+                values.push(
+                    last_valid
+                        .and_then(|idx| series_values.get(idx).cloned())
+                        .unwrap_or_else(|| missing.clone()),
+                );
             }
             Column::from_values(values)?
         };
@@ -88943,6 +88972,21 @@ impl DataFrame {
             return self.pivot_int64_keys_f64_values(iv, cv, vv, index_col);
         }
 
+        // A key's label: the value's own (a float, a bool, an instant - they
+        // were Debug text, 'Float64(1.0)'), a missing key NaN (NaT beside
+        // instants) - it was 'Null(NaN)'.
+        let label_of = |value: &Scalar| -> IndexLabel {
+            match value {
+                Scalar::Datetime64(_) | Scalar::Timedelta64(_) | Scalar::Null(NullKind::NaT)
+                    if value.is_missing() =>
+                {
+                    IndexLabel::Null(NullKind::NaT)
+                }
+                value if value.is_missing() => IndexLabel::Null(NullKind::NaN),
+                value => scalar_to_index_label(value)
+                    .unwrap_or_else(|_| IndexLabel::Utf8(format!("{value:?}"))),
+            }
+        };
         // Collect unique index and column values in order of appearance
         let mut row_keys: Vec<ScalarKey<'_>> = Vec::new();
         let mut row_labels: Vec<IndexLabel> = Vec::new();
@@ -88950,51 +88994,39 @@ impl DataFrame {
         for v in idx_vals.values() {
             let key = scalar_key_allow_missing(v);
             if seen_rows.insert(key) {
-                let label = match v {
-                    Scalar::Utf8(s) => s.as_str().into(),
-                    Scalar::Int64(n) => (*n).into(),
-                    other => format!("{other:?}").as_str().into(),
-                };
                 row_keys.push(key);
-                row_labels.push(label);
+                row_labels.push(label_of(v));
             }
         }
 
         let mut col_keys: Vec<ScalarKey<'_>> = Vec::new();
-        let mut col_labels: Vec<String> = Vec::new();
+        let mut col_typed: Vec<IndexLabel> = Vec::new();
         let mut seen_cols: FxHashSet<ScalarKey<'_>> = FxHashSet::default();
         for v in col_vals.values() {
             let key = scalar_key_allow_missing(v);
             if seen_cols.insert(key) {
-                let raw = format!("{v:?}");
-                let clean_name = raw
-                    .strip_prefix("Utf8(\"")
-                    .and_then(|s| s.strip_suffix("\")"))
-                    .or_else(|| raw.strip_prefix("Int64(").and_then(|s| s.strip_suffix(")")))
-                    .or_else(|| {
-                        raw.strip_prefix("Float64(")
-                            .and_then(|s| s.strip_suffix(")"))
-                    })
-                    .unwrap_or(raw.as_str());
                 col_keys.push(key);
-                col_labels.push(clean_name.to_string());
+                col_typed.push(label_of(v));
             }
         }
 
-        // pandas pivot sorts BOTH axes ascending with nulls last, exactly
-        // like pivot_table's sort=True default (br-frankenpandas-r0t9l,
-        // verified live 2.2.3: rows ['z','a'] -> ['a','z']). Co-sort each
-        // axis's first-seen (key, label) pairs with the same typed
-        // comparator; the stable sort keeps first-seen order for
-        // cross-type ties.
+        // pandas pivot sorts BOTH axes ascending, like pivot_table's
+        // sort=True default (br-frankenpandas-r0t9l, verified live 2.2.3:
+        // rows ['z','a'] -> ['a','z']), a missing key FIRST (pivot unstacks:
+        // its code -1 sorts first; it came last). Co-sort each axis's
+        // first-seen (key, label) pairs with the same typed comparator; the
+        // stable sort keeps first-seen order for cross-type ties.
         let mut row_pairs: Vec<(ScalarKey<'_>, IndexLabel)> =
             row_keys.into_iter().zip(row_labels).collect();
         row_pairs.sort_by(|a, b| scalar_key_cmp(&a.0, &b.0));
+        row_pairs.sort_by_key(|(_, label)| !label.is_missing());
         let (row_keys, row_labels): (Vec<_>, Vec<_>) = row_pairs.into_iter().unzip();
-        let mut col_pairs: Vec<(ScalarKey<'_>, String)> =
-            col_keys.into_iter().zip(col_labels).collect();
+        let mut col_pairs: Vec<(ScalarKey<'_>, IndexLabel)> =
+            col_keys.into_iter().zip(col_typed).collect();
         col_pairs.sort_by(|a, b| scalar_key_cmp(&a.0, &b.0));
-        let (col_keys, col_labels): (Vec<_>, Vec<_>) = col_pairs.into_iter().unzip();
+        col_pairs.sort_by_key(|(_, label)| !label.is_missing());
+        let (col_keys, col_typed): (Vec<_>, Vec<IndexLabel>) = col_pairs.into_iter().unzip();
+        let col_labels: Vec<String> = col_typed.iter().map(column_key).collect();
 
         // Build a map of (row_key, col_key) -> value. FxHashMap (not std
         // SipHash) for the per-row scatter AND the per-output-cell lookups
@@ -89098,14 +89130,16 @@ impl DataFrame {
         // Per br-frankenpandas-xb0ra: pandas sets the result's index.name
         // to the name of the source column used as the pivot index.
         let index = Index::new(row_labels).rename_index(Some(index_col));
-        Ok(Self {
+        let frame = Self {
             index,
             column_order: column_order.into(),
             columns: columns.into(),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        };
+        // The columns are labelled by their typed keys (a missing one NaN).
+        Ok(frame.with_recorded_column_labels(col_typed))
     }
 
     /// Typed pivot for all-valid `Int64` index/columns keys + all-valid no-NaN
@@ -99819,8 +99853,12 @@ impl DataFrameGroupBy<'_> {
             }
         }
         let names: Vec<Option<String>> = self.key_names.clone();
+        // dropna=False keys hold a missing label as a value of its level, as
+        // pandas' groupby levels do (an unstack sorts it last).
         Ok(Some(
-            fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names),
+            fp_index::MultiIndex::from_arrays(level_arrays)?
+                .set_names(names)
+                .with_missing_as_level(!self.dropna),
         ))
     }
 
@@ -101119,6 +101157,16 @@ impl DataFrameGroupBy<'_> {
                 continue;
             }
 
+            // first / last of a group with no value: None for a pandas object
+            // column (text, or bools beside a missing one), else NaN (it was
+            // NaN for every column).
+            let no_value = if col.dtype() == DType::Utf8
+                || (col.dtype() == DType::Bool && col.has_any_missing())
+            {
+                Scalar::Null(NullKind::Null)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            };
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
                 let group_vals: Vec<Scalar> = row_indices
@@ -101158,13 +101206,13 @@ impl DataFrameGroupBy<'_> {
                         .iter()
                         .find(|v| !v.is_missing())
                         .cloned()
-                        .unwrap_or(Scalar::Null(NullKind::NaN)),
+                        .unwrap_or_else(|| no_value.clone()),
                     "last" => group_vals
                         .iter()
                         .rev()
                         .find(|v| !v.is_missing())
                         .cloned()
-                        .unwrap_or(Scalar::Null(NullKind::NaN)),
+                        .unwrap_or_else(|| no_value.clone()),
                     "nunique" => fp_types::nannunique(&group_vals),
                     "prod" => nanprod_preserving_int(&group_vals),
                     "any" => fp_types::nanany(&group_vals),
@@ -171929,6 +171977,142 @@ mod tests {
         // NEGATIVE: numbers alone still promote to float64.
         let numbers = df.melt(&["id"], &["amount"], None, None).unwrap();
         assert_eq!(numbers.column("value").unwrap().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn pivot_labels_keys_by_value_and_puts_a_missing_key_first() {
+        let df = DataFrame::from_dict(
+            &["r", "c", "v"],
+            vec![
+                (
+                    "r",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("y".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        // pandas: rows [NaN, 1.0, 2.0], columns [NaN, 'x', 'y'] - float
+        // labels, not 'Float64(1.0)'; the missing key first, not 'Null(NaN)'.
+        let out = df.pivot("r", "c", "v").unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Null(NullKind::NaN),
+                IndexLabel::Float64(fp_index::OrderedF64(1.0)),
+                IndexLabel::Float64(fp_index::OrderedF64(2.0)),
+            ]
+        );
+        assert_eq!(out.column_names(), vec!["NaN", "x", "y"]);
+        assert_eq!(out.column_labels()[0], IndexLabel::Null(NullKind::NaN));
+        assert_eq!(out.column("NaN").unwrap().values()[0], Scalar::Float64(2.0));
+        // NEGATIVE: present keys keep their sorted order.
+        let present = df.take_rows(&[0, 2]).unwrap().pivot("r", "c", "v").unwrap();
+        assert_eq!(present.column_names(), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn unstack_orders_a_missing_label_by_what_it_is() {
+        // pandas: a set_index key's NaN is code -1 and unstacks FIRST; a
+        // groupby(dropna=False) key's NaN is a value of its level and
+        // unstacks LAST (sorted with the values).
+        let df = DataFrame::from_dict(
+            &["a", "b", "v"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("x".into())],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Utf8("p".into()), Scalar::Null(NullKind::Null)],
+                ),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let levels = fp_index::MultiIndex::from_arrays(vec![
+            vec![IndexLabel::Utf8("x".into()), IndexLabel::Utf8("x".into())],
+            vec![
+                IndexLabel::Utf8("p".into()),
+                IndexLabel::Null(NullKind::NaN),
+            ],
+        ])
+        .unwrap();
+        let values = df.column("v").unwrap().clone();
+        let coded = Series::new(
+            "v",
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)])
+                .with_row_multiindex(levels.clone())
+                .unwrap(),
+            values.clone(),
+        )
+        .unwrap();
+        let first = coded.unstack().unwrap();
+        assert!(first.column_labels()[0].is_missing());
+        // The flag survives a take of the rows (a groupby result relabelled).
+        let as_level = levels.with_missing_as_level(true).take(&[0, 1]).unwrap();
+        assert!(as_level.missing_is_a_level());
+        let grouped = Series::new(
+            "v",
+            Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)])
+                .with_row_multiindex(as_level)
+                .unwrap(),
+            values,
+        )
+        .unwrap();
+        let last = grouped.unstack().unwrap();
+        assert!(last.column_labels()[1].is_missing());
+        assert!(!last.column_labels()[0].is_missing());
+    }
+
+    #[test]
+    fn groupby_first_of_an_object_group_with_no_value_is_none() {
+        let keys = Series::from_values(
+            "k",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+        )
+        .unwrap();
+        let text = Series::from_values(
+            "v",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("x".into()), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let first = text.groupby(&keys).unwrap().first().unwrap();
+        assert_eq!(first.values()[1], Scalar::Null(NullKind::Null));
+        let last = text.groupby(&keys).unwrap().last().unwrap();
+        assert_eq!(last.values()[1], Scalar::Null(NullKind::Null));
+        // NEGATIVE: a float column's empty group stays NaN.
+        let floats = Series::from_values(
+            "v",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let first = floats.groupby(&keys).unwrap().first().unwrap();
+        assert!(first.values()[1].is_missing());
+        assert_ne!(first.values()[1], Scalar::Null(NullKind::Null));
     }
 
     // ── DataFrame.from_dict_index ──
