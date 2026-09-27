@@ -84,7 +84,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 | **Fail closed** | Unknown features, incompatible dtypes, and ambiguous coercions produce errors, not silent corruption. Strict mode rejects; hardened mode logs and recovers under a Bayesian expected-loss decision rule. |
 | **Zero unsafe** | Every crate uses `#![forbid(unsafe_code)]`. Memory safety comes from the type system, not audits. |
 | **Test everything differentially** | Conformance packets run FrankenPandas operations and compare against the pandas oracle. 1,387 packet JSON files, replayed against the live pandas oracle in CI (daily batch and every pull request). |
-| **Document every divergence** | 29 numbered divergence entries (17 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible test packets. No silent disagreement. |
+| **Document every divergence** | 29 numbered divergence entries (16 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible test packets. No silent disagreement. |
 
 ## What's In The Box
 

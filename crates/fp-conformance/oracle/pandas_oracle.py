@@ -348,6 +348,13 @@ def scalar_to_json(value: Any) -> dict[str, Any]:
         return {"kind": "null", "value": "null"}
     if isinstance(value, bool):
         return {"kind": "bool", "value": value}
+    # br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8: a bytes value is
+    # fp-types' bytes object cell, Scalar::Object(ObjectValue::Bytes), whose
+    # serde form is {"bytes": [...]}. It fell to str(value) below and read as
+    # the TEXT "b'..'". No fixture carried a bytes value before this (checked:
+    # no expected value in the corpus is a "b'" string).
+    if isinstance(value, (bytes, bytearray)):
+        return {"kind": "object", "value": {"bytes": list(value)}}
     # br-frankenpandas-4hmx4: a pd.Timestamp label (e.g. the name of an
     # asof() result row over a DatetimeIndex) writes as the TYPED datetime64
     # label - i64 nanoseconds, the encoding of FrankenPandas'
@@ -5738,8 +5745,11 @@ def op_series_str_encode(pd, payload: dict[str, Any]) -> dict[str, Any]:
     op_name = "series_str_encode"
     series = _series_for_str_op(pd, payload, op_name)
     try:
-        # FP's str.encode reports the UTF-8 byte length of each element.
-        out = series.str.encode("utf-8").str.len()
+        # pandas' answer: each str as its bytes, a missing value kept. This
+        # asked `.str.encode("utf-8").str.len()` because FP's encode returned
+        # byte LENGTHS (DISC-025) - the oracle answered FP's question, not
+        # pandas'. br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8.
+        out = series.str.encode("utf-8")
     except Exception as exc:
         raise OracleError(f"{op_name} failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -5772,10 +5782,17 @@ def op_series_str_rsplit_get(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_series_str_decode(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    # FP's str.decode is the identity on an already-decoded str Series.
+    # pandas' answer: bytes decode to str, anything else (a str too) is NaN.
+    # This returned the input unchanged because FP's decode was the identity
+    # (DISC-025) - the oracle answered FP's question, not pandas'.
+    # br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8.
     op_name = "series_str_decode"
     series = _series_for_str_op(pd, payload, op_name)
-    return {"expected_series": series_to_expected(series)}
+    try:
+        out = series.str.decode("utf-8")
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_str_find(pd, payload: dict[str, Any]) -> dict[str, Any]:

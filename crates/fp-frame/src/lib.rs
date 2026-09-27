@@ -50559,6 +50559,101 @@ fn str_find_bounded(s: &str, sub: &str, start: i64, end: Option<i64>, reverse: b
 ///
 /// Created by `Series::str()`. Provides string manipulation methods
 /// analogous to pandas `Series.str` namespace.
+/// The text codecs the core encodes and decodes itself, by Python's names
+/// and aliases: UTF-8, ASCII and Latin-1, strict (4qg5w.8).
+#[derive(Clone, Copy)]
+enum TextCodec {
+    Utf8,
+    Ascii,
+    Latin1,
+}
+
+impl TextCodec {
+    fn parse(encoding: &str) -> Result<Self, FrameError> {
+        let name = encoding.trim().to_ascii_lowercase().replace('_', "-");
+        match name.as_str() {
+            "utf-8" | "utf8" | "u8" | "utf" | "cp65001" => Ok(Self::Utf8),
+            "ascii" | "us-ascii" | "646" => Ok(Self::Ascii),
+            "latin-1" | "latin1" | "latin" | "l1" | "iso-8859-1" | "iso8859-1" | "8859"
+            | "cp819" => Ok(Self::Latin1),
+            _ => Err(FrameError::CompatibilityRejected(format!(
+                "the '{encoding}' codec is not built into the core (UTF-8, ASCII and Latin-1 are); \
+                 the Python binding encodes and decodes with Python's codecs"
+            ))),
+        }
+    }
+
+    /// Python's name for the codec, as its errors spell it.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Utf8 => "utf-8",
+            Self::Ascii => "ascii",
+            Self::Latin1 => "latin-1",
+        }
+    }
+
+    fn encode(self, text: &str) -> Result<Vec<u8>, FrameError> {
+        let limit: u32 = match self {
+            Self::Utf8 => return Ok(text.as_bytes().to_vec()),
+            Self::Ascii => 0x80,
+            Self::Latin1 => 0x100,
+        };
+        text.chars()
+            .enumerate()
+            .map(|(position, ch)| {
+                u8::try_from(u32::from(ch))
+                    .ok()
+                    .filter(|_| u32::from(ch) < limit)
+                    .ok_or_else(|| {
+                        let code = u32::from(ch);
+                        let escaped = if code < 0x100 {
+                            format!("\\x{code:02x}")
+                        } else if code < 0x1_0000 {
+                            format!("\\u{code:04x}")
+                        } else {
+                            format!("\\U{code:08x}")
+                        };
+                        FrameError::CompatibilityRejected(format!(
+                            "'{}' codec can't encode character '{escaped}' in position {position}: ordinal not in range({limit})",
+                            self.name()
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    fn decode(self, data: &[u8]) -> Result<String, FrameError> {
+        match self {
+            Self::Utf8 => std::str::from_utf8(data).map(str::to_owned).map_err(|error| {
+                let position = error.valid_up_to();
+                let byte = data[position];
+                let reason = match error.error_len() {
+                    None => "unexpected end of data",
+                    Some(_) if (0xc2..=0xf4).contains(&byte) => "invalid continuation byte",
+                    Some(_) => "invalid start byte",
+                };
+                FrameError::CompatibilityRejected(format!(
+                    "'utf-8' codec can't decode byte 0x{byte:02x} in position {position}: {reason}"
+                ))
+            }),
+            Self::Ascii => data
+                .iter()
+                .enumerate()
+                .map(|(position, &byte)| {
+                    if byte < 0x80 {
+                        Ok(char::from(byte))
+                    } else {
+                        Err(FrameError::CompatibilityRejected(format!(
+                            "'ascii' codec can't decode byte 0x{byte:02x} in position {position}: ordinal not in range(128)"
+                        )))
+                    }
+                })
+                .collect(),
+            Self::Latin1 => Ok(data.iter().map(|&byte| char::from(byte)).collect()),
+        }
+    }
+}
+
 pub struct StringAccessor<'a> {
     series: &'a Series,
 }
@@ -51210,19 +51305,23 @@ impl StringAccessor<'_> {
     fn over_list_cells(
         &self,
         on_list: impl Fn(&[Scalar]) -> Scalar,
+        on_bytes: impl Fn(&[u8]) -> Scalar,
         on_text: impl Fn(&str) -> Scalar,
     ) -> Option<Result<Series, FrameError>> {
         let values = self.series.values();
-        if !values
-            .iter()
-            .any(|value| matches!(value, Scalar::Object(fp_types::ObjectValue::List(_))))
-        {
+        if !values.iter().any(|value| {
+            matches!(
+                value,
+                Scalar::Object(fp_types::ObjectValue::List(_) | fp_types::ObjectValue::Bytes(_))
+            )
+        }) {
             return None;
         }
         let out: Vec<Scalar> = values
             .iter()
             .map(|value| match value {
                 Scalar::Object(fp_types::ObjectValue::List(items)) => on_list(items),
+                Scalar::Object(fp_types::ObjectValue::Bytes(data)) => on_bytes(data),
                 Scalar::Utf8(text) => on_text(text),
                 // A missing cell stays the missing value it is (None, NaN).
                 missing if missing.is_missing() => missing.clone(),
@@ -52040,9 +52139,11 @@ impl StringAccessor<'_> {
     /// Per br-frankenpandas-rg8ys.6.6: pandas returns float64 (not int64)
     /// to represent nullable integers. Nulls become NaN.
     pub fn len(&self) -> Result<Series, FrameError> {
-        // A list cell's length (str.split(...).str.len()); fvsao.33.
+        // A list cell's length (str.split(...).str.len()); fvsao.33. A bytes
+        // cell's is its byte count, as Python's len (it was NaN; 4qg5w.8).
         if let Some(result) = self.over_list_cells(
             |items| Scalar::Int64(i64::try_from(items.len()).unwrap_or(i64::MAX)),
+            |data| Scalar::Int64(i64::try_from(data.len()).unwrap_or(i64::MAX)),
             |text| Scalar::Int64(i64::try_from(text.chars().count()).unwrap_or(i64::MAX)),
         ) {
             return result;
@@ -53216,6 +53317,12 @@ impl StringAccessor<'_> {
             |items| {
                 position(items.len()).map_or(Scalar::Null(NullKind::NaN), |at| items[at].clone())
             },
+            // A bytes cell's i-th byte is an int, as Python indexes bytes.
+            |data| {
+                position(data.len()).map_or(Scalar::Null(NullKind::NaN), |at| {
+                    Scalar::Int64(i64::from(data[at]))
+                })
+            },
             |text| {
                 let chars: Vec<char> = text.chars().collect();
                 position(chars.len()).map_or(Scalar::Null(NullKind::NaN), |at| {
@@ -54025,44 +54132,64 @@ impl StringAccessor<'_> {
         DataFrame::new_with_column_order(index, columns, col_order)
     }
 
-    /// Encode strings to bytes (returns byte length as Float64).
-    ///
-    /// Matches `pd.Series.str.encode(encoding)`. Since Rust strings are
-    /// always UTF-8, this returns the byte length of each string for
-    /// the "utf-8" encoding. Per br-frankenpandas-rg8ys.6.6: pandas
-    /// returns float64 for nullable integers (nulls become NaN).
-    pub fn encode(&self, _encoding: &str) -> Result<Series, FrameError> {
-        // In Rust, strings are always valid UTF-8, so "encoding" is a no-op.
-        // Return the byte lengths. Int64 with no nulls, Float64 (NaN) when any
-        // null is present.
-        //
-        // ⚠️ THIS DOES NOT MATCH pandas, and the comment used to claim it did.
-        // MEASURED, live pandas 2.2.3 on `pd.Series(['foo','hello world',None])`:
-        //
-        //     s.str.encode('utf-8') -> [b'foo', b'hello world', None]   object
-        //     s.str.len()           -> [3.0, 11.0, nan]                 float64
-        //
-        // pandas returns a BYTES object per element and preserves a supplied
-        // None; this returns a NUMBER and mints NaN. It is `str.len` under
-        // another name, and the two agree on nothing but arity. See DISC-025;
-        // the decision (real bytes / explicit refusal / documented divergence)
-        // is br-frankenpandas-rw01l.
-        //
-        // The false claim is why this sat unnoticed: it was read as parity while
-        // fp_p2d_413 quietly pinned the byte lengths as expected output.
-        let name = SeriesName::from(format!("{}_encoded", self.series.name()));
-        self.apply_str_int(|s| s.len() as i64, &name)
+    /// pandas' `Series.str.encode(encoding)`: each str as its bytes (a bytes
+    /// cell), a missing value kept as it is (None stays None, NaN stays
+    /// NaN), any other value NaN; the name kept. It returned each str's byte
+    /// LENGTH under the name '<name>_encoded' (DISC-025, 4qg5w.8). The core
+    /// encodes UTF-8, ASCII and Latin-1 (see [`TextCodec`]), strictly: a
+    /// character the codec cannot hold is Python's UnicodeEncodeError text.
+    /// Other codecs are refused - the Python binding uses Python's own.
+    pub fn encode(&self, encoding: &str) -> Result<Series, FrameError> {
+        let codec = TextCodec::parse(encoding)?;
+        let values = self
+            .series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Utf8(text) => codec
+                    .encode(text)
+                    .map(|data| Scalar::Object(fp_types::ObjectValue::bytes(data))),
+                missing if missing.is_missing() => Ok(missing.clone()),
+                _ => Ok(Scalar::Null(NullKind::NaN)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Series::new(
+            self.series.name(),
+            self.series.index().clone(),
+            Column::from_object_values(values),
+        )
     }
 
-    /// Decode bytes to strings (identity operation in Rust).
-    ///
-    /// Sibling to `encode()` (see DISC-025 and br-frankenpandas-rw01l).
-    /// In live pandas 2.2.3, `.str.decode` requires a Series of `bytes` objects
-    /// and raises `AttributeError: Can only use .str.decode with 'bytes' dtype!`
-    /// on string inputs. Since FrankenPandas currently represents text and binary
-    /// strings as `Utf8`, this returns an identity clone of the string Series.
-    pub fn decode(&self, _encoding: &str) -> Result<Series, FrameError> {
-        Ok(self.series.clone())
+    /// pandas' `Series.str.decode(encoding)`: each bytes cell as its text, a
+    /// missing value kept, any other value - a str too - NaN; a result of
+    /// nothing but missing values holding a NaN is float64 (pandas converts
+    /// the objects: `['a', None]` decodes to `[nan, nan]`, `[None]` stays
+    /// `[None]`). It returned the Series unchanged (DISC-025, 4qg5w.8).
+    /// Codecs as [`Self::encode`]; bytes the codec cannot read are Python's
+    /// UnicodeDecodeError text.
+    pub fn decode(&self, encoding: &str) -> Result<Series, FrameError> {
+        let codec = TextCodec::parse(encoding)?;
+        let values = self
+            .series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Object(fp_types::ObjectValue::Bytes(data)) => {
+                    codec.decode(data).map(Scalar::Utf8)
+                }
+                missing if missing.is_missing() => Ok(missing.clone()),
+                _ => Ok(Scalar::Null(NullKind::NaN)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let column = if values.iter().all(Scalar::is_missing) && values.iter().any(Scalar::is_nan) {
+            Column::new(
+                DType::Float64,
+                vec![Scalar::Null(NullKind::NaN); values.len()],
+            )?
+        } else {
+            Column::from_object_values(values)
+        };
+        Series::new(self.series.name(), self.series.index().clone(), column)
     }
 
     /// Translate characters using a mapping table.
@@ -133109,18 +133236,16 @@ mod tests {
         assert_eq!(rfind.column().dtype(), DType::Float64);
         assert_eq!(rfind.column().values()[1], Scalar::Null(NullKind::NaN));
 
-        // `str.encode` BELONGS IN THIS TEST, not with the object-output
-        // accessors, and br-frankenpandas-q0ktc filed it in the wrong group.
-        // That bead measured pandas' `s.str.encode('utf-8')`, which yields
-        // BYTES and preserves a supplied None. FrankenPandas' `encode` is a
-        // different operation: it returns each element's UTF-8 BYTE LENGTH
-        // through `apply_str_int` — the very helper `len` and `rfind` above
-        // use — so lufpu's rule puts it on the int/float side, where the
-        // missing is NaN and the column promotes to Float64.
+        // `str.encode` is an OBJECT-output accessor now, as pandas':
+        // `s.str.encode('utf-8')` yields BYTES and keeps a supplied missing
+        // value as it is (4qg5w.8; it returned each element's byte LENGTH
+        // through `apply_str_int`, which is why this test used to hold it).
         let encoded = s.str().encode("utf-8").unwrap();
-        assert_eq!(encoded.column().dtype(), DType::Float64);
-        assert_eq!(encoded.column().values()[1], Scalar::Null(NullKind::NaN));
-        assert_eq!(encoded.column().values()[0], Scalar::Float64(7.0));
+        assert!(matches!(
+            encoded.column().values()[0],
+            Scalar::Object(fp_types::ObjectValue::Bytes(_))
+        ));
+        assert_eq!(encoded.column().values()[1], s.values()[1]);
     }
 
     /// `str.findall` carries BOTH nywa8 rules in one object-output column, and
@@ -133252,7 +133377,6 @@ mod tests {
                         .values()
                         .to_vec(),
                 ),
-                ("encode", s.str().encode("utf-8").unwrap().values().to_vec()),
                 ("count", s.str().count("-").unwrap().values().to_vec()),
                 (
                     "count_literal",
@@ -171796,39 +171920,67 @@ mod tests {
     }
 
     #[test]
-    fn str_encode_returns_byte_lengths() {
+    fn str_encode_returns_bytes_and_decode_reads_them_4qg5w_8() {
+        use fp_types::ObjectValue;
+        let bytes = |data: &[u8]| Scalar::Object(ObjectValue::bytes(data.to_vec()));
         let s = Series::from_values(
             "s",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
             vec![
                 Scalar::Utf8("hello".to_string()),
                 Scalar::Utf8("café".to_string()),
                 Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
             ],
         )
         .unwrap();
-        let result = s.str().encode("utf-8").unwrap();
-        // pandas returns float64 when any null is present
-        assert_eq!(result.values()[0], Scalar::Float64(5.0));
-        // "café" is 5 bytes in UTF-8 (é is 2 bytes)
-        assert_eq!(result.values()[1], Scalar::Float64(5.0));
-        assert!(result.values()[2].is_missing());
-    }
-
-    #[test]
-    fn str_decode_identity() {
-        let s = Series::from_values(
-            "s",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![
-                Scalar::Utf8("hello".to_string()),
-                Scalar::Utf8("world".to_string()),
-            ],
-        )
-        .unwrap();
-        let result = s.str().decode("utf-8").unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("hello".to_string()));
-        assert_eq!(result.values()[1], Scalar::Utf8("world".to_string()));
+        // Each str as its UTF-8 bytes ("café" is 5 of them), None kept, a
+        // non-str NaN, the name kept (it was the byte lengths, '<name>_encoded').
+        let encoded = s.str().encode("utf-8").unwrap();
+        assert_eq!(encoded.name(), "s");
+        assert_eq!(
+            encoded.values(),
+            &[
+                bytes(b"hello"),
+                bytes("café".as_bytes()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        assert_eq!(bytes(b"a'b").to_string(), "b\"a'b\"");
+        assert_eq!(bytes(b"\xe9\n").to_string(), "b'\\xe9\\n'");
+        // Round trip, and the byte counts / bytes str.len and str.get see.
+        let decoded = encoded.str().decode("utf-8").unwrap();
+        assert_eq!(&decoded.values()[..3], &s.values()[..3]);
+        assert_eq!(
+            encoded.str().len().unwrap().values()[1],
+            Scalar::Float64(5.0)
+        );
+        assert_eq!(
+            encoded.str().get(0).unwrap().values()[0],
+            Scalar::Float64(104.0)
+        );
+        // Latin-1 and ASCII, and their refusals in Python's words.
+        let latin = s.str().encode("latin-1").unwrap();
+        assert_eq!(latin.values()[1], bytes(b"caf\xe9"));
+        let refused = |result: Result<Series, FrameError>| match result {
+            Err(FrameError::CompatibilityRejected(message)) => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        assert_eq!(
+            refused(s.str().encode("ascii")),
+            "'ascii' codec can't encode character '\\xe9' in position 3: ordinal not in range(128)"
+        );
+        let invalid = Series::from_values("b", vec![0_i64.into()], vec![bytes(b"\xff")]).unwrap();
+        assert_eq!(
+            refused(invalid.str().decode("utf-8")),
+            "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+        );
+        // NEGATIVE: decoding str (not bytes) is pandas' all-NaN float64, not
+        // the str unchanged (it was an identity clone).
+        let not_bytes = s.str().decode("utf-8").unwrap();
+        assert_eq!(not_bytes.column().dtype(), DType::Float64);
+        assert!(not_bytes.values().iter().all(Scalar::is_missing));
     }
 
     #[test]

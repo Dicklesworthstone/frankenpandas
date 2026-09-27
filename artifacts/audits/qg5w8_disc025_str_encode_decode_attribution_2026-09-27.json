@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8 / DISC-025. FOUR fixtures,",
+    "named explicitly, because bulk regeneration is forbidden.",
+    "",
+    "WHAT CHANGED IN THE ORACLE. op_series_str_encode asked pandas",
+    "`.str.encode('utf-8').str.len()` and op_series_str_decode returned its input",
+    "unchanged, both commented 'FP's str.encode reports the UTF-8 byte length' /",
+    "'FP's str.decode is the identity': the oracle answered FrankenPandas' question,",
+    "so these fixtures pinned DISC-025's divergence as if it were pandas' answer.",
+    "They now ask pandas `.str.encode('utf-8')` and `.str.decode('utf-8')`, and",
+    "scalar_to_json writes a bytes value as fp-types' bytes object cell",
+    "({\"kind\": \"object\", \"value\": {\"bytes\": [...]}}) instead of the text \"b'..'\".",
+    "",
+    "WHY THIS IS NOT LAUNDERING FP'S ANSWER INTO THE CORPUS. The moved values are",
+    "pandas' own (live 2.2.3, below), and FrankenPandas changed in the same unit of",
+    "work to produce them: StringAccessor::encode returns bytes cells",
+    "(ObjectValue::Bytes, new) with a missing value kept and the name kept;",
+    "decode reads bytes and gives NaN for anything else. Against the OLD fp code",
+    "all four regenerated fixtures FAIL (lengths / identity) - the gate tightened.",
+    "",
+    "INTEGRITY CHECK (the price of a gate change): rows admitted or moved = 4 (these",
+    "four; no other fixture carries series_str_encode / series_str_decode, and no",
+    "expected value anywhere in the corpus was a \"b'\" text the new bytes branch could",
+    "re-read). WIN/LOSE against the pre-change code: 0 WIN / 4 LOSE. Against this",
+    "commit's code: 4 WIN."
+  ],
+  "attributions": {
+    "fp_p2d_247_series_str_encode_basic_strict.json": {
+      "divergence": "DISC-025",
+      "bead": "br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8",
+      "agent": "cod-pandas (Claude)",
+      "date": "2026-09-27",
+      "moved_key": "expected_series.values",
+      "from": "int64 byte lengths [5, 5, 0, 7]",
+      "to": "bytes cells [b'hello', b'world', b'', b'test123']",
+      "evidence": "live pandas 2.2.3: pd.Series(['hello','world','','test123'], name='text').str.encode('utf-8') -> object [b'hello', b'world', b'', b'test123'], name 'text'"
+    },
+    "fp_p2d_413_series_str_encode_with_nulls_hardened.json": {
+      "divergence": "DISC-025",
+      "bead": "br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8",
+      "agent": "cod-pandas (Claude)",
+      "date": "2026-09-27",
+      "moved_key": "expected_series.values",
+      "from": "float64 byte lengths with NaN [5.0, NaN, 5.0, NaN]",
+      "to": "bytes cells with the input None kept [b'hello', None, b'world', None]",
+      "evidence": "live pandas 2.2.3: pd.Series(['hello', None, 'world', None]).str.encode('utf-8') -> object [b'hello', None, b'world', None] (a supplied None is kept, not turned into NaN; scratch p12/probe_encode_pd.py 'encode' row)"
+    },
+    "fp_p2d_248_series_str_decode_basic_strict.json": {
+      "divergence": "DISC-025",
+      "bead": "br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8",
+      "agent": "cod-pandas (Claude)",
+      "date": "2026-09-27",
+      "moved_key": "expected_series.values",
+      "from": "the str input unchanged ['hello', 'world', 'test']",
+      "to": "all NaN (float64)",
+      "evidence": "live pandas 2.2.3: pd.Series(['hello','world','test']).str.decode('utf-8') -> float64 [nan, nan, nan]; decode reads bytes and maps any other value to NaN (scratch p12/probe_encode_pd.py 'decode on str' row: float64 [nan])"
+    },
+    "fp_p2d_414_series_str_decode_with_nulls_hardened.json": {
+      "divergence": "DISC-025",
+      "bead": "br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8",
+      "agent": "cod-pandas (Claude)",
+      "date": "2026-09-27",
+      "moved_key": "expected_series.values",
+      "from": "the input unchanged ['hello', None, 'world', None]",
+      "to": "all NaN (float64)",
+      "evidence": "live pandas 2.2.3: pd.Series(['a', None]).str.decode('utf-8') -> float64 [nan, nan]. The input None's NaN is NOT an oracle read/write asymmetry (the tool flags this move ROUND-TRIP by its marker rule): pandas' decode maps the str values to NaN and then converts the all-missing object result to float64, which turns the None into NaN too; a Series of None alone stays object [None] (p12/probe_encode_edge.py 'decode [None]' vs 'decode str+None' rows)"
+    }
+  },
+  "retirements": {}
+}

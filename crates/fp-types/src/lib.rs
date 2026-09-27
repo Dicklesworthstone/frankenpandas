@@ -1200,6 +1200,10 @@ pub enum Scalar {
 pub enum ObjectValue {
     /// A list of values, compared and printed as Python's list.
     List(std::sync::Arc<[Scalar]>),
+    /// A bytes value, compared and printed as Python's bytes (`b'ab'`):
+    /// `str.encode`'s cells. The core reads it, so a bytes column needs no
+    /// host (4qg5w.8).
+    Bytes(std::sync::Arc<[u8]>),
     /// A host-language value, opaque to the core.
     Host(HostValue),
 }
@@ -1318,11 +1322,26 @@ impl ObjectValue {
     pub fn as_list(&self) -> Option<&[Scalar]> {
         match self {
             Self::List(items) => Some(items),
-            Self::Host(_) => None,
+            Self::Bytes(_) | Self::Host(_) => None,
         }
     }
 
-    /// The cell as Python's `repr` spells it (`[1, 'a', None]`).
+    /// A bytes cell of `data`.
+    #[must_use]
+    pub fn bytes(data: Vec<u8>) -> Self {
+        Self::Bytes(data.into())
+    }
+
+    /// The bytes of a bytes cell.
+    #[must_use]
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(data) => Some(data),
+            Self::List(_) | Self::Host(_) => None,
+        }
+    }
+
+    /// The cell as Python's `repr` spells it (`[1, 'a', None]`, `b'ab'`).
     #[must_use]
     pub fn repr(&self) -> String {
         match self {
@@ -1330,6 +1349,7 @@ impl ObjectValue {
                 let parts: Vec<String> = items.iter().map(Scalar::python_repr).collect();
                 format!("[{}]", parts.join(", "))
             }
+            Self::Bytes(data) => python_bytes_repr(data),
             Self::Host(value) => value.object().host_repr(),
         }
     }
@@ -1350,36 +1370,40 @@ impl ObjectValue {
                     .collect();
                 format!("[{}]", parts.join(", "))
             }
+            Self::Bytes(data) => python_bytes_repr(data),
             Self::Host(value) => value.object().host_str(),
         }
     }
 
-    /// The cell's Python type as Python's errors name it (`list`,
+    /// The cell's Python type as Python's errors name it (`list`, `bytes`,
     /// `datetime.date`).
     #[must_use]
     pub fn type_name(&self) -> String {
         match self {
             Self::List(_) => "list".to_owned(),
+            Self::Bytes(_) => "bytes".to_owned(),
             Self::Host(value) => value.object().host_type_name(),
         }
     }
 
     /// Python's `==` between this cell and a plain value: a host value asks
-    /// the host (a dtype equals its name), a list never equals one.
+    /// the host (a dtype equals its name), a list or bytes never equals one
+    /// (`b'a' == 'a'` is False).
     #[must_use]
     pub fn python_eq_scalar(&self, other: &Scalar) -> bool {
         match self {
             Self::Host(value) => value.object().host_eq_scalar(other),
-            Self::List(_) => false,
+            Self::List(_) | Self::Bytes(_) => false,
         }
     }
 
     /// Python's ordering of two cells, None where Python raises: host values
-    /// by the host, lists item by item (a shorter prefix first), and a list
-    /// against a host value unordered.
+    /// by the host, lists item by item (a shorter prefix first), bytes by
+    /// byte, and cells of different kinds unordered.
     #[must_use]
     pub fn python_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
+            (Self::Bytes(left), Self::Bytes(right)) => Some(left.cmp(right)),
             (Self::Host(left), Self::Host(right)) => {
                 if left == right {
                     Some(std::cmp::Ordering::Equal)
@@ -1415,7 +1439,11 @@ impl ObjectValue {
         if let Some(ordering) = self.python_cmp(other).filter(|ordering| ordering.is_ne()) {
             return ordering;
         }
-        let rank = |cell: &Self| u8::from(matches!(cell, Self::Host(_)));
+        let rank = |cell: &Self| match cell {
+            Self::List(_) => 0_u8,
+            Self::Bytes(_) => 1,
+            Self::Host(_) => 2,
+        };
         rank(self)
             .cmp(&rank(other))
             .then_with(|| self.repr().cmp(&other.repr()))
@@ -1427,9 +1455,41 @@ impl ObjectValue {
     fn address(&self) -> usize {
         match self {
             Self::List(items) => items.as_ptr().addr(),
+            Self::Bytes(data) => data.as_ptr().addr(),
             Self::Host(value) => std::sync::Arc::as_ptr(&value.0).cast::<()>().addr(),
         }
     }
+}
+
+/// Python's `repr` of a bytes value: `b'...'` (double quotes when it holds a
+/// `'` and no `"`), printable ASCII as itself, `\\`, `\t`, `\n`, `\r` and
+/// the quote escaped, every other byte as `\xNN`.
+#[must_use]
+pub fn python_bytes_repr(data: &[u8]) -> String {
+    let quote = if data.contains(&b'\'') && !data.contains(&b'"') {
+        b'"'
+    } else {
+        b'\''
+    };
+    let mut out = String::with_capacity(data.len() + 3);
+    out.push('b');
+    out.push(char::from(quote));
+    for &byte in data {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            _ if byte == quote => {
+                out.push('\\');
+                out.push(char::from(byte));
+            }
+            0x20..=0x7e => out.push(char::from(byte)),
+            _ => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    out.push(char::from(quote));
+    out
 }
 
 impl PartialOrd for ObjectValue {
@@ -1449,6 +1509,7 @@ impl PartialEq for ObjectValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::List(left), Self::List(right)) => left == right,
+            (Self::Bytes(left), Self::Bytes(right)) => left == right,
             (Self::Host(left), Self::Host(right)) => left == right,
             _ => false,
         }
@@ -1469,6 +1530,10 @@ impl std::hash::Hash for ObjectValue {
                     item.python_repr().hash(state);
                 }
             }
+            Self::Bytes(data) => {
+                2_u8.hash(state);
+                data.hash(state);
+            }
             Self::Host(value) => {
                 1_u8.hash(state);
                 match value.object().host_hash() {
@@ -1487,22 +1552,27 @@ impl std::fmt::Debug for ObjectValue {
 }
 
 /// Python's `str` of the cell - what `astype(str)` and the writers produce:
-/// a list as its repr (`['a', 1]`), a host value as its str.
+/// a list or bytes as its repr (`['a', 1]`, `b'ab'`), a host value as its
+/// str.
 impl std::fmt::Display for ObjectValue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::List(_) => formatter.write_str(&self.repr()),
+            Self::List(_) | Self::Bytes(_) => formatter.write_str(&self.repr()),
             Self::Host(value) => formatter.write_str(&value.object().host_str()),
         }
     }
 }
 
-/// A list cell serializes as the sequence of its items; a host value has no
-/// serialized form.
+/// A list cell serializes as the sequence of its items, a bytes cell as
+/// `{"bytes": [..]}`; a host value has no serialized form.
 impl Serialize for ObjectValue {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::List(items) => items.as_ref().serialize(serializer),
+            Self::Bytes(data) => SerializedObject::Bytes {
+                bytes: data.to_vec(),
+            }
+            .serialize(serializer),
             Self::Host(_) => Err(serde::ser::Error::custom(
                 "a host-language object cell cannot be serialized",
             )),
@@ -1510,9 +1580,21 @@ impl Serialize for ObjectValue {
     }
 }
 
+/// The serialized forms of an object cell: a list's items, or a bytes
+/// value's bytes.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum SerializedObject {
+    List(Vec<Scalar>),
+    Bytes { bytes: Vec<u8> },
+}
+
 impl<'de> Deserialize<'de> for ObjectValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Vec::<Scalar>::deserialize(deserializer).map(Self::list)
+        Ok(match SerializedObject::deserialize(deserializer)? {
+            SerializedObject::List(items) => Self::list(items),
+            SerializedObject::Bytes { bytes } => Self::bytes(bytes),
+        })
     }
 }
 
@@ -2210,9 +2292,10 @@ impl Scalar {
             }),
             Self::Period(p) => Ok(p.ordinal != 0),
             Self::Interval(_) => Ok(true),
-            // Python's truth: a list is true when it has items, any other
-            // object true.
+            // Python's truth: a list or bytes is true when it has items, any
+            // other object true.
             Self::Object(ObjectValue::List(items)) => Ok(!items.is_empty()),
+            Self::Object(ObjectValue::Bytes(data)) => Ok(!data.is_empty()),
             Self::Object(ObjectValue::Host(_)) => Ok(true),
         }
     }
@@ -9004,6 +9087,40 @@ mod tests {
         assert_ne!(first, second);
         assert_ne!(first.cmp(&second), Ordering::Equal);
         assert_eq!(first.cmp(&second), second.cmp(&first).reverse());
+    }
+
+    #[test]
+    fn bytes_cells_print_order_and_serialize_like_python_bytes_4qg5w_8() {
+        use std::cmp::Ordering;
+
+        use super::ObjectValue;
+        let bytes = |data: &[u8]| Scalar::Object(ObjectValue::bytes(data.to_vec()));
+        // Python's repr: single quotes unless the bytes hold a ' and no ",
+        // \xNN for the unprintable, \\ \t \n \r escaped.
+        assert_eq!(bytes(b"ab").python_repr(), "b'ab'");
+        assert_eq!(bytes(b"a'b").python_repr(), "b\"a'b\"");
+        assert_eq!(bytes(b"a'\"").python_repr(), "b'a\\'\"'");
+        assert_eq!(bytes(b"\x00\t\\\xff").python_repr(), "b'\\x00\\t\\\\\\xff'");
+        assert_eq!(bytes(b"ab").python_type_name(), "bytes");
+        // Ordered byte by byte, a prefix first; never equal to a str.
+        assert_eq!(bytes(b"ab").python_cmp(&bytes(b"b")), Some(Ordering::Less));
+        assert_eq!(bytes(b"a").python_cmp(&bytes(b"ab")), Some(Ordering::Less));
+        assert_eq!(bytes(b"a").python_cmp(&Scalar::Utf8("a".to_owned())), None);
+        assert_ne!(bytes(b"a"), Scalar::Utf8("a".to_owned()));
+        assert!(!bytes(b"").to_bool().unwrap());
+        // The serde form the conformance fixtures carry, both ways.
+        let json = serde_json::to_string(&bytes(b"hi")).unwrap();
+        assert_eq!(json, r#"{"kind":"object","value":{"bytes":[104,105]}}"#);
+        let back: Scalar = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, bytes(b"hi"));
+        // NEGATIVE: a list cell still (de)serializes as its items.
+        let list: Scalar =
+            serde_json::from_str(r#"{"kind":"object","value":[{"kind":"int64","value":1}]}"#)
+                .unwrap();
+        assert_eq!(
+            list,
+            Scalar::Object(ObjectValue::list(vec![Scalar::Int64(1)]))
+        );
     }
 
     #[test]

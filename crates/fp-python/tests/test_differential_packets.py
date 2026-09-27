@@ -10391,3 +10391,65 @@ def _quantile_refusal_outcome(m: Any, run: Any) -> Any:
 def test_quantile_refuses_bool_and_text_like_pandas(case: str) -> None:
     run = _QUANTILE_REFUSAL_CASES[case]
     assert _quantile_refusal_outcome(fpd, run) == _quantile_refusal_outcome(pd, run), case
+
+
+# 4qg5w.8 / DISC-025: str.encode / str.decode and bytes cells. There was no
+# str.encode or str.decode (the core's encode returned byte lengths, decode
+# the Series unchanged); Python bytes were host objects the core could not
+# read (str.len NaN, every kernel single-threaded under the GIL).
+_BYTES_CASES = {
+    "encode": lambda m: m.Series(["ab", None, "é", np.nan], name="t").str.encode("utf-8"),
+    "encode latin-1": lambda m: m.Series(["é"]).str.encode("latin-1"),
+    "encode utf-16": lambda m: m.Series(["é"]).str.encode("utf-16"),
+    "encode ascii ignore": lambda m: m.Series(["é"]).str.encode("ascii", errors="ignore"),
+    "encode a mixed column": lambda m: m.Series(["a", 1, None]).str.encode("utf-8"),
+    "encode nothing but None": lambda m: m.Series([None]).str.encode("utf-8"),
+    "decode": lambda m: m.Series([b"ab", None, b"\xc3\xa9"], name="t").str.decode("utf-8"),
+    "decode a mixed column": lambda m: m.Series([b"ab", "x", None]).str.decode("utf-8"),
+    "decode nothing but None": lambda m: m.Series([None]).str.decode("utf-8"),
+    "decode replace": lambda m: m.Series([b"\xff"]).str.decode("utf-8", errors="replace"),
+    "round trip utf-16": lambda m: m.Series(["é"]).str.encode("utf-16").str.decode("utf-16"),
+    "round trip": lambda m: m.Series(["ab", None, "é"]).str.encode("utf-8").str.decode("utf-8"),
+    "len of bytes": lambda m: m.Series([b"ab", None]).str.len(),
+    "len of bytes, no None": lambda m: m.Series([b"hello", b"x"]).str.len(),
+    "get of bytes": lambda m: m.Series([b"hello", None]).str.get(0),
+    "get of bytes, no None": lambda m: m.Series([b"hello", b"x"]).str.get(0),
+    "bytes repr": lambda m: repr(m.Series([b"a'b", b"\x00\n"])),
+    "bytes equal bytes, not str": lambda m: ((m.Series([b"a", b"b"]) == b"a").tolist(), (m.Series([b"a"]) == "a").tolist()),
+    "bytes value_counts": lambda m: m.Series([b"a", b"b", b"a"]).value_counts().to_dict(),
+    "bytes sort": lambda m: m.Series([b"b", b"a", b"ab"]).sort_values().tolist(),
+    "bytes unique": lambda m: list(m.Series([b"b", b"a", b"b"]).unique()),
+    "a bytes index label": lambda m: m.Series([1, 2], index=[b"x", b"y"]).loc[b"y"],
+    # NEGATIVES: decoding str is NaN, not the str unchanged; a codec error is
+    # Python's, not swallowed.
+    "decode of str is NaN": lambda m: m.Series(["ab"]).str.decode("utf-8"),
+    "decode of str and None is float64 NaN": lambda m: m.Series(["a", None]).str.decode("utf-8"),
+    "encode ascii raises": lambda m: m.Series(["é"]).str.encode("ascii"),
+    "decode invalid utf-8 raises": lambda m: m.Series([b"\xff"]).str.decode("utf-8"),
+}
+
+
+def _bytes_outcome(m: Any, run: Any) -> Any:
+    try:
+        r = run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+    if isinstance(r, np.generic):
+        return repr(r.item())
+    if hasattr(r, "dtype") and hasattr(r, "tolist"):
+        return (str(r.dtype), repr(r.tolist()).replace("nan", "NaN"), r.name)
+    return repr(r)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BYTES_CASES))
+def test_str_encode_decode_and_bytes_cells_match_pandas(case: str) -> None:
+    run = _BYTES_CASES[case]
+    assert _bytes_outcome(fpd, run) == _bytes_outcome(pd, run), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_str_encode_needs_an_encoding_like_pandas() -> None:
+    for m in (pd, fpd):
+        with pytest.raises(TypeError, match="missing 1 required positional argument: 'encoding'"):
+            m.Series(["a"]).str.encode()

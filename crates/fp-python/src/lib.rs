@@ -3953,6 +3953,9 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
                 .collect::<PyResult<Vec<_>>>()?;
             PyList::new(py, items)?.into_py_any(py)
         }
+        Scalar::Object(fp_types::ObjectValue::Bytes(data)) => {
+            pyo3::types::PyBytes::new(py, data).into_py_any(py)
+        }
         Scalar::Object(fp_types::ObjectValue::Host(value)) => {
             match value.object().as_any().downcast_ref::<PyHost>() {
                 Some(host) => Ok(host.0.clone_ref(py)),
@@ -3976,6 +3979,13 @@ fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
             .map(|item| py_to_cell(py, &item))
             .collect::<PyResult<Vec<_>>>()?;
         return Ok(Scalar::Object(fp_types::ObjectValue::list(items)));
+    }
+    // bytes are a bytes cell the core reads (they were a host object, so
+    // every kernel over them ran single-threaded under the GIL; 4qg5w.8).
+    if let Ok(data) = obj.cast::<pyo3::types::PyBytes>() {
+        return Ok(Scalar::Object(fp_types::ObjectValue::bytes(
+            data.as_bytes().to_vec(),
+        )));
     }
     // A numpy array is an object cell as it is, as pandas keeps it (a
     // one-element array became its float through numpy's deprecated
@@ -4113,6 +4123,7 @@ fn refuse_unhashable_keys(py: Python<'_>, column: &Column) -> PyResult<()> {
         };
         let unhashable = match object {
             fp_types::ObjectValue::List(_) => Some("list".to_owned()),
+            fp_types::ObjectValue::Bytes(_) => None,
             fp_types::ObjectValue::Host(host) => host
                 .object()
                 .as_any()
@@ -36977,6 +36988,71 @@ impl PySeriesStringAccessor {
                 pyo3::types::PyString::new(py, text).call_method1("translate", (table,))?;
             Ok(Scalar::Utf8(translated.extract()?))
         })
+    }
+
+    /// pandas' `str.encode(encoding, errors='strict')`: each str as its bytes
+    /// through Python's own codec (its UnicodeEncodeError as Python raises
+    /// it), a missing value kept as it is, any other value NaN. There was no
+    /// str.encode; the core's returned byte lengths (4qg5w.8).
+    #[pyo3(signature = (encoding, errors="strict"))]
+    fn encode(&self, py: Python<'_>, encoding: &str, errors: &str) -> PyResult<PySeries> {
+        let values = self
+            .series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Utf8(text) => {
+                    let encoded = pyo3::types::PyString::new(py, text)
+                        .call_method1("encode", (encoding, errors))?;
+                    let data = encoded.cast::<pyo3::types::PyBytes>()?.as_bytes().to_vec();
+                    Ok(Scalar::Object(fp_types::ObjectValue::bytes(data)))
+                }
+                missing if missing.is_missing() => Ok(missing.clone()),
+                _ => Ok(Scalar::Null(NullKind::NaN)),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let inner = Series::new(
+            self.series.name(),
+            self.series.index().clone(),
+            Column::from_object_values(values),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
+    }
+
+    /// pandas' `str.decode(encoding, errors='strict')`: each bytes value as
+    /// its text through Python's own codec, a missing value kept, any other
+    /// value - a str too - NaN; nothing but missing values holding a NaN is
+    /// float64, as pandas converts them. There was no str.decode; the
+    /// core's returned the Series unchanged (4qg5w.8).
+    #[pyo3(signature = (encoding, errors="strict"))]
+    fn decode(&self, py: Python<'_>, encoding: &str, errors: &str) -> PyResult<PySeries> {
+        let values = self
+            .series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Object(fp_types::ObjectValue::Bytes(data)) => {
+                    let decoded = pyo3::types::PyBytes::new(py, data)
+                        .call_method1("decode", (encoding, errors))?;
+                    Ok(Scalar::Utf8(decoded.extract()?))
+                }
+                missing if missing.is_missing() => Ok(missing.clone()),
+                _ => Ok(Scalar::Null(NullKind::NaN)),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let column = if values.iter().all(Scalar::is_missing) && values.iter().any(Scalar::is_nan) {
+            Column::new(
+                DType::Float64,
+                vec![Scalar::Null(NullKind::NaN); values.len()],
+            )
+            .map_err(column_error_to_py)?
+        } else {
+            Column::from_object_values(values)
+        };
+        let inner = Series::new(self.series.name(), self.series.index().clone(), column)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     /// pandas' `str.extractall(pat, flags=0)`: a row per match of each

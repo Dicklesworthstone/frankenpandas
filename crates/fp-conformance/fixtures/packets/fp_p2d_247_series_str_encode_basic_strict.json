@@ -5,36 +5,113 @@
   "operation": "series_str_encode",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
-    "generated_at": "2026-09-01T06:10:42Z"
+    "oracle_script_sha256": "6c938de0c5b667b205cd74341794bd94c34a2400961bfd688e417887fca9472f",
+    "generated_at": "2026-09-27T11:12:23Z"
   },
   "left": {
     "name": "text",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "hello" },
-      { "kind": "utf8", "value": "world" },
-      { "kind": "utf8", "value": "" },
-      { "kind": "utf8", "value": "test123" }
+      {
+        "kind": "utf8",
+        "value": "hello"
+      },
+      {
+        "kind": "utf8",
+        "value": "world"
+      },
+      {
+        "kind": "utf8",
+        "value": ""
+      },
+      {
+        "kind": "utf8",
+        "value": "test123"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 5 },
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 7 }
-    ]
+      {
+        "kind": "object",
+        "value": {
+          "bytes": [
+            104,
+            101,
+            108,
+            108,
+            111
+          ]
+        }
+      },
+      {
+        "kind": "object",
+        "value": {
+          "bytes": [
+            119,
+            111,
+            114,
+            108,
+            100
+          ]
+        }
+      },
+      {
+        "kind": "object",
+        "value": {
+          "bytes": []
+        }
+      },
+      {
+        "kind": "object",
+        "value": {
+          "bytes": [
+            116,
+            101,
+            115,
+            116,
+            49,
+            50,
+            51
+          ]
+        }
+      }
+    ],
+    "name": "text"
   }
 }

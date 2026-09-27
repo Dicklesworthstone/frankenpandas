@@ -5,8 +5,8 @@
   "operation": "series_str_encode",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
-    "generated_at": "2026-09-01T06:11:01Z"
+    "oracle_script_sha256": "6c938de0c5b667b205cd74341794bd94c34a2400961bfd688e417887fca9472f",
+    "generated_at": "2026-09-27T11:12:24Z"
   },
   "left": {
     "name": "text",
@@ -68,21 +68,38 @@
     ],
     "values": [
       {
-        "kind": "float64",
-        "value": 5.0
+        "kind": "object",
+        "value": {
+          "bytes": [
+            104,
+            101,
+            108,
+            108,
+            111
+          ]
+        }
       },
       {
         "kind": "null",
-        "value": "na_n"
+        "value": "null"
       },
       {
-        "kind": "float64",
-        "value": 5.0
+        "kind": "object",
+        "value": {
+          "bytes": [
+            119,
+            111,
+            114,
+            108,
+            100
+          ]
+        }
       },
       {
         "kind": "null",
-        "value": "na_n"
+        "value": "null"
       }
-    ]
+    ],
+    "name": "text"
   }
 }
