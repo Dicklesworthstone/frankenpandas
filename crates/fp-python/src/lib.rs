@@ -170,6 +170,29 @@ fn parse_dtype(name: &str) -> PyResult<fp_types::DType> {
 
 /// pandas' dtype name for a column: numpy bool cannot hold a missing value,
 /// so a bool column with one is pandas' object (it said bool; fvsao.13).
+/// pandas' `nlargest` / `nsmallest` column check (SelectN's
+/// `is_valid_dtype_n_method`): numbers (bools too), datetimes, timedeltas
+/// and periods pass; any other column's pandas dtype name is returned, its
+/// selection pandas' TypeError (text was sorted; k56su).
+fn n_method_refused_dtype(column: &Column) -> Option<String> {
+    let name = column_pandas_dtype_name(column);
+    let selectable = column.categorical().is_none()
+        && name != "object"
+        && matches!(
+            column.dtype(),
+            DType::Int64
+                | DType::Int64Nullable
+                | DType::Float64
+                | DType::Float64Nullable
+                | DType::Bool
+                | DType::BoolNullable
+                | DType::Datetime64 { .. }
+                | DType::Timedelta64
+                | DType::Period
+        );
+    (!selectable).then_some(name)
+}
+
 fn column_pandas_dtype_name(column: &Column) -> String {
     let dtype = column.dtype();
     if dtype == DType::Bool && column.has_any_missing() {
@@ -13800,76 +13823,9 @@ impl PyTimedeltaIndex {
     /// the bound method).
     #[getter]
     fn components(&self) -> PyResult<PyDataFrame> {
-        let nanos_per_sec: i64 = 1_000_000_000;
-        let nanos_per_min: i64 = 60 * nanos_per_sec;
-        let nanos_per_hour: i64 = 60 * nanos_per_min;
-        let nanos_per_day: i64 = 24 * nanos_per_hour;
-
-        let mut days = Vec::with_capacity(self.inner.len());
-        let mut hours = Vec::with_capacity(self.inner.len());
-        let mut minutes = Vec::with_capacity(self.inner.len());
-        let mut seconds = Vec::with_capacity(self.inner.len());
-        let mut milliseconds = Vec::with_capacity(self.inner.len());
-        let mut microseconds = Vec::with_capacity(self.inner.len());
-        let mut nanoseconds = Vec::with_capacity(self.inner.len());
-
-        for &ns in &self.inner.asi8() {
-            if ns == Timedelta::NAT {
-                days.push(Scalar::Null(NullKind::NaN));
-                hours.push(Scalar::Null(NullKind::NaN));
-                minutes.push(Scalar::Null(NullKind::NaN));
-                seconds.push(Scalar::Null(NullKind::NaN));
-                milliseconds.push(Scalar::Null(NullKind::NaN));
-                microseconds.push(Scalar::Null(NullKind::NaN));
-                nanoseconds.push(Scalar::Null(NullKind::NaN));
-            } else {
-                let sign = if ns < 0 { -1 } else { 1 };
-                let abs_ns = ns.abs();
-                let d = abs_ns / nanos_per_day;
-                let rem_d = abs_ns % nanos_per_day;
-                let h = rem_d / nanos_per_hour;
-                let rem_h = rem_d % nanos_per_hour;
-                let m = rem_h / nanos_per_min;
-                let rem_m = rem_h % nanos_per_min;
-                let s = rem_m / nanos_per_sec;
-                let rem_s = rem_m % nanos_per_sec;
-                let ms = rem_s / 1_000_000;
-                let rem_ms = rem_s % 1_000_000;
-                let us = rem_ms / 1_000;
-                let ns_part = rem_ms % 1_000;
-
-                days.push(Scalar::Int64(sign * d));
-                hours.push(Scalar::Int64(sign * h));
-                minutes.push(Scalar::Int64(sign * m));
-                seconds.push(Scalar::Int64(sign * s));
-                milliseconds.push(Scalar::Int64(sign * ms));
-                microseconds.push(Scalar::Int64(sign * us));
-                nanoseconds.push(Scalar::Int64(sign * ns_part));
-            }
-        }
-        let cols = vec![
-            ("days", days),
-            ("hours", hours),
-            ("minutes", minutes),
-            ("seconds", seconds),
-            ("milliseconds", milliseconds),
-            ("microseconds", microseconds),
-            ("nanoseconds", nanoseconds),
-        ];
-        let df = DataFrame::from_dict(
-            &[
-                "days",
-                "hours",
-                "minutes",
-                "seconds",
-                "milliseconds",
-                "microseconds",
-                "nanoseconds",
-            ],
-            cols,
-        )
-        .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+        Ok(PyDataFrame {
+            inner: timedelta_components(&self.inner.asi8())?,
+        })
     }
 
     fn delete(&self, loc: usize) -> PyResult<Self> {
@@ -19003,6 +18959,42 @@ fn is_sequence(value: &Bound<'_, PyAny>) -> bool {
         && value.try_iter().is_ok()
 }
 
+/// pandas' Timedelta `components` of each value, a column per unit (days
+/// .. nanoseconds): the days floored and every other part the non-negative
+/// remainder, as pandas splits -1 min into -1 days 23:59:00 (they were each
+/// negated, -1 min 0 days 0 hours -1 minutes; k56su); NaT a missing row.
+fn timedelta_components(values: &[i64]) -> PyResult<DataFrame> {
+    const UNITS: [(&str, i64); 7] = [
+        ("days", 86_400_000_000_000),
+        ("hours", 3_600_000_000_000),
+        ("minutes", 60_000_000_000),
+        ("seconds", 1_000_000_000),
+        ("milliseconds", 1_000_000),
+        ("microseconds", 1_000),
+        ("nanoseconds", 1),
+    ];
+    let mut columns: Vec<Vec<Scalar>> = vec![Vec::with_capacity(values.len()); UNITS.len()];
+    for &nanos in values {
+        if nanos == Timedelta::NAT {
+            for column in &mut columns {
+                column.push(Scalar::Null(NullKind::NaN));
+            }
+            continue;
+        }
+        let mut rest = nanos.rem_euclid(UNITS[0].1);
+        columns[0].push(Scalar::Int64(nanos.div_euclid(UNITS[0].1)));
+        for (column, (_, unit)) in columns.iter_mut().zip(UNITS).skip(1) {
+            column.push(Scalar::Int64(rest / unit));
+            rest %= unit;
+        }
+    }
+    // A NaT row makes the columns float64, as pandas'.
+    let columns = columns.into_iter().map(pandas_promote_int_with_missing);
+    let names: Vec<&str> = UNITS.iter().map(|(name, _)| *name).collect();
+    DataFrame::from_dict(&names, names.iter().copied().zip(columns).collect())
+        .map_err(frame_error_to_py)
+}
+
 /// The flat row index a row MultiIndex rides on - its tuples joined by '/',
 /// as set_index keys them - with the levels attached.
 fn row_multiindex_axis(multi: fp_index::MultiIndex) -> PyResult<Index> {
@@ -23225,6 +23217,11 @@ impl PySeries {
 
     #[pyo3(signature = (n=5, keep="first"))]
     fn nlargest(&self, n: usize, keep: &str) -> PyResult<PySeries> {
+        if let Some(dtype) = n_method_refused_dtype(self.inner.column()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Cannot use method 'nlargest' with dtype {dtype}"
+            )));
+        }
         let res = match keep {
             "first" => self.inner.nlargest(n),
             _ => self.inner.nlargest_keep(n, keep),
@@ -23235,6 +23232,11 @@ impl PySeries {
 
     #[pyo3(signature = (n=5, keep="first"))]
     fn nsmallest(&self, n: usize, keep: &str) -> PyResult<PySeries> {
+        if let Some(dtype) = n_method_refused_dtype(self.inner.column()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Cannot use method 'nsmallest' with dtype {dtype}"
+            )));
+        }
         let res = match keep {
             "first" => self.inner.nsmallest(n),
             _ => self.inner.nsmallest_keep(n, keep),
@@ -26396,6 +26398,24 @@ impl PyDataFrame {
             ))
         })?;
         index_label_to_py(py, &self.inner.column_label(&name))
+    }
+
+    /// pandas' TypeError for an nlargest / nsmallest over a column it cannot
+    /// order that way (see [`n_method_refused_dtype`]; k56su).
+    fn refuse_n_method(&self, columns: &[String], method: &str) -> PyResult<()> {
+        for name in columns {
+            let Some(dtype) = self.inner.column(name).and_then(n_method_refused_dtype) else {
+                continue;
+            };
+            let shown = match self.inner.column_label(name) {
+                IndexLabel::Utf8(text) => format!("'{text}'"),
+                other => other.to_string(),
+            };
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Column {shown} has dtype {dtype}, cannot use method '{method}' with this dtype"
+            )));
+        }
+        Ok(())
     }
 
     /// The index levels a query expression can name: each named level of a
@@ -33200,6 +33220,7 @@ impl PyDataFrame {
                 "columns cannot be empty",
             ));
         }
+        self.refuse_n_method(&cols, "nlargest")?;
         if cols.len() == 1 {
             let col = &cols[0];
             let res = match keep {
@@ -33230,6 +33251,7 @@ impl PyDataFrame {
                 "columns cannot be empty",
             ));
         }
+        self.refuse_n_method(&cols, "nsmallest")?;
         if cols.len() == 1 {
             let col = &cols[0];
             let res = match keep {
@@ -41925,6 +41947,30 @@ pub struct PySeriesDatetimeAccessor {
 
 #[pymethods]
 impl PySeriesDatetimeAccessor {
+    /// pandas' `TimedeltaProperties.components`: a frame of each value's
+    /// days .. nanoseconds, over the Series' index (it was missing; k56su).
+    #[getter]
+    fn components(&self) -> PyResult<PyDataFrame> {
+        if self.series.column().dtype() != DType::Timedelta64 {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "'DatetimeProperties' object has no attribute 'components'",
+            ));
+        }
+        let values: Vec<i64> = self
+            .series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Timedelta64(nanos) => *nanos,
+                _ => Timedelta::NAT,
+            })
+            .collect();
+        let inner = timedelta_components(&values)?
+            .with_index(self.series.index().clone())
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner })
+    }
+
     #[getter]
     fn year(&self) -> PyResult<PySeries> {
         let s = self.series.dt().year().map_err(frame_error_to_py)?;

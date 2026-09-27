@@ -12771,3 +12771,47 @@ def _na_label_outcome(m: Any, run: Any) -> Any:
 def test_nullable_value_counts_na_label_like_pandas(case: str) -> None:
     run = _NA_LABEL_CASES[case]
     assert _na_label_outcome(fpd, run) == _na_label_outcome(pd, run), case
+
+
+# br-frankenpandas-k56su (everyday probe 15): a timedelta Series' .dt had no
+# components (and TimedeltaIndex.components negated each part of a negative
+# value); nlargest / nsmallest sorted object and category columns where
+# pandas raises TypeError.
+def _k5_td(m: Any) -> Any:
+    return m.Series(m.to_timedelta(["1 days 02:03:04.005006007", None, "-1 min"]), name="d")
+
+
+_N_METHOD_CASES = {
+    "Series dt components": lambda m: repr(_k5_td(m).dt.components),
+    "Series dt components dtypes": lambda m: [str(t) for t in _k5_td(m).dt.components.dtypes],
+    "Series dt components without NaT": lambda m: repr(m.Series(m.to_timedelta(["1h", "2 days"]), index=["a", "b"]).dt.components),
+    "TimedeltaIndex components of a negative": lambda m: repr(m.to_timedelta(["-1 min", "1 days"]).components),
+    "Series nlargest object": lambda m: repr(m.Series(["b", "a"]).nlargest(1)),
+    "Series nsmallest category": lambda m: repr(m.Series(["b", "a"], dtype="category").nsmallest(1)),
+    "frame nlargest over an object column": lambda m: repr(m.DataFrame({"k": ["a", "b"], "v": [1, 2]}).nlargest(1, ["k", "v"])),
+    "frame nsmallest over an object column": lambda m: repr(m.DataFrame({"k": ["a", "b"], "v": [1, 2]}).nsmallest(1, "k")),
+    # pandas raises by design: a datetime Series has no components.
+    "datetime components": lambda m: repr(m.Series(m.to_datetime(["2024-01-01"])).dt.components),
+    # NEGATIVE: numeric, bool and datetime selections as before.
+    "Series nlargest bool": lambda m: repr(m.Series([True, False]).nlargest(1)),
+    "Series nlargest datetime": lambda m: repr(m.Series(m.to_datetime(["2024-01-01", "2023-01-01"])).nlargest(1)),
+    "frame nlargest numeric": lambda m: repr(m.DataFrame({"k": ["a", "b"], "v": [1, 2]}).nlargest(1, "v")),
+}
+
+
+def _n_method_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except AttributeError:
+        # The class alone: the accessor class' name differs (fp's .dt of
+        # datetimes is DatetimeProperties in its message too).
+        return ("raise", "AttributeError")
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N_METHOD_CASES))
+def test_timedelta_components_and_n_methods_like_pandas(case: str) -> None:
+    run = _N_METHOD_CASES[case]
+    assert _n_method_outcome(fpd, run) == _n_method_outcome(pd, run), case
