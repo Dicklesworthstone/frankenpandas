@@ -35453,6 +35453,36 @@ fn write_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyRe
         | (DType::Timedelta64, Scalar::Timedelta64(_)) => true,
         _ => false,
     };
+    // A nullable column keeps its dtype through a write: an integral float
+    // is an Int64's int, and a value the dtype cannot hold is pandas'
+    // TypeError (it upcast to float64 / object; 4qg5w.11).
+    if dtype.is_nullable() {
+        #[allow(clippy::cast_possible_truncation)] // integral and in range, checked
+        let cells: Vec<Scalar> = cells
+            .into_iter()
+            .map(|cell| match (&dtype, cell) {
+                (DType::Int64Nullable, Scalar::Float64(v))
+                    if v.fract() == 0.0 && (-(2f64.powi(63))..2f64.powi(63)).contains(&v) =>
+                {
+                    Scalar::Int64(v as i64)
+                }
+                (_, cell) => cell,
+            })
+            .collect();
+        if let Some(refused) = cells.iter().find(|cell| !holds(cell)) {
+            let shown = match refused {
+                Scalar::Utf8(text) => text.clone(),
+                Scalar::Bool(true) => "True".to_owned(),
+                Scalar::Bool(false) => "False".to_owned(),
+                other => other.python_repr(),
+            };
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Invalid value '{shown}' for dtype {}",
+                pandas_dtype_name(&dtype)
+            )));
+        }
+        return column.put(positions, &cells).map_err(column_error_to_py);
+    }
     if cells.iter().all(holds)
         && let Ok(written) = column.put(positions, &cells)
     {
@@ -35657,12 +35687,39 @@ fn series_write(
             let mut labels = series.index().labels().to_vec();
             labels.push(label);
             let index = Index::new(labels).rename_index(series.index().name());
+            let cell = py_to_scalar(py, value)?;
+            let kept = nullable_append_dtype(&series.column().dtype(), &cell);
             let mut values = series.values().to_vec();
-            values.push(py_to_scalar(py, value)?);
-            let column = Column::from_values(pandas_promote_int_with_missing(values))
-                .map_err(column_error_to_py)?;
+            values.push(cell);
+            let column = match kept {
+                Some(dtype) => Column::new(dtype, values),
+                None => Column::from_values(pandas_promote_int_with_missing(values)),
+            }
+            .map_err(column_error_to_py)?;
             Series::new(series.name(), index, column).map_err(frame_error_to_py)
         }
+    }
+}
+
+/// The nullable dtype a Series of `dtype` has after setting with
+/// enlargement appends `cell`, as pandas promotes a masked dtype by the
+/// value: an Int64 stays Int64 for an int and becomes Float64 for a float,
+/// a Float64 takes a number, both keep a missing value as NA, a boolean
+/// takes a bool. None where the result is inferred again (object: a bool
+/// into a number, a number or a missing value into a boolean, a string).
+fn nullable_append_dtype(dtype: &DType, cell: &Scalar) -> Option<DType> {
+    match (dtype, cell) {
+        (DType::Int64Nullable, Scalar::Int64(_)) => Some(DType::Int64Nullable),
+        (DType::Int64Nullable | DType::Float64Nullable, Scalar::Float64(v)) if !v.is_nan() => {
+            Some(DType::Float64Nullable)
+        }
+        (DType::Float64Nullable, Scalar::Int64(_)) | (DType::BoolNullable, Scalar::Bool(_)) => {
+            Some(dtype.clone())
+        }
+        (DType::Int64Nullable | DType::Float64Nullable, cell) if cell.is_missing() => {
+            Some(dtype.clone())
+        }
+        _ => None,
     }
 }
 
@@ -35727,7 +35784,7 @@ fn loc_enlarge(
     } else if let Some(column) = py_array_like_column(py, value)? {
         column.values().to_vec()
     } else if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
-        py_sequence_to_scalars(py, value)?
+        numeric_row(py_sequence_to_scalars(py, value)?)
     } else {
         vec![py_to_scalar(py, value)?; columns.len()]
     };
@@ -35736,6 +35793,7 @@ fn loc_enlarge(
             "cannot set a row with mismatched columns",
         ));
     }
+    let row = df.len();
     let mut labels = df.index().labels().to_vec();
     labels.push(label);
     let index = Index::new(labels).rename_index(df.index().name());
@@ -35749,16 +35807,21 @@ fn loc_enlarge(
     let mut built = Vec::with_capacity(names.len());
     for name in &names {
         let existing = df.column(name);
+        let cell = columns
+            .iter()
+            .position(|column| column == name)
+            .map_or_else(missing, |at| cells[at].clone());
+        if let Some(column) = existing
+            && let Some(grown) = nullable_row_cell(column, &cell, whole_row, row)?
+        {
+            built.push((name.clone(), grown));
+            continue;
+        }
         let mut values = existing.map_or_else(
             || vec![missing(); df.len()],
             |column| column.values().to_vec(),
         );
-        values.push(
-            columns
-                .iter()
-                .position(|column| column == name)
-                .map_or_else(missing, |at| cells[at].clone()),
-        );
+        values.push(cell);
         // The reindex a partial row goes through leaves an int64 (or new)
         // column float64 before its cell is set.
         let widened = !whole_row && existing.is_none_or(|column| column.dtype() == DType::Int64);
@@ -35797,6 +35860,66 @@ fn loc_enlarge(
     let order: Vec<String> = built.iter().map(|(name, _)| name.clone()).collect();
     DataFrame::new_with_column_order(index, built.into_iter().collect::<BTreeMap<_, _>>(), order)
         .map_err(frame_error_to_py)
+}
+
+/// A list or tuple row as the Series pandas makes of it before appending:
+/// numbers with a float or a missing value among them are float64, so an
+/// int is its float (`df.loc[5] = [9, 9.5]` makes an int64 column float64);
+/// any other row keeps each cell as it is (an object row).
+#[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
+fn numeric_row(cells: Vec<Scalar>) -> Vec<Scalar> {
+    let numbers = cells
+        .iter()
+        .all(|cell| cell.is_missing() || matches!(cell, Scalar::Int64(_) | Scalar::Float64(_)));
+    let float_row = cells
+        .iter()
+        .any(|cell| cell.is_missing() || matches!(cell, Scalar::Float64(_)));
+    if !(numbers && float_row && cells.iter().any(|cell| !cell.is_missing())) {
+        return cells;
+    }
+    cells
+        .into_iter()
+        .map(|cell| match cell {
+            Scalar::Int64(v) => Scalar::Float64(v as f64),
+            other => other,
+        })
+        .collect()
+}
+
+/// A nullable column after [`loc_enlarge`] appends `cell` at `row`, as
+/// pandas keeps a masked dtype (4qg5w.11; it became int64 / float64 /
+/// object): a missing cell is an NA (an all-missing piece never changes a
+/// concat's dtype); a partial row's cell is written into that NA, so an
+/// integral float is cast and a value the dtype cannot hold is pandas'
+/// TypeError; a whole row's cell promotes as [`nullable_append_dtype`].
+/// None for a column that is not nullable, or a whole row's cell that
+/// makes it object.
+fn nullable_row_cell(
+    column: &Column,
+    cell: &Scalar,
+    whole_row: bool,
+    row: usize,
+) -> PyResult<Option<Column>> {
+    let dtype = column.dtype();
+    if !dtype.is_nullable() {
+        return Ok(None);
+    }
+    let mut values = column.values().to_vec();
+    if whole_row && !cell.is_missing() {
+        let Some(kept) = nullable_append_dtype(&dtype, cell) else {
+            return Ok(None);
+        };
+        values.push(cell.clone());
+        return Column::new(kept, values)
+            .map(Some)
+            .map_err(column_error_to_py);
+    }
+    values.push(Scalar::Null(NullKind::Null));
+    let grown = Column::new(dtype, values).map_err(column_error_to_py)?;
+    if cell.is_missing() {
+        return Ok(Some(grown));
+    }
+    write_cells(&grown, &[row], vec![cell.clone()]).map(Some)
 }
 
 /// Column names selected by a `.loc` column indexer: one name, a list, or an

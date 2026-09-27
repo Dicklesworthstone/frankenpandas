@@ -12271,6 +12271,49 @@ mod tests {
     }
 
     #[test]
+    fn merge_outer_gap_widens_int64_and_keeps_int64_nullable_4qg5w_11() {
+        // DISC-011's merge row (pandas 2.2.3): the row an outer merge invents
+        // is float64 NaN in a numpy int64 column and NA in a nullable Int64.
+        let frame = |key: &str, keys: &[i64], name: &str, dtype: DType, values: &[i64]| {
+            let ints = |xs: &[i64]| xs.iter().map(|x| Scalar::Int64(*x)).collect::<Vec<_>>();
+            let labels = (0..keys.len() as i64).map(IndexLabel::Int64).collect();
+            let columns = std::collections::BTreeMap::from([
+                (
+                    key.to_owned(),
+                    Column::new(DType::Int64, ints(keys)).unwrap(),
+                ),
+                (name.to_owned(), Column::new(dtype, ints(values)).unwrap()),
+            ]);
+            DataFrame::new_with_column_order(
+                Index::new(labels),
+                columns,
+                vec![key.to_owned(), name.to_owned()],
+            )
+            .unwrap()
+        };
+        for (dtype, widened) in [
+            (DType::Int64, DType::Float64),
+            (DType::Int64Nullable, DType::Int64Nullable),
+        ] {
+            let left = frame("k", &[1, 2], "v", dtype.clone(), &[7, 8]);
+            let right = frame("k", &[2, 3], "w", dtype.clone(), &[5, 6]);
+            let merged = merge_dataframes(&left, &right, "k", JoinType::Outer).unwrap();
+            let v = merged.columns.get("v").unwrap();
+            assert_eq!(v.dtype(), widened, "{dtype:?}");
+            match widened {
+                DType::Float64 => {
+                    assert_eq!(v.values()[0], Scalar::Float64(7.0));
+                    assert_eq!(v.values()[2], Scalar::Null(NullKind::NaN));
+                }
+                _ => {
+                    assert_eq!(v.values()[0], Scalar::Int64(7));
+                    assert!(v.values()[2].is_missing(), "{dtype:?}: {:?}", v.values());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn join_row_count_lattice_n8npw() {
         // Invariant (br-frankenpandas-n8npw): inner<=left<=outer and inner<=right<=outer
         // by row count. Seeded LCG, no mocks.

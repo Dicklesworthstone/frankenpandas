@@ -1787,7 +1787,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 | Native Datetime DType is internally `Int64` ns timestamps | Datetime/Timedelta/Period scalars exist but DataFrame columns store nanosecond Int64 codes | Use the `.dt()` accessor for component extraction; for serde, use `to_period` / `to_timestamp` to normalize |
 | Sparse storage is dense under the hood | `SparseDType` is reportable and the `SparseAccessor` API works, but `Column` storage is still dense, one slot per row including the fill value (see DISC-009) | Use the `.sparse()` accessor to interrogate density / nnz on a Series; compressed-sparse physical storage is a future epic |
 | GroupBy.apply has shape-explicit variants | Rust static typing forces `apply_scalar` / `apply_series` / `apply_series_stacked` (see DISC-010) instead of pandas' shape-inferring `apply` | Pick the variant that matches your closure's output shape |
-| Null-introduction promotion policy is still being settled | The nullable extension dtypes exist (`DType::Int64Nullable`, `Float64Nullable`, `BoolNullable`) and are used across storage, kernels and IO; what remains open is which paths promote `Int64` to `Float64` on null introduction versus keeping `Int64` with a validity mask (DISC-011) | Cast explicitly with `astype` where downstream code depends on one representation |
+| The Rust constructors spell ints with a missing value as an `Int64` holding it | Every pandas-observable path promotes as pandas: a numpy int64 column that gains a missing value is float64 with NaN, a nullable `Int64` / `Float64` / `boolean` keeps its dtype with NA. `Series::from_values` / `DataFrame::from_dict` given ints and a missing value still build an `Int64` column holding it, which pandas never produces (DISC-011, br-frankenpandas-ih6ho) | In Rust, build the column as `DType::Int64Nullable` or `DType::Float64` explicitly; the Python binding already converts as pandas |
 | Mixed naive/tz-aware CSV `parse_dates` falls back to raw strings | Without `utc=True`, normalization is ambiguous (DISC-012) | Pass `utc=True` to `to_datetime` or `CsvReadOptions` |
 
 ## FAQ
@@ -1840,7 +1840,7 @@ A: As of 2026-09-24 the tracker holds about 4,100 beads, of which 79 are open. M
 | In progress | Python packaging for `fp-python` | `pyproject.toml` + maturin wheel builds for Linux, macOS, and Windows, each native leg smoke-testing its wheel; `frankenpandas.pyi` type stubs; differential pytest harness. No PyPI release yet, and the binding is not yet a drop-in replacement (see Limitations) |
 | Done | Tokio-free PostgreSQL `SqlConnection` adapter | `PostgresConnection` behind `sql-postgresql` with pure synchronous wire protocol and live-server integration tests |
 | Done | MySQL `SqlConnection` adapter | `MysqlConnection` behind `sql-mysql` (no live-server integration test yet) |
-| Medium | Null-introduction promotion policy (DISC-011) | Nullable dtypes exist; the per-path promotion rule and the constructor dtype parser are the open items |
+| Medium | Rust constructor spelling of ints with a missing value (DISC-011) | Every observable path promotes as pandas; the Rust constructors' `Int64` holding a missing value is the open decision, taken with the harness and the fixtures that pin it (br-frankenpandas-ih6ho) |
 | Medium | Shared thread pool | Replace per-call `thread::scope` fan-out (147 occurrences across 8 files) with one pool; the spawn cost is the dominant loss at 100k rows |
 | Done | Native deterministic SVG/HTML plotting renderer | Zero-dependency pure safe-Rust SVG/HTML renderer in `fp-frame` supporting line, bar, barh, hist, box, kde, density, area, pie, scatter, hexbin across DataFrame, Series, and GroupBy |
 | Medium | Lazy evaluation / query planning | Would enable optimization across chained operations |
@@ -2828,7 +2828,7 @@ A rough heat map of how compatible we are with pandas, by API family, as of 2026
 | DataFrame construction | 🟢 | All 12 documented constructors. 15+ entries in the conformance suite. |
 | Selection (`loc` / `iloc` / `at` / `iat` / `xs` / `squeeze`) | 🟢 | Including negative-position indexing, boolean masks, regex column filters. |
 | Boolean / Kleene logic | 🟢 | All truth-table edge cases match pandas; DISC-005 and DISC-013 are in the Resolved Divergences section. |
-| Index alignment (binary ops) | 🟡 | DISC-011/014 note that null introduction doesn't yet promote `Int64` → `Float64` like pandas' nullable extension Int64. |
+| Index alignment (binary ops) | 🟢 | A gap alignment invents widens int64 to float64 NaN and keeps a nullable `Int64` with NA, as pandas (DISC-011 now covers only the Rust constructors). |
 | Float-zero / NaN groupby keys | 🟢 | Normalized via `ScalarKey`. |
 | Window operations (rolling / expanding / ewm / resample) | 🟢 | Validation matches pandas (rejects `min_periods > window`, etc.). |
 | GroupBy aggregations (14 reductions + ops) | 🟢 | Including Utf8 lex-sort for `min` / `max` / `idxmin` / `idxmax` / `cummin` / `cummax`. |

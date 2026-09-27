@@ -6112,6 +6112,17 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .as_ref()
             .is_some_and(|map| map.contains_key(name))
     };
+    // A column forced to a nullable dtype (Int64 / Float64 / boolean) is
+    // built as that dtype: inferring from its values made Int64 a plain
+    // int64 holding the NA, and Float64 a float64 (4qg5w.11).
+    let forced_nullable = |name: &str| -> Option<DType> {
+        options
+            .dtype
+            .as_ref()
+            .and_then(|map| map.get(name))
+            .filter(|dtype| dtype.is_nullable())
+            .cloned()
+    };
 
     // If index_col is set, extract that column as the index
     if let Some(ref idx_col_name) = options.index_col {
@@ -6171,7 +6182,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 continue;
             }
             let name = headers.get(orig_idx).cloned().unwrap_or_default();
-            let column = if preserve_object_text && !dtype_forced(&name) {
+            let column = if let Some(dtype) = forced_nullable(&name) {
+                Column::new(dtype, columns[col_idx].clone())?
+            } else if preserve_object_text && !dtype_forced(&name) {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[orig_idx]);
                 build_csv_object_aware_column(columns[col_idx].clone(), &rb, &ro)?
             } else {
@@ -6191,7 +6204,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         let mut column_order = Vec::with_capacity(header_count);
         for (idx, values) in columns.into_iter().enumerate() {
             let name = headers.get(idx).cloned().unwrap_or_default();
-            let column = if preserve_object_text && !dtype_forced(&name) {
+            let column = if let Some(dtype) = forced_nullable(&name) {
+                Column::new(dtype, values)?
+            } else if preserve_object_text && !dtype_forced(&name) {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[idx]);
                 build_csv_object_aware_column(values, &rb, &ro)?
             } else {
@@ -30407,6 +30422,51 @@ mod tests {
         );
         // id column should remain Int64 (not in dtype map)
         assert_eq!(frame.column("id").unwrap().values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn csv_nullable_dtype_keeps_the_na_4qg5w_11() {
+        // dtype={'a': 'Int64'} is an Int64 column with an NA for the empty
+        // field (it was int64 holding a None; boolean was object, Float64
+        // float64).
+        let input = "a,b,c,d\n1,True,1.5,7\n,,,8\n3,False,3,9\n";
+        let dtype_map = std::collections::HashMap::from([
+            ("a".to_owned(), fp_types::DType::Int64Nullable),
+            ("b".to_owned(), fp_types::DType::BoolNullable),
+            ("c".to_owned(), fp_types::DType::Float64Nullable),
+        ]);
+        let opts = CsvReadOptions {
+            dtype: Some(dtype_map),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let a = frame.column("a").unwrap();
+        assert_eq!(a.dtype(), fp_types::DType::Int64Nullable);
+        assert_eq!(a.values()[0], Scalar::Int64(1));
+        assert!(a.values()[1].is_missing());
+        let b = frame.column("b").unwrap();
+        assert_eq!(b.dtype(), fp_types::DType::BoolNullable);
+        assert_eq!(b.values()[2], Scalar::Bool(false));
+        assert!(b.values()[1].is_missing());
+        let c = frame.column("c").unwrap();
+        assert_eq!(c.dtype(), fp_types::DType::Float64Nullable);
+        assert_eq!(c.values()[2], Scalar::Float64(3.0));
+        assert!(c.values()[1].is_missing());
+        // NEGATIVE: a column the map does not name is inferred as before, and
+        // an inferred int column with an empty field is numpy's float64 NaN
+        // (DISC-011's read_csv / read_json rows), not an int64 holding it.
+        assert_eq!(frame.column("d").unwrap().dtype(), fp_types::DType::Int64);
+        let plain = read_csv_with_options("a,b\n1,x\n,y\n3,z\n", &CsvReadOptions::default())
+            .expect("parse");
+        let a = plain.column("a").unwrap();
+        assert_eq!(a.dtype(), fp_types::DType::Float64);
+        assert_eq!(a.values()[1], Scalar::Null(fp_types::NullKind::NaN));
+        let records =
+            read_json_str(r#"[{"a":1},{"a":null},{"a":3}]"#, JsonOrient::Records).expect("parse");
+        assert_eq!(
+            records.column("a").unwrap().dtype(),
+            fp_types::DType::Float64
+        );
     }
 
     #[test]

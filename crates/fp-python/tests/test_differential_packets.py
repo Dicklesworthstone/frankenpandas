@@ -10469,3 +10469,123 @@ def test_str_encode_needs_an_encoding_like_pandas() -> None:
     for m in (pd, fpd):
         with pytest.raises(TypeError, match="missing 1 required positional argument: 'encoding'"):
             m.Series(["a"]).str.encode()
+
+
+# 4qg5w.11: pandas' nullable Int64 / Float64 / boolean keep their dtype where
+# an operation invents or selects a missing value. frankenpandas made them
+# float64 (concat, unstack, diff, pct_change, setting with enlargement), a
+# plain int64 holding the NA (where / mask), or upcast a written value the
+# dtype cannot hold where pandas raises. NEGATIVES: numpy int64 still widens
+# to float64 NaN.
+def _nullable_set(s: Any, key: Any, value: Any, iloc: bool = False) -> Any:
+    if iloc:
+        s.iloc[key] = value
+    else:
+        s[key] = value
+    return s
+
+
+def _nullable_loc_set(d: Any, key: Any, value: Any) -> Any:
+    d.loc[key] = value
+    return d
+
+
+def _nullable_frame(m: Any) -> Any:
+    return m.DataFrame({
+        "a": m.Series([1, 2], dtype="Int64"),
+        "c": m.Series([True, False], dtype="boolean"),
+        "f": m.Series([0.5, 1.5], dtype="Float64"),
+    })
+
+
+def _pairs(m: Any, *pairs: tuple[str, int]) -> Any:
+    return m.MultiIndex.from_tuples(list(pairs))
+
+
+_NULLABLE_KEEP_CASES = {
+    "concat invents a gap in Int64": lambda m: m.concat([m.DataFrame({"k": [1, 2], "v": m.Series([7, 8], dtype="Int64")}), m.DataFrame({"k": [3]})]),
+    "concat of Int64 and int64": lambda m: m.concat([m.DataFrame({"v": m.Series([7, None], dtype="Int64")}), m.DataFrame({"v": [5]})]),
+    "concat invents a gap in Float64": lambda m: m.concat([m.DataFrame({"v": m.Series([0.5], dtype="Float64")}), m.DataFrame({"k": [3]})]),
+    "concat invents a gap in boolean": lambda m: m.concat([m.DataFrame({"v": m.Series([True], dtype="boolean")}), m.DataFrame({"k": [3]})]),
+    "Series.where": lambda m: m.Series([1, 2, 3], dtype="Int64").where(m.Series([False, True, True])),
+    "Series.where with other": lambda m: m.Series([1, 2, 3], dtype="Int64").where(m.Series([False, True, True]), 0),
+    "Series.mask": lambda m: m.Series([1, 2, 3], dtype="Int64").mask(m.Series([False, True, True])),
+    "Series.where of Float64": lambda m: m.Series([1.5, 2.5], dtype="Float64").where(m.Series([False, True])),
+    "Series.where of boolean": lambda m: m.Series([True, False], dtype="boolean").where(m.Series([False, True])),
+    "DataFrame.where": lambda m: (lambda d: d.where(d > 1))(m.DataFrame({"a": m.Series([1, 2, 3], dtype="Int64"), "b": [1.5, 2.5, 3.5]})),
+    "DataFrame.mask": lambda m: (lambda d: d.mask(d > 1))(m.DataFrame({"a": m.Series([1, 2, 3], dtype="Int64")})),
+    "DataFrame.where with another frame": lambda m: (lambda d: d.where(d > 1, d * 10))(m.DataFrame({"a": m.Series([1, 2, 3], dtype="Int64")})),
+    "diff": lambda m: m.Series([1, 2, None, 4], dtype="Int64").diff(),
+    "diff -1": lambda m: m.Series([1, 2, None, 4], dtype="Int64").diff(-1),
+    "diff 2": lambda m: m.Series([1, 2, 4, 8], dtype="Int64").diff(2),
+    "diff wraps as numpy": lambda m: m.Series([-(2**62), 2**62], dtype="Int64").diff(),
+    "diff of Float64": lambda m: m.Series([0.5, None, 2.0, 3.5], dtype="Float64").diff(),
+    "diff of boolean": lambda m: m.Series([True, False, None, True, True], dtype="boolean").diff(),
+    "DataFrame.diff": lambda m: m.DataFrame({"a": m.Series([1, 3, None, 10], dtype="Int64"), "b": [1.0, 4.0, 9.0, 16.0]}).diff(),
+    "pct_change": lambda m: m.Series([1, 2, None, 4], dtype="Int64").pct_change(),
+    "pct_change with no fill": lambda m: m.Series([1, 2, None, 4], dtype="Int64").pct_change(fill_method=None),
+    "pct_change of Float64": lambda m: m.Series([1.0, 3.0, 6.0], dtype="Float64").pct_change(),
+    "DataFrame.pct_change": lambda m: m.DataFrame({"a": m.Series([2, 3, 6], dtype="Int64")}).pct_change(),
+    "pct_change of boolean raises": lambda m: m.Series([True, False], dtype="boolean").pct_change(),
+    "unstack with a missing pair": lambda m: m.Series([1, 2, 3], index=_pairs(m, ("a", 1), ("a", 2), ("b", 1)), dtype="Int64").unstack(),
+    "unstack complete": lambda m: m.Series([1, 2, 3, 4], index=_pairs(m, ("a", 1), ("a", 2), ("b", 1), ("b", 2)), dtype="Int64").unstack(),
+    "unstack of boolean": lambda m: m.Series([True, False, True], index=_pairs(m, ("a", 1), ("a", 2), ("b", 1)), dtype="boolean").unstack(),
+    "enlarge Int64 by an int": lambda m: _nullable_set(m.Series([1, 2], dtype="Int64"), 5, 9),
+    "enlarge Int64 by a float": lambda m: _nullable_set(m.Series([1, 2], dtype="Int64"), 5, 2.5),
+    "enlarge Int64 by None": lambda m: _nullable_set(m.Series([1, 2], dtype="Int64"), 5, None),
+    "enlarge Float64 by an int": lambda m: _nullable_set(m.Series([1.5], dtype="Float64"), 5, 9),
+    "enlarge boolean by a bool": lambda m: _nullable_set(m.Series([True], dtype="boolean"), 5, False),
+    "enlarge Int64 by a str": lambda m: _nullable_set(m.Series([1, 2], dtype="Int64"), 5, "x"),
+    "write an integral float into Int64": lambda m: _nullable_set(m.Series([1, 2], dtype="Int64"), 0, 3.0),
+    "write NA into Int64": lambda m: _nullable_set(m.Series([1, 2], dtype="Int64"), 0, m.NA),
+    "write 2.5 into Int64 raises": lambda m: _nullable_set(m.Series([1, 2], dtype="Int64"), 0, 2.5),
+    "write 2.5 into two Int64 rows raises": lambda m: _nullable_set(m.Series([1, 2, 3], dtype="Int64"), [0, 1], 2.5),
+    "write 2.5 into an Int64 slice raises": lambda m: _nullable_set(m.Series([1, 2, 3], dtype="Int64"), slice(0, 2), 2.5, iloc=True),
+    "write True into Int64 raises": lambda m: _nullable_set(m.Series([1, 2], dtype="Int64"), 0, True),
+    "write 1 into boolean raises": lambda m: _nullable_set(m.Series([True, False], dtype="boolean"), 0, 1),
+    "write text into Float64 raises": lambda m: _nullable_set(m.Series([1.5], dtype="Float64"), 0, "1.5"),
+    "frame row enlargement keeps each nullable dtype": lambda m: _nullable_loc_set(_nullable_frame(m), 5, [9, True, 2.5]),
+    "frame row enlargement by a float makes Int64 Float64": lambda m: _nullable_loc_set(_nullable_frame(m), 5, [9.5, True, 1]),
+    "frame row of numbers and a float is float64": lambda m: _nullable_loc_set(m.DataFrame({"a": m.Series([1, 2], dtype="Int64"), "b": [1.5, 2.5]}), 5, [9, 9.5]),
+    "frame row of None keeps each nullable dtype": lambda m: _nullable_loc_set(_nullable_frame(m), 5, [None, None, None]),
+    "frame row of one int makes boolean object": lambda m: _nullable_loc_set(_nullable_frame(m), 5, 1),
+    "frame partial row keeps Int64, the others NA": lambda m: _nullable_loc_set(_nullable_frame(m), (5, "a"), 9),
+    "frame partial row of 2.5 into Int64 raises": lambda m: _nullable_loc_set(_nullable_frame(m), (5, "a"), 2.5),
+    "frame write of 2.5 into Int64 raises": lambda m: _nullable_loc_set(_nullable_frame(m), (0, "a"), 2.5),
+    "frame write of an integral float into Int64": lambda m: _nullable_loc_set(_nullable_frame(m), (0, "a"), 3.0),
+    "read_csv dtype Int64": lambda m: m.read_csv(io.StringIO("a,b\n1,x\n,y\n3,z\n"), dtype={"a": "Int64"}),
+    "read_csv dtype Float64": lambda m: m.read_csv(io.StringIO("a,b\n1.5,x\n,y\n3,z\n"), dtype={"a": "Float64"}),
+    "read_csv dtype boolean": lambda m: m.read_csv(io.StringIO("a,b\nTrue,x\n,y\nFalse,z\n"), dtype={"a": "boolean"}),
+    # NEGATIVES: numpy int64 has no NA; an invented gap is float64 NaN.
+    "int64 concat gap is float64 NaN": lambda m: m.concat([m.DataFrame({"v": [7, 8]}), m.DataFrame({"k": [3]})]),
+    "int64 outer add is float64 NaN": lambda m: m.Series([1, 2]) + m.Series([10], index=[5]),
+    "int64 where is float64 NaN": lambda m: m.Series([1, 2, 3]).where(m.Series([False, True, True])),
+    "int64 diff is float64": lambda m: m.Series([1, 2, 4]).diff(),
+    "int64 enlarge by None is float64": lambda m: _nullable_set(m.Series([1, 2]), 5, None),
+    "int64 unstack with a missing pair is float64": lambda m: m.Series([1, 2, 3], index=_pairs(m, ("a", 1), ("a", 2), ("b", 1))).unstack(),
+    "int64 frame row of ints stays int64": lambda m: _nullable_loc_set(m.DataFrame({"a": [1, 2], "b": [1.5, 2.5]}), 5, [9, 9]),
+    "int64 frame row of numbers and a float is float64": lambda m: _nullable_loc_set(m.DataFrame({"a": [1, 2], "b": [1.5, 2.5]}), 5, [9, 9.5]),
+}
+
+
+def _nullable_cell(v: Any) -> str:
+    return repr(v.item() if isinstance(v, np.generic) else v)
+
+
+def _nullable_outcome(m: Any, run: Any) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+    if hasattr(r, "columns"):
+        return {repr(c): (str(r[c].dtype), [_nullable_cell(v) for v in r[c].tolist()]) for c in r.columns}
+    return (str(r.dtype), [_nullable_cell(v) for v in r.tolist()], r.name)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NULLABLE_KEEP_CASES))
+def test_nullable_dtypes_keep_their_na_like_pandas(case: str) -> None:
+    run = _NULLABLE_KEEP_CASES[case]
+    assert _nullable_outcome(fpd, run) == _nullable_outcome(pd, run), case

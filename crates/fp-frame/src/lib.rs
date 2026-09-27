@@ -9657,6 +9657,42 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
+    /// [`Self::diff`] of a nullable Int64 / Float64 / boolean Series:
+    /// `value[i] - value[i - periods]` in the Series' own dtype (integers
+    /// wrap, as numpy's; booleans xor), NA where a side is missing or absent.
+    fn nullable_diff(&self, periods: i64) -> Result<Self, FrameError> {
+        let values = self.column.values();
+        let n = i64::try_from(values.len()).unwrap_or(i64::MAX);
+        let out: Vec<Scalar> = (0..n)
+            .map(|i| {
+                let j = i - periods;
+                if !(0..n).contains(&j) {
+                    return Scalar::Null(NullKind::Null);
+                }
+                match (&values[i as usize], &values[j as usize]) {
+                    (Scalar::Int64(a), Scalar::Int64(b)) => Scalar::Int64(a.wrapping_sub(*b)),
+                    (Scalar::Bool(a), Scalar::Bool(b)) => Scalar::Bool(a ^ b),
+                    (a, b) if !a.is_missing() && !b.is_missing() => {
+                        match (a.to_f64(), b.to_f64()) {
+                            (Ok(a), Ok(b)) => Scalar::Float64(a - b),
+                            _ => Scalar::Null(NullKind::Null),
+                        }
+                    }
+                    _ => Scalar::Null(NullKind::Null),
+                }
+            })
+            .collect();
+        let column = Column::new(self.column.dtype(), out)?;
+        Self::new(self.name.clone(), self.index.clone(), column)
+    }
+
+    /// `result` with its column in this Series' nullable dtype, as
+    /// [`nullable_kept`] (`where`, `mask`).
+    fn keep_nullable(&self, result: Self) -> Result<Self, FrameError> {
+        let column = nullable_kept(&self.column, result.column.clone());
+        Self::new(result.name.clone(), result.index.clone(), column)
+    }
+
     /// Build a Series from a ROW SUBSET of this one, keeping the categorical
     /// metadata.
     ///
@@ -21417,6 +21453,11 @@ impl Series {
     /// Matches `pd.Series.diff(periods)`. Computes `value[i] - value[i - periods]`.
     /// Produces NaN for positions without a valid predecessor and for nulls.
     pub fn diff(&self, periods: i64) -> Result<Self, FrameError> {
+        // A nullable Int64 / Float64 / boolean Series diffs in its own dtype,
+        // a gap NA (pandas' masked arrays; it came back float64; 4qg5w.11).
+        if self.column.dtype().is_nullable() {
+            return self.nullable_diff(periods);
+        }
         let n = self.len();
 
         // Typed Float64 fast path (br-frankenpandas-igxsj): an `as_f64_slice`
@@ -22635,6 +22676,11 @@ impl Series {
     /// values become `NaN`. The condition Series is aligned to `self` via
     /// left-index alignment before masking.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
+        // A nullable Series keeps its dtype (4qg5w.11).
+        self.keep_nullable(self.where_cond_selected(cond, other)?)
+    }
+
+    fn where_cond_selected(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
 
         // Identity fast path (br-frankenpandas-whident): when self and cond share the same
@@ -23086,6 +23132,11 @@ impl Series {
     /// Matches `series.mask(cond, other)`. This is the inverse of `where`:
     /// values are replaced where the condition IS True, not where it is False.
     pub fn mask(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
+        // A nullable Series keeps its dtype (4qg5w.11).
+        self.keep_nullable(self.mask_selected(cond, other)?)
+    }
+
+    fn mask_selected(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
 
         // Identity fast path (br-frankenpandas-whident): same-index ⇒ 1:1 alignment, skip the
@@ -26245,6 +26296,24 @@ impl Series {
                     "cannot perform __truediv__ with this index type: DatetimeArray".to_owned(),
                 ));
             }
+            DType::BoolNullable => {
+                return Err(FrameError::CompatibilityRejected(
+                    "operator 'truediv' not implemented for bool dtypes".to_owned(),
+                ));
+            }
+            // A nullable Int64 / Float64 Series' change is Float64, a gap NA
+            // (pandas' masked division; it came back float64; 4qg5w.11).
+            DType::Int64Nullable | DType::Float64Nullable => {
+                let plain = Self::new(
+                    self.name.clone(),
+                    self.index.clone(),
+                    self.column
+                        .with_dtype(self.column.dtype().to_non_nullable()),
+                )?;
+                let result = plain.pct_change_with_fill(periods, fill_method, limit)?;
+                let column = result.column.with_dtype(DType::Float64Nullable);
+                return Self::new(result.name.clone(), result.index.clone(), column);
+            }
             _ => {}
         }
         // Validate fill_method up front (preserve the error for unknown methods
@@ -26692,26 +26761,31 @@ impl Series {
             grid[col][row].get_or_insert_with(|| value.clone());
         }
         let any_missing = grid.iter().flatten().any(Option::is_none);
+        // A nullable source keeps its dtype, a missing combination NA (it
+        // came back float64; 4qg5w.11).
+        let nullable = self.column.dtype().is_nullable();
         let mut columns = BTreeMap::new();
         let mut order = Vec::with_capacity(cols.len());
         for (label, cells) in cols.iter().zip(grid) {
             let values: Vec<Scalar> = cells
                 .into_iter()
                 .map(|cell| match cell {
-                    Some(Scalar::Int64(v)) if any_missing => Scalar::Float64(v as f64),
+                    Some(Scalar::Int64(v)) if any_missing && !nullable => Scalar::Float64(v as f64),
                     Some(value) => value,
+                    None if nullable => Scalar::Null(NullKind::Null),
                     None => Scalar::Null(NullKind::NaN),
                 })
                 .collect();
             let name = label.to_string();
             // pandas upcasts a numeric source with missing cells to float64
             // for EVERY column; an all-missing one inferred object.
-            let column =
-                if any_missing && matches!(self.column.dtype(), DType::Int64 | DType::Float64) {
-                    Column::new(DType::Float64, values)?
-                } else {
-                    Column::from_values(values)?
-                };
+            let column = if nullable {
+                Column::new(self.column.dtype(), values)?
+            } else if any_missing && matches!(self.column.dtype(), DType::Int64 | DType::Float64) {
+                Column::new(DType::Float64, values)?
+            } else {
+                Column::from_values(values)?
+            };
             columns.insert(name.clone(), column);
             order.push(name);
         }
@@ -63324,6 +63398,38 @@ fn column_with_invented_gaps(
     Column::from_values(values).map_err(Into::into)
 }
 
+/// The nullable dtype (Int64 / Float64 / boolean) the present source columns
+/// of `col_name` share, when any is nullable: a concat keeps it and fills a
+/// gap with NA, as pandas keeps `Int64` through a concat that invents one (an
+/// all-valid Int64 source widened to float64; 4qg5w.11). None when no source
+/// is nullable, or they disagree.
+fn concat_nullable_dtype(frames: &[&DataFrame], col_name: &str) -> Option<DType> {
+    let dtypes: Vec<DType> = frames
+        .iter()
+        .filter_map(|frame| frame.column(col_name))
+        .map(Column::dtype)
+        .collect();
+    let nullable = dtypes.iter().find(|dtype| dtype.is_nullable())?.clone();
+    dtypes
+        .iter()
+        .all(|dtype| dtype.to_nullable() == nullable)
+        .then_some(nullable)
+}
+
+/// `result` in `source`'s nullable dtype (Int64 / Float64 / boolean) when
+/// `source` is nullable and `result` holds the same kind of values: pandas'
+/// masked arrays keep their dtype through a selection or a fill (`where`,
+/// `mask`), where rebuilding from values made a nullable Int64 a plain int64
+/// holding the NA (4qg5w.11). Anything else is `result`.
+fn nullable_kept(source: &Column, result: Column) -> Column {
+    let dtype = source.dtype();
+    if dtype.is_nullable() && result.dtype() == dtype.to_non_nullable() {
+        result.with_dtype(dtype)
+    } else {
+        result
+    }
+}
+
 /// Reindex one column by `positions`, applying br-frankenpandas-nywa8 RULE 1 to
 /// any gap the operation INVENTS.
 ///
@@ -63532,11 +63638,15 @@ pub fn concat_dataframes_with_ignore_index(
         //   a: left [None, 2], absent right -> [null, 2, null]   int64
         //   c: absent left, right [300]      -> [NaN, NaN, 300.0] float64
         // (br-frankenpandas-nywa8)
-        let source_was_all_valid = frames.iter().all(|frame| {
-            frame
-                .column(col_name)
-                .is_none_or(|column| !column.values().iter().any(fp_types::Scalar::is_missing))
-        });
+        // A nullable source (Int64 / Float64 / boolean) keeps its dtype and
+        // takes an NA gap whether or not it already held one (4qg5w.11).
+        let nullable_dtype = concat_nullable_dtype(frames, col_name);
+        let source_was_all_valid = nullable_dtype.is_none()
+            && frames.iter().all(|frame| {
+                frame
+                    .column(col_name)
+                    .is_none_or(|column| !column.values().iter().any(fp_types::Scalar::is_missing))
+            });
         // Only counts as invented if a row actually gets one. An EMPTY frame
         // contributes no rows, so a column absent from it is not widened —
         // measured: concat of {} with {'a': [50, 60]} keeps int64.
@@ -63561,7 +63671,10 @@ pub fn concat_dataframes_with_ignore_index(
         }
         columns.insert(
             col_name.clone(),
-            column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+            match nullable_dtype {
+                Some(dtype) => Column::new(dtype, values)?,
+                None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+            },
         );
     }
 
@@ -63746,11 +63859,15 @@ pub fn concat_dataframes_with_keys(
         //   a: left [None, 2], absent right -> [null, 2, null]   int64
         //   c: absent left, right [300]      -> [NaN, NaN, 300.0] float64
         // (br-frankenpandas-nywa8)
-        let source_was_all_valid = frames.iter().all(|frame| {
-            frame
-                .column(col_name)
-                .is_none_or(|column| !column.values().iter().any(fp_types::Scalar::is_missing))
-        });
+        // A nullable source (Int64 / Float64 / boolean) keeps its dtype and
+        // takes an NA gap whether or not it already held one (4qg5w.11).
+        let nullable_dtype = concat_nullable_dtype(frames, col_name);
+        let source_was_all_valid = nullable_dtype.is_none()
+            && frames.iter().all(|frame| {
+                frame
+                    .column(col_name)
+                    .is_none_or(|column| !column.values().iter().any(fp_types::Scalar::is_missing))
+            });
         // Only counts as invented if a row actually gets one. An EMPTY frame
         // contributes no rows, so a column absent from it is not widened —
         // measured: concat of {} with {'a': [50, 60]} keeps int64.
@@ -63775,7 +63892,10 @@ pub fn concat_dataframes_with_keys(
         }
         columns.insert(
             col_name.clone(),
-            column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+            match nullable_dtype {
+                Some(dtype) => Column::new(dtype, values)?,
+                None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+            },
         );
     }
 
@@ -79288,7 +79408,10 @@ impl DataFrame {
                 })
                 .collect();
 
-            new_columns.insert(col_name.clone(), Column::from_values(values)?);
+            new_columns.insert(
+                col_name.clone(),
+                nullable_kept(data_col, Column::from_values(values)?),
+            );
         }
 
         Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
@@ -79349,7 +79472,10 @@ impl DataFrame {
                 })
                 .collect();
 
-            new_columns.insert(col_name.clone(), Column::from_values(values)?);
+            new_columns.insert(
+                col_name.clone(),
+                nullable_kept(data_col, Column::from_values(values)?),
+            );
         }
 
         Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
@@ -79518,7 +79644,10 @@ impl DataFrame {
                 })
                 .collect();
 
-            new_columns.insert(col_name.clone(), Column::from_values(values)?);
+            new_columns.insert(
+                col_name.clone(),
+                nullable_kept(data_col, Column::from_values(values)?),
+            );
         }
 
         Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
@@ -79681,7 +79810,10 @@ impl DataFrame {
                 })
                 .collect();
 
-            new_columns.insert(col_name.clone(), Column::from_values(values)?);
+            new_columns.insert(
+                col_name.clone(),
+                nullable_kept(data_col, Column::from_values(values)?),
+            );
         }
 
         Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
@@ -171917,6 +172049,199 @@ mod tests {
             let err = df.describe_with_percentiles(percentiles).unwrap_err();
             assert!(matches!(err, FrameError::CompatibilityRejected(_)));
         }
+    }
+
+    /// DISC-011's per-path table on the Rust API: a gap an operation invents
+    /// widens numpy int64 to float64 NaN and keeps a nullable Int64 Int64
+    /// with an NA, as pandas 2.2.3 (reindex, outer alignment, shift, concat).
+    #[test]
+    fn null_introduction_per_path_matches_pandas_4qg5w_11() {
+        let labels = |n: usize| (0..n as i64).map(IndexLabel::Int64).collect::<Vec<_>>();
+        let ints = |values: &[i64]| values.iter().map(|v| Scalar::Int64(*v)).collect::<Vec<_>>();
+        for (dtype, widened) in [
+            (DType::Int64, DType::Float64),
+            (DType::Int64Nullable, DType::Int64Nullable),
+        ] {
+            let column = |values: &[i64]| Column::new(dtype.clone(), ints(values)).unwrap();
+            let s = Series::new("s", Index::new(labels(3)), column(&[1, 2, 3])).unwrap();
+            let t = Series::new(
+                "s",
+                Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(5)]),
+                column(&[10, 20]),
+            )
+            .unwrap();
+            let df = DataFrame::new_with_column_order(
+                Index::new(labels(3)),
+                BTreeMap::from([("v".to_owned(), s.column().clone())]),
+                vec!["v".to_owned()],
+            )
+            .unwrap();
+            let other = DataFrame::new_with_column_order(
+                Index::new(labels(1)),
+                BTreeMap::from([("k".to_owned(), column(&[1]))]),
+                vec!["k".to_owned()],
+            )
+            .unwrap();
+            let joined = concat_dataframes(&[&df, &other]).unwrap();
+            let paths = [
+                (
+                    "reindex",
+                    s.reindex(vec![IndexLabel::Int64(0), IndexLabel::Int64(9)])
+                        .unwrap()
+                        .column()
+                        .clone(),
+                ),
+                ("outer add", s.add(&t).unwrap().column().clone()),
+                ("shift", s.shift(1).unwrap().column().clone()),
+                ("concat", joined.column("v").unwrap().clone()),
+            ];
+            for (path, result) in paths {
+                assert_eq!(result.dtype(), widened, "{dtype:?} {path}");
+                let missing = result.values().iter().filter(|v| v.is_missing()).count();
+                assert!(missing > 0, "{dtype:?} {path}: no gap");
+                // numpy's gap is a NaN, a masked array's an NA.
+                assert!(
+                    result
+                        .values()
+                        .iter()
+                        .filter(|v| v.is_missing())
+                        .all(|v| match widened {
+                            DType::Float64 => matches!(v, Scalar::Null(NullKind::NaN)),
+                            _ => true,
+                        }),
+                    "{dtype:?} {path}: {:?}",
+                    result.values()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nullable_dtypes_keep_their_na_4qg5w_11() {
+        let na = || Scalar::Null(NullKind::Null);
+        let labels = |n: usize| (0..n as i64).map(IndexLabel::Int64).collect::<Vec<_>>();
+        let series = |dtype: DType, values: Vec<Scalar>| {
+            let index = Index::new(labels(values.len()));
+            Series::new("s", index, Column::new(dtype, values).unwrap()).unwrap()
+        };
+        let frame = |name: &str, column: Column| {
+            let index = Index::new(labels(column.len()));
+            let columns = BTreeMap::from([(name.to_owned(), column)]);
+            DataFrame::new_with_column_order(index, columns, vec![name.to_owned()]).unwrap()
+        };
+        // Each cell, a missing one as None.
+        let cells = |s: &Series| -> Vec<Option<Scalar>> {
+            s.values()
+                .iter()
+                .map(|v| (!v.is_missing()).then(|| v.clone()))
+                .collect()
+        };
+        let ints = series(
+            DType::Int64Nullable,
+            vec![Scalar::Int64(1), Scalar::Int64(2), na(), Scalar::Int64(4)],
+        );
+        // diff keeps Int64, a gap NA (it was float64); integers wrap as numpy's.
+        let diff = ints.diff(1).unwrap();
+        assert_eq!(diff.column().dtype(), DType::Int64Nullable);
+        assert_eq!(cells(&diff), vec![None, Some(Scalar::Int64(1)), None, None]);
+        let wide = series(
+            DType::Int64Nullable,
+            vec![Scalar::Int64(-(1_i64 << 62)), Scalar::Int64(1_i64 << 62)],
+        );
+        assert_eq!(
+            cells(&wide.diff(1).unwrap())[1],
+            Some(Scalar::Int64(i64::MIN))
+        );
+        let flags = series(
+            DType::BoolNullable,
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                na(),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+            ],
+        );
+        let flag_diff = flags.diff(1).unwrap();
+        assert_eq!(flag_diff.column().dtype(), DType::BoolNullable);
+        assert_eq!(
+            cells(&flag_diff),
+            vec![
+                None,
+                Some(Scalar::Bool(true)),
+                None,
+                None,
+                Some(Scalar::Bool(false))
+            ]
+        );
+        // pct_change is Float64 (after the default pad); boolean is refused.
+        let change = ints.pct_change(1).unwrap();
+        assert_eq!(change.column().dtype(), DType::Float64Nullable);
+        assert_eq!(
+            cells(&change),
+            vec![
+                None,
+                Some(Scalar::Float64(1.0)),
+                Some(Scalar::Float64(0.0)),
+                Some(Scalar::Float64(1.0)),
+            ]
+        );
+        let err = flags.pct_change(1).unwrap_err().to_string();
+        assert!(
+            err.contains("operator 'truediv' not implemented for bool dtypes"),
+            "{err}"
+        );
+        // where / mask keep Int64 (a plain int64 held the NA).
+        let cond = series(
+            DType::Bool,
+            vec![
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ],
+        );
+        let kept = ints.where_cond(&cond, None).unwrap();
+        assert_eq!(kept.column().dtype(), DType::Int64Nullable);
+        assert_eq!(cells(&kept), vec![None, Some(Scalar::Int64(2)), None, None]);
+        let masked = ints.mask(&cond, None).unwrap();
+        assert_eq!(masked.column().dtype(), DType::Int64Nullable);
+        assert_eq!(
+            cells(&masked),
+            vec![Some(Scalar::Int64(1)), None, None, Some(Scalar::Int64(4))]
+        );
+        // A frame's where, and a concat that invents a gap, keep it too.
+        let df = frame("a", ints.column().clone());
+        let df_cond = frame("a", cond.column().clone());
+        let df_kept = df.where_cond(&df_cond, None).unwrap();
+        assert_eq!(df_kept.column("a").unwrap().dtype(), DType::Int64Nullable);
+        let other = frame(
+            "b",
+            Column::new(DType::Int64, vec![Scalar::Int64(5)]).unwrap(),
+        );
+        let joined = concat_dataframes(&[&df, &other]).unwrap();
+        let a = joined.column("a").unwrap();
+        assert_eq!(a.dtype(), DType::Int64Nullable);
+        assert!(a.values()[4].is_missing());
+        // NEGATIVE: numpy int64 has no NA - its diff, where and invented gap
+        // are float64.
+        let plain = series(
+            DType::Int64,
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(4),
+                Scalar::Int64(8),
+            ],
+        );
+        assert_eq!(plain.diff(1).unwrap().column().dtype(), DType::Float64);
+        assert_eq!(
+            plain.where_cond(&cond, None).unwrap().column().dtype(),
+            DType::Float64
+        );
+        let plain_frame = frame("a", plain.column().clone());
+        let plain_joined = concat_dataframes(&[&plain_frame, &other]).unwrap();
+        assert_eq!(plain_joined.column("a").unwrap().dtype(), DType::Float64);
     }
 
     #[test]

@@ -68,7 +68,7 @@
 | DISC-008 | RESOLVED | PyO3 Python bindings (fp-python crate) |
 | DISC-009 | WILL-FIX | Sparse dtype before compressed storage |
 | DISC-010 | INVESTIGATING | GroupBy.apply explicit output-shape |
-| DISC-011 | RESOLVED | Nullable Int64/Bool extension dtypes implemented |
+| DISC-011 | NARROWED | Promotion on null introduction matches pandas on every observable path; the Rust constructors' int64 + missing inference remains (br-frankenpandas-ih6ho) |
 | DISC-012 | ACCEPTED | Mixed naive/tz-aware CSV parse_dates |
 | DISC-013 | RESOLVED | Series alignment now sorts result |
 | DISC-014 | RESOLVED | Duplicate-label arithmetic preserves Int64Nullable |
