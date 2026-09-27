@@ -1224,6 +1224,11 @@ pub trait HostObject: Send + Sync {
     fn host_eq_scalar(&self, _other: &Scalar) -> bool {
         false
     }
+    /// The value's type as the host's own errors name it (`datetime.date`,
+    /// `dict`), for a refusal pandas lets the host raise.
+    fn host_type_name(&self) -> String {
+        "object".to_owned()
+    }
     /// The value itself, for the host that made it to take back.
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -1349,6 +1354,16 @@ impl ObjectValue {
         }
     }
 
+    /// The cell's Python type as Python's errors name it (`list`,
+    /// `datetime.date`).
+    #[must_use]
+    pub fn type_name(&self) -> String {
+        match self {
+            Self::List(_) => "list".to_owned(),
+            Self::Host(value) => value.object().host_type_name(),
+        }
+    }
+
     /// Python's `==` between this cell and a plain value: a host value asks
     /// the host (a dtype equals its name), a list never equals one.
     #[must_use]
@@ -1375,7 +1390,7 @@ impl ObjectValue {
             (Self::List(left), Self::List(right)) => {
                 for (a, b) in left.iter().zip(right.iter()) {
                     if a != b {
-                        let ordering = python_item_cmp(a, b)?;
+                        let ordering = a.python_cmp(b)?;
                         if ordering.is_ne() {
                             return Some(ordering);
                         }
@@ -1414,26 +1429,6 @@ impl ObjectValue {
             Self::List(items) => items.as_ptr().addr(),
             Self::Host(value) => std::sync::Arc::as_ptr(&value.0).cast::<()>().addr(),
         }
-    }
-}
-
-/// Python's ordering of two list items: numbers by value, text by code
-/// point, nested cells by [`ObjectValue::python_cmp`]; None where Python
-/// raises (a number against text).
-fn python_item_cmp(left: &Scalar, right: &Scalar) -> Option<std::cmp::Ordering> {
-    let numeric = |value: &Scalar| {
-        matches!(
-            value,
-            Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
-        )
-    };
-    match (left, right) {
-        (Scalar::Utf8(a), Scalar::Utf8(b)) => Some(a.cmp(b)),
-        (Scalar::Object(a), Scalar::Object(b)) => a.python_cmp(b),
-        _ if numeric(left) && numeric(right) => {
-            left.to_f64().ok()?.partial_cmp(&right.to_f64().ok()?)
-        }
-        _ => None,
     }
 }
 
@@ -1553,6 +1548,71 @@ impl std::fmt::Display for Scalar {
 }
 
 impl Scalar {
+    /// Python's ordering of two values: numbers by value, text by code
+    /// point, instants, durations and same-frequency periods by their
+    /// payload, intervals by (left, right), object cells by
+    /// [`ObjectValue::python_cmp`]; None where
+    /// Python raises (a number against text, a list against a tuple, two
+    /// dicts).
+    #[must_use]
+    pub fn python_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let numeric =
+            |value: &Self| matches!(value, Self::Bool(_) | Self::Int64(_) | Self::Float64(_));
+        match (self, other) {
+            (Self::Utf8(a), Self::Utf8(b)) => Some(a.cmp(b)),
+            (Self::Datetime64(a), Self::Datetime64(b))
+            | (Self::Timedelta64(a), Self::Timedelta64(b)) => Some(a.cmp(b)),
+            (Self::Period(a), Self::Period(b)) if a.freq == b.freq => {
+                Some(a.ordinal.cmp(&b.ordinal))
+            }
+            (Self::Interval(a), Self::Interval(b)) => Some(
+                a.left
+                    .partial_cmp(&b.left)?
+                    .then(a.right.partial_cmp(&b.right)?),
+            ),
+            (Self::Object(a), Self::Object(b)) => a.python_cmp(b),
+            _ if numeric(self) && numeric(other) => {
+                self.to_f64().ok()?.partial_cmp(&other.to_f64().ok()?)
+            }
+            _ => None,
+        }
+    }
+
+    /// The two types Python's TypeError names when it cannot order `self`
+    /// against `other` (see [`Self::python_cmp`]): two lists by the first
+    /// unequal items they hold (`[1] < ['a']` names 'int' and 'str'), any
+    /// other pair by their own types.
+    #[must_use]
+    pub fn python_cmp_type_names(&self, other: &Self) -> (String, String) {
+        if let (Self::Object(ObjectValue::List(left)), Self::Object(ObjectValue::List(right))) =
+            (self, other)
+            && let Some((a, b)) = left.iter().zip(right.iter()).find(|(a, b)| a != b)
+        {
+            return a.python_cmp_type_names(b);
+        }
+        (self.python_type_name(), other.python_type_name())
+    }
+
+    /// The value's Python type as Python's errors name it (`str`, `int`,
+    /// `Timestamp`, `list`), for a TypeError pandas lets Python raise.
+    #[must_use]
+    pub fn python_type_name(&self) -> String {
+        match self {
+            Self::Null(NullKind::NaN) | Self::Float64(_) => "float",
+            Self::Null(NullKind::NaT) => "NaTType",
+            Self::Null(NullKind::Null) => "NoneType",
+            Self::Bool(_) => "bool",
+            Self::Int64(_) => "int",
+            Self::Utf8(_) => "str",
+            Self::Timedelta64(_) => "Timedelta",
+            Self::Datetime64(_) => "Timestamp",
+            Self::Period(_) => "Period",
+            Self::Interval(_) => "Interval",
+            Self::Object(object) => return object.type_name(),
+        }
+        .to_owned()
+    }
+
     /// The value as Python's `repr` spells it inside a container (`'a'`,
     /// `1`, `1.5`, `None`, `nan`, `[1, 2]`) - how a list cell prints its
     /// items.
@@ -8944,6 +9004,62 @@ mod tests {
         assert_ne!(first, second);
         assert_ne!(first.cmp(&second), Ordering::Equal);
         assert_eq!(first.cmp(&second), second.cmp(&first).reverse());
+    }
+
+    #[test]
+    fn values_order_and_name_their_types_as_python_does_fvsao_71() {
+        use std::cmp::Ordering;
+
+        use super::{HostValue, ObjectValue};
+        let text = |value: &str| Scalar::Utf8(value.to_owned());
+        let host =
+            |name: &'static str| Scalar::Object(ObjectValue::Host(HostValue::new(Named(name))));
+        let list = |items: Vec<Scalar>| Scalar::Object(ObjectValue::list(items));
+        // Numbers across kinds by value, text by code point, instants,
+        // intervals by (left, right), cells as the host orders them.
+        assert_eq!(
+            Scalar::Bool(true).python_cmp(&Scalar::Float64(1.5)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            Scalar::Int64(2).python_cmp(&Scalar::Float64(2.0)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(text("b").python_cmp(&text("a")), Some(Ordering::Greater));
+        assert_eq!(
+            Scalar::Datetime64(5).python_cmp(&Scalar::Datetime64(9)),
+            Some(Ordering::Less)
+        );
+        let interval = |left: f64, right: f64| {
+            Scalar::Interval(Interval::new(left, right, IntervalClosed::Right))
+        };
+        assert_eq!(
+            interval(0.0, 5.0).python_cmp(&interval(0.0, 2.0)),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(host("a").python_cmp(&host("b")), Some(Ordering::Less));
+        // NEGATIVES: what Python cannot order - a str and an int, an instant
+        // and a duration, a cell and a number, unorderable host values.
+        assert_eq!(text("a").python_cmp(&Scalar::Int64(1)), None);
+        assert_eq!(
+            Scalar::Datetime64(1).python_cmp(&Scalar::Timedelta64(1)),
+            None
+        );
+        assert_eq!(host("a").python_cmp(&Scalar::Int64(1)), None);
+        assert_eq!(host("!a").python_cmp(&host("b")), None);
+        // Their types as Python's TypeError names them; a host value by its
+        // host (the default for a host that cannot say is 'object'), a list
+        // pair by the first unequal items it holds.
+        assert_eq!(text("a").python_type_name(), "str");
+        assert_eq!(Scalar::Bool(true).python_type_name(), "bool");
+        assert_eq!(Scalar::Datetime64(1).python_type_name(), "Timestamp");
+        assert_eq!(list(vec![]).python_type_name(), "list");
+        assert_eq!(host("a").python_type_name(), "object");
+        let (left, right) = list(vec![Scalar::Int64(1), Scalar::Int64(2)])
+            .python_cmp_type_names(&list(vec![Scalar::Int64(1), text("x")]));
+        assert_eq!((left.as_str(), right.as_str()), ("int", "str"));
+        let (left, right) = text("a").python_cmp_type_names(&list(vec![]));
+        assert_eq!((left.as_str(), right.as_str()), ("str", "list"));
     }
 
     #[test]

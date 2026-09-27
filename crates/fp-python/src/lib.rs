@@ -4201,6 +4201,27 @@ impl fp_types::HostObject for PyHost {
         })
     }
 
+    // Python's own `tp_name`: a class defined in Python by its bare name, a
+    // builtin by its name, any other built type as `module.name`
+    // (`datetime.date`), as Python's TypeErrors print it.
+    fn host_type_name(&self) -> String {
+        const HEAP_TYPE: u64 = 1 << 9;
+        Python::attach(|py| {
+            let kind = self.0.bind(py).get_type();
+            let Ok(name) = kind.name().map(|name| name.to_string()) else {
+                return "object".to_owned();
+            };
+            let heap_type = kind
+                .getattr("__flags__")
+                .and_then(|flags| flags.extract::<u64>())
+                .is_ok_and(|flags| flags & HEAP_TYPE != 0);
+            match kind.module().map(|module| module.to_string()) {
+                Ok(module) if !heap_type && module != "builtins" => format!("{module}.{name}"),
+                _ => name,
+            }
+        })
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -14245,7 +14266,11 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg == "Limit must be greater than 0"
                 || msg.starts_with("Invalid fill method. ")
                 || (msg.starts_with("operator '")
-                    && msg.ends_with("not implemented for bool dtypes"));
+                    && msg.ends_with("not implemented for bool dtypes"))
+                // Python's TypeError for values it cannot order, and pandas'
+                // refusal to rank an unordered categorical by group (fvsao.71).
+                || msg.starts_with("'<' not supported between instances of ")
+                || msg == "Cannot perform rank with non-ordered Categorical";
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -14281,6 +14306,11 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || lower.contains("type does not support")
                 // numpy's TypeError for bool - bool.
                 || lower.contains("numpy boolean subtract")
+                // Python's TypeError for values it cannot order, and pandas'
+                // refusal to rank intervals (fvsao.71).
+                || lower.contains("not supported between instances of")
+                || lower.contains("rank is not supported for")
+                || lower.contains("cannot perform rank with non-ordered categorical")
             {
                 (PyErrorKind::Type, text)
             } else {
@@ -14402,6 +14432,68 @@ fn parse_ascending_bool(ascending: Option<&Bound<'_, PyAny>>) -> PyResult<bool> 
                 ))
             }
         }
+    }
+}
+
+/// A `rank` text option (`method`, `na_option`) as the caller passed it: the
+/// text, or None for an explicit None, which pandas refuses - an Option
+/// argument cannot tell that from the option left out.
+struct RankOption(Option<String>);
+
+impl RankOption {
+    fn text(text: &str) -> Self {
+        Self(Some(text.to_owned()))
+    }
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for RankOption {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_none() {
+            return Ok(Self(None));
+        }
+        obj.extract::<String>().map(|text| Self(Some(text)))
+    }
+}
+
+/// A flag pandas reads by Python truthiness: `rank(ascending=None)` ranks
+/// descending, `pct=1` scales.
+struct Truthy(bool);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Truthy {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        obj.is_truthy().map(Self)
+    }
+}
+
+/// pandas' `rank` method and na_option, checked as pandas checks them: an
+/// na_option other than keep / top / bottom is a ValueError, then an
+/// unknown method (None included) a KeyError of it; they defaulted
+/// silently (fvsao.71).
+fn rank_options<'o>(
+    py: Python<'_>,
+    method: &'o RankOption,
+    na_option: &'o RankOption,
+) -> PyResult<(&'o str, &'o str)> {
+    let na_option = match na_option.0.as_deref() {
+        Some(na_option @ ("keep" | "top" | "bottom")) => na_option,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "na_option must be one of 'keep', 'top', or 'bottom'",
+            ));
+        }
+    };
+    match method.0.as_deref() {
+        Some(method @ ("average" | "min" | "max" | "first" | "dense")) => Ok((method, na_option)),
+        Some(other) => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+            other.to_owned(),
+        )),
+        // One None argument, as pandas' KeyError(None) carries: a bare None
+        // would be read as no arguments at all.
+        None => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>((py.None(),))),
     }
 }
 
@@ -19552,40 +19644,32 @@ impl PySeries {
         Ok(PySeries { inner: r })
     }
 
-    /// Compute numerical data ranks (pandas `Series.rank`).
-    #[pyo3(signature = (axis=None, method=None, numeric_only=false, na_option=None, ascending=None, pct=false))]
+    /// Compute numerical data ranks (pandas `Series.rank`). The first
+    /// positional argument is the axis, as pandas has it: `s.rank("min")` is
+    /// pandas' "No axis named min" (it ranked by method "min").
+    #[pyo3(signature = (
+        axis=None,
+        method=RankOption::text("average"),
+        numeric_only=Truthy(false),
+        na_option=RankOption::text("keep"),
+        ascending=Truthy(true),
+        pct=Truthy(false)
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn rank(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
-        method: Option<&str>,
-        numeric_only: bool,
-        na_option: Option<&str>,
-        ascending: Option<bool>,
-        pct: bool,
+        method: RankOption,
+        numeric_only: Truthy,
+        na_option: RankOption,
+        ascending: Truthy,
+        pct: Truthy,
     ) -> PyResult<PySeries> {
-        let mut m = method.unwrap_or("average");
-        if let Some(a) = axis {
-            if let Ok(s) = a.extract::<&str>() {
-                if matches!(s, "average" | "min" | "max" | "first" | "dense") && method.is_none() {
-                    m = s;
-                } else {
-                    let parsed = parse_axis_param_for_type(Some(a), "Series")?.unwrap_or(0);
-                    if parsed != 0 {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "No axis named {parsed} for object type Series"
-                        )));
-                    }
-                }
-            } else {
-                let parsed = parse_axis_param_for_type(Some(a), "Series")?.unwrap_or(0);
-                if parsed != 0 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "No axis named {parsed} for object type Series"
-                    )));
-                }
-            }
-        }
-        if numeric_only
+        // A Series has axis 0 alone; anything else is pandas' ValueError.
+        parse_axis_param_for_type(axis, "Series")?;
+        let (method, na_option) = rank_options(py, &method, &na_option)?;
+        if numeric_only.0
             && !matches!(
                 self.inner.dtype(),
                 DType::Int64 | DType::Float64 | DType::Bool
@@ -19595,11 +19679,9 @@ impl PySeries {
                 "Series.rank does not allow numeric_only=True with non-numeric dtype.",
             ));
         }
-        let asc = ascending.unwrap_or(true);
-        let na = na_option.unwrap_or("keep");
         let r = self
             .inner
-            .rank_with_pct(m, asc, na, pct)
+            .rank_with_pct(method, ascending.0, na_option, pct.0)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
@@ -30834,33 +30916,32 @@ impl PyDataFrame {
         ))
     }
 
-    #[pyo3(signature = (axis=None, method=None, numeric_only=false, na_option=None, ascending=None, pct=false))]
+    /// pandas' `DataFrame.rank`; the first positional argument is the axis,
+    /// as for `Series.rank`.
+    #[pyo3(signature = (
+        axis=None,
+        method=RankOption::text("average"),
+        numeric_only=Truthy(false),
+        na_option=RankOption::text("keep"),
+        ascending=Truthy(true),
+        pct=Truthy(false)
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn rank(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
-        method: Option<&str>,
-        numeric_only: bool,
-        na_option: Option<&str>,
-        ascending: Option<bool>,
-        pct: bool,
+        method: RankOption,
+        numeric_only: Truthy,
+        na_option: RankOption,
+        ascending: Truthy,
+        pct: Truthy,
     ) -> PyResult<PyDataFrame> {
-        let mut m = method.unwrap_or("average");
-        let mut ax = 0;
-        if let Some(a) = axis {
-            if let Ok(s) = a.extract::<&str>() {
-                if matches!(s, "average" | "min" | "max" | "first" | "dense") && method.is_none() {
-                    m = s;
-                } else {
-                    ax = parse_axis_param_for_type(Some(a), "DataFrame")?.unwrap_or(0);
-                }
-            } else {
-                ax = parse_axis_param_for_type(Some(a), "DataFrame")?.unwrap_or(0);
-            }
-        }
-        let asc = ascending.unwrap_or(true);
-        let na = na_option.unwrap_or("keep");
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let (m, na) = rank_options(py, &method, &na_option)?;
+        let (asc, pct) = (ascending.0, pct.0);
 
-        let target_df = if numeric_only {
+        let target_df = if numeric_only.0 {
             self.inner
                 .select_dtypes(&[DType::Int64, DType::Float64, DType::Bool], &[])
                 .map_err(frame_error_to_py)?
@@ -40871,20 +40952,26 @@ impl PyGroupBy {
         self.kurt()
     }
 
-    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    /// pandas' `DataFrameGroupBy.rank(method, ascending, na_option, pct)`.
+    #[pyo3(signature = (
+        method=RankOption::text("average"),
+        ascending=Truthy(true),
+        na_option=RankOption::text("keep"),
+        pct=Truthy(false)
+    ))]
     fn rank(
         &self,
-        method: Option<&str>,
-        ascending: Option<bool>,
-        na_option: Option<&str>,
+        py: Python<'_>,
+        method: RankOption,
+        ascending: Truthy,
+        na_option: RankOption,
+        pct: Truthy,
     ) -> PyResult<PyDataFrame> {
-        let m = method.unwrap_or("average");
-        let asc = ascending.unwrap_or(true);
-        let na = na_option.unwrap_or("keep");
+        let (method, na_option) = rank_options(py, &method, &na_option)?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
-            .rank(m, asc, na)
+            .rank_with_pct(method, ascending.0, na_option, pct.0)
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: result })
     }
@@ -42776,21 +42863,27 @@ impl PySeriesGroupBy {
         self.kurt()
     }
 
-    #[pyo3(signature = (method=None, ascending=None, na_option=None))]
+    /// pandas' `SeriesGroupBy.rank(method, ascending, na_option, pct)`.
+    #[pyo3(signature = (
+        method=RankOption::text("average"),
+        ascending=Truthy(true),
+        na_option=RankOption::text("keep"),
+        pct=Truthy(false)
+    ))]
     fn rank(
         &self,
-        method: Option<&str>,
-        ascending: Option<bool>,
-        na_option: Option<&str>,
+        py: Python<'_>,
+        method: RankOption,
+        ascending: Truthy,
+        na_option: RankOption,
+        pct: Truthy,
     ) -> PyResult<PySeries> {
-        let m = method.unwrap_or("average");
-        let asc = ascending.unwrap_or(true);
-        let na = na_option.unwrap_or("keep");
+        let (method, na_option) = rank_options(py, &method, &na_option)?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .rank(m, asc, na)
+            .rank_with_pct(method, ascending.0, na_option, pct.0)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
@@ -57472,12 +57565,13 @@ mod tests {
             let ax1 = pyo3::types::PyInt::new(py, 1);
             let rk_asc = py_s
                 .rank(
+                    py,
                     Some(ax0.as_any()),
-                    Some("average"),
-                    false,
-                    None,
-                    Some(true),
-                    false,
+                    RankOption::text("average"),
+                    Truthy(false),
+                    RankOption::text("keep"),
+                    Truthy(true),
+                    Truthy(false),
                 )
                 .expect("rank asc");
             assert_eq!(
@@ -57490,14 +57584,30 @@ mod tests {
             );
 
             let rk_pct = py_s
-                .rank(None, Some("average"), false, None, Some(true), true)
+                .rank(
+                    py,
+                    None,
+                    RankOption::text("average"),
+                    Truthy(false),
+                    RankOption::text("keep"),
+                    Truthy(true),
+                    Truthy(true),
+                )
                 .expect("rank pct");
             assert_eq!(rk_pct.inner.len(), 3);
 
             // Series rank invalid axis
             assert!(
-                py_s.rank(Some(ax1.as_any()), None, false, None, None, false)
-                    .is_err()
+                py_s.rank(
+                    py,
+                    Some(ax1.as_any()),
+                    RankOption::text("average"),
+                    Truthy(false),
+                    RankOption::text("keep"),
+                    Truthy(true),
+                    Truthy(false),
+                )
+                .is_err()
             );
 
             // Series clip scalar
@@ -57558,7 +57668,15 @@ mod tests {
 
             // DataFrame rank axis 0 and 1
             let rk_df0 = py_df
-                .rank(Some(ax0.as_any()), None, false, None, None, false)
+                .rank(
+                    py,
+                    Some(ax0.as_any()),
+                    RankOption::text("average"),
+                    Truthy(false),
+                    RankOption::text("keep"),
+                    Truthy(true),
+                    Truthy(false),
+                )
                 .expect("rank df 0");
             assert_eq!(
                 rk_df0.inner.columns()["a"].values(),
@@ -57566,7 +57684,15 @@ mod tests {
             );
 
             let rk_df1 = py_df
-                .rank(Some(ax1.as_any()), None, false, None, None, false)
+                .rank(
+                    py,
+                    Some(ax1.as_any()),
+                    RankOption::text("average"),
+                    Truthy(false),
+                    RankOption::text("keep"),
+                    Truthy(true),
+                    Truthy(false),
+                )
                 .expect("rank df 1");
             assert_eq!(
                 rk_df1.inner.columns()["a"].values(),

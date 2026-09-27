@@ -12047,12 +12047,22 @@ impl Column {
             && values
                 .iter()
                 .any(|value| matches!(value, Scalar::Int64(_) | Scalar::Float64(_)));
+        // So is an object cell (a date, a list) beside numbers: `[2, date, 1]`
+        // stringified its ints to '2' and '1' (fvsao.71), where a str beside
+        // them kept them.
+        let object_cell_mix = values
+            .iter()
+            .any(|value| matches!(value, Scalar::Object(_)))
+            && values.iter().any(|value| {
+                !matches!(value, Scalar::Utf8(_) | Scalar::Object(_) | Scalar::Null(_))
+            });
         let preserve_utf8_object_bucket = matches!(dtype, DType::Utf8)
             && (values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
                 && values
                     .iter()
                     .any(|value| !matches!(value, Scalar::Utf8(_) | Scalar::Null(_)))
-                || bool_numeric_object_mix);
+                || bool_numeric_object_mix
+                || object_cell_mix);
         let needs_coercion = values.iter().any(|v| {
             let d = v.dtype();
             d != dtype && d != DType::Null
@@ -37816,6 +37826,31 @@ mod tests {
             column.values(),
             &[Scalar::Utf8("x".into()), Scalar::Int64(1)]
         );
+    }
+
+    #[test]
+    fn column_from_values_keeps_numbers_beside_object_cells_fvsao_71() {
+        // [2, [1], 1.5, True] is pandas' object column of an int, a list, a
+        // float and a bool; the numbers were cast to the text '2', '1.5'
+        // and 'True' because no str sat beside them.
+        let cell = Scalar::Object(fp_types::ObjectValue::list(vec![Scalar::Int64(1)]));
+        let mixed = vec![
+            Scalar::Int64(2),
+            cell.clone(),
+            Scalar::Float64(1.5),
+            Scalar::Bool(true),
+            Scalar::Null(NullKind::Null),
+        ];
+        let column = Column::from_values(mixed.clone()).expect("object column");
+        assert_eq!(column.dtype(), DType::Utf8);
+        assert_eq!(&column.values()[..4], &mixed[..4]);
+        // NEGATIVE: object cells alone need no keeping, and an explicit cast
+        // to text still stringifies numbers.
+        let cells = Column::from_values(vec![cell.clone(), cell]).expect("cells");
+        assert!(matches!(cells.values()[0], Scalar::Object(_)));
+        let cast =
+            Column::new(DType::Utf8, vec![Scalar::Int64(2), Scalar::Int64(3)]).expect("cast");
+        assert_eq!(cast.values()[0], Scalar::Utf8("2".into()));
     }
 
     #[test]

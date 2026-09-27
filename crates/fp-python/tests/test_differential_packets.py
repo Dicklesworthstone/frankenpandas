@@ -10076,3 +10076,137 @@ def test_a_frame_holding_both_0_and_str_0_is_refused_not_corrupted(case: str) ->
     assert [_label_kind(c) for c in kept.columns].count(("0", "str")) == 1
     with pytest.raises((NotImplementedError, ValueError)):
         _LABEL_CLASH_CASES[case](fpd)
+
+
+# fvsao.71: rank and cumcount. A groupby row whose key is missing ranked 0.0
+# and counted 0 (pandas: NaN); groupby rank of text or object cells was all
+# NaN; Series.rank of dates or lists was all NaN, of a mixed column NaN for
+# the odd kind out; values Python cannot order ranked instead of raising
+# Python's TypeError; an ordered categorical ranked by value; an explicit
+# method=None / na_option=None fell back to the defaults; groupby rank had
+# no pct; and [2, date, 1] stored its ints as text.
+def _rank_view(x: Any) -> Any:
+    def one(v: Any) -> Any:
+        return None if isinstance(v, float) and v != v else v
+
+    if hasattr(x, "columns"):
+        return ("frame", [str(c) for c in x.columns], [(str(x[c].dtype), [one(v) for v in x[c].tolist()]) for c in x.columns])
+    return ("series", str(x.dtype), [one(v) for v in x.tolist()], [str(i) for i in x.index])
+
+
+_D = datetime.date
+_RANK_KEYS = ["x", "y", "x", None, "y", "x"]
+
+
+def _rank_frame(m: Any, values: Any) -> Any:
+    return m.DataFrame({"k": _RANK_KEYS, "v": values})
+
+
+def _ordered_cat(m: Any) -> Any:
+    return m.Series(m.Categorical(["b", "a", "c", "b", None, "a"], categories=["c", "b", "a"], ordered=True))
+
+
+_RANK_TEXT = ["b", "a", "b", None, "c", "a"]
+_RANK_DATES = [_D(2020, 1, 3), _D(2020, 1, 1), None, _D(2020, 1, 2), _D(2020, 1, 1), _D(2020, 1, 3)]
+_RANK_LISTS = [[2], [1, 5], None, [1], [2], [0]]
+
+_RANK_CASES = {
+    "text": lambda m: m.Series(_RANK_TEXT).rank(),
+    "text min desc pct": lambda m: m.Series(_RANK_TEXT).rank(method="min", ascending=False, pct=True),
+    "text dense top": lambda m: m.Series(_RANK_TEXT).rank(method="dense", na_option="top"),
+    "text first bottom": lambda m: m.Series(_RANK_TEXT).rank(method="first", na_option="bottom"),
+    "dates": lambda m: m.Series(_RANK_DATES).rank(),
+    "dates max desc": lambda m: m.Series(_RANK_DATES).rank(method="max", ascending=False),
+    "lists": lambda m: m.Series(_RANK_LISTS).rank(),
+    "tuples": lambda m: m.Series([(2, 1), (1, 5), None, (1, 5)]).rank(method="dense"),
+    "ints floats and bools in one column": lambda m: m.Series([2, 1.5, True, None]).rank(),
+    "ints past 2**53": lambda m: m.Series([2**60, 2**60 + 1, -(2**62), 7, 2**60]).rank(),
+    "an ordered categorical by its category order": lambda m: _ordered_cat(m).rank(),
+    "an unordered categorical by value": lambda m: m.Series(["b", "a", "c", None], dtype="category").rank(),
+    "instants with NaT": lambda m: m.Series(m.to_datetime(["2020-01-03", None, "2020-01-02"])).rank(),
+    "groupby instants with NaT, every key present": lambda m: m.DataFrame({"k": ["x", "y", "x"], "v": m.to_datetime(["2020-01-03", None, "2020-01-02"])}).groupby("k")["v"].rank(),
+    "intervals by left then right": lambda m: m.Series(m.IntervalIndex.from_tuples([(1, 3), (0, 5), (0, 2), (1, 3)])).rank(),
+    "ints beside dates stay ints": lambda m: m.Series([2, _D(2020, 1, 1), 1]),
+    "groupby ints, a missing key": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k")["v"].rank(),
+    "groupby floats, a missing key": lambda m: _rank_frame(m, [3.5, 1.0, None, 5.0, 1.0, 4.0]).groupby("k")["v"].rank(method="min"),
+    "groupby text": lambda m: _rank_frame(m, _RANK_TEXT).groupby("k")["v"].rank(),
+    "groupby dates": lambda m: _rank_frame(m, _RANK_DATES).groupby("k")["v"].rank(ascending=False),
+    "groupby lists": lambda m: _rank_frame(m, _RANK_LISTS).groupby("k")["v"].rank(),
+    "groupby pct": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k")["v"].rank(pct=True),
+    "groupby dense pct": lambda m: _rank_frame(m, _RANK_TEXT).groupby("k")["v"].rank(method="dense", pct=True),
+    "groupby an ordered categorical": lambda m: _rank_frame(m, _ordered_cat(m)).groupby("k")["v"].rank(),
+    "frame groupby": lambda m: m.DataFrame({"k": _RANK_KEYS, "i": [3, 1, 2, 5, 1, 4], "f": [0.5, 2.0, 1.0, 3.0, None, 0.5], "t": _RANK_TEXT}).groupby("k").rank(),
+    "frame groupby dates and lists pct": lambda m: m.DataFrame({"k": _RANK_KEYS, "d": _RANK_DATES, "l": _RANK_LISTS}).groupby("k").rank(pct=True),
+    "frame groupby keys that are dates": lambda m: m.DataFrame({"k": _RANK_DATES, "v": [3, 1, 2, 5, 1, 4]}).groupby("k").rank(),
+    "cumcount, a missing key": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k")["v"].cumcount(),
+    "cumcount descending, a missing key": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k").cumcount(ascending=False),
+    "cumcount, every key present": lambda m: m.DataFrame({"k": ["x", "y", "x"], "v": [1, 2, 3]}).groupby("k").cumcount(),
+    "ascending=None ranks descending": lambda m: m.Series([1, 3, 2]).rank(ascending=None),
+    "groupby ascending=None ranks descending": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k")["v"].rank(ascending=None),
+    "pct=1 scales": lambda m: m.DataFrame({"v": [1, 3, 2]}).rank(pct=1),
+    # NEGATIVES: what pandas refuses.
+    "a str and an int raise": lambda m: m.Series(["b", 1, "a"]).rank(),
+    "a str and an int in different groups raise": lambda m: m.DataFrame({"k": [1, 2, 1], "v": ["b", 1, "a"]}).groupby("k")["v"].rank(),
+    "an int and a date raise": lambda m: m.Series([2, _D(2020, 1, 1), 1]).rank(),
+    "a list and a tuple raise": lambda m: m.Series([[2], (1,), [1]]).rank(),
+    "two dicts raise": lambda m: m.Series([{"a": 1}, {"b": 2}]).groupby([1, 1]).rank(),
+    "lists holding a str and an int raise": lambda m: m.Series([[1], ["a"]]).rank(),
+    "a date and a time raise": lambda m: m.DataFrame({"v": [_D(2020, 1, 1), datetime.time(1)]}).groupby([1, 1]).rank(),
+    "groupby an unordered categorical raises": lambda m: _rank_frame(m, m.Series(_RANK_TEXT, dtype="category")).groupby("k")["v"].rank(),
+    "method=None raises": lambda m: m.Series([1, 2]).rank(method=None),
+    "groupby method=None raises": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k").rank(method=None),
+    "na_option=None raises": lambda m: m.DataFrame({"v": [1, 2]}).rank(na_option=None),
+    "groupby na_option=None raises": lambda m: _rank_frame(m, [3, 1, 2, 5, 1, 4]).groupby("k")["v"].rank(na_option=None),
+    "an unknown method raises": lambda m: m.Series([1, 2]).rank(method="MIN"),
+    "a positional method is the axis": lambda m: m.Series([1, 2]).rank("min"),
+}
+
+# DISC-029: where pandas 2.2.3 ranks a missing value (a groupby NaT as the
+# smallest instant once some key is missing, a nullable <NA> by the
+# placeholder under its mask), frankenpandas keeps it missing.
+_RANK_DIVERGENCES = {
+    "groupby NaT": lambda m: m.DataFrame({"k": ["x", "x", "x", None], "v": m.to_datetime(["2020-01-03", None, "2020-01-02", "2020-01-01"])}).groupby("k")["v"].rank(),
+    "nullable Int64 <NA>": lambda m: m.Series([3, None, 2, 1], dtype="Int64").rank(),
+}
+
+
+def _rank_outcome(m: Any, run: Any) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _rank_view(run(m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RANK_CASES))
+def test_rank_matches_pandas_across_values_groups_and_parameters(case: str) -> None:
+    run = _RANK_CASES[case]
+    assert _rank_outcome(fpd, run) == _rank_outcome(pd, run), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RANK_DIVERGENCES))
+@pytest.mark.xfail(strict=True, reason="DISC-029: frankenpandas keeps a missing value missing")
+def test_rank_of_a_missing_value_pandas_does_not_mask(case: str) -> None:
+    run = _RANK_DIVERGENCES[case]
+    assert _rank_outcome(fpd, run) == _rank_outcome(pd, run), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_rank_keeps_the_missing_values_pandas_ranks_missing() -> None:
+    # The DISC-029 shapes, pinned on frankenpandas' side: missing is NaN.
+    for case, expected in (("groupby NaT", [2.0, None, 1.0, None]), ("nullable Int64 <NA>", [3.0, None, 2.0, 1.0])):
+        assert _rank_view(_RANK_DIVERGENCES[case](fpd))[2] == expected, case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_groupby_rank_refuses_intervals_like_pandas() -> None:
+    # Series.rank ranks intervals (a _RANK_CASES case); groupby rank refuses
+    # them. pandas' message names the subtype (interval[int64, right]),
+    # which frankenpandas' interval cells do not carry (fvsao.54).
+    for m in (pd, fpd):
+        frame = m.DataFrame({"k": [1, 1], "v": m.Series(m.IntervalIndex.from_tuples([(0, 1), (1, 3)]))})
+        with pytest.raises(TypeError, match="rank is not supported for interval"):
+            frame.groupby("k")["v"].rank()

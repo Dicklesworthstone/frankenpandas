@@ -8,7 +8,7 @@
 > resolve to the wrong entry depending on which heading a reader hit first, and one
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
 > number on whichever entry the existing in-tree citations actually meant. The next
-> free number is DISC-029. To see every ID in use:
+> free number is DISC-030. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -167,6 +167,14 @@
 - **Resolution:** ACCEPTED (2026-09-08, `br-frankenpandas-dxkbb`). Option (a) (pinning numpy's undocumented quicksort artifact) is rejected as fragile tech debt. Conformance fixtures for argsort avoid ambiguous tie order across engines.
 - **Tests affected:** `series_argsort` conformance fixtures avoid ties.
 - **Review date:** 2026-09-08
+
+### DISC-029: rank keeps a missing value missing where pandas 2.2.3 ranks what lies under it
+- **Reference:** MEASURED, live pandas 2.2.3, two shapes. (1) GroupBy rank of a `datetime64` / `timedelta64` column ranks `NaT` as the SMALLEST value instead of as missing once some group KEY is missing: `DataFrame({"k": ["x", "x", "x", None], "v": to_datetime(["2020-01-03", None, "2020-01-02", "2020-01-01"])}).groupby("k")["v"].rank()` → `[3.0, 1.0, 2.0, NaN]`, and `na_option` has no effect on it; with every key present the same rank gives `[2.0, NaN, 1.0]`, as `Series.rank` does. (2) `Series.rank` of a nullable `Int64` column ranks each `<NA>` by the placeholder stored under its mask: `Series([3, None, 2, 2, 1, 0], dtype="Int64").rank()` → `[6.0, 2.5, 4.5, 4.5, 2.5, 1.0]` (the NA ties with the 1); the same column's groupby rank masks it (`<NA>`).
+- **Our impl:** a missing value is missing in every rank: `NaT` and `<NA>` take `na_option` (NaN under `keep`), in Series, SeriesGroupBy and DataFrameGroupBy rank alike (`rank_sort_keys` / `rank_row_keys`, fp-frame).
+- **Impact:** those two shapes only; every other rank of datetime, timedelta and nullable data agrees (probe `p12/probe_rank_dtypes.py` of `br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.71`: the remaining rows are these and the nullable groupby OUTPUT dtype, `Float64` in pandas and `float64` here, a separate masked-dtype gap). Reproducing (1) would rank a missing instant ahead of every real one, against pandas' own `Series.rank` and its NaT semantics; reproducing (2) needs the placeholder pandas happened to store, which depends on how the array was built.
+- **Resolution:** ACCEPTED (2026-09-27, `br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.71`). Revisit if a pinned pandas release masks both.
+- **Tests affected:** `test_rank_of_a_missing_value_pandas_does_not_mask` (its two strict xfail cases) and `test_rank_keeps_the_missing_values_pandas_ranks_missing` (fp-python pytest).
+- **Review date:** 2026-09-27
 
 ## Resolved Divergences
 

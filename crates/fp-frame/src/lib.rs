@@ -29249,6 +29249,13 @@ impl Series {
     ) -> Result<Self, FrameError> {
         validate_rank_method(method)?;
         validate_rank_na_option(na_option)?;
+        // An ordered categorical ranks by category order, never by value, so
+        // it skips the typed value paths (fvsao.71).
+        let ordered_categories = self
+            .categorical
+            .as_ref()
+            .or_else(|| self.column.categorical())
+            .filter(|meta| meta.ordered);
 
         // Counting-histogram fast path: an all-valid, bounded-range Int64 column
         // (with values exactly representable as f64) is ranked in O(n) via a
@@ -29256,7 +29263,9 @@ impl Series {
         // => na_option is moot. Bit-identical to the sort path (which keys on
         // `v as f64`), so it is gated to |v| <= 2^53 where i64->f64 is exact and
         // collision-free, matching the sort's grouping exactly.
-        if let Some(ranks) = self.rank_i64_histogram(method, ascending, pct) {
+        if ordered_categories.is_none()
+            && let Some(ranks) = self.rank_i64_histogram(method, ascending, pct)
+        {
             // Ranks are finite (never NaN) so the typed f64 constructor yields
             // the same all-valid Float64 column as Scalar::Float64 + from_values.
             let index = self.index().clone();
@@ -29274,7 +29283,8 @@ impl Series {
         // shared logic, and the ranks are finite so `from_f64_values` yields the
         // same all-valid Float64 column as the `Scalar::Float64` + `from_values`
         // general path.
-        if let Some(data) = self.column().as_f64_slice()
+        if ordered_categories.is_none()
+            && let Some(data) = self.column().as_f64_slice()
             && !data.iter().any(|x| x.is_nan())
         {
             // br-frankenpandas-wgyn4: replace the O(n log n) comparison sort with
@@ -29296,79 +29306,16 @@ impl Series {
             return Self::new(self.name.clone(), index, Column::from_f64_values(ranks));
         }
 
+        // Text (br-frankenpandas-ff284), instants and durations (fvsao.17) and
+        // object cells (fvsao.71) rank by an ordinal key among their distinct
+        // values; numbers by value (see `rank_sort_keys`).
         let vals = self.column().values();
-        let mut null_positions = Vec::new();
-        let mut sortable = Vec::new();
-
-        // Per br-frankenpandas-ff284: pandas ranks Utf8 lexicographically.
-        // The original to_f64-based path silently treated all Utf8 as null
-        // (returning all-NaN by default na_option='keep'). For Utf8, build
-        // a string→sorted-rank-key map so equal strings get equal f64
-        // keys (preserving tie semantics in rank_numeric_positions) and
-        // sort order matches lex order.
-        if matches!(self.column().dtype(), DType::Utf8) {
-            let mut unique_strs: Vec<&str> = vals
-                .iter()
-                .filter_map(|v| match v {
-                    Scalar::Utf8(s) => Some(s.as_str()),
-                    _ => None,
-                })
-                .collect();
-            unique_strs.sort();
-            unique_strs.dedup();
-            let key_of = |s: &str| -> f64 {
-                unique_strs
-                    .binary_search(&s)
-                    .expect("string must be in deduped set") as f64
-            };
-            for (i, v) in vals.iter().enumerate() {
-                if v.is_missing() {
-                    null_positions.push(i);
-                } else if let Scalar::Utf8(s) = v {
-                    sortable.push((i, key_of(s.as_str())));
-                } else {
-                    null_positions.push(i);
-                }
+        let (sortable, null_positions) = match ordered_categories {
+            Some(meta) => {
+                rank_group_keys(&ordered_categorical_rank_keys(vals, meta), 0..vals.len())
             }
-        } else if matches!(
-            self.column().dtype(),
-            DType::Datetime64 { .. } | DType::Timedelta64
-        ) {
-            // Temporal values rank by their exact nanoseconds through a dense
-            // ordinal key, as the Utf8 arm does: `ns as f64` would merge
-            // instants closer than f64's spacing (256 ns near 2020), and
-            // Datetime64 fell to `to_f64` and ranked all-NaN
-            // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17;
-            // Timedelta64 ranked by `ns as f64` since br-frankenpandas-5pxmt).
-            let nanos_of = |v: &Scalar| match v {
-                Scalar::Datetime64(ns) | Scalar::Timedelta64(ns) if *ns != i64::MIN => Some(*ns),
-                _ => None,
-            };
-            let mut unique_nanos: Vec<i64> = vals.iter().filter_map(nanos_of).collect();
-            unique_nanos.sort_unstable();
-            unique_nanos.dedup();
-            for (i, v) in vals.iter().enumerate() {
-                match nanos_of(v) {
-                    Some(ns) => {
-                        let key = unique_nanos
-                            .binary_search(&ns)
-                            .expect("nanoseconds must be in the deduped set");
-                        sortable.push((i, key as f64));
-                    }
-                    None => null_positions.push(i),
-                }
-            }
-        } else {
-            for (i, v) in vals.iter().enumerate() {
-                if v.is_missing() {
-                    null_positions.push(i);
-                } else if let Ok(f) = v.to_f64() {
-                    sortable.push((i, f));
-                } else {
-                    null_positions.push(i);
-                }
-            }
-        }
+            None => rank_sort_keys(vals)?,
+        };
 
         let ranked = rank_numeric_positions(
             vals.len(),
@@ -40870,7 +40817,8 @@ fn rank_i64_groups_global(
     if !matches!(method, "average" | "min" | "max" | "first" | "dense") {
         return None;
     }
-    let mut out = vec![0.0_f64; n];
+    // A row in no group (its key is missing) ranks NaN (fvsao.71).
+    let mut out = vec![f64::NAN; n];
     if slice.is_empty() {
         return Some(out);
     }
@@ -40893,7 +40841,7 @@ fn rank_i64_groups_global(
     // One stable radix argsort of the whole column in the requested direction.
     let order = fp_columnar::radix_argsort_i64(slice, ascending);
 
-    // Row -> group ordinal (rows not in any group keep usize::MAX and stay 0.0,
+    // Row -> group ordinal (rows not in any group keep usize::MAX and stay NaN,
     // exactly as the per-group path leaves ungrouped rows untouched).
     let num_groups = group_rows.len();
     let mut gid = vec![usize::MAX; n];
@@ -41165,6 +41113,239 @@ fn rank_f64_slice_radix(
         i = j;
     }
     Some(out)
+}
+
+/// The (position, sort key) pairs and missing positions that
+/// [`rank_numeric_positions`] ranks, for any values: numbers by value; text,
+/// instants, durations, periods and object cells (dates, lists) by their
+/// position among the distinct values in Python's order, so equal values
+/// tie and order is exact (an instant's `ns as f64` would merge instants
+/// 256 ns apart). Groupby rank tried only `to_f64`, so a text or object
+/// column ranked all NaN (fvsao.71); Series rank had this for text and
+/// instants alone, and ranked a mixed column's odd kind out as NaN. Where
+/// Python cannot order two values (a str and an int, two dicts) pandas
+/// raises Python's TypeError, and so does this.
+fn rank_sort_keys(vals: &[Scalar]) -> Result<(Vec<(usize, f64)>, Vec<usize>), FrameError> {
+    let numeric = |value: &Scalar| {
+        matches!(
+            value,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)
+        )
+    };
+    let mut null_positions = Vec::new();
+    let mut present: Vec<(usize, &Scalar)> = Vec::with_capacity(vals.len());
+    for (position, value) in vals.iter().enumerate() {
+        if value.is_missing() {
+            null_positions.push(position);
+        } else {
+            present.push((position, value));
+        }
+    }
+    null_positions.sort_unstable();
+    // Integers past 2^53 rank by their exact order among the distinct values:
+    // as f64 keys 2^60 and 2^60 + 1 tied, where pandas ranks int64 exactly.
+    let integer = |value: &Scalar| match value {
+        Scalar::Int64(v) => Some(*v),
+        Scalar::Bool(v) => Some(i64::from(*v)),
+        _ => None,
+    };
+    if present
+        .iter()
+        .any(|(_, value)| matches!(value, Scalar::Int64(v) if v.unsigned_abs() > 1 << 53))
+        && let Some(ints) = present
+            .iter()
+            .map(|(position, value)| integer(value).map(|v| (*position, v)))
+            .collect::<Option<Vec<(usize, i64)>>>()
+    {
+        let mut distinct: Vec<i64> = ints.iter().map(|&(_, v)| v).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let sortable = ints
+            .into_iter()
+            .map(|(position, v)| {
+                let key = distinct.binary_search(&v).unwrap_or_else(|at| at);
+                (position, key as f64)
+            })
+            .collect();
+        return Ok((sortable, null_positions));
+    }
+    if present.iter().all(|(_, value)| numeric(value)) {
+        let sortable = present
+            .into_iter()
+            .map(|(position, value)| (position, value.to_f64().unwrap_or(f64::NAN)))
+            .collect();
+        return Ok((sortable, null_positions));
+    }
+    // Sorted by a total order (kind first, then Python's order within a
+    // kind), so the sort is well defined whatever the values; then every
+    // neighbouring pair must be one Python orders, or Python would raise.
+    let mut distinct: Vec<&Scalar> = present.iter().map(|(_, value)| *value).collect();
+    distinct.sort_by(|a, b| rank_total_cmp(a, b));
+    distinct.dedup_by(|a, b| rank_total_cmp(a, b).is_eq());
+    if let Some(pair) = distinct
+        .windows(2)
+        .find(|pair| pair[0].python_cmp(pair[1]).is_none())
+    {
+        // Name the pair as pandas' message does: the first value and the
+        // first value Python cannot order against it ('str' and 'int' for
+        // ["b", 1, "a"]); else the unordered neighbours.
+        let (first, second) = present
+            .first()
+            .and_then(|(_, head)| {
+                present
+                    .iter()
+                    .find(|(_, value)| head.python_cmp(value).is_none())
+                    .map(|(_, value)| (*head, *value))
+            })
+            .unwrap_or((pair[0], pair[1]));
+        let (first, second) = first.python_cmp_type_names(second);
+        return Err(FrameError::CompatibilityRejected(format!(
+            "'<' not supported between instances of '{first}' and '{second}'"
+        )));
+    }
+    let sortable = present
+        .into_iter()
+        .map(|(position, value)| {
+            let key = distinct
+                .binary_search_by(|probe| rank_total_cmp(probe, value))
+                .unwrap_or_else(|insert_at| insert_at);
+            (position, key as f64)
+        })
+        .collect();
+    Ok((sortable, null_positions))
+}
+
+/// Each row's [`rank_sort_keys`] key over a whole column, for groupby rank;
+/// None where the value is missing. pandas' groupby rank orders the column
+/// as one array, so a str and an int in different groups still raise
+/// Python's TypeError; and one sort serves every group. It refuses
+/// intervals, as pandas' groupby does (its Series.rank ranks them).
+fn rank_row_keys(vals: &[Scalar]) -> Result<Vec<Option<f64>>, FrameError> {
+    if vals
+        .iter()
+        .any(|value| matches!(value, Scalar::Interval(_)))
+    {
+        return Err(FrameError::CompatibilityRejected(
+            "rank is not supported for interval dtype".to_owned(),
+        ));
+    }
+    let (sortable, _) = rank_sort_keys(vals)?;
+    let mut keys = vec![None; vals.len()];
+    for (position, key) in sortable {
+        keys[position] = Some(key);
+    }
+    Ok(keys)
+}
+
+/// Each row's rank key in an ordered categorical: its category's position,
+/// None where missing. pandas ranks an ordered categorical by its codes
+/// (`['b', 'a']` ordered b < a ranks 'b' first); by value it ranked
+/// alphabetically, and a numeric one took the typed value paths (fvsao.71).
+fn ordered_categorical_rank_keys(
+    values: &[Scalar],
+    meta: &CategoricalMetadata,
+) -> Vec<Option<f64>> {
+    let positions: FxHashMap<ScalarKey<'_>, usize> = meta
+        .categories
+        .iter()
+        .enumerate()
+        .map(|(position, category)| (scalar_key_allow_missing(category), position))
+        .collect();
+    values
+        .iter()
+        .map(|value| {
+            if value.is_missing() {
+                None
+            } else {
+                positions
+                    .get(&scalar_key_allow_missing(value))
+                    .map(|&position| position as f64)
+            }
+        })
+        .collect()
+}
+
+/// The rank keys of a groupby value column with categorical metadata `meta`:
+/// an ordered categorical by category order; an unordered one refused, as
+/// pandas' groupby refuses it (Series.rank ranks it by value).
+fn groupby_categorical_rank_keys(
+    values: &[Scalar],
+    meta: &CategoricalMetadata,
+) -> Result<Vec<Option<f64>>, FrameError> {
+    if meta.ordered {
+        Ok(ordered_categorical_rank_keys(values, meta))
+    } else {
+        Err(FrameError::CompatibilityRejected(
+            "Cannot perform rank with non-ordered Categorical".to_owned(),
+        ))
+    }
+}
+
+/// The (position, key) pairs and missing positions of one group's `rows`
+/// under [`rank_row_keys`], as [`rank_numeric_positions`] takes them.
+fn rank_group_keys(
+    keys: &[Option<f64>],
+    rows: impl IntoIterator<Item = usize>,
+) -> (Vec<(usize, f64)>, Vec<usize>) {
+    let mut sortable = Vec::new();
+    let mut null_positions = Vec::new();
+    for (local, row) in rows.into_iter().enumerate() {
+        match keys[row] {
+            Some(key) => sortable.push((local, key)),
+            None => null_positions.push(local),
+        }
+    }
+    (sortable, null_positions)
+}
+
+/// A groupby cumcount's output: int64 when every row is in a group; float64
+/// with NaN on the rows whose key is missing (dropna leaves them in no
+/// group) when any is, as pandas gives - they were counted 0
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.71).
+fn cumcount_column(counts: Vec<Option<i64>>) -> Column {
+    if counts.iter().all(Option::is_some) {
+        Column::from_i64_values_owned(counts.into_iter().flatten().collect())
+    } else {
+        Column::from_f64_values(
+            counts
+                .into_iter()
+                .map(|count| count.map_or(f64::NAN, |count| count as f64))
+                .collect(),
+        )
+    }
+}
+
+/// A total order over present values for [`rank_sort_keys`]: by kind, then
+/// within a kind as Python orders it (object cells by their total order,
+/// which is Python's wherever Python has one).
+fn rank_total_cmp(left: &Scalar, right: &Scalar) -> Ordering {
+    let kind = |value: &Scalar| match value {
+        Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_) => 0_u8,
+        Scalar::Utf8(_) => 1,
+        Scalar::Datetime64(_) => 2,
+        Scalar::Timedelta64(_) => 3,
+        Scalar::Period(_) => 4,
+        Scalar::Interval(_) => 5,
+        Scalar::Object(_) => 6,
+        Scalar::Null(_) => 7,
+    };
+    kind(left)
+        .cmp(&kind(right))
+        .then_with(|| match (left, right) {
+            (Scalar::Utf8(a), Scalar::Utf8(b)) => a.cmp(b),
+            (Scalar::Datetime64(a), Scalar::Datetime64(b))
+            | (Scalar::Timedelta64(a), Scalar::Timedelta64(b)) => a.cmp(b),
+            (Scalar::Period(a), Scalar::Period(b)) => (a.freq, a.ordinal).cmp(&(b.freq, b.ordinal)),
+            (Scalar::Interval(a), Scalar::Interval(b)) => a
+                .left
+                .total_cmp(&b.left)
+                .then_with(|| a.right.total_cmp(&b.right)),
+            (Scalar::Object(a), Scalar::Object(b)) => a.cmp(b),
+            _ => left
+                .to_f64()
+                .unwrap_or(f64::NAN)
+                .total_cmp(&right.to_f64().unwrap_or(f64::NAN)),
+        })
 }
 
 fn rank_numeric_positions(
@@ -45422,6 +45603,13 @@ impl SeriesGroupBy<'_> {
     ) -> Result<Series, FrameError> {
         validate_rank_method(method)?;
         validate_rank_na_option(na_option)?;
+        // A categorical ranks by category order or not at all (fvsao.71), so
+        // it skips the typed value paths.
+        let categories = self
+            .series
+            .categorical
+            .as_ref()
+            .or_else(|| self.series.column.categorical());
         let (_order, order_keys, groups) = self.build_groups();
 
         // Counting-sort fast path (br-frankenpandas-pd7ie): an all-valid
@@ -45433,9 +45621,12 @@ impl SeriesGroupBy<'_> {
         // `i64 as f64` collision-free, matching the comparator's `v.to_f64()`
         // ordering; "first" ties resolve in group-iteration order on both paths).
         // Any group whose values aren't a dense bounded histogram falls the whole
-        // op back to the comparison path. Typed f64 output (ranks never NaN here).
-        if let Some(slice) = self.series.column.as_i64_slice() {
-            let mut out = vec![0.0_f64; self.series.len()];
+        // op back to the comparison path. Typed f64 output (NaN only on a row
+        // whose key is missing).
+        if categories.is_none()
+            && let Some(slice) = self.series.column.as_i64_slice()
+        {
+            let mut out = vec![f64::NAN; self.series.len()];
             let mut all_ok = true;
             for key in &order_keys {
                 let indices = &groups[key];
@@ -45462,8 +45653,10 @@ impl SeriesGroupBy<'_> {
         // Float64 sibling of the counting-sort path (br-frankenpandas-wgyn4):
         // an all-valid no-NaN Float64 column ranks each group via a per-group
         // radix argsort + tie walk (O(g)) instead of the comparison sort.
-        if let Some(slice) = self.series.column.as_f64_slice() {
-            let mut out = vec![0.0_f64; self.series.len()];
+        if categories.is_none()
+            && let Some(slice) = self.series.column.as_f64_slice()
+        {
+            let mut out = vec![f64::NAN; self.series.len()];
             let mut all_ok = true;
             for key in &order_keys {
                 let indices = &groups[key];
@@ -45487,23 +45680,21 @@ impl SeriesGroupBy<'_> {
             }
         }
 
+        // A row whose key is missing belongs to no group and ranks NaN, as does
+        // every row of the typed paths above (br-frankenpandas-rc0923-epic-
+        // python-honest-dropin-fvsao.71).
         let mut ranks = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+        // Text and object cells rank by their order in the whole column, as
+        // pandas ranks them; `to_f64` sent them all to NaN (fvsao.71).
+        let values = self.series.column.values();
+        let keys = match categories {
+            Some(meta) => groupby_categorical_rank_keys(values, meta)?,
+            None => rank_row_keys(values)?,
+        };
 
         for key in &order_keys {
             let indices = &groups[key];
-            let mut null_positions = Vec::new();
-            let mut sortable = Vec::new();
-
-            for (local_idx, &series_idx) in indices.iter().enumerate() {
-                let v = &self.series.column.values()[series_idx];
-                if v.is_missing() {
-                    null_positions.push(local_idx);
-                } else if let Ok(f) = v.to_f64() {
-                    sortable.push((local_idx, f));
-                } else {
-                    null_positions.push(local_idx);
-                }
-            }
+            let (sortable, null_positions) = rank_group_keys(&keys, indices.iter().copied());
 
             let group_ranks = rank_numeric_positions(
                 indices.len(),
@@ -45747,7 +45938,7 @@ impl SeriesGroupBy<'_> {
         }
 
         let (_order, order_keys, groups) = self.build_groups();
-        let mut out = vec![Scalar::Int64(0); self.series.len()];
+        let mut counts: Vec<Option<i64>> = vec![None; self.series.len()];
 
         for key in &order_keys {
             let indices = &groups[key];
@@ -45758,15 +45949,14 @@ impl SeriesGroupBy<'_> {
                 } else {
                     group_len - count as i64 - 1
                 };
-                out[idx] = Scalar::Int64(value);
+                counts[idx] = Some(value);
             }
         }
 
         // Per br-frankenpandas-i72df: pandas DataFrameGroupBy.cumcount returns
         // a Series whose index.name == source df.index.name.
         let index = self.series.index.clone();
-        let column = Column::from_values(out)?;
-        Series::new("", index, column)
+        Series::new("", index, cumcount_column(counts))
     }
 
     /// Assign ordinal group number to each source row.
@@ -107780,8 +107970,12 @@ impl DataFrameGroupBy<'_> {
         // bit-identical to the serial column loop.
         let compute_col = |col_name: &String| -> Result<Column, FrameError> {
             let col = &self.df.columns[col_name];
+            // A categorical ranks by category order or not at all (fvsao.71),
+            // never through the typed value paths.
+            let categories = col.categorical();
             let typed: Option<Column> = col
                 .as_i64_slice()
+                .filter(|_| categories.is_none())
                 .and_then(|slice| {
                     let group_rows: Vec<&[usize]> = group_order
                         .iter()
@@ -107793,7 +107987,7 @@ impl DataFrameGroupBy<'_> {
                     // back to the per-group histogram outside the f64-exact range.
                     rank_i64_groups_global(slice, &group_rows, method, ascending, pct, n)
                         .or_else(|| {
-                            let mut out = vec![0.0_f64; n];
+                            let mut out = vec![f64::NAN; n];
                             for rows in &group_rows {
                                 let group_vals: Vec<i64> = rows.iter().map(|&i| slice[i]).collect();
                                 let group_ranks =
@@ -107807,8 +108001,9 @@ impl DataFrameGroupBy<'_> {
                         .map(Column::from_f64_values)
                 })
                 .or_else(|| {
-                    let slice = col.as_f64_slice()?;
-                    let mut out = vec![0.0_f64; n];
+                    let slice = col.as_f64_slice().filter(|_| categories.is_none())?;
+                    // A row whose key is missing ranks NaN (fvsao.71).
+                    let mut out = vec![f64::NAN; n];
                     for gkey in &group_order {
                         let row_indices = &groups[gkey];
                         let group_vals: Vec<f64> = row_indices.iter().map(|&i| slice[i]).collect();
@@ -107825,25 +108020,18 @@ impl DataFrameGroupBy<'_> {
                 Some(c) => c,
                 None => {
                     let mut out = vec![Scalar::Null(NullKind::NaN); n];
+                    // Text and object cells rank by their order in the whole
+                    // column, as pandas ranks them (fvsao.71).
+                    let keys = match categories {
+                        Some(meta) => groupby_categorical_rank_keys(col.values(), meta)?,
+                        None => rank_row_keys(col.values())?,
+                    };
                     for gkey in &group_order {
                         let row_indices = &groups[gkey];
-                        let group_vals: Vec<Scalar> = row_indices
-                            .iter()
-                            .map(|&i| col.values()[i].clone())
-                            .collect();
-                        let mut null_positions = Vec::new();
-                        let mut sortable = Vec::new();
-                        for (i, v) in group_vals.iter().enumerate() {
-                            if v.is_missing() {
-                                null_positions.push(i);
-                            } else if let Ok(f) = v.to_f64() {
-                                sortable.push((i, f));
-                            } else {
-                                null_positions.push(i);
-                            }
-                        }
+                        let (sortable, null_positions) =
+                            rank_group_keys(&keys, row_indices.iter().copied());
                         let transformed = rank_numeric_positions(
-                            group_vals.len(),
+                            row_indices.len(),
                             sortable,
                             &null_positions,
                             method,
@@ -108773,7 +108961,7 @@ impl DataFrameGroupBy<'_> {
         }
         let (_group_order, groups) = self.build_groups();
         let n = self.df.len();
-        let mut out = vec![Scalar::Int64(0); n];
+        let mut counts: Vec<Option<i64>> = vec![None; n];
 
         for row_indices in groups.values() {
             let group_len = row_indices.len() as i64;
@@ -108783,15 +108971,14 @@ impl DataFrameGroupBy<'_> {
                 } else {
                     group_len - count as i64 - 1
                 };
-                out[idx] = Scalar::Int64(count);
+                counts[idx] = Some(count);
             }
         }
 
         // Per br-frankenpandas-pqvd2: pandas groupby.cumcount preserves
         // source row-axis name. Sister to br-i72df SeriesGroupBy fix.
         let index = self.df.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(String::new(), index, column)
+        Series::new(String::new(), index, cumcount_column(counts))
     }
 
     /// Assign group number to each row.
@@ -127179,6 +127366,9 @@ mod tests {
         fn host_eq_scalar(&self, other: &Scalar) -> bool {
             matches!(other, Scalar::Int64(n) if *n == i64::from(self.0))
         }
+        fn host_type_name(&self) -> String {
+            "Day".to_owned()
+        }
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -127312,6 +127502,170 @@ mod tests {
         .unwrap();
         assert_eq!(mixed.nunique_with_dropna(false), 2);
         assert_eq!(mixed.nunique_with_dropna(true), 1);
+    }
+
+    #[test]
+    fn rank_orders_every_kind_of_value_and_groupby_leaves_missing_keys_nan_fvsao_71() {
+        use fp_types::{CategoricalMetadata, HostValue, ObjectValue};
+        let day = |n: u32| Scalar::Object(ObjectValue::Host(HostValue::new(Day(n))));
+        let text = |value: &str| Scalar::Utf8(value.to_owned());
+        let nan = f64::NAN;
+        let ranks = |values: &[Scalar]| -> Vec<f64> {
+            values
+                .iter()
+                .map(|value| value.to_f64().unwrap_or(nan))
+                .collect()
+        };
+        let same = |got: Vec<f64>, want: &[f64]| {
+            got.len() == want.len()
+                && got
+                    .iter()
+                    .zip(want)
+                    .all(|(g, w)| (g.is_nan() && w.is_nan()) || g == w)
+        };
+        let series = |values: Vec<Scalar>| {
+            let rows: Vec<IndexLabel> = (0..values.len() as i64).map(IndexLabel::Int64).collect();
+            Series::from_values("v", rows, values).unwrap()
+        };
+        let rank = |s: &Series| s.rank_with_pct("average", true, "keep", false);
+
+        // Object cells rank in their own order (they ranked all NaN).
+        let days = series(vec![day(15), day(2), Scalar::Null(NullKind::Null), day(15)]);
+        assert!(same(
+            ranks(rank(&days).unwrap().values()),
+            &[2.5, 1.0, nan, 2.5]
+        ));
+        // Integers past 2^53 rank exactly (2^60 and 2^60 + 1 tied as f64).
+        let big = series(vec![
+            Scalar::Int64(1 << 60),
+            Scalar::Int64((1 << 60) + 1),
+            Scalar::Int64(-(1 << 62)),
+        ]);
+        assert!(same(ranks(rank(&big).unwrap().values()), &[2.0, 3.0, 1.0]));
+
+        // Grouped: a row whose key is missing ranks NaN and counts NaN (they
+        // were 0.0 and 0), text ranks within its group, and ints stay on the
+        // typed path.
+        let keys = series(vec![
+            text("x"),
+            text("y"),
+            text("x"),
+            Scalar::Null(NullKind::Null),
+        ]);
+        let words = series(vec![text("b"), text("a"), text("a"), text("c")]);
+        let by_key = words.groupby(&keys).unwrap();
+        assert!(same(
+            ranks(
+                by_key
+                    .rank_with_pct("average", true, "keep", false)
+                    .unwrap()
+                    .values()
+            ),
+            &[2.0, 1.0, 1.0, nan]
+        ));
+        let counts = by_key.cumcount().unwrap();
+        assert_eq!(counts.column().dtype(), DType::Float64);
+        assert!(same(ranks(counts.values()), &[0.0, 0.0, 1.0, nan]));
+        let ints = series((1..=4).map(Scalar::Int64).collect());
+        let int_ranks = ints
+            .groupby(&keys)
+            .unwrap()
+            .rank_with_pct("min", true, "keep", true)
+            .unwrap();
+        assert!(same(ranks(int_ranks.values()), &[0.5, 1.0, 1.0, nan]));
+        let frame = DataFrame::from_dict(
+            &["k", "i", "d"],
+            vec![
+                ("k", keys.values().to_vec()),
+                ("i", (1..=4).map(Scalar::Int64).collect()),
+                ("d", vec![day(3), day(1), day(1), day(2)]),
+            ],
+        )
+        .unwrap();
+        let grouped = frame.groupby(&["k"]).unwrap();
+        let ranked = grouped.rank("average", false, "keep").unwrap();
+        assert!(same(
+            ranks(ranked.column("i").unwrap().values()),
+            &[2.0, 1.0, 1.0, nan]
+        ));
+        assert!(same(
+            ranks(ranked.column("d").unwrap().values()),
+            &[1.0, 1.0, 2.0, nan]
+        ));
+        assert_eq!(grouped.cumcount().unwrap().column().dtype(), DType::Float64);
+        // NEGATIVE: every key present keeps cumcount int64.
+        let whole = series(vec![text("x"), text("y"), text("x"), text("y")]);
+        let counted = words.groupby(&whole).unwrap().cumcount().unwrap();
+        assert_eq!(counted.column().dtype(), DType::Int64);
+
+        // An ordered categorical ranks by its categories' order, not by value.
+        let meta = CategoricalMetadata::new(vec![text("c"), text("b"), text("a")], true);
+        let ordered = Series::new(
+            "v",
+            Index::from_range(0, 3, 1),
+            Column::new(DType::Categorical, vec![text("a"), text("c"), text("b")])
+                .unwrap()
+                .with_categorical(Some(meta.clone())),
+        )
+        .unwrap();
+        assert!(same(
+            ranks(rank(&ordered).unwrap().values()),
+            &[3.0, 1.0, 2.0]
+        ));
+
+        // NEGATIVES: values Python cannot order raise its TypeError, naming
+        // the first value and the first it cannot be ordered against - also
+        // when they sit in different groups.
+        let refusal = |result: Result<Series, FrameError>| match result {
+            Err(FrameError::CompatibilityRejected(message)) => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        let mixed = series(vec![text("b"), Scalar::Int64(1), text("a")]);
+        assert_eq!(
+            refusal(rank(&mixed)),
+            "'<' not supported between instances of 'str' and 'int'"
+        );
+        let apart = series(vec![text("x"), text("y"), text("x")]);
+        assert_eq!(
+            refusal(
+                mixed
+                    .groupby(&apart)
+                    .unwrap()
+                    .rank_with_pct("average", true, "keep", false)
+            ),
+            "'<' not supported between instances of 'str' and 'int'"
+        );
+        let day_and_int = series(vec![day(1), Scalar::Int64(2)]);
+        assert_eq!(
+            refusal(rank(&day_and_int)),
+            "'<' not supported between instances of 'Day' and 'int'"
+        );
+        let lists = series(vec![
+            Scalar::Object(ObjectValue::list(vec![Scalar::Int64(1)])),
+            Scalar::Object(ObjectValue::list(vec![text("a")])),
+        ]);
+        assert_eq!(
+            refusal(rank(&lists)),
+            "'<' not supported between instances of 'int' and 'str'"
+        );
+        // An unordered categorical refuses groupby rank, as pandas' does.
+        let unordered = Series::new(
+            "v",
+            Index::from_range(0, 3, 1),
+            Column::new(DType::Categorical, vec![text("a"), text("c"), text("b")])
+                .unwrap()
+                .with_categorical(Some(CategoricalMetadata::new(meta.categories, false))),
+        )
+        .unwrap();
+        assert_eq!(
+            refusal(
+                unordered
+                    .groupby(&apart)
+                    .unwrap()
+                    .rank_with_pct("average", true, "keep", false)
+            ),
+            "Cannot perform rank with non-ordered Categorical"
+        );
     }
 
     #[test]
