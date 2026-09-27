@@ -7412,7 +7412,7 @@ def _ab(m: Any) -> Any:
 
 
 def _q_named(r: Any) -> Any:
-    return (str(r.name), [str(i) for i in r.index], _dtype_values(r))
+    return (_label_kind(r.name), [str(i) for i in r.index], _dtype_values(r))
 
 
 def _number(v: Any) -> Any:
@@ -7434,7 +7434,7 @@ def _records() -> Any:
 # record_path / meta, merge_asof suffixes, groupby quantile interpolation,
 # pivot_table sort=False, sample weights.
 _VALUE_COUNTS_CASES = {
-    # (Series names are text here - fvsao.32 - so the q name compares as str.)
+    # (The q name compares by value and type: the float q - fvsao.32.)
     "frame quantile nearest": lambda m: _q_named(_ab(m)[["v", "w"]].quantile(0.3, interpolation="nearest")),
     "frame quantile lower int": lambda m: _q_named(_ab(m)[["v"]].quantile(0.3, interpolation="lower")),
     "frame quantile midpoint": lambda m: _q_named(_ab(m)[["v", "w"]].quantile(0.3, interpolation="midpoint")),
@@ -7742,10 +7742,9 @@ _DATE_TEXT_CASES = {
     "non-monotonic month": lambda m: _shaped(m.Series([1, 2, 3], index=m.to_datetime(["2024-02-03", "2024-01-05", "2024-02-01"])).loc["2024-02"]),
     "frame month": lambda m: _shaped(_daily_frame(m).loc["2024-02"]),
     "frame month column": lambda m: _shaped(_daily_frame(m).loc["2024-02", "w"]),
-    # The row's name is left out: Series names are text in the binding, so
-    # pandas' Timestamp name comes back as text
+    # The row is named by its Timestamp label, typed
     # (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.32).
-    "frame day row": lambda m: (_daily_frame(m).loc["2024-02-01"].tolist(), [str(i) for i in _daily_frame(m).loc["2024-02-01"].index]),
+    "frame day row": lambda m: (_daily_frame(m).loc["2024-02-01"].tolist(), [str(i) for i in _daily_frame(m).loc["2024-02-01"].index], _label_kind(_daily_frame(m).loc["2024-02-01"].name)),
     "list of dates": lambda m: _shaped(_daily(m).loc[["2024-02-01", "2024-01-30"]]),
     "timestamp key": lambda m: _number(_daily(m)[m.Timestamp("2024-02-02")]),
     "at text": lambda m: _number(_daily(m).at["2024-02-01"]),
@@ -9273,3 +9272,172 @@ def _series_name_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_SERIES_NAME_CASES))
 def test_series_names_keep_their_types_like_pandas(case: str) -> None:
     assert _series_name_outcome(fpd, case) == _series_name_outcome(pd, case), case
+
+
+# fvsao.32: typed labels as ARGUMENTS (set_index(0), subset=[0], on=0,
+# astype({0: float}), ...) - they raised TypeError, the binding reading every
+# column argument as text - and typed labels OUT of the operations that
+# build columns (pivot, get_dummies, melt's variable, stack's level, corr),
+# the column axis' own name (pivot's 'c', rename_axis(columns=),
+# df.columns.name = ...), and a RangeIndex kept by a drop (pandas'
+# RangeIndex.delete).
+def _mixed_frame(m: Any) -> Any:
+    return m.DataFrame([[1, 2.0, "a"], [1, None, "b"], [3, 4.0, "a"]])
+
+
+def _pivot_source(m: Any) -> Any:
+    return m.DataFrame({"r": [0, 0, 1], "c": [5, 6, 5], "v": [1, 2, 3]})
+
+
+def _axis_view(x: Any) -> Any:
+    if hasattr(x, "columns"):
+        return (
+            repr(x.columns),
+            [_label_kind(c) for c in x.columns],
+            [_label_kind(i) for i in x.index],
+            [[_missing_or(v) for v in row] for row in x.values.tolist()],
+        )
+    if hasattr(x, "index") and hasattr(x, "dtype"):
+        return (_label_kind(x.name), [_label_kind(i) for i in x.index], [_missing_or(v) for v in x.tolist()])
+    return x
+
+
+def _set_columns_name(m: Any) -> Any:
+    frame = _intcol_frame(m)
+    frame.columns.name = "x"
+    return frame.columns.name
+
+
+def _insert_typed(m: Any) -> Any:
+    frame = _intcol_frame(m)
+    frame.insert(0, 9, [7, 8, 9])
+    return frame
+
+
+def _setitem_typed_list(m: Any) -> Any:
+    frame = _intcol_frame(m)
+    frame[[0, 1]] = 0
+    return frame
+
+
+def _loc_set_typed(m: Any) -> Any:
+    frame = _intcol_frame(m)
+    frame.loc[:, 0] = 5
+    return frame
+
+
+_COLUMN_ARG_CASES = {
+    "set_index(0)": lambda m: _mixed_frame(m).set_index(0),
+    "set_index([0, 2])": lambda m: [[_missing_or(v) for v in row] for row in _mixed_frame(m).set_index([0, 2]).values.tolist()],
+    "merge(on=0)": lambda m: _mixed_frame(m).merge(_mixed_frame(m), on=0),
+    "merge(left_on, right_on)": lambda m: _mixed_frame(m).merge(_mixed_frame(m), left_on=0, right_on=0),
+    "merge overlap suffixed to text": lambda m: _intcol_frame(m).merge(_intcol_frame(m), left_index=True, right_index=True),
+    "join lsuffix": lambda m: _intcol_frame(m).join(_intcol_frame(m), lsuffix="_l"),
+    "astype({0: float})": lambda m: _mixed_frame(m).astype({0: float}),
+    "insert(0, 9, ..)": _insert_typed,
+    "dropna(subset=[1])": lambda m: _mixed_frame(m).dropna(subset=[1]),
+    "drop_duplicates(subset=[0])": lambda m: _mixed_frame(m).drop_duplicates(subset=[0]),
+    "duplicated(subset=[0])": lambda m: _mixed_frame(m).duplicated(subset=[0]),
+    "fillna({1: 0.5})": lambda m: _mixed_frame(m).fillna({1: 0.5}),
+    "round({1: 0})": lambda m: _mixed_frame(m).round({1: 0}),
+    "filter(items=[0, 2, 5])": lambda m: _mixed_frame(m).filter(items=[0, 2, 5]),
+    "at[1, 2]": lambda m: _mixed_frame(m).at[1, 2],
+    "get(1)": lambda m: _mixed_frame(m).get(1),
+    "get absent": lambda m: _mixed_frame(m).get(7, "default"),
+    "isin({0: [1]})": lambda m: _mixed_frame(m).isin({0: [1]}),
+    "replace({0: {1: 10}})": lambda m: _mixed_frame(m).replace({0: {1: 10}}),
+    "reindex(columns=[2, 0, 7])": lambda m: _mixed_frame(m).reindex(columns=[2, 0, 7]),
+    "df[[0, 1]] = 0": _setitem_typed_list,
+    "loc[:, 0] = 5": _loc_set_typed,
+    "groupby(0).agg({1: 'sum'})": lambda m: _mixed_frame(m).groupby(0).agg({1: "sum"}),
+    "value_counts()": lambda m: _intcol_frame(m).value_counts(),
+    "nlargest(1, 0)": lambda m: _mixed_frame(m).nlargest(1, 0),
+    "full list selection is an Index": lambda m: _intcol_frame(m)[[0, 1, 2]],
+    "melt": lambda m: _intcol_frame(m).melt(),
+    "melt id_vars": lambda m: _intcol_frame(m).melt(id_vars=[0], value_vars=[1]),
+    "melt mixed labels": lambda m: m.DataFrame({0: [1], "a": [2]}).melt(),
+    "stack": lambda m: _intcol_frame(m).stack(),
+    "stack().unstack() labels": lambda m: [_label_kind(c) for c in _intcol_frame(m).stack().unstack().columns],
+    "corr": lambda m: _intcol_frame(m).corr(),
+    "cov": lambda m: _intcol_frame(m).cov(),
+    "corr of some columns": lambda m: m.DataFrame([[1, 2, "a"], [3, 5, "b"]]).corr(numeric_only=True),
+    "describe(include='all') labels": lambda m: [_label_kind(c) for c in _mixed_frame(m).describe(include="all").columns],
+    "pivot": lambda m: _pivot_source(m).pivot(index="r", columns="c", values="v"),
+    "pivot columns name": lambda m: _pivot_source(m).pivot(index="r", columns="c", values="v").columns.name,
+    "pivot.T index name": lambda m: _pivot_source(m).pivot(index="r", columns="c", values="v").T.index.name,
+    "pivot.T columns name": lambda m: _pivot_source(m).pivot(index="r", columns="c", values="v").T.columns.name,
+    "pivot_table": lambda m: _pivot_source(m).pivot_table(index="r", columns="c", values="v", aggfunc="sum"),
+    "crosstab": lambda m: m.crosstab(m.Series([1, 2, 1]), m.Series([3, 3, 4])),
+    "groupby().unstack()": lambda m: m.DataFrame({"a": [1, 1, 2], "b": [3, 4, 3], "v": [1, 2, 3]}).groupby(["a", "b"])["v"].sum().unstack(),
+    "get_dummies of ints": lambda m: m.get_dummies(m.Series([10, 2, 10])),
+    "get_dummies(columns=[1])": lambda m: m.get_dummies(m.DataFrame([[1, "x"], [2, "y"]]), columns=[1]),
+    "rename_axis(columns='k')": lambda m: _intcol_frame(m).rename_axis(columns="k").columns.name,
+    "rename_axis('k', axis=1)": lambda m: _intcol_frame(m).rename_axis("k", axis=1).columns.name,
+    "rename_axis index and columns": lambda m: (lambda d: (d.index.name, d.columns.name))(_intcol_frame(m).rename_axis(index="i", columns="k")),
+    "columns.name = 'x'": _set_columns_name,
+    "columns name kept by head": lambda m: _intcol_frame(m).rename_axis(columns="k").head(1).columns.name,
+    "columns name kept by add": lambda m: (_intcol_frame(m).rename_axis(columns="k") + 1).columns.name,
+    "drop first keeps the range": lambda m: m.DataFrame([[1, 2, 3, 4]]).drop(columns=0),
+    "drop two keeps a range": lambda m: m.DataFrame([[1, 2, 3, 4]]).drop(columns=[0, 2]),
+    "drop to 0, 3 keeps the stop": lambda m: m.DataFrame([[1, 2, 3, 4]]).drop(columns=[1, 2]),
+    "drop all": lambda m: m.DataFrame([[1, 2, 3, 4]]).drop(columns=[0, 1, 2, 3]),
+    "itertuples": lambda m: [tuple(t) + (t._fields,) for t in _intcol_frame(m).itertuples()],
+    "itertuples renamed fields": lambda m: [t._fields for t in m.DataFrame({"a": [1], "class": [2], "b c": [3]}).itertuples()],
+    # NEGATIVES: dropping the middle leaves an Index (not a range); a
+    # typed label that labels no column is absent (filter skips it, get
+    # gives the default, at raises); a suffixed overlap is text.
+    "drop middle is an Index": lambda m: m.DataFrame([[1, 2, 3, 4]]).drop(columns=1),
+    "at of an absent typed label": lambda m: _mixed_frame(m).at[1, 7],
+    "set_index of an absent label": lambda m: _mixed_frame(m).set_index(7),
+}
+
+
+def _column_arg_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _axis_view(_COLUMN_ARG_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_COLUMN_ARG_CASES))
+def test_typed_labels_as_arguments_and_column_axes_match_pandas(case: str) -> None:
+    assert _column_arg_outcome(fpd, case) == _column_arg_outcome(pd, case), case
+
+
+def _setitem_str_0_on_int_columns(m: Any) -> Any:
+    frame = m.DataFrame([[1, 2]])
+    frame["0"] = [9]
+    return frame
+
+
+def _setitem_int_0_on_str_columns(m: Any) -> Any:
+    frame = m.DataFrame({"0": [1]})
+    frame[0] = [9]
+    return frame
+
+
+# A REFUSAL, not parity (fvsao.32 stays open for it): pandas keeps the
+# integer label 0 and the string '0' as two columns; frankenpandas keys
+# columns by text, so one of them overwrote the other - df['0'] = ... on
+# DataFrame([[1, 2]]) replaced column 0's data, DataFrame({0: .., '0': ..})
+# kept one column's values under two labels. It refuses instead.
+_LABEL_CLASH_CASES = {
+    "dict keys 0 and '0'": lambda m: m.DataFrame({0: [1], "0": [2]}),
+    "columns=[0, '0']": lambda m: m.DataFrame([[1, 2]], columns=[0, "0"]),
+    "df['0'] = on int columns": _setitem_str_0_on_int_columns,
+    "df[0] = on a '0' column": _setitem_int_0_on_str_columns,
+    "concat of 0 and '0'": lambda m: m.concat([m.DataFrame({0: [1]}), m.DataFrame({"0": [2]})], axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LABEL_CLASH_CASES))
+def test_a_frame_holding_both_0_and_str_0_is_refused_not_corrupted(case: str) -> None:
+    kept = _LABEL_CLASH_CASES[case](pd)
+    assert [_label_kind(c) for c in kept.columns].count((0, "int")) == 1
+    assert [_label_kind(c) for c in kept.columns].count(("0", "str")) == 1
+    with pytest.raises((NotImplementedError, ValueError)):
+        _LABEL_CLASH_CASES[case](fpd)
