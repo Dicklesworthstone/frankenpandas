@@ -12742,3 +12742,32 @@ def _from_records_outcome(m: Any, run: Any) -> Any:
 def test_from_records_index_field_like_pandas(case: str) -> None:
     run = _FROM_RECORDS_CASES[case]
     assert _from_records_outcome(fpd, run) == _from_records_outcome(pd, run), case
+
+
+# br-frankenpandas-05cm6: value_counts(dropna=False) of a nullable Series
+# labelled the missing value None; pandas' label is pd.NA itself (printed
+# <NA>). [ns] the index dtype: pandas' is the masked Int64, fp's object - fp
+# has no masked Index dtype yet (05cm6 stays open for it).
+_NA_LABEL_CASES = {
+    "Int64 value_counts": lambda m: repr(m.Series([1, None, 1], dtype="Int64").value_counts(dropna=False)),
+    "Int64 value_counts NA label is pd.NA": lambda m: m.Series([1, None], dtype="Int64").value_counts(dropna=False).index[-1] is m.NA,
+    "boolean value_counts": lambda m: repr(m.Series([True, None, True], dtype="boolean").value_counts(dropna=False)),
+    "Float64 value_counts normalize": lambda m: repr(m.Series([1.5, None], dtype="Float64").value_counts(dropna=False, normalize=True)),
+    # NEGATIVE: numpy float64 keeps its NaN label; dropna=True has no NA row.
+    "float64 value_counts": lambda m: repr(m.Series([1.0, None, 1.0]).value_counts(dropna=False)),
+    "Int64 value_counts dropna": lambda m: repr(m.Series([1, None, 1], dtype="Int64").value_counts()),
+}
+
+
+def _na_label_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NA_LABEL_CASES))
+def test_nullable_value_counts_na_label_like_pandas(case: str) -> None:
+    run = _NA_LABEL_CASES[case]
+    assert _na_label_outcome(fpd, run) == _na_label_outcome(pd, run), case

@@ -21997,7 +21997,29 @@ impl PySeries {
                 DType::Int64Nullable
             };
             let column = r.column().astype(target).map_err(column_error_to_py)?;
-            let r = Series::new(r.name(), r.index().clone(), column).map_err(frame_error_to_py)?;
+            // The missing value's label is pd.NA itself, as pandas' (it
+            // printed None; 05cm6).
+            let index = if r.index().labels().iter().any(IndexLabel::is_missing) {
+                let na = IndexLabel::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+                    PyHost(na_object(py)?),
+                )));
+                let labels = r
+                    .index()
+                    .labels()
+                    .iter()
+                    .map(|label| {
+                        if label.is_missing() {
+                            na.clone()
+                        } else {
+                            label.clone()
+                        }
+                    })
+                    .collect();
+                Index::new(labels).rename_index(r.index().name())
+            } else {
+                r.index().clone()
+            };
+            let r = Series::new(r.name(), index, column).map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: r });
         }
         Ok(PySeries { inner: r })
